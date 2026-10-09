@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/server/authn"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -48,12 +50,36 @@ func TestServerHealth(t *testing.T) {
 	}
 }
 
-// debugRoutes are every route owned by the debug API router, including the
-// event graph route, whose path does not contain "debug".
+// debugRoutes are every route the IncludeDebugAPI gate covers, including the
+// event graph route, whose path does not contain "debug", and the agent-graph
+// routes, which disclose the agent tree and every tool name through the DOT
+// source they return.
 var debugRoutes = []string{
 	"/debug/trace/evt1",
 	"/debug/trace/session/sess1",
 	"/apps/app1/users/user1/sessions/sess1/events/evt1/graph",
+	"/dev/apps/app1/build_graph",
+	"/dev/apps/app1/build_graph_image",
+}
+
+// ungatedDevRoutes are every route the agent builder owns. They must answer
+// whether or not the debug API is enabled.
+//
+// None of them reads an agent or reveals anything about one. The GET answers an
+// empty 200 on purpose, so the UI disables its builder toggle, and a 404 there
+// is the error status that handler exists to avoid. The writes answer 501,
+// which tells a client the feature is missing rather than the path is wrong.
+//
+// All three are listed, not just the GET, because the regression this guards
+// against is a whole router moving inside the gate.
+var ungatedDevRoutes = []struct {
+	method     string
+	path       string
+	wantStatus int
+}{
+	{http.MethodGet, "/dev/apps/app1/builder", http.StatusOK},
+	{http.MethodPost, "/dev/apps/app1/builder/save", http.StatusNotImplemented},
+	{http.MethodPost, "/dev/apps/app1/builder/cancel", http.StatusNotImplemented},
 }
 
 // muxNotFound is what gorilla/mux writes when no route matches. A registered
@@ -71,9 +97,16 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 		{name: "included when opted in", include: true, wantRouted: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// A real agent, because the gated routes now include the agent
+			// graph, which loads one. agent.NewSingleLoader(nil) panics inside
+			// LoadAgent rather than returning an error.
+			rootAgent, err := agent.New(agent.Config{Name: "app1", Description: "root agent"})
+			if err != nil {
+				t.Fatalf("agent.New() failed: %v", err)
+			}
 			srv, err := NewServer(ServerConfig{
 				SessionService: session.InMemoryService(),
-				AgentLoader:    agent.NewSingleLoader(nil),
+				AgentLoader:    agent.NewSingleLoader(rootAgent),
 				DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: tc.include},
 			})
 			if err != nil {
@@ -87,6 +120,66 @@ func TestNewServerDebugAPIGate(t *testing.T) {
 					t.Errorf("GET %s: routed = %v, want %v (code %d, body %q)",
 						route, routed, tc.wantRouted, rr.Code, rr.Body.String())
 				}
+			}
+			for _, route := range ungatedDevRoutes {
+				rr := httptest.NewRecorder()
+				srv.ServeHTTP(rr, httptest.NewRequest(route.method, route.path, nil))
+				if rr.Body.String() == muxNotFound {
+					t.Errorf("%s %s: not routed, want it served regardless of the gate",
+						route.method, route.path)
+				}
+				if rr.Code != route.wantStatus {
+					t.Errorf("%s %s: status = %d, want %d",
+						route.method, route.path, rr.Code, route.wantStatus)
+				}
+			}
+		})
+	}
+}
+
+// TestNewServerAlwaysSetsAuthorizer verifies NewServer always leaves the
+// request path with a usable authorizer. It checks behavior rather than the
+// Server struct (the authorizer is injected into the controllers, not stored on
+// Server): a caller authenticated as "alice" who asks for another user's
+// sessions is permitted when no authorizer is supplied — NewServer substitutes
+// a permit-all default rather than leaving it nil and panicking — and is
+// refused with 403 when an [authz.strict] authorizer is supplied.
+func TestNewServerAlwaysSetsAuthorizer(t *testing.T) {
+	const otherUsersSessions = "/apps/" + testAppName + "/users/other-user/sessions"
+
+	tests := []struct {
+		name       string
+		authorizer authz.Authorizer
+		wantCode   int
+	}{
+		{name: "nil defaults to a permit-all authorizer", authorizer: nil, wantCode: http.StatusOK},
+		{name: "provided authorizer is enforced", authorizer: authz.NewStrict(), wantCode: http.StatusForbidden},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rootAgent, err := agent.New(agent.Config{Name: testAppName, Description: "root agent"})
+			if err != nil {
+				t.Fatalf("agent.New() failed: %v", err)
+			}
+			srv, err := NewServer(ServerConfig{
+				SessionService: session.InMemoryService(),
+				AgentLoader:    agent.NewSingleLoader(rootAgent),
+				Authenticator: authn.NewCustom(
+					func(*http.Request) (*authn.Caller, error) {
+						return &authn.Caller{UserID: "alice"}, nil
+					}),
+				Authorizer: tt.authorizer,
+			})
+			if err != nil {
+				t.Fatalf("NewServer() failed: %v", err)
+			}
+
+			rr := httptest.NewRecorder()
+			srv.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, otherUsersSessions, nil))
+			if got := rr.Code; got != tt.wantCode {
+				t.Errorf("GET %s authenticated as alice = %d, want %d; body: %s",
+					otherUsersSessions, got, tt.wantCode, rr.Body.String())
 			}
 		})
 	}
@@ -105,20 +198,26 @@ const (
 // The transport matters here: net/http strips the body from a HEAD response in
 // the server, not in the handler, so a [httptest.ResponseRecorder] would record
 // a body that never reaches the wire.
-func newAssembledServer(t *testing.T) *httptest.Server {
+func newAssembledServer(t *testing.T, authenticatedUserID string) *httptest.Server {
 	t.Helper()
 
 	rootAgent, err := agent.New(agent.Config{Name: testAppName, Description: "root agent"})
 	if err != nil {
 		t.Fatalf("agent.New() failed: %v", err)
 	}
-	server, err := NewServer(ServerConfig{
+	cfg := ServerConfig{
 		SessionService: session.InMemoryService(),
 		AgentLoader:    agent.NewSingleLoader(rootAgent),
 		// The debug API is opt-in. These tests cover the assembled server the
 		// web UI talks to, and the web UI is the debug tool, so they opt in.
 		DebugAPIConfig: DebugAPIConfig{IncludeDebugAPI: true},
-	})
+	}
+	if authenticatedUserID != "" {
+		cfg.Authenticator = authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
+		})
+	}
+	server, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer() failed: %v", err)
 	}
@@ -154,7 +253,7 @@ func do(t *testing.T, testServer *httptest.Server, method, path string) (*http.R
 // GET alone, so gorilla/mux rejected HEAD before the handler ran and monitoring,
 // link checkers and caches all saw 405.
 func TestHeadMatchesGet(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "test-user")
 
 	paths := []struct {
 		name string
@@ -191,7 +290,7 @@ func TestHeadMatchesGet(t *testing.T) {
 // delete handler and destroyed data on any server mounting adkrest without CORS
 // middleware in front of it.
 func TestOptionsDoesNotDeleteSession(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "test-user")
 	sessionPath := testSessions + "/keep-me"
 
 	createResp, createBody := do(t, testServer, http.MethodPost, sessionPath)
@@ -223,7 +322,7 @@ func TestOptionsDoesNotDeleteSession(t *testing.T) {
 // 405. gorilla/mux omits it, which leaves a client unable to discover what the
 // resource does support.
 func TestMethodNotAllowedHasAllowHeader(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "")
 
 	tests := []struct {
 		name        string
@@ -288,7 +387,7 @@ func parseAllow(allow string) []string {
 // NotFoundHandler and returned a bare 404, while PATCH /version returned 405
 // only because the one PATCH route happens to be registered before /version.
 func TestMethodNotAllowedMatrix(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "")
 	devApp := "/dev/apps/" + testAppName
 
 	tests := []struct {
@@ -366,7 +465,7 @@ func TestMethodNotAllowedMatrix(t *testing.T) {
 // TestUnmatchedPathIsStillNotFound guards the other side of the fallback: a
 // path no route serves must stay a 404, not become a 405 with an empty Allow.
 func TestUnmatchedPathIsStillNotFound(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "")
 
 	for _, method := range probedMethods {
 		t.Run(method, func(t *testing.T) {
@@ -416,7 +515,7 @@ func doNoRedirect(t *testing.T, testServer *httptest.Server, method, path string
 // POST /apps/x/users/y/sessions/ came back as a session list and created
 // nothing at all.
 func TestTrailingSlashKeepsMethodAndBody(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "test-user")
 	const sessionID = "slashed-session"
 	path := testSessions + "/" + sessionID
 
@@ -446,7 +545,7 @@ func TestTrailingSlashKeepsMethodAndBody(t *testing.T) {
 // slash behaviour: a GET is served directly rather than redirected, and a verb
 // the path does not serve is still refused with an Allow header.
 func TestTrailingSlashOnSafeAndRejectedMethods(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "")
 
 	t.Run("GET is served without a redirect", func(t *testing.T) {
 		resp, body := doNoRedirect(t, testServer, http.MethodGet, "/list-apps/")
@@ -483,7 +582,7 @@ func TestTrailingSlashOnSafeAndRejectedMethods(t *testing.T) {
 // self-contradictory, so the fallback answers it: 204 with an Allow header that
 // includes OPTIONS.
 func TestOptionsDescribesTheResource(t *testing.T) {
-	testServer := newAssembledServer(t)
+	testServer := newAssembledServer(t, "")
 
 	resp, body := do(t, testServer, http.MethodOptions, testSessions+"/some-session")
 	if got, want := resp.StatusCode, http.StatusNoContent; got != want {

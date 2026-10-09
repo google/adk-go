@@ -17,7 +17,9 @@ package mcptoolset
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -31,7 +33,7 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider) (tool.Tool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (tool.Tool, error) {
 	mcp := &mcpTool{
 		name:        t.Name,
 		description: t.Description,
@@ -42,6 +44,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		mcpClient:                   client,
 		requireConfirmation:         requireConfirmation,
 		requireConfirmationProvider: requireConfirmationProvider,
+		metadataProvider:            metadataProvider,
 	}
 
 	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
@@ -68,6 +71,8 @@ type mcpTool struct {
 	requireConfirmation bool
 
 	requireConfirmationProvider tool.ConfirmationProvider
+
+	metadataProvider MetadataProvider
 }
 
 // Name implements the tool.Tool.
@@ -119,10 +124,29 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 		}
 	}
 
-	res, err := t.mcpClient.CallTool(ctx, &mcp.CallToolParams{
+	params := &mcp.CallToolParams{
 		Name:      t.name,
 		Arguments: args,
-	})
+	}
+	if t.metadataProvider != nil {
+		meta, err := t.metadataProvider(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("metadata provider for MCP tool %q failed: %w", t.name, err)
+		}
+		for _, k := range slices.Sorted(maps.Keys(meta)) {
+			if k == "progressToken" || strings.HasPrefix(k, "io.modelcontextprotocol/") {
+				return nil, fmt.Errorf("metadata provider for MCP tool %q returned reserved _meta key %q", t.name, k)
+			}
+		}
+		// The MCP client writes its own reserved keys into params.Meta before
+		// sending the call, so pass a copy rather than a map the provider may
+		// reuse across invocations. maps.Clone keeps nil nil, so a nil provider
+		// map contributes nothing while the client still attaches its own
+		// reserved `_meta` entries.
+		params.Meta = maps.Clone(meta)
+	}
+
+	res, err := t.mcpClient.CallTool(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
 	}

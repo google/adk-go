@@ -22,6 +22,7 @@ import (
 	"log"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
@@ -31,9 +32,14 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
 )
+
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
 
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
@@ -44,9 +50,30 @@ type RuntimeAPIController struct {
 	agentLoader       agent.Loader
 	pluginConfig      runner.PluginConfig
 	autoCreateSession bool
+	authorizer        authz.Authorizer
+
+	checkOrigin func(*http.Request) bool
+
+	maxLiveMessageBytes  int64
+	liveKeepaliveTimeout time.Duration
+	// livePingInterval is how often the server pings a live connection. Zero
+	// when the keepalive is off.
+	livePingInterval time.Duration
+	// liveSlots holds one token per live session the controller may serve at
+	// once. Nil when the cap is disabled.
+	liveSlots chan struct{}
 
 	eventsCompactionConfig *compaction.Config
 }
+
+// Defaults for the /run_live limits. The message and keepalive bounds follow
+// uvicorn, which serves adk-python's /run_live: ws_max_size is 16 MiB and
+// ws_ping_interval/ws_ping_timeout are 20s each, so a peer that stops answering
+// pings is dropped after roughly 40s.
+const (
+	defaultMaxLiveMessageBytes  = 16 << 20
+	defaultLiveKeepaliveTimeout = 40 * time.Second
+)
 
 // RuntimeAPIControllerConfig carries everything [NewRuntimeAPIControllerWithConfig]
 // needs.
@@ -58,13 +85,17 @@ type RuntimeAPIController struct {
 // constructor; a struct absorbs both problems at once, and adding a field to it
 // breaks nobody.
 type RuntimeAPIControllerConfig struct {
-	SessionService    session.Service
-	MemoryService     memory.Service
-	AgentLoader       agent.Loader
-	ArtifactService   artifact.Service
+	SessionService  session.Service
+	MemoryService   memory.Service
+	AgentLoader     agent.Loader
+	ArtifactService artifact.Service
+	// SSETimeout is the write deadline for a /run_sse response, measured
+	// from when the request arrives. Zero means 120 seconds. Negative means
+	// no deadline, which also clears the http.Server's WriteTimeout.
 	SSETimeout        time.Duration
 	PluginConfig      runner.PluginConfig
 	AutoCreateSession bool
+	Authorizer        authz.Authorizer
 
 	// Compaction enables context compaction for the runners this controller
 	// creates, replacing older session events with summaries.
@@ -77,6 +108,60 @@ type RuntimeAPIControllerConfig struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// CheckOrigin reports whether a /run_live upgrade carrying this request's
+	// Origin may proceed. It becomes the WebSocket upgrader's CheckOrigin hook,
+	// and a false answer refuses the handshake with 403.
+	//
+	// [google.golang.org/adk/v2/server/adkrest.NewServer] supplies one built
+	// from its AllowedOrigins, which is where the check belongs for anyone
+	// using that server. Set this only when mounting this controller in a
+	// router of your own.
+	//
+	// optional; nil keeps gorilla/websocket's default, which accepts a request
+	// with no Origin and otherwise requires Origin's host to equal Host — and
+	// so accepts a page that reached this server by rebinding its own DNS name,
+	// since such a page controls both
+	CheckOrigin func(*http.Request) bool
+
+	// MaxLiveMessageBytes caps one client message on a /run_live connection.
+	// A message larger than the cap closes the connection with close code 1009
+	// instead of being buffered, so no one message can make the server
+	// allocate without bound. It bounds a message, not a session: messages
+	// under the cap still accumulate in the session behind it.
+	//
+	// optional; zero means 16 MiB, negative means no cap
+	MaxLiveMessageBytes int64
+
+	// LiveKeepaliveTimeout drops a /run_live peer that has stopped responding.
+	// The server pings at half this interval. While it waits on the client, a
+	// pong or a client message restarts the clock, and a write the peer does
+	// not accept within the timeout also ends the connection.
+	//
+	// It is not an idle timeout: a client that sends nothing but still answers
+	// pings, as every browser does, stays connected. What it removes is a peer
+	// that has gone away without closing, which as a hijacked connection sits
+	// outside [net/http.Server]'s own timeouts and would otherwise hold its
+	// agent session for as long as the process runs.
+	//
+	// optional; zero means 40s, negative turns the keepalive off
+	LiveKeepaliveTimeout time.Duration
+
+	// MaxLiveSessions caps how many /run_live connections this controller
+	// serves at once. Past the cap the handler returns an error carrying 503
+	// and does not upgrade, so one caller cannot hold open more agent
+	// sessions, model connections and goroutines than the process can carry.
+	// [NewErrorHandler] is what turns that error into the response; a caller
+	// mounting [RuntimeAPIController.RunLiveHandler] itself has to write the
+	// status.
+	//
+	// There is no cap by default, as in adk-python. Behind an autoscaler such
+	// as Cloud Run, the platform's own per-instance concurrency setting decides
+	// admission, and a lower cap here would refuse sessions the platform has
+	// already routed to this instance instead of letting it scale out.
+	//
+	// optional; zero or negative means no cap
+	MaxLiveSessions int
 }
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
@@ -97,6 +182,12 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 	})
 }
 
+// WithAuthorizer sets the authorizer. Provided to be compatible with [NewRuntimeAPIController]
+// Deprecated: use [NewRuntimeAPIControllerWithConfig] to set authorizer directly in RuntimeAPIControllerConfig.
+func (c *RuntimeAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
+}
+
 // NewRuntimeAPIControllerWithConfig creates the controller for the Runtime API.
 //
 // A separate constructor rather than a variadic parameter on the one above:
@@ -104,15 +195,48 @@ func NewRuntimeAPIController(sessionService session.Service, memoryService memor
 // holding it as a value even though ordinary call sites still compile, and it
 // is released API.
 func NewRuntimeAPIControllerWithConfig(cfg RuntimeAPIControllerConfig) *RuntimeAPIController {
+	authorizer := cfg.Authorizer
+	if authorizer == nil {
+		authorizer = authz.NewNoop()
+	}
+	sseTimeout := cfg.SSETimeout
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
+
+	maxLiveMessageBytes := cfg.MaxLiveMessageBytes
+	if maxLiveMessageBytes == 0 {
+		maxLiveMessageBytes = defaultMaxLiveMessageBytes
+	}
+	liveKeepaliveTimeout := cfg.LiveKeepaliveTimeout
+	if liveKeepaliveTimeout == 0 {
+		liveKeepaliveTimeout = defaultLiveKeepaliveTimeout
+	}
+	var livePingInterval time.Duration
+	if liveKeepaliveTimeout > 0 {
+		// A timeout under 2ns would halve to zero, which time.NewTicker rejects.
+		livePingInterval = max(liveKeepaliveTimeout/2, time.Nanosecond)
+	}
+	var liveSlots chan struct{}
+	if cfg.MaxLiveSessions > 0 {
+		liveSlots = make(chan struct{}, cfg.MaxLiveSessions)
+	}
+
 	return &RuntimeAPIController{
 		sessionService:         cfg.SessionService,
 		memoryService:          cfg.MemoryService,
 		agentLoader:            cfg.AgentLoader,
 		artifactService:        cfg.ArtifactService,
-		sseTimeout:             cfg.SSETimeout,
+		sseTimeout:             sseTimeout,
 		pluginConfig:           cfg.PluginConfig,
 		autoCreateSession:      cfg.AutoCreateSession,
+		checkOrigin:            cfg.CheckOrigin,
+		maxLiveMessageBytes:    maxLiveMessageBytes,
+		liveKeepaliveTimeout:   liveKeepaliveTimeout,
+		livePingInterval:       livePingInterval,
+		liveSlots:              liveSlots,
 		eventsCompactionConfig: cfg.Compaction,
+		authorizer:             authorizer,
 	}
 }
 
@@ -122,6 +246,14 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionEvents, err := c.runAgent(req.Context(), runAgentRequest)
 	if err != nil {
 		return err
@@ -160,7 +292,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 			// the request would discard work the caller asked for and paid for
 			// in order to report that a later prompt will be larger.
 			if errors.Is(err, compaction.ErrCompaction) {
-				log.Printf("adkrest: %v", err)
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
 				continue
 			}
 			return nil, newStatusError(fmt.Errorf("failed to run agent: %w", err), http.StatusInternalServerError)
@@ -174,7 +306,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
@@ -185,6 +320,13 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	if err != nil {
 		http.Error(rw, "failed to decode request body: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), runAgentRequest.UserId); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
@@ -201,7 +343,11 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	// Flush as soon as possible so the client doesn't drop connection.
 	// Add the headers after the error handling to avoid wrong content type.
-	rw.Header().Set("Content-Type", "text/event-stream")
+	// The charset is redundant — text/event-stream is always UTF-8 — but is
+	// stated anyway, which is what its registration allows the parameter for.
+	// RFC 7231 removed the old ISO-8859-1 default for text/*, yet clients
+	// still implement it and mojibake every non-ASCII rune when it is absent.
+	rw.Header().Set("Content-Type", "text/event-stream; charset=UTF-8")
 	rw.Header().Set("Cache-Control", "no-cache")
 	rw.Header().Set("Connection", "keep-alive")
 	if err := rc.Flush(); err != nil {
@@ -221,14 +367,14 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			// an error event here would tell a client its answer failed after
 			// it has already received it.
 			if errors.Is(err, compaction.ErrCompaction) {
-				log.Printf("adkrest: %v", err)
+				log.Printf("adkrest: %v", err) //nolint:forbidigo // pre-slog call site
 				continue
 			}
 			err := flashErrorEvent(rc, rw, err)
 			// The error is returned only when we cannot communicate with the client
 			// Exit the handler as connection is closed.
 			if err != nil {
-				log.Printf("failed to flash error event: %v", err)
+				log.Printf("failed to flash error event: %v", err) //nolint:forbidigo // pre-slog call site
 				return
 			}
 			continue
@@ -239,12 +385,12 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
 		marshalledData, err := json.Marshal(models.FromSessionEvent(*event))
 		if err != nil {
-			log.Printf("failed to marshal event: %v", err)
+			log.Printf("failed to marshal event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 		err = flashEvent(rc, rw, string(marshalledData))
 		if err != nil {
-			log.Printf("failed to flash event: %v", err)
+			log.Printf("failed to flash event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
 	}
@@ -333,6 +479,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
+		CheckOrigin:     c.checkOrigin,
 	}
 
 	q := req.URL.Query()
@@ -344,6 +491,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	if userID == "" {
 		userID = q.Get("user_id")
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), userID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return nil
+		}
+	}
+
 	sessionID := q.Get("sessionId")
 	if sessionID == "" {
 		sessionID = q.Get("session_id")
@@ -353,6 +508,14 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		return fmt.Errorf("appName, userId, and sessionId are required")
 	}
 
+	// Before the upgrade, so a refusal is an ordinary HTTP response the client
+	// can read rather than a close frame on a connection it just won.
+	release, ok := c.acquireLiveSlot()
+	if !ok {
+		return newStatusError(fmt.Errorf("live session limit of %d reached", cap(c.liveSlots)), http.StatusServiceUnavailable)
+	}
+	defer release()
+
 	ws, err := upgrader.Upgrade(rw, req, nil)
 	if err != nil {
 		return fmt.Errorf("failed to upgrade to websocket: %w", err)
@@ -361,8 +524,15 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		_ = ws.Close()
 	}()
 
+	stopPings, peerGone := c.applyLiveConnLimits(ws)
+	defer stopPings()
+
 	sendClose := func(code int, reason string) {
-		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+		_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(reason)))
+		// Only the close reply matters from here. The keepalive's pong handler
+		// would push the deadline below out on every pong, so a client sending
+		// pongs could hold the connection open past the drain.
+		ws.SetPongHandler(nil)
 		_ = ws.SetReadDeadline(time.Now().Add(time.Second))
 		for {
 			if _, _, err := ws.ReadMessage(); err != nil {
@@ -377,7 +547,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		if _, loadErr := c.agentLoader.LoadAgent(appName); loadErr != nil {
 			closeReason = fmt.Sprintf("agent %s not found for original error: %v", appName, err)
 		}
-		log.Printf("Failed to get runner for app %s: %v", appName, err)
+		log.Printf("Failed to get runner for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, closeReason)
 		return nil
 	}
@@ -390,13 +560,18 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 		OutputAudioTranscription: &genai.AudioTranscriptionConfig{},
 	})
 	if err != nil {
-		log.Printf("RunLive failed for app %s: %v", appName, err)
+		log.Printf("RunLive failed for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 		sendClose(websocket.CloseInternalServerErr, err.Error())
 		return nil
 	}
 	defer func() {
 		_ = liveSession.Close()
 	}()
+	// Once the keepalive gives up, neither a reader blocked in Send nor the
+	// loop below waiting on the agent would see the socket close. Closing the
+	// session returns both, except on a sequentialagent root, whose Close
+	// waits on the mutex a blocked Send holds (issue #1749).
+	defer context.AfterFunc(peerGone, func() { _ = liveSession.Close() })()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
 	go func() {
@@ -404,11 +579,16 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 			_ = liveSession.Close()
 		}()
 		for {
+			// Armed only while waiting on the client, so neither session
+			// setup nor a slow hand-off to the agent counts against a peer
+			// that answers every ping.
+			_ = ws.SetReadDeadline(c.liveDeadline())
 			messageType, p, err := ws.ReadMessage()
 			if err != nil {
 				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					log.Printf("WebSocket read error for app %s: %v", appName, err)
+					log.Printf("WebSocket read error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 				}
+				_ = ws.Close()
 				break
 			}
 
@@ -419,13 +599,13 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 						Data:     p,
 					},
 				}); err != nil {
-					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send binary data to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			} else if messageType == websocket.TextMessage {
 				var apiReq models.LiveRequest
 				if err := json.Unmarshal(p, &apiReq); err != nil {
-					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err)
+					log.Printf("Failed to unmarshal client message for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					continue
 				}
 
@@ -449,7 +629,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 				}
 
 				if err := liveSession.Send(liveReq); err != nil {
-					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err)
+					log.Printf("Failed to send message to Gemini for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
 					break
 				}
 			}
@@ -457,17 +637,123 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 
 	for event, err := range eventIter {
+		// A peer that accepts nothing for the keepalive timeout has stopped
+		// responding too, even if it keeps sending messages or pongs that
+		// extend the read deadline. Set on every pass, before either write
+		// below, so neither blocks without bound or inherits a deadline that
+		// expired while the agent was quiet.
+		_ = ws.SetWriteDeadline(c.liveDeadline())
 		if err != nil {
-			log.Printf("RunLive failed: %v\n", err)
-			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, err.Error()))
+			log.Printf("RunLive failed: %v\n", err) //nolint:forbidigo // pre-slog call site
+			_ = ws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, truncateCloseReason(err.Error())))
 			break
 		}
 
 		err = ws.WriteJSON(models.FromSessionEvent(*event))
 		if err != nil {
+			if !errors.Is(err, websocket.ErrCloseSent) {
+				log.Printf("WebSocket write error for app %s: %v", appName, err) //nolint:forbidigo // pre-slog call site
+			}
 			break
 		}
 	}
 
 	return nil
+}
+
+// acquireLiveSlot takes one of the controller's concurrent live-session slots.
+// It reports false when they are all held, and otherwise returns the function
+// that gives the slot back.
+func (c *RuntimeAPIController) acquireLiveSlot() (release func(), ok bool) {
+	if c.liveSlots == nil {
+		return func() {}, true
+	}
+	select {
+	case c.liveSlots <- struct{}{}:
+		return func() { <-c.liveSlots }, true
+	default:
+		return nil, false
+	}
+}
+
+// applyLiveConnLimits bounds what one live connection may consume: a read limit
+// so a client message cannot be buffered without end, and the pings and pong
+// handler of the keepalive, so a peer that stops responding is dropped. The
+// keepalive's deadlines are set around each read and write, from
+// [RuntimeAPIController.liveDeadline]. It returns the function that stops the
+// pinger, which the caller must call, and a context that is cancelled once a
+// ping cannot be written within the timeout.
+func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func(), peerGone context.Context) {
+	if c.maxLiveMessageBytes > 0 {
+		// The upgrade bypasses MaxBytesMiddleware, and gorilla/websocket has no default limit.
+		ws.SetReadLimit(c.maxLiveMessageBytes)
+	}
+	if c.liveKeepaliveTimeout <= 0 {
+		return func() {}, context.Background()
+	}
+
+	ws.SetPongHandler(func(string) error {
+		// A failure means the connection is already gone, which the read in
+		// progress reports.
+		_ = ws.SetReadDeadline(c.liveDeadline())
+		return nil
+	})
+
+	// Ping from a goroutine of its own: the caller's write loop blocks on the
+	// event iterator, so it cannot also keep the clock running. WriteControl is
+	// the one write method gorilla allows concurrently with the others.
+	peerGone, giveUp := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	ticker := time.NewTicker(c.livePingInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				// The same deadline as an event write, so a slow event write
+				// that finishes within its own deadline does not fail a queued
+				// ping and close the connection. The read deadline still runs
+				// from the last pong or client message, so the client stays
+				// connected only while the next pong or message lands within
+				// the timeout of the previous one.
+				if err := ws.WriteControl(websocket.PingMessage, nil, c.liveDeadline()); err != nil {
+					_ = ws.Close()
+					giveUp()
+					return
+				}
+			}
+		}
+	}()
+	return func() { close(done); giveUp() }, peerGone
+}
+
+// liveDeadline returns the deadline for the next read or write on a live
+// connection: the keepalive timeout from now, or the zero time, which sets no
+// deadline, when the keepalive is off.
+func (c *RuntimeAPIController) liveDeadline() time.Time {
+	if c.liveKeepaliveTimeout <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(c.liveKeepaliveTimeout)
+}
+
+// maxCloseReason is the longest reason a websocket close frame can carry: a
+// control frame payload is capped at 125 bytes and the close code takes two.
+const maxCloseReason = 123
+
+// truncateCloseReason trims reason to fit a close frame, on a rune boundary
+// because the reason must be valid UTF-8. gorilla refuses to send an over-long
+// control frame at all, so without this a long error reaches the browser as a
+// bare abnormal closure carrying no explanation.
+func truncateCloseReason(reason string) string {
+	if len(reason) <= maxCloseReason {
+		return reason
+	}
+	truncated := reason[:maxCloseReason]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }

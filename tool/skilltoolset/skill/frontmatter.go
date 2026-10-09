@@ -24,6 +24,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -221,11 +222,11 @@ func Validate(fm *Frontmatter) error {
 		}
 	}
 
-	if len(fm.Description) < 1 || len(fm.Description) > 1024 {
+	if fm.Description == "" || utf8.RuneCountInString(fm.Description) > 1024 {
 		return fmt.Errorf("description must be between 1 and 1024 characters long")
 	}
 
-	if len(fm.Compatibility) > 500 {
+	if utf8.RuneCountInString(fm.Compatibility) > 500 {
 		return fmt.Errorf("compatibility must not exceed 500 characters")
 	}
 

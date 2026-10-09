@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
+	"google.golang.org/adk/v2/server/authz"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -36,12 +37,18 @@ import (
 
 // SessionsAPIController is the controller for the Sessions API.
 type SessionsAPIController struct {
-	service session.Service
+	service    session.Service
+	authorizer authz.Authorizer
 }
 
 // NewSessionsAPIController creates a new SessionsAPIController.
 func NewSessionsAPIController(service session.Service) *SessionsAPIController {
-	return &SessionsAPIController{service: service}
+	return &SessionsAPIController{service: service, authorizer: authz.NewNoop()}
+}
+
+// WithAuthorizer sets the authorizer for the Controller. Provided in order not to change NewSessionsAPIController.
+func (c *SessionsAPIController) WithAuthorizer(authorizer authz.Authorizer) {
+	c.authorizer = authorizer
 }
 
 // CreateSessionHandler is an HTTP handler for the create session API.
@@ -52,6 +59,14 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	createSessionRequest := models.CreateSessionRequest{}
 	if req.Body != nil {
 		err := json.NewDecoder(req.Body).Decode(&createSessionRequest)
@@ -99,6 +114,12 @@ func (c *SessionsAPIController) DeleteSessionHandler(rw http.ResponseWriter, req
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
 
 	err = c.service.Delete(req.Context(), &session.DeleteRequest{
 		AppName:   sessionID.AppName,
@@ -124,6 +145,14 @@ func (c *SessionsAPIController) GetSessionHandler(rw http.ResponseWriter, req *h
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	storedSession, err := c.service.Get(req.Context(), &session.GetRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
@@ -159,6 +188,12 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	if sessionID.ID == "" {
 		http.Error(rw, "session_id parameter is required", http.StatusBadRequest)
 		return
+	}
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
 	}
 
 	updateRequest := models.UpdateSessionRequest{}
@@ -246,6 +281,14 @@ func (c *SessionsAPIController) ListSessionsHandler(rw http.ResponseWriter, req 
 		http.Error(rw, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	if c.authorizer != nil {
+		if err := c.authorizer.CanActAsUser(req.Context(), sessionID.UserID); err != nil {
+			authz.WriteHTTPStatusForAuthError(rw, err)
+			return
+		}
+	}
+
 	// Not `var sessions []models.Session`: a nil slice encodes as JSON null,
 	// and clients expect an empty list for a user with no sessions.
 	sessions := []models.Session{}

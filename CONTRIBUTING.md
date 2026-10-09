@@ -18,6 +18,7 @@ We'd love to accept your patches and contributions to this project.
     -   [Testing Requirements](#testing-requirements)
     -   [Unit Tests](#unit-tests)
     -   [Manual End-to-End (E2E) Tests](#manual-end-to-end-e2e-tests)
+    -   [Stale pull requests](#stale-pull-requests)
 -   [AI-assisted development](#ai-assisted-development)
 -   [ADK Web](#adk-web)
     -   [Refreshing the embedded web bundle](#refreshing-the-embedded-web-bundle)
@@ -202,11 +203,17 @@ information on using pull requests.
 ### Requirement for PRs
 
 -   Code must follow [Google Go Style Guide](https://google.github.io/styleguide/go/index).
--   All PRs, other than small documentation or typo fixes, should have an Issue
-    associated. If a relevant issue doesn't exist, please create one first or
-    you may instead describe the bug or feature directly within the PR
-    description, following the structure of our issue templates.
+-   All PRs, other than small documentation or typo fixes, must have an Issue
+    associated. If a relevant issue doesn't exist, please create one first, then
+    reference it from the PR description with `Closes: #<number>` or
+    `Related: #<number>`. Describe the problem and the solution in the PR
+    description as well, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
+-   Library code must not write diagnostics to stdout, stderr, the standard
+    `log` package's logger or `slog`'s default logger, and `golangci-lint`
+    rejects it. See
+    [Logging and error messages](AGENTS.md#logging-and-error-messages) in
+    `AGENTS.md` for the levels to use and what to do instead.
 -   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
     `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
     title, and in the commit subject too on a single-commit PR, where that is
@@ -312,6 +319,20 @@ Depending on your change:
         runner setup.
     -   Include the command used and console output showing test results.
     -   Highlight sections of the log that directly relate to your change.
+
+### Stale pull requests
+
+If your pull request is waiting on you, you have two weeks to respond. After
+that, a maintainer may take the change over and finish it. Waiting on you means
+review comments unanswered, CI red, or a question left hanging.
+
+The two weeks run from the last thing that needed an answer from you. Any reply
+stops the clock, and a comment saying you need another week counts. Come back
+after a takeover has started and the pull request goes back to you, unless a
+replacement has already merged.
+
+Your commits keep your name on them either way. The point is to get the change
+to users, not to take the work off you.
 
 ## AI-assisted development
 

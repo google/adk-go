@@ -76,7 +76,7 @@ func TestWorkflowAgent_Resume_RestoresStateFromSession(t *testing.T) {
 	var handlerCalled atomic.Bool
 
 	// makeNodes returns fresh node instances per agent so the test
-	// proves resume goes through session.State, not through any
+	// proves resume works from session event history, not through any
 	// shared in-memory references between a1 and a2.
 	makeNodes := func() (workflow.Node, workflow.Node) {
 		return newAskerNode("human_approval", "approve?", nil),
@@ -115,9 +115,11 @@ func TestWorkflowAgent_Resume_Idempotent(t *testing.T) {
 	runFreshTurn(t, sess, a, "x")
 	// First resume: matches the waiting node, runs the handler.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
-	// Second resume with the same payload: PendingRequest was
-	// consumed by the first call, so no waiting node matches and
-	// Resume yields ErrNothingToResume rather than re-running.
+	// Second resume with the same payload: nothing from the first
+	// call carries over, because RunState is rebuilt from event
+	// history on every turn. The response it replays has already been
+	// consumed, so no waiting node matches and Resume yields
+	// ErrNothingToResume rather than re-running.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), workflow.ErrNothingToResume)
 
 	if got := handlerRuns.Load(); got != 1 {
