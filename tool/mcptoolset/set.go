@@ -76,8 +76,12 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var client sessionClient = newConnectionRefresher(cfg.Client, transport)
+	if cfg.Auth != nil {
+		client = newPerUserClients(cfg.Client, transport)
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   client,
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -139,6 +143,11 @@ type Config struct {
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
 	//
+	// With Auth set, each acting user (app and user from the ADK context) gets
+	// an MCP session of its own, so a server that binds sessions to the user
+	// who created them serves every user. Sessions stay open until the toolset
+	// is closed.
+	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
 	// would fight over the same request.
@@ -172,8 +181,15 @@ type Config struct {
 	MetadataProvider MetadataProvider
 }
 
+// sessionClient is the MCP connection a set uses: one shared session, or one
+// per acting user when Config.Auth is set.
+type sessionClient interface {
+	MCPClient
+	io.Closer
+}
+
 type set struct {
-	mcpClient                   *connectionRefresher
+	mcpClient                   sessionClient
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
