@@ -66,7 +66,7 @@ func (m *Model) generate(ctx context.Context, params openai.ChatCompletionNewPar
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed, not reassigned: the closure captures ctx by reference, so
 		// assigning to it would leave a second range over this sequence
-		// starting from the deadline the first one already cancelled.
+		// starting from the deadline the first one already canceled.
 		ctx := ctx
 		if timeout > 0 {
 			var cancel context.CancelFunc
