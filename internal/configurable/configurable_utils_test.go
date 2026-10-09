@@ -235,7 +235,7 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 		t.Skipf("symlinks are not supported in this environment: %v", err)
 	}
 
-	agentDir := alias // filepath.Join(alias, "root_agent.yaml")
+	agentDir := alias
 	if _, err := ResolveAgentReference(context.Background(), agentDir, "missing.yaml", true); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no containment rejection", agentDir, "missing.yaml", err)
 	}
@@ -249,7 +249,10 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 // TestResolveConfigReferenceVolumeQualifiedRefs covers references that carry a
 // volume name. On Windows a drive-relative reference such as `C:node.yaml` is
 // not absolute yet still escapes the parent directory, by resolving against the
-// current directory of that drive, and filepath.IsLocal is what rules it out.
+// current directory of that drive. SafeSubpath refuses these on Windows because
+// the volume name carries a ':' (rejected by its windows-specific
+// forbidden-character check) or a leading `\\` (rejected by its UNC-prefix
+// check); the test keys its own expectation off filepath.VolumeName.
 //
 // The expectation is platform-dependent rather than skipped, so that the test
 // asserts something everywhere: on Unix these are ordinary, if odd, relative
@@ -339,7 +342,7 @@ func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
 			}
 			refPath := tc.layout(t, dir)
 
-			parentPath := dir // filepath.Join(dir, "root_agent.yaml")
+			parentPath := dir
 			if _, err := resolveConfigReference(parentPath, refPath, false, true); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
 				t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a link inside the directory is refused for being a link",
 					parentPath, refPath, err, utils.ErrSymlinkInRelativePath)
@@ -382,12 +385,10 @@ func TestResolveConfigReferenceCanonicalizesRegistryKey(t *testing.T) {
 	}
 
 	realKey, err := resolveConfigReference(base, "real/sub_agent.yaml", false, true)
-	// realKey, err := resolveConfigReference(filepath.Join(realDir, "root_agent.yaml"), "sub_agent.yaml", false)
 	if err != nil {
 		t.Fatalf("resolveConfigReference through the real directory failed: %v", err)
 	}
 	aliasKey, err := resolveConfigReference(base, "alias/sub_agent.yaml", true, true)
-	// aliasKey, err := resolveConfigReference(filepath.Join(aliasDir, "root_agent.yaml"), "sub_agent.yaml", false)
 	if err != nil {
 		t.Fatalf("resolveConfigReference through the symlinked directory failed: %v", err)
 	}
@@ -432,10 +433,11 @@ func TestResolveConfigReferenceBelowNonDirectory(t *testing.T) {
 }
 
 // TestResolveConfigReferenceEmptyRef covers the empty reference, which is
-// usually an unfilled template rather than an attempt to escape. IsLocal
-// rejects it along with the escaping spellings, so it needs its own message to
-// avoid rendering as a bare "config reference must be ...: " with nothing after
-// the colon.
+// usually an unfilled template rather than an attempt to escape. It cleans to
+// ".", which resolves back to the base directory, and SafeSubpath refuses a
+// reference that lands on the base itself with a distinct "effectively empty"
+// message rather than the generic "not a subpath" — the wording this test pins,
+// so an unfilled template reads as such.
 func TestResolveConfigReferenceEmptyRef(t *testing.T) {
 	_, agentDir, _ := newAgentDir(t)
 
@@ -469,7 +471,10 @@ func withinDir(dir, path string) bool {
 // it. The expectation is branched on runtime.GOOS rather than skipped, so the
 // test asserts something concrete on both Windows and Unix.
 //
-// The cases all turn on filepath.IsLocal being platform-aware:
+// The cases all turn on path spellings meaning different things on Windows and
+// Unix, which SafeSubpath honors through its platform-specific validation ("\"
+// is a separator on Windows but a literal byte on Unix; forbidden characters
+// and reserved device names apply only on Windows):
 //
 //   - Windows reserved device names (NUL, CON, COM1, LPT1, ...) name a device
 //     rather than a file on Windows and are refused there; on Unix they are
@@ -517,6 +522,7 @@ func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
 		{name: "reserved name Charger0", refPath: `\\.\Charger0`, wantRejected: windows},
 		{name: "reserved name CON", refPath: "CON", wantRejected: windows},
 		{name: "reserved name CONIN$", refPath: "CONIN$", wantRejected: windows},
+		{name: "reserved name CONOUT$", refPath: "CONOUT$", wantRejected: windows},
 		// Backslash as a separator (Windows) climbs out; as a literal character
 		// (Unix) it is one file name that stays put.
 		{name: "backslash traversal", refPath: `..\..\outside.yaml`, wantRejected: windows},

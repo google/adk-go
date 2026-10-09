@@ -42,12 +42,12 @@ var (
 func SafeSubpath(base, rel string, acceptSymlinks, evalPath bool) (absPath, relPath string, resErr error) {
 	// check the base path.
 	if !filepath.IsAbs(base) {
-		return "", "", fmt.Errorf("base file is not absolute")
+		return "", "", fmt.Errorf("base path is not absolute")
 	}
 	absBase := filepath.Clean(base)
 
 	// validate rel
-	// on windwos do not allow rel to start with "\\" - it will catch \\host\dir, \\.\long, \\?\ etc
+	// on windows do not allow rel to start with "\\" - it will catch \\host\dir, \\.\long, \\?\ etc
 	if runtime.GOOS == "windows" && strings.HasPrefix(rel, "\\") {
 		return "", "", fmt.Errorf("%w: rel path should not start with \\", ErrNotValidRelativePath)
 	}
@@ -81,7 +81,6 @@ func SafeSubpath(base, rel string, acceptSymlinks, evalPath bool) (absPath, relP
 		}
 
 		// check for trailing " " and "." all along the path
-		// cleanRel := filepath.Clean(rel)
 		p := rel
 		cont := true
 		for cont {
@@ -153,7 +152,7 @@ func SafeSubpath(base, rel string, acceptSymlinks, evalPath bool) (absPath, relP
 		if evalPath {
 			hasSymlink, err := ContainsSymlink(absBase, rel)
 			if err != nil {
-				return "", "", fmt.Errorf("%w: cannot check for symlinks: %v", ErrNotValidRelativePath, err)
+				return "", "", fmt.Errorf("%w: cannot check for symlinks: %w", ErrNotValidRelativePath, err)
 			}
 			if hasSymlink {
 				return "", "", ErrSymlinkInRelativePath
@@ -190,7 +189,7 @@ func ContainsSymlink(base, rel string) (bool, error) {
 		return false, fmt.Errorf("the base path has to be absolute")
 	}
 	if filepath.IsAbs(rel) {
-		return false, fmt.Errorf("the rel path musn't be absolute")
+		return false, fmt.Errorf("the rel path must not be absolute")
 	}
 
 	p := base
@@ -219,34 +218,36 @@ const (
 // windowsForbiddenFileNames lists names of files reserved on windows. Also file names with such suffixes are reserved.
 // please refer to https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
 var windowsForbiddenFileNames = map[string]bool{
-	"CON":  true,
-	"PRN":  true,
-	"AUX":  true,
-	"NUL":  true,
-	"COM1": true,
-	"COM2": true,
-	"COM3": true,
-	"COM4": true,
-	"COM5": true,
-	"COM6": true,
-	"COM7": true,
-	"COM8": true,
-	"COM9": true,
-	"COM¹": true,
-	"COM²": true,
-	"COM³": true,
-	"LPT1": true,
-	"LPT2": true,
-	"LPT3": true,
-	"LPT4": true,
-	"LPT5": true,
-	"LPT6": true,
-	"LPT7": true,
-	"LPT8": true,
-	"LPT9": true,
-	"LPT¹": true,
-	"LPT²": true,
-	"LPT³": true,
+	"CON":     true,
+	"CONIN$":  true,
+	"CONOUT$": true,
+	"PRN":     true,
+	"AUX":     true,
+	"NUL":     true,
+	"COM1":    true,
+	"COM2":    true,
+	"COM3":    true,
+	"COM4":    true,
+	"COM5":    true,
+	"COM6":    true,
+	"COM7":    true,
+	"COM8":    true,
+	"COM9":    true,
+	"COM¹":    true,
+	"COM²":    true,
+	"COM³":    true,
+	"LPT1":    true,
+	"LPT2":    true,
+	"LPT3":    true,
+	"LPT4":    true,
+	"LPT5":    true,
+	"LPT6":    true,
+	"LPT7":    true,
+	"LPT8":    true,
+	"LPT9":    true,
+	"LPT¹":    true,
+	"LPT²":    true,
+	"LPT³":    true,
 }
 
 // isLinkLike reports whether a component may redirect the read somewhere other

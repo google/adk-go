@@ -43,7 +43,7 @@ import (
 	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
-type AgentFactory func(ctx context.Context, configBytes []byte, configPath string) (agent.Agent, error)
+type AgentFactory func(ctx context.Context, configBytes []byte, agentDir string) (agent.Agent, error)
 
 type ToolFactory func(ctx context.Context, args map[string]any) (tool.Tool, error)
 
@@ -373,18 +373,6 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	registryMu.RUnlock()
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
-
-// // Reasons a config reference can be rejected. They are sentinels so that callers
-// // and tests can identify the rejection without matching on the message text.
-// var (
-// 	// errConfigReferenceNotLocal reports a reference that names a file outside
-// 	// the referencing config's directory by its spelling alone.
-// 	errConfigReferenceNotLocal = errors.New("config reference must be a relative path inside the agent directory")
-// 	// errConfigReferenceSymlink reports a reference that reaches its target
-// 	// through a symbolic link, or through any other reparse point, below that
-// 	// directory.
-// 	errConfigReferenceSymlink = errors.New("config reference traverses a link")
-// )
 
 func resolveConfigReference(parentPath, refPath string, acceptSymlinks, evalPath bool) (string, error) {
 	abs, _, err := utils.SafeSubpath(parentPath, refPath, acceptSymlinks, evalPath)
