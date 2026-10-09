@@ -543,8 +543,8 @@ func (s *scheduler) cancelAll() {
 // run is the single-consumer loop. It drains the eventQueue, applies
 // state-side effects, yields events to the caller, and schedules
 // successor nodes when a node completes. Returns when all running
-// tasks have signalled completion.
-// Start with draining=true only after cancelling tasks for a caller that
+// tasks have signaled completion.
+// Start with draining=true only after canceling tasks for a caller that
 // has already stopped consuming. In that mode yield is never called.
 //
 // On non-nil yield-return-false (caller broke from the range loop)
