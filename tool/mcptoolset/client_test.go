@@ -35,7 +35,7 @@ func TestClosePreventsRetry(t *testing.T) {
 		t.Cleanup(func() { _ = session.Close() })
 		return ct.Connect(ctx)
 	})
-	client := newConnectionRefresher(nil, transport)
+	client := newConnectionRefresher(nil, transport, nil)
 	t.Cleanup(func() { _ = client.Close() })
 	calls := 0
 	_, _, err := withRetry(t.Context(), client, func(*mcp.ClientSession) (*mcp.CallToolResult, error) {
