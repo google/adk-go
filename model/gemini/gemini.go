@@ -128,9 +128,11 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 // candidate, resuming a generation the model paused with CONTINUATION.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+	clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
 	contents, config := req.Contents, req.Config
 	for {
-		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, config)
+		requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, requestConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to call model: %w", err)
 		}
@@ -160,12 +162,14 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 
 	return func(yield func(*model.LLMResponse, error) bool) {
 		c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
+		clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
 		contents, config := req.Contents, req.Config
 		for {
 			var token []byte
 			var parts []*genai.Part
 			var usage *genai.GenerateContentResponseUsageMetadata
-			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, config) {
+			requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, requestConfig) {
 				if err != nil {
 					yield(nil, err)
 					return
@@ -210,6 +214,81 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			yield(closeResult, nil)
 		}
 	}
+}
+
+// configPreservingEmptyTextThoughtSignatures works around googleapis/go-genai#931.
+// The SDK omits an empty Part.Text when it converts a request to JSON, turning a
+// trailing text part from Gemini 3 into a part with a thought signature but no
+// data field. Restore the empty text in the request body without changing the
+// response part or its position in session history.
+//
+// Part.Text is a string, so Go cannot distinguish an explicitly empty text
+// from a genuinely content-free signature part, such as one returned by a
+// server-side media tool. Normalizing both shapes is deliberate: it keeps the
+// signature in its original part while ensuring the wire part has a data field.
+func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentConfig, fallbackProvider genai.ExtrasRequestProvider) *genai.GenerateContentConfig {
+	if config == nil {
+		config = &genai.GenerateContentConfig{}
+	}
+	configCopy := *config
+	httpOptions := &genai.HTTPOptions{}
+	if config.HTTPOptions != nil {
+		*httpOptions = *config.HTTPOptions
+	}
+
+	provider := httpOptions.ExtrasRequestProvider
+	if provider == nil {
+		provider = fallbackProvider
+	}
+	httpOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+		if provider != nil {
+			body = provider(body)
+		}
+		preserveEmptyTextThoughtSignatureParts(body)
+		return body
+	}
+	configCopy.HTTPOptions = httpOptions
+	return &configCopy
+}
+
+func preserveEmptyTextThoughtSignatureParts(body map[string]any) {
+	for _, content := range mapsFromSlice(body["contents"]) {
+		for _, part := range mapsFromSlice(content["parts"]) {
+			if _, hasSignature := part["thoughtSignature"]; !hasSignature || partHasData(part) {
+				continue
+			}
+			part["text"] = ""
+		}
+	}
+}
+
+func mapsFromSlice(value any) []map[string]any {
+	switch values := value.(type) {
+	case []map[string]any:
+		return values
+	case []any:
+		maps := make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			if valueMap, ok := value.(map[string]any); ok {
+				maps = append(maps, valueMap)
+			}
+		}
+		return maps
+	default:
+		return nil
+	}
+}
+
+func partHasData(part map[string]any) bool {
+	for field := range part {
+		switch field {
+		case "audioTranscription", "mediaProcessing", "mediaResolution", "partMetadata", "speechMetadata", "thought", "thoughtSignature", "videoMetadata":
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // retryResends reports whether the requests that resume a generation set

@@ -617,7 +617,7 @@ func TestRunNode_WithRunID_SequentialRerunAfterFailure(t *testing.T) {
 }
 
 // TestRunNode_WithRunID_WaiterUnblocksOnCancel: a caller parked on the gate
-// is released when the invocation is cancelled, rather than waiting out a
+// is released when the invocation is canceled, rather than waiting out a
 // leader whose child is still working.
 func TestRunNode_WithRunID_WaiterUnblocksOnCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

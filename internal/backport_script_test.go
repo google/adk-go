@@ -32,7 +32,7 @@ import (
 // That shipped: three contributors' pull requests collected one comment per run
 // for nine runs before it was noticed.
 //
-// A behavioural test would need a live pull request, so this pins the property
+// A behavioral test would need a live pull request, so this pins the property
 // that actually broke: whichever spelling gh returns, the filter matches it.
 func TestBackportConflictCommentMatchesBothBotSpellings(t *testing.T) {
 	path := filepath.Join("..", "scripts", "backport.sh")
