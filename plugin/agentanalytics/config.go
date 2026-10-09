@@ -79,7 +79,7 @@ func DefaultConfig() Config {
 		ShutdownTimeout:      10 * time.Second,
 		QueueMaxSize:         10000,
 		CustomTags:           make(map[string]any),
-		Logger:               log.Default(),
+		Logger:               log.Default(), //nolint:forbidigo // pre-slog call site
 		RetryConfig: RetryConfig{
 			MaxRetries:   3,
 			InitialDelay: 100 * time.Millisecond,

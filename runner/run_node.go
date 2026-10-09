@@ -120,7 +120,7 @@ func (r *Runner) runNode(
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
-			log.Printf("adk: %v", err)
+			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
 

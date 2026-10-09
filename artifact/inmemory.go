@@ -270,6 +270,12 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		if key.SessionID != userScopedArtifactKey { // scan includes key matching `userScopeHi`
 			continue
 		}
+		// Session ID "user" shares this key range with user-scoped artifacts,
+		// so skip that session's private files. Python rejects the ID instead,
+		// but Go already accepts it.
+		if !fileHasUserNamespace(key.FileName) {
+			continue
+		}
 		files[key.FileName] = true
 	}
 

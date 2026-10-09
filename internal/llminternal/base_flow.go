@@ -24,6 +24,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
@@ -153,7 +154,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				thoughtOnlyTurns++
 				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
-					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event", //nolint:forbidigo // pre-slog call site
 						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
 					return
 				}
@@ -166,7 +167,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				// an a2a peer whose stream ends on an appended artifact chunk with no
 				// terminal status). The turn was truncated, not completed, which is
 				// not expected, so we log a warning and return instead of looping again.
-				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history", //nolint:forbidigo // pre-slog call site
 					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
@@ -347,6 +348,40 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 	}
 }
 
+// isResumable reports whether a live-connection error means the socket is
+// gone and the flow should reconnect, rather than surface the error and stop.
+//
+// Both the reader and the sender goroutine report into the same errChan and
+// the flow acts on whichever arrives first, so the two must classify the same
+// connection loss the same way. They do not produce the same text: the reader
+// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
+// sees the raw socket write failure, whose wording is platform-specific
+// ("write: broken pipe" on Linux, "wsasend: An established connection was
+// aborted by the software in your host machine." on Windows). Matching the
+// transport failure by type rather than by text keeps the verdict the same on
+// every platform.
+func isResumable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	// A failed read or write on the underlying socket of an already-established
+	// connection. The dial lives on a different path, which handles its own
+	// errors, so reaching here means a live connection dropped.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "1008") ||
+		strings.Contains(errStr, "GoAway")
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -391,21 +426,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			SessionResumption:        runCfg.Live.SessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
-		}
-
-		isResumable := func(err error) bool {
-			if err == nil {
-				return false
-			}
-			if err == io.EOF {
-				return true
-			}
-			errStr := err.Error()
-			return strings.Contains(errStr, "broken pipe") ||
-				strings.Contains(errStr, "connection reset") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "1008") ||
-				strings.Contains(errStr, "GoAway")
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
@@ -455,7 +475,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				sleepDuration := policy.jittered(currentBackoff)
 				currentBackoff = policy.nextBackoff(currentBackoff)
 
-				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v",
+				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v", //nolint:forbidigo // pre-slog call site
 					reconnectAttempts, policy.maxAttempts, shortLivedReconnects, sleepDuration)
 				if !waitBeforeReconnect(ctx, sess, sleepDuration) {
 					// Cancellation reports itself, matching the consumer
@@ -482,12 +502,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle) //nolint:forbidigo // pre-slog call site
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
-				log.Printf("failed to connect live session: %v\n", err)
+				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
 				if isReconnect {
 					// genai returns without closing the socket it dialled when
 					// the setup write fails, and it dials with a context-less
@@ -519,7 +539,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// Send preprocessed content directly to model if any exists after early preprocessing
 			if len(nreq.Contents) > 0 {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-					log.Printf("failed to send history: %v\n", err)
+					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
 					sess.pushError(err)
 					// cleanup, not a bare return: genai dials the live socket
 					// with a context-less websocket.DefaultDialer.Dial, and
@@ -545,7 +565,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if resp != nil {
 						if resp.SessionResumptionHandle != "" {
 							if isIContext {
-								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle) //nolint:forbidigo // pre-slog call site
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
 						}
@@ -690,7 +710,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				case ce := <-errChan:
 					if isResumable(ce.err) {
-						log.Printf("Connection error, attempting to resume: %v\n", ce.err)
+						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
 						lastErr = ce.err
 						// Score the connection's life from where the error was
 						// produced, not from here: this loop also runs tools
@@ -1381,7 +1401,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								default:
 								}
 								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 								updatedContent := &genai.Content{
@@ -1393,7 +1413,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 									},
 								}
 								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
-									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 							}

@@ -203,6 +203,7 @@ var UnsupportedConfigFields = []ConfigField{
 	}},
 	{Name: "ModelArmorConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
 	{Name: "AudioTranscriptionConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
+	{Name: "ContinuationToken", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ContinuationToken != nil }},
 }
 
 // ConfigField names a GenerateContentConfig field alongside a predicate
