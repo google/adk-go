@@ -16,13 +16,16 @@ package toolsearch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/glebarez/sqlite"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -37,6 +40,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/database"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/geminitool"
@@ -892,10 +896,11 @@ func TestSearch_ParallelCallsKeepAllDiscoveries(t *testing.T) {
 	checkNames(t, llm.declared, []string{"add_numbers", "multiply_numbers"}, nil)
 }
 
-// TestDiscoveredNames_OrderAndFiltering covers state read back from the database
-// session service, where the stored int arrives as a float64, a store that
-// decodes it as an int64, ties from calls in one response, a value of an
-// unexpected type, and keys that belong to something else.
+// TestDiscoveredNames_OrderAndFiltering covers each type a stored position can
+// come back as (an int, a float64 as encoding/json decodes it, an int64 from a
+// custom store, and anything else), ties from calls in one response, and keys
+// that belong to something else. TestSearch_DiscoveriesSurviveReload runs the
+// in-memory and database session services.
 func TestDiscoveredNames_OrderAndFiltering(t *testing.T) {
 	state := newFakeState(map[string]any{
 		stateKeyPrefix + "test_agent:z_tool":       float64(0),
@@ -1081,10 +1086,11 @@ func TestNew_CopiesSkillAnnotations(t *testing.T) {
 	}
 }
 
-// TestSearch_OverlappingParallelCallsNeverReportNoMatch sends two overlapping
-// select: calls in one model response through the real runner. Whichever call
-// runs second must say the tool is already available, not that nothing matched.
-func TestSearch_OverlappingParallelCallsNeverReportNoMatch(t *testing.T) {
+// TestSearch_OverlappingParallelCallsReportAlreadyAvailable sends two
+// overlapping select: calls in one model response through the real runner. Each
+// call must either return zebra_tool or say it is already available, so the
+// call that runs second does not report it as missing.
+func TestSearch_OverlappingParallelCallsReportAlreadyAvailable(t *testing.T) {
 	newTool := func(name string) tool.Tool {
 		ft, err := functiontool.New(functiontool.Config{Name: name, Description: name},
 			func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
@@ -1110,6 +1116,7 @@ func TestSearch_OverlappingParallelCallsNeverReportNoMatch(t *testing.T) {
 		if err != nil {
 			t.Fatalf("runner.New() error = %v", err)
 		}
+		responses := 0
 		for ev, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
 			if err != nil {
 				t.Fatalf("Run() error = %v", err)
@@ -1118,13 +1125,36 @@ func TestSearch_OverlappingParallelCallsNeverReportNoMatch(t *testing.T) {
 				continue
 			}
 			for _, p := range ev.LLMResponse.Content.Parts {
-				if fr := p.FunctionResponse; fr != nil && strings.Contains(fmt.Sprint(fr.Response["note"]), "no tools matched") {
-					t.Fatalf("run %d: a search_tools call reported no match: %v", i, fr.Response)
+				if p.FunctionResponse == nil {
+					continue
+				}
+				responses++
+				out := decodeSearchOutput(t, p.FunctionResponse.Response)
+				if !slices.Contains(matchNames(out.Matches), "zebra_tool") && !strings.Contains(out.Note, "already available: zebra_tool") {
+					t.Fatalf("run %d: search_tools neither returned zebra_tool nor said it is already available: %+v", i, out)
 				}
 			}
 		}
+		if responses != 2 {
+			t.Fatalf("run %d: got %d search_tools responses, want 2", i, responses)
+		}
 		checkNames(t, llm.declared, []string{"zebra_tool", "apple_tool"}, nil)
 	}
+}
+
+// decodeSearchOutput converts a search_tools function response back to
+// searchOutput.
+func decodeSearchOutput(t *testing.T, response map[string]any) searchOutput {
+	t.Helper()
+	b, err := json.Marshal(response)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var out searchOutput
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	return out
 }
 
 // TestSearch_IndexesMCPArguments checks that argument metadata is indexed for
@@ -1164,5 +1194,76 @@ func TestSearch_AlreadyAvailableOnlyWhenToolsReturnsIt(t *testing.T) {
 	out := mustSearch(t, newToolCtx(state), "select:list_books,core_tool,removed_tool,ghost_core", base, gts, 8)
 	if want := "tools not found: removed_tool, ghost_core. already available: list_books, core_tool"; out.Note != want {
 		t.Errorf("note = %q, want %q", out.Note, want)
+	}
+}
+
+// nilDeclarationTool packs itself into a request but declares no function.
+type nilDeclarationTool struct{ stubTool }
+
+func (*nilDeclarationTool) Declaration() *genai.FunctionDeclaration { return nil }
+
+func TestBuildItems_SkipsToolsWithNilDeclaration(t *testing.T) {
+	catalog := []tool.Tool{
+		&stubTool{name: "declared_tool", desc: "declares a function"},
+		&nilDeclarationTool{stubTool{name: "undeclared_tool", desc: "declares nothing"}},
+	}
+	checkNames(t, itemNames(buildItems(catalog)), []string{"declared_tool"}, []string{"undeclared_tool"})
+}
+
+// TestSearch_DiscoveriesSurviveReload discovers one tool per turn, each turn
+// through a new runner on the same session, and checks that the second turn
+// declares both in discovery order. The database service reads state back
+// through encoding/json, so the first discovery returns as a float64.
+func TestSearch_DiscoveriesSurviveReload(t *testing.T) {
+	services := map[string]func(t *testing.T) session.Service{
+		"inmemory": func(*testing.T) session.Service { return session.InMemoryService() },
+		"database": func(t *testing.T) session.Service {
+			svc, err := database.NewSessionService(sqlite.Open(filepath.Join(t.TempDir(), "sessions.db")))
+			if err != nil {
+				t.Fatalf("database.NewSessionService() error = %v", err)
+			}
+			if err := database.AutoMigrate(svc); err != nil {
+				t.Fatalf("database.AutoMigrate() error = %v", err)
+			}
+			return svc
+		},
+	}
+	for name, newService := range services {
+		t.Run(name, func(t *testing.T) {
+			newTool := func(name string) tool.Tool {
+				ft, err := functiontool.New(functiontool.Config{Name: name, Description: name},
+					func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+				if err != nil {
+					t.Fatalf("functiontool.New(%q) error = %v", name, err)
+				}
+				return ft
+			}
+			gated, err := New(&staticToolset{tools: []tool.Tool{newTool("apple_tool"), newTool("zebra_tool")}}, Config{})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			svc := newService(t)
+			var llm *parallelCallModel
+			// Discovery order deliberately differs from name order.
+			for _, query := range []string{"select:zebra_tool", "select:apple_tool"} {
+				llm = &parallelCallModel{calls: []*genai.FunctionCall{{ID: "1", Name: ToolName, Args: map[string]any{"query": query}}}}
+				a, err := llmagent.New(llmagent.Config{Name: "agent", Model: llm, Toolsets: []tool.Toolset{gated}})
+				if err != nil {
+					t.Fatalf("llmagent.New() error = %v", err)
+				}
+				r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: svc, AutoCreateSession: true})
+				if err != nil {
+					t.Fatalf("runner.New() error = %v", err)
+				}
+				for _, err := range r.Run(t.Context(), "user", "session", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("Run(%q) error = %v", query, err)
+					}
+				}
+			}
+			if diff := cmp.Diff([]string{ToolName, "zebra_tool", "apple_tool"}, llm.declared); diff != "" {
+				t.Errorf("second turn declared tools mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

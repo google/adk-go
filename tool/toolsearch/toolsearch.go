@@ -93,6 +93,11 @@ type Config struct {
 // agent can use at most one gating toolset, since two on one agent each expose
 // a tool named ToolName and the framework rejects every model step with a
 // duplicate-tool error. Combine the catalogs into one base toolset instead.
+//
+// Give the agent each base tool only through the gating toolset. A base tool
+// that also reaches the agent another way, such as llmagent.Config.Tools, is
+// still searchable, and once discovered it fails every later model step of the
+// session with the same duplicate-tool error.
 func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	if base == nil {
 		return nil, errors.New("toolsearch: base toolset is nil")
@@ -326,8 +331,8 @@ type declarer interface {
 	Declaration() *genai.FunctionDeclaration
 }
 
-// callable reports whether the flow can both pack t into a request and dispatch
-// a function call to it.
+// callable reports whether t packs itself into a request and declares a
+// function, which the model needs before it can call t.
 func callable(t tool.Tool) bool {
 	if _, ok := t.(requestProcessor); !ok {
 		return false
