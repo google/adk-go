@@ -891,9 +891,9 @@ func TestSearch_ParallelCallsKeepAllDiscoveries(t *testing.T) {
 }
 
 // TestDiscoveredNames_OrderAndFiltering covers state read back from the database
-// session service, where the stored int arrives as a float64, ties from calls in
-// one response, a value of an unexpected type, and keys that belong to something
-// else.
+// session service, where the stored int arrives as a float64, a store that
+// decodes it as an int64, ties from calls in one response, a value of an
+// unexpected type, and keys that belong to something else.
 func TestDiscoveredNames_OrderAndFiltering(t *testing.T) {
 	state := newFakeState(map[string]any{
 		stateKeyPrefix + "test_agent:z_tool":       float64(0),
@@ -902,12 +902,13 @@ func TestDiscoveredNames_OrderAndFiltering(t *testing.T) {
 		stateKeyPrefix + "test_agent:b_tool":       1,
 		stateKeyPrefix + "test_agent:d_tool":       1,
 		stateKeyPrefix + "test_agent:a_tool":       1,
+		stateKeyPrefix + "test_agent:y_tool":       int64(2),
 		stateKeyPrefix + "test_agent:bad_value":    "1",
 		stateKeyPrefix + "test_agent:":             0,
 		stateKeyPrefix + "test_agent_2:other_tool": 0,
 		"unrelated": 0,
 	})
-	want := []string{"z_tool", "a_tool", "b_tool", "c_tool", "d_tool", "e_tool", "bad_value"}
+	want := []string{"z_tool", "a_tool", "b_tool", "c_tool", "d_tool", "e_tool", "y_tool", "bad_value"}
 	if diff := cmp.Diff(want, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
