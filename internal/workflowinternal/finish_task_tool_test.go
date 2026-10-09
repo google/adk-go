@@ -333,6 +333,24 @@ func TestFinishTaskTool_Run(t *testing.T) {
 			want: wantSuccess,
 		},
 		{
+			name:         "nullable string wrapper, non-null args",
+			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+			args:         map[string]any{"result": "hello"},
+			want:         wantSuccess,
+		},
+		{
+			name:          "validation error: nullable string wrapper, null result",
+			outputSchema:  &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+			args:          map[string]any{"result": nil},
+			wantErrSubstr: []string{"finish_task", "validation errors", "result"},
+		},
+		{
+			name:          "validation error: string wrapper, null result",
+			outputSchema:  &genai.Schema{Type: genai.TypeString},
+			args:          map[string]any{"result": nil},
+			wantErrSubstr: []string{"finish_task", "validation errors"},
+		},
+		{
 			name:          "validation error: missing required field",
 			outputSchema:  sampleOutputSchema,
 			args:          map[string]any{"result": "success"},

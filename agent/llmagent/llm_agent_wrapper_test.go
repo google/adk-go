@@ -1504,3 +1504,62 @@ func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
 		t.Errorf("the undeclared sub-agent's mode after building a coordinator = %q, want unset", got)
 	}
 }
+
+// A task agent whose OutputSchema is a nullable non-object type must not
+// finish with a null result: a nil Output reads as "the task did not finish",
+// so the coordinator would never get a function response. finish_task rejects
+// the null and the model retries with a value, which closes the delegation.
+func TestTaskAgent_NullableResultClosesDelegation(t *testing.T) {
+	fcTurn := func(id, name string, args map[string]any) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{ID: id, Name: name, Args: args},
+		}}}}
+	}
+	taskLLM := &scriptedLLM{turns: []*model.LLMResponse{
+		fcTurn("finish-1", "finish_task", map[string]any{"result": nil}),
+		fcTurn("finish-2", "finish_task", map[string]any{"result": "retry-value"}),
+	}}
+	task, err := llmagent.New(llmagent.Config{
+		Name: "doer", Description: "d", Model: taskLLM, Mode: llmagent.ModeTask,
+		OutputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordLLM := &scriptedLLM{turns: []*model.LLMResponse{
+		fcTurn("fc-1", "doer", map[string]any{"request": "x"}),
+	}}
+	coord, err := llmagent.New(llmagent.Config{Name: "coord", Model: coordLLM, Mode: llmagent.ModeChat, SubAgents: []agent.Agent{task}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: coord, SessionService: session.InMemoryService(), AppName: "app", AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var delegationFR *genai.FunctionResponse
+	for ev, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p.FunctionResponse != nil && p.FunctionResponse.Name == "doer" {
+				delegationFR = p.FunctionResponse
+			}
+		}
+	}
+
+	if delegationFR == nil {
+		t.Fatal("no function response closed the delegation to doer")
+	}
+	if diff := cmp.Diff(map[string]any{"output": "retry-value"}, delegationFR.Response); diff != "" {
+		t.Errorf("delegation response mismatch (-want +got):\n%s", diff)
+	}
+	if taskLLM.callIdx != 2 {
+		t.Errorf("task model called %d times, want 2: the null result should be rejected and retried", taskLLM.callIdx)
+	}
+}

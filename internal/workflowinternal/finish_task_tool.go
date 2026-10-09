@@ -180,6 +180,13 @@ func (t *FinishTaskTool) validateArgs(args map[string]any) error {
 		return utils.ValidateMapOnSchema(args, t.userSchema, false)
 	}
 
+	// The unwrapped value becomes the task's output, and a nil output reads
+	// as "the task did not finish", so the delegation would never close.
+	// Reject null even when the schema is nullable so the model retries.
+	if v, ok := args[t.wrapperKey]; ok && v == nil {
+		return fmt.Errorf("%q must not be null", t.wrapperKey)
+	}
+
 	return utils.ValidateMapOnSchema(
 		args,
 		t.wrappedSchema,
