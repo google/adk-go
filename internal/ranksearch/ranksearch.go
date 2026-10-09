@@ -270,15 +270,16 @@ func BuildTokens(name, description string, extra ...string) []string {
 	return toks
 }
 
-// DescribeSearch appends the sorted item names to a search tool's base
-// description so the model knows what it can search for (and select: by name).
-// The list is sorted for a stable, cache-friendly declaration.
+// DescribeSearch appends the sorted, deduplicated item names to a search tool's
+// base description so the model knows what it can search for (and select: by
+// name). The list is sorted for a stable, cache-friendly declaration.
 func DescribeSearch(baseDescription string, itemNames []string) string {
 	if len(itemNames) == 0 {
 		return baseDescription
 	}
 	names := slices.Clone(itemNames)
 	slices.Sort(names)
+	names = slices.Compact(names)
 	return baseDescription +
 		"\n\nAvailable to load (not yet active — search or select: by name): " +
 		strings.Join(names, ", ")
@@ -295,7 +296,8 @@ func looksLikeRegex(query string) bool {
 func buildMatchFn(query string) func(string) bool {
 	re, err := regexp.Compile("(?i)" + query)
 	if err != nil {
-		re = regexp.MustCompile("(?i)" + regexp.QuoteMeta(query))
+		// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
+		re = regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD")))
 	}
 	return re.MatchString
 }
