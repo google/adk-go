@@ -45,8 +45,9 @@ type RunConfig struct {
 	// Zero, the value a caller gets from agent.RunConfig{}, means the default:
 	// 500, or the value of the ADK_MAX_LLM_CALLS environment variable if it is
 	// set to a valid integer. A value of ADK_MAX_LLM_CALLS that is not an
-	// integer is ignored silently and the default of 500 applies. A negative
-	// value, such as -1, means no limit.
+	// integer is ignored silently and the default of 500 applies, while 0 or a
+	// negative value there disables the limit. A negative MaxLLMCalls, such as
+	// -1, means no limit.
 	//
 	// The limit covers the agents the invocation runs, including those nested
 	// through agenttool: each nested run gets its own budget of the same size.
