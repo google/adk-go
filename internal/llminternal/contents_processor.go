@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -242,7 +243,13 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
-			return p == nil || reflect.ValueOf(*p).IsZero()
+			if p == nil || reflect.ValueOf(*p).IsZero() {
+				return true
+			}
+			if p.FileData != nil && strings.HasPrefix(p.FileData.FileURI, "artifact://") && strings.Contains(p.FileData.FileURI, "/_adk_live/") {
+				return true
+			}
+			return false
 		})
 		if len(content.Parts) == 0 {
 			continue
