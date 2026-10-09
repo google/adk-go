@@ -666,7 +666,7 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	}
 	fruit, ok := ischema.Properties["fruit"]
 	if !ok {
-		t.Fatalf("unexpeced jsonschema: missing 'fruit': %+v", ischema)
+		t.Fatalf("unexpected jsonschema: missing 'fruit': %+v", ischema)
 	}
 	fruit.Description = "print the remaining quantity of the item."
 	fruit.Enum = []any{"mandarin", "kiwi"}

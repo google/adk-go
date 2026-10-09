@@ -56,7 +56,7 @@ import (
 // WithICDelta, its panic does not fire, and an embedder that overrides the
 // method to count or record calls stops being invoked for those deltas. The empty
 // delta is exercised in-tree, but never against a mock, so what changed is what
-// the exported mock promises rather than any behaviour here.
+// the exported mock promises rather than any behavior here.
 //
 // A third consequence, on the same promise: a panic out of Value — including the
 // one a nil Ctx raises — is contained by [IdentityFromContext] rather than

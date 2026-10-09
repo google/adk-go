@@ -128,7 +128,7 @@ func compactionEvent(id string, ts, start, end int, summary string, excluded ...
 }
 
 // fakeSummarizer records the windows it is handed and returns a canned summary,
-// so window-selection behaviour can be tested without a model.
+// so window-selection behavior can be tested without a model.
 type fakeSummarizer struct {
 	// summary is the text of the returned summary. Empty means "decline",
 	// which makes SummarizeEvents return no content.
