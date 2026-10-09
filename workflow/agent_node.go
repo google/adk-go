@@ -19,11 +19,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
+	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
 	internalcontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/session"
@@ -51,11 +54,7 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 		return nil, fmt.Errorf("resolving output schema for agent %q: %w", a.Name(), err)
 	}
 
-	// The wrapped agent's Run already emits an invoke_agent span, so
-	// the scheduler must not add a redundant invoke_node wrapper —
-	// whether this node is activated by a static edge or delegated to
-	// via RunNode. Mirrors runner.newAgentNode.
-	cfg.EmitsOwnSpan = true
+	cfg = applyAgentNodeDefaults(a, cfg)
 
 	return &AgentNode{
 		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
@@ -63,20 +62,66 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	}, nil
 }
 
+// applyAgentNodeDefaults fills in AgentNode config defaults.
+//
+// Only agents whose own runtime already knows how to continue an interrupted
+// exchange default to re-entry: LlmAgents and task-mode remote A2A agents.
+// Other wrapped agents keep the engine's base handoff behavior, matching
+// adk-python. An explicit caller value always wins.
+func applyAgentNodeDefaults(a agent.Agent, cfg NodeConfig) NodeConfig {
+	// The wrapped agent's Run already emits an invoke_agent span, so the
+	// scheduler must not add a redundant invoke_node wrapper.
+	cfg.EmitsOwnSpan = true
+	if cfg.RerunOnResume == nil && defaultsToReentry(a) {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
+	return cfg
+}
+
+// defaultsToReentry reports whether a is an agent type whose runtime can
+// consume the resume response directly. Go's A2A remote agent is task-based,
+// so a live A2A remote-agent state is the task-mode case mirrored from
+// adk-python.
+func defaultsToReentry(a agent.Agent) bool {
+	if a == nil {
+		return false
+	}
+	if _, ok := a.(llminternal.Agent); ok {
+		return true
+	}
+	ia, ok := a.(agentinternal.Agent)
+	if !ok || ia == nil {
+		return false
+	}
+	state := agentinternal.Reveal(ia)
+	if state == nil || state.AgentType != agentinternal.TypeRemoteAgent {
+		return false
+	}
+	remoteState, ok := state.Config.(iremoteagent.RemoteAgentState)
+	return ok && remoteState.A2A != nil
+}
+
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
-// It uses explicitly provided schemas for both input and output.
+// It uses explicitly provided schemas for both input and output. LlmAgent and
+// task-mode remote A2A agents default RerunOnResume to true unless the caller
+// explicitly sets it; other agents keep the engine default.
 func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[any, any](a, inputSchema, outputSchema, cfg)
 }
 
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
+// LlmAgent and task-mode remote A2A agents default RerunOnResume to true
+// unless the caller explicitly sets it; other agents keep the engine default.
 func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
 
 // NewAgentNode creates a new node wrapping an agent. Input and output schemas
-// are inferred as `any`.
+// are inferred as `any`. LlmAgent and task-mode remote A2A agents default
+// RerunOnResume to true unless the caller explicitly sets it; other agents
+// keep the engine default.
 func NewAgentNode(a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return NewAgentNodeTyped[any, any](a, cfg)
 }
@@ -99,6 +144,16 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		if ctx == nil {
 			yield(nil, fmt.Errorf("AgentNode.Run: nil context for agent %q", n.agent.Name()))
 			return
+		}
+
+		// A resumed node consumes the current user content (the tool reply).
+		// Keep the original input too: RunLLMAgentAsNode uses it to seed the
+		// one-shot prompt before the pending call while still delivering the
+		// reply as UserContent. Non-LLM NodeRunners that use input directly
+		// should make the same split themselves; the default handoff mode means
+		// they are not re-entered unless the caller opts in.
+		if n.isResuming(ctx) {
+			userContent = ctx.UserContent()
 		}
 
 		// A graph node is a one-shot placement: an agent that declares no
@@ -145,6 +200,9 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
+		if path := ctx.Path(); path != "" {
+			exCtx = exCtx.WithDelta(&agent.CommonContextDelta{Path: &path})
+		}
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
@@ -191,6 +249,75 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			}
 		}
 	}
+}
+
+// isResuming reports whether this activation is consuming a reply for an
+// interrupt raised by this node. The per-activation ResumedInput map is the
+// freshness signal: stale events in session history do not match it on a
+// later loop-back, retry, or parallel activation.
+func (n *AgentNode) isResuming(ctx agent.Context) bool {
+	if ctx == nil || ctx.Session() == nil {
+		return false
+	}
+	nodePath := ctx.Path()
+	if nodePath == "" {
+		nodePath = n.Name()
+	}
+	events := ctx.Session().Events()
+	if events == nil {
+		return false
+	}
+	for i := 0; i < events.Len(); i++ {
+		ev := events.At(i)
+		if ev == nil || len(ev.LongRunningToolIDs) == 0 {
+			continue
+		}
+		if invocationID := ctx.InvocationID(); invocationID != "" && ev.InvocationID != invocationID {
+			continue
+		}
+		evPath := ""
+		if ev.NodeInfo != nil {
+			evPath = ev.NodeInfo.Path
+		}
+		if evPath == "" {
+			evPath = ev.Author
+		}
+		if !pathMatchesNode(evPath, nodePath) {
+			continue
+		}
+		for _, id := range ev.LongRunningToolIDs {
+			if _, ok := ctx.ResumedInput(id); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathMatchesNode(eventPath, nodePath string) bool {
+	eventPath = staticPath(eventPath)
+	nodePath = staticPath(nodePath)
+	return eventPath == nodePath ||
+		strings.HasPrefix(eventPath, nodePath+"/") ||
+		strings.HasSuffix(eventPath, "/"+nodePath) ||
+		strings.Contains(eventPath, "/"+nodePath+"/")
+}
+
+// staticPath strips run suffixes such as "@1" from each path segment. Node
+// activation paths carry a run ID, while descendant events include the
+// parent's path followed by the child's path, so comparing static paths lets
+// an AgentNode recognize interrupts raised by a wrapped composite agent.
+func staticPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if at := strings.IndexByte(segment, '@'); at >= 0 {
+			segments[i] = segment[:at]
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 // synthesizeAgentOutput sets Event.Output from concatenated model

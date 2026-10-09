@@ -219,14 +219,24 @@ func TestDecodeWorkflowInputResponse(t *testing.T) {
 			want: map[string]any{"k": "v"},
 		},
 		{
-			name: "PriorityOrder_ResponseWinsOverPayload",
+			name: "MultiKeyResponsePreserved",
 			fr: &genai.FunctionResponse{
 				Response: map[string]any{
 					"response": `"from-response"`,
 					"payload":  "from-payload",
 				},
 			},
-			want: "from-response",
+			want: map[string]any{
+				"response": `"from-response"`,
+				"payload":  "from-payload",
+			},
+		},
+		{
+			name: "ResultShape_StructuredResult",
+			fr: &genai.FunctionResponse{
+				Response: map[string]any{"result": map[string]any{"approved": true}},
+			},
+			want: map[string]any{"approved": true},
 		},
 		{
 			name: "Fallback_NeitherKey_ReturnsRawMap",

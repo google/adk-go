@@ -170,6 +170,12 @@ type NodeInfo struct {
 	// stands in for a whole delegation chain rather than each level
 	// re-emitting a duplicate. Mirrors adk-python's node_info.output_for.
 	OutputFor []string `json:"outputFor,omitempty"`
+
+	// ResumeConsumedIDs lists the workflow interrupt IDs whose responses were
+	// successfully consumed by a resumed node. The workflow engine emits a
+	// checkpoint event carrying these IDs so a later turn can distinguish a
+	// completed resume from one that emitted an event and then failed.
+	ResumeConsumedIDs []string `json:"resumeConsumedIds,omitempty"`
 }
 
 // RequestInput describes a single human-in-the-loop prompt emitted
@@ -497,7 +503,7 @@ func (e *Event) UnmarshalJSON(b []byte) error {
 	// nil NodeInfo means the event did not come from a workflow -- readers
 	// test the pointer, not its contents. An all-zero NodeInfo carries no
 	// information, so it is indistinguishable from absent.
-	if ni := e.NodeInfo; ni != nil && ni.Path == "" && !ni.MessageAsOutput && len(ni.OutputFor) == 0 {
+	if ni := e.NodeInfo; ni != nil && ni.Path == "" && !ni.MessageAsOutput && len(ni.OutputFor) == 0 && len(ni.ResumeConsumedIDs) == 0 {
 		e.NodeInfo = nil
 	}
 	return nil

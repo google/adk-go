@@ -18,7 +18,6 @@
 package workflowagent
 
 import (
-	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -122,25 +121,14 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 }
 
 // detectResume inspects the inbound user message for FunctionResponses
-// targeting a previously-emitted RequestInput. Returns the
-// responses map keyed by InterruptID (suitable for
-// Workflow.Resume), the RunState reconstructed from session history,
-// and true if this turn is a resume; (nil, nil, false) for a fresh
-// turn.
+// targeting a long-running interrupt represented in the rehydrated
+// RunState, including a previously-emitted RequestInput. Returns the
+// responses map keyed by InterruptID (suitable for Workflow.Resume), the
+// RunState reconstructed from session history, and true if this turn is a
+// resume; (nil, nil, false) for a fresh turn.
 func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
 	frs := utils.FunctionResponses(ctx.UserContent())
 	if len(frs) == 0 {
-		return nil, nil, false, nil
-	}
-
-	responses := map[string]any{}
-	for _, fr := range frs {
-		if fr.Name != workflow.WorkflowInputFunctionCallName {
-			continue
-		}
-		responses[fr.ID] = decodeWorkflowInputResponse(fr)
-	}
-	if len(responses) == 0 {
 		return nil, nil, false, nil
 	}
 
@@ -157,33 +145,61 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 		return nil, nil, false, nil
 	}
 
+	// Match by interrupt ID, not function name. Agent nodes can pause on any
+	// long-running call (notably adk_request_confirmation and
+	// adk_request_credential), while the workflow's own input request remains
+	// the one name we can use to report a mistargeted reply as
+	// ErrNothingToResume rather than silently starting a fresh run.
+	known := knownInterruptIDs(state)
+	responses := map[string]any{}
+	for _, fr := range frs {
+		if fr == nil || fr.ID == "" {
+			continue
+		}
+		if _, ok := known[fr.ID]; !ok && fr.Name != workflow.WorkflowInputFunctionCallName {
+			continue
+		}
+		responses[fr.ID] = decodeWorkflowInputResponse(fr)
+	}
+	if len(responses) == 0 {
+		return nil, nil, false, nil
+	}
+
 	return responses, state, true, nil
 }
 
-// decodeWorkflowInputResponse extracts the user-supplied payload
-// from a FunctionResponse targeting a workflow input request.
-//
-// Three accepted shapes, in priority order:
-//
-//  1. {"response": <value>}  — when value is a string, it is
-//     parsed as JSON and the result returned; if the string is
-//     not valid JSON it is returned verbatim. When value is any
-//     other type, it is returned as-is.
-//  2. {"payload": <any>}     — value returned verbatim.
-//  3. anything else           — the whole Response map is returned.
-func decodeWorkflowInputResponse(fr *genai.FunctionResponse) any {
-	if raw, ok := fr.Response["response"]; ok {
-		if s, isStr := raw.(string); isStr {
-			var decoded any
-			if err := json.Unmarshal([]byte(s), &decoded); err == nil {
-				return decoded
-			}
-			return s
+// knownInterruptIDs returns every interrupt ID represented by the rehydrated
+// state, including already-answered re-entry IDs. Keeping spent IDs here lets
+// a duplicate reply reach Resume and produce ErrNothingToResume instead of
+// falling through to a fresh graph run.
+func knownInterruptIDs(state *workflow.RunState) map[string]struct{} {
+	ids := map[string]struct{}{}
+	if state == nil {
+		return ids
+	}
+	for _, ns := range state.Nodes {
+		if ns == nil {
+			continue
 		}
-		return raw
+		for _, id := range ns.Interrupts {
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
+		for id := range ns.ResumedInputs {
+			if id != "" {
+				ids[id] = struct{}{}
+			}
+		}
 	}
-	if payload, ok := fr.Response["payload"]; ok {
-		return payload
+	return ids
+}
+
+// decodeWorkflowInputResponse extracts the user-supplied payload from a
+// FunctionResponse using the shared resume decoder.
+func decodeWorkflowInputResponse(fr *genai.FunctionResponse) any {
+	if fr == nil {
+		return nil
 	}
-	return fr.Response
+	return utils.UnwrapResponse(fr.Response)
 }

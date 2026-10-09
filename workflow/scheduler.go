@@ -134,6 +134,12 @@ type nodeRun struct {
 	branch       string         // composite branch assigned at scheduling; used to stamp Event.Branch when the node leaves it empty
 	nodePath     string         // hierarchical path assigned at scheduling (e.g. "parent/child@1" or "child@1")
 
+	// resumeInputs is non-nil only for a re-entry resume activation. On a
+	// successful completion the scheduler emits a checkpoint for these
+	// interrupt IDs so rehydration can distinguish success from a failed
+	// resume that emitted progress before erroring.
+	resumeInputs map[string]any
+
 	// interruptIDs are unresolved long-running tool call IDs raised by
 	// the node's events. A non-empty set at completion parks the node
 	// in NodeWaiting. Mirrors adk-python's Context._interrupt_ids.
@@ -397,7 +403,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
 	ns.Branch = branch
-	s.runsByName[name] = &nodeRun{branch: branch, nodePath: nodePath}
+	s.runsByName[name] = &nodeRun{branch: branch, nodePath: nodePath, resumeInputs: resumeInputs}
 
 	s.runCancels[name] = cancel
 	s.wg.Add(1)
@@ -600,7 +606,14 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 				close(it.processed)
 			}
 		case completionItem:
-			err := s.handleCompletion(it, !draining)
+			checkpoint, err := s.handleCompletion(it, !draining)
+			if checkpoint != nil && !draining {
+				if !yield(checkpoint, nil) {
+					draining = true
+					consumerGone = true
+					s.cancelAll()
+				}
+			}
 			if err != nil && pendingErr == nil {
 				pendingErr = err
 				if !draining {
@@ -814,7 +827,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 // context cancel, multiple-output, multiple-routing-event,
 // multiple-input-request) does not silently park in NodeWaiting:
 // failures take precedence and surface as NodeFailed.
-func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) error {
+func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) (*session.Event, error) {
 	ns := s.state.EnsureNode(it.nodeName)
 	nr := s.runsByName[it.nodeName]
 	// For retryable nodes still delete them from run variables. If the node is retried,
@@ -836,23 +849,23 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	if s.parentCtx.Err() != nil {
 		if it.err != nil && !s.echoesCancellation(it.err) {
 			ns.Status = NodeFailed
-			return it.err
+			return nil, it.err
 		}
 		// Matches adk-python, which marks every task it reaps during
 		// shutdown CANCELLED regardless of who cancelled it
 		// (_workflow.py _cleanup_all_tasks, run from a finally).
 		ns.Status = NodeCancelled
-		return nil
+		return nil, nil
 	}
 	if errors.Is(it.err, context.Canceled) {
 		ns.Status = NodeCancelled
-		return nil // sibling cancellation; not the original error
+		return nil, nil // sibling cancellation; not the original error
 	}
 	// WaitForOutput park: a pause, not a failure, and with no interrupt
 	// ID. Mirrors adk-python's wait_for_output WAITING state.
 	if errors.Is(it.err, ErrNodeWaitingForOutput) {
 		ns.Status = NodeWaiting
-		return nil
+		return resumeCheckpointFor(s.parentCtx, it.nodeName, nr), nil
 	}
 	if it.err != nil {
 		currentNode := s.nodesByName[it.nodeName]
@@ -868,16 +881,16 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 					// Return nil to continue the scheduler loop. Successors will
 					// be scheduled only when a retry attempt eventually succeeds
 					// and reaches the bottom of this function.
-					return nil // Don't fail the workflow
+					return nil, nil // Don't fail the workflow
 				}
 			}
 		}
 		ns.Status = NodeFailed
-		return it.err
+		return nil, it.err
 	}
 	if nr != nil && nr.err != nil {
 		ns.Status = NodeFailed
-		return nr.err
+		return nil, nr.err
 	}
 
 	// Happy path: decide between NodeWaiting (an open interrupt) or
@@ -896,7 +909,7 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 		for id := range nr.interruptIDs {
 			ns.Interrupts = append(ns.Interrupts, id)
 		}
-		return nil
+		return resumeCheckpointFor(s.parentCtx, it.nodeName, nr), nil
 	}
 
 	ns.Status = NodeCompleted
@@ -910,14 +923,14 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	ns.ResumedInputs = nil
 
 	if !scheduleNewWork {
-		return nil
+		return resumeCheckpointFor(s.parentCtx, it.nodeName, nr), nil
 	}
 
 	// Schedule successors. Find them via the routing-aware helper,
 	// which reads any routing event off this completion's accumulator.
 	currentNode := s.nodesByName[it.nodeName]
 	if currentNode == nil {
-		return nil
+		return resumeCheckpointFor(s.parentCtx, it.nodeName, nr), nil
 	}
 	var input any
 	var routingEv *session.Event
@@ -935,7 +948,50 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	for _, succ := range findSuccessors(s.graph, s.state, currentNode, input, routingEv, ns.Branch) {
 		s.scheduleNode(succ.node, succ.input, succ.triggeredBy, succ.branch)
 	}
-	return nil
+	return resumeCheckpointFor(s.parentCtx, it.nodeName, nr), nil
+}
+
+// resumeCheckpointFor records a successful re-entry activation on the event
+// stream. The checkpoint is deliberately distinct from the node's own events:
+// a node may emit progress and then fail, and only a checkpoint proves that the
+// activation finished successfully.
+func resumeCheckpointFor(ctx agent.Context, nodeName string, nr *nodeRun) *session.Event {
+	if nr == nil || len(nr.resumeInputs) == 0 {
+		return nil
+	}
+	path := nr.nodePath
+	if path == "" {
+		path = nodeName
+	}
+	return newResumeConsumedEvent(ctx, nodeName, path, resumeInputIDs(nr.resumeInputs))
+}
+
+func resumeInputIDs(inputs map[string]any) []string {
+	if len(inputs) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(inputs))
+	for id := range inputs {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
+}
+
+func newResumeConsumedEvent(ctx agent.Context, nodeName, nodePath string, consumed []string) *session.Event {
+	if ctx == nil || len(consumed) == 0 {
+		return nil
+	}
+	if nodePath == "" {
+		nodePath = nodeName
+	}
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = ctx.AgentName()
+	ev.Branch = ctx.Branch()
+	ev.NodeInfo = &session.NodeInfo{Path: nodePath, ResumeConsumedIDs: consumed}
+	return ev
 }
 
 // successor is the per-target dispatch tuple produced by
