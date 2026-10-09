@@ -176,7 +176,7 @@ func TestTailRetentionE2E(t *testing.T) {
 	// A low threshold with a short retained tail, so a handful of turns
 	// produces several passes. What degrades a rolling summary is the number of
 	// times it is re-summarized, not the size at which that starts, so a small
-	// threshold buys the behaviour under test in a short recording.
+	// threshold buys the behavior under test in a short recording.
 	//
 	// Deliberately well below the point where compaction merely starts firing.
 	// At 700 it fired once in one recording and twice in another, depending on
