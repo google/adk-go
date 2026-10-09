@@ -1149,3 +1149,20 @@ func TestSearch_IndexesMCPArguments(t *testing.T) {
 	out := mustSearch(t, newToolCtx(newFakeState(nil)), "postal code", base, mustNew(t, base, Config{}), 8)
 	checkNames(t, matchNames(out.Matches), []string{"get_weather"}, nil)
 }
+
+// TestSearch_AlreadyAvailableOnlyWhenToolsReturnsIt checks that select: calls a
+// name already available only when Tools returns it. A discovered tool the base
+// no longer returns, and a core name the base never had, are not found.
+func TestSearch_AlreadyAvailableOnlyWhenToolsReturnsIt(t *testing.T) {
+	base := &staticToolset{tools: makeTools(
+		toolDef{"list_books", "list books"},
+		toolDef{"core_tool", "core"},
+		toolDef{"other_tool", "other"},
+	)}
+	gts := mustNew(t, base, Config{CoreToolNames: []string{"core_tool", "ghost_core"}})
+	state := discoveredState(t, "list_books", "removed_tool")
+	out := mustSearch(t, newToolCtx(state), "select:list_books,core_tool,removed_tool,ghost_core", base, gts, 8)
+	if want := "tools not found: removed_tool, ghost_core. already available: list_books, core_tool"; out.Note != want {
+		t.Errorf("note = %q, want %q", out.Note, want)
+	}
+}
