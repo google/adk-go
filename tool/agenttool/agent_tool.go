@@ -219,7 +219,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if !ok {
 			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
 		}
-		if agentOutputSchema := llminternal.Reveal(internalLlmAgent).OutputSchema; agentOutputSchema != nil {
+		subState := llminternal.Reveal(internalLlmAgent)
+		artifactSaved := subState.OutputArtifact != "" && lastEvent.Actions.ArtifactDelta[subState.OutputArtifact] > 0
+		if agentOutputSchema := subState.OutputSchema; agentOutputSchema != nil && !artifactSaved {
 			// Assuming schemautils.ValidateOutputSchema parses the JSON string outputText
 			// and validates it against the agentOutputSchema, returning a map[string]any.
 			parsedOutput, err := utils.ValidateOutputSchema(outputText, agentOutputSchema)
