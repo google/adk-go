@@ -95,6 +95,43 @@ func TestComputeFlags_RejectsUnsafeA2AAgentCardURL(t *testing.T) {
 	}
 }
 
+// TestComputeFlags_RejectsUnsafeServiceName covers the service name, which
+// gcloudDeployToCloudRun and runGcloudProxy place in gcloud's positional
+// SERVICE slot. A value beginning with '-' is parsed by gcloud as a flag rather
+// than a service name (argument injection, CWE-88); only that case is rejected,
+// the exact service-name/identifier form is left for gcloud to validate.
+func TestComputeFlags_RejectsUnsafeServiceName(t *testing.T) {
+	for _, name := range []string{
+		"--flags-file=/tmp/evil.yaml", // the injection payload
+		"-s",
+		"-agent",
+	} {
+		resetFlags(t, "main.go", "http://127.0.0.1:8081")
+		flags.cloudRun.serviceName = name
+		if err := flags.computeFlags(); err == nil {
+			t.Errorf("computeFlags() with serviceName %q = nil, want an error", name)
+		}
+	}
+}
+
+// TestComputeFlags_AcceptsServiceNames guards that any value not beginning with
+// '-' is passed through to gcloud unchanged, including both a service ID and a
+// fully qualified identifier.
+func TestComputeFlags_AcceptsServiceNames(t *testing.T) {
+	for _, name := range []string{
+		"my-agent",
+		"a",
+		"9agent",
+		"projects/my-project/locations/us-central1/services/my-agent", // fully qualified identifier
+	} {
+		resetFlags(t, "main.go", "http://127.0.0.1:8081")
+		flags.cloudRun.serviceName = name
+		if err := flags.computeFlags(); err != nil {
+			t.Errorf("computeFlags() with serviceName %q = %v, want nil", name, err)
+		}
+	}
+}
+
 func TestComputeFlags_AcceptsBenignValues(t *testing.T) {
 	resetFlags(t, "main.go", "http://127.0.0.1:8081")
 
