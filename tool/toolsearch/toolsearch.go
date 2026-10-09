@@ -195,11 +195,14 @@ func discoveredNames(state session.ReadonlyState, agentName string) []string {
 			continue
 		}
 		// The database session service decodes state with encoding/json, so the
-		// stored int comes back as a float64. A custom service may return another
-		// type, and such a tool is kept, sorted last, rather than dropped.
+		// stored int comes back as a float64, and a custom service may decode it
+		// as an int64. A tool with any other type is kept, sorted last, rather
+		// than dropped.
 		order := math.Inf(1)
 		switch v := value.(type) {
 		case int:
+			order = float64(v)
+		case int64:
 			order = float64(v)
 		case float64:
 			order = v
