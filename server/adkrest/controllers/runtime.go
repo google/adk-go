@@ -569,8 +569,7 @@ func (c *RuntimeAPIController) RunLiveHandler(rw http.ResponseWriter, req *http.
 	}()
 	// Once the keepalive gives up, neither a reader blocked in Send nor the
 	// loop below waiting on the agent would see the socket close. Closing the
-	// session returns both, except on a sequentialagent root, whose Close
-	// waits on the mutex a blocked Send holds (issue #1749).
+	// session returns both.
 	defer context.AfterFunc(peerGone, func() { _ = liveSession.Close() })()
 
 	// Spawning goroutine for reading from the client over WebSocket and pushing it to Runner
