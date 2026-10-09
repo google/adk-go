@@ -148,7 +148,7 @@ func StartCompactEventsSpan(ctx context.Context, params StartCompactEventsSpanPa
 			genAICompactionTokenThreshold.Int(params.TokenThreshold),
 			genAICompactionEventRetention.Int(params.EventRetentionSize))
 	}
-	return tracer.Start(ctx, fmt.Sprintf("%s %s", compactEventsName, params.Trigger), trace.WithAttributes(attrs...))
+	return tracer().Start(ctx, fmt.Sprintf("%s %s", compactEventsName, params.Trigger), trace.WithAttributes(attrs...))
 }
 
 // TraceCompactionResultParams contains parameters for [TraceCompactionResult].
@@ -250,10 +250,7 @@ func recordCompactionUsage(span trace.Span, u *genai.GenerateContentResponseUsag
 	if u.PromptTokenCount > 0 {
 		span.SetAttributes(genAICompactionInputTokens.Int(int(u.PromptTokenCount)))
 	}
-	// Candidates plus thoughts, matching TraceGenerateContentResult in this
-	// package and the semconv note it cites. Counting candidates alone made
-	// two spans in one trace mean different things by the same key, and
-	// under-reported what a thinking model charged for the summary.
+	// Output tokens include thoughts, per semconv.
 	if out := u.CandidatesTokenCount + u.ThoughtsTokenCount; out > 0 {
 		span.SetAttributes(genAICompactionOutputTokens.Int(int(out)))
 	}

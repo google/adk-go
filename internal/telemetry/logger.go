@@ -36,6 +36,17 @@ import (
 // https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/.
 const captureMessageContentEnvVar = "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
 
+// adkTelemetrySchemaVersionOptIn selects otel_semconv_1_36 ("1") or the default otel_semconv_1_44 ("2").
+// Unlike ADK Python, the default is otel_semconv_1_44 everywhere.
+const adkTelemetrySchemaVersionOptIn = "ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN"
+
+const otelSemconv136 = "otel_semconv_1_36"
+
+// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-events.md
+const inferenceOperationDetailsEventName = "gen_ai.client.inference.operation.details"
+
+const elidedContent = "<elided>"
+
 // contentCaptureMode says which signals may carry message content.
 //
 // The variable was a boolean here before spans could carry content, and
@@ -73,6 +84,14 @@ func parseContentCaptureMode(s string) contentCaptureMode {
 	return captureNone
 }
 
+func useLegacySchema() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(adkTelemetrySchemaVersionOptIn))) {
+	case otelSemconv136, "1":
+		return true
+	}
+	return false
+}
+
 func contentCapture() contentCaptureMode {
 	once.Do(func() {
 		ApplyEnv()
@@ -95,31 +114,30 @@ func captureContentOnSpans() bool {
 	return mode == captureSpanOnly || mode == captureSpanAndEvent
 }
 
-const elidedContent = "<elided>"
+var loggerProvider = global.GetLoggerProvider()
 
-var otelLogger = global.GetLoggerProvider().Logger(
-	systemName,
-	log.WithSchemaURL(semconv.SchemaURL),
-	log.WithInstrumentationVersion(version.Version),
-)
-
-// OverrideLoggerForTesting replaces the package-level otelLogger
-// with one derived from lp for the duration of the calling test.
-// The original logger is restored via t.Cleanup.
-func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
-	original := otelLogger
-	otelLogger = lp.Logger(
+func otelLogger() log.Logger {
+	return loggerProvider.Logger(
 		systemName,
-		log.WithSchemaURL(semconv.SchemaURL),
+		log.WithSchemaURL(schemaURL()),
 		log.WithInstrumentationVersion(version.Version),
 	)
-	t.Cleanup(func() { otelLogger = original })
 }
 
-// LogRequest logs the request to the model - the system message and user messages.
+// OverrideLoggerForTesting makes logging use lp until the test ends.
+func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
+	original := loggerProvider
+	loggerProvider = lp
+	t.Cleanup(func() { loggerProvider = original })
+}
+
+// logRequest logs the request to the model - the system message and user messages.
 // It iterates over the request contents and logs each as a separate event.
-// Check [logSystemMessage] and [logUserMessage] for emitted event details.
-func LogRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backend) {
+// Legacy schema only.
+func logRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backend) {
+	if !useLegacySchema() {
+		return
+	}
 	genAISystem := variantToGenAISystem(backend)
 	logSystemMessage(ctx, req, genAISystem)
 	for _, content := range req.Contents {
@@ -127,12 +145,17 @@ func LogRequest(ctx context.Context, req *model.LLMRequest, backend genai.Backen
 	}
 }
 
-// LogResponse logs the inference result.
+// logResponse logs the inference result.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aichoice.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
 // * The spec embeds the "content" field to be under the "message" key, but it's added directly in body.
 // * The "tool_calls" field is required if available in the spec, but it's omitted.
-func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Backend) {
+//
+// Legacy schema only.
+func logResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Backend) {
+	if !useLegacySchema() {
+		return
+	}
 	record := log.Record{}
 	record.SetEventName("gen_ai.choice")
 
@@ -161,7 +184,35 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Bac
 		record.AddAttributes(*genAISystem)
 	}
 
-	otelLogger.Emit(ctx, record)
+	otelLogger().Emit(ctx, record)
+}
+
+// logInferenceOperationDetails emits the inference event, with messages only when capture is on.
+func logInferenceOperationDetails(ctx context.Context, params GenerateContentParams, result generateContentResult) {
+	if useLegacySchema() {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		semconv.GenAIOperationNameGenerateContent,
+		semconv.GenAIRequestModel(params.ModelName),
+		gcpVertexAgentInvocationID.String(params.InvocationID),
+	}
+	if provider, ok := providerName(params.ModelName, params.Backend); ok {
+		attrs = append(attrs, provider)
+	}
+	if result.Error != nil {
+		attrs = append(attrs, errorType(result.Error))
+	}
+	attrs = append(attrs, generateContentResultAttributes(result)...)
+	if getGenAICaptureMessageContent() {
+		attrs = append(attrs, eventContentAttributes(append(requestContent(params.Request), responseContent(result.Response, result.Error)...))...)
+	}
+	record := log.Record{}
+	record.SetEventName(inferenceOperationDetailsEventName)
+	// The spec makes this event opt-in; DEBUG lets consumers filter it out.
+	record.SetSeverity(log.SeverityDebug)
+	record.AddAttributes(attrs...)
+	otelLogger().Emit(ctx, record)
 }
 
 // logSystemMessage logs the system message from the request.
@@ -177,7 +228,7 @@ func logSystemMessage(ctx context.Context, req *model.LLMRequest, genAISystem *a
 	if genAISystem != nil {
 		record.AddAttributes(*genAISystem)
 	}
-	otelLogger.Emit(ctx, record)
+	otelLogger().Emit(ctx, record)
 }
 
 // logUserMessage logs the user message from the request.
@@ -194,7 +245,7 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *at
 		record.AddAttributes(*genAISystem)
 	}
 
-	otelLogger.Emit(ctx, record)
+	otelLogger().Emit(ctx, record)
 }
 
 // GenAISystemAttr returns the gen_ai.system attribute for a backend, and

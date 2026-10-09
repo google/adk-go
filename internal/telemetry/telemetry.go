@@ -21,13 +21,16 @@ package telemetry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/version"
 	"google.golang.org/adk/v2/model"
@@ -48,26 +51,34 @@ var (
 	gcpVertexAgentInvocationID      = attribute.Key("gcp.vertex.agent.invocation_id")
 	genAIUsageCacheReadInputTokens  = attribute.Key("gen_ai.usage.cache_read.input_tokens")
 	genAIUsageReasoningOutputTokens = attribute.Key("gen_ai.usage.reasoning.output_tokens")
+	genAIToolCallArguments          = attribute.Key("gen_ai.tool.call.arguments")
+	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
-// tracer is the tracer instance for ADK go.
-var tracer trace.Tracer = otel.GetTracerProvider().Tracer(
-	systemName,
-	trace.WithInstrumentationVersion(version.Version),
-	trace.WithSchemaURL(semconv.SchemaURL),
-)
+var tracerProvider = otel.GetTracerProvider()
 
-// OverrideTracerForTesting replaces the package-level tracer with one
-// derived from tp for the duration of the calling test. The original
-// tracer is restored via t.Cleanup.
-func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
-	original := tracer
-	tracer = tp.Tracer(
+// tracer is looked up per use, since the schema URL follows the env.
+func tracer() trace.Tracer {
+	return tracerProvider.Tracer(
 		systemName,
 		trace.WithInstrumentationVersion(version.Version),
-		trace.WithSchemaURL(semconv.SchemaURL),
+		trace.WithSchemaURL(schemaURL()),
 	)
-	t.Cleanup(func() { tracer = original })
+}
+
+func schemaURL() string {
+	if useLegacySchema() {
+		return semconv.SchemaURL
+	}
+	// TODO(maxind): use semconv/v1.44.0 SchemaURL once otel-go ships it.
+	return "https://opentelemetry.io/schemas/1.44.0"
+}
+
+// OverrideTracerForTesting makes tracing use tp until the test ends.
+func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
+	original := tracerProvider
+	tracerProvider = tp
+	t.Cleanup(func() { tracerProvider = original })
 }
 
 type TraceAgentResultParams struct {
@@ -80,20 +91,18 @@ func TraceAgentResult(span trace.Span, params TraceAgentResultParams) {
 	recordErrorAndStatus(span, params.Error)
 }
 
-// StartGenerateContentSpanParams contains parameters for [StartGenerateContentSpan].
-type StartGenerateContentSpanParams struct {
+type GenerateContentParams struct {
 	// ModelName is the name of the model being used for generation.
 	ModelName string
 	// InvocationID is the ID of the invocation.
 	InvocationID string
-	// Request is the request about to be sent to the model. It is used only
-	// to record the opt-in gen_ai.input.messages and
-	// gen_ai.system_instructions attributes, and may be nil.
+	// Request is required.
 	Request *model.LLMRequest
+	Backend genai.Backend
 }
 
-// StartGenerateContentSpan starts a new semconv generate_content span.
-func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSpanParams) (context.Context, trace.Span) {
+// startGenerateContentSpan starts a new semconv generate_content span.
+func startGenerateContentSpan(ctx context.Context, params GenerateContentParams) (context.Context, trace.Span) {
 	modelName := params.ModelName
 	attrs := []attribute.KeyValue{
 		// Used by adk-web, can be removed once it reads the invocation id from invoke_agent span.
@@ -101,53 +110,65 @@ func StartGenerateContentSpan(ctx context.Context, params StartGenerateContentSp
 		semconv.GenAIOperationNameGenerateContent,
 		semconv.GenAIRequestModel(modelName),
 	}
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
+	if provider, ok := providerName(params.ModelName, params.Backend); ok && !useLegacySchema() {
+		attrs = append(attrs, provider)
+	}
+	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation
 	// costs milliseconds, and on a span the sampler drops it buys nothing. The
 	// conventions list the attributes worth having at span creation for
 	// sampling, and content is not among them. Still before the model call, so
 	// the prompt is on the span even when the call fails and no response is
 	// ever traced.
-	if span.IsRecording() {
-		span.SetAttributes(requestContentAttributes(params.Request)...)
+	if span.IsRecording() && captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes(requestContent(params.Request))...)
 	}
 	return spanCtx, span
 }
 
-type TraceGenerateContentResultParams struct {
+type generateContentResult struct {
 	Response *model.LLMResponse
 	EventID  string
 	Error    error
 }
 
-// TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
-func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
+// traceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
+func traceGenerateContentResult(span trace.Span, params generateContentResult) {
 	recordErrorAndStatus(span, params.Error)
+	span.SetAttributes(generateContentResultAttributes(params)...)
+	if captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes(responseContent(params.Response, params.Error))...)
+	}
+}
+
+// generateContentResultAttributes returns content-free result attributes.
+func generateContentResultAttributes(params generateContentResult) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
 	// Record a finish reason when the call produced a response or an error; a
 	// nil response and nil error means there is no result to describe.
 	if params.Response != nil || params.Error != nil {
-		span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
+		attrs = append(attrs, semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
 	}
 	if params.Response == nil {
-		return
+		return attrs
 	}
-	span.SetAttributes(gcpVertexAgentEventID.String(params.EventID))
-	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
-	if params.Response.UsageMetadata != nil {
-		span.SetAttributes(
+	attrs = append(attrs, gcpVertexAgentEventID.String(params.EventID))
+	if u := params.Response.UsageMetadata; u != nil {
+		attrs = append(attrs,
 			// Tool-use prompt tokens are reported separately from PromptTokenCount and
 			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
 			// matches the semantic-conventions reference implementation for google-genai:
 			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
+			semconv.GenAIUsageInputTokens(int(u.PromptTokenCount+u.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.
-			semconv.GenAIUsageOutputTokens(int(params.Response.UsageMetadata.CandidatesTokenCount+params.Response.UsageMetadata.ThoughtsTokenCount)),
-			genAIUsageCacheReadInputTokens.Int(int(params.Response.UsageMetadata.CachedContentTokenCount)),
-			genAIUsageReasoningOutputTokens.Int(int(params.Response.UsageMetadata.ThoughtsTokenCount)),
+			semconv.GenAIUsageOutputTokens(int(u.CandidatesTokenCount+u.ThoughtsTokenCount)),
+			genAIUsageCacheReadInputTokens.Int(int(u.CachedContentTokenCount)),
+			genAIUsageReasoningOutputTokens.Int(int(u.ThoughtsTokenCount)),
 		)
 	}
+	return attrs
 }
 
 // StartExecuteToolSpanParams contains parameters for [StartExecuteToolSpan].
@@ -161,10 +182,18 @@ type StartExecuteToolSpanParams struct {
 // StartExecuteToolSpan starts a new semconv execute_tool span.
 func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams) (context.Context, trace.Span) {
 	toolName := params.ToolName
-	spanCtx, span := tracer.Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(
+	attrs := []attribute.KeyValue{
 		semconv.GenAIOperationNameExecuteTool,
 		semconv.GenAIToolName(toolName),
-		gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args))))
+	}
+	legacy := useLegacySchema()
+	if legacy {
+		attrs = append(attrs, gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args)))
+	}
+	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(attrs...))
+	if !legacy && params.Args != nil && span.IsRecording() && captureContentOnSpans() {
+		span.SetAttributes(spanContentAttributes([]contentAttr{{genAIToolCallArguments, toolPayload(params.Args)}})...)
+	}
 	return spanCtx, span
 }
 
@@ -184,31 +213,40 @@ func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 		semconv.GenAIToolDescriptionKey.String(params.Description),
 	}
 
-	toolCallID := "<not specified>"
-	toolResponse := "<not specified>"
-
+	var functionResponse *genai.FunctionResponse
 	if params.ResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(params.ResponseEvent.ID))
-		if params.ResponseEvent.LLMResponse.Content != nil {
-			responseParts := params.ResponseEvent.LLMResponse.Content.Parts
-
-			if len(responseParts) > 0 {
-				functionResponse := responseParts[0].FunctionResponse
-				if functionResponse != nil {
-					if functionResponse.ID != "" {
-						toolCallID = functionResponse.ID
-					}
-					if functionResponse.Response != nil {
-						toolResponse = safeSerialize(functionResponse.Response)
-					}
-				}
-			}
+		if c := params.ResponseEvent.LLMResponse.Content; c != nil && len(c.Parts) > 0 {
+			functionResponse = c.Parts[0].FunctionResponse
 		}
 	}
 
-	attributes = append(attributes, semconv.GenAIToolCallIDKey.String(toolCallID))
-	attributes = append(attributes, gcpVertexAgentToolResponseName.String(toolResponse))
+	if !useLegacySchema() {
+		if functionResponse != nil {
+			if functionResponse.ID != "" {
+				attributes = append(attributes, semconv.GenAIToolCallID(functionResponse.ID))
+			}
+			if captureContentOnSpans() && functionResponse.Response != nil && params.Error == nil {
+				attributes = append(attributes, spanContentAttributes([]contentAttr{{genAIToolCallResult, toolPayload(functionResponse.Response)}})...)
+			}
+		}
+		span.SetAttributes(attributes...)
+		return
+	}
 
+	toolCallID := "<not specified>"
+	toolResponse := "<not specified>"
+	if functionResponse != nil {
+		if functionResponse.ID != "" {
+			toolCallID = functionResponse.ID
+		}
+		if functionResponse.Response != nil {
+			toolResponse = safeSerialize(functionResponse.Response)
+		}
+	}
+	attributes = append(attributes,
+		semconv.GenAIToolCallID(toolCallID),
+		gcpVertexAgentToolResponseName.String(toolResponse))
 	span.SetAttributes(attributes...)
 }
 
@@ -218,6 +256,18 @@ func recordErrorAndStatus(span trace.Span, err error) {
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
+	if !useLegacySchema() {
+		span.SetAttributes(errorType(err))
+	}
+}
+
+// errorType mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L183-L198
+func errorType(err error) attribute.KeyValue {
+	var apiErr genai.APIError
+	if errors.As(err, &apiErr) {
+		return semconv.ErrorTypeKey.String(strconv.Itoa(apiErr.Code))
+	}
+	return semconv.ErrorType(err)
 }
 
 // WrapYield wraps a yield function to add tracing of values returned by iterators. Read [iter.Seq2] for more information about yield.
@@ -251,7 +301,7 @@ func WrapYield[T any](span trace.Span, yield func(T, error) bool, finalizeSpan f
 
 // StartTrace starts a new span with the given name.
 func StartTrace(ctx context.Context, traceName string) (context.Context, trace.Span) {
-	return tracer.Start(ctx, traceName)
+	return tracer().Start(ctx, traceName)
 }
 
 // TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
@@ -261,8 +311,11 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 		semconv.GenAIOperationNameKey.String(executeToolName),
 		semconv.GenAIToolNameKey.String(mergeToolName),
 		semconv.GenAIToolDescriptionKey.String(mergeToolName),
-		gcpVertexAgentToolCallArgsName.String("N/A"),
-		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
+	}
+	if useLegacySchema() {
+		attributes = append(attributes,
+			gcpVertexAgentToolCallArgsName.String("N/A"),
+			gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)))
 	}
 	if fnResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(fnResponseEvent.ID))

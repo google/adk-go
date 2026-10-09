@@ -2,6 +2,7 @@
   "root_span": {
     "name": "invoke_workflow my_workflow",
     "attributes": {
+      "error.type": "*workflow.NodeRunError",
       "gen_ai.conversation.id": "PRESENT",
       "gen_ai.operation.name": "invoke_workflow",
       "gen_ai.workflow.name": "my_workflow"
@@ -31,6 +32,7 @@
           {
             "name": "invoke_agent task_agent",
             "attributes": {
+              "error.type": "*errors.errorString",
               "gcp.vertex.agent.invocation_id": "PRESENT",
               "gen_ai.agent.description": "collaborative task_agent",
               "gen_ai.agent.name": "task_agent",
@@ -42,6 +44,7 @@
               {
                 "name": "generate_content mock",
                 "attributes": {
+                  "error.type": "*errors.errorString",
                   "gcp.vertex.agent.invocation_id": "PRESENT",
                   "gen_ai.operation.name": "generate_content",
                   "gen_ai.request.model": "mock",
@@ -53,18 +56,17 @@
                 "children": [],
                 "logs": [
                   {
-                    "event_name": "gen_ai.system.message",
-                    "body": {
-                      "content": "<elided>"
-                    },
-                    "attributes": {}
-                  },
-                  {
-                    "event_name": "gen_ai.user.message",
-                    "body": {
-                      "content": "<elided>"
-                    },
-                    "attributes": {}
+                    "event_name": "gen_ai.client.inference.operation.details",
+                    "body": null,
+                    "attributes": {
+                      "error.type": "*errors.errorString",
+                      "gcp.vertex.agent.invocation_id": "PRESENT",
+                      "gen_ai.operation.name": "generate_content",
+                      "gen_ai.request.model": "mock",
+                      "gen_ai.response.finish_reasons": [
+                        "error"
+                      ]
+                    }
                   }
                 ]
               }

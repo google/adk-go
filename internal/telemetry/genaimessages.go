@@ -15,9 +15,12 @@
 package telemetry
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"log"
 	"strings"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 	"google.golang.org/genai"
@@ -54,14 +57,8 @@ const (
 	finishError         = "error"
 )
 
-// maxContentAttributeBytes bounds each content attribute.
-//
-// A request carries the whole conversation, rebuilt on every model call, so an
-// attribute grows with the session and would eventually exceed what a backend
-// accepts — Cloud Trace discards an attribute value over 64 KiB in full, and
-// silently. Rather than trim, an attribute that does not fit is left unset:
-// losing one span's content is recoverable, and a partial value that claims to
-// be the whole conversation is not. Trimming to fit is worth adding later.
+// maxContentAttributeBytes stays under Cloud Trace's 64 KiB attribute limit,
+// past which it rejects the whole export request.
 const maxContentAttributeBytes = 60 << 10
 
 // unserializablePlaceholder stands in for a tool payload encoding/json rejects.
@@ -74,13 +71,54 @@ const unserializablePlaceholder = `"<unserializable>"`
 // leave the conversation around it unrecorded.
 const maxInlineDataBytes = 16 << 10
 
+// contentValue is recorded as its JSON encoding in the legacy schema, and as value() otherwise.
+type contentValue interface {
+	value() attribute.Value
+}
+
+type contentAttr struct {
+	key   attribute.Key
+	value contentValue
+}
+
+type messageList []chatMessage
+
+func (l messageList) value() attribute.Value {
+	values := make([]attribute.Value, len(l))
+	for i, m := range l {
+		values[i] = m.value()
+	}
+	return attribute.SliceValue(values...)
+}
+
 // chatMessage is one turn. FinishReason is required on an output message and
 // absent from an input one, which is the only difference between the two
 // message schemas.
 type chatMessage struct {
-	Role         string `json:"role"`
-	Parts        []any  `json:"parts"`
-	FinishReason string `json:"finish_reason,omitempty"`
+	Role         string   `json:"role"`
+	Parts        partList `json:"parts"`
+	FinishReason string   `json:"finish_reason,omitempty"`
+}
+
+func (m chatMessage) value() attribute.Value {
+	kvs := []attribute.KeyValue{
+		str("role", m.Role),
+		{Key: "parts", Value: m.Parts.value()},
+	}
+	if m.FinishReason != "" {
+		kvs = append(kvs, str("finish_reason", m.FinishReason))
+	}
+	return attribute.MapValue(kvs...)
+}
+
+type partList []contentValue
+
+func (l partList) value() attribute.Value {
+	values := make([]attribute.Value, len(l))
+	for i, p := range l {
+		values[i] = p.value()
+	}
+	return attribute.SliceValue(values...)
 }
 
 type textPart struct {
@@ -88,11 +126,27 @@ type textPart struct {
 	Content string `json:"content"`
 }
 
+func (p textPart) value() attribute.Value {
+	return attribute.MapValue(str("type", p.Type), str("content", p.Content))
+}
+
 type toolCallPart struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Type      string  `json:"type"`
+	ID        string  `json:"id,omitempty"`
+	Name      string  `json:"name"`
+	Arguments rawJSON `json:"arguments,omitempty"`
+}
+
+func (p toolCallPart) value() attribute.Value {
+	kvs := []attribute.KeyValue{str("type", p.Type)}
+	if p.ID != "" {
+		kvs = append(kvs, str("id", p.ID))
+	}
+	kvs = append(kvs, str("name", p.Name))
+	if len(p.Arguments) > 0 {
+		kvs = append(kvs, attribute.KeyValue{Key: "arguments", Value: p.Arguments.value()})
+	}
+	return attribute.MapValue(kvs...)
 }
 
 type blobPart struct {
@@ -103,6 +157,18 @@ type blobPart struct {
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
+func (p blobPart) value() attribute.Value {
+	kvs := []attribute.KeyValue{str("type", p.Type)}
+	if p.MIMEType != "" {
+		kvs = append(kvs, str("mime_type", p.MIMEType))
+	}
+	kvs = append(kvs, str("modality", p.Modality), str("content", p.Content))
+	if p.Truncated {
+		kvs = append(kvs, attribute.Bool("truncated", true))
+	}
+	return attribute.MapValue(kvs...)
+}
+
 type uriPart struct {
 	Type     string `json:"type"`
 	MIMEType string `json:"mime_type,omitempty"`
@@ -110,29 +176,77 @@ type uriPart struct {
 	URI      string `json:"uri"`
 }
 
-type toolResponsePart struct {
-	Type     string          `json:"type"`
-	ID       string          `json:"id,omitempty"`
-	Name     string          `json:"name,omitempty"`
-	Response json.RawMessage `json:"response"`
+func (p uriPart) value() attribute.Value {
+	kvs := []attribute.KeyValue{str("type", p.Type)}
+	if p.MIMEType != "" {
+		kvs = append(kvs, str("mime_type", p.MIMEType))
+	}
+	kvs = append(kvs, str("modality", p.Modality), str("uri", p.URI))
+	return attribute.MapValue(kvs...)
 }
 
-// requestContentAttributes returns the gen_ai.system_instructions and
-// gen_ai.input.messages attributes for req, or nil when content capture is off
-// or req carries nothing to record.
-//
-// Content is sensitive and often large, so the semantic conventions require
-// instrumentations not to capture it by default. This is gated on
-// OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT, the same flag that
-// governs content in log records.
-func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
-	if req == nil || !captureContentOnSpans() {
+type toolResponsePart struct {
+	Type     string  `json:"type"`
+	ID       string  `json:"id,omitempty"`
+	Name     string  `json:"name,omitempty"`
+	Response rawJSON `json:"response"`
+}
+
+func (p toolResponsePart) value() attribute.Value {
+	kvs := []attribute.KeyValue{str("type", p.Type)}
+	if p.ID != "" {
+		kvs = append(kvs, str("id", p.ID))
+	}
+	if p.Name != "" {
+		kvs = append(kvs, str("name", p.Name))
+	}
+	kvs = append(kvs, attribute.KeyValue{Key: "response", Value: p.Response.value()})
+	return attribute.MapValue(kvs...)
+}
+
+// str replaces invalid UTF-8 as encoding/json does, since OTLP exporters reject it.
+func str(k, v string) attribute.KeyValue {
+	if !utf8.ValidString(v) {
+		var b strings.Builder
+		for _, r := range v {
+			b.WriteRune(r)
+		}
+		v = b.String()
+	}
+	return attribute.String(k, v)
+}
+
+// rawJSON is an encoded tool payload.
+type rawJSON []byte
+
+func (r rawJSON) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
+	return r, nil
+}
+
+// value decodes r, as JSON is the safe way to walk arbitrary application values.
+func (r rawJSON) value() attribute.Value {
+	// Keeps integers integers.
+	dec := json.NewDecoder(bytes.NewReader(r))
+	dec.UseNumber()
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
+		return attribute.Value{}
+	}
+	return toLogValue(decoded)
+}
+
+// requestContent is user content, so callers gate it on content capture.
+func requestContent(req *model.LLMRequest) []contentAttr {
+	if req == nil {
 		return nil
 	}
-	var attrs []attribute.KeyValue
+	var content []contentAttr
 	if req.Config != nil && req.Config.SystemInstruction != nil {
 		if parts := semconvParts(req.Config.SystemInstruction.Parts); len(parts) > 0 {
-			attrs = appendJSON(attrs, genAISystemInstructions, parts)
+			content = append(content, contentAttr{genAISystemInstructions, parts})
 		}
 	}
 	if len(req.Contents) > 0 {
@@ -147,41 +261,66 @@ func requestContentAttributes(req *model.LLMRequest) []attribute.KeyValue {
 			}
 			msgs = append(msgs, chatMessage{Role: schemaRole(c), Parts: semconvParts(c.Parts)})
 		}
-		attrs = appendJSON(attrs, genAIInputMessages, msgs)
+		content = append(content, contentAttr{genAIInputMessages, messageList(msgs)})
 	}
-	return attrs
+	return content
 }
 
-// responseContentAttributes returns the gen_ai.output.messages attribute for
-// resp, gated exactly as [requestContentAttributes] is.
-//
-// Partial responses are skipped. Each streamed chunk would otherwise overwrite
-// the attribute, leaving the span holding a fragment rather than the answer.
-func responseContentAttributes(resp *model.LLMResponse, err error) []attribute.KeyValue {
-	if resp == nil || resp.Partial || !captureContentOnSpans() {
+// responseContent skips partial responses, so a stream records its final answer.
+func responseContent(resp *model.LLMResponse, err error) []contentAttr {
+	if resp == nil || resp.Partial {
 		return nil
 	}
 	// A candidate suppressed by a safety filter has a finish reason and no
 	// parts, and is the case an operator most wants on the span, so the message
 	// is recorded with an empty parts list. ADK carries a single candidate, so
 	// there is always exactly one output message.
-	var parts []any
+	parts := partList{}
 	if resp.Content != nil {
 		parts = semconvParts(resp.Content.Parts)
-	} else {
-		parts = []any{}
 	}
-	return appendJSON(nil, genAIOutputMessages, []chatMessage{{
+	return []contentAttr{{genAIOutputMessages, messageList{{
 		Role:         roleAssistant,
 		Parts:        parts,
 		FinishReason: schemaFinishReason(resp, err),
-	}})
+	}}}}
+}
+
+// spanContentAttributes drops, with a warning, attributes too large to export.
+func spanContentAttributes(content []contentAttr) []attribute.KeyValue {
+	legacy := useLegacySchema()
+	var attrs []attribute.KeyValue
+	for _, c := range content {
+		encoded, err := json.Marshal(c.value)
+		if err != nil {
+			// Unreachable.
+			continue
+		}
+		if len(encoded) > maxContentAttributeBytes {
+			log.Printf("adk: telemetry: leaving %s off the span: its JSON encoding is %d bytes, over the %d-byte limit", c.key, len(encoded), maxContentAttributeBytes)
+			continue
+		}
+		if legacy {
+			attrs = append(attrs, c.key.String(string(encoded)))
+		} else {
+			attrs = append(attrs, attribute.KeyValue{Key: c.key, Value: c.value.value()})
+		}
+	}
+	return attrs
+}
+
+func eventContentAttributes(content []contentAttr) []attribute.KeyValue {
+	attrs := make([]attribute.KeyValue, len(content))
+	for i, c := range content {
+		attrs[i] = attribute.KeyValue{Key: c.key, Value: c.value.value()}
+	}
+	return attrs
 }
 
 // semconvParts converts genai parts, skipping those with no mapping. Never
 // returns nil, so a message always has the parts array the schema requires.
-func semconvParts(ps []*genai.Part) []any {
-	out := make([]any, 0, len(ps))
+func semconvParts(ps []*genai.Part) partList {
+	out := make(partList, 0, len(ps))
 	for _, p := range ps {
 		if converted := semconvPart(p); converted != nil {
 			out = append(out, converted)
@@ -199,7 +338,7 @@ func semconvParts(ps []*genai.Part) []any {
 // Structured variants are matched before Text. genai documents that exactly one
 // field of a part should be set, but if that is ever violated, losing a tool
 // call to an accompanying string is the worse outcome.
-func semconvPart(p *genai.Part) any {
+func semconvPart(p *genai.Part) contentValue {
 	switch {
 	case p == nil:
 		return nil
@@ -257,13 +396,13 @@ func semconvPart(p *genai.Part) any {
 // and chans, and detects reference cycles. Walking the value to sanitize it
 // would be worse than useless — a map holding two references to itself fans out
 // exponentially and never returns.
-func toolPayload(v map[string]any) json.RawMessage {
+func toolPayload(v map[string]any) rawJSON {
 	if v == nil {
-		return json.RawMessage("null")
+		return rawJSON("null")
 	}
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return json.RawMessage(unserializablePlaceholder)
+		return rawJSON(unserializablePlaceholder)
 	}
 	return raw
 }
@@ -378,20 +517,4 @@ func schemaFinishReason(resp *model.LLMResponse, err error) string {
 	default:
 		return strings.ToLower(string(resp.FinishReason))
 	}
-}
-
-// appendJSON encodes value and appends it to attrs under key, unless it does
-// not fit. See [maxContentAttributeBytes] for why an oversized attribute is
-// dropped rather than trimmed.
-func appendJSON(attrs []attribute.KeyValue, key attribute.Key, value any) []attribute.KeyValue {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		// Unreachable: tool payloads are pre-encoded by toolPayload and
-		// everything else is a string or a slice of them.
-		return attrs
-	}
-	if len(encoded) > maxContentAttributeBytes {
-		return attrs
-	}
-	return append(attrs, key.String(string(encoded)))
 }

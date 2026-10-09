@@ -13,6 +13,15 @@
 // limitations under the License.
 
 // Package telemetry contains OpenTelemetry related functionality for ADK.
+//
+// # Telemetry format
+//
+// ADK follows the OpenTelemetry GenAI semantic conventions v1.44.0. Message
+// content is recorded only when OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+// is SPAN_ONLY, EVENT_ONLY or SPAN_AND_EVENT ("true" or "1" mean EVENT_ONLY).
+//
+// ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN=otel_semconv_1_36 (or 1) restores the
+// format of earlier releases, until at least March 2027.
 package telemetry
 
 import (
