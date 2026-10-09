@@ -195,19 +195,12 @@ type Config struct {
 	// allow agent transferring across the tree.
 	SubAgents []agent.Agent
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [agent.BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [agent.AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// GenerateContentConfig is for the additional content generation
