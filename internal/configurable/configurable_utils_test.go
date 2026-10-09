@@ -260,7 +260,7 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 		t.Skipf("symlinks are not supported in this environment: %v", err)
 	}
 
-	agentDir := alias //filepath.Join(alias, "root_agent.yaml")
+	agentDir := alias // filepath.Join(alias, "root_agent.yaml")
 	if _, err := ResolveAgentReference(context.Background(), agentDir, "missing.yaml", true); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want no containment rejection", agentDir, "missing.yaml", err)
 	}
@@ -364,7 +364,7 @@ func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
 			}
 			refPath := tc.layout(t, dir)
 
-			parentPath := dir //filepath.Join(dir, "root_agent.yaml")
+			parentPath := dir // filepath.Join(dir, "root_agent.yaml")
 			if _, err := resolveConfigReference(parentPath, refPath, false, true); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
 				t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a link inside the directory is refused for being a link",
 					parentPath, refPath, err, utils.ErrSymlinkInRelativePath)
@@ -544,7 +544,7 @@ func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
 		{name: "reserved name CONIN$", refPath: "CONIN$", wantRejected: windows},
 		// Backslash as a separator (Windows) climbs out; as a literal character
 		// (Unix) it is one file name that stays put.
-		{name: "backslash traversal", refPath: `..\..\outside.yaml`, wantRejected: true},
+		{name: "backslash traversal", refPath: `..\..\outside.yaml`, wantRejected: windows},
 		// Accepted on both, and contained on both: a nested path on Windows, a
 		// flat file name on Unix. Exercises the containment branch on Windows.
 		{name: "backslash subdir", refPath: `sub\child.yaml`, wantRejected: false},

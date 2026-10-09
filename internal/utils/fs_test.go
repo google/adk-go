@@ -33,7 +33,7 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotRel, err := SafeSubpath(base, tc.rel, true, true)
+			got, gotRel, err := SafeSubpath(base, tc.rel, true, false)
 
 			if tc.wantErr {
 				if err == nil {
@@ -54,14 +54,6 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 			if tc.wantSuffix != gotRel {
 				t.Fatalf("SafeSubpath(%q, %q) = (%q,%q); want suffix %q", base, tc.rel, got, gotRel, tc.wantSuffix)
 			}
-
-			// want := base
-			// if tc.wantSuffix != "" {
-			// 	want = filepath.Join(base, filepath.FromSlash(tc.wantSuffix))
-			// }
-			// if got != want {
-			// 	t.Errorf("Normalize(%q, %q) = %q; want %q", base, tc.rel, got, want)
-			// }
 		})
 	}
 }
@@ -207,26 +199,3 @@ func TestSafeSubpath_NonWindows(t *testing.T) {
 
 	runTests(t, base, cases)
 }
-
-// func TestSymlinks(t *testing.T) {
-// 	p := `C:\Users\kdroste\Start Menu`
-
-// 	tests := []string{"Users\\kdroste\\Start Menu", "Users\\kdroste", "Users\\kdroste\\Start Menu\\", "Users\\kdroste\\Start Menu\\desktop.ini", "Users\\kdroste\\Start Menu\\Programs"}
-
-// 	for _, f := range tests {
-// 		t.Logf("Looking at %q", f)
-// 		fi, err := os.Lstat(p)
-// 		if err != nil {
-// 			t.Errorf("failed to Lstat: %v", err)
-// 		}
-// 		t.Logf("ModeIrregular: %+v", fi.Mode()&os.ModeIrregular != 0)
-// 		t.Logf("ModeDir: %+v", fi.Mode()&os.ModeDir != 0)
-// 		res, err := ContainsSymlink("C:\\", f)
-// 		if err != nil {
-// 			t.Errorf("cannot ContainsSymlink")
-// 		}
-// 		t.Logf("ContainsSymlink: %+v", res)
-// 	}
-
-// 	t.Fail()
-// }
