@@ -15,7 +15,6 @@
 package appinfo
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -23,6 +22,7 @@ import (
 	"github.com/gorilla/mux"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/server/adkrest/controllers"
 )
 
 // experimentalWarning is logged the first time the endpoint serves a request.
@@ -55,17 +55,6 @@ func Handler(loader agent.Loader) http.HandlerFunc {
 			http.Error(w, "app not found", http.StatusNotFound)
 			return
 		}
-
-		// Marshal before writing anything, so an encoding failure (such as a tool
-		// schema that cannot be serialized) can still answer 500.
-		body, err := json.Marshal(build(r.Context(), appName, root))
-		if err != nil {
-			// The type only: the error text can quote a tool's schema.
-			log.Printf("app-info: encoding the description of an app failed: %T", err)
-			http.Error(w, "encoding the app description failed", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json; charset=UTF-8")
-		_, _ = w.Write(body)
+		controllers.EncodeJSONResponse(build(r.Context(), appName, root), http.StatusOK, w)
 	}
 }

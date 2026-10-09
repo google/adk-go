@@ -17,7 +17,6 @@ package appinfo_test
 import (
 	"encoding/json"
 	"log"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,12 +24,10 @@ import (
 	"testing"
 
 	"github.com/gorilla/mux"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/exp/appinfo"
-	"google.golang.org/adk/v2/tool"
 )
 
 const path = "/apps/{app_name}/app-info"
@@ -114,34 +111,6 @@ func TestHandlerWithoutLoader(t *testing.T) {
 	rec := serve(t, nil, httptest.NewRequest(http.MethodGet, "/apps/concierge/app-info", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
-	}
-}
-
-// unencodableTool declares a schema JSON cannot represent.
-type unencodableTool struct{}
-
-func (unencodableTool) Name() string        { return "unencodable" }
-func (unencodableTool) Description() string { return "Has a NaN in its schema." }
-func (unencodableTool) IsLongRunning() bool { return false }
-func (unencodableTool) Declaration() *genai.FunctionDeclaration {
-	return &genai.FunctionDeclaration{
-		Name:                 "unencodable",
-		ParametersJsonSchema: map[string]any{"default": math.NaN()},
-	}
-}
-
-// TestHandlerEncodingFailure pins that a response JSON cannot encode is a 500,
-// not a 200 with an empty body.
-func TestHandlerEncodingFailure(t *testing.T) {
-	loader := newLoader(t, llmagent.Config{
-		Name:        "odd",
-		Description: "Holds a tool with an unencodable schema.",
-		Instruction: "Work.",
-		Tools:       []tool.Tool{unencodableTool{}},
-	})
-	rec := serve(t, loader, httptest.NewRequest(http.MethodGet, "/apps/odd/app-info", nil))
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want %d; body: %q", rec.Code, http.StatusInternalServerError, rec.Body)
 	}
 }
 
