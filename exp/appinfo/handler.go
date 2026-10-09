@@ -56,8 +56,8 @@ func Handler(loader agent.Loader) http.HandlerFunc {
 			return
 		}
 
-		// Encoded before anything is written, so a value JSON cannot represent
-		// answers 500 rather than 200 with an empty body.
+		// Marshal before writing anything, so an encoding failure (such as a tool
+		// schema that cannot be serialized) can still answer 500.
 		body, err := json.Marshal(build(r.Context(), appName, root))
 		if err != nil {
 			// The type only: the error text can quote a tool's schema.
