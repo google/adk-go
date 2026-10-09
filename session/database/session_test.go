@@ -19,32 +19,44 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/session"
 )
 
 func TestLocalSessionEventsSnapshot(t *testing.T) {
-	first := &session.Event{ID: "first"}
-	s := &localSession{events: []*session.Event{first}}
+	base := time.Date(2026, time.September, 4, 0, 0, 0, 0, time.UTC)
+	initial := make([]*session.Event, 3, 4)
+	initial[0] = &session.Event{ID: "first", Timestamp: base}
+	initial[1] = &session.Event{ID: "second", Timestamp: base.Add(2 * time.Second)}
+	initial[2] = &session.Event{ID: "third", Timestamp: base.Add(3 * time.Second)}
+	s := &localSession{events: initial}
 	snapshot := s.Events()
 
-	// Replacing a slot must not change a previously returned history snapshot.
-	s.mu.Lock()
-	s.events[0] = &session.Event{ID: "replacement"}
-	s.mu.Unlock()
-	if err := s.appendEvent(&session.Event{ID: "second"}); err != nil {
+	// The live slice has spare capacity, so an in-place out-of-order insertion
+	// shifts its existing slots. A snapshot returned before that insertion must
+	// still describe the history that existed when the caller requested it.
+	if err := s.appendEvent(&session.Event{
+		ID: "between", Timestamp: base.Add(time.Second),
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if got := snapshot.Len(); got != 1 {
-		t.Fatalf("snapshot.Len() = %d, want 1", got)
+	if got := snapshot.Len(); got != 3 {
+		t.Fatalf("snapshot.Len() = %d, want 3", got)
 	}
-	if got := snapshot.At(0); got != first {
-		t.Errorf("snapshot.At(0) = %v, want original event %v", got, first)
-	}
+	var snapshotIDs []string
 	for event := range snapshot.All() {
-		if event != first {
-			t.Errorf("snapshot.All() yielded %v, want original event %v", event, first)
-		}
+		snapshotIDs = append(snapshotIDs, event.ID)
+	}
+	if got, want := fmt.Sprint(snapshotIDs), "[first second third]"; got != want {
+		t.Errorf("snapshot IDs = %s, want %s", got, want)
+	}
+	var liveIDs []string
+	for event := range s.Events().All() {
+		liveIDs = append(liveIDs, event.ID)
+	}
+	if got, want := fmt.Sprint(liveIDs), "[first between second third]"; got != want {
+		t.Errorf("live IDs = %s, want %s", got, want)
 	}
 }
 
