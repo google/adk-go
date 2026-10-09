@@ -258,7 +258,7 @@ func (s *gcsService) Delete(ctx context.Context, req *artifact.DeleteRequest) er
 	// Delete specific version
 	if version != 0 {
 		blobName := buildBlobName(appName, userID, sessionID, fileName, version)
-		if err := s.bucket.object(blobName).delete(ctx); err != nil {
+		if err := s.bucket.object(blobName).delete(ctx); err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 			return fmt.Errorf("failed to delete artifact: %w", err)
 		}
 		return nil
