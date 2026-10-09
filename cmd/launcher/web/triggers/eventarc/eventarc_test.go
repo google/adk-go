@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package pubsub
+package eventarc
 
 import (
 	"bytes"
-	"fmt"
 	"iter"
 	"log"
 	"net/http"
@@ -33,80 +32,8 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
-func TestParse(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		wantPrefix string
-		wantRetry  int
-		wantErr    bool
-	}{
-		{
-			name:       "default values",
-			args:       []string{},
-			wantPrefix: "/api",
-			wantRetry:  3,
-			wantErr:    false,
-		},
-		{
-			name:       "custom prefix and retries",
-			args:       []string{"-path_prefix=/custom", "-trigger_max_retries=5"},
-			wantPrefix: "/custom",
-			wantRetry:  5,
-			wantErr:    false,
-		},
-		{
-			name:       "invalid retry count",
-			args:       []string{"-trigger_max_retries=-1"},
-			wantPrefix: "/api",
-			wantRetry:  3,
-			wantErr:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			l := NewLauncher().(*pubsubLauncher)
-			_, err := l.Parse(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if tt.wantErr {
-				return
-			}
-			if l.config.pathPrefix != tt.wantPrefix {
-				t.Errorf("Parse() pathPrefix = %v, want %v", l.config.pathPrefix, tt.wantPrefix)
-			}
-			if l.config.triggerMaxRetries != tt.wantRetry {
-				t.Errorf("Parse() triggerMaxRetries = %v, want %v", l.config.triggerMaxRetries, tt.wantRetry)
-			}
-		})
-	}
-}
-
-func TestSetupSubrouters(t *testing.T) {
-	l := NewLauncher().(*pubsubLauncher)
-	_, _ = l.Parse([]string{"-path_prefix=/api"})
-
-	router := mux.NewRouter()
-	config := &launcher.Config{}
-
-	err := l.SetupSubrouters(router, config)
-	if err != nil {
-		t.Fatalf("SetupSubrouters() failed: %v", err)
-	}
-
-	// Verify route is registered
-	req := httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", nil)
-	var match mux.RouteMatch
-	if !router.Match(req, &match) {
-		t.Errorf("SetupSubrouters() did not register expected route")
-	}
-}
-
 const (
-	testAudience       = "https://example.run.app/api/apps/noop/trigger/pubsub"
+	testAudience       = "https://example.run.app/api/apps/noop/trigger/eventarc"
 	testServiceAccount = "push@project.iam.gserviceaccount.com"
 )
 
@@ -115,7 +42,7 @@ var authArgs = []string{"-oidc_audience=" + testAudience, "-oidc_service_account
 // newTestServer parses args, wires the route onto a fresh router, and returns
 // the router with the session service the trigger writes into. A non-nil auth
 // replaces the authenticator Parse built, standing in for a token that verifies.
-func newTestServer(t *testing.T, l *pubsubLauncher, args []string, auth authn.Authenticator) (*mux.Router, session.Service) {
+func newTestServer(t *testing.T, l *eventarcLauncher, args []string, auth authn.Authenticator) (*mux.Router, session.Service) {
 	t.Helper()
 	if _, err := l.Parse(args); err != nil {
 		t.Fatalf("Parse(%q) failed: %v", args, err)
@@ -143,10 +70,13 @@ func newTestServer(t *testing.T, l *pubsubLauncher, args []string, auth authn.Au
 	return router, sessions
 }
 
-// postEvent sends a push delivery whose subscription field names source.
+// postEvent sends a binary-mode CloudEvent whose ce-source names source.
 func postEvent(router http.Handler, source, authorization string) *httptest.ResponseRecorder {
-	body := fmt.Sprintf(`{"message":{"data":"aGk=","messageId":"1"},"subscription":%q}`, source)
-	req := httptest.NewRequest(http.MethodPost, "/api/apps/noop/trigger/pubsub", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/apps/noop/trigger/eventarc", strings.NewReader(`{}`))
+	req.Header.Set("ce-id", "1")
+	req.Header.Set("ce-type", "google.cloud.storage.object.v1.finalized")
+	req.Header.Set("ce-source", source)
+	req.Header.Set("ce-specversion", "1.0")
 	if authorization != "" {
 		req.Header.Set("Authorization", authorization)
 	}
@@ -174,7 +104,7 @@ func TestUnauthenticatedCallerCannotImpersonate(t *testing.T) {
 		{name: "non-bearer scheme", authorization: "Basic dXNlcjpwYXNz"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			router, sessions := newTestServer(t, NewLauncher().(*pubsubLauncher), authArgs, nil)
+			router, sessions := newTestServer(t, NewLauncher().(*eventarcLauncher), authArgs, nil)
 
 			rec := postEvent(router, "victim", tc.authorization)
 
@@ -191,7 +121,7 @@ func TestUnauthenticatedCallerCannotImpersonate(t *testing.T) {
 // Auth is opt-in, so without the flags the route behaves as it always has.
 // This also proves sessionCount can see the run the test above forbids.
 func TestNoAuthFlagsKeepsRouteOpen(t *testing.T) {
-	router, sessions := newTestServer(t, NewLauncher().(*pubsubLauncher), nil, nil)
+	router, sessions := newTestServer(t, NewLauncher().(*eventarcLauncher), nil, nil)
 
 	rec := postEvent(router, "victim", "")
 
@@ -207,7 +137,7 @@ func TestVerifiedCallerRunsAsDeliveryUser(t *testing.T) {
 	verified := authn.NewCustom(func(*http.Request) (*authn.Caller, error) {
 		return &authn.Caller{UserID: "push-sa-subject"}, nil
 	})
-	router, sessions := newTestServer(t, NewLauncher().(*pubsubLauncher), authArgs, verified)
+	router, sessions := newTestServer(t, NewLauncher().(*eventarcLauncher), authArgs, verified)
 
 	rec := postEvent(router, "delivery-user", "")
 
@@ -226,7 +156,7 @@ func TestRefusedCallerGets403(t *testing.T) {
 	refused := authn.NewCustom(func(*http.Request) (*authn.Caller, error) {
 		return nil, authn.ErrForbidden
 	})
-	router, sessions := newTestServer(t, NewLauncher().(*pubsubLauncher), authArgs, refused)
+	router, sessions := newTestServer(t, NewLauncher().(*eventarcLauncher), authArgs, refused)
 
 	rec := postEvent(router, "victim", "")
 
@@ -252,7 +182,7 @@ func TestStartupWarnsOnlyWhenUnauthenticated(t *testing.T) {
 			log.SetOutput(&buf)
 			t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-			newTestServer(t, NewLauncher().(*pubsubLauncher), tc.args, nil)
+			newTestServer(t, NewLauncher().(*eventarcLauncher), tc.args, nil)
 
 			if got := strings.Contains(buf.String(), "unauthenticated"); got != tc.wantWarn {
 				t.Errorf("logged an unauthenticated warning = %t, want %t; log: %q", got, tc.wantWarn, buf.String())
