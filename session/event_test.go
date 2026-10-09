@@ -16,11 +16,14 @@ package session_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -96,4 +99,50 @@ func TestNewEventDeterministicReplay(t *testing.T) {
 			t.Errorf("event %d Timestamp: first run %v, second run %v", i, first[i].Timestamp, second[i].Timestamp)
 		}
 	}
+}
+
+// TestIsFinalResponseSkipsNilParts covers events whose Content.Parts hold a nil
+// *genai.Part. Parts is a []*genai.Part, so a nil element is representable in
+// content decoded from JSON or produced outside the library; the helpers
+// behind IsFinalResponse must skip it rather than panic.
+func TestIsFinalResponseSkipsNilParts(t *testing.T) {
+	text := &genai.Part{Text: "hi"}
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}
+	response := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}
+	codeResult := &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{}}
+
+	for _, tc := range []struct {
+		name  string
+		parts []*genai.Part
+		want  bool
+	}{
+		{name: "only nil", parts: []*genai.Part{nil}, want: true},
+		{name: "nil before text", parts: []*genai.Part{nil, text}, want: true},
+		{name: "nil after text", parts: []*genai.Part{text, nil}, want: true},
+		{name: "nil before function call", parts: []*genai.Part{nil, call}, want: false},
+		{name: "nil between function responses", parts: []*genai.Part{response, nil, response}, want: false},
+		{name: "nil before code execution result", parts: []*genai.Part{nil, codeResult}, want: false},
+		{name: "nil after code execution result", parts: []*genai.Part{codeResult, nil}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &session.Event{
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{Role: genai.RoleModel, Parts: tc.parts},
+				},
+			}
+			if got := event.IsFinalResponse(); got != tc.want {
+				t.Errorf("IsFinalResponse() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("decoded from JSON", func(t *testing.T) {
+		var event session.Event
+		if err := json.Unmarshal([]byte(`{"content":{"role":"model","parts":[null,{"text":"hi"}]}}`), &event); err != nil {
+			t.Fatalf("json.Unmarshal failed: %v", err)
+		}
+		if got := event.IsFinalResponse(); got != true {
+			t.Errorf("IsFinalResponse() = %v, want true", got)
+		}
+	})
 }
