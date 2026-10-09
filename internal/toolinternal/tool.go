@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package tool defines internal-only interfaces and logic for tools.
+// Package toolinternal retains compatibility interfaces for tool capabilities.
+// Dispatch must use tool.As to preserve capabilities through wrapper chains,
+// including when introducing new capabilities.
 package toolinternal
 
 import (
@@ -21,14 +23,15 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 )
 
+// Keep the original method set and defined type: loadmemorytool.New exposes it
+// in its return type, and request processors may register execution-only adapters.
 type FunctionTool interface {
 	tool.Tool
 	Declaration() *genai.FunctionDeclaration
-	Run(ctx agent.Context, args any) (result map[string]any, err error)
+	Run(ctx agent.Context, args any) (map[string]any, error)
 }
 
 type StreamingFunctionTool interface {
@@ -38,25 +41,13 @@ type StreamingFunctionTool interface {
 }
 
 type RequestProcessor interface {
-	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
+	tool.RequestProcessor
 }
 
-// ResponseDeferrer allows to skip generation of the FR by the tool.
-// Used in the cases when FR is generated externally (e.g. TaskAgentTool)
 type ResponseDeferrer interface {
-	DefersResponse() bool
+	tool.ResponseDeferrer
 }
 
-// SkipSummarizationResultDisplayer is implemented by tools whose result
-// should still be shown to the user as text when SkipSummarization causes
-// the agent loop to end on their function response event.
-//
-// SkipSummarization is set for two opposite reasons: agenttool sets it
-// because the sub-agent already produced the final answer, which is meant to
-// be seen; other tools (UI/widget tools, pending-confirmation flows) set it
-// to suppress an internal acknowledgement that was never meant to be shown.
-// Only tools that implement this interface, with DisplayResultOnSkipSummarization
-// returning true, get their result surfaced as a visible text part.
 type SkipSummarizationResultDisplayer interface {
-	DisplayResultOnSkipSummarization() bool
+	tool.SkipSummarizationResultDisplayer
 }
