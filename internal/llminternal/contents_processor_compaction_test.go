@@ -70,7 +70,7 @@ func compactionSummaryEvent(ts, start, end int, summary string) *session.Event {
 // compactionInvocationCtx builds an invocation context over events for an agent
 // named agentName.
 //
-// Compaction records are only honoured when the run has compaction configured,
+// Compaction records are only honored when the run has compaction configured,
 // so configured selects which side of that gate the context sits on.
 func compactionInvocationCtx(t *testing.T, agentName string, events []*session.Event, configured bool) agent.InvocationContext {
 	t.Helper()
@@ -127,6 +127,28 @@ func TestContentsRequestProcessor_Compaction(t *testing.T) {
 				genai.NewContentFromText("Earlier: one exchange.", "model"),
 				genai.NewContentFromText("q2", "user"),
 				genai.NewContentFromText("a2", "model"),
+			},
+		},
+		{
+			// The summary covers only q1, so the call stays raw. Unanswered
+			// and not long-running, it is dropped at assembly.
+			name: "an unanswered call left outside the summary is dropped",
+			events: []*session.Event{
+				compactionTextEvent("user", 1, "q1"),
+				{
+					Author:    agentName,
+					Timestamp: compactionAt(2),
+					LLMResponse: model.LLMResponse{Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "unanswered", Name: "slow_tool"}}},
+					}},
+				},
+				compactionTextEvent("user", 3, "q2"),
+				compactionSummaryEvent(4, 1, 1, "Earlier: the user asked one question."),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Earlier: the user asked one question.", "model"),
+				genai.NewContentFromText("q2", "user"),
 			},
 		},
 		{
@@ -263,7 +285,7 @@ func TestContentsRequestProcessor_CompactionKeepsToolPairing(t *testing.T) {
 //
 // A record tells prompt assembly to drop a span of history and put content of
 // the record's choosing in its place. EventActions is writable by tool code and
-// the REST create-session body maps onto the stored event, so honouring an
+// the REST create-session body maps onto the stored event, so honoring an
 // unsolicited record would hand any writer an erase-and-inject primitive, even
 // in an application that never enabled compaction.
 func TestContentsRequestProcessor_CompactionIgnoredWhenNotConfigured(t *testing.T) {
@@ -353,7 +375,7 @@ func TestContentsRequestProcessor_CompactionFromAnotherAgent(t *testing.T) {
 // A hole names an event by invocation and timestamp. ConvertForeignEvent builds
 // a replacement event and its output goes straight into Apply, so blanking the
 // invocation made the hole stop matching. The event was then inside the range,
-// named by nothing, and dropped in favour of a summary that never described it.
+// named by nothing, and dropped in favor of a summary that never described it.
 func TestForeignEventKeepsItsInvocationSoAHoleStillProtectsIt(t *testing.T) {
 	t.Parallel()
 

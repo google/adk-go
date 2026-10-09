@@ -90,21 +90,14 @@ type Config struct {
 	// allow agent transferring across the tree.
 	SubAgents []Agent
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []BeforeAgentCallback
 	// Run is the function that defines the agent's behavior.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []AfterAgentCallback
 }
 
@@ -124,18 +117,20 @@ type Memory interface {
 	SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error)
 }
 
-// BeforeAgentCallback is a function that is called before the agent starts
-// its run.
-// If it returns non-nil content or error, the agent run will be skipped and a
-// new event will be created.
+// BeforeAgentCallback runs before the agent.
+// Non-nil content with no error is yielded as an event and skips the remaining
+// before-agent callbacks, the agent run, and the after-agent callbacks.
+//
+// An error takes precedence over content, skips the remaining before-agent
+// callbacks, and is yielded with a nil event. If the caller keeps iterating,
+// the agent and after-agent callbacks can still run.
 type BeforeAgentCallback func(Context) (*genai.Content, error)
 
-// AfterAgentCallback is a function that is called after the agent has completed
-// its run.
-// If it returns non-nil content or error, a new event will be created.
-//
-// The callback will be skipped also if EndInvocation was called before or
-// BeforeAgentCallbacks returned non-nil results.
+// AfterAgentCallback runs after the agent completes. It is skipped if the
+// invocation has ended or the caller stops iterating before that point.
+// Non-nil content or an error skips the remaining after-agent callbacks.
+// Content is yielded as an event; an error takes precedence and is yielded
+// with a nil event.
 type AfterAgentCallback func(Context) (*genai.Content, error)
 
 type agent struct {
@@ -391,7 +386,7 @@ type invocationContext struct {
 	endInvocation  bool
 }
 
-// Apply implements [InvocationContext].
+// WithICDelta implements [InvocationContext].
 func (c *invocationContext) WithICDelta(d *InvocationContextDelta) InvocationContext {
 	if d == nil {
 		return c

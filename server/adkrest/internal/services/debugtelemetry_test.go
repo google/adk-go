@@ -494,7 +494,7 @@ func compareDebugSpans(a, b DebugSpan) bool {
 	return a.Attributes["genai.operation.name"] < b.Attributes["genai.operation.name"]
 }
 
-// TestConvertRecordsBuildsEmptyContainersNotNil asserts on the raw serialised bytes.
+// TestConvertRecordsBuildsEmptyContainersNotNil asserts on the raw serialized bytes.
 //
 // A Go nil slice marshals to JSON null and a nil map to null too. The ADK web UI
 // validates the trace response against array and object schemas, so a null makes it
@@ -558,7 +558,7 @@ func mapValue(kvs ...attribute.KeyValue) attribute.Value {
 	return attribute.MapValue(kvs...)
 }
 
-// TestMessageLogBodySerializesContentAsObject asserts on the raw serialised bytes.
+// TestMessageLogBodySerializesContentAsObject asserts on the raw serialized bytes.
 //
 // With OpenTelemetry content capture off — the default — the server records
 // body.content as the string "<elided>". The ADK web UI requires an object with
@@ -626,7 +626,7 @@ func TestMessageLogBodySerializesContentAsObject(t *testing.T) {
 	}
 }
 
-// TestUnrepresentableLogBodyDoesNotPoisonOtherSpans asserts on the raw serialised
+// TestUnrepresentableLogBodyDoesNotPoisonOtherSpans asserts on the raw serialized
 // bytes.
 //
 // The handler encodes every span of a session in a single call, so a body that

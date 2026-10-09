@@ -85,8 +85,9 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 	return func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range ctx.Agent().SubAgents() {
 			for event, err := range subAgent.Run(ctx) {
-				// TODO: ensure consistency -- if there's an error, return and close iterator, verify everywhere in ADK.
-				if !yield(event, err) {
+				// A failed sub-agent ends the sequence, as in adk-python: later
+				// sub-agents would run without the output they depend on.
+				if !yield(event, err) || err != nil {
 					return
 				}
 			}
@@ -160,18 +161,18 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			visited[subAgent] = true
 			if llmAgent, ok := subAgent.(llminternal.Agent); ok {
 				state := llminternal.Reveal(llmAgent)
-				hasTaskCompleted := false
-				for _, t := range state.Tools {
-					if t.Name() == "task_completed" {
-						hasTaskCompleted = true
-						break
+				// Live callers must observe the completed injection before using
+				// the shared tool slice and instruction.
+				state.LiveModeInjection.Do(func() {
+					for _, t := range state.Tools {
+						if t.Name() == "task_completed" {
+							return
+						}
 					}
-				}
-				if !hasTaskCompleted {
 					state.Tools = append(state.Tools, taskCompletedTool)
 					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
 					state.Instruction += instructionSuffix
-				}
+				})
 			} else if _, live := subAgent.(liveRunner); live && len(subAgent.SubAgents()) > 0 {
 				injectSubAgents(subAgent.SubAgents())
 			}
@@ -205,13 +206,13 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			for ev, err := range innerIter {
 				if !yield(ev, err) {
 					if err := subSess.Close(); err != nil {
-						log.Printf("error closing sub-session: %v\n", err)
+						log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 					}
 					return
 				}
 			}
 			if err := subSess.Close(); err != nil {
-				log.Printf("error closing sub-session: %v\n", err)
+				log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 			}
 		}
 	}

@@ -28,14 +28,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 // fakeLiveModel implements model.LLM plus the Client() accessor RunLive
@@ -350,7 +353,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			//
 			// This case passes with or without the errChan guards: the sender
 			// exits through the existing connCtx.Done() arm, so nothing is
-			// stranded. It pins the terminal-path behaviour; it is not a
+			// stranded. It pins the terminal-path behavior; it is not a
 			// regression guard for the leak.
 			name: "non-resumable error terminates after one connection",
 			serveConn: func(connNum int, conn *websocket.Conn) {
@@ -372,7 +375,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 1,
 		},
 		{
-			// Cancelling the invocation context while the reader is blocked in
+			// Canceling the invocation context while the reader is blocked in
 			// Recv is the everyday teardown path: cleanup closes the
 			// connection, the reader's Recv fails, and its error send must not
 			// block forever on the abandoned channel.
@@ -446,7 +449,7 @@ func liveHistoryProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f 
 // Every other return in RunLive's own body releases the attempt through
 // cleanup (or cancelConn, before the connection exists). The SendHistory
 // failure path returns without either, so the websocket is never closed.
-// Cancelling the context would not help: genai dials with
+// Canceling the context would not help: genai dials with
 // websocket.DefaultDialer.Dial, which takes no context, and nothing in the SDK
 // watches one — only an explicit Close releases that socket. So the connection
 // survives for the lifetime of the process, not just the invocation.
@@ -569,4 +572,61 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 		t.Errorf("connection count = %d, want 1 (Close must not trigger a reconnect)", got)
 	}
 	assertNoRunLiveLeak(t, baseline)
+}
+
+type longRunningMockTool struct{ mockFunctionTool }
+
+func (*longRunningMockTool) IsLongRunning() bool { return true }
+
+// TestRunLiveMarksLongRunningCalls checks that a call to a long-running tool
+// received in live mode is recorded with its ID in LongRunningToolIDs. The
+// tool returns no response, so without the marker prompt assembly would treat
+// the pending call as unanswered and drop it on a later turn.
+func TestRunLiveMarksLongRunningCalls(t *testing.T) {
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"lr_1","name":"long_job","args":{}},{"id":"plain_1","name":"plain_job","args":{}}]}}`
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
+			t.Errorf("writing toolCall failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		Tools: []tool.Tool{
+			&longRunningMockTool{mockFunctionTool{name: "long_job"}},
+			&mockFunctionTool{name: "plain_job", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
+				return map[string]any{"ok": true}, nil
+			}},
+		},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the function call event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || len(utils.FunctionCalls(ev.LLMResponse.Content)) == 0 {
+			continue
+		}
+		if diff := cmp.Diff([]string{"lr_1"}, ev.LongRunningToolIDs); diff != "" {
+			t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
+		}
+		return
+	}
 }

@@ -51,10 +51,10 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 	// TODO: genai seems to be missing initial_history_in_client_content flag
 	isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 	if isGemini31 {
-		log.Printf("skipping sending history for gemini 3.1\n")
+		log.Printf("skipping sending history for gemini 3.1\n") //nolint:forbidigo // pre-slog call site
 		return nil
 	}
-	log.Printf("sending preprocessed content %d\n", len(history))
+	log.Printf("sending preprocessed content %d\n", len(history)) //nolint:forbidigo // pre-slog call site
 
 	var filteredHistory []*genai.Content
 	for _, content := range history {
@@ -78,7 +78,7 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			})
 		}
 	}
-	log.Printf("sending history: of size %d\n", len(filteredHistory))
+	log.Printf("sending history: of size %d\n", len(filteredHistory)) //nolint:forbidigo // pre-slog call site
 	turnComplete := len(filteredHistory) > 0 && filteredHistory[len(filteredHistory)-1].Role == "user"
 	if len(filteredHistory) > 0 {
 		err := c.sdkSession.SendClientContent(genai.LiveClientContentInput{
@@ -112,12 +112,12 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		if err != nil {
 			return fmt.Errorf("failed to send tool response: %w", err)
 		}
-		log.Printf("sending tool response\n")
+		log.Printf("sending tool response\n") //nolint:forbidigo // pre-slog call site
 	} else {
 		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
 		isGeminiAPI := c.backend == genai.BackendGeminiAPI
 		if isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
-			log.Printf("Attempting to send text via SendRealtimeInput\n")
+			log.Printf("Attempting to send text via SendRealtimeInput\n") //nolint:forbidigo // pre-slog call site
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
 			})
@@ -174,12 +174,12 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			Media: v,
 		})
 	case *genai.ActivityStart:
-		log.Printf("sending activity start\n")
+		log.Printf("sending activity start\n") //nolint:forbidigo // pre-slog call site
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			ActivityStart: v,
 		})
 	case *genai.ActivityEnd:
-		log.Printf("sending activity end\n")
+		log.Printf("sending activity end\n") //nolint:forbidigo // pre-slog call site
 		return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 			ActivityEnd: v,
 		})

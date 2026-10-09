@@ -101,12 +101,12 @@ func newRetriableRunner(cfg ControllerConfig) *RetriableRunner {
 	switch {
 	case cfg.Compaction == nil:
 	case cfg.Compaction.CompactionInterval == 1:
-		log.Printf("adk: sliding-window compaction is configured on a trigger controller with " +
+		log.Printf("adk: sliding-window compaction is configured on a trigger controller with " + //nolint:forbidigo // pre-slog call site
 			"CompactionInterval 1, so it fires on every delivery and writes a summary into a " +
 			"session that is discarded when the delivery ends. Use TokenThreshold and " +
 			"EventRetentionSize to compact within a single run.")
 	case cfg.Compaction.CompactionInterval > 1:
-		log.Printf("adk: sliding-window compaction is configured on a trigger controller, but a " +
+		log.Printf("adk: sliding-window compaction is configured on a trigger controller, but a " + //nolint:forbidigo // pre-slog call site
 			"delivery handled in one attempt runs a single invocation, so the window will not " +
 			"reach its interval. Use TokenThreshold and EventRetentionSize to compact within a " +
 			"single run.")
@@ -188,7 +188,7 @@ func (r *RetriableRunner) runAgentWithRetry(ctx context.Context, runR *runner.Ru
 				// failing here would NACK a message that was handled, and on
 				// Pub/Sub push that means redelivering work already done.
 				if errors.Is(err, compaction.ErrCompaction) {
-					log.Printf("triggers: %v", err)
+					log.Printf("triggers: %v", err) //nolint:forbidigo // pre-slog call site
 					continue
 				}
 				runErr = err

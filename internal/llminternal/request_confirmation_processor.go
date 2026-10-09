@@ -86,7 +86,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 					} else {
 						tempJSON, err := json.Marshal(funcResp.Response)
 						if err != nil {
-							yield(nil, fmt.Errorf("error failed marshalling confirmation function response for event id %q: %w", event.ID, err))
+							yield(nil, fmt.Errorf("error failed marshaling confirmation function response for event id %q: %w", event.ID, err))
 							return
 						}
 						err = json.Unmarshal(tempJSON, &tc)
@@ -159,7 +159,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			//
 			// Only this agent can ask this agent's user for confirmation. Function call
 			// parts also reach the session from other places, notably an A2A peer
-			// response converted into a model-role event: honouring a confirmation
+			// response converted into a model-role event: honoring a confirmation
 			// request from such an event would let the peer choose which local tool
 			// runs, and with what arguments, bypassing the human-in-the-loop gate
 			// entirely. Skip any event not authored by this agent.

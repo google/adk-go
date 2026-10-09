@@ -59,7 +59,7 @@ type Entry struct {
 	// Author of the memory.
 	Author string
 	// Timestamp shows when the original content of this memory happened.
-	// This string will be forwarded to LLM. Preferred format is ISO 8601 format.
+	// It is forwarded to the LLM formatted as ISO 8601.
 	Timestamp time.Time
 	// CustomMetadata contains optional custom metadata associated with the memory.
 	CustomMetadata map[string]any
