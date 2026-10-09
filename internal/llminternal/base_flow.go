@@ -353,13 +353,26 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// Timeouts do not get one verdict. gorilla/websocket replaces any net.Error
+// whose Temporary() is true with its own type (hideTempErr), and ETIMEDOUT
+// counts as temporary, so over ws:// a timed-out read or write loses the
+// *net.OpError and is fatal. Over wss:// a timed-out read is hidden the same
+// way, but crypto/tls wraps a failed write in an error whose Temporary() is
+// always false, so the sender keeps the *net.OpError and resumes. The reader
+// and the sender can therefore disagree about one timed-out wss:// connection.
+// On Windows a TCP timeout is WSAETIMEDOUT (10060), which Go does not treat
+// as temporary, so it keeps the *net.OpError and resumes on both goroutines.
+// The text match before the type check treated it as fatal.
 func isResumable(err error) bool {
 	if err == nil {
 		return false

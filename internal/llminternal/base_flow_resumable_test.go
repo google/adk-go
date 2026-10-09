@@ -15,11 +15,15 @@
 package llminternal
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -46,7 +50,55 @@ const (
 	wsaeConnReset   = syscall.Errno(10054)
 )
 
+// failingConn passes traffic through until fail is set, then returns err
+// from every Write.
+type failingConn struct {
+	net.Conn
+	fail atomic.Bool
+	err  error
+}
+
+func (c *failingConn) Write(b []byte) (int, error) {
+	if c.fail.Load() {
+		return 0, c.err
+	}
+	return c.Conn.Write(b)
+}
+
+// tlsWriteErr returns the error crypto/tls hands back when the socket under an
+// established TLS connection fails a write with sockErr. That is the error the
+// sender sees over wss://, and crypto/tls does not return the socket error
+// as is, so the test builds it for real rather than guessing its shape.
+func tlsWriteErr(t *testing.T, sockErr error) error {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	raw, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	fc := &failingConn{Conn: raw, err: sockErr}
+	cfg := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	cfg.ServerName = "example.com" // a name on the httptest certificate
+	conn := tls.Client(fc, cfg)
+	if err := conn.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	fc.fail.Store(true)
+	_, err = conn.Write([]byte("x"))
+	if err == nil {
+		t.Fatal("write on a failed socket succeeded")
+	}
+	if _, ok := err.(*net.OpError); ok {
+		t.Fatalf("crypto/tls returned the socket error unwrapped (%T); this case no longer covers the wss:// shape", err)
+	}
+	return err
+}
+
 func TestIsResumable(t *testing.T) {
+	wssWriteErr := tlsWriteErr(t, socketErr("write", "wsasend", wsaeConnAborted))
+
 	tests := []struct {
 		name string
 		err  error
@@ -99,8 +151,13 @@ func TestIsResumable(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "sender: wrapped socket error still resumable",
-			err:  fmt.Errorf("sending realtime input: %w", socketErr("write", "wsasend", wsaeConnAborted)),
+			name: "sender: SendContent wrapper around a socket error",
+			err:  fmt.Errorf("failed to send content: %w", socketErr("write", "wsasend", wsaeConnAborted)),
+			want: true,
+		},
+		{
+			name: "sender: wss write error wrapped by crypto/tls",
+			err:  wssWriteErr,
 			want: true,
 		},
 
