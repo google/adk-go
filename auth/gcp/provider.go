@@ -232,7 +232,7 @@ const maxCachedLifetime = time.Hour
 // on this provider's path at all: GcpAuthProviderScheme is a CustomAuthScheme,
 // and CredentialManager returns the provider's credential directly without ever
 // loading or saving one (credential_manager.py). Caching GCP credentials is a Go
-// addition, and this slot is its own design. The nearest analogue is
+// addition, and this slot is its own design. The nearest analog is
 // AuthConfig.get_credential_key (auth_tool.py), which joins two digests of
 // canonical JSON — one of the auth scheme, one of the credential used to obtain
 // it. Go cannot produce the second, a Client's credentials being opaque to this
@@ -401,7 +401,7 @@ func cacheUntil(now, expiresAt time.Time) (time.Time, bool) {
 // arriving after it has passed fails immediately. A failed attempt is not
 // cached, so the next call retries.
 //
-// A hung attempt is not abandoned. The lookup cannot be cancelled, so retiring
+// A hung attempt is not abandoned. The lookup cannot be canceled, so retiring
 // it would start a fresh one every initTimeout, each parked in a syscall pinning
 // an OS thread. Waiters get a prompt error instead, and the moment the stuck
 // lookup returns its client is published and callers recover.
