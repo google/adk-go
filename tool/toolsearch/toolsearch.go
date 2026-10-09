@@ -248,15 +248,14 @@ func executeSearch(
 		return searchOutput{}, fmt.Errorf("toolsearch: list base tools: %w", err)
 	}
 
-	// Already-discovered tools and core tools are both excluded from results —
-	// core tools are always visible, so returning them wastes result slots.
-	already := discoveredNames(ctx.ReadonlyState(), ctx.AgentName())
-	alreadyAvailable := make(map[string]bool, len(already)+len(coreNames))
-	for _, n := range already {
-		alreadyAvailable[n] = true
-	}
-	for n := range coreNames {
-		alreadyAvailable[n] = true
+	// Tools the model already has are excluded from results, which would waste
+	// result slots, and select: reports them as already available. They are
+	// taken from what Tools returns, so a core or discovered name the base does
+	// not return is reported as not found.
+	discovered := discoveredNames(ctx.ReadonlyState(), ctx.AgentName())
+	alreadyAvailable := make(map[string]bool)
+	for _, t := range availableTools(baseTools, coreNames, discovered) {
+		alreadyAvailable[t.Name()] = true
 	}
 
 	matches, note := ranksearch.Rank(buildItems(baseTools), args.Query, alreadyAvailable, ranksearch.Config{
@@ -434,29 +433,36 @@ func (g *gatingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 		return baseTools, nil
 	}
 
+	discovered := discoveredNames(ctx.ReadonlyState(), ctx.AgentName())
+	return append([]tool.Tool{g.searchTool}, availableTools(baseTools, g.coreNames, discovered)...), nil
+}
+
+// availableTools returns the base tools Tools exposes next to the search tool:
+// the core tools in catalog order, then the discovered ones in discovery order.
+func availableTools(baseTools []tool.Tool, coreNames map[string]bool, discovered []string) []tool.Tool {
 	byName := make(map[string]tool.Tool, len(baseTools))
 	for _, t := range baseTools {
 		byName[t.Name()] = t
 	}
 
-	visible := []tool.Tool{g.searchTool}
+	var available []tool.Tool
 	for _, t := range baseTools {
-		if g.coreNames[t.Name()] {
-			visible = append(visible, t)
+		if coreNames[t.Name()] {
+			available = append(available, t)
 		}
 	}
-	for _, name := range discoveredNames(ctx.ReadonlyState(), ctx.AgentName()) {
-		if g.coreNames[name] {
+	for _, name := range discovered {
+		if coreNames[name] {
 			continue
 		}
 		// RevealTools accepts any name, so skip a tool the flow cannot pack, and
 		// one named ToolName, which would duplicate the search tool.
 		t, ok := byName[name]
 		if _, packable := t.(requestProcessor); ok && packable && name != ToolName {
-			visible = append(visible, t)
+			available = append(available, t)
 		}
 	}
-	return visible, nil
+	return available
 }
 
 // ProcessRequest forwards to the base toolset when it implements the hook, so
