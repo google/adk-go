@@ -95,8 +95,8 @@ func (m *recordingModel) seen() []string {
 //   - Successive records supersede rather than accumulate: each covers a range
 //     starting where the first one did, so exactly one summary materializes
 //     into a prompt no matter how many passes have run.
-//   - No prompt the agent sent outgrew the summary, the retained tail and the
-//     new message.
+//   - Each agent prompt that follows a new summary holds only that summary,
+//     the retained tail and the new message.
 //
 // Replay keys on exact request bytes, so most defects in these change a request
 // and arrive as a replay miss. The checks on captured prompts run before that
@@ -128,13 +128,34 @@ func (m *recordingModel) seen() []string {
 func TestTailRetentionE2E(t *testing.T) {
 	requireCassette(t)
 
+	// The summarizer's own model, wrapped so its prompts can be inspected.
+	//
+	// No timeout, for the same reason as TestCompactionE2E: a deadline on the
+	// summarization call travels to the wire as an X-Server-Timeout header and
+	// would make the cassette depend on that number.
+	summarizerModel := &recordingModel{inner: compactionModel(t)}
+	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
+		Model: summarizerModel,
+	})
+	if err != nil {
+		t.Fatalf("NewLLMSummarizer() error = %v", err)
+	}
+
+	// Each agent prompt is captured with the number of summarizations run by
+	// then, so the boundedness check can tell which prompts follow a new
+	// summary. Compaction runs inside the turn, before the agent's model call.
+	type agentPrompt struct {
+		contents       []*genai.Content
+		summarizations int
+	}
 	var (
 		mu      sync.Mutex
-		prompts [][]*genai.Content
+		prompts []agentPrompt
 		capture = func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
+			n := len(summarizerModel.seen())
 			mu.Lock()
 			defer mu.Unlock()
-			prompts = append(prompts, req.Contents)
+			prompts = append(prompts, agentPrompt{contents: req.Contents, summarizations: n})
 			return nil, nil
 		}
 	)
@@ -150,19 +171,6 @@ func TestTailRetentionE2E(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("llmagent.New() error = %v", err)
-	}
-
-	// The summarizer's own model, wrapped so its prompts can be inspected.
-	//
-	// No timeout, for the same reason as TestCompactionE2E: a deadline on the
-	// summarization call travels to the wire as an X-Server-Timeout header and
-	// would make the cassette depend on that number.
-	summarizerModel := &recordingModel{inner: compactionModel(t)}
-	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
-		Model: summarizerModel,
-	})
-	if err != nil {
-		t.Fatalf("NewLLMSummarizer() error = %v", err)
 	}
 
 	// A low threshold with a short retained tail, so a handful of turns
@@ -201,19 +209,32 @@ func TestTailRetentionE2E(t *testing.T) {
 		}
 	}
 
-	// Boundedness. Once compaction runs, a prompt holds one summary, the
-	// retained tail and the new message, however long the session gets.
-	// Without compaction the prompt for turn N holds 2N-1 contents, so this
-	// fails from the third turn on.
+	// Boundedness. Tail retention fires on prompt tokens, not on content
+	// count, so how far a prompt grows between summaries depends on how much
+	// the model writes and thinks; in this recording thinking tokens carry most
+	// of each turn's margin over the threshold. What the trigger does
+	// guarantee is that the prompt right after a new summary holds only that
+	// summary, the retained tail and the new message, so only those prompts
+	// are held to the bound. A re-record with a terser model must not fail
+	// correct code.
 	mu.Lock()
-	captured := append([][]*genai.Content(nil), prompts...)
+	captured := append([]agentPrompt(nil), prompts...)
 	mu.Unlock()
 	maxContents := cfg.EventRetentionSize + 2
+	var afterSummary, ran int
 	for i, p := range captured {
-		if len(p) > maxContents {
-			t.Errorf("prompt %d carries %d contents, want at most %d (summary, retained tail of %d, new message): history is not being replaced by a summary",
-				i+1, len(p), maxContents, cfg.EventRetentionSize)
+		if p.summarizations == ran {
+			continue
 		}
+		ran = p.summarizations
+		afterSummary++
+		if len(p.contents) > maxContents {
+			t.Errorf("prompt %d, the first after summarization %d, carries %d contents, want at most %d (summary, retained tail of %d, new message): history is not being replaced by a summary",
+				i+1, ran, len(p.contents), maxContents, cfg.EventRetentionSize)
+		}
+	}
+	if afterSummary == 0 {
+		t.Errorf("none of %d agent prompts followed a summarization, so compaction never ran", len(captured))
 	}
 
 	// The seed. The summarizer is called once per stored record, so call k
