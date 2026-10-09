@@ -586,6 +586,31 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			name: "FilterAdkLiveArtifacts",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "user",
+							Parts: []*genai.Part{
+								{Text: "Some text"},
+								{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio.pcm#1"}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "Some text"},
+					},
+				},
+			},
+		},
+		{
 			name: "ExcludeToolConfirmation",
 			events: []*session.Event{
 				{
