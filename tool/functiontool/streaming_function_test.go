@@ -15,11 +15,15 @@
 package functiontool_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
 	"strings"
 	"testing"
+
+	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -51,6 +55,45 @@ func requireStreamingTool(t *testing.T, cfg functiontool.Config, handler functio
 		t.Fatalf("NewStreaming() returned %T, want toolinternal.StreamingFunctionTool", got)
 	}
 	return streamingTool
+}
+
+func TestStreamingFunctionTool_SanitizesAnyOfInputSchema(t *testing.T) {
+	ischema := &jsonschema.Schema{}
+	if err := json.Unmarshal([]byte(`{
+		"type":"object",
+		"properties":{
+			"age":{
+				"title":"Age",
+				"description":"years",
+				"anyOf":[{"type":"integer"},{"type":"null"}]
+			}
+		}
+	}`), ischema); err != nil {
+		t.Fatal(err)
+	}
+	st := requireStreamingTool(t, functiontool.Config{
+		Name:        "stream_age",
+		Description: "streams",
+		InputSchema: ischema,
+	}, func(ctx agent.Context, input streamingArgs) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {}
+	})
+	decl := st.(interface{ Declaration() *genai.FunctionDeclaration }).Declaration()
+	raw, err := json.Marshal(decl.ParametersJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	age := out["properties"].(map[string]any)["age"].(map[string]any)
+	if _, ok := age["title"]; ok {
+		t.Fatalf("title still alongside anyOf: %#v", age)
+	}
+	if _, ok := age["anyOf"]; !ok {
+		t.Fatalf("age missing anyOf: %#v", age)
+	}
 }
 
 func TestStreamingFunctionToolConfirmation(t *testing.T) {

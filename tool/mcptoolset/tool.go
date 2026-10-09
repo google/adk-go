@@ -53,10 +53,10 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 	// to a nil pointer and genai converter includes "responseJsonSchema": null in the json sent to the llm which causes it to crash.
 	// we need the following "if" check to keep ResponseJsonSchema (nil,nil) instead of (*jsonschema.Schema, nil)
 	if t.InputSchema != nil {
-		mcp.funcDeclaration.ParametersJsonSchema = t.InputSchema
+		mcp.funcDeclaration.ParametersJsonSchema = toolutils.SanitizeSchemaForVertex(t.InputSchema)
 	}
 	if t.OutputSchema != nil {
-		mcp.funcDeclaration.ResponseJsonSchema = t.OutputSchema
+		mcp.funcDeclaration.ResponseJsonSchema = toolutils.SanitizeSchemaForVertex(t.OutputSchema)
 	}
 	return mcp, nil
 }
