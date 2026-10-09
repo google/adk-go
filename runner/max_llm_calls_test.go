@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -168,5 +169,111 @@ func TestRun_MaxLLMCallsNegativeMeansUnlimited(t *testing.T) {
 	}
 	if m.calls < stopAfter {
 		t.Errorf("model calls = %d, want at least %d before the consumer stopped", m.calls, stopAfter)
+	}
+}
+
+func newLoopingLLMAgent(t *testing.T, m *loopingModel) agent.Agent {
+	t.Helper()
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "looper",
+		Model: m,
+		Tools: []tool.Tool{noopToolForTest(t)},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	return a
+}
+
+// rangeWholeRun consumes a run the way the adkrest SSE handler does: it keeps
+// ranging after an error instead of breaking. So that a regression fails
+// rather than hangs, it stops once the model has been called far more often
+// than the budget allows, or once more than one limit error has arrived.
+func rangeWholeRun(t *testing.T, root agent.Agent, m *loopingModel, cfg agent.RunConfig) (limitErrs int) {
+	t.Helper()
+	r, err := New(Config{
+		AppName:           "testApp",
+		Agent:             root,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New() failed: %v", err)
+	}
+
+	const giveUpAfterCalls = 50
+	msg := genai.NewContentFromText("go", genai.RoleUser)
+	for _, e := range r.Run(t.Context(), "u", "s", msg, cfg) {
+		if e != nil {
+			if !errors.Is(e, agent.ErrLLMCallsLimitExceeded) {
+				t.Fatalf("Run() yielded error %v, want only ErrLLMCallsLimitExceeded", e)
+			}
+			limitErrs++
+		}
+		if limitErrs > 1 || m.calls > giveUpAfterCalls {
+			break
+		}
+	}
+	return limitErrs
+}
+
+func TestRun_MaxLLMCallsEndsALoopAgentRun(t *testing.T) {
+	// A loopagent root takes the agent path in Runner.Run rather than the node
+	// path an llmagent root takes, so this also covers the budget being set on
+	// that path.
+	m := &loopingModel{}
+	root, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "loop",
+			SubAgents: []agent.Agent{newLoopingLLMAgent(t, m)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("loopagent.New() failed: %v", err)
+	}
+
+	limitErrs := rangeWholeRun(t, root, m, agent.RunConfig{MaxLLMCalls: 3})
+
+	if m.calls != 3 {
+		t.Errorf("model calls = %d, want 3", m.calls)
+	}
+	if limitErrs != 1 {
+		t.Errorf("limit errors = %d, want the run to end after exactly 1", limitErrs)
+	}
+}
+
+func TestRun_MaxLLMCallsEndsARunWhoseRootIgnoresErrors(t *testing.T) {
+	// A custom root that runs its sub-agent again after an error, as loopagent
+	// did before it learned to stop. Every rerun is refused before it reaches
+	// the model, so without the runner ending the run the consumer would get
+	// an endless stream of limit errors.
+	m := &loopingModel{}
+	looper := newLoopingLLMAgent(t, m)
+	root, err := agent.New(agent.Config{
+		Name:      "stubborn",
+		SubAgents: []agent.Agent{looper},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for {
+					for ev, err := range looper.Run(ctx) {
+						if !yield(ev, err) {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() failed: %v", err)
+	}
+
+	limitErrs := rangeWholeRun(t, root, m, agent.RunConfig{MaxLLMCalls: 3})
+
+	if m.calls != 3 {
+		t.Errorf("model calls = %d, want 3", m.calls)
+	}
+	if limitErrs != 1 {
+		t.Errorf("limit errors = %d, want the run to end after exactly 1", limitErrs)
 	}
 }
