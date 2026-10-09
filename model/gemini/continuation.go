@@ -30,9 +30,9 @@ import (
 // CONTINUATION and a continuation token on the candidate. The model resends
 // the request with the output so far and the token until the generation
 // finishes, and returns one response with the joined content and the summed
-// usage of every request, as ADK Java and ADK Kotlin do. A response stopped by
-// maxOutputTokens is not resumed, since the API applies maxOutputTokens to the
-// whole generation.
+// usage of every request, as ADK Java and ADK Kotlin do. A request that sets
+// no maxOutputTokens stops at the same limit with MAX_TOKENS and a token
+// instead, and is resumed the same way.
 
 // maxResumes bounds the requests that resume one generation. A model that
 // pauses every 300 decoding steps takes about 150 of them for a 45K-token
@@ -48,18 +48,33 @@ const maxResumes = 256
 // resend.
 var continuationRetry = &genai.HTTPRetryOptions{Attempts: genai.Ptr[int32](8)}
 
-// continuationToken returns the token that resumes resp, or nil if resp did
-// not pause or carries no token.
-func continuationToken(resp *genai.GenerateContentResponse) []byte {
-	if len(resp.Candidates) == 0 || resp.Candidates[0] == nil || resp.Candidates[0].FinishReason != genai.FinishReasonContinuation {
+// resumeToken returns the token that resumes resp, or nil if resp finished or
+// stopped in a way that is not resumed. A CONTINUATION stop is resumed. So is a
+// MAX_TOKENS stop with a token when the request sets no maxOutputTokens, since
+// the API then stops each request at its per-request output limit with
+// MAX_TOKENS. When the request sets maxOutputTokens, MAX_TOKENS means that
+// budget is spent, as the API applies it to the whole generation, so it is not
+// resumed. ADK Java and ADK Kotlin resume only CONTINUATION.
+func (c *continuation) resumeToken(resp *genai.GenerateContentResponse) []byte {
+	if len(resp.Candidates) == 0 || resp.Candidates[0] == nil {
 		return nil
 	}
-	token := resp.Candidates[0].ContinuationToken
-	if len(token) == 0 {
-		log.Printf("adk: the model paused a generation for continuation without a continuation token; returning the partial output") //nolint:forbidigo // pre-slog call site
-		return nil
+	candidate := resp.Candidates[0]
+	token := candidate.ContinuationToken
+	switch candidate.FinishReason {
+	case genai.FinishReasonContinuation:
+		if len(token) == 0 {
+			log.Printf("adk: the model paused a generation for continuation without a continuation token; returning the partial output") //nolint:forbidigo // pre-slog call site
+			return nil
+		}
+		return token
+	case genai.FinishReasonMaxTokens:
+		if len(token) == 0 || (c.config != nil && c.config.MaxOutputTokens > 0) {
+			return nil
+		}
+		return token
 	}
-	return token
+	return nil
 }
 
 // continuation carries one generation across the requests that resume it.
