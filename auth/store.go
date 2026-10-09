@@ -133,8 +133,8 @@ type CredentialStore interface {
 	// It is the invalidation hook for a caller that learns a credential is no
 	// longer good before it expires — on consent revocation or logout — and ADK
 	// calls it for one case of its own: a provider refreshing a credential the
-	// downstream rejected drops the entry when it cannot replace it, so a
-	// credential known to be bad is never served again. An implementation should
+	// downstream rejected drops the entry when it cannot replace it, rather than
+	// keep serving a credential known to be bad. An implementation should
 	// therefore expect Delete on a request path, not only from an operator.
 	//
 	// A revocation nobody tells ADK about is still served until the entry expires.

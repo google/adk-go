@@ -595,10 +595,11 @@ func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) 
 }
 
 func TestProviderRefreshForcesNewToken(t *testing.T) {
-	// Both credential services mint a fresh token when the caller passes the
-	// prior (rejected) token as forceRefreshToken. Refresh must read the cached
-	// token and send it on both routes; the connector's Operation-wrapped
-	// response and Agent Identity's inline response only differ in the envelope.
+	// Both credential services mint a fresh token when asked to force a refresh:
+	// Agent Identity is sent the rejected token as forceRefreshToken, the
+	// connector the boolean forceRefresh. Refresh must ask on both routes, from the
+	// credential it is given; the connector's Operation-wrapped response and Agent
+	// Identity's inline response only differ in the envelope.
 	tests := []struct {
 		name     string
 		resource string
@@ -2085,6 +2086,90 @@ func TestProviderRefreshFailsClosedOnAnUnreadableToken(t *testing.T) {
 	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
 	if _, ok, _ := store.Get(ctx, key); ok {
 		t.Error("the rejected credential is still cached")
+	}
+}
+
+// A cold miss hands the caller the fetched credential, which is readable, while
+// the store reads back a type this package cannot read. An unreadable cached
+// entry cannot be shown to differ from the rejected one, so it must not be served
+// as a replacement: Refresh forces instead.
+func TestProviderRefreshDoesNotServeAnUnreadableCachedEntry(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	rp, _ := replacingProvider(t, srv, pointerStore{auth.NewInMemoryCredentialStore()})
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(auth.BearerCredential); !ok {
+		t.Fatalf("Credential() on a cold miss = %T, want the fetched auth.BearerCredential", rejected)
+	}
+
+	got, err := rp.Refresh(ctx, rejected)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if b, ok := got.(auth.BearerCredential); !ok || b.Token != "tok2" {
+		t.Errorf("Refresh() = %+v, want the replacement tok2", got)
+	}
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forced)
+	}
+}
+
+// The same reading at eviction: an unreadable cached entry counts as possibly the
+// rejected one, so the throttled path drops it.
+func TestProviderRefreshEvictsAnUnreadableCachedEntry(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := pointerStore{auth.NewInMemoryCredentialStore()}
+	rp, client := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	// Burns the cooldown and caches tok2, which the store reads back as a pointer.
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if _, err := rp.Refresh(ctx, fresh); err == nil {
+		t.Fatal("Refresh() inside the cooldown = nil error, want it refused")
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached after a refused refresh")
+	}
+}
+
+// A Refresh whose context is already done sends nothing to the service, so it
+// must not spend the cooldown: the next rejection still gets its forced refresh.
+func TestProviderRefreshOnADoneContextKeepsTheCooldown(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	rp, _ := replacingProvider(t, srv, auth.NewInMemoryCredentialStore())
+	live := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(live)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	done, cancel := context.WithCancel(live)
+	cancel()
+	if _, err := rp.Refresh(done, rejected); err == nil {
+		t.Fatal("Refresh() on a canceled context = nil error, want an error")
+	}
+
+	rejected, err = rp.Credential(live)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, err := rp.Refresh(live, rejected); err != nil {
+		t.Errorf("Refresh() after a canceled one error = %v; the canceled one must not have taken the cooldown", err)
+	}
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forced)
 	}
 }
 
