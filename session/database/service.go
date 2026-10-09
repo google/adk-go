@@ -346,6 +346,18 @@ func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest
 	}
 
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Delete the events explicitly instead of relying on the ON DELETE
+		// CASCADE foreign key: SQLite enforces foreign keys only when the
+		// connection enables them, and without it the session row goes and its
+		// events stay behind.
+		if err := tx.Where(&storageEvent{
+			AppName:   req.AppName,
+			UserID:    req.UserID,
+			SessionID: req.SessionID,
+		}).Delete(&storageEvent{}).Error; err != nil {
+			return fmt.Errorf("database error during session events deletion: %w", err)
+		}
+
 		target := &storageSession{}
 
 		result := tx.Where(&storageSession{
