@@ -34,13 +34,13 @@ import (
 //
 // Expected layout example:
 //
-//	  skill-1/
-//		   SKILL.md
-//		   assets/
-//	  skill-2/
-//		   SKILL.md
-//		   references/
-//		   scripts/
+//	skill-1/
+//	         SKILL.md
+//	         assets/
+//	skill-2/
+//	         SKILL.md
+//	         references/
+//	         scripts/
 func NewFileSystemSource(filesystem fs.FS) Source {
 	return &fileSystemSource{filesystem: filesystem}
 }
@@ -107,11 +107,64 @@ func (f *fileSystemSource) LoadInstructions(ctx context.Context, name string) (s
 	return string(instructions), nil
 }
 
+// rejectSymlinkPath walks every path component of p, from the filesystem
+// root down, and refuses the whole path if any component is a symbolic
+// link.
+//
+// Checking each component -- rather than only the final target -- closes
+// the gap path.Clean leaves open: a resourcePath that is syntactically
+// inside references/, assets/, or scripts/ can still resolve, through a
+// symlink shipped inside the skill itself, to a file outside the skill's
+// own directory. fs.Open ultimately reaches the operating system's open(2),
+// which dereferences symlinks transparently, so the string-level prefix
+// check alone never sees the real target.
+//
+// This requires the underlying filesystem to implement fs.ReadLinkFS
+// (added in Go 1.23; os.DirFS satisfies it). A filesystem that does not --
+// such as the in-memory filesystems common in tests -- has no notion of
+// symlinks at all, so it cannot contain one to escape through; this follows
+// the same convention as fs.Lstat itself, which falls back to the ordinary,
+// symlink-following Stat when ReadLinkFS is unavailable.
+func (f *fileSystemSource) rejectSymlinkPath(p string) error {
+	rlfs, ok := f.filesystem.(fs.ReadLinkFS)
+	if !ok {
+		return nil
+	}
+
+	clean := path.Clean(p)
+	if clean == "." {
+		return nil
+	}
+
+	var cur string
+	for _, part := range strings.Split(clean, "/") {
+		if cur == "" {
+			cur = part
+		} else {
+			cur = cur + "/" + part
+		}
+		info, err := rlfs.Lstat(cur)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("%w: %q", ErrResourceNotFound, p)
+			}
+			return fmt.Errorf("lstat %q: %w", cur, err)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%w: %q contains a symbolic link (%q); a skill resource path must not pass through a symlink", ErrInvalidResourcePath, p, cur)
+		}
+	}
+	return nil
+}
+
 // LoadResource reads a specific file from the skill's directory.
 //
-// For security, the resourcePath is sanitized using path.Clean. Access is
+// For security, the resourcePath is sanitized using path.Clean, access is
 // strictly limited to files within the 'references/', 'assets/', or
-// 'scripts/' subdirectories to prevent path traversal attacks.
+// 'scripts/' subdirectories, and -- on a filesystem that supports symlinks
+// -- every path component the resolved path walks through is required to
+// be a real directory or file rather than a symbolic link, which together
+// prevent path traversal and symlink-escape attacks.
 func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
@@ -123,6 +176,10 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 	}
 
 	fullPath := path.Join(name, cleanPath)
+	if err := f.rejectSymlinkPath(fullPath); err != nil {
+		return nil, err
+	}
+
 	file, err := f.filesystem.Open(fullPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -138,6 +195,12 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 // If resourceDirectoryPath is empty or ".", it walks the 'references/',
 // 'assets/', and 'scripts/' directories. It restricts traversal to these
 // approved directories and returns sanitized paths relative to the skill root.
+//
+// Note: fs.WalkDir lists a symlinked entry by name but does not follow it
+// to walk its target's contents, so this method does not leak file content
+// across the same symlink LoadResource is hardened against above; it can
+// only reveal that a symlink with a given name exists. LoadResource is the
+// path that actually opens file content and is the one this change fixes.
 func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDirectoryPath string) ([]string, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
