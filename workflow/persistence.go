@@ -25,6 +25,55 @@ import (
 	"google.golang.org/adk/v2/session"
 )
 
+// A successful activation without output needs its own history record.
+// Unlike Python's replay of a no-output dynamic node, this records proven
+// success so a later resume does not repeat the node's side effects.
+const workflowNodeCompletedKey = "adk.workflow.node_completed"
+
+const workflowBasePathPrefix = "adk.workflow.base_path."
+
+const workflowFailedChildPathsKey = "adk.workflow.failed_child_paths"
+
+const (
+	workflowNodeOutcomeKey     = "adk.workflow.node_outcome"
+	workflowDelegatedOutputKey = "adk.workflow.delegated_output"
+)
+
+const (
+	workflowNodeFailureOutcome   = "failed"
+	workflowNodeCancelledOutcome = "cancelled"
+)
+
+// Read markers recorded by the earlier PR revision as well as real
+// error events. New attempt records use metadata, not terminal errors.
+const (
+	workflowNodeFailureCode   = "WorkflowNodeFailed"
+	workflowNodeCancelledCode = "WorkflowNodeCancelled"
+)
+
+func workflowNodeOutcome(ev *session.Event) string {
+	if outcome, ok := ev.CustomMetadata[workflowNodeOutcomeKey].(string); ok {
+		if outcome == workflowNodeFailureOutcome || outcome == workflowNodeCancelledOutcome {
+			return outcome
+		}
+	}
+	if ev.ErrorCode == workflowNodeCancelledCode {
+		return workflowNodeCancelledOutcome
+	}
+	if ev.ErrorCode != "" {
+		return workflowNodeFailureOutcome
+	}
+	return ""
+}
+
+func completedDelegatedOutput(ev *session.Event) (any, bool) {
+	if ev.CustomMetadata[workflowNodeCompletedKey] != true {
+		return nil, false
+	}
+	value, ok := ev.CustomMetadata[workflowDelegatedOutputKey]
+	return value, ok
+}
+
 // nodeScanState accumulates, per node, what the session history says
 // about a paused run. Mirrors adk-python's _ChildScanState.
 type nodeScanState struct {
@@ -42,8 +91,10 @@ type nodeScanState struct {
 	resolvedCount map[string]int
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
-	schemas map[string]*jsonschema.Schema
-	branch  string
+	schemas  map[string]*jsonschema.Schema
+	branch   string
+	finished bool
+	failed   bool
 }
 
 func (s *nodeScanState) addInterrupt(id string) {
@@ -66,8 +117,9 @@ func (s *nodeScanState) addInterrupt(id string) {
 // (Event.LongRunningToolIDs, attributed by event node path), the user
 // FunctionResponses that resolved them, and each interrupt's declared
 // response schema. inferNodeState then maps that scan to a NodeState
-// (WAITING / PENDING+ResumedInputs / COMPLETED+Output). Returns
-// (nil, nil) when no node has interrupt history.
+// (WAITING / PENDING+ResumedInputs / COMPLETED+Output). Failed
+// activations are reconstructed for retry on a valid resume. Returns
+// (nil, nil) when no node has interrupt or failure history.
 //
 // invocationID scopes the scan to a single logical run: events from
 // other invocations are skipped, so a fresh run started in a session
@@ -86,12 +138,12 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 
 	// Stage 1: scan history into a per-node view of the pause
 	// (interrupts raised, responses that resolved them, schemas).
-	scans := scanHistory(events, nodesByName, invocationID)
+	scans := scanHistory(events, nodesByName, invocationID, w.name)
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
-	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID)
+	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID, w.name)
 	workflowInput := firstUserInput(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
@@ -102,12 +154,24 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 	if state == nil {
 		return nil, nil
 	}
+	// Restore completed predecessors as well as interrupted nodes. Join
+	// barriers consult Nodes, not the completed set used to skip replayed
+	// successors, and need the predecessors' outputs after a resume.
+	for name, output := range nodeOutputs {
+		if _, exists := state.Nodes[name]; !exists {
+			ns := &NodeState{Status: NodeCompleted, Output: output}
+			if scan := scans[name]; scan != nil {
+				ns.Branch = scan.branch
+			}
+			state.Nodes[name] = ns
+		}
+	}
 
-	// WAITING nodes have not finished, so Resume must not treat them
-	// as already-run; the rest stay in completed to skip their
-	// successors.
+	// Pending, failed and waiting nodes cannot suppress replay of a
+	// successor. In particular, a failed attempt may already have emitted
+	// output, but that output is not a completed result.
 	for name, ns := range state.Nodes {
-		if ns.Status == NodeWaiting {
+		if ns.Status != NodeCompleted {
 			delete(completed, name)
 		}
 	}
@@ -118,10 +182,10 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 // scanHistory walks session events once and returns, per static graph
 // node, what history says about a paused run: the long-running
 // interrupts it raised, the user responses that resolved them, and
-// each interrupt's declared response schema. Only nodes with
-// interrupt history are returned. invocationID, when non-empty,
+// each interrupt's declared response schema, and the latest result or
+// failure. invocationID, when non-empty,
 // restricts the scan to that invocation's events.
-func scanHistory(events session.Events, nodesByName map[string]Node, invocationID string) map[string]*nodeScanState {
+func scanHistory(events session.Events, nodesByName map[string]Node, invocationID, workflowName string) map[string]*nodeScanState {
 	scans := map[string]*nodeScanState{}
 	interruptOwner := map[string]string{} // interrupt ID -> node name
 	scanFor := func(name string) *nodeScanState {
@@ -141,6 +205,10 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
+		if ev.Partial {
+			continue
+		}
+		ev = graphHistoryEvent(ev, workflowName)
 
 		// A user FunctionResponse resolves an interrupt — not the
 		// tool's own initial "pending" response (authored by the
@@ -158,6 +226,11 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
+				// A repeated answer must not reopen work that completed after
+				// its first answer. A first answer invalidates pre-resume output.
+				if sf.resolvedCount[fr.ID] == 0 || sf.failed {
+					sf.finished = false
+				}
 				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
 				sf.resolvedCount[fr.ID]++
 			}
@@ -172,14 +245,31 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
-		if ev.Output != nil {
-			s.branch = ev.Branch
+		for _, name := range eventOutputOwners(ev, nodesByName) {
+			sf := scanFor(name)
+			sf.branch = ev.Branch
+		}
+		if own := ownEventNodeName(ev, nodesByName); own != "" {
+			sf := scanFor(own)
+			_, hasOutput := childEventOutput(ev)
+			if hasOutput || ev.CustomMetadata[workflowNodeCompletedKey] == true {
+				sf.branch = ev.Branch
+				sf.finished, sf.failed = true, false
+			} else if outcome := workflowNodeOutcome(ev); outcome != "" {
+				sf.branch = ev.Branch
+				sf.finished = false
+				// A sibling failure may cancel an asker just after its
+				// pause was persisted. Its interrupt still owns the resume;
+				// cancellation must not replace that pause with a failure.
+				sf.failed = outcome != workflowNodeCancelledOutcome || len(unresolvedInterrupts(sf)) == 0
+			}
 		}
 		for _, id := range ev.LongRunningToolIDs {
 			if id == "" {
 				continue
 			}
 			s.addInterrupt(id)
+			s.finished = false
 			if s.branch == "" {
 				s.branch = ev.Branch
 			}
@@ -193,14 +283,18 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 }
 
 // collectNodeOutputs walks history once and returns each graph node's
-// last cached output plus the set of nodes that emitted any event.
+// last own or explicitly delegated output, plus the set of nodes that
+// emitted an event without a subsequent failure. Completion records
+// allow a successful node with no output to contribute nil.
 // The outputs feed predecessor-input reconstruction for re-entry
 // nodes; completed lets Resume skip already-run successors. When
 // invocationID is non-empty, events from other invocations are skipped
 // so a prior run's completed nodes do not suppress the current run.
-func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invocationID string) (outputs map[string]any, completed map[string]bool) {
+func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invocationID, workflowName string) (outputs map[string]any, completed map[string]bool) {
 	outputs = map[string]any{}
 	completed = map[string]bool{}
+	interruptOwner := map[string]string{}
+	resolved := map[string]bool{}
 	for i := 0; i < events.Len(); i++ {
 		ev := events.At(i)
 		if ev == nil {
@@ -209,11 +303,46 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		if invocationID != "" && ev.InvocationID != invocationID {
 			continue
 		}
+		if ev.Partial {
+			continue
+		}
+		ev = graphHistoryEvent(ev, workflowName)
+		if ev.Author == "user" && ev.Content != nil {
+			for _, part := range ev.Content.Parts {
+				if fr := frPart(part); fr != nil {
+					if owner, ok := interruptOwner[fr.ID]; ok && !resolved[fr.ID] {
+						delete(outputs, owner)
+						delete(completed, owner)
+						resolved[fr.ID] = true
+					}
+				}
+			}
+			continue
+		}
 		name := eventNodeName(ev, nodesByName)
 		if _, ok := nodesByName[name]; !ok {
 			continue
 		}
 		completed[name] = true
+		for _, id := range ev.LongRunningToolIDs {
+			if id != "" {
+				interruptOwner[id] = name
+			}
+		}
+		if own := ownEventNodeName(ev, nodesByName); own != "" {
+			if ev.CustomMetadata[workflowNodeCompletedKey] == true {
+				if value, delegated := completedDelegatedOutput(ev); delegated {
+					if _, exists := outputs[own]; value != nil || !exists {
+						outputs[own] = value
+					}
+				} else {
+					outputs[own] = nil
+				}
+			} else if _, hasOutput := childEventOutput(ev); !hasOutput && workflowNodeOutcome(ev) != "" {
+				delete(outputs, own)
+				delete(completed, own)
+			}
+		}
 		// Prefer an explicit Output; otherwise derive it from the
 		// model message when the event is flagged MessageAsOutput,
 		// so a message-as-output node recovers its output on resume
@@ -223,32 +352,45 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		if !ok {
 			continue
 		}
-		outputs[name] = out
-		// A delegated output also counts for the static owners of the
-		// OutputFor paths, so a delegating ancestor recovers it on resume
-		// without re-emitting. Mirrors adk-python's output_for.
-		if ev.NodeInfo != nil {
-			for _, p := range ev.NodeInfo.OutputFor {
-				owner := staticNodeName(p)
-				if owner == name {
-					continue
-				}
-				if _, known := nodesByName[owner]; known {
-					outputs[owner] = out
-				}
-			}
+		for _, owner := range eventOutputOwners(ev, nodesByName) {
+			outputs[owner] = out
 		}
 	}
 	return outputs, completed
 }
 
-// buildRunState maps each interrupted node's scan to a NodeState via
-// inferNodeState. Returns (nil, nil) when no node has interrupt
-// history, matching the "nothing to resume" case.
+// Workflows and graph nodes may share a name. Record the actual graph
+// base rather than guessing which known path segment is the graph node.
+// Older history has no base metadata; Run's conventional prefix is the
+// best available fallback, while Resume and RunNode can be unprefixed.
+func graphHistoryEvent(ev *session.Event, workflowName string) *session.Event {
+	if ev.NodeInfo == nil {
+		return ev
+	}
+	base, known := ev.CustomMetadata[workflowBasePathPrefix+workflowName].(string)
+	if !known && workflowName != "" {
+		base = workflowName + "@1"
+	}
+	if base == "" {
+		return ev
+	}
+	copy := *ev
+	info := *ev.NodeInfo
+	info.Path = strings.TrimPrefix(info.Path, base+"/")
+	info.OutputFor = make([]string, len(ev.NodeInfo.OutputFor))
+	for i, path := range ev.NodeInfo.OutputFor {
+		info.OutputFor[i] = strings.TrimPrefix(path, base+"/")
+	}
+	copy.NodeInfo = &info
+	return &copy
+}
+
+// buildRunState maps interrupted or failed nodes' scans to NodeStates.
+// Returns (nil, nil) when there is no interrupt or failure history.
 func (w *Workflow) buildRunState(scans map[string]*nodeScanState, nodesByName map[string]Node, nodeOutputs map[string]any, workflowInput any) (*RunState, error) {
 	var state *RunState
 	for nodeName, scan := range scans {
-		if len(scan.interrupts) == 0 {
+		if len(scan.interrupts) == 0 && !scan.failed {
 			continue
 		}
 		ns, err := w.inferNodeState(nodesByName[nodeName], scan, nodeOutputs, workflowInput)
@@ -314,6 +456,8 @@ func validateResolved(scan *nodeScanState) (map[string]any, error) {
 //   - unresolved interrupts, re-run + some resolved -> NodePending
 //     (partial resume: re-run with the resolved responses)
 //   - unresolved interrupts otherwise               -> NodeWaiting
+//   - latest attempt failed                         -> NodeFailed
+//   - latest attempt produced a result              -> NodeCompleted
 //   - all resolved, re-run                           -> NodePending (re-entry)
 //   - all resolved, handoff                          -> NodeCompleted
 //     with Output = the response (forwarded to successors by Resume)
@@ -343,6 +487,15 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		if len(resumed) > 0 {
 			ns.ResumedInputs = resumed
 		}
+	case scan.failed:
+		ns.Status = NodeFailed
+		ns.ResumedInputs = resumed
+		ns.Input, ns.TriggeredBy = w.predecessorInput(node, nodeOutputs, workflowInput)
+	case scan.finished:
+		// A re-entry node may have finished on an earlier resume turn.
+		// Its consumed interrupt must not turn it back into Pending.
+		ns.Status = NodeCompleted
+		ns.Output = nodeOutputs[node.Name()]
 	case reenter:
 		// All resolved, re-entry: re-run with the responses.
 		ns.Status = NodePending
@@ -456,13 +609,52 @@ func eventNodeName(ev *session.Event, nodesByName map[string]Node) string {
 	return ev.Author
 }
 
-// staticNodeName returns the static graph node owning a node path: the
-// first segment of a composite "parent/child@run" path.
-func staticNodeName(path string) string {
-	if i := strings.IndexByte(path, '/'); i >= 0 {
-		return path[:i]
+// ownPathNodeName distinguishes a graph node's own events from events
+// it forwards for dynamic descendants. Interrupt ownership deliberately
+// uses eventNodeName's broader ancestor attribution instead.
+func ownPathNodeName(path string, nodesByName map[string]Node) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		name, _, _ := strings.Cut(segment, "@")
+		if _, known := nodesByName[name]; known {
+			if i == len(segments)-1 {
+				return name
+			}
+			return ""
+		}
 	}
-	return path
+	return ""
+}
+
+func ownEventNodeName(ev *session.Event, nodesByName map[string]Node) string {
+	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
+		return ownPathNodeName(ev.NodeInfo.Path, nodesByName)
+	}
+	if _, known := nodesByName[ev.Author]; known {
+		return ev.Author
+	}
+	return ""
+}
+
+// Only an emitter's own output or an explicit OutputFor delegation is
+// a graph node's result. Folding a child path into its static ancestor
+// would manufacture output for an orchestrator that discarded the result.
+func eventOutputOwners(ev *session.Event, nodesByName map[string]Node) []string {
+	if _, hasOutput := childEventOutput(ev); !hasOutput {
+		return nil
+	}
+	var owners []string
+	if own := ownEventNodeName(ev, nodesByName); own != "" {
+		owners = append(owners, own)
+	}
+	if ev.NodeInfo != nil {
+		for _, path := range ev.NodeInfo.OutputFor {
+			if own := ownPathNodeName(path, nodesByName); own != "" {
+				owners = append(owners, own)
+			}
+		}
+	}
+	return owners
 }
 
 // frPart returns the FunctionResponse on a part if present and keyed.

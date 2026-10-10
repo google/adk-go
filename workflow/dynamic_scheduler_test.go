@@ -253,6 +253,79 @@ func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
 
 func noopEmit(*session.Event) error { return nil }
 
+func TestSubScheduler_RehydrateCache_LatestOutcome(t *testing.T) {
+	const path = "parent/child@1"
+	output := func() *session.Event {
+		return &session.Event{Output: "result", NodeInfo: &session.NodeInfo{Path: path}}
+	}
+	failure := func() *session.Event {
+		ev := &session.Event{NodeInfo: &session.NodeInfo{Path: path}}
+		ev.ErrorCode = workflowNodeFailureCode
+		return ev
+	}
+	parentFailure := &session.Event{NodeInfo: &session.NodeInfo{Path: "parent"}}
+	parentFailure.CustomMetadata = map[string]any{workflowFailedChildPathsKey: []any{path}}
+	resultWithCode := output()
+	resultWithCode.ErrorCode = "finish_reason"
+	parentCancelled := &session.Event{NodeInfo: &session.NodeInfo{Path: "parent"}}
+	parentCancelled.ErrorCode = workflowNodeCancelledCode
+	messageOutput := modelEvent(path, "result", true)
+	for _, tc := range []struct {
+		name    string
+		events  sliceEvents
+		wantHit bool
+	}{
+		{name: "failure_after_output", events: sliceEvents{output(), failure()}},
+		{name: "later_result", events: sliceEvents{failure(), output()}, wantHit: true},
+		{name: "result_with_error_code", events: sliceEvents{resultWithCode}, wantHit: true},
+		{name: "message_output", events: sliceEvents{messageOutput}, wantHit: true},
+		{name: "parent_recorded_child_failure", events: sliceEvents{output(), parentFailure}},
+		{name: "parent_cancelled_without_child_path", events: sliceEvents{output(), parentCancelled}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, ev := range tc.events {
+				ev.InvocationID = "test-invocation-id"
+			}
+			ctx := newMockCtx(t)
+			ctx.sess = &eventsSession{events: tc.events}
+			sub := newDynamicSubScheduler(agent.Promote(ctx), "parent", noopEmit).(*dynamicSubScheduler)
+			_, hit := sub.awaitOrLead(path)
+			if hit != tc.wantHit {
+				t.Fatal("cache did not reflect the child's latest outcome")
+			}
+		})
+	}
+}
+
+func TestSubScheduler_RehydrateCache_ChildFailureMarker(t *testing.T) {
+	var attempts int
+	child := NewDynamicNode("child", func(ctx agent.Context, _ any, emit func(*session.Event) error) (any, error) {
+		attempts++
+		if attempts > 1 {
+			return "retried", nil
+		}
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = "partial"
+		if err := emit(ev); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("scripted failure")
+	}, NodeConfig{})
+	ctx := newMockCtx(t)
+	var history sliceEvents
+	emit := func(ev *session.Event) error { history = append(history, ev); return nil }
+	first := newDynamicSubScheduler(agent.Promote(ctx), "parent", emit).(*dynamicSubScheduler)
+	if _, err := first.runNode(child, nil, runNodeOptions{}); !errors.Is(err, ErrNodeFailed) {
+		t.Fatal("fixture did not fail after emitting output")
+	}
+	ctx.sess = &eventsSession{events: history}
+	second := newDynamicSubScheduler(agent.Promote(ctx), "parent", noopEmit).(*dynamicSubScheduler)
+	out, err := second.runNode(child, nil, runNodeOptions{})
+	if err != nil || out != "retried" || attempts != 2 {
+		t.Fatal("failed dynamic child was replayed from its partial output")
+	}
+}
+
 // eventsSession is a minimal session.Session exposing a fixed event
 // history; only Events() is consulted by rehydrateCache.
 type eventsSession struct {
