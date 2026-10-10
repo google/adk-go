@@ -195,3 +195,36 @@ func TestInMemoryCanonicalURIEscapesSegments(t *testing.T) {
 		})
 	}
 }
+
+// adk-python's InMemoryArtifactService deep-copies the part on save and on
+// load (in_memory_artifact_service.py: `model_copy(deep=True)`), so a caller
+// that edits a part it saved or loaded cannot rewrite the stored version.
+func TestInMemoryService_DoesNotAliasStoredParts(t *testing.T) {
+	ctx := t.Context()
+	s := artifact.InMemoryService()
+	req := func(p *genai.Part) *artifact.SaveRequest {
+		return &artifact.SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt", Part: p}
+	}
+	part := genai.NewPartFromText("v1")
+	if _, err := s.Save(ctx, req(part)); err != nil {
+		t.Fatal(err)
+	}
+	part.Text = "edited after save"
+
+	load := func() *genai.Part {
+		t.Helper()
+		resp, err := s.Load(ctx, &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.txt"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Part
+	}
+	got := load()
+	if got.Text != "v1" {
+		t.Errorf("Load() after editing the saved part = %q, want %q", got.Text, "v1")
+	}
+	got.Text = "edited after load"
+	if again := load(); again.Text != "v1" {
+		t.Errorf("Load() after editing a loaded part = %q, want %q", again.Text, "v1")
+	}
+}
