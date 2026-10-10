@@ -77,6 +77,11 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {
+		// Without sub-agents nothing can escalate, fail or advance an
+		// iteration, so the loop would spin forever. adk-python returns here too.
+		if len(ctx.Agent().SubAgents()) == 0 {
+			return
+		}
 		for {
 			shouldExit := false
 			for _, subAgent := range ctx.Agent().SubAgents() {
