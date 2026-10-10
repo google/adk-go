@@ -60,16 +60,20 @@ type MetadataProvider func(ctx agent.Context) (map[string]any, error)
 //
 // Example:
 //
+//	mcpTools, err := mcptoolset.New(mcptoolset.Config{
+//		Transport: &mcp.CommandTransport{Command: exec.Command("myserver")},
+//	})
+//	if err != nil {
+//		return err
+//	}
+//	defer mcpTools.(io.Closer).Close()
+//
 //	llmagent.New(llmagent.Config{
 //		Name:        "agent_name",
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
-//		Toolsets: []tool.Set{
-//			mcptoolset.New(mcptoolset.Config{
-//				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
-//			}),
-//		},
+//		Toolsets:    []tool.Toolset{mcpTools},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
 	transport, err := buildTransport(cfg)
