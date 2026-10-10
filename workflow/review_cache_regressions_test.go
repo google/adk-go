@@ -148,15 +148,12 @@ func TestSubScheduler_FailureInventory(t *testing.T) {
 	if _, hit := sub.awaitOrLead("parent/inflight@1"); hit {
 		t.Fatal("fixture did not register an in-flight path")
 	}
-	wrapped := sub.withChildFailures(failedErr)
-	if !errors.Is(wrapped, failure) || wrapped.Error() != failedErr.Error() {
-		t.Fatal("inventory changed the original error or its cause")
-	}
+	inventory := sub.childFailures()
 	node := newDummyNode("parent")
 	wf := mustNew(t, []Edge{{From: Start, To: node}})
 	sched := newScheduler(agent.Promote(ctx), wf.graph, 0)
 	sched.state.Nodes["parent"] = &NodeState{Status: NodeFailed}
-	ev := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, wrapped)
+	ev := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, inventory)
 	paths, ok := ev.CustomMetadata[workflowFailedChildPathsKey].([]any)
 	if !ok || len(paths) != 2 {
 		t.Fatal("inventory lost an uncertain path or retained duplicate/recovered paths")
@@ -168,7 +165,7 @@ func TestSubScheduler_FailureInventory(t *testing.T) {
 	if !set["parent/failed@stable"] || !set["parent/inflight@1"] {
 		t.Fatal("inventory did not cover both failed and in-flight children")
 	}
-	sub.finishRun("parent/inflight@1", runResult{out: "ok"}, false)
+	sub.finishRun("parent/inflight@1", runResult{out: "ok"}, false, failureInventory{})
 }
 
 func TestWorkflowNode_DelegatedControlOwnership(t *testing.T) {
@@ -286,8 +283,8 @@ func TestSubScheduler_WaitForOutputHasNoFailureMarker(t *testing.T) {
 			t.Fatal("waiting for output was recorded as a failure")
 		}
 	}
-	var pathsError *failedChildPathsError
-	if !errors.As(sub.withChildFailures(errors.New("scripted failure")), &pathsError) || pathsError.paths == nil || len(pathsError.paths) != 0 {
+	inventory := sub.childFailures()
+	if !inventory.known || inventory.paths == nil || len(inventory.paths) != 0 {
 		t.Fatal("waiting for output contaminated the failure inventory")
 	}
 }

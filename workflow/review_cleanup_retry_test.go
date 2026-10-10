@@ -187,17 +187,15 @@ func TestScheduler_InitialDrainDoesNotFinalize(t *testing.T) {
 func TestSubScheduler_EmptyFailureInventoryPersists(t *testing.T) {
 	ctx := newTopLevelCtx(t)
 	sub := newDynamicSubScheduler(ctx, "parent", noopEmit).(*dynamicSubScheduler)
-	failure := errors.New("scripted parent failure")
-	wrapped := sub.withChildFailures(failure)
-	var inventory *failedChildPathsError
-	if !errors.As(wrapped, &inventory) || inventory.paths == nil || len(inventory.paths) != 0 || !errors.Is(wrapped, failure) || wrapped.Error() != failure.Error() {
-		t.Fatal("known empty inventory was lost or changed the original failure")
+	inventory := sub.childFailures()
+	if !inventory.known || inventory.paths == nil || len(inventory.paths) != 0 {
+		t.Fatal("known empty inventory was lost")
 	}
 	n := newDummyNode("parent")
 	wf := mustNew(t, []Edge{{From: Start, To: n}})
 	sched := newScheduler(ctx, wf.graph, 0)
 	sched.state.Nodes["parent"] = &NodeState{Status: NodeFailed}
-	ev := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, wrapped)
+	ev := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, inventory)
 	data, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatal("failure record serialization failed")
@@ -210,7 +208,7 @@ func TestSubScheduler_EmptyFailureInventoryPersists(t *testing.T) {
 	if !ok || paths == nil || len(paths) != 0 {
 		t.Fatal("empty inventory was omitted or persisted as null")
 	}
-	unknown := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, failure)
+	unknown := sched.completionEvent("parent", &nodeRun{nodePath: "parent"}, failureInventory{})
 	if _, ok := unknown.CustomMetadata[workflowFailedChildPathsKey]; ok {
 		t.Fatal("unknown inventory was recorded as known")
 	}
@@ -232,16 +230,18 @@ func TestSubScheduler_RecoveredNestedFailureInventory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := newDynamicSubScheduler(newTopLevelCtx(t), "parent", noopEmit).(*dynamicSubScheduler)
 			sub.failedPaths[sibling] = struct{}{}
-			failure := &failedChildPathsError{cause: errors.New("scripted child failure"), paths: []string{leaf}}
-			sub.finishRun(mid, runResult{err: failure}, true)
+			failure := errors.New("scripted child failure")
+			sub.finishRun(mid, runResult{err: failure}, true, failureInventory{known: true, paths: []string{leaf}})
 			if _, ok := sub.failedPaths[leaf]; !ok || len(sub.failedPaths) != 2 {
 				t.Fatal("nested inventory was widened or lost")
 			}
 			res := runResult{out: "recovered"}
+			var inventory failureInventory
 			if tc.paths != nil {
-				res.err = &failedChildPathsError{cause: failure.cause, paths: tc.paths}
+				res.err = failure
+				inventory = failureInventory{known: true, paths: tc.paths}
 			}
-			sub.finishRun(mid, res, true)
+			sub.finishRun(mid, res, true, inventory)
 			if _, ok := sub.failedPaths[sibling]; !ok || len(sub.failedPaths) != 1+len(tc.paths) {
 				t.Fatal("new child inventory retained stale failures or cleared another subtree")
 			}
@@ -292,7 +292,7 @@ func TestSubScheduler_UnrecordedChildFailureRemainsConservative(t *testing.T) {
 			wf := mustNew(t, []Edge{{From: Start, To: n}})
 			sched := newScheduler(agent.Promote(ctx), wf.graph, 0)
 			sched.state.Nodes[parent] = &NodeState{Status: NodeFailed}
-			history = append(history, sched.completionEvent(parent, &nodeRun{nodePath: parent}, sub.withChildFailures(err)))
+			history = append(history, sched.completionEvent(parent, &nodeRun{nodePath: parent}, sub.childFailures()))
 			data, err := json.Marshal(history)
 			if err != nil {
 				t.Fatal("history serialization failed")

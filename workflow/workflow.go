@@ -32,6 +32,11 @@ import (
 // Custom nodes typically embed BaseNode (constructed via NewBaseNode)
 // to inherit Name, Description, and Config implementations, and
 // supply only Run.
+//
+// A custom node that calls another node's Run directly does not forward
+// its private recovery inventory. On failure, retries may conservatively
+// invalidate the custom node's subtree and repeat completed descendants.
+// Use RunNode within a DynamicNode to track child activations explicitly.
 type Node interface {
 	Name() string
 	Description() string

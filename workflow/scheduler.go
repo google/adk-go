@@ -223,8 +223,9 @@ func (eventItem) isQueueItem() {}
 // consumer via errors.Is (currently: context.Canceled,
 // context.DeadlineExceeded, anything else → NodeFailed).
 type completionItem struct {
-	nodeName string
-	err      error
+	nodeName  string
+	err       error
+	inventory failureInventory
 }
 
 func (completionItem) isQueueItem() {}
@@ -454,6 +455,7 @@ func runNode(
 	defer func() {
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+			completion.inventory = failureInventory{}
 		}
 		span.recordError(completion.err, nil)
 		out <- completion
@@ -464,10 +466,12 @@ func runNode(
 		completion.err = fmt.Errorf("%w for node %q: %w", ErrInputValidation, name, err)
 		return
 	}
+	ctx, inventoryRecorder := withFailureInventory(ctx, n)
 
 	for ev, err := range n.Run(ctx, validated) {
 		if err != nil {
 			completion.err = err
+			completion.inventory = inventoryRecorder.snapshot()
 			return
 		}
 		// Block on non-partial events until the consumer has persisted
@@ -556,7 +560,8 @@ func (s *scheduler) cancelAll() {
 // Workflow.Run); it is the only mutator of state.Nodes and the
 // node-side accumulators.
 func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
-	var pendingErr error     // first non-nil node error; surfaced after drain
+	var pendingErr error // first non-nil node error; surfaced after drain
+	var pendingInventory failureInventory
 	var cancelErr error      // cause of an external cancellation; surfaced only when no node reported an error
 	consumerGone := draining // no further yield is allowed after consumer exit, including initial cleanup
 
@@ -607,7 +612,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 			nr := s.runsByName[it.nodeName]
 			err := s.handleCompletion(it, !draining)
 			if !consumerGone {
-				if ev := s.completionEvent(it.nodeName, nr, it.err); ev != nil && !yield(ev, nil) {
+				if ev := s.completionEvent(it.nodeName, nr, it.inventory); ev != nil && !yield(ev, nil) {
 					consumerGone = true
 					draining = true
 					s.cancelAll()
@@ -615,6 +620,9 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 			}
 			if err != nil && pendingErr == nil {
 				pendingErr = err
+				if it.err != nil {
+					pendingInventory = it.inventory.clone()
+				}
 				if !draining {
 					draining = true
 					s.cancelAll()
@@ -646,6 +654,9 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 		runErr = cancelErr
 	}
 	if runErr != nil && !consumerGone {
+		// A WorkflowNode forwards this error unchanged. Bridge its recovery
+		// evidence to the enclosing activation without wrapping that error.
+		publishFailureInventory(s.parentCtx, s.graph, pendingInventory)
 		yield(nil, runErr)
 		return
 	}
@@ -662,7 +673,7 @@ func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
 // Output events alone cannot distinguish success from a partial result
 // followed by failure, or record successful completion with no output.
 // Keep those outcomes in history without persisting the node's error text.
-func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *session.Event {
+func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureInventory) *session.Event {
 	if name == Start.Name() || s.graph.isRootWrapper {
 		return nil
 	}
@@ -695,7 +706,7 @@ func (s *scheduler) completionEvent(name string, nr *nodeRun, failure error) *se
 		// A failed attempt can still recover through retries or a parent
 		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
 		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
-		recordFailedChildPaths(ev.CustomMetadata, failure)
+		recordFailedChildPaths(ev.CustomMetadata, inventory)
 	} else {
 		ev.CustomMetadata[workflowNodeCompletedKey] = true
 	}

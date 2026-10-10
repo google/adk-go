@@ -132,7 +132,8 @@ func (n *dynamicNode[IN, OUT]) Run(ctx agent.Context, input any) iter.Seq2[*sess
 			if errors.Is(err, ErrNodeInterrupted) {
 				return
 			}
-			yield(nil, sub.(*dynamicSubScheduler).withChildFailures(err))
+			publishFailureInventory(ctx, n, sub.(*dynamicSubScheduler).childFailures())
+			yield(nil, err)
 			return
 		}
 

@@ -233,19 +233,29 @@ func TestRunner_WorkflowRetryPreservesCompletedChild(t *testing.T) {
 		name         string
 		nested       bool
 		childFailure bool
+		workflowNode bool
 	}{
 		{name: "direct"},
 		{name: "nested", nested: true},
 		{name: "nested_body_failure", nested: true, childFailure: true},
+		{name: "workflow_node_body_failure", nested: true, childFailure: true, workflowNode: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var chargeCalls, parentCalls, childCalls atomic.Int32
 			failure := errors.New("scripted body failure")
-			charge := workflow.NewFunctionNode("charge", func(agent.Context, any) (string, error) {
+			var charge workflow.Node = workflow.NewFunctionNode("charge", func(agent.Context, any) (string, error) {
 				chargeCalls.Add(1)
 				return "charged", nil
 			}, workflow.NodeConfig{})
-			var child workflow.Node = charge
+			if tc.workflowNode {
+				compute := charge
+				// WorkflowNode strips ordinary child outputs. A delegated
+				// completion keeps the replay evidence in existing metadata.
+				charge = workflow.NewDynamicNode("charge", func(ctx agent.Context, in any, _ func(*session.Event) error) (any, error) {
+					return workflow.RunNode[string](ctx, compute, in, workflow.WithUseAsOutput())
+				}, workflow.NodeConfig{})
+			}
+			child := charge
 			if tc.nested {
 				child = workflow.NewDynamicNode("mid", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
 					out, err := workflow.RunNode[string](ctx, charge, in, workflow.WithRunID("charge"))
@@ -257,6 +267,13 @@ func TestRunner_WorkflowRetryPreservesCompletedChild(t *testing.T) {
 					}
 					return out, nil
 				}, workflow.NodeConfig{})
+			}
+			if tc.workflowNode {
+				var err error
+				child, err = workflow.NewWorkflowNode("inner", []workflow.Edge{{From: workflow.Start, To: child}})
+				if err != nil {
+					t.Fatal("nested workflow construction failed")
+				}
 			}
 			p := workflow.NewDynamicNode("p", func(ctx agent.Context, in any, _ func(*session.Event) error) (string, error) {
 				parentCalls.Add(1)
@@ -280,7 +297,7 @@ func TestRunner_WorkflowRetryPreservesCompletedChild(t *testing.T) {
 				}
 			}
 			if !completed || parentCalls.Load() != 2 || chargeCalls.Load() != 1 {
-				t.Fatal("parent retry repeated a completed child or lost its result")
+				t.Fatalf("parent retry repeated a completed child or lost its result (completed=%v, parent=%d, charge=%d, child=%d)", completed, parentCalls.Load(), chargeCalls.Load(), childCalls.Load())
 			}
 		})
 	}
