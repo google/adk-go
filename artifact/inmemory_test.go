@@ -228,3 +228,45 @@ func TestInMemoryService_DoesNotAliasStoredParts(t *testing.T) {
 		t.Errorf("Load() after editing a loaded part = %q, want %q", again.Text, "v1")
 	}
 }
+
+func TestInMemoryService_DoesNotAliasStoredInlineData(t *testing.T) {
+	ctx := t.Context()
+	s := artifact.InMemoryService()
+	data := []byte("abc")
+	part := &genai.Part{
+		InlineData:       &genai.Blob{Data: data, MIMEType: "text/plain"},
+		FileData:         &genai.FileData{FileURI: "gs://b/o"},
+		ThoughtSignature: []byte("sig"),
+		PartMetadata:     map[string]any{"k": "v"},
+		VideoMetadata:    &genai.VideoMetadata{StartOffset: time.Second},
+	}
+	if _, err := s.Save(ctx, &artifact.SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.bin", Part: part}); err != nil {
+		t.Fatal(err)
+	}
+	data[0] = 'X'
+	part.InlineData.MIMEType = "edited"
+	part.FileData.FileURI = "edited"
+	part.ThoughtSignature[0] = 'X'
+	part.PartMetadata["k"] = "edited"
+	part.VideoMetadata.StartOffset = time.Hour
+
+	load := func() *genai.Part {
+		t.Helper()
+		resp, err := s.Load(ctx, &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f.bin"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp.Part
+	}
+	got := load()
+	if string(got.InlineData.Data) != "abc" || got.InlineData.MIMEType != "text/plain" {
+		t.Errorf("Load() after editing the saved part = %q (%s), want %q (text/plain)", got.InlineData.Data, got.InlineData.MIMEType, "abc")
+	}
+	if got.FileData.FileURI != "gs://b/o" || string(got.ThoughtSignature) != "sig" || got.PartMetadata["k"] != "v" || got.VideoMetadata.StartOffset != time.Second {
+		t.Errorf("Load() after editing the saved part kept edits to FileData, ThoughtSignature, PartMetadata or VideoMetadata")
+	}
+	got.InlineData.Data[1] = 'Y'
+	if again := load(); string(again.InlineData.Data) != "abc" {
+		t.Errorf("Load() after editing a loaded part = %q, want %q", again.InlineData.Data, "abc")
+	}
+}

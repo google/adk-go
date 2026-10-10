@@ -175,11 +175,36 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 		nextVersion = internalVer + 1
 	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, &artifactEntry{
-		part:           req.Part,
+		part:           clonePart(req.Part),
 		createTime:     createTime,
 		customMetadata: customMetadata,
 	})
 	return &SaveResponse{Version: nextVersion}, nil
+}
+
+// clonePart returns a copy of p that shares no inline data, file data, thought
+// signature or metadata with it, so neither the saver nor a loader can rewrite
+// the stored version. Save only accepts text or inline data, so the other
+// members of genai.Part are not expected on a stored artifact. adk-python
+// deep-copies on save and on load too (in_memory_artifact_service.py).
+func clonePart(p *genai.Part) *genai.Part {
+	cp := *p
+	if p.InlineData != nil {
+		blob := *p.InlineData
+		blob.Data = slices.Clone(blob.Data)
+		cp.InlineData = &blob
+	}
+	if p.FileData != nil {
+		fd := *p.FileData
+		cp.FileData = &fd
+	}
+	if p.VideoMetadata != nil {
+		vm := *p.VideoMetadata
+		cp.VideoMetadata = &vm
+	}
+	cp.ThoughtSignature = slices.Clone(p.ThoughtSignature)
+	cp.PartMetadata = maps.Clone(p.PartMetadata)
+	return &cp
 }
 
 // Delete implements [artifact.Service]
@@ -231,14 +256,14 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 		if !ok {
 			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 		}
-		return &LoadResponse{Part: entry.part}, nil
+		return &LoadResponse{Part: clonePart(entry.part)}, nil
 	}
 	// pick the latest version
 	_, entry, ok := s.find(appName, userID, sessionID, fileName)
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &LoadResponse{Part: entry.part}, nil
+	return &LoadResponse{Part: clonePart(entry.part)}, nil
 }
 
 // List implements [artifact.Service]
