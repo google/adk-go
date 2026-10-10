@@ -47,11 +47,6 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		metadataProvider:            metadataProvider,
 	}
 
-	// Since t.InputSchema and t.OutputSchema are pointers (*jsonschema.Schema) and the destination ResponseJsonSchema
-	// is an interface (any), we have encountered the type nil problem.
-	// This will make the omitempty not work since ResponseJsonSchema becomes an interface wrapper
-	// to a nil pointer and genai converter includes "responseJsonSchema": null in the json sent to the llm which causes it to crash.
-	// we need the following "if" check to keep ResponseJsonSchema (nil,nil) instead of (*jsonschema.Schema, nil)
 	if t.InputSchema != nil {
 		mcp.funcDeclaration.ParametersJsonSchema = t.InputSchema
 	}
