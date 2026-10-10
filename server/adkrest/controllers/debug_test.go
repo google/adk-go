@@ -34,12 +34,16 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestSessionSpansHandler(t *testing.T) {
@@ -689,5 +693,79 @@ func TestEventGraphHandlerRejectsANilAgent(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d (body %q)", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+// TestEventGraphHandlerSkipsNilParts pins that a nil part ahead of a function
+// call or response leaves the event graph as it is without that part. The agent
+// has the tool the parts name, so the graph highlights that tool only when the
+// call or response is found.
+func TestEventGraphHandlerSkipsNilParts(t *testing.T) {
+	const (
+		appName   = "test-app"
+		userID    = "test-user"
+		sessionID = "test-session"
+	)
+
+	type noArgs struct{}
+	f, err := functiontool.New(functiontool.Config{Name: "f", Description: "f"}, func(agent.Context, noArgs) (map[string]any, error) { return nil, nil })
+	if err != nil {
+		t.Fatalf("create tool: %v", err)
+	}
+	rootAgent, err := llmagent.New(llmagent.Config{Name: appName, Tools: []tool.Tool{f}})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	graph := func(t *testing.T, parts []*genai.Part) string {
+		t.Helper()
+		ev := &session.Event{ID: "test-event", Author: appName}
+		ev.Content = &genai.Content{Role: "model", Parts: parts}
+		key := fakes.SessionKey{AppName: appName, UserID: userID, SessionID: sessionID}
+		sessionService := &fakes.FakeSessionService{
+			Sessions: map[fakes.SessionKey]fakes.TestSession{
+				key: {
+					Id:            key,
+					SessionState:  fakes.TestState{},
+					SessionEvents: fakes.TestEvents{ev},
+					UpdatedAt:     time.Now(),
+				},
+			},
+		}
+		apiController := controllers.NewDebugAPIController(sessionService, agent.NewSingleLoader(rootAgent), nil)
+		req := httptest.NewRequest(http.MethodGet, "/events/test-event/graph", nil)
+		req = mux.SetURLVars(req, map[string]string{
+			"app_name":   appName,
+			"user_id":    userID,
+			"session_id": sessionID,
+			"event_id":   "test-event",
+		})
+		rr := httptest.NewRecorder()
+		apiController.EventGraphHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body %q)", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		return rr.Body.String()
+	}
+
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}
+	resp := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f"}}
+	for _, tc := range []struct {
+		name string
+		part *genai.Part
+	}{
+		{"function_call_after_nil", call},
+		{"function_response_after_nil", resp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := graph(t, []*genai.Part{nil, tc.part})
+			want := graph(t, []*genai.Part{tc.part})
+			if want == graph(t, []*genai.Part{{Text: "no call"}}) {
+				t.Fatalf("graph for %s does not highlight the tool", tc.name)
+			}
+			if got != want {
+				t.Errorf("body with a leading nil part =\n%s\nwant\n%s", got, want)
+			}
+		})
 	}
 }

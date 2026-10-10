@@ -15,6 +15,7 @@
 package models_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -94,5 +95,40 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
 		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
+	}
+}
+
+// TestEventMarshalJSONWithNilParts pins that a nil part in a stored event is
+// dropped from the REST output rather than written as null, which the web UI
+// cannot render.
+func TestEventMarshalJSONWithNilParts(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		parts []*genai.Part
+		want  string
+	}{
+		{"nil_before_text", []*genai.Part{nil, {Text: "THY"}}, `{"role":"user","parts":[{"text":"THY"}]}`},
+		{"only_nil_omits_parts", []*genai.Part{nil}, `{"role":"user"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := session.Event{}
+			ev.Content = &genai.Content{Role: genai.RoleUser, Parts: tc.parts}
+
+			data, err := json.Marshal(models.FromSessionEvent(ev))
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			var got struct {
+				Content json.RawMessage `json:"content"`
+			}
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if string(got.Content) != tc.want {
+				t.Errorf("content = %s, want %s", got.Content, tc.want)
+			}
+		})
 	}
 }

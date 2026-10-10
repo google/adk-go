@@ -283,6 +283,28 @@ func TestDecodeRequestBody_RejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestBody_DropsNilParts(t *testing.T) {
+	body := `{
+		"appName": "a",
+		"userId": "u",
+		"sessionId": "s",
+		"newMessage": {"role": "user", "parts": [null, {"text": "hi"}, null, {"text": "there"}]}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBufferString(body))
+
+	got, err := decodeRequestBody(req)
+	if err != nil {
+		t.Fatalf("decodeRequestBody: unexpected error: %v", err)
+	}
+	parts, err := json.Marshal(got.NewMessage.Parts)
+	if err != nil {
+		t.Fatalf("json.Marshal: unexpected error: %v", err)
+	}
+	if want := `[{"text":"hi"},{"text":"there"}]`; string(parts) != want {
+		t.Errorf("NewMessage.Parts = %s, want %s", parts, want)
+	}
+}
+
 // TestNewRuntimeAPIController_BackwardCompatible pins that the constructor
 // keeps the signature it was released with, and that the options live on a
 // sibling rather than on a trailing variadic parameter grown onto it.

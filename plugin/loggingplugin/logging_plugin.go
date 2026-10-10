@@ -91,6 +91,9 @@ func (p *loggingPlugin) formatContent(content *genai.Content, maxLength int) str
 
 	var parts []string
 	for _, part := range content.Parts {
+		if part == nil {
+			continue
+		}
 		if part.Text != "" {
 			text := strings.TrimSpace(part.Text)
 			if len(text) > maxLength {

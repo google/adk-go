@@ -750,6 +750,41 @@ func TestContentsRequestProcessor(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "NilPartInUserEvent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role:  "user",
+							Parts: []*genai.Part{nil, {Text: "Hello"}},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", "user"),
+			},
+		},
+		{
+			name: "AuthEventAfterNilPart",
+			events: []*session.Event{
+				{
+					Author: agentName,
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								nil,
+								{FunctionCall: &genai.FunctionCall{Name: "adk_request_credential"}},
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
 			name: "TranscriptionAggregation",
 			events: []*session.Event{
 				{
@@ -1020,6 +1055,34 @@ func TestConvertForeignEvent(t *testing.T) {
 				Branch: "b",
 			},
 			want: nil,
+		},
+		{
+			name: "NilPartExcluded",
+			event: &session.Event{
+				Timestamp: now,
+				Author:    "foreign",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{nil, {Text: "the answer"}},
+					},
+				},
+				Branch: "b",
+			},
+			want: &session.Event{
+				Timestamp: now,
+				Author:    "user",
+				LLMResponse: model.LLMResponse{
+					Content: &genai.Content{
+						Role: "user",
+						Parts: []*genai.Part{
+							{Text: "For context:"},
+							{Text: "[foreign] said: the answer"},
+						},
+					},
+				},
+				Branch: "b",
+			},
 		},
 	}
 
@@ -1345,6 +1408,36 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
 				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement with nil part in intermediate response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{nil, {FunctionResponse: frLROInter}}}}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROFinal, "user")}},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Run long process", "user"),
+				NewContentFromFunctionCall(fcLRO, "model"),
+				NewContentFromFunctionResponse(frLROFinal, "user"),
+			},
+		},
+		{
+			name: "Rearrangement with nil part in final response",
+			events: []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Run long process", "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcLRO, "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frLROInter, "user")}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Still processing...", "model")}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{nil, {FunctionResponse: frLROFinal}}}}},
 			},
 			want: []*genai.Content{
 				genai.NewContentFromText("Run long process", "user"),
