@@ -31,7 +31,6 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
-	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
@@ -267,7 +266,7 @@ func (r *Runner) newNodeInvocationContext(
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {
