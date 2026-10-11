@@ -108,12 +108,9 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			if !t.Field(i).IsExported() {
 				return fmt.Errorf("%w %q in type %v", errCloneUnexported, t.Field(i).Name, t)
 			}
-			// Create a copy of the field and set it on the destination struct
-			fieldCopy := reflect.New(src.Field(i).Type()).Elem()
-			if err := deepCopy(src.Field(i), fieldCopy, depth+1); err != nil {
+			if err := deepCopy(src.Field(i), dst.Field(i), depth+1); err != nil {
 				return err
 			}
-			dst.Field(i).Set(fieldCopy)
 		}
 	case reflect.Interface:
 		if src.IsNil() {
@@ -133,32 +130,25 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			valueCopy = reflect.ValueOf(json.RawMessage(raw))
 		}
 		dst.Set(valueCopy)
-	case reflect.Array:
+	case reflect.Array, reflect.Slice:
+		if src.Kind() == reflect.Slice {
+			if src.IsNil() {
+				return nil
+			}
+			dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
+		}
 		for i := 0; i < src.Len(); i++ {
 			if err := deepCopy(src.Index(i), dst.Index(i), depth+1); err != nil {
 				return err
 			}
 		}
-	case reflect.Slice:
-		if src.IsNil() {
-			return nil
-		}
-		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
-		for i := 0; i < src.Len(); i++ {
-			// Create a copy of each element and set it in the new slice
-			elemCopy := reflect.New(src.Index(i).Type()).Elem()
-			if err := deepCopy(src.Index(i), elemCopy, depth+1); err != nil {
-				return err
-			}
-			dst.Index(i).Set(elemCopy)
-		}
 	case reflect.Map:
 		if src.IsNil() {
 			return nil
 		}
-		dst.Set(reflect.MakeMap(src.Type()))
-		for _, key := range src.MapKeys() {
-			// Create copies of the key and value and set them in the new map
+		dst.Set(reflect.MakeMapWithSize(src.Type(), src.Len()))
+		for it := src.MapRange(); it.Next(); {
+			key, value := it.Key(), it.Value()
 			keyCopy := reflect.New(key.Type()).Elem()
 			if err := deepCopy(key, keyCopy, depth+1); err != nil {
 				return err
@@ -166,8 +156,8 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			if !keyCopy.Comparable() {
 				return fmt.Errorf("cloned map key of type %v is not comparable", key.Type())
 			}
-			valCopy := reflect.New(src.MapIndex(key).Type()).Elem()
-			if err := deepCopy(src.MapIndex(key), valCopy, depth+1); err != nil {
+			valCopy := reflect.New(value.Type()).Elem()
+			if err := deepCopy(value, valCopy, depth+1); err != nil {
 				return err
 			}
 			dst.SetMapIndex(keyCopy, valCopy)
@@ -176,14 +166,12 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 		if src.IsNil() {
 			return nil
 		}
-		// Create a new pointer and deep copy the underlying value
 		newPtr := reflect.New(src.Elem().Type())
 		if err := deepCopy(src.Elem(), newPtr.Elem(), depth+1); err != nil {
 			return err
 		}
 		dst.Set(newPtr)
 	default:
-		// For basic types, direct assignment is sufficient
 		dst.Set(src)
 	}
 	return nil
