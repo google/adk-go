@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"iter"
 	"testing"
 	"time"
@@ -23,6 +24,33 @@ import (
 
 	"google.golang.org/adk/v2/session"
 )
+
+func TestWithAgentCancelOnCallbackContext(t *testing.T) {
+	parent := NewCallbackContext(newTestInvocationContext(t), &session.EventActions{})
+	ctx, cancel := parent.WithAgentCancel()
+	if ctx == nil || cancel == nil {
+		t.Fatal("WithAgentCancel must return a context and cancel function")
+	}
+	defer cancel()
+	if ctx.Err() != nil {
+		t.Fatal("derived context was canceled before cancel was called")
+	}
+	if ctx.AgentName() != parent.AgentName() || ctx.InvocationID() != parent.InvocationID() {
+		t.Fatal("derived context lost agent or invocation identity")
+	}
+	cancel()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("cancel did not close the derived context")
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("derived context does not report cancellation")
+	}
+	if parent.Err() != nil {
+		t.Fatal("canceling the derived context canceled its parent")
+	}
+}
 
 // newTestInvocationContext builds a minimal *invocationContext for wrapper tests.
 func newTestInvocationContext(t *testing.T) InvocationContext {

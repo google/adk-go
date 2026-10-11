@@ -45,8 +45,7 @@ func (c *callbackContextWrapper) WithICDelta(d *InvocationContextDelta) Invocati
 
 // WithAgentCancel implements [Context].
 func (c *callbackContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
-	log.Print("WithAgentCancel() is not supported for callback context")
-	return nil, nil
+	return c.context.WithAgentCancel()
 }
 
 // WithAgentTimeout implements [Context].
