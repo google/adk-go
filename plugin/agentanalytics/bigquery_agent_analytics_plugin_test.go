@@ -141,6 +141,7 @@ type mockInvocationContext struct {
 	userID         string
 	appName        string
 	branch         string
+	path           string
 	functionCallID string
 	state          mapState
 }
@@ -155,6 +156,7 @@ func (m *mockInvocationContext) SessionID() string    { return m.sessionID }
 func (m *mockInvocationContext) InvocationID() string { return m.invocationID }
 func (m *mockInvocationContext) UserID() string       { return m.userID }
 func (m *mockInvocationContext) Branch() string       { return m.branch }
+func (m *mockInvocationContext) Path() string         { return m.path }
 
 func (m *mockInvocationContext) UserContent() *genai.Content { return nil }
 
@@ -752,6 +754,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				"turn_complete":  `true`,
 				"interrupted":    `false`,
 				"usage_metadata": `{"prompt_token_count":10,"candidates_token_count":5,"total_token_count":15}`,
+				"cache_type":     `"none"`,
 			},
 		},
 		{
@@ -879,6 +882,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				"adk.session_id":     `"sess-id"`,
 				"adk.user_id":        `"user-id"`,
 				"adk.author":         `"test-agent"`,
+				"root_agent_name":    `"test-agent"`,
 				"custom_tags":        `{"team":"search","labels":{"tier":"gold"}}`,
 				"session_metadata": `{"session_id":"sess-id","app_name":"test-app","user_id":"user-id",` +
 					`"state":{"user_pref":"dark","temp:scratch":"[REDACTED]","api_key":"[REDACTED]"}}`,
@@ -967,10 +971,8 @@ func TestAttributes_OptionalSections(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPluginWithConfig(t, tt.mutate)
 			mCtx.appName = "test-app"
-			wantTrace, wantSpan := "", ""
 			if tt.inSpan {
 				mCtx.ctx = trace.ContextWithSpanContext(mCtx.ctx, spanCtx)
-				wantTrace, wantSpan = traceHex, spanHex
 			}
 			if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "hello")); err != nil {
 				t.Fatalf("OnUserMessageCallback error: %v", err)
@@ -978,10 +980,20 @@ func TestAttributes_OptionalSections(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventUserMessageReceived)
+			// The row belongs to the invocation span. Inside an ambient
+			// span, the invocation continues the ambient trace under the
+			// ambient span; outside one, it starts a trace of its own.
 			gotTrace, _ := row["trace_id"].(string)
 			gotSpan, _ := row["span_id"].(string)
-			if gotTrace != wantTrace || gotSpan != wantSpan {
-				t.Errorf("trace_id, span_id = %q, %q, want %q, %q", gotTrace, gotSpan, wantTrace, wantSpan)
+			gotParent, hasParent := row["parent_span_id"].(string)
+			switch {
+			case tt.inSpan && (gotTrace != traceHex || gotParent != spanHex):
+				t.Errorf("trace_id, parent_span_id = %q, %q, want %q, %q", gotTrace, gotParent, traceHex, spanHex)
+			case !tt.inSpan && (!eventIDPattern.MatchString(gotTrace) || hasParent):
+				t.Errorf("trace_id, parent_span_id = %q, %q, want 32 hex digits and no parent", gotTrace, gotParent)
+			}
+			if !spanIDPattern.MatchString(gotSpan) || gotSpan == spanHex {
+				t.Errorf("span_id = %q, want 16 hex digits of a span of the invocation", gotSpan)
 			}
 			attrs := jsonObjectColumn(t, row, "attributes")
 			for path, wantJSON := range tt.want {
@@ -1654,21 +1666,25 @@ func TestFinalResponseToolNames(t *testing.T) {
 }
 
 // TestToolFailure_WritesErrorRows replays the callbacks ADK runs for a failed
-// tool call: OnToolErrorCallback, then AfterToolCallback with the same error.
-// Only TOOL_ERROR should be emitted, without a duplicate TOOL_COMPLETED row.
+// tool call: BeforeToolCallback, OnToolErrorCallback, then
+// AfterToolCallback with the same error. The call ends with a single
+// TOOL_ERROR row, as in adk-python, which runs no after_tool_callback for
+// failed calls.
 func TestToolFailure_WritesErrorRows(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
+	mCtx.functionCallID = "call-1"
 	lookupTool := &fakeTool{name: "lookup"}
 	args := map[string]any{"query": "weather"}
 	toolErr := errors.New("lookup failed")
 	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, lookupTool, args))
 	errs.add(p.OnToolErrorCallback()(mCtx, lookupTool, args, toolErr))
 	errs.add(p.AfterToolCallback()(mCtx, lookupTool, args, nil, toolErr))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	if diff := cmp.Diff([]string{EventToolError, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
+	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
 	row := onlyRowOfType(t, rows, EventToolError)
@@ -1680,6 +1696,12 @@ func TestToolFailure_WritesErrorRows(t *testing.T) {
 	}
 	checkJSON(t, "content", jsonObjectColumn(t, row, "content"),
 		`{"tool":"lookup","args":{"query":"weather"},"tool_origin":"UNKNOWN"}`)
+	if got, want := row["span_id"], onlyRowOfType(t, rows, EventToolStarting)["span_id"]; got != want {
+		t.Errorf("TOOL_ERROR span_id = %v, want the TOOL_STARTING span_id %v", got, want)
+	}
+	if _, ok := row[columnLatencyMS]; !ok {
+		t.Error("TOOL_ERROR row has no latency_ms")
+	}
 }
 
 func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
@@ -1695,11 +1717,18 @@ func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
 	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventToolCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
-	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolStarting), "content"),
+	startRow := onlyRowOfType(t, rows, EventToolStarting)
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	doneRow := onlyRowOfType(t, rows, EventToolCompleted)
+	if errRow["span_id"] != startRow["span_id"] || doneRow["span_id"] != startRow["span_id"] {
+		t.Errorf("span_ids = (%v, %v, %v), want all equal to TOOL_STARTING span_id",
+			startRow["span_id"], errRow["span_id"], doneRow["span_id"])
+	}
+	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, startRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
-	checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolError), "content"),
+	checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, errRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
+	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, doneRow, "content"),
 		`{"tool":"","result":{"ok":true},"tool_origin":"UNKNOWN"}`)
 }
 
@@ -3214,6 +3243,25 @@ func TestADKVersionFromBuildInfo(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := adkVersionFromBuildInfo(tt.info); got != tt.want {
 				t.Errorf("adkVersionFromBuildInfo() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCacheType(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *genai.GenerateContentResponseUsageMetadata
+		want  string
+	}{
+		{name: "no usage", want: "none"},
+		{name: "no cached tokens", usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}, want: "none"},
+		{name: "cached tokens", usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CachedContentTokenCount: 1}, want: "implicit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cacheType(tt.usage); got != tt.want {
+				t.Errorf("cacheType(%+v) = %q, want %q", tt.usage, got, tt.want)
 			}
 		})
 	}
