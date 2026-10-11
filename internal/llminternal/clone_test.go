@@ -316,11 +316,15 @@ func TestCloneOpaqueJSON(t *testing.T) {
 
 func TestCloneOpaqueJSONErrors(t *testing.T) {
 	t.Run("marshal failure", func(t *testing.T) {
-		wantErr := errors.New("marshal failed")
+		const payload = "private customer payload"
+		wantErr := errors.New(payload)
 		original := struct{ Value any }{Value: &cloneTestJSON{err: wantErr}}
 		got, err := clone(original)
 		if !errors.Is(err, wantErr) {
-			t.Errorf("clone() error = %v, want %v", err, wantErr)
+			t.Fatal("clone() error does not preserve the original cause")
+		}
+		if strings.Contains(err.Error(), payload) {
+			t.Error("clone() error contains customer content")
 		}
 		if got.Value != nil {
 			t.Fatal("clone() returned a partial value")

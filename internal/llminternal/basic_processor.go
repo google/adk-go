@@ -91,6 +91,15 @@ var (
 	errCloneUnexported = errors.New("cannot clone unexported field")
 )
 
+// cloneJSONError hides customer content while preserving the underlying error.
+type cloneJSONError struct{ err error }
+
+func (e *cloneJSONError) Error() string {
+	return "clone JSON value: serialization failed"
+}
+
+func (e *cloneJSONError) Unwrap() error { return e.err }
+
 // deepCopy copies src to dst using reflect.
 func deepCopy(src, dst reflect.Value, depth int) error {
 	if depth > maxCloneDepth {
@@ -125,7 +134,7 @@ func deepCopy(src, dst reflect.Value, depth int) error {
 			// exposing private state or rounding numbers through float64.
 			raw, err := json.Marshal(src.Interface())
 			if err != nil {
-				return fmt.Errorf("clone JSON value of type %v: %w", src.Elem().Type(), err)
+				return &cloneJSONError{err: err}
 			}
 			valueCopy = reflect.ValueOf(json.RawMessage(raw))
 		}
