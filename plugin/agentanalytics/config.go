@@ -144,9 +144,13 @@ type Config struct {
 	DebugContentFormatterErrors bool
 
 	// EventAllowlist, if non-empty, limits logging to the listed event types.
+	// The legacy umbrella name "EVENT" matches all session-event rows
+	// (such as STATE_DELTA, AGENT_TRANSFER, and AGENT_RESPONSE).
 	EventAllowlist []string
 	// EventDenylist stops the listed event types from being logged. It takes
-	// precedence over EventAllowlist.
+	// precedence over EventAllowlist, including when "EVENT" is listed in
+	// EventAllowlist. The legacy umbrella name "EVENT" suppresses all
+	// session-event rows.
 	EventDenylist []string
 
 	// PayloadColumnDenylist names payload columns that are omitted from newly

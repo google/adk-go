@@ -64,14 +64,21 @@ const (
 	// EventLLMResponse is written once per model call, on the final
 	// non-partial response. Streamed chunks with Partial set only feed
 	// latency_ms.time_to_first_token_ms on that final row.
-	EventLLMResponse               = "LLM_RESPONSE"
-	EventLLMError                  = "LLM_ERROR"
-	EventToolStarting              = "TOOL_STARTING"
-	EventToolCompleted             = "TOOL_COMPLETED"
-	EventToolError                 = "TOOL_ERROR"
-	EventStateDelta                = "STATE_DELTA"
-	EventAgentTransfer             = "AGENT_TRANSFER"
-	EventEventCompaction           = "EVENT_COMPACTION"
+	EventLLMResponse   = "LLM_RESPONSE"
+	EventLLMError      = "LLM_ERROR"
+	EventToolStarting  = "TOOL_STARTING"
+	EventToolCompleted = "TOOL_COMPLETED"
+	EventToolError     = "TOOL_ERROR"
+	EventStateDelta    = "STATE_DELTA"
+	EventAgentTransfer = "AGENT_TRANSFER"
+	// EventEventCompaction is emitted when session.EventActions.Compaction is
+	// populated (or when session.Event.CustomMetadata carries "adk_compaction" on
+	// ADK versions prior to typed EventActions.Compaction).
+	EventEventCompaction = "EVENT_COMPACTION"
+	// EventAgentStateCheckpoint is emitted when session.Event.CustomMetadata
+	// carries "adk_agent_state" or "agent_state" (or terminal "end_of_agent" /
+	// "adk_end_of_agent" == true), mirroring adk-python's checkpoint rows while
+	// session.EventActions does not yet expose a typed agent-state field.
 	EventAgentStateCheckpoint      = "AGENT_STATE_CHECKPOINT"
 	EventToolPaused                = "TOOL_PAUSED"
 	EventHITLCredentialRequest     = "HITL_CREDENTIAL_REQUEST"
@@ -87,18 +94,14 @@ const (
 )
 
 const (
-	// legacyEventType is written for every session event passed to the
-	// OnEventCallback.
-	// TODO(haiyuan): replace it with the per-event rows that adk-python
-	// writes (STATE_DELTA, AGENT_TRANSFER, HITL_*, ...).
+	// legacyEventType is accepted in EventAllowlist and EventDenylist as an
+	// alias matching all session-event rows (STATE_DELTA, AGENT_RESPONSE, etc.)
+	// for backwards compatibility with filters written before the per-signal
+	// session event types.
 	legacyEventType = "EVENT"
 
 	// adkEnvelopeSchemaVersion is the version of the attributes.adk object.
 	adkEnvelopeSchemaVersion = "1"
-
-	// unknownToolOrigin is written to content.tool_origin of tool events.
-	// TODO(haiyuan): classify tools (LOCAL, MCP, A2A, ...) as adk-python does.
-	unknownToolOrigin = "UNKNOWN"
 
 	userAuthor = "user"
 
@@ -431,10 +434,17 @@ type eventData struct {
 	content any
 	// contentTruncated reports that content was truncated while it was built.
 	contentTruncated bool
+	// parts holds pre-formatted content_parts entries (e.g. for AGENT_RESPONSE).
+	parts []map[string]any
+	// partsTruncated reports that parts were truncated while they were built.
+	partsTruncated bool
 	// attributes are event-specific attributes, written next to the common
 	// ones.
 	attributes map[string]any
-	// errMsg is written to error_message.
+	// adkExtras holds extra fields merged into attributes.adk (e.g. pause_kind).
+	adkExtras map[string]any
+	// errMsg is written to error_message. Callbacks that set it also set
+	// failed.
 	errMsg string
 	// failed sets the status column to "ERROR".
 	failed         bool
@@ -453,6 +463,25 @@ func (p *analyticsPlugin) shouldLogEvent(eventType string) bool {
 	if len(p.allowlist) > 0 {
 		_, ok := p.allowlist[eventType]
 		return ok
+	}
+	return true
+}
+
+// shouldLogSessionEvent applies EventDenylist and EventAllowlist for rows
+// derived from session.Event, preserving the legacy "EVENT" filter name as
+// an alias for the session-event family while keeping per-type denylist
+// precedence.
+func (p *analyticsPlugin) shouldLogSessionEvent(eventType string) bool {
+	if _, ok := p.denylist[legacyEventType]; ok {
+		return false
+	}
+	if _, ok := p.denylist[eventType]; ok {
+		return false
+	}
+	if len(p.allowlist) > 0 {
+		_, allowLegacy := p.allowlist[legacyEventType]
+		_, allowType := p.allowlist[eventType]
+		return allowLegacy || allowType
 	}
 	return true
 }
@@ -486,6 +515,18 @@ func (p *analyticsPlugin) logEvent(ctx context.Context, id identity, eventType s
 	if !p.shouldLogEvent(eventType) {
 		return
 	}
+	p.writeEvent(ctx, id, eventType, span, build)
+}
+
+func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, eventType string, span rowSpan, build func(*eventData)) {
+	if !p.shouldLogSessionEvent(eventType) {
+		return
+	}
+	p.writeEvent(ctx, id, eventType, span, build)
+}
+
+func (p *analyticsPlugin) writeEvent(ctx context.Context, id identity, eventType string, span rowSpan, build func(*eventData)) {
+	defer p.recoverCallback(eventType)
 	d := &eventData{span: span}
 	if build != nil {
 		build(d)
@@ -495,12 +536,15 @@ func (p *analyticsPlugin) logEvent(ctx context.Context, id identity, eventType s
 
 func (p *analyticsPlugin) onUserMessage(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
 	id := identityOf(ctx)
+	var span rowSpan
 	p.logEvent(ctx, id, EventUserMessageReceived, func() rowSpan {
-		return p.traces.invocationSpan(ctx, id, runnerAgentOf(ctx))
+		span = p.traces.invocationSpan(ctx, id, runnerAgentOf(ctx))
+		return span
 	}, func(d *eventData) {
 		d.content = msg
 		d.author = userAuthor
 	})
+	p.emitUserMessageSignalEvents(ctx, id, msg, span)
 	return nil, nil
 }
 
@@ -595,16 +639,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if !ev.Partial && ev.Content != nil {
 			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch)
 		}
-		p.logEvent(ctx, id, legacyEventType, func() rowSpan {
-			return p.traces.eventSpan(ctx, evID, ev.Author, ev.Branch)
-		}, func(d *eventData) {
-			d.content = ev.Content
-			d.attributes = map[string]any{"event_author": ev.Author}
-			d.sourceEvent = ev
-			d.author = ev.Author
-			d.customMetadata = ev.CustomMetadata
-		})
 	}
+	defer p.recoverCallback(legacyEventType)
+	p.emitSessionEventSignals(ctx, ev)
 	return nil, nil
 }
 
@@ -699,13 +736,15 @@ func (p *analyticsPlugin) onModelError(ctx agent.Context, req *model.LLMRequest,
 }
 
 func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
+	defer p.recoverCallback(EventToolStarting)
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
 	p.logEvent(ctx, id, EventToolStarting, func() rowSpan {
 		return p.traces.pushToolSpan(ctx, id, toolKey(id, callID, name))
 	}, func(d *eventData) {
-		d.content = toolContent(name, "args", args)
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "args", args, origin)
 		var desc string
 		var longRunning bool
 		if t != nil {
@@ -727,20 +766,34 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
 	span, closedByError := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), false)
-	if err != nil {
+	// A tool that waits for the user's confirmation fails with
+	// tool.ErrConfirmationRequired before it runs. adk-python returns the
+	// confirmation request as the tool's result, so, as there, the call
+	// completes with the error that ADK sends the model as its result.
+	confirmationRequired := errors.Is(err, tool.ErrConfirmationRequired)
+	if err != nil && !confirmationRequired {
 		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
 		// closedByError; when an earlier plugin short-circuited
 		// OnToolErrorCallback before onToolError ran, emit TOOL_ERROR here so
 		// the failed call still gets its terminal row.
 		if !closedByError {
-			p.logToolError(ctx, id, func() rowSpan { return span }, name, callID, args, err)
+			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		}
 		return nil, nil
 	}
+	if confirmationRequired {
+		result = map[string]any{"error": err.Error()}
+	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
-		d.content = toolContent(name, "result", result)
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "result", result, origin)
 		d.functionCallID = callID
 	})
+	if confirmationRequired {
+		// The tool has not run, so a final response tool has no response
+		// yet: AGENT_RESPONSE is written when the confirmed call runs.
+		return nil, nil
+	}
 	if _, ok := p.finalResponseTools[name]; ok {
 		p.logEvent(ctx, id, EventAgentResponse, func() rowSpan {
 			return p.traces.eventSpan(ctx, id, id.agentName, id.branch)
@@ -755,19 +808,25 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 
 func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
 	defer p.recoverCallback(EventToolError)
+	if errors.Is(err, tool.ErrConfirmationRequired) {
+		// The call waits for the user's confirmation and has not failed.
+		// Its span stays open for the TOOL_COMPLETED row of afterTool.
+		return nil, nil
+	}
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	p.logToolError(ctx, id, func() rowSpan {
+	p.logToolError(ctx, id, t, func() rowSpan {
 		span, _ := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), true)
 		return span
 	}, name, callID, args, err)
 	return nil, nil
 }
 
-func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
+func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.Tool, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
 	p.logEvent(ctx, id, EventToolError, spanFn, func(d *eventData) {
-		d.content = toolContent(name, "args", args)
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "args", args, origin)
 		d.failed = true
 		if err != nil {
 			d.errMsg = err.Error()
@@ -785,11 +844,11 @@ func toolName(t tool.Tool) string {
 	return orZero(t.Name)
 }
 
-func toolContent(name, payloadKey string, payload map[string]any) map[string]any {
+func toolContent(name, payloadKey string, payload map[string]any, origin string) map[string]any {
 	return map[string]any{
 		"tool":        name,
 		payloadKey:    payload,
-		"tool_origin": unknownToolOrigin,
+		"tool_origin": cmp.Or(origin, ToolOriginUnknown),
 	}
 }
 
@@ -1353,6 +1412,10 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 	var parts []map[string]any
 	partsTruncated := false
 	preFormatted := false
+	if len(d.parts) > 0 && withParts && p.config.ContentFormatter == nil {
+		parts = d.parts
+		partsTruncated = d.partsTruncated
+	}
 	switch v := payload.(type) {
 	case *genai.Content:
 		summary, t := contentSummary(v, maxLen, redact)
@@ -1469,6 +1532,11 @@ func (p *analyticsPlugin) adkEnvelope(eventID string, id identity, agentName str
 	putNonEmpty(adk, "author", cmp.Or(d.author, agentName))
 	if ev := d.sourceEvent; ev != nil {
 		addSourceEvent(adk, ev)
+	}
+	for k, v := range d.adkExtras {
+		if _, ok := adk[k]; !ok {
+			adk[k] = v
+		}
 	}
 	return adk
 }
