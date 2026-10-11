@@ -451,23 +451,37 @@ func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) age
 	return m
 }
 
-func (m *MockInvocationContext) Session() session.Session                                { return m.session }
-func (m *MockInvocationContext) InvocationID() string                                    { return m.invocationID }
-func (m *MockInvocationContext) Agent() agent.Agent                                      { return nil }
-func (m *MockInvocationContext) Artifacts() agent.Artifacts                              { return nil }
-func (m *MockInvocationContext) Memory() agent.Memory                                    { return nil }
-func (m *MockInvocationContext) Branch() string                                          { return "" }
-func (m *MockInvocationContext) IsolationScope() string                                  { return "" }
-func (m *MockInvocationContext) UserContent() *genai.Content                             { return nil }
-func (m *MockInvocationContext) RunConfig() *agent.RunConfig                             { return nil }
-func (m *MockInvocationContext) EndInvocation()                                          {}
-func (m *MockInvocationContext) Ended() bool                                             { return false }
+func (m *MockInvocationContext) Session() session.Session { return m.session }
+
+func (m *MockInvocationContext) InvocationID() string { return m.invocationID }
+
+func (m *MockInvocationContext) Agent() agent.Agent { return nil }
+
+func (m *MockInvocationContext) Artifacts() agent.Artifacts { return nil }
+
+func (m *MockInvocationContext) Memory() agent.Memory { return nil }
+
+func (m *MockInvocationContext) Branch() string { return "" }
+
+func (m *MockInvocationContext) IsolationScope() string { return "" }
+
+func (m *MockInvocationContext) UserContent() *genai.Content { return nil }
+
+func (m *MockInvocationContext) RunConfig() *agent.RunConfig { return nil }
+func (m *MockInvocationContext) EndInvocation()              {}
+func (m *MockInvocationContext) Ended() bool                 { return false }
+
 func (m *MockInvocationContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
-func (m *MockInvocationContext) Value(key any) any                                       { return nil }
-func (m *MockInvocationContext) ResumedInput(string) (any, bool)                         { return nil, false }
-func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool)                 { return time.Time{}, false }
-func (m *MockInvocationContext) Done() <-chan struct{}                                   { return nil }
-func (m *MockInvocationContext) Err() error                                              { return nil }
+
+func (m *MockInvocationContext) Value(key any) any { return nil }
+
+func (m *MockInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
+
+func (m *MockInvocationContext) Deadline() (deadline time.Time, ok bool) { return time.Time{}, false }
+
+func (m *MockInvocationContext) Done() <-chan struct{} { return nil }
+
+func (m *MockInvocationContext) Err() error { return nil }
 
 type MockCallbackContext struct {
 	agent.ContextMock // inherit mocking responses

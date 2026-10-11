@@ -25,7 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	"google.golang.org/adk/v2/artifact"
+	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
@@ -101,7 +101,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 
 // Run executes the wrapped agent with the provided arguments.
 // It creates a new session for the sub-agent, runs the agent, and returns
-// the final result.
+// the final result. Artifacts are accessed through the parent tool context.
 func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -152,11 +152,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	sessionService := session.InMemoryService()
 
 	r, err := runner.New(runner.Config{
-		AppName:        t.agent.Name(),
-		Agent:          t.agent,
-		SessionService: sessionService,
-		// TODO - use forwarding_artifact_service as in python.
-		ArtifactService: artifact.InMemoryService(),
+		AppName:         t.agent.Name(),
+		Agent:           t.agent,
+		SessionService:  sessionService,
+		ArtifactService: artifactinternal.NewForwardingService(toolCtx.Artifacts()),
 		MemoryService:   memory.InMemoryService(),
 	})
 	if err != nil {

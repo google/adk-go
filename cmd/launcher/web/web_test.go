@@ -25,12 +25,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
@@ -478,5 +481,597 @@ func TestBuildBaseRouterLeavesHealthToTheCaller(t *testing.T) {
 	rec := serveWithoutPanic(t, router, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusTeapot {
 		t.Errorf("GET /health status = %d, want %d: the embedder's handler was shadowed", rec.Code, http.StatusTeapot)
+	}
+}
+
+type trackingSpanProcessor struct {
+	shutdownCalled atomic.Bool
+}
+
+func (p *trackingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *trackingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *trackingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *trackingSpanProcessor) Shutdown(context.Context) error {
+	p.shutdownCalled.Store(true)
+	return nil
+}
+
+// TestRunShutsDownTelemetryWhenServerFailsToStart covers issue #1469:
+// when the HTTP server fails to start (e.g. port already bound),
+// Run must shut down the initialized OpenTelemetry providers.
+func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	tracker := &trackingSpanProcessor{}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(tracker)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("telemetry shutdown was not called after server startup failure")
+	}
+}
+
+type failingSpanProcessor struct {
+	shutdownErr error
+}
+
+func (p *failingSpanProcessor) OnStart(context.Context, sdktrace.ReadWriteSpan) {}
+func (p *failingSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)                     {}
+func (p *failingSpanProcessor) ForceFlush(context.Context) error                { return nil }
+func (p *failingSpanProcessor) Shutdown(context.Context) error {
+	return p.shutdownErr
+}
+
+// TestRunLogsWhenTelemetryShutdownFails covers the defer error branch:
+// when telemetry shutdown fails, the error is logged to stderr rather than
+// terminating or panicking.
+func TestRunLogsWhenTelemetryShutdownFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	failingProcessor := &failingSpanProcessor{
+		shutdownErr: fmt.Errorf("simulated flush error"),
+	}
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithSpanProcessors(failingProcessor)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if got := buf.String(); !strings.Contains(got, "telemetry shutdown failed: simulated flush error") {
+		t.Errorf("expected log output to contain telemetry shutdown error, got %q", got)
+	}
+}
+
+type trackingSublauncher struct {
+	telemetryFailSublauncher
+	userMessageCalled atomic.Bool
+}
+
+func (s *trackingSublauncher) UserMessage(webURL string, printer func(v ...any)) {
+	s.userMessageCalled.Store(true)
+}
+
+// TestRunDoesNotAnnounceURLWhenTelemetryInitFails covers issue #1469:
+// sublauncher UserMessage and URL announcements must only occur after telemetry
+// initialization succeeds.
+func TestRunDoesNotAnnounceURLWhenTelemetryInitFails(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+
+	sub := &trackingSublauncher{}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil || !strings.Contains(err.Error(), "telemetry initialization failed") {
+		t.Fatalf("Run() error = %v, want error containing %q", err, "telemetry initialization failed")
+	}
+
+	if sub.userMessageCalled.Load() {
+		t.Errorf("UserMessage was called before telemetry initialization succeeded")
+	}
+	startingPrefix := strings.Split(logStartingWebServer, "%")[0]
+	startsOnPrefix := strings.Split(logWebServerStartsOn, "%")[0]
+	if got := buf.String(); strings.Contains(got, startingPrefix) || strings.Contains(got, startsOnPrefix) {
+		t.Errorf("startup banner was logged before telemetry initialization succeeded: %q", got)
+	}
+}
+
+type optionAppendingSublauncher struct {
+	telemetryFailSublauncher
+	processor *trackingSpanProcessor
+}
+
+func (s *optionAppendingSublauncher) Keyword() string { return "appending" }
+
+func (s *optionAppendingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	c.TelemetryOptions = append(c.TelemetryOptions, telemetry.WithSpanProcessors(s.processor))
+	return nil
+}
+
+// TestRunSetupSubroutersCanAppendTelemetryOptions verifies the invariant that
+// SetupSubrouters runs before telemetry initialization, so that subrouters can
+// append telemetry options (e.g. span processors) that are picked up by Run.
+func TestRunSetupSubroutersCanAppendTelemetryOptions(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	tracker := &trackingSpanProcessor{}
+	sub := &optionAppendingSublauncher{processor: tracker}
+	l := NewLauncher(sub).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(port), "appending"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+
+	config := &launcher.Config{}
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !tracker.shutdownCalled.Load() {
+		t.Errorf("span processor appended in SetupSubrouters was not initialized/shut down")
+	}
+}
+
+func TestHostBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			// The web server must default to loopback-only so it cannot
+			// accidentally be exposed to the network.
+			name: "loopback by default",
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "explicit loopback",
+			args: []string{"--host", "127.0.0.1"},
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "all interfaces",
+			args: []string{"--host", "0.0.0.0"},
+			want: "0.0.0.0:8080",
+		},
+		{
+			// An empty value must not resolve to ":8080", which binds every
+			// interface. Only the explicit 0.0.0.0 above may do that.
+			name: "empty host falls back to loopback",
+			args: []string{"--host", ""},
+			want: "127.0.0.1:8080",
+		},
+		{
+			name: "IPv6 loopback",
+			args: []string{"--host", "::1"},
+			want: "[::1]:8080",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := NewLauncher().(*webLauncher)
+			if _, err := launcher.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", tc.args, err)
+			}
+			srv := launcher.buildHTTPServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			if got := srv.Addr; got != tc.want {
+				t.Errorf("server Addr = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWebURL(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "localhost", host: "localhost", port: 8080, want: "http://localhost:8080"},
+		// Loopback-ish hosts are normalized to "localhost" so the displayed
+		// URL matches the ADK Web UI backend origin (http://localhost:8080/api)
+		// and avoids a browser CORS mismatch.
+		{name: "IPv4 loopback", host: "127.0.0.1", port: 8080, want: "http://localhost:8080"},
+		{name: "IPv6 loopback", host: "::1", port: 8080, want: "http://localhost:8080"},
+		{name: "all interfaces IPv4", host: "0.0.0.0", port: 8080, want: "http://localhost:8080"},
+		{name: "all interfaces IPv6", host: "::", port: 8080, want: "http://localhost:8080"},
+		// Non-loopback configured hosts are left untouched.
+		{name: "custom hostname", host: "example.com", port: 8080, want: "http://example.com:8080"},
+		{name: "custom IP", host: "192.168.1.10", port: 8080, want: "http://192.168.1.10:8080"},
+		// A non-loopback IPv6 host is not normalized, so the URL must bracket
+		// it rather than emit an ambiguous host:port string.
+		{name: "custom IPv6", host: "2001:db8::1", port: 8080, want: "http://[2001:db8::1]:8080"},
+		// An empty host is the default, so it must print the loopback URL
+		// rather than the malformed "http://:8080".
+		{name: "empty host", host: "", port: 8080, want: "http://localhost:8080"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &webLauncher{config: &webConfig{host: tc.host, port: tc.port}}
+			if got := w.webURL(); got != tc.want {
+				t.Errorf("webURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// bindHostRecordingSublauncher captures the bind address the launcher hands its
+// sublaunchers.
+type bindHostRecordingSublauncher struct {
+	telemetryFailSublauncher
+	seen string
+}
+
+func (s *bindHostRecordingSublauncher) Keyword() string { return "recording" }
+
+func (s *bindHostRecordingSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	s.seen = c.BindHost
+	return nil
+}
+
+// TestRunPassesResolvedBindHostToSublaunchers pins that sublaunchers receive the
+// address the server is bound to, resolved rather than raw.
+//
+// The REST server arms its Host check on a declared loopback bind, and that
+// check is the only one that sees a rebound page's same-origin GET, which
+// carries no Origin header. An empty -host must therefore arrive as the
+// loopback default, not as "": the check reads an empty value as "no bind
+// declared" and stays off.
+func TestRunPassesResolvedBindHostToSublaunchers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default", want: defaultHost},
+		{name: "empty host resolves to the default", args: []string{"--host", ""}, want: defaultHost},
+		{name: "explicit loopback", args: []string{"--host", "127.0.0.1"}, want: "127.0.0.1"},
+		{name: "all interfaces", args: []string{"--host", "0.0.0.0"}, want: "0.0.0.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Occupy the port so Run fails at bind, after SetupSubrouters.
+			ln, err := net.Listen("tcp", net.JoinHostPort(tc.want, "0"))
+			if err != nil {
+				t.Fatalf("net.Listen() failed: %v", err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			port := ln.Addr().(*net.TCPAddr).Port
+
+			sub := &bindHostRecordingSublauncher{}
+			l := NewLauncher(sub).(*webLauncher)
+			args := append(append([]string{}, tc.args...), "--port", fmt.Sprint(port), "recording")
+			if _, err := l.Parse(args); err != nil {
+				t.Fatalf("Parse(%v) failed: %v", args, err)
+			}
+
+			config := &launcher.Config{}
+			if err := l.Run(t.Context(), config); err == nil {
+				t.Fatalf("Run() succeeded, want server bind failure")
+			}
+
+			if sub.seen != tc.want {
+				t.Errorf("sublauncher saw BindHost = %q, want %q", sub.seen, tc.want)
+			}
+			if host, _, err := net.SplitHostPort(l.buildHTTPServer(nil).Addr); err != nil {
+				t.Fatalf("SplitHostPort(%q) failed: %v", l.buildHTTPServer(nil).Addr, err)
+			} else if host != sub.seen {
+				t.Errorf("sublauncher saw BindHost = %q, but the server binds %q", sub.seen, host)
+			}
+		})
+	}
+}
+
+// guardedSublauncher registers one route and keeps the router it was given, so
+// a test can send requests through the middleware the launcher installs after
+// setup has run.
+type guardedSublauncher struct {
+	telemetryFailSublauncher
+	// keyword selects it on the command line and prefixes its route; empty
+	// means "guarded".
+	keyword string
+	// contributes, when set, is appended to the allowed origins the way the
+	// api sublauncher appends the web UI origin.
+	contributes string
+	// seen is AllowedOrigins as SetupSubrouters found it, which is the list
+	// anything this sublauncher built would have been given.
+	seen   []string
+	router *mux.Router
+}
+
+func (s *guardedSublauncher) Keyword() string {
+	if s.keyword == "" {
+		return "guarded"
+	}
+	return s.keyword
+}
+
+func (s *guardedSublauncher) SetupSubrouters(r *mux.Router, c *launcher.Config) error {
+	s.seen = slices.Clone(c.AllowedOrigins)
+	if s.contributes != "" {
+		c.AllowedOrigins = append(c.AllowedOrigins, s.contributes)
+	}
+	// StatusTeapot so that reaching the handler cannot be confused with any
+	// status the guard itself writes.
+	r.PathPrefix("/" + s.Keyword()).HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	s.router = r
+	return nil
+}
+
+// runForRouter runs the launcher with subs far enough to install the guard, and
+// returns the router it built.
+//
+// Run is stopped by an occupied port, which fails the bind after both setup and
+// the guard, so the router comes back in the state a served request would meet.
+func runForRouter(t *testing.T, config *launcher.Config, args []string, subs ...*guardedSublauncher) *mux.Router {
+	t.Helper()
+	sublaunchers := make([]Sublauncher, len(subs))
+	for i, s := range subs {
+		sublaunchers[i] = s
+	}
+	l := NewLauncher(sublaunchers...).(*webLauncher)
+	args = slices.Clone(args)
+	for _, s := range subs {
+		args = append(args, s.Keyword())
+	}
+	if _, err := l.Parse(args); err != nil {
+		t.Fatalf("Parse(%v) failed: %v", args, err)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(l.bindHost(), "0"))
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	l.config.port = ln.Addr().(*net.TCPAddr).Port
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+	if subs[0].router == nil {
+		t.Fatalf("Run() returned before SetupSubrouters, so no router was captured")
+	}
+	return subs[0].router
+}
+
+// statusFor sends a GET for path through router, with the Host and Origin
+// headers given, and returns the response status. An empty host leaves
+// httptest's "example.com", and an empty origin sends no Origin header.
+func statusFor(router *mux.Router, path, host, origin string) int {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if host != "" {
+		req.Host = host
+	}
+	if origin != "" {
+		req.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// TestRunGuardsEverySublauncherRoute pins that the launcher's origin guard
+// covers the routes a sublauncher registered, and the root routes it registers
+// itself.
+//
+// Several of these routes run an agent, so a page that reaches one through
+// rebound DNS executes tools on the machine the server runs on. The guard sits
+// on the launcher's router rather than inside each sublauncher, so that none
+// of them can be added without it.
+func TestRunGuardsEverySublauncherRoute(t *testing.T) {
+	twoFlags := []string{"--allow_origins", "https://one.example.com", "--allow_origins", "https://two.example.com"}
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		contributes string // appended by the sublauncher
+		path        string
+		host        string
+		origin      string
+		want        int
+	}{
+		{
+			name: "loopback host is served",
+			path: "/guarded/x",
+			host: "localhost:8080",
+			want: http.StatusTeapot,
+		},
+		{
+			name:   "rebound host is refused",
+			path:   "/guarded/x",
+			host:   "rebind.attacker.com:8080",
+			origin: "http://rebind.attacker.com:8080",
+			want:   http.StatusForbidden,
+		},
+		{
+			// A rebound page's same-origin request carries no Origin at all,
+			// so the Host header is the only thing that gives it away.
+			name: "rebound host with no origin is refused",
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			// An empty -host binds the loopback default, and the guard has to
+			// be armed by that rather than by the empty flag value.
+			name: "rebound host is refused when -host is empty",
+			args: []string{"--host", ""},
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "root health route is guarded too",
+			path: "/health",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusForbidden,
+		},
+		{
+			name: "health is served over loopback",
+			path: "/health",
+			host: "127.0.0.1:8080",
+			want: http.StatusOK,
+		},
+		{
+			name:        "origin a sublauncher contributed is served",
+			contributes: "https://ui.example.com",
+			path:        "/guarded/x",
+			host:        "localhost:8080",
+			origin:      "https://ui.example.com",
+			want:        http.StatusTeapot,
+		},
+		{
+			// Contributing an origin vouches for its host, which is how this
+			// runs behind a proxy on the same machine.
+			name:        "host of a contributed origin is served",
+			contributes: "https://ui.example.com",
+			path:        "/guarded/x",
+			host:        "ui.example.com",
+			want:        http.StatusTeapot,
+		},
+		{
+			name:   "first -allow_origins value is served",
+			args:   twoFlags,
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://one.example.com",
+			want:   http.StatusTeapot,
+		},
+		{
+			name:   "repeated -allow_origins value is served",
+			args:   twoFlags,
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://two.example.com",
+			want:   http.StatusTeapot,
+		},
+		{
+			name:   "unlisted origin is refused",
+			args:   []string{"--allow_origins", "https://one.example.com"},
+			path:   "/guarded/x",
+			host:   "localhost:8080",
+			origin: "https://evil.example.com",
+			want:   http.StatusForbidden,
+		},
+		{
+			// The escape hatch has to turn the guard off wholesale, or an
+			// operator who knows their deployment is exposed cannot serve it.
+			name: "star allows a rebound host",
+			args: []string{"--allow_origins", "*"},
+			path: "/guarded/x",
+			host: "rebind.attacker.com:8080",
+			want: http.StatusTeapot,
+		},
+		{
+			// On a non-loopback bind the server is legitimately reachable under
+			// whatever name resolves to it, so the Host check must not fire.
+			name: "no host check when bound to all interfaces",
+			args: []string{"--host", "0.0.0.0"},
+			path: "/guarded/x",
+			host: "anything.example.com",
+			want: http.StatusTeapot,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := runForRouter(t, &launcher.Config{}, tc.args, &guardedSublauncher{contributes: tc.contributes})
+
+			if got := statusFor(router, tc.path, tc.host, tc.origin); got != tc.want {
+				t.Errorf("GET %s with Host %q and Origin %q = %d, want %d", tc.path, tc.host, tc.origin, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunAllowedOriginsReachSublaunchers pins which allowed origins each
+// sublauncher is handed, and which the guard is built from.
+//
+// A sublauncher that builds a server from the list, as the api one builds the
+// REST server, refuses whatever it was not given, even after the launcher's
+// guard passed it. So the caller's entries and the -allow_origins ones must be
+// in place before the first sublauncher runs, and the guard must be built from
+// the list as the last sublauncher left it.
+func TestRunAllowedOriginsReachSublaunchers(t *testing.T) {
+	const (
+		fromCaller = "https://caller.example.com"
+		fromFlag   = "https://flag.example.com"
+		fromFirst  = "https://first.example.com"
+		fromSecond = "https://second.example.com"
+	)
+	// Spare capacity, so that an append into the caller's array would land in
+	// it rather than in a fresh one, where this test could not see it.
+	callerOrigins := make([]string, 1, 4)
+	callerOrigins[0] = fromCaller
+	first := &guardedSublauncher{keyword: "first", contributes: fromFirst}
+	second := &guardedSublauncher{keyword: "second", contributes: fromSecond}
+
+	router := runForRouter(t, &launcher.Config{AllowedOrigins: callerOrigins}, []string{"--allow_origins", fromFlag}, first, second)
+
+	if want := []string{fromCaller, fromFlag}; !slices.Equal(first.seen, want) {
+		t.Errorf("first sublauncher saw AllowedOrigins = %q, want %q", first.seen, want)
+	}
+	if want := []string{fromCaller, fromFlag, fromFirst}; !slices.Equal(second.seen, want) {
+		t.Errorf("second sublauncher saw AllowedOrigins = %q, want %q", second.seen, want)
+	}
+	if spare := callerOrigins[1:cap(callerOrigins)]; slices.ContainsFunc(spare, func(s string) bool { return s != "" }) {
+		t.Errorf("Run wrote %q into the spare capacity of the caller's AllowedOrigins", spare)
+	}
+	for _, origin := range []string{fromCaller, fromFlag, fromFirst, fromSecond} {
+		if got := statusFor(router, "/first/x", "localhost:8080", origin); got != http.StatusTeapot {
+			t.Errorf("GET /first/x with Origin %q = %d, want %d", origin, got, http.StatusTeapot)
+		}
 	}
 }

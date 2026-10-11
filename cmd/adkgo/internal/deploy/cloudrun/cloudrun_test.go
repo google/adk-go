@@ -301,3 +301,50 @@ func TestPrepareDockerfile_A2AURLReachesCMDArray(t *testing.T) {
 		t.Errorf("CMD args = %q, want them to carry %q", args, agentURL)
 	}
 }
+
+// TestPrepareDockerfile_BindsAllInterfaces guards that the generated Cloud Run
+// container opts back into all interfaces. The web server binds loopback by
+// default, so a container that keeps that default is unreachable from the
+// Cloud Run front end.
+func TestPrepareDockerfile_BindsAllInterfaces(t *testing.T) {
+	resetFlags(t, "main.go", "")
+	flags.cloudRun.serverPort = 8080
+
+	if err := flags.computeFlags(); err != nil {
+		t.Fatalf("computeFlags() = %v, want no error", err)
+	}
+	if err := flags.prepareDockerfile(); err != nil {
+		t.Fatalf("prepareDockerfile() = %v, want no error", err)
+	}
+
+	content, err := os.ReadFile(flags.build.dockerfileBuildPath)
+	if err != nil {
+		t.Fatalf("cannot read the generated Dockerfile: %v", err)
+	}
+	var cmdLine string
+	for _, line := range strings.Split(string(content), "\n") {
+		if rest, ok := strings.CutPrefix(line, "CMD "); ok {
+			cmdLine = rest
+		}
+	}
+	if cmdLine == "" {
+		t.Fatalf("no CMD instruction in the generated Dockerfile:\n%s", content)
+	}
+
+	var args []string
+	if err := json.Unmarshal([]byte(cmdLine), &args); err != nil {
+		t.Fatalf("CMD %s does not parse as a JSON array: %v", cmdLine, err)
+	}
+	host := ""
+	for i, arg := range args {
+		if arg == "-host" && i+1 < len(args) {
+			host = args[i+1]
+		}
+	}
+	if host != "0.0.0.0" {
+		t.Errorf("CMD args = %q, want -host 0.0.0.0 so Cloud Run can reach the server", args)
+	}
+	if !slices.Contains(args, "8080") {
+		t.Errorf("CMD args = %q, want them to carry the server port %q", args, "8080")
+	}
+}

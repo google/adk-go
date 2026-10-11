@@ -15,6 +15,8 @@
 package helper
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"reflect"
@@ -30,7 +32,7 @@ import (
 func ConvertSnake(o any) any {
 	res, err := convertSnake("", "", o)
 	if err != nil {
-		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err)
+		log.Printf("Failed to convert: %+v of type %T: %v", o, o, err) //nolint:forbidigo // pre-slog call site
 		// better to return an original version than nothing
 		return o
 	}
@@ -120,6 +122,15 @@ func convertSnake(path, indent string, o any) (any, error) {
 		}
 		return m, nil
 	case reflect.Slice:
+		if rm, ok := o.(json.RawMessage); ok {
+			if len(rm) == 0 {
+				return nil, nil
+			}
+			return rm, nil
+		}
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return base64.StdEncoding.EncodeToString(v.Bytes()), nil
+		}
 		res := []any{}
 		for i := 0; i < v.Len(); i++ {
 			elem, err := convertSnake(path+".[]", indent+"    ", v.Index(i).Interface())

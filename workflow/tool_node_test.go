@@ -417,7 +417,7 @@ func TestToolNode_WorkflowIntegration(t *testing.T) {
 // compaction record on the event a ToolNode emits.
 //
 // A compaction record instructs prompt assembly to drop a range of history and
-// substitute content for it, so honouring one written by a tool would turn a
+// substitute content for it, so honoring one written by a tool would turn a
 // stored field into an erase-and-inject primitive reachable by any tool an
 // agent loads. The strip was in place with nothing exercising it: removing the
 // line left the whole suite green.

@@ -16,6 +16,7 @@ package llminternal_test
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"testing"
 
@@ -1186,5 +1187,169 @@ func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 
 	if finalResponse.ErrorMessage != "" {
 		t.Errorf("ErrorMessage was unexpectedly overwritten to '%s'", finalResponse.ErrorMessage)
+	}
+}
+
+// streamFunctionCall runs one streamed function call the way Vertex sends it:
+// a first chunk that only names the call, then nameless chunks of partial
+// arguments, then the chunk that ends it. It returns the assembled arguments
+// as JSON, which is the form the tool's schema is validated against.
+func streamFunctionCall(t *testing.T, name string, chunks ...[]*genai.PartialArg) string {
+	t.Helper()
+
+	calls := []*genai.FunctionCall{{Name: name, ID: "fc_" + name, WillContinue: ptr(true)}}
+	for _, partialArgs := range chunks {
+		calls = append(calls, &genai.FunctionCall{PartialArgs: partialArgs, WillContinue: ptr(true)})
+	}
+	calls = append(calls, &genai.FunctionCall{WillContinue: ptr(false)})
+
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	for i, call := range calls {
+		chunk := &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: call}}},
+			}},
+		}
+		if i == len(calls)-1 {
+			chunk.Candidates[0].FinishReason = genai.FinishReasonStop
+		}
+		for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+			if err != nil {
+				t.Fatalf("chunk %d: unexpected error: %v", i, err)
+			}
+		}
+	}
+
+	finalResponse := aggregator.Close()
+	if finalResponse == nil {
+		t.Fatal("expected final response from aggregator")
+	}
+	parts := finalResponse.Content.Parts
+	if len(parts) != 1 || parts[0].FunctionCall == nil {
+		t.Fatalf("expected exactly one function call part, got %+v", parts)
+	}
+	args, err := json.Marshal(parts[0].FunctionCall.Args)
+	if err != nil {
+		t.Fatalf("assembled arguments do not marshal: %v", err)
+	}
+	return string(args)
+}
+
+// An argument that is an array of objects is the common case for a chart: the
+// model streams one member of one element at a time, and a string member can
+// be split over several chunks and closed by a chunk that carries the path and
+// no value at all.
+func TestStreamedArrayOfObjectsArgument(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "Jan 20", WillContinue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].label", StringValue: "23", WillContinue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].label"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0].value", NumberValue: ptr(1250.5)}},
+		[]*genai.PartialArg{{JsonPath: "$.data[1].label", StringValue: "Feb 2023"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[1].value", NumberValue: ptr(990.0)}},
+		[]*genai.PartialArg{{JsonPath: "$.title", StringValue: "Revenue"}},
+	)
+
+	want := `{"data":[{"label":"Jan 2023","value":1250.5},{"label":"Feb 2023","value":990}],"title":"Revenue"}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// A top-level array of strings has no member name to hide the index behind, so
+// it is the shape that exposes a path split on "." alone.
+func TestStreamedArrayOfStringsArgument(t *testing.T) {
+	args := streamFunctionCall(t, "describe_tables",
+		[]*genai.PartialArg{{JsonPath: "$.tables[0]", StringValue: "ord", WillContinue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.tables[0]", StringValue: "ers"}},
+		[]*genai.PartialArg{{JsonPath: "$.tables[1]", StringValue: "customers"}},
+	)
+
+	want := `{"tables":["orders","customers"]}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// Indices are positions, not arrival order: an element that arrives late keeps
+// the index the model gave it, and the gap it leaves stays null.
+func TestStreamedArrayArgumentKeepsIndexPositions(t *testing.T) {
+	args := streamFunctionCall(t, "query_gold_table",
+		[]*genai.PartialArg{{JsonPath: "$.queries[2]", StringValue: "third"}},
+		[]*genai.PartialArg{{JsonPath: "$.queries[0]", StringValue: "first"}},
+	)
+
+	want := `{"queries":["first",null,"third"]}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// Numbers, booleans and nulls inside an array element, and a nested object,
+// all survive the same traversal.
+func TestStreamedArrayArgumentScalarTypes(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: "$.filters[0].enabled", BoolValue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.filters[0].value", NULLValue: "NULL_VALUE"}},
+		[]*genai.PartialArg{{JsonPath: "$.filters[1].enabled", BoolValue: ptr(false)}},
+		[]*genai.PartialArg{{JsonPath: "$.options.stacked", BoolValue: ptr(true)}},
+		[]*genai.PartialArg{{JsonPath: "$.limit", NumberValue: ptr(10.0)}},
+	)
+
+	want := `{"filters":[{"enabled":true,"value":null},{"enabled":false}],"limit":10,"options":{"stacked":true}}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// RFC 9535 addresses a member whose name is not a bare identifier with a quoted
+// bracket selector, which is the only way a property name containing a dot can
+// be told apart from two nested members.
+func TestStreamedArgumentQuotedMemberNames(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: `$['series.name'][0]["data point"]`, StringValue: "x"}},
+		[]*genai.PartialArg{{JsonPath: `$['it\'s']`, StringValue: "y"}},
+	)
+
+	want := `{"it's":"y","series.name":[{"data point":"x"}]}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// A path the parser does not understand is dropped rather than written to an
+// invented key, so one unreadable chunk cannot add a property the tool's schema
+// will reject. "$.tables[]" is not hypothetical: Vertex closes a streamed array
+// with exactly that path and no value.
+func TestStreamedArgumentUnsupportedPathsDropped(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: "$.data[]", StringValue: "end of array"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[*]", StringValue: "wildcard"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[0:2]", StringValue: "slice"}},
+		[]*genai.PartialArg{{JsonPath: "$..data", StringValue: "descendant"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[-1]", StringValue: "negative"}},
+		[]*genai.PartialArg{{JsonPath: "", StringValue: "empty"}},
+		[]*genai.PartialArg{{JsonPath: "$.title", StringValue: "kept"}},
+	)
+
+	want := `{"title":"kept"}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// An index too large to allocate, or too large to fit in an int, is dropped.
+// The bound that rejects it is all that keeps an overflowed, negative index
+// from reaching the slice it would be used on.
+func TestStreamedArgumentOutOfRangeIndexDropped(t *testing.T) {
+	args := streamFunctionCall(t, "render_chart",
+		[]*genai.PartialArg{{JsonPath: "$.data[65537]", StringValue: "too large"}},
+		[]*genai.PartialArg{{JsonPath: "$.data[9999999999999999999]", StringValue: "overflows int"}},
+		[]*genai.PartialArg{{JsonPath: "$.title", StringValue: "kept"}},
+	)
+
+	want := `{"title":"kept"}`
+	if args != want {
+		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
 	}
 }

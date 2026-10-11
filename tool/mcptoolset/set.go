@@ -17,6 +17,7 @@ package mcptoolset
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,11 +27,33 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// MetadataProvider supplies request-scoped metadata for MCP tool calls. The
+// returned map is sent in the `_meta` field of mcp.CallToolParams, letting an
+// agent forward values such as tracing IDs or tenant identifiers from the
+// incoming request to the MCP server.
+//
+// It is called before each tool call is sent; when a tool requires confirmation,
+// it runs only for the confirmed call, with the context of the request carrying
+// the confirmation. It may be called concurrently. The returned map, and
+// anything reachable from it, must not be modified after the provider returns.
+// Returning a nil map contributes no metadata, while returning an error or a
+// reserved MCP key ("progressToken" or any "io.modelcontextprotocol/*" key)
+// fails the tool call.
+type MetadataProvider func(ctx agent.Context) (map[string]any, error)
+
 // New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
+// New returns an error if neither Transport nor Endpoint is provided.
+//
+// The returned toolset implements [io.Closer]. Callers must close it when it
+// is no longer in use. Close waits for ongoing connection setup and MCP
+// operations to finish, and is safe to call concurrently or more than once.
+// Further MCP operations fail with [mcp.ErrConnectionClosed]; closing does not
+// affect other sessions created with Config.Client.
+// When using [tool.FilterToolset], retain the original toolset to close it.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
@@ -58,6 +81,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		metadataProvider:            cfg.MetadataProvider,
 	}, nil
 }
 
@@ -69,6 +93,9 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
 		transport = &mcp.StreamableClientTransport{Endpoint: cfg.Endpoint}
+	}
+	if transport == nil {
+		return nil, fmt.Errorf("mcptoolset: set Config.Transport or Config.Endpoint")
 	}
 	if cfg.Auth == nil {
 		return transport, nil
@@ -139,14 +166,25 @@ type Config struct {
 	// func(name string, toolInput any) bool
 	// Returning true means confirmation is required.
 	RequireConfirmationProvider tool.ConfirmationProvider
+
+	// MetadataProvider, when set, is called before each tool call is sent to
+	// build the request's `_meta` entries.
+	MetadataProvider MetadataProvider
 }
 
 type set struct {
-	mcpClient                   MCPClient
+	mcpClient                   *connectionRefresher
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
+	metadataProvider            MetadataProvider
 }
+
+func (s *set) Close() error {
+	return s.mcpClient.Close()
+}
+
+var _ io.Closer = (*set)(nil)
 
 func (*set) Name() string {
 	return "mcp_tool_set"
@@ -169,7 +207,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

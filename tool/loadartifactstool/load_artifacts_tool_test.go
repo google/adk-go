@@ -15,6 +15,8 @@
 package loadartifactstool_test
 
 import (
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -492,6 +494,61 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 			}
 			if appendedContent.Parts[1].Text != "This is the content of doc1.txt" {
 				t.Errorf("Second part of appended content: got %v, want 'This is the content of doc1.txt'", appendedContent.Parts[1].Text)
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
+	tests := []struct {
+		name          string
+		artifactNames []string
+	}{
+		{
+			name:          "missing artifact",
+			artifactNames: []string{"missing.txt"},
+		},
+		{
+			name:          "missing artifact alongside a saved one",
+			artifactNames: []string{"doc1.txt", "missing.txt"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loadArtifactsTool := loadartifactstool.New()
+			tc := createToolContext(t)
+			if _, err := tc.Artifacts().Save(t.Context(), "doc1.txt", &genai.Part{Text: "This is the content of doc1.txt"}); err != nil {
+				t.Fatalf("Failed to save artifact: %v", err)
+			}
+
+			llmRequest := &model.LLMRequest{
+				Contents: []*genai.Content{
+					{
+						Role: genai.RoleUser,
+						Parts: []*genai.Part{
+							genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+								"artifact_names": tt.artifactNames,
+							}),
+						},
+					},
+				},
+			}
+
+			requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+			if !ok {
+				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+			}
+
+			err := requestProcessor.ProcessRequest(tc, llmRequest)
+			if err == nil {
+				t.Fatal("ProcessRequest should return an error when an artifact cannot be loaded, but got nil")
+			}
+			if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
+				t.Errorf("error names the failure %d times, want once: %v", got, err)
+			}
+			if !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true, got: %v", err)
 			}
 		})
 	}

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
@@ -542,6 +543,104 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	}
 }
 
+// TestInMemoryService_AppendEvent_ConcurrentActionMapWrites checks that
+// AppendEvent finishes reading the current *Event, including cloning its
+// action maps and extracting StateDelta, before Session.Events exposes it to
+// concurrent readers that could mutate those maps, potentially causing a fatal
+// concurrent map read write runtime throw.
+func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
+	for _, actionMap := range []struct {
+		name  string
+		write func(*session.Event)
+	}{
+		{
+			name: "ArtifactDelta",
+			write: func(event *session.Event) {
+				event.Actions.ArtifactDelta["injected"] = 1
+			},
+		},
+		{
+			name: "RequestedToolConfirmations",
+			write: func(event *session.Event) {
+				event.Actions.RequestedToolConfirmations["injected"] = toolconfirmation.ToolConfirmation{Confirmed: true}
+			},
+		},
+		{
+			name: "StateDelta",
+			write: func(event *session.Event) {
+				event.Actions.StateDelta["injected"] = 1
+			},
+		},
+	} {
+		for _, deltaShape := range []string{"with_temp", "without_temp", "nil"} {
+			// A nil StateDelta cannot be written through the live event.
+			if actionMap.name == "StateDelta" && deltaShape == "nil" {
+				continue
+			}
+			t.Run(actionMap.name+"/"+deltaShape, func(t *testing.T) {
+				ctx := t.Context()
+				svc := session.InMemoryService()
+				cr, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u"})
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				live := cr.Session
+				stop := make(chan struct{})
+				done := make(chan struct{})
+				firstWrite := make(chan struct{})
+				t.Cleanup(func() {
+					close(stop)
+					<-done
+				})
+				go func() {
+					defer close(done)
+					wrote := false
+					for {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						evs := live.Events()
+						if n := evs.Len(); n > 0 {
+							actionMap.write(evs.At(n - 1))
+							if !wrote {
+								close(firstWrite)
+								wrote = true
+							}
+						}
+					}
+				}()
+				for i := range 20000 {
+					var delta map[string]any
+					switch deltaShape {
+					case "with_temp":
+						delta = map[string]any{"temp:t": i, "k": i}
+					case "without_temp":
+						delta = map[string]any{"k": i}
+					}
+					ev := &session.Event{
+						ID:        fmt.Sprintf("e%d", i),
+						Timestamp: time.Now(),
+						Actions: session.EventActions{
+							StateDelta:                 delta,
+							ArtifactDelta:              map[string]int64{"a": int64(i)},
+							RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{"call": {}},
+						},
+					}
+					if err := svc.AppendEvent(ctx, live, ev); err != nil {
+						t.Fatalf("AppendEvent: %v", err)
+					}
+					if i == 0 {
+						// Ensure the history writer runs before the remaining appends.
+						<-firstWrite
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta covers the
 // one input class where stripping changes the shape of the stored delta rather
 // than its contents: every key is temp:, so the map goes from populated to
@@ -596,17 +695,11 @@ func TestInMemoryService_AppendEvent_AllTempKeysStrippedKeepsEmptyDelta(t *testi
 // that the canonical record's StateDelta is a map of its own, not the one the
 // live session handle publishes.
 //
-// AppendEvent builds that field from the delta the session returns while
-// holding only the service lock, never the session's own mutex. The map the
-// session appends to its event list is reachable by anyone holding the handle
-// the moment that mutex is released, so if the canonical record takes the map
-// itself rather than a copy made under the lock, a caller walking session
-// history writes into a map AppendEvent reads. A concurrent map read and write
-// is a runtime throw rather than a recoverable panic.
-//
-// Sharing is what this can observe; the lock the copy is taken under is not.
-// Proving that needs a concurrent writer, which reproduces only
-// probabilistically and takes the test binary down with it when it fires.
+// AppendEvent holds the session mutex until it finishes reading event.
+// After it returns, writes through the live handle must not change the
+// canonical record.
+// TestInMemoryService_AppendEvent_ConcurrentActionMapWrites checks that the
+// session stays locked until AppendEvent finishes all event reads.
 func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *testing.T) {
 	// Both delta shapes matter. trimTempDeltaState returns the event unchanged
 	// when it strips nothing, so with no temp: key the live session publishes
