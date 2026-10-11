@@ -88,12 +88,6 @@ func (sm *stateMap) Scan(value any) error {
 	return json.Unmarshal(bytes, sm)
 }
 
-func (sm stateMap) GormValue(ctx context.Context, db *gorm.DB) clause.Expr {
-	data, _ := json.Marshal(sm)
-	// TODO log the expression result
-	return gorm.Expr("?", string(data))
-}
-
 // dynamicJSON defined JSON data type, that implements driver.Valuer, sql.Scanner interface
 type dynamicJSON json.RawMessage
 

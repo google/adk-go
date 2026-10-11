@@ -35,9 +35,9 @@
 // flow of execution.
 //
 // Assertions are structural (FC/FR names, scope ids, presence of
-// synthesised FRs) rather than exact-text — recorded model output may
+// synthesized FRs) rather than exact-text — recorded model output may
 // shift in wording across re-recordings, but the framework's
-// orchestration behaviour around it must not.
+// orchestration behavior around it must not.
 
 package llmagent_test
 
@@ -253,7 +253,7 @@ func dumpSession(t *testing.T, sess session.Session) {
 	}
 }
 
-// eventDump is the YAML-marshalled per-event record. Fields are
+// eventDump is the YAML-marshaled per-event record. Fields are
 // pointers / omitempty so the produced YAML stays compact.
 type eventDump struct {
 	Author             string      `yaml:"author,omitempty"`
@@ -513,7 +513,7 @@ func eventsByAuthor(events []*session.Event, name string) []*session.Event {
 //   - the coordinator calls the TaskAgentTool for data_fetcher,
 //   - data_fetcher finishes via finish_task with the structured
 //     output (validated against its schema),
-//   - the synthesised FR for the delegation carries an `output` key
+//   - the synthesized FR for the delegation carries an `output` key
 //     with the structured payload, and
 //   - the coordinator then invokes the plain function tool
 //     `store_report` exactly once.
@@ -618,9 +618,9 @@ contains everything you need.`,
 		t.Errorf("turn 1: finish_task FR result = %q, want %q", got, "Task completed.")
 	}
 
-	// (3) The synthesised FR back to the coordinator carries the
+	// (3) The synthesized FR back to the coordinator carries the
 	//     structured items. For object-schema task agents the
-	//     synthesised FR passes the map through directly (NOT
+	//     synthesized FR passes the map through directly (NOT
 	//     wrapped under `output`); only primitive/array outputs get
 	//     wrapped via the schema's WrapperKey.
 	fetcherFRs := collectFRsByName(events1, "data_fetcher")
@@ -659,7 +659,7 @@ contains everything you need.`,
 	//     active on turn 2 (the most-recent non-user author from
 	//     turn 1 was the coordinator's final text),
 	//   - the coordinator's content view on turn 2 includes the
-	//     synthesised data_fetcher FR (unscoped, visible to root)
+	//     synthesized data_fetcher FR (unscoped, visible to root)
 	//     so it can recall the items WITHOUT re-dispatching,
 	//   - no new data_fetcher delegation is issued (the model uses
 	//     conversation history instead of re-querying the sub-agent),
@@ -692,11 +692,11 @@ contains everything you need.`,
 // =============================================================================
 
 // TestDelegation_02_ChatToTwoTaskSequential covers runChat's outer
-// re-entry loop: after dispatching the first task FC and synthesising
+// re-entry loop: after dispatching the first task FC and synthesizing
 // its FR, the coordinator's LLM is re-invoked and emits the second
 // task FC in the SAME user turn. Validates that each sub-agent runs
 // in its own isolation scope and that the coordinator sees both
-// synthesised FRs before producing the final text.
+// synthesized FRs before producing the final text.
 func TestDelegation_02_ChatToTwoTaskSequential(t *testing.T) {
 	orderSchema := &genai.Schema{
 		Type: genai.TypeObject,
@@ -742,7 +742,8 @@ contains both. Do not ask the user any questions.`,
 		t.Fatalf("payment_collector: %v", err)
 	}
 	coordinator, err := llmagent.New(llmagent.Config{
-		Name:        "coordinator",
+		Name: "coordinator",
+		// Note: prompt string matches recorded HTTP cassette; do not edit without re-recording.
 		Description: "Calls order_collector, then payment_collector, then summarises.",
 		Model:       newDelegationModel(t),
 		Mode:        llmagent.ModeChat,
@@ -766,7 +767,8 @@ always contains everything needed for both steps.`,
 
 	// --- Turn 1: order + payment in one user message ---
 	events1 := dr.turn(
-		"Order 2 pizzas. Pay with card 4111111111111111, cvv 123.")
+		"Order 2 pizzas. Pay with card 4111111111111111, cvv 123.",
+	)
 
 	// Both delegation FCs present.
 	if got := len(collectFCsByName(events1, "order_collector")); got != 1 {
@@ -776,7 +778,7 @@ always contains everything needed for both steps.`,
 		t.Errorf("turn 1: payment_collector FCs = %d, want 1", got)
 	}
 
-	// Both synthesised FRs present. Object-schema task agents pass
+	// Both synthesized FRs present. Object-schema task agents pass
 	// the structured map straight through as the FR Response.
 	orderFRs := collectFRsByName(events1, "order_collector")
 	if len(orderFRs) != 1 {
@@ -813,7 +815,7 @@ always contains everything needed for both steps.`,
 	// --- Turn 2: follow-up requiring memory of BOTH delegations ---
 	//
 	// Verifies the coordinator's history view on turn 2 contains
-	// both synthesised FRs (order + payment) and no new delegations
+	// both synthesized FRs (order + payment) and no new delegations
 	// are issued — the model answers from history.
 	events2 := dr.turn("What did I order, and how am I paying?")
 	if got := len(collectFCsByName(events2, "order_collector")); got != 0 {
@@ -825,7 +827,7 @@ always contains everything needed for both steps.`,
 	if got := finalModelTextAuthor(events2); got != "coordinator" {
 		t.Errorf("turn 2: final model text author = %q, want %q", got, "coordinator")
 	}
-	// Reply should mention both pizza (order) and a recognisable
+	// Reply should mention both pizza (order) and a recognizable
 	// fragment of the card number (payment) — proves both FRs are
 	// in the coordinator's view.
 	if reply := finalModelText(events2); !mentionsAll(reply, "pizza") {
@@ -1008,7 +1010,7 @@ listing both translations.`,
 	// Parallel single_turn dispatch races to write events into the
 	// session in non-deterministic order; skip the YAML dump so the
 	// checked-in testdata file doesn't churn on every replay. Turn-1
-	// behaviour is still asserted directly against the event stream.
+	// behavior is still asserted directly against the event stream.
 	dr.SkipDump()
 
 	// --- Turn 1: translate 'good morning' to ES + FR ---
@@ -1068,7 +1070,7 @@ listing both translations.`,
 // adk-go's base_flow handles transfer_to_agent inline by calling the
 // target via RunNode (NOT plain Run), which re-engages the LlmAgent
 // mode wrapper for the target. End-effect matches adk-python's
-// DynamicNodeScheduler re-dispatch behaviour at
+// DynamicNodeScheduler re-dispatch behavior at
 // _dynamic_node_scheduler.py:228-281, without needing the
 // scheduler-level loop or resumability bookkeeping.
 func TestDelegation_05_ChatChainedThroughChatToTask(t *testing.T) {
@@ -1152,7 +1154,7 @@ respond to the user.`,
 		t.Errorf("turn 1: editor FCs = %d, want 1; events=%v", got, eventSummaries(events1))
 	}
 
-	// (3) Editor's finish_task succeeded and the synthesised editor
+	// (3) Editor's finish_task succeeded and the synthesized editor
 	//     FR carries the polished text (object schema, passed through).
 	editorFRs := collectFRsByName(events1, "editor")
 	if len(editorFRs) != 1 {
@@ -1242,7 +1244,7 @@ func sessionEventsSnapshot(dr *delegationRunner) []*session.Event {
 //	        sub-agent calls the confirm tool; the framework wraps the
 //	        call as an adk_request_confirmation long-running tool and
 //	        pauses; runChat's dispatchAndYield leaves the delegation
-//	        UNRESOLVED (no synthesised FR) and drains cleanly.
+//	        UNRESOLVED (no synthesized FR) and drains cleanly.
 //	Turn 2: user replies with a FunctionResponse for the pending
 //	        adk_request_confirmation FC; the runner stamps the user
 //	        event with the still-open task scope
@@ -1353,7 +1355,7 @@ confirming completion.`,
 	})
 	// On resume: confirm tool was actually invoked, executor called
 	// finish_task with `done=true`, and the coordinator received a
-	// synthesised executor FR carrying the structured output.
+	// synthesized executor FR carrying the structured output.
 	if confirmCalls != 1 {
 		t.Errorf("turn 2: confirm handler invocations = %d, want 1 (must "+
 			"actually run after the user approves)", confirmCalls)
@@ -1477,7 +1479,7 @@ answer in one short sentence. Do NOT call solver more than once.`,
 		t.Errorf("turn 1: finish_task success FRs = %d, want exactly 1", successFRs)
 	}
 
-	// Synthesised solver FR carries the corrected structured payload
+	// Synthesized solver FR carries the corrected structured payload
 	// (object schemas pass through as the FR Response directly).
 	solverFRs := collectFRsByName(events1, "solver")
 	if len(solverFRs) != 1 {
@@ -1493,7 +1495,7 @@ answer in one short sentence. Do NOT call solver more than once.`,
 	// coordinator's session: on a follow-up turn the coordinator
 	// either re-dispatches solver or answers from history; either
 	// way the eventual reply should contain "42". This pins that
-	// the prior turn's bookkeeping (one synthesised solver FR with
+	// the prior turn's bookkeeping (one synthesized solver FR with
 	// the corrected answer, no orphan FR/FC pairs) didn't poison
 	// the conversation history.
 	events2 := dr.turn("What was the answer to the previous question?")
@@ -1512,7 +1514,7 @@ answer in one short sentence. Do NOT call solver more than once.`,
 
 // TestDelegation_08_ChatToTaskPlusFunctionTool exercises mixed
 // dispatch in the same coordinator: a TaskAgentTool (deferred FR,
-// synthesised by runChat) AND a regular FunctionTool (immediate FR,
+// synthesized by runChat) AND a regular FunctionTool (immediate FR,
 // produced by the standard tool-execution pipeline) live in the same
 // tools dict. The coordinator must distinguish them and the framework
 // must route them through the correct paths.
@@ -1577,10 +1579,10 @@ immediately call ` + "`finish_task`" + ` with {"items":[...]}.`,
 
 	dr := newDelegationRunner(t, coordinator)
 
-	// --- Turn 1: extract + summarise ---
+	// --- Turn 1: extract + summarize ---
 	events1 := dr.turn("Extract and summarise: apples, bread, eggs.")
 
-	// Task path: extractor delegation + synthesised FR carrying the
+	// Task path: extractor delegation + synthesized FR carrying the
 	// structured output (object schema, passed through directly).
 	if got := len(collectFCsByName(events1, "extractor")); got != 1 {
 		t.Errorf("turn 1: extractor FCs = %d, want 1", got)
@@ -1651,7 +1653,7 @@ immediately call ` + "`finish_task`" + ` with {"items":[...]}.`,
 //
 // adk-go's runner picks the LAST non-user author as the active agent
 // on each subsequent turn (the documented inline-forward divergence
-// vs adk-python). This test pins that behaviour: after turn 2's
+// vs adk-python). This test pins that behavior: after turn 2's
 // peer transfer, the active agent is `support`.
 //
 // Two user turns are recorded in the same trace file.
@@ -2039,7 +2041,7 @@ func summarizeContents(contents []*genai.Content) string {
 }
 
 // summarizeAllRounds formats every captured round's contents on a
-// single labelled line for use in failure diagnostics.
+// single labeled line for use in failure diagnostics.
 func summarizeAllRounds(rounds [][]*genai.Content) string {
 	parts := make([]string, len(rounds))
 	for i, c := range rounds {

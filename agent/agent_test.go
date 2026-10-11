@@ -180,7 +180,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		}
 	}
 
-	// Even though beforeAgentCallback returns nil, it stil doesn't call llm because
+	// Even though beforeAgentCallback returns nil, it still doesn't call llm because
 	// endInvocation is true.
 	if custom.callCounter != 0 {
 		t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, 0)

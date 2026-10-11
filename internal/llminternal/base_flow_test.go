@@ -940,6 +940,77 @@ func (m *alwaysThinkingModel) GenerateContent(ctx context.Context, req *model.LL
 	}
 }
 
+// TestCallLLMStreamingModeFromRunConfig pins how callLLM derives the streaming
+// flag, including the nil case (issue #586).
+//
+// None of these store a runconfig in the Go context, as when agent.Run() is
+// invoked directly and the runner is bypassed, so runconfig.FromContext would
+// return nil; the streaming mode is read from the invocation context instead.
+// An invocation context built outside the runner need not carry a RunConfig at
+// all, and that has to resolve to false rather than panic.
+func TestCallLLMStreamingModeFromRunConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		runConfig *agent.RunConfig
+		want      bool
+	}{
+		{
+			name:      "SSE streams",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+			want:      true,
+		},
+		{
+			name:      "none does not stream",
+			runConfig: &agent.RunConfig{StreamingMode: agent.StreamingModeNone},
+			want:      false,
+		},
+		{
+			name:      "unset streaming mode does not stream",
+			runConfig: &agent.RunConfig{},
+			want:      false,
+		},
+		{
+			name:      "nil run config does not stream",
+			runConfig: nil,
+			want:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			var gotStream bool
+			m := &mockModelForTest{
+				name: "test-model",
+				generateContent: func(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+					calls++
+					gotStream = stream
+					return func(func(*model.LLMResponse, error) bool) {}
+				},
+			}
+			f := &Flow{Model: m}
+
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				RunConfig: tc.runConfig,
+			})
+
+			req := &model.LLMRequest{}
+			for _, err := range f.callLLM(ctx, req, map[string]any{}, map[string]int64{}) {
+				if err != nil {
+					t.Fatalf("callLLM() error = %v, want nil", err)
+				}
+			}
+
+			if calls != 1 {
+				t.Fatalf("GenerateContent called %d times, want 1", calls)
+			}
+			if gotStream != tc.want {
+				t.Errorf("GenerateContent received stream=%v, want %v", gotStream, tc.want)
+			}
+		})
+	}
+}
+
 func TestRun_ThoughtOnlyTurnsTerminate(t *testing.T) {
 	m := &alwaysThinkingModel{}
 	f := &Flow{Model: m}
@@ -1222,6 +1293,70 @@ func captureLog(t *testing.T, fn func()) string {
 	})
 	fn()
 	return buf.String()
+}
+
+// dynamicToolset returns different tools on each call to simulate a toolset
+// whose output depends on session state written by an earlier tool in the run.
+type dynamicToolset struct {
+	callCount   int
+	toolsByCall map[int][]tool.Tool
+}
+
+func (d *dynamicToolset) Name() string { return "dynamic" }
+func (d *dynamicToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
+	tools := d.toolsByCall[d.callCount]
+	d.callCount++
+	return tools, nil
+}
+
+// TestToolProcessorReEvaluatesToolsetsEachStep verifies that toolProcessor
+// calls Toolset.Tools() on every step, not just the first. This ensures that
+// tools activated by session-state changes in an earlier step are visible to
+// subsequent model calls within the same Runner.Run().
+func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
+	extraTool := &mockFunctionTool{name: "extra_tool"}
+
+	// Call 0: no tools yet. Call 1+: return extraTool.
+	ts := &dynamicToolset{
+		toolsByCall: map[int][]tool.Tool{
+			0: nil,
+			1: {extraTool},
+		},
+	}
+
+	baseTool := &mockFunctionTool{name: "base_tool"}
+	agentState := &State{Tools: []tool.Tool{baseTool}, Toolsets: []tool.Toolset{ts}}
+	mockAgent := &mockLLMAgent{s: agentState}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent})
+
+	f := &Flow{}
+
+	// First call: toolset returns nil, so f.Tools holds only the static tool.
+	// A non-nil f.Tools is what would trip a per-run cache guard.
+	req1 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req1, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 1 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 1 {
+		t.Errorf("after call 1: got %d tools, want 1", len(f.Tools))
+	}
+
+	// Second call: toolset now returns extraTool — f.Tools must be updated.
+	req2 := &model.LLMRequest{}
+	for _, err := range toolProcessor(ctx, req2, f) {
+		if err != nil {
+			t.Fatalf("toolProcessor call 2 error: %v", err)
+		}
+	}
+	if len(f.Tools) != 2 || f.Tools[1].Name() != extraTool.Name() {
+		t.Errorf("after call 2: got tools %v, want [%s %s]", f.Tools, baseTool.Name(), extraTool.Name())
+	}
+
+	if ts.callCount != 2 {
+		t.Errorf("toolset.Tools() called %d times, want 2", ts.callCount)
+	}
 }
 
 func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
