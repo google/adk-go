@@ -51,6 +51,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTransport struct {
@@ -823,11 +824,14 @@ func TestCallbacks_WriteRows(t *testing.T) {
 			attrs:     map[string]string{"adk.function_call_id": `"call-1"`},
 		},
 		{
-			eventType: legacyEventType,
-			content:   `{"text_summary":"event text"}`,
+			eventType: EventAgentResponse,
+			content:   `{"response":"text: 'event text'"}`,
 			parts:     []map[string]any{textPart("event text", 0)},
 			attrs: map[string]string{
 				"event_author":        `"test-agent"`,
+				"source_event_id":     `"event-1"`,
+				"source_event_author": `"test-agent"`,
+				"source_event_branch": `"root.test-agent"`,
 				"adk.source_event_id": `"event-1"`,
 				"adk.branch":          `"root.test-agent"`,
 				"adk.node":            `{"path":"wf@0/review@2","run_id":"2","parent_run_id":"0","output_for":["wf@0"]}`,
@@ -933,7 +937,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				t.Errorf("attributes.adk.adk_version = %v, want either absent or a real version", v)
 			}
 			_, hasBranch := lookup(attrs, "adk", "branch")
-			if wantBranch := w.eventType == legacyEventType; hasBranch != wantBranch {
+			if wantBranch := w.eventType == EventAgentResponse; hasBranch != wantBranch {
 				t.Errorf("attributes.adk.branch present = %v, want %v", hasBranch, wantBranch)
 			}
 			_, hasCallID := lookup(attrs, "adk", "function_call_id")
@@ -1618,7 +1622,10 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.CustomMetadataAllowlist = tt.allowlist })
 			md := map[string]any{"a2a:task_id": "task-1", "private": "p"}
 			var errs callbackErrors
-			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{CustomMetadata: md}})
+			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: textContent("model", "hi"), CustomMetadata: md},
+			})
 			errs.add(gotEv, evErr)
 			if gotEv != nil {
 				t.Errorf("OnEventCallback returned %v, want nil so subsequent plugins run", gotEv)
@@ -1628,7 +1635,7 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-			for _, eventType := range []string{legacyEventType, EventLLMResponse} {
+			for _, eventType := range []string{EventAgentResponse, EventLLMResponse} {
 				attrs := jsonObjectColumn(t, onlyRowOfType(t, rows, eventType), "attributes")
 				got, ok := lookup(attrs, "custom_metadata")
 				switch {
@@ -1740,6 +1747,61 @@ func TestToolFailure_WritesErrorRows(t *testing.T) {
 	if _, ok := row[columnLatencyMS]; !ok {
 		t.Error("TOOL_ERROR row has no latency_ms")
 	}
+}
+
+// TestToolConfirmationRequired_CompletesCall replays the callbacks ADK runs
+// for a call of a tool that waits for the user's confirmation: the tool
+// fails with tool.ErrConfirmationRequired before it runs, so ADK runs
+// BeforeToolCallback, OnToolErrorCallback, then AfterToolCallback with the
+// same error. As in adk-python, whose tools return the confirmation request
+// as their result, the call ends with a TOOL_COMPLETED row whose result is
+// the error that ADK sends the model, and no TOOL_ERROR row. A final
+// response tool writes its AGENT_RESPONSE row when the confirmed call runs.
+func TestToolConfirmationRequired_CompletesCall(t *testing.T) {
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"deploy"} })
+	mCtx.functionCallID = "call-1"
+	deployTool := &fakeTool{name: "deploy"}
+	args := map[string]any{"region": "us-central1"}
+	toolErr := fmt.Errorf("error tool %q %w", "deploy", tool.ErrConfirmationRequired)
+	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	if res, err := p.OnToolErrorCallback()(mCtx, deployTool, args, toolErr); res != nil || err != nil {
+		t.Errorf("OnToolErrorCallback() = %v, %v; want nil, nil", res, err)
+	}
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, nil, toolErr))
+	// The user confirms the call, and ADK runs the tool.
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, map[string]any{"cluster_id": "c-123"}, nil))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	wantTypes := []string{
+		EventToolStarting, EventToolCompleted, // waits for confirmation
+		EventToolStarting, EventToolCompleted, EventAgentResponse, // confirmed
+		EventInvocationCompleted,
+	}
+	if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+	}
+	row := rowsOfType(rows, EventToolCompleted)[0]
+	if got := row["status"]; got != "OK" {
+		t.Errorf("status = %v, want OK", got)
+	}
+	if got, ok := row["error_message"]; ok {
+		t.Errorf("error_message = %v, want none", got)
+	}
+	checkJSON(t, "content", jsonObjectColumn(t, row, "content"),
+		`{"tool":"deploy","result":{"error":"error tool \"deploy\" requires confirmation, please approve or reject"},"tool_origin":"UNKNOWN"}`)
+	checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), `"call-1"`, "adk", "function_call_id")
+	if got, want := row["span_id"], rowsOfType(rows, EventToolStarting)[0]["span_id"]; got != want {
+		t.Errorf("TOOL_COMPLETED span_id = %v, want the TOOL_STARTING span_id %v", got, want)
+	}
+	if _, ok := row[columnLatencyMS]; !ok {
+		t.Error("TOOL_COMPLETED row has no latency_ms")
+	}
+	checkJSON(t, "AGENT_RESPONSE content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventAgentResponse), "content"),
+		`{"response":{"region":"us-central1"}}`)
 }
 
 func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
@@ -1904,13 +1966,17 @@ func (noAgentContext) AgentName() string { panic("invocation has no agent") }
 func TestIdentity_AgentFallsBackToEventAuthor(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
 	ctx := noAgentContext{mCtx}
-	if _, err := p.OnEventCallback()(ctx, &session.Event{Author: "event-author"}); err != nil {
+	ev := &session.Event{
+		Author:      "event-author",
+		LLMResponse: model.LLMResponse{Content: textContent("model", "hi")},
+	}
+	if _, err := p.OnEventCallback()(ctx, ev); err != nil {
 		t.Fatalf("OnEventCallback error: %v", err)
 	}
 	p.AfterRunCallback()(ctx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	row := onlyRowOfType(t, rows, legacyEventType)
+	row := onlyRowOfType(t, rows, EventAgentResponse)
 	if got := row["agent"]; got != "event-author" {
 		t.Errorf("agent = %v, want the event author", got)
 	}
@@ -2640,7 +2706,7 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 	errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: structuredContent}, nil))
 	errs.add(p.OnEventCallback()(mCtx, &session.Event{
 		Author:      "test-agent",
-		LLMResponse: model.LLMResponse{Content: structuredContent},
+		LLMResponse: model.LLMResponse{Content: textContent("model", `{"api_key":"sk-secret-key","note":"hello world"}`)},
 	}))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
@@ -2660,33 +2726,43 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 		t.Errorf("LLM_REQUEST content %s leaked secret from JSON text", raw)
 	}
 
-	for _, eventType := range []string{EventLLMResponse, legacyEventType} {
-		row := onlyRowOfType(t, rows, eventType)
-		if raw, _ := row["content"].(string); strings.Contains(raw, "sk-secret") {
-			t.Errorf("%s content %s leaked secret", eventType, raw)
-		}
-		parts, _ := row["content_parts"].([]map[string]any)
-		if len(parts) != 5 {
-			t.Fatalf("%s content_parts len = %d, want 5: %v", eventType, len(parts), parts)
-		}
-		if parts[1]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[1] mime_type = %v", eventType, parts[1]["mime_type"])
-		}
-		if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[1] part_attributes = %s, want redacted args", eventType, attrs)
-		}
-		if parts[2]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[2] mime_type = %v", eventType, parts[2]["mime_type"])
-		}
-		if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[2] part_attributes = %s, want redacted response", eventType, attrs)
-		}
-		if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
-			t.Errorf("%s parts[3] = %v", eventType, parts[3])
-		}
-		if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
-			t.Errorf("%s parts[4] = %v", eventType, parts[4])
-		}
+	resRow := onlyRowOfType(t, rows, EventLLMResponse)
+	if raw, _ := resRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("LLM_RESPONSE content %s leaked secret", raw)
+	}
+	parts, _ := resRow["content_parts"].([]map[string]any)
+	if len(parts) != 5 {
+		t.Fatalf("LLM_RESPONSE content_parts len = %d, want 5: %v", len(parts), parts)
+	}
+	if parts[1]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[1] mime_type = %v", parts[1]["mime_type"])
+	}
+	if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[1] part_attributes = %s, want redacted args", attrs)
+	}
+	if parts[2]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[2] mime_type = %v", parts[2]["mime_type"])
+	}
+	if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[2] part_attributes = %s, want redacted response", attrs)
+	}
+	if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
+		t.Errorf("LLM_RESPONSE parts[3] = %v", parts[3])
+	}
+	if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
+		t.Errorf("LLM_RESPONSE parts[4] = %v", parts[4])
+	}
+
+	agentRespRow := onlyRowOfType(t, rows, EventAgentResponse)
+	if raw, _ := agentRespRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE content %s leaked secret", raw)
+	}
+	respParts, _ := agentRespRow["content_parts"].([]map[string]any)
+	if len(respParts) != 1 {
+		t.Fatalf("AGENT_RESPONSE content_parts len = %d, want 1: %v", len(respParts), respParts)
+	}
+	if text, _ := respParts[0]["text"].(string); strings.Contains(text, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE parts[0] text = %s leaked secret", text)
 	}
 
 	proseCases := []string{

@@ -49,9 +49,9 @@ const (
 
 // sensitiveKeys holds normalized (lowercase, "-" replaced by "_") map keys
 // whose values are always redacted. It is the adk-python list plus
-// "aws_secret_access_key", "aws_session_token", "bearer", "credential",
-// "credentials", "passphrase", "secret_access_key", "session_token" and
-// "x_goog_api_key". A value under "credential" or "credentials" in a map, in
+// "api_key_secret", "api_key_string", "auth_code", "aws_secret_access_key",
+// "aws_session_token", "bearer", "code_verifier", "credential", "credentials",
+// "passphrase", "secret_access_key", "session_token" and "x_goog_api_key". A value under "credential" or "credentials" in a map, in
 // JSON text, in a Python dict or in a Go struct printed with %+v is redacted
 // as a whole, so that no field of a credentials envelope, such as the AWS STS
 // result {"Credentials": {"AccessKeyId": ..., "SecretAccessKey": ...,
@@ -64,11 +64,15 @@ const (
 var sensitiveKeys = map[string]struct{}{
 	"access_token":          {},
 	"api_key":               {},
+	"api_key_secret":        {},
+	"api_key_string":        {},
+	"auth_code":             {},
 	"authorization":         {},
 	"aws_secret_access_key": {},
 	"aws_session_token":     {},
 	"bearer":                {},
 	"client_secret":         {},
+	"code_verifier":         {},
 	"credential":            {},
 	"credentials":           {},
 	"google_access_id":      {},
