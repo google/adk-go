@@ -55,10 +55,10 @@ const (
 	EventUserMessageReceived = "USER_MESSAGE_RECEIVED"
 	EventInvocationStarting  = "INVOCATION_STARTING"
 	EventInvocationCompleted = "INVOCATION_COMPLETED"
+	EventInvocationError     = "INVOCATION_ERROR"
 	EventAgentStarting       = "AGENT_STARTING"
 	EventAgentCompleted      = "AGENT_COMPLETED"
 	EventAgentError          = "AGENT_ERROR"
-	EventInvocationError     = "INVOCATION_ERROR"
 	EventLLMRequest          = "LLM_REQUEST"
 	// EventLLMResponse is written once per model call, on the final
 	// non-partial response. Streamed chunks with Partial set only feed
@@ -178,19 +178,21 @@ func NewBigQueryAgentAnalyticsPluginWithConfig(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bigquery client: %w", err)
 	}
-	defer func() {
-		if err := bqClient.Close(); err != nil {
-			config.logf("failed to close bigquery client: %v", err)
-		}
-	}()
 
 	// Setup Storage Write Client
 	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, config.ClientOptions...)
 	if err != nil {
+		if closeErr := closeBQClient(bqClient); closeErr != nil {
+			config.logf("failed to close bigquery client: %v", closeErr)
+		}
 		return nil, fmt.Errorf("failed to create BigQuery write client: %w", err)
 	}
 
-	return NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+	return newBigQueryAgentAnalyticsPlugin(ctx, config, bqClient, writeClient, true)
+}
+
+var closeBQClient = func(c *bq.Client) error {
+	return c.Close()
 }
 
 type dropStatsProvider interface {
@@ -198,17 +200,17 @@ type dropStatsProvider interface {
 }
 
 // pluginRegistry maps weak pointers of constructed ADK plugins to their
-// drop stats provider so callers of NewBigQueryAgentAnalyticsPlugin* can inspect
-// drop stats via AsBigQueryAgentAnalyticsPlugin both before and after Close
-// without pinning unclosed plugins in memory.
-var pluginRegistry sync.Map // map[weak.Pointer[baseplugin.Plugin]]dropStatsProvider
+// internal pluginState so callers of NewBigQueryAgentAnalyticsPlugin* can inspect
+// drop stats and sync views via AsBigQueryAgentAnalyticsPlugin both before and
+// after Close without pinning unclosed plugins in memory.
+var pluginRegistry sync.Map // map[weak.Pointer[baseplugin.Plugin]]*pluginState
 
-func registerPlugin(adkPlugin *baseplugin.Plugin, stats dropStatsProvider) {
+func registerPlugin(adkPlugin *baseplugin.Plugin, state *pluginState) {
 	if adkPlugin == nil {
 		return
 	}
 	key := weak.Make(adkPlugin)
-	pluginRegistry.Store(key, stats)
+	pluginRegistry.Store(key, state)
 	runtime.AddCleanup(adkPlugin, func(k weak.Pointer[baseplugin.Plugin]) {
 		pluginRegistry.Delete(k)
 	}, key)
@@ -224,14 +226,44 @@ func newDisabledPlugin() (*baseplugin.Plugin, error) {
 	if err != nil {
 		return nil, err
 	}
-	registerPlugin(adkPlugin, nil)
+	registerPlugin(adkPlugin, &pluginState{enabled: false, closed: true})
 	return adkPlugin, nil
 }
 
+// pluginState holds the operational state of a constructed BigQuery Agent
+// Analytics plugin independently of the public [baseplugin.Plugin]. It is the
+// value of the plugin's pluginRegistry entry, which a global map holds until
+// the plugin is collected, so nothing it refers to may lead back to the
+// plugin. It therefore keeps no Config, whose Logger or ContentFormatter can
+// refer to an object that holds the plugin, and no BatchProcessor, which
+// keeps the Config. Its view runner refers to the BigQuery client, which can
+// refer to the caller's objects, only weakly, while the plugin itself keeps
+// the client alive. The startup view pass forgets its context when it ends.
+type pluginState struct {
+	counters *dropCounters
+	// enabled is false for a disabled plugin, which neither writes rows nor
+	// creates views.
+	enabled bool
+	// defs and defsErr are the views of the plugin's Config, or why it has
+	// none, from [Config.ViewDefinitions].
+	defs           []ViewDefinition
+	defsErr        error
+	runner         viewRunner
+	viewGate       chan struct{}
+	viewsMu        sync.Mutex
+	lifeCtx        context.Context
+	lifeCancel     context.CancelFunc
+	viewsCancel    context.CancelFunc
+	asyncViewsDone chan struct{}
+	closed         bool
+}
+
 // BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
-// BigQuery Agent Analytics operational metrics such as [DropStats].
+// BigQuery Agent Analytics operational metrics and helpers such as [DropStats]
+// and [BigQueryAgentAnalyticsPlugin.SyncViews].
 type BigQueryAgentAnalyticsPlugin struct {
 	*baseplugin.Plugin
+	*pluginState
 	stats dropStatsProvider
 }
 
@@ -261,14 +293,19 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 	if !ok {
 		return nil, false
 	}
-	stats, _ := v.(dropStatsProvider)
+	state, ok := v.(*pluginState)
+	if !ok {
+		return nil, false
+	}
 	return &BigQueryAgentAnalyticsPlugin{
-		Plugin: p,
-		stats:  stats,
+		Plugin:      p,
+		pluginState: state,
+		stats:       state.counters,
 	}, true
 }
 
-// NewBigQueryAgentAnalyticsPluginWithClients creates a newly configured analytics plugin using the provided BigQuery clients.
+// NewBigQueryAgentAnalyticsPluginWithClients creates a plugin that writes rows
+// through writeClient and manages the table and views through bqClient.
 //
 // When bqClient is not nil, it creates the events table if it does not exist
 // and, unless DisableSchemaUpgrade is set, adds any missing columns to an
@@ -276,13 +313,20 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // construction and closes writeClient. Passing bqClient == nil skips table
 // inspection, creation, and schema upgrades for pre-provisioned append-only
 // deployments. ctx bounds this table setup; background writes use only its
-// values (see [NewBatchProcessor]).
+// values (see [NewBatchProcessor]). If config.ProjectID is empty or
+// bigquery.DetectProjectID, the project of bqClient is used for the table, the
+// views and the write stream; when config.ProjectID names another project,
+// bqClient checks, creates and upgrades the events table (and views) in
+// config.ProjectID rather than bqClient.Project().
 //
-// The plugin owns writeClient and closes it when the plugin is closed. It
-// also closes writeClient right away when config.Enabled is false, and before
-// it returns any error, such as an invalid config or a table that cannot be
-// read, created or upgraded. bqClient and a supplied GCSOffloader remain
-// caller-owned.
+// bqClient is also used after construction, by background view creation and by
+// [BigQueryAgentAnalyticsPlugin.SyncViews], so it must stay open and usable
+// until the returned plugin is closed. The plugin owns writeClient and closes
+// it when the plugin is closed. It also closes writeClient right away when
+// config.Enabled is false, and before it returns any error, such as an invalid
+// config or a table that cannot be read, created or upgraded. bqClient and a
+// supplied GCSOffloader remain caller-owned, and the caller is responsible for
+// closing them.
 //
 // Register the plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results or agent content. ADK runs the
@@ -298,15 +342,33 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	bqClient *bq.Client,
 	writeClient *bqstorage.BigQueryWriteClient,
 ) (*baseplugin.Plugin, error) {
-	if !config.Enabled {
-		// The disabled plugin never writes, so it does not keep writeClient.
+	return newBigQueryAgentAnalyticsPlugin(ctx, config, bqClient, writeClient, false)
+}
+
+func newBigQueryAgentAnalyticsPlugin(
+	ctx context.Context,
+	config Config,
+	bqClient *bq.Client,
+	writeClient *bqstorage.BigQueryWriteClient,
+	ownBQClient bool,
+) (*baseplugin.Plugin, error) {
+	closeClients := func() {
 		closeWriteClient(writeClient, config)
+		if ownBQClient && bqClient != nil {
+			if closeErr := closeBQClient(bqClient); closeErr != nil {
+				config.logf("failed to close bigquery client: %v", closeErr)
+			}
+		}
+	}
+	if !config.Enabled {
+		// The disabled plugin never writes, so it does not keep the clients.
+		closeClients()
 		return newDisabledPlugin()
 	}
 	config = applyDefaults(config)
 	deniedColumns, err := validateConfig(config)
 	if err != nil {
-		closeWriteClient(writeClient, config)
+		closeClients()
 		return nil, err
 	}
 	if writeClient == nil {
@@ -330,7 +392,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			}
 			o, err := newGCSOffloader(ctx, config.GCSBucketName, gcsOpts...)
 			if err != nil {
-				closeWriteClient(writeClient, config)
+				closeClients()
 				return nil, fmt.Errorf("failed to create GCS offloader: %w", err)
 			}
 			ownedOffloader = o
@@ -338,7 +400,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 	}
 	closeOwnedResources := func() {
-		closeWriteClient(writeClient, config)
+		closeClients()
 		if ownedOffloader != nil {
 			if closeErr := ownedOffloader.Close(); closeErr != nil {
 				config.logf("failed to close GCS offloader: %v", closeErr)
@@ -346,9 +408,20 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		}
 	}
 
+	// A client made for bq.DetectProjectID, or a ProjectID left empty, knows the
+	// project that the table, the views and the write stream belong to.
+	if bqClient != nil && (config.ProjectID == "" || config.ProjectID == bq.DetectProjectID) {
+		config.ProjectID = bqClient.Project()
+	}
+
 	// Ensure table exists and optionally upgrade schema (done once per instance).
 	if bqClient != nil {
-		tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
+		ds := bqClient.Dataset(config.DatasetID)
+		if config.ProjectID != "" {
+			// Check the table in the project that the rows and views go to.
+			ds = bqClient.DatasetInProject(config.ProjectID, config.DatasetID)
+		}
+		tableRef := ds.Table(config.TableName)
 		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
 			closeOwnedResources()
 			return nil, err
@@ -382,7 +455,24 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		traces:             traces,
 	}
 
-	adkPlugin, err := baseplugin.New(baseplugin.Config{
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
+	defs, defsErr := config.ViewDefinitions()
+	state := &pluginState{
+		counters:   processor.counters,
+		enabled:    true,
+		defs:       defs,
+		defsErr:    defsErr,
+		viewGate:   make(chan struct{}, 1),
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
+	}
+	state.viewGate <- struct{}{}
+	if bqClient != nil {
+		state.runner = bqViewRunner{client: weak.Make(bqClient), projectID: config.ProjectID, datasetID: config.DatasetID}
+	}
+
+	var adkPlugin *baseplugin.Plugin
+	adkPlugin, err = baseplugin.New(baseplugin.Config{
 		Name: pluginName,
 
 		OnUserMessageCallback: p.onUserMessage,
@@ -402,20 +492,29 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		OnToolErrorCallback: p.onToolError,
 
 		CloseFunc: func() error {
+			state.stopAsyncViewCreation()
 			// The processor uploads while it flushes, so it goes first.
 			processor.Close()
-			var errs []error
+			var closeErrs []error
 			if ownedOffloader != nil {
 				if err := ownedOffloader.Close(); err != nil {
-					errs = append(errs, fmt.Errorf("failed to close GCS offloader: %w", err))
+					closeErrs = append(closeErrs, fmt.Errorf("failed to close GCS offloader: %w", err))
 				}
 			}
 			if writeClient != nil {
 				if err := writeClient.Close(); err != nil {
-					errs = append(errs, fmt.Errorf("failed to close BigQuery write client: %w", err))
+					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery write client: %w", err))
 				}
 			}
-			return errors.Join(errs...)
+			if ownBQClient && bqClient != nil {
+				if err := closeBQClient(bqClient); err != nil {
+					closeErrs = append(closeErrs, fmt.Errorf("failed to close BigQuery client: %w", err))
+				}
+			}
+			// The view runner refers to bqClient only weakly, so this function,
+			// which the plugin holds, keeps the client alive for the plugin.
+			runtime.KeepAlive(bqClient)
+			return errors.Join(closeErrs...)
 		},
 	})
 	if err != nil {
@@ -424,7 +523,19 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		return nil, err
 	}
 
-	registerPlugin(adkPlugin, processor.counters)
+	registerPlugin(adkPlugin, state)
+
+	if config.createViews() && state.runner != nil {
+		logf := config.viewLogf()
+		if defsErr != nil {
+			if logf != nil {
+				logf("agentanalytics: skipping view creation: %v", defsErr)
+			}
+		} else {
+			// Pass only the non-default Logger hook so the goroutine does not retain Config.
+			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+		}
+	}
 	return adkPlugin, nil
 }
 
@@ -458,6 +569,9 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	}
 	if _, ok := denied[columnAttributes]; ok && len(c.CustomMetadataAllowlist) > 0 {
 		return nil, errors.New("invalid config: CustomMetadataAllowlist cannot be used when PayloadColumnDenylist contains \"attributes\"")
+	}
+	if c.ViewPrefix != "" && !isValidIdentifier(c.ViewPrefix) {
+		return nil, fmt.Errorf("invalid config: invalid ViewPrefix %q", c.ViewPrefix)
 	}
 	return denied, nil
 }

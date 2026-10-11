@@ -38,6 +38,23 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+// streamWriterTraceIDPrefix is the client identity prefix attached to
+// BigQuery Storage Write API AppendRowsRequest.TraceId so BigQuery
+// server-side telemetry can attribute writes to ADK Go independently of
+// the row-level trace_id and session_id columns.
+const streamWriterTraceIDPrefix = "google-adk-bq-logger-go"
+
+var streamWriterTraceID = sync.OnceValue(func() string {
+	return streamWriterTraceIDForVersion(adkVersion())
+})
+
+func streamWriterTraceIDForVersion(v string) string {
+	if v == "" {
+		return streamWriterTraceIDPrefix
+	}
+	return streamWriterTraceIDPrefix + "/" + v
+}
+
 func createCommittedWriteStream(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, config Config) (string, error) {
 	if writeClient == nil {
 		return "", fmt.Errorf("writeClient is nil")
@@ -1143,6 +1160,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 
 		req := &storagepb.AppendRowsRequest{
 			WriteStream: s.streamName,
+			TraceId:     streamWriterTraceID(),
 			Rows: &storagepb.AppendRowsRequest_ArrowRows{
 				ArrowRows: &storagepb.AppendRowsRequest_ArrowData{
 					WriterSchema: &storagepb.ArrowSchema{
