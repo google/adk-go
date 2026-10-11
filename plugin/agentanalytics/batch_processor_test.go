@@ -20,13 +20,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	storagepb "cloud.google.com/go/bigquery/storage/apiv1/storagepb"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/api/option"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
@@ -38,11 +41,16 @@ import (
 // mockStream implements the unexported stream interface in streamWriter
 type mockStream struct {
 	sendErr   error
+	sendDelay time.Duration
+	onSend    func()
 	recvRes   *storagepb.AppendRowsResponse
 	recvErr   error
 	recvSeq   []mockRecv
 	sendCount int32
 	recvCount int32
+
+	mu   sync.Mutex
+	sent []*storagepb.AppendRowsRequest
 }
 
 // mockRecv is one scripted Recv result; recvSeq supplies them in order before
@@ -55,8 +63,24 @@ type mockRecv struct {
 }
 
 func (m *mockStream) Send(req *storagepb.AppendRowsRequest) error {
+	if m.onSend != nil {
+		m.onSend()
+	}
+	if m.sendDelay > 0 {
+		time.Sleep(m.sendDelay)
+	}
 	atomic.AddInt32(&m.sendCount, 1)
+	m.mu.Lock()
+	m.sent = append(m.sent, req)
+	m.mu.Unlock()
 	return m.sendErr
+}
+
+// requests returns the requests passed to Send, in order.
+func (m *mockStream) requests() []*storagepb.AppendRowsRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.sent)
 }
 
 // maxMockRecv bounds how many times Recv answers without a terminal error. The
@@ -217,6 +241,54 @@ func TestBatchProcessor_DataTypes(t *testing.T) {
 	count := atomic.LoadInt32(&mStream.sendCount)
 	if count != 1 {
 		t.Errorf("Expected 1 send, got %d", count)
+	}
+}
+
+func TestBatchProcessor_WriteBatchEncodesRows(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor error: %v", err)
+	}
+	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+	bp.streamWriter.stream = mStream
+
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	row := map[string]any{
+		"timestamp":  ts,
+		"event_id":   "0123456789abcdef0123456789abcdef",
+		"event_type": "LLM_REQUEST",
+		"content":    `{"prompt":"hi"}`,
+		"content_parts": []map[string]any{
+			{"mime_type": "text/plain", "text": "hi", "part_index": 0, "storage_mode": "INLINE"},
+		},
+		"status":       "OK",
+		"is_truncated": false,
+	}
+	if err := bp.writeBatch(ctx, []map[string]any{row}); err != nil {
+		t.Fatalf("writeBatch() error: %v", err)
+	}
+
+	sent := mStream.requests()
+	if len(sent) != 1 {
+		t.Fatalf("Send received %d requests, want 1", len(sent))
+	}
+	want := []map[string]any{{
+		"timestamp":  ts.Truncate(time.Microsecond),
+		"event_id":   "0123456789abcdef0123456789abcdef",
+		"event_type": "LLM_REQUEST",
+		"content":    `{"prompt":"hi"}`,
+		"content_parts": []map[string]any{
+			{"mime_type": "text/plain", "text": "hi", "part_index": int64(0), "storage_mode": "INLINE"},
+		},
+		"status":       "OK",
+		"is_truncated": false,
+	}}
+	if diff := cmp.Diff(want, decodeArrowRows(t, sent[0])); diff != "" {
+		t.Errorf("decoded rows mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -459,4 +531,542 @@ func TestStreamWriter_RetryOpensAFreshStream(t *testing.T) {
 	if got := atomic.LoadInt32(&dead.sendCount); got != 1 {
 		t.Errorf("the aborted stream was reused: Send called %d times on it, want 1", got)
 	}
+}
+
+func TestBatchProcessor_CloseDrainsAndRejectsNewAppends(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.BatchSize = 100
+	config.BatchFlushIntv = time.Hour
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor error: %v", err)
+	}
+	mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+	bp.streamWriter.stream = mStream
+
+	bp.Start()
+	bp.Append(map[string]any{"event_type": "before_close"})
+	bp.Close()
+
+	// Appends after Close must be ignored.
+	bp.Append(map[string]any{"event_type": "after_close"})
+	if len(bp.queue) != 0 {
+		t.Errorf("queue len after Close = %d, want 0", len(bp.queue))
+	}
+	if got := atomic.LoadInt32(&mStream.sendCount); got != 1 {
+		t.Errorf("Send called %d times, want 1", got)
+	}
+}
+
+func TestBatchProcessor_ConcurrentAppendAndClose(t *testing.T) {
+	for iter := range 20 {
+		ctx := context.Background()
+		config := DefaultConfig()
+		config.BatchSize = 50
+		config.QueueMaxSize = 10000
+		config.BatchFlushIntv = time.Hour
+		config.RetryConfig.MaxRetries = 0
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+		if err != nil {
+			t.Fatalf("iter %d: NewBatchProcessor error: %v", iter, err)
+		}
+		mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+		bp.streamWriter.stream = mStream
+		bp.Start()
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for g := range 8 {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				<-start
+				for i := range 50 {
+					bp.Append(map[string]any{"event_type": fmt.Sprintf("evt_%d_%d", id, i)})
+				}
+			}(g)
+		}
+		close(start)
+		bp.Close()
+		wg.Wait()
+
+		if got := len(bp.queue); got != 0 {
+			t.Fatalf("iter %d: queue len after Close and concurrent Appends = %d, want 0 (unflushed items stranded in queue)", iter, got)
+		}
+	}
+}
+
+func TestBatchProcessor_CloseDrainsInFlightAndQueuedBatches(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.BatchSize = 5
+	config.QueueMaxSize = 1000
+	config.BatchFlushIntv = time.Hour
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor error: %v", err)
+	}
+
+	firstSendStarted := make(chan struct{})
+	var firstSendOnce sync.Once
+	mStream := &mockStream{
+		sendDelay: 15 * time.Millisecond,
+		onSend: func() {
+			firstSendOnce.Do(func() { close(firstSendStarted) })
+		},
+		recvRes: &storagepb.AppendRowsResponse{},
+	}
+	bp.streamWriter.stream = mStream
+	bp.Start()
+
+	const totalRows = 35
+	for i := range totalRows {
+		bp.Append(map[string]any{"event_type": fmt.Sprintf("evt_%d", i)})
+	}
+
+	// Wait until the first Append-triggered background flush is in flight, then
+	// call Close() while remaining batches are still in the queue.
+	<-firstSendStarted
+	bp.Close()
+
+	if got := len(bp.queue); got != 0 {
+		t.Fatalf("queue len after Close = %d, want 0", got)
+	}
+	var gotRows int
+	for _, req := range mStream.requests() {
+		gotRows += len(decodeArrowRows(t, req))
+	}
+	if gotRows != totalRows {
+		t.Errorf("total rows sent = %d, want %d", gotRows, totalRows)
+	}
+}
+
+func TestBatchProcessor_ReusesCachedStreamAcrossFlushes(t *testing.T) {
+	ctx := context.Background()
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 32)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	bp.Start()
+
+	const numFlushes = 20
+	for i := range numFlushes {
+		bp.Append(map[string]any{"event_type": fmt.Sprintf("flush_%d", i)})
+		bp.flush()
+	}
+	bp.Close()
+
+	if got := srv.streamsOpened.Load(); got != 1 {
+		t.Errorf("AppendRows opened %d streams across %d flushes, want 1", got, numFlushes)
+	}
+	var gotRows int
+	for len(srv.requests) > 0 {
+		req := <-srv.requests
+		gotRows += len(decodeArrowRows(t, req))
+	}
+	if gotRows != numFlushes {
+		t.Errorf("received %d rows across %d flushes with MaxRetries=0, want %d", gotRows, numFlushes, numFlushes)
+	}
+}
+
+func TestBatchProcessor_ConcurrentCloseWaitsForDrain(t *testing.T) {
+	ctx := context.Background()
+	config := DefaultConfig()
+	config.BatchSize = 5
+	config.QueueMaxSize = 100
+	config.BatchFlushIntv = time.Hour
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor error: %v", err)
+	}
+
+	firstSendEntered := make(chan struct{})
+	releaseFirstSend := make(chan struct{})
+	var firstSendOnce sync.Once
+	mStream := &mockStream{
+		onSend: func() {
+			firstSendOnce.Do(func() {
+				close(firstSendEntered)
+				<-releaseFirstSend
+			})
+		},
+		recvRes: &storagepb.AppendRowsResponse{},
+	}
+	bp.streamWriter.stream = mStream
+	bp.Start()
+
+	const totalRows = 15
+	for i := range totalRows {
+		bp.Append(map[string]any{"event_type": fmt.Sprintf("evt_%d", i)})
+	}
+
+	<-firstSendEntered
+
+	close1Done := make(chan struct{})
+	go func() {
+		bp.Close()
+		close(close1Done)
+	}()
+
+	close2Done := make(chan struct{})
+	go func() {
+		bp.Close()
+		close(close2Done)
+	}()
+
+	select {
+	case <-close2Done:
+		t.Fatal("second Close() returned while first Close() was still draining")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(releaseFirstSend)
+	<-close1Done
+	<-close2Done
+
+	var gotRows int
+	for _, req := range mStream.requests() {
+		gotRows += len(decodeArrowRows(t, req))
+	}
+	if gotRows != totalRows {
+		t.Errorf("total rows sent after concurrent Close = %d, want %d", gotRows, totalRows)
+	}
+}
+
+func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_FreshStream(t *testing.T) {
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.ShutdownTimeout = time.Second
+	config.RetryConfig.MaxRetries = 1
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	bp.Start()
+	bp.Append(map[string]any{"event_type": "queued_fresh_row"})
+
+	// Cancel constructor context before Close()
+	cancel()
+
+	bp.Close()
+
+	select {
+	case req := <-srv.requests:
+		rows := decodeArrowRows(t, req)
+		if len(rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(rows))
+		}
+		if rows[0]["event_type"] != "queued_fresh_row" {
+			t.Errorf("event_type = %v, want queued_fresh_row", rows[0]["event_type"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued row was not delivered during shutdown drain with canceled constructor context")
+	}
+
+	if bp.streamWriter.stream != nil {
+		t.Error("stream was not explicitly closed after draining")
+	}
+}
+
+func TestBatchProcessor_DrainDeliversQueuedRowsAfterConstructorContextCanceled_CachedStream(t *testing.T) {
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.ShutdownTimeout = time.Second
+	config.RetryConfig.MaxRetries = 1
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	bp.Start()
+
+	// Send initial batch to establish cached stream
+	if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "initial_cached"}}); err != nil {
+		t.Fatalf("initial writeBatch: %v", err)
+	}
+	select {
+	case <-srv.requests:
+	case <-time.After(time.Second):
+		t.Fatal("initial batch not received")
+	}
+
+	if bp.streamWriter.stream == nil {
+		t.Fatal("expected cached stream to be present")
+	}
+
+	bp.Append(map[string]any{"event_type": "queued_cached_row"})
+
+	// Cancel constructor context, rendering cached stream canceled
+	cancel()
+
+	bp.Close()
+
+	select {
+	case req := <-srv.requests:
+		rows := decodeArrowRows(t, req)
+		if len(rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(rows))
+		}
+		if rows[0]["event_type"] != "queued_cached_row" {
+			t.Errorf("event_type = %v, want queued_cached_row", rows[0]["event_type"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued row was not delivered during shutdown drain with canceled cached stream")
+	}
+
+	if bp.streamWriter.stream != nil {
+		t.Error("stream was not explicitly closed after draining")
+	}
+}
+
+func TestBatchProcessor_RootContextCancelBeforeFirstStreamOpenDrainsQueuedRowOnClose(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.ShutdownTimeout = time.Second
+	config.RetryConfig.MaxRetries = 1
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	bp.Start()
+
+	// Append row WITHOUT prior writeBatch, so streamWriter.stream is nil.
+	bp.Append(map[string]any{"event_type": "queued_unopened_stream_row"})
+
+	// Cancel constructor context BEFORE stream is ever opened.
+	cancel()
+
+	bp.Close()
+
+	select {
+	case req := <-srv.requests:
+		rows := decodeArrowRows(t, req)
+		if len(rows) != 1 {
+			t.Fatalf("got %d rows, want 1", len(rows))
+		}
+		if rows[0]["event_type"] != "queued_unopened_stream_row" {
+			t.Errorf("event_type = %v, want queued_unopened_stream_row", rows[0]["event_type"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued row was not delivered during shutdown drain when root context was cancelled before opening stream")
+	}
+}
+
+func TestBatchProcessor_InitContextCanceledDoesNotStopProcessing(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	initCtx, cancelInit := context.WithCancel(context.Background())
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 1
+	config.BatchFlushIntv = 10 * time.Millisecond
+	config.ShutdownTimeout = time.Second
+
+	bp, err := NewBatchProcessor(initCtx, writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	// Cancel the init context immediately after construction.
+	cancelInit()
+
+	bp.Start()
+
+	// Append a row after init context is canceled; it should still be flushed and delivered.
+	bp.Append(map[string]any{"event_type": "post_cancel_row"})
+
+	select {
+	case req := <-srv.requests:
+		rows := decodeArrowRows(t, req)
+		if len(rows) != 1 || rows[0]["event_type"] != "post_cancel_row" {
+			t.Fatalf("got rows %v, want 1 row with post_cancel_row", rows)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("row was not flushed because processor stopped when constructor context was canceled")
+	}
+
+	bp.Close()
+}
+
+// TestBatchProcessor_ConcurrentStartAndClose verifies that multiple concurrent Start and Close
+// calls do not race or cause a close-of-closed-channel panic.
+func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { _ = lis.Close() })
+	gSrv := grpc.NewServer()
+	t.Cleanup(func() { gSrv.Stop() })
+	srv := &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)}
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("failed to dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = 10 * time.Millisecond
+
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bp.Start()
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			bp.Close()
+		}()
+	}
+	wg.Wait()
 }

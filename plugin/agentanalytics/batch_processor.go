@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
@@ -39,44 +40,53 @@ type BatchProcessor struct {
 	config       Config
 	queue        chan map[string]any
 
+	appendMu    sync.RWMutex
 	flushMu     sync.Mutex
 	arrowSchema *arrow.Schema
 	allocator   memory.Allocator
 
-	ctx     context.Context
-	cancel  context.CancelFunc
-	done    chan struct{}
-	started bool // Track if Start() has been called.
+	ctx       context.Context
+	cancel    context.CancelFunc
+	stop      chan struct{}
+	done      chan struct{}
+	started   atomic.Bool // Track if Start() has been called.
+	closed    atomic.Bool
+	closeOnce sync.Once
 }
 
 // NewBatchProcessor creates a new BatchProcessor instance.
 func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config) (*BatchProcessor, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	schemaBytes, err := SerializedArrowSchema()
+	config = applyDefaults(config)
+	denied, err := validateConfig(config)
 	if err != nil {
-		cancel()
+		return nil, err
+	}
+	arrowSchema := projectArrowSchema(denied)
+	schemaBytes, err := serializeArrowSchema(arrowSchema)
+	if err != nil {
 		return nil, fmt.Errorf("failed to serialize arrow schema: %w", err)
 	}
+	baseCtx := context.WithoutCancel(ctx)
+	ctx, cancel := context.WithCancel(baseCtx)
 
 	return &BatchProcessor{
 		writeClient:  writeClient,
-		streamWriter: newStreamWriter(writeClient, streamName, schemaBytes, config),
+		streamWriter: newStreamWriter(ctx, writeClient, streamName, schemaBytes, config),
 		streamName:   streamName,
 		config:       config,
 		queue:        make(chan map[string]any, config.QueueMaxSize),
-		arrowSchema:  ArrowSchema(),
+		arrowSchema:  arrowSchema,
 		allocator:    memory.NewGoAllocator(), // Use Go memory allocator
 		ctx:          ctx,
 		cancel:       cancel,
+		stop:         make(chan struct{}),
 		done:         make(chan struct{}),
-		started:      false,
 	}, nil
 }
 
 // Start begins the background goroutine to process and flush the queue periodically.
 func (b *BatchProcessor) Start() {
-	if !b.started {
-		b.started = true
+	if b.started.CompareAndSwap(false, true) {
 		go func() {
 			defer close(b.done)
 			ticker := time.NewTicker(b.config.BatchFlushIntv)
@@ -84,15 +94,10 @@ func (b *BatchProcessor) Start() {
 
 			for {
 				select {
+				case <-b.stop:
+					return
 				case <-b.ctx.Done():
-					shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), b.config.ShutdownTimeout)
-					defer cancel()
-					for len(b.queue) > 0 {
-						b.blockingFlush(shutdownCtx) // Force flush remaining on shutdown
-					}
-					// Wait for any concurrent background flushes to finish
-					b.flushMu.Lock()
-					b.flushMu.Unlock()
+					b.drainRemaining()
 					return
 				case <-ticker.C:
 					b.flush()
@@ -104,15 +109,23 @@ func (b *BatchProcessor) Start() {
 
 // Append adds a row to the processor queue asynchronously.
 func (b *BatchProcessor) Append(row map[string]any) {
+	b.appendMu.RLock()
+	if b.closed.Load() {
+		b.appendMu.RUnlock()
+		return
+	}
+	var shouldFlush bool
 	select {
 	case b.queue <- row:
-		if len(b.queue) == b.config.BatchSize {
-			go b.flush()
-		}
+		shouldFlush = len(b.queue) == b.config.BatchSize
 	default:
 		if b.config.Logger != nil {
 			b.config.Logger.Println("WARNING: BigQuery event queue is full, dropping event.")
 		}
+	}
+	b.appendMu.RUnlock()
+	if shouldFlush {
+		go b.flush()
 	}
 }
 
@@ -152,6 +165,15 @@ func (b *BatchProcessor) writeAndLogBatch(ctx context.Context, batch []map[strin
 	}
 }
 
+func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
+	if len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(b.ctx, b.config.ShutdownTimeout)
+	defer cancel()
+	b.writeAndLogBatch(ctx, batch)
+}
+
 // flush drains the current queue and appends it. Uses TryLock to avoid blocking.
 func (b *BatchProcessor) flush() {
 	// Ensure single flush execution at any moment
@@ -159,25 +181,38 @@ func (b *BatchProcessor) flush() {
 		return
 	}
 	defer b.flushMu.Unlock()
+	if b.closed.Load() {
+		return
+	}
 
 	batch := b.drainQueue()
-	b.writeAndLogBatch(b.ctx, batch)
+	b.writeBatchBounded(batch)
 
-	// If the queue has enough items for another batch, drain and write synchronously.
-	for len(b.queue) >= b.config.BatchSize {
+	// If the queue has enough items for another batch, drain and write synchronously
+	// unless shutdown has started (in which case Close drains under ShutdownTimeout).
+	for !b.closed.Load() && len(b.queue) >= b.config.BatchSize {
 		batch = b.drainQueue()
-		b.writeAndLogBatch(b.ctx, batch)
+		b.writeBatchBounded(batch)
 	}
 }
 
-// blockingFlush drains the current queue and appends it. Uses a blocking Lock.
-func (b *BatchProcessor) blockingFlush(ctx context.Context) {
+// drainRemaining flushes all remaining queued batches under ShutdownTimeout.
+func (b *BatchProcessor) drainRemaining() {
 	b.flushMu.Lock()
 	defer b.flushMu.Unlock()
-
-	batch := b.drainQueue()
-	b.writeAndLogBatch(ctx, batch)
-	// No recursive call here; this is for ensuring completion on shutdown.
+	defer b.streamWriter.close()
+	if len(b.queue) == 0 {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), b.config.ShutdownTimeout)
+	defer cancel()
+	for len(b.queue) > 0 {
+		batch := b.drainQueue()
+		if len(batch) == 0 {
+			break
+		}
+		b.writeAndLogBatch(shutdownCtx, batch)
+	}
 }
 
 // writeBatch allocates a new Apache Arrow RecordBuilder from the batch and commits the writes to BigQuery.
@@ -217,7 +252,7 @@ func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any)
 				} else {
 					fieldVector.AppendNull()
 				}
-			case "event_type", "agent", "session_id", "invocation_id", "user_id", "trace_id", "span_id", "parent_span_id", "status", "error_message":
+			case eventIDField, "event_type", "agent", "session_id", "invocation_id", "user_id", "trace_id", "span_id", "parent_span_id", "status", "error_message":
 				if v, ok := val.(string); ok {
 					fieldVector.(*array.StringBuilder).Append(v)
 				} else {
@@ -360,10 +395,13 @@ func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any)
 
 // streamWriter is a wrapper that maintains a persistent BigQuery write stream.
 type streamWriter struct {
-	writeClient *bqstorage.BigQueryWriteClient
-	streamName  string
-	schemaBytes []byte
-	config      Config
+	writeClient  *bqstorage.BigQueryWriteClient
+	streamName   string
+	schemaBytes  []byte
+	config       Config
+	baseCtx      context.Context
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
 
 	stream interface {
 		Send(*storagepb.AppendRowsRequest) error
@@ -373,13 +411,32 @@ type streamWriter struct {
 	mu sync.Mutex
 }
 
-func newStreamWriter(client *bqstorage.BigQueryWriteClient, streamName string, schemaBytes []byte, config Config) *streamWriter {
+func newStreamWriter(ctx context.Context, client *bqstorage.BigQueryWriteClient, streamName string, schemaBytes []byte, config Config) *streamWriter {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &streamWriter{
 		writeClient: client,
 		streamName:  streamName,
 		schemaBytes: schemaBytes,
 		config:      config,
+		baseCtx:     context.WithoutCancel(ctx),
 	}
+}
+
+func (s *streamWriter) resetStream() {
+	if s.streamCancel != nil {
+		s.streamCancel()
+		s.streamCancel = nil
+	}
+	s.streamCtx = nil
+	s.stream = nil
+}
+
+func (s *streamWriter) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resetStream()
 }
 
 func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch) (*storagepb.AppendRowsResponse, error) {
@@ -402,13 +459,38 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			}
 		}
 
-		var err error
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		if s.stream != nil && s.streamCtx != nil && s.streamCtx.Err() != nil {
+			s.resetStream()
+		}
+
 		if s.stream == nil {
-			s.stream, err = s.writeClient.AppendRows(ctx)
-			if err != nil {
+			baseCtx := s.baseCtx
+			if baseCtx == nil || baseCtx.Err() != nil {
+				baseCtx = context.WithoutCancel(ctx)
+			}
+			streamCtx, streamCancel := context.WithCancel(baseCtx)
+			stopOpen := context.AfterFunc(ctx, streamCancel)
+			stream, err := s.writeClient.AppendRows(streamCtx)
+			if !stopOpen() {
+				streamCancel()
+				if err == nil {
+					err = ctx.Err()
+				}
 				lastErr = fmt.Errorf("failed to open append rows stream: %w", err)
 				continue
 			}
+			if err != nil {
+				streamCancel()
+				lastErr = fmt.Errorf("failed to open append rows stream: %w", err)
+				continue
+			}
+			s.stream = stream
+			s.streamCtx = streamCtx
+			s.streamCancel = streamCancel
 		}
 
 		batchBytes := serializeRecord(recordBatch, s.config.Logger)
@@ -432,6 +514,11 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			},
 		}
 
+		var stopCall func() bool
+		if s.streamCancel != nil {
+			stopCall = context.AfterFunc(ctx, s.streamCancel)
+		}
+
 		if err := s.stream.Send(req); err != nil {
 			// An error not generated by the client is reported as io.EOF here, with the
 			// real status left for Recv; drain until it surfaces, releasing the stream.
@@ -449,14 +536,20 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 					break
 				}
 			}
-			s.stream = nil // Reset stream on send error
+			if stopCall != nil {
+				stopCall()
+			}
+			s.resetStream() // Reset stream on send error
 			lastErr = fmt.Errorf("failed to send row batch: %w", err)
 			continue
 		}
 
 		res, err := s.stream.Recv()
+		if stopCall != nil {
+			stopCall()
+		}
 		if err != nil {
-			s.stream = nil // Reset stream on receive error
+			s.resetStream() // Reset stream on receive error
 			lastErr = fmt.Errorf("failed to receive response for row batch: %w", err)
 			continue
 		}
@@ -490,9 +583,18 @@ func serializeRecord(record arrow.RecordBatch, logger Logger) []byte {
 
 // Close gracefully shuts down the processing loop, flushes, and stops.
 func (b *BatchProcessor) Close() {
-	b.cancel()
-	// Only wait on the done channel if the Start() goroutine was actually launched.
-	if b.started {
-		<-b.done
-	}
+	b.closeOnce.Do(func() {
+		b.appendMu.Lock()
+		b.closed.Store(true)
+		close(b.stop)
+		b.appendMu.Unlock()
+
+		// Only wait on the done channel if the Start() goroutine was actually launched.
+		if b.started.Load() {
+			<-b.done
+		}
+		b.drainRemaining()
+		b.streamWriter.close()
+		b.cancel()
+	})
 }

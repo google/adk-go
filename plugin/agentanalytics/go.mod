@@ -5,6 +5,8 @@ go 1.26.5
 require (
 	cloud.google.com/go/bigquery v1.79.0
 	github.com/apache/arrow-go/v18 v18.6.0
+	github.com/google/go-cmp v0.7.0
+	github.com/google/uuid v1.6.0
 	go.opentelemetry.io/otel/trace v1.44.0
 	google.golang.org/adk/v2 v2.0.0
 	google.golang.org/api v0.288.0
@@ -26,11 +28,9 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/safehtml v0.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.17 // indirect
 	github.com/googleapis/gax-go/v2 v2.23.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
