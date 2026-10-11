@@ -80,6 +80,58 @@ func TestBasicRequestProcessor_ConfigIsolation(t *testing.T) {
 	}
 }
 
+func TestBasicRequestProcessor_OutputSchemaIsolation(t *testing.T) {
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+	}
+	base := utils.Must(agent.New(agent.Config{Name: "testAgent"}))
+	a := &mockLLMAgent{Agent: base, s: &State{OutputSchema: schema}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+	requests := []*model.LLMRequest{{}, {}}
+	for _, req := range requests {
+		for _, err := range basicRequestProcessor(ctx, req, &Flow{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !cmp.Equal(req.Config.ResponseSchema, schema) {
+			t.Fatal("request schema differs from OutputSchema")
+		}
+	}
+	requests[0].Config.ResponseSchema.Properties["answer"].Type = genai.TypeNumber
+	for name, got := range map[string]*genai.Schema{
+		"agent":         schema,
+		"other request": requests[1].Config.ResponseSchema,
+	} {
+		if got.Properties["answer"].Type != genai.TypeString {
+			t.Errorf("request mutation changed %s schema", name)
+		}
+	}
+}
+
+func TestBasicRequestProcessor_OutputSchemaCloneError(t *testing.T) {
+	schema := &genai.Schema{Type: genai.TypeArray}
+	schema.Items = schema
+	base := utils.Must(agent.New(agent.Config{Name: "testAgent"}))
+	a := &mockLLMAgent{Agent: base, s: &State{OutputSchema: schema}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+	req := &model.LLMRequest{}
+	errorsSeen := 0
+	for ev, err := range basicRequestProcessor(ctx, req, &Flow{}) {
+		if ev != nil || !errors.Is(err, errCloneDepth) {
+			t.Fatal("processor did not return the expected depth error")
+		}
+		errorsSeen++
+	}
+	if errorsSeen != 1 {
+		t.Errorf("processor returned %d errors, want one", errorsSeen)
+	}
+	if req.Config.ResponseSchema != nil || req.Config.ResponseMIMEType != "" {
+		t.Error("processor configured structured output after clone failure")
+	}
+}
+
 func TestBasicRequestProcessor_JSONSchemaCompatibility(t *testing.T) {
 	type schemaWithCache struct {
 		Type  string `json:"type"`
