@@ -214,7 +214,7 @@ func (f *deployCloudRunFlags) cleanTemp() error {
 		})
 }
 
-// compileEntryPoint builds locally the server using flags and environment variables in order to be run in CloudRun containter
+// compileEntryPoint builds locally the server using flags and environment variables in order to be run in CloudRun container
 func (f *deployCloudRunFlags) compileEntryPoint() error {
 	return util.LogStartStop("Compiling server",
 		func(p util.Printer) error {

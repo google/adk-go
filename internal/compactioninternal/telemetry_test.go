@@ -630,7 +630,7 @@ func TestCompactionSpanOmitsAbsentTimestamps(t *testing.T) {
 // threw away is not reported as a stored one.
 //
 // The span used to end when the summarizer returned, before any of the reasons
-// a caller discards a result: a cancelled turn, a failed re-read, a competing
+// a caller discards a result: a canceled turn, a failed re-read, a competing
 // compaction, a plugin rejecting it, a failed append. Every one of those left a
 // span saying the compaction succeeded, carrying a result_event_id that exists
 // in no session, so a trace could not distinguish a compaction that shrank a
