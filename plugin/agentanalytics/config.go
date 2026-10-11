@@ -37,6 +37,7 @@ const (
 	defaultTableName               = "agent_events"
 	defaultMaxInlineTextSize       = 32 * 1024
 	defaultGCSMaxConcurrentUploads = 8
+	defaultViewPrefix              = "v"
 )
 
 // Logger interface to use standard log operations natively.
@@ -132,17 +133,18 @@ type GCSContentOffloader interface {
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
-// [DefaultConfig] when a plugin or batch processor is constructed.
-//
-// Use [DefaultConfig] or set LogMultiModalContent: true to enable
-// content_parts (DisableMultiModalContent overrides it). Session metadata
-// logging, redaction of sensitive keys and credentials, run-end flushing, and
-// additive schema upgrades are enabled by default; DisableSessionMetadata,
-// DisableSensitiveKeyRedaction, DisableFlushOnRunEnd, and
-// DisableAutoSchemaUpgrade (or DisableSchemaUpgrade) opt out of each. Created
-// and upgraded tables carry label adk_schema_version="2" ([SchemaVersion]),
-// while attributes.adk.schema_version on each row is "1". Recursive payload
-// sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+// [DefaultConfig] when a plugin or batch processor is constructed. Session
+// metadata logging, redaction of sensitive keys and credentials, run-end
+// flushing, additive schema upgrades, and per-event view creation are enabled
+// by default and can be turned off with DisableSessionMetadata,
+// DisableSensitiveKeyRedaction, DisableFlushOnRunEnd, DisableAutoSchemaUpgrade
+// (or DisableSchemaUpgrade), and DisableCreateViews (or CreateViews=false on a
+// DefaultConfig). Multi-modal content_parts logging is controlled by
+// LogMultiModalContent (set to true by [DefaultConfig]) and overridden when
+// DisableMultiModalContent is true. Created and upgraded tables carry label
+// adk_schema_version="2" ([SchemaVersion]), while attributes.adk.schema_version
+// on each row is "1". Recursive payload sanitization is bounded by
+// maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
 	Enabled        bool
 	ProjectID      string
@@ -304,6 +306,24 @@ type Config struct {
 	// issued.
 	DisableAutoSchemaUpgrade bool
 
+	// CreateViews creates or replaces one BigQuery view per event type, named
+	// "<ViewPrefix>_<lower-case event type>" (for example v_tool_starting), in
+	// the dataset of the events table. The views are created in the background
+	// once the table is ready, with one CREATE OR REPLACE VIEW job per view;
+	// this needs bigquery.jobs.create and bigquery.tables.create/update, and
+	// replaces existing views of the same names. Failures are only reported
+	// through Logger; [BigQueryAgentAnalyticsPlugin.SyncViews] creates the views
+	// synchronously and returns the error. Deployments that start many
+	// instances may prefer DisableCreateViews plus one SyncViews call at
+	// deploy time.
+	CreateViews bool
+	// DisableCreateViews turns CreateViews off.
+	DisableCreateViews bool
+	// ViewPrefix is the name prefix of the created views. Empty means "v".
+	// It may contain only letters, digits, '_' and '-'. Give each events
+	// table that shares a dataset its own prefix.
+	ViewPrefix string
+
 	// ExactlyOnceDelivery writes through a COMMITTED write stream with
 	// explicit offsets instead of the default stream (for which event_id
 	// remains the row-level deduplication key), so that retrying an append
@@ -313,6 +333,8 @@ type Config struct {
 	// rotation fail. Replacing a desynchronized stream consumes
 	// CreateWriteStream quota. The stream is finalized on Close.
 	ExactlyOnceDelivery bool
+
+	fromDefault bool
 }
 
 // DefaultConfig returns the default configuration for the agent analytics plugin.
@@ -334,6 +356,9 @@ func DefaultConfig() Config {
 		GCSMaxConcurrentUploads:  defaultGCSMaxConcurrentUploads,
 		GCSUploadTimeout:         gcsUploadTimeout,
 		GCSMaxPendingUploadBytes: defaultMaxPendingUploadBytes,
+		CreateViews:              true,
+		ViewPrefix:               defaultViewPrefix,
+		fromDefault:              true,
 		RetryConfig: RetryConfig{
 			MaxRetries:   3,
 			InitialDelay: 100 * time.Millisecond,
@@ -392,6 +417,9 @@ func applyDefaults(c Config) Config {
 	if c.GCSMaxPendingUploadBytes <= 0 {
 		c.GCSMaxPendingUploadBytes = defaultMaxPendingUploadBytes
 	}
+	if c.ViewPrefix == "" {
+		c.ViewPrefix = defaultViewPrefix
+	}
 	return c
 }
 
@@ -413,6 +441,16 @@ func (c Config) flushOnRunEnd() bool {
 
 func (c Config) autoSchemaUpgrade() bool {
 	return !c.DisableAutoSchemaUpgrade && !c.DisableSchemaUpgrade
+}
+
+func (c Config) createViews() bool {
+	if c.DisableCreateViews {
+		return false
+	}
+	if c.fromDefault {
+		return c.CreateViews
+	}
+	return true
 }
 
 // maxContentLength returns the text truncation limit; -1 means no limit.
