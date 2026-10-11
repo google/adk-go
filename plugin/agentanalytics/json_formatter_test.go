@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 )
 
@@ -2599,4 +2600,716 @@ func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
 			t.Errorf("text did not redact credential: %s", text)
 		}
 	})
+}
+
+// collectParts returns the collector after it has taken in the messages,
+// which are numbered from 0 as the messages of a request are.
+func collectParts(opts partsOptions, contents ...*genai.Content) *partsCollector {
+	c := &partsCollector{opts: opts}
+	for i, content := range contents {
+		c.addContent(content, i)
+	}
+	return c
+}
+
+// singlePart returns a message that holds part.
+func singlePart(part *genai.Part) *genai.Content {
+	return &genai.Content{Parts: []*genai.Part{part}}
+}
+
+// partAttributes decodes the part_attributes of an entry.
+func partAttributes(t *testing.T, entry map[string]any) any {
+	t.Helper()
+	s, ok := entry["part_attributes"].(string)
+	if !ok {
+		t.Fatalf("part_attributes is %T, want a JSON string; entry: %v", entry["part_attributes"], entry)
+	}
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		t.Fatalf("part_attributes is not JSON: %v\n%s", err, s)
+	}
+	return v
+}
+
+func TestFormatContentParts_StructuredParts(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+		// The entry apart from part_attributes, which is compared as JSON.
+		wantMIMEType, wantText, wantAttrs string
+	}{
+		{
+			name:         "function call",
+			part:         &genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", Args: map[string]any{"q": "weather"}}},
+			wantMIMEType: "application/json",
+			wantText:     "Function: lookup",
+			wantAttrs:    `{"function_call":{"args":{"q":"weather"},"name":"lookup"},"function_name":"lookup"}`,
+		},
+		{
+			name:         "function response",
+			part:         &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "lookup", Response: map[string]any{"temp": 21}}},
+			wantMIMEType: "application/json",
+			wantText:     "Function response: lookup",
+			wantAttrs:    `{"function_response":{"name":"lookup","response":{"temp":21}}}`,
+		},
+		{
+			name:         "function response without a name",
+			part:         &genai.Part{FunctionResponse: &genai.FunctionResponse{Response: map[string]any{"ok": true}}},
+			wantMIMEType: "application/json",
+			wantText:     "Function response: unknown",
+			wantAttrs:    `{"function_response":{"response":{"ok":true}}}`,
+		},
+		{
+			name:         "executable code",
+			part:         &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+			wantMIMEType: "text/plain",
+			wantText:     "print(1)",
+			wantAttrs:    `{"executable_code":{"code":"print(1)","language":"PYTHON"}}`,
+		},
+		{
+			name:         "code execution result",
+			part:         &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}},
+			wantMIMEType: "text/plain",
+			wantText:     "1",
+			wantAttrs:    `{"code_execution_result":{"outcome":"OUTCOME_OK","output":"1"}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := formatContentParts(singlePart(tt.part), 100, true)
+
+			if truncated {
+				t.Error("formatContentParts() truncated = true, want false")
+			}
+			if len(got) != 1 {
+				t.Fatalf("formatContentParts() returned %d entries, want 1: %v", len(got), got)
+			}
+			checkJSON(t, "part_attributes", partAttributes(t, got[0]), tt.wantAttrs)
+			delete(got[0], "part_attributes")
+			want := map[string]any{"part_index": 0, "storage_mode": "INLINE", "mime_type": tt.wantMIMEType, "text": tt.wantText}
+			if diff := cmp.Diff(want, got[0]); diff != "" {
+				t.Errorf("entry mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPartsCollector_PartAttributesRedactSensitiveKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		redact bool
+		want   string
+	}{
+		{
+			name:   "redaction on",
+			redact: true,
+			want:   `{"function_response":{"name":"login","response":{"api_key":"[REDACTED]","user":"ann"}}}`,
+		},
+		{
+			name:   "redaction off",
+			redact: false,
+			want:   `{"function_response":{"name":"login","response":{"api_key":"SECRET-KEY","user":"ann"}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			part := &genai.Part{FunctionResponse: &genai.FunctionResponse{
+				Name: "login", Response: map[string]any{"api_key": "SECRET-KEY", "user": "ann"},
+			}}
+
+			c := collectParts(partsOptions{maxLen: 100, redact: tt.redact}, singlePart(part))
+
+			if len(c.parts) != 1 {
+				t.Fatalf("got %d entries, want 1: %v", len(c.parts), c.parts)
+			}
+			checkJSON(t, "part_attributes", partAttributes(t, c.parts[0]), tt.want)
+		})
+	}
+}
+
+// TestPartsCollector_TruncatedFlag checks which parts make the row truncated.
+func TestPartsCollector_TruncatedFlag(t *testing.T) {
+	const maxLen = 30
+	long := strings.Repeat("x", 50)
+	tests := []struct {
+		name string
+		part *genai.Part
+		want bool
+	}{
+		{name: "short text", part: &genai.Part{Text: "short"}},
+		{name: "text at the limit", part: &genai.Part{Text: strings.Repeat("x", maxLen)}},
+		{name: "long text", part: &genai.Part{Text: long}, want: true},
+		{name: "inline data", part: &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: make([]byte, 1000)}}},
+		{name: "function call", part: &genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup"}}},
+		{name: "function call with a long name", part: &genai.Part{FunctionCall: &genai.FunctionCall{Name: long}}, want: true},
+		{
+			name: "function response",
+			part: &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"k": "v"}}},
+		},
+		{
+			name: "function response with a long value",
+			part: &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"k": long}}},
+			want: true,
+		},
+		{name: "executable code", part: &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}},
+		{name: "long executable code", part: &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: long}}, want: true},
+		{name: "long code output", part: &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: long}}, want: true},
+		{name: "file URI", part: &genai.Part{FileData: &genai.FileData{FileURI: "https://example.com/a.png"}}},
+		{name: "file URI with a secret", part: &genai.Part{FileData: &genai.FileData{FileURI: "https://example.com/a.png?key=abc"}}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, got := formatContentParts(singlePart(tt.part), maxLen, true); got != tt.want {
+				t.Errorf("formatContentParts() truncated = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatContentParts_EmptyParts(t *testing.T) {
+	content := &genai.Content{Parts: []*genai.Part{nil, {}, {Text: ""}, {InlineData: nil}}}
+
+	got := FormatContentParts(content, 100)
+
+	// Every part keeps its index, whether or not there is anything to log.
+	want := []map[string]any{
+		{"part_index": 0, "storage_mode": "INLINE"},
+		{"mime_type": "text/plain", "part_attributes": "{}", "part_index": 1, "storage_mode": "INLINE"},
+		{"mime_type": "text/plain", "part_attributes": "{}", "part_index": 2, "storage_mode": "INLINE"},
+		{"mime_type": "text/plain", "part_attributes": "{}", "part_index": 3, "storage_mode": "INLINE"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("FormatContentParts() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestPartsCollector_InlineDataWithoutMIMEType(t *testing.T) {
+	content := singlePart(&genai.Part{InlineData: &genai.Blob{Data: []byte{1}}})
+	// Without offloading, a missing MIME type is written as it is.
+	want := []map[string]any{{
+		"part_index": 0, "storage_mode": "INLINE", "mime_type": "", "text": "[BINARY DATA]",
+	}}
+	// Offloading needs a content type for the object, so the part records the
+	// generic binary type that the object is stored with.
+	wantOffloaded := []map[string]any{{
+		"part_index": 0, "storage_mode": "INLINE", "mime_type": "application/octet-stream", "text": "[BINARY DATA]",
+	}}
+
+	t.Run("exported function", func(t *testing.T) {
+		if diff := cmp.Diff(want, FormatContentParts(content, 100)); diff != "" {
+			t.Errorf("FormatContentParts() mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("offloading off", func(t *testing.T) {
+		c := collectParts(partsOptions{maxLen: 100}, content)
+		if diff := cmp.Diff(want, c.parts); diff != "" {
+			t.Errorf("content_parts mismatch (-want +got):\n%s", diff)
+		}
+		if len(c.pending) != 0 {
+			t.Errorf("queued uploads = %v, want none", c.pending)
+		}
+	})
+	t.Run("offloading on", func(t *testing.T) {
+		c := collectParts(partsOptions{maxLen: 100, offload: true, inlineLimit: 10}, content)
+		if diff := cmp.Diff(wantOffloaded, c.parts); diff != "" {
+			t.Errorf("content_parts mismatch (-want +got):\n%s", diff)
+		}
+		// The object is stored with the same type that the row names.
+		wantPending := []pendingUpload{{slot: 0, mimeType: "application/octet-stream", data: []byte{1}}}
+		if diff := cmp.Diff(wantPending, c.pending, cmp.AllowUnexported(pendingUpload{})); diff != "" {
+			t.Errorf("queued uploads mismatch (-want +got):\n%s", diff)
+		}
+	})
+	t.Run("offloading on, upload budget exhausted", func(t *testing.T) {
+		c := collectParts(partsOptions{
+			maxLen:       100,
+			offload:      true,
+			inlineLimit:  10,
+			reserveBytes: func(int) bool { return false },
+		}, content)
+		wantKept := []map[string]any{{
+			"part_index": 0, "storage_mode": "INLINE", "mime_type": "application/octet-stream", "text": uploadFailedText,
+		}}
+		if diff := cmp.Diff(wantKept, c.parts); diff != "" {
+			t.Errorf("content_parts mismatch (-want +got):\n%s", diff)
+		}
+		if len(c.pending) != 0 {
+			t.Errorf("queued uploads = %v, want none", c.pending)
+		}
+	})
+}
+
+// TestPartsCollector_Offloading is the decision table of what is queued for
+// upload and what stays in the row.
+func TestPartsCollector_Offloading(t *testing.T) {
+	const inlineLimit = 10
+	on := partsOptions{maxLen: 100, offload: true, inlineLimit: inlineLimit}
+	textEntry := func(text string) map[string]any {
+		return map[string]any{"part_index": 0, "storage_mode": "INLINE", "mime_type": "text/plain", "text": text}
+	}
+	imageEntry := map[string]any{"part_index": 0, "storage_mode": "INLINE", "mime_type": "image/png", "text": "[BINARY DATA]"}
+	image := func(data ...byte) *genai.Part {
+		return &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: data}}
+	}
+	text := func(n int) string { return strings.Repeat("a", n) }
+	tests := []struct {
+		name string
+		opts partsOptions
+		part *genai.Part
+		// wantEntry, if set, is the only content_parts entry.
+		wantEntry   map[string]any
+		wantPending []pendingUpload
+	}{
+		{
+			name:      "offloading off keeps long text inline",
+			opts:      partsOptions{maxLen: 100, inlineLimit: inlineLimit},
+			part:      &genai.Part{Text: text(40)},
+			wantEntry: textEntry(text(40)),
+		},
+		{
+			name:      "offloading off keeps images inline",
+			opts:      partsOptions{maxLen: 100, inlineLimit: inlineLimit},
+			part:      image(1, 2, 3),
+			wantEntry: imageEntry,
+		},
+		{
+			name:      "text at the limit stays inline",
+			opts:      on,
+			part:      &genai.Part{Text: text(inlineLimit)},
+			wantEntry: textEntry(text(inlineLimit)),
+		},
+		{
+			name:        "text over the limit is queued",
+			opts:        on,
+			part:        &genai.Part{Text: text(inlineLimit + 1)},
+			wantEntry:   textEntry(text(inlineLimit + 1)),
+			wantPending: []pendingUpload{{slot: 0, mimeType: "text/plain", isText: true, text: text(inlineLimit + 1)}},
+		},
+		{
+			// The limit counts bytes: six runes of two bytes are twelve.
+			name:        "text over the limit in bytes is queued",
+			opts:        on,
+			part:        &genai.Part{Text: strings.Repeat("é", 6)},
+			wantPending: []pendingUpload{{slot: 0, mimeType: "text/plain", isText: true, text: strings.Repeat("é", 6)}},
+		},
+		{
+			name:      "text at the limit in bytes stays inline",
+			opts:      on,
+			part:      &genai.Part{Text: strings.Repeat("é", 5)},
+			wantEntry: textEntry(strings.Repeat("é", 5)),
+		},
+		{
+			// The row cannot keep all of this inline, so the object must.
+			name:        "text cut by MaxContentLen is queued in full",
+			opts:        partsOptions{maxLen: 30, offload: true, inlineLimit: 100},
+			part:        &genai.Part{Text: text(40)},
+			wantEntry:   textEntry(text(30) + "...[TRUNCATED]"),
+			wantPending: []pendingUpload{{slot: 0, mimeType: "text/plain", isText: true, text: text(40), fallbackTruncated: true}},
+		},
+		{
+			name:      "text at MaxContentLen stays inline",
+			opts:      partsOptions{maxLen: 30, offload: true, inlineLimit: 100},
+			part:      &genai.Part{Text: text(30)},
+			wantEntry: textEntry(text(30)),
+		},
+		{
+			name:      "without a length limit only the inline limit counts",
+			opts:      partsOptions{maxLen: -1, offload: true, inlineLimit: 100},
+			part:      &genai.Part{Text: text(40)},
+			wantEntry: textEntry(text(40)),
+		},
+		{
+			name:        "image is queued",
+			opts:        on,
+			part:        image(1, 2, 3),
+			wantEntry:   imageEntry,
+			wantPending: []pendingUpload{{slot: 0, mimeType: "image/png", data: []byte{1, 2, 3}}},
+		},
+		{
+			name:        "image without data is queued too",
+			opts:        on,
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantEntry:   imageEntry,
+			wantPending: []pendingUpload{{slot: 0, mimeType: "image/png"}},
+		},
+		{
+			name: "function call is not queued",
+			opts: on,
+			part: &genai.Part{FunctionCall: &genai.FunctionCall{Name: strings.Repeat("f", 40)}},
+		},
+		{
+			name: "function response is not queued",
+			opts: on,
+			part: &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "f", Response: map[string]any{"k": text(40)}}},
+		},
+		{
+			name: "code is not queued",
+			opts: on,
+			part: &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: text(40)}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := collectParts(tt.opts, singlePart(tt.part))
+
+			if tt.wantEntry != nil {
+				if diff := cmp.Diff([]map[string]any{tt.wantEntry}, c.parts); diff != "" {
+					t.Errorf("content_parts mismatch (-want +got):\n%s", diff)
+				}
+			}
+			if diff := cmp.Diff(tt.wantPending, c.pending, cmp.AllowUnexported(pendingUpload{})); diff != "" {
+				t.Errorf("queued uploads mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPartsCollector_FileDataObjectRefs(t *testing.T) {
+	tests := []struct {
+		name         string
+		offload      bool
+		connectionID string
+		uri          string
+		wantURI      string
+		// wantRef is the object_ref of the entry; nil means there is none.
+		wantRef       map[string]any
+		wantTruncated bool
+	}{
+		{
+			name: "Cloud Storage file with a connection", offload: true, connectionID: "us.conn",
+			uri: "gs://bucket/doc.pdf", wantURI: "gs://bucket/doc.pdf",
+			wantRef: map[string]any{"uri": "gs://bucket/doc.pdf", "details": "{}", "authorizer": "us.conn"},
+		},
+		{
+			name: "Cloud Storage file without a connection", offload: true,
+			uri: "gs://bucket/doc.pdf", wantURI: "gs://bucket/doc.pdf",
+			wantRef: map[string]any{"uri": "gs://bucket/doc.pdf", "details": "{}"},
+		},
+		{
+			name: "other file", offload: true, connectionID: "us.conn",
+			uri: "https://example.com/doc.pdf", wantURI: "https://example.com/doc.pdf",
+		},
+		{
+			name: "offloading off", connectionID: "us.conn",
+			uri: "gs://bucket/doc.pdf", wantURI: "gs://bucket/doc.pdf",
+		},
+		{
+			name: "Cloud Storage file with a secret in the URI", offload: true, connectionID: "us.conn",
+			uri: "gs://bucket/doc.pdf?key=abc", wantURI: "gs://bucket/doc.pdf?key=%5BREDACTED%5D", wantTruncated: true,
+		},
+		{
+			name: "Cloud Storage file with user information", offload: true, connectionID: "us.conn",
+			uri: "gs://user:pw@bucket/doc.pdf", wantURI: redactedURIPlaceholder, wantTruncated: true,
+		},
+		{name: "no URI", offload: true, connectionID: "us.conn"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			part := &genai.Part{FileData: &genai.FileData{FileURI: tt.uri, MIMEType: "application/pdf"}}
+
+			c := collectParts(partsOptions{maxLen: 100, redact: true, offload: tt.offload, inlineLimit: 10, connectionID: tt.connectionID}, singlePart(part))
+
+			want := map[string]any{"part_index": 0, "storage_mode": "EXTERNAL_URI", "mime_type": "application/pdf", "uri": tt.wantURI}
+			if tt.wantRef != nil {
+				want["object_ref"] = tt.wantRef
+			}
+			if diff := cmp.Diff([]map[string]any{want}, c.parts); diff != "" {
+				t.Errorf("content_parts mismatch (-want +got):\n%s", diff)
+			}
+			if c.truncated != tt.wantTruncated {
+				t.Errorf("truncated = %v, want %v", c.truncated, tt.wantTruncated)
+			}
+			if len(c.pending) != 0 {
+				t.Errorf("queued uploads = %v, want none: the file is stored already", c.pending)
+			}
+		})
+	}
+}
+
+// TestPartsCollector_SlotsAndOrdinals checks that a queued upload names its
+// entry and its message correctly when there are several messages, and
+// entries that are not uploaded.
+func TestPartsCollector_SlotsAndOrdinals(t *testing.T) {
+	png := func(b byte) *genai.Part {
+		return &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{b}}}
+	}
+	long := strings.Repeat("a", 40)
+	opts := partsOptions{maxLen: 100, offload: true, inlineLimit: 10}
+
+	c := collectParts(opts,
+		&genai.Content{Parts: []*genai.Part{{Text: "short"}, png(1)}},
+		// A nil message has no parts, but keeps its number.
+		nil,
+		&genai.Content{Parts: []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{Name: "f"}}, png(2), {Text: long}}},
+	)
+
+	// Slots count the entries of all messages; part indexes restart in each.
+	want := []pendingUpload{
+		{slot: 1, contentOrd: 0, partIdx: 1, mimeType: "image/png", data: []byte{1}},
+		{slot: 4, contentOrd: 2, partIdx: 2, mimeType: "image/png", data: []byte{2}},
+		{slot: 5, contentOrd: 2, partIdx: 3, mimeType: "text/plain", isText: true, text: long},
+	}
+	if diff := cmp.Diff(want, c.pending, cmp.AllowUnexported(pendingUpload{})); diff != "" {
+		t.Errorf("queued uploads mismatch (-want +got):\n%s", diff)
+	}
+	if got := len(c.parts); got != 6 {
+		t.Fatalf("got %d content_parts entries, want 6: %v", got, c.parts)
+	}
+	for _, u := range c.pending {
+		if got, want := c.parts[u.slot]["part_index"], u.partIdx; got != want {
+			t.Errorf("the entry in slot %d has part_index %v, want %v", u.slot, got, want)
+		}
+	}
+}
+
+func TestPartsCollector_QueuedDataIsACopy(t *testing.T) {
+	blob := []byte{1, 2, 3}
+	part := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: blob}}
+	c := collectParts(partsOptions{maxLen: 100, offload: true, inlineLimit: 10}, singlePart(part))
+
+	// The caller changes the bytes, and then the message.
+	blob[0] = 0xEE
+	part.InlineData.Data = nil
+	part.InlineData.MIMEType = "image/gif"
+
+	want := []pendingUpload{{slot: 0, mimeType: "image/png", data: []byte{1, 2, 3}}}
+	if diff := cmp.Diff(want, c.pending, cmp.AllowUnexported(pendingUpload{})); diff != "" {
+		t.Errorf("queued uploads mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestPartsCollector_TextAndStructuredRedaction(t *testing.T) {
+	secretJSON := `{"api_key":"sk-secret-key-999","msg":"` + strings.Repeat("x", 40) + `"}`
+	codeJSON := `{"password":"pw-secret-123"}`
+
+	t.Run("redact enabled", func(t *testing.T) {
+		c := collectParts(
+			partsOptions{maxLen: 500, redact: true, offload: true, inlineLimit: 20},
+			&genai.Content{Parts: []*genai.Part{
+				{Text: secretJSON},
+				{ExecutableCode: &genai.ExecutableCode{Language: genai.LanguagePython, Code: codeJSON}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: codeJSON}},
+			}},
+		)
+		if len(c.pending) != 1 {
+			t.Fatalf("pending len = %d, want 1", len(c.pending))
+		}
+		if strings.Contains(c.pending[0].text, "sk-secret-key-999") || !strings.Contains(c.pending[0].text, redactedValue) {
+			t.Errorf("queued upload text was not redacted: %q", c.pending[0].text)
+		}
+		for i, part := range c.parts {
+			text, _ := part["text"].(string)
+			if strings.Contains(text, "sk-secret-key-999") || strings.Contains(text, "pw-secret-123") {
+				t.Errorf("part %d text contains unredacted secret: %q", i, text)
+			}
+			if !strings.Contains(text, redactedValue) {
+				t.Errorf("part %d text lacks %q: %q", i, redactedValue, text)
+			}
+		}
+	})
+
+	t.Run("redact disabled", func(t *testing.T) {
+		c := collectParts(
+			partsOptions{maxLen: 500, redact: false, offload: true, inlineLimit: 20},
+			singlePart(&genai.Part{Text: secretJSON}),
+		)
+		if len(c.pending) != 1 || !strings.Contains(c.pending[0].text, "sk-secret-key-999") {
+			t.Errorf("pending text with redact=false = %v, want original secret preserved", c.pending)
+		}
+	})
+}
+
+func TestNormalizeFunctionResponse_PythonSnakeCaseParity(t *testing.T) {
+	willCont := true
+	fr := &genai.FunctionResponse{
+		ID:           "call-1",
+		Name:         "lookup_doc",
+		WillContinue: &willCont,
+		Scheduling:   genai.FunctionResponseSchedulingWhenIdle,
+		Response: map[string]any{
+			"CallerCamelKey": "untouched",
+			"api_key":        "sk-hidden",
+		},
+		Parts: []*genai.FunctionResponsePart{
+			{
+				InlineData: &genai.FunctionResponseBlob{
+					MIMEType:    "text/plain",
+					Data:        []byte("hello"),
+					DisplayName: "greeting.txt",
+				},
+			},
+			{
+				InlineData: &genai.FunctionResponseBlob{
+					MIMEType:    "image/png",
+					Data:        []byte{0x89, 'P', 'N', 'G', 0xff},
+					DisplayName: "pixel.png",
+				},
+			},
+			{
+				FileData: &genai.FunctionResponseFileData{
+					FileURI:     "gs://bucket/file.pdf",
+					MIMEType:    "application/pdf",
+					DisplayName: "report.pdf",
+				},
+			},
+		},
+	}
+
+	c := collectParts(partsOptions{maxLen: 1000, redact: true}, singlePart(&genai.Part{FunctionResponse: fr}))
+	if len(c.parts) != 1 {
+		t.Fatalf("got %d parts, want 1", len(c.parts))
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(c.parts[0]["part_attributes"].(string)), &got); err != nil {
+		t.Fatalf("part_attributes is not JSON: %v", err)
+	}
+	want := map[string]any{
+		"function_response": map[string]any{
+			"id":            "call-1",
+			"name":          "lookup_doc",
+			"will_continue": true,
+			"scheduling":    string(genai.FunctionResponseSchedulingWhenIdle),
+			"response": map[string]any{
+				"CallerCamelKey": "untouched",
+				"api_key":        redactedValue,
+			},
+			"parts": []any{
+				map[string]any{
+					"inline_data": map[string]any{
+						"mime_type":    "text/plain",
+						"data":         "hello",
+						"display_name": "greeting.txt",
+					},
+				},
+				map[string]any{
+					"inline_data": map[string]any{
+						"mime_type":    "image/png",
+						"data":         binaryDataPlaceholder,
+						"display_name": "pixel.png",
+					},
+				},
+				map[string]any{
+					"file_data": map[string]any{
+						"file_uri":     "gs://bucket/file.pdf",
+						"mime_type":    "application/pdf",
+						"display_name": "report.pdf",
+					},
+				},
+			},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("part_attributes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// The bytes of a function response's inline media are sanitized like any other
+// payload: UTF-8 data is redacted and truncated as text, and binary data is
+// replaced by a placeholder.
+func TestNormalizeFunctionResponse_InlineMediaDataIsSanitized(t *testing.T) {
+	const (
+		credentialText = "db password: hunter2\napi_key=SECRET123\nAuthorization: Bearer abc.def.ghi\n{\"token\": \"TOKENVALUE\"}"
+		keyedJSON      = `{"password": "p4ssw0rd", "user": "alice"}`
+	)
+
+	// inlineMedia collects a function response that carries one inline media
+	// part and returns the collector, the part_attributes written for it, and
+	// the data it holds there.
+	inlineMedia := func(t *testing.T, opts partsOptions, mimeType string, data []byte) (*partsCollector, string, any) {
+		t.Helper()
+		c := collectParts(opts, singlePart(&genai.Part{FunctionResponse: &genai.FunctionResponse{
+			Name: "fetch",
+			Parts: []*genai.FunctionResponsePart{{
+				InlineData: &genai.FunctionResponseBlob{MIMEType: mimeType, Data: data},
+			}},
+		}}))
+		if len(c.parts) != 1 {
+			t.Fatalf("got %d parts, want 1", len(c.parts))
+		}
+		attrs, _ := c.parts[0]["part_attributes"].(string)
+		parts, _ := lookup(partAttributes(t, c.parts[0]), "function_response", "parts")
+		list, _ := parts.([]any)
+		if len(list) != 1 {
+			t.Fatalf("function_response.parts = %v, want 1 part; part_attributes: %s", parts, attrs)
+		}
+		got, ok := lookup(list[0], "inline_data", "data")
+		if !ok {
+			t.Fatalf("part has no inline_data.data: %v", list[0])
+		}
+		return c, attrs, got
+	}
+
+	t.Run("credentials in UTF-8 data are redacted", func(t *testing.T) {
+		_, attrs, data := inlineMedia(t, partsOptions{maxLen: 1000, redact: true}, "text/plain", []byte(credentialText))
+		for _, secret := range []string{"hunter2", "SECRET123", "abc.def.ghi", "TOKENVALUE"} {
+			if strings.Contains(attrs, secret) {
+				t.Errorf("part_attributes leaks %q: %s", secret, attrs)
+			}
+		}
+		if s, _ := data.(string); !strings.Contains(s, redactedValue) {
+			t.Errorf("data = %q, want it to contain %q", data, redactedValue)
+		}
+	})
+
+	t.Run("sensitive keys in JSON data are redacted", func(t *testing.T) {
+		_, attrs, data := inlineMedia(t, partsOptions{maxLen: 1000, redact: true}, "application/json", []byte(keyedJSON))
+		if strings.Contains(attrs, "p4ssw0rd") {
+			t.Errorf("part_attributes leaks the password: %s", attrs)
+		}
+		if s, _ := data.(string); !strings.Contains(s, redactedValue) || !strings.Contains(s, "alice") {
+			t.Errorf("data = %q, want the password redacted and the user kept", data)
+		}
+	})
+
+	t.Run("binary data is replaced by a placeholder", func(t *testing.T) {
+		c, _, data := inlineMedia(t, partsOptions{maxLen: 1000, redact: true}, "image/png", []byte{0x89, 'P', 'N', 'G', 0xff})
+		if data != binaryDataPlaceholder {
+			t.Errorf("data = %v, want %q", data, binaryDataPlaceholder)
+		}
+		if !c.truncated {
+			t.Error("collector is not marked truncated after binary data was dropped")
+		}
+	})
+
+	t.Run("long data is truncated", func(t *testing.T) {
+		c, _, data := inlineMedia(t, partsOptions{maxLen: 10, redact: true}, "text/plain", []byte(strings.Repeat("a", 50)))
+		if want := strings.Repeat("a", 10) + truncationSuffix; data != want {
+			t.Errorf("data = %v, want %q", data, want)
+		}
+		if !c.truncated {
+			t.Error("collector is not marked truncated after data was cut")
+		}
+	})
+
+	t.Run("data is kept as text when redaction is off", func(t *testing.T) {
+		_, _, data := inlineMedia(t, partsOptions{maxLen: 1000, redact: false}, "text/plain", []byte(credentialText))
+		if data != credentialText {
+			t.Errorf("data = %v, want %q", data, credentialText)
+		}
+	})
+}
+
+func TestPartsCollector_QueuedTextDoesNotMarkTruncated(t *testing.T) {
+	longText := strings.Repeat("a", 50)
+	c := collectParts(partsOptions{maxLen: 20, offload: true, inlineLimit: 100}, singlePart(&genai.Part{Text: longText}))
+	if len(c.pending) != 1 {
+		t.Fatalf("pending len = %d, want 1", len(c.pending))
+	}
+	if c.truncated || c.nonUploadTruncated {
+		t.Errorf("truncated=%v nonUploadTruncated=%v, want both false when text is queued for offload", c.truncated, c.nonUploadTruncated)
+	}
+
+	// When pending upload budget rejects the reservation, truncation is recorded immediately.
+	cRejected := collectParts(partsOptions{
+		maxLen:       20,
+		offload:      true,
+		inlineLimit:  100,
+		reserveBytes: func(int) bool { return false },
+	}, singlePart(&genai.Part{Text: longText}))
+	if len(cRejected.pending) != 0 {
+		t.Fatalf("pending len = %d, want 0 when reservation fails", len(cRejected.pending))
+	}
+	if !cRejected.truncated || !cRejected.nonUploadTruncated {
+		t.Errorf("truncated=%v nonUploadTruncated=%v, want both true when reservation fails", cRejected.truncated, cRejected.nonUploadTruncated)
+	}
 }
