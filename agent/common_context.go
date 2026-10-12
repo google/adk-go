@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -793,6 +794,7 @@ func newTrackedArtifacts(inner Artifacts, actions *session.EventActions) Artifac
 type trackedArtifacts struct {
 	Artifacts
 	actions *session.EventActions
+	mu      sync.Mutex // Guards delta updates through this wrapper.
 }
 
 // Unwrap lets internal adapters reach the backing service without adding methods
@@ -805,11 +807,16 @@ func (a *trackedArtifacts) Save(ctx context.Context, name string, data *genai.Pa
 		return resp, err
 	}
 	if a.actions != nil {
+		a.mu.Lock()
+		defer a.mu.Unlock()
 		if a.actions.ArtifactDelta == nil {
 			a.actions.ArtifactDelta = make(map[string]int64)
 		}
-		// TODO: RWLock, check the version stored is newer in case multiple tools save the same file.
-		a.actions.ArtifactDelta[name] = resp.Version
+		// Keep the highest version when saves finish out of order, matching
+		// mergeArtifactDeltas and deliberately differing from Python's last-write-wins.
+		if version, ok := a.actions.ArtifactDelta[name]; !ok || resp.Version > version {
+			a.actions.ArtifactDelta[name] = resp.Version
+		}
 	}
 	return resp, nil
 }

@@ -16,6 +16,7 @@ package llmagent_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,36 @@ import (
 // conversation. The header alone is a few dozen bytes and a real recording here
 // is tens of kilobytes, so anything under this is a stub from a failed record.
 const minCassetteBytes = 1024
+
+// requireCassette fails the test unless its committed cassette is present and
+// larger than a stub. Recording mode is exempt, since that is the run that
+// creates the file.
+//
+// The cassette is committed, so its absence is a lost or renamed file rather
+// than an unrecorded checkout. Skipping would turn that into a silent pass,
+// which is how a test quietly stops running for months. A failed or interrupted
+// re-record leaves the header and nothing else, and accepting it meant dying
+// much later on a replay miss, with a message that never mentioned the
+// cassette.
+func requireCassette(t *testing.T) {
+	t.Helper()
+	// The same path newGeminiModel opens, subtest separators included.
+	trace := filepath.Join("testdata", strings.ReplaceAll(t.Name()+".httprr", "/", "_"))
+	if recording, _ := httprr.Recording(trace); recording {
+		return
+	}
+	reRecord := fmt.Sprintf("Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ "+
+		"-run '^%s$' -httprecord='%s\\.httprr$' -count=1 -v",
+		t.Name(), strings.TrimSuffix(filepath.Base(trace), ".httprr"))
+	info, err := os.Stat(trace)
+	if err != nil {
+		t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
+	}
+	if info.Size() < minCassetteBytes {
+		t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
+			"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
+	}
+}
 
 // TestCompactionE2E drives a real model through enough turns to trigger a
 // sliding-window compaction, then checks that the next prompt carries the
@@ -117,27 +148,7 @@ func TestCompactionE2E(t *testing.T) {
 	// suite in this package. Change it only alongside a re-record, since the
 	// model name is part of the request URL the cassette keys on.
 
-	// The cassette is committed, so its absence is a lost or renamed file rather
-	// than an unrecorded checkout. Skipping would turn that into a silent pass,
-	// which is how a test quietly stops running for months. Every other cassette
-	// test in this package fails instead, and so does this one. Recording mode
-	// goes ahead regardless, since that is the run that creates the file.
-	trace := filepath.Join("testdata", t.Name()+".httprr")
-	if recording, _ := httprr.Recording(trace); !recording {
-		const reRecord = "Re-record with: GOOGLE_API_KEY=... go test ./agent/llmagent/ " +
-			"-run '^TestCompactionE2E$' -httprecord='TestCompactionE2E\\.httprr$' -count=1 -v"
-		info, err := os.Stat(trace)
-		if err != nil {
-			t.Fatalf("no cassette at %s: %v. It is committed, so this means it was lost or renamed. %s", trace, err, reRecord)
-		}
-		// A failed or interrupted re-record leaves the header and nothing else.
-		// Accepting it meant dying eighty lines later on a replay miss, with a
-		// message that never mentioned the cassette.
-		if info.Size() < minCassetteBytes {
-			t.Fatalf("the cassette at %s is %d bytes, too small to hold a conversation. "+
-				"A re-record that failed partway leaves a header-only stub. %s", trace, info.Size(), reRecord)
-		}
-	}
+	requireCassette(t)
 
 	// Captured before each model call, so the assertions can look at the exact
 	// history the agent sent rather than inferring it from the session.
