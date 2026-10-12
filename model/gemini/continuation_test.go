@@ -241,6 +241,7 @@ func TestContinuation_PreservesClientProviderOnEveryRequest(t *testing.T) {
 func TestContinuation_Generate(t *testing.T) {
 	tests := []struct {
 		name            string
+		config          *genai.GenerateContentConfig
 		byToken         map[string][]map[string]any
 		want            *model.LLMResponse
 		wantTokens      []string
@@ -292,7 +293,54 @@ func TestContinuation_Generate(t *testing.T) {
 			wantOutputSoFar: []string{"", "one "},
 		},
 		{
+			name: "MAX_TOKENS with a token after CONTINUATION not resumed",
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two ", "MAX_TOKENS", "t2")},
+				"t2": {candidate("three", "STOP", "")},
+			},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two "}}},
+				FinishReason:  genai.FinishReasonMaxTokens,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
+		{
 			name: "MAX_TOKENS with a token not resumed",
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "MAX_TOKENS", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
+				FinishReason:  genai.FinishReasonMaxTokens,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 2, TotalTokenCount: 12},
+			},
+			wantTokens:      []string{""},
+			wantOutputSoFar: []string{""},
+		},
+		{
+			// maxOutputTokens bounds the whole generation, so the per-request
+			// limit below it is still resumed.
+			name:   "CONTINUATION with maxOutputTokens",
+			config: &genai.GenerateContentConfig{MaxOutputTokens: 100},
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
+				FinishReason:  genai.FinishReasonStop,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
+		{
+			name:   "MAX_TOKENS with a token and maxOutputTokens not resumed",
+			config: &genai.GenerateContentConfig{MaxOutputTokens: 100},
 			byToken: map[string][]map[string]any{
 				"":   {candidate("one ", "MAX_TOKENS", "t1")},
 				"t1": {candidate("two", "STOP", "")},
@@ -320,8 +368,10 @@ func TestContinuation_Generate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			api := &fakeContinuationAPI{byToken: tc.byToken}
+			req := continuationRequest()
+			req.Config = tc.config
 			var got *model.LLMResponse
-			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), false) {
+			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), req, false) {
 				if err != nil {
 					t.Fatalf("GenerateContent: %v", err)
 				}
@@ -376,29 +426,120 @@ func TestContinuation_GenerateStream(t *testing.T) {
 	checkRequests(t, api, []string{"", "t1"}, []string{"", "one two "})
 }
 
-// TestContinuation_GenerateStreamMaxTokens checks that a streamed MAX_TOKENS
-// stop with a token is returned as it is, as the unary one is.
-func TestContinuation_GenerateStreamMaxTokens(t *testing.T) {
-	api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
-		"":   {candidate("one ", "", ""), candidate("two", "MAX_TOKENS", "t1")},
-		"t1": {candidate("three", "STOP", "")},
-	}}
-	var final *model.LLMResponse
-	for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), true) {
-		if err != nil {
-			t.Fatalf("GenerateContent: %v", err)
-		}
-		if !resp.Partial {
-			final = resp
-		}
+// TestContinuation_GenerateStreamResumesOnlyContinuation checks that a
+// streamed MAX_TOKENS stop with a token is returned as it is, as the unary one
+// is, wherever it falls in the generation and whatever maxOutputTokens says,
+// and that a streamed CONTINUATION stop is resumed when the request sets
+// maxOutputTokens. The stop that ends the generation completes the turn, and a
+// resumed one does not.
+func TestContinuation_GenerateStreamResumesOnlyContinuation(t *testing.T) {
+	tests := []struct {
+		name            string
+		config          *genai.GenerateContentConfig
+		byToken         map[string][]map[string]any
+		wantPartials    []string
+		want            *model.LLMResponse
+		wantTokens      []string
+		wantOutputSoFar []string
+	}{
+		{
+			name: "MAX_TOKENS with a token not resumed",
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "", ""), candidate("two", "MAX_TOKENS", "t1")},
+				"t1": {candidate("three", "STOP", "")},
+			},
+			wantPartials: []string{"one ", "two (turn complete)"},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
+				FinishReason:  genai.FinishReasonMaxTokens,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 2, TotalTokenCount: 12},
+			},
+			wantTokens:      []string{""},
+			wantOutputSoFar: []string{""},
+		},
+		{
+			name: "MAX_TOKENS with a token after CONTINUATION not resumed",
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two ", "MAX_TOKENS", "t2")},
+				"t2": {candidate("three", "STOP", "")},
+			},
+			wantPartials: []string{"one ", "two  (turn complete)"},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two "}}},
+				FinishReason:  genai.FinishReasonMaxTokens,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
+		{
+			name:   "MAX_TOKENS with a token and maxOutputTokens not resumed",
+			config: &genai.GenerateContentConfig{MaxOutputTokens: 100},
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "MAX_TOKENS", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			},
+			wantPartials: []string{"one  (turn complete)"},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one "}}},
+				FinishReason:  genai.FinishReasonMaxTokens,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CandidatesTokenCount: 2, TotalTokenCount: 12},
+			},
+			wantTokens:      []string{""},
+			wantOutputSoFar: []string{""},
+		},
+		{
+			name:   "CONTINUATION with maxOutputTokens",
+			config: &genai.GenerateContentConfig{MaxOutputTokens: 100},
+			byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "STOP", "")},
+			},
+			wantPartials: []string{"one ", "two (turn complete)"},
+			want: &model.LLMResponse{
+				Content:       &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "one two"}}},
+				FinishReason:  genai.FinishReasonStop,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 20, CandidatesTokenCount: 4, TotalTokenCount: 24},
+			},
+			wantTokens:      []string{"", "t1"},
+			wantOutputSoFar: []string{"", "one "},
+		},
 	}
-	if final == nil {
-		t.Fatal("no final response")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: tc.byToken}
+			req := continuationRequest()
+			req.Config = tc.config
+			var partials []string
+			var final *model.LLMResponse
+			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), req, true) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+				if !resp.Partial {
+					final = resp
+					continue
+				}
+				desc := resp.Content.Parts[0].Text
+				if resp.TurnComplete {
+					desc += " (turn complete)"
+				}
+				partials = append(partials, desc)
+			}
+			if diff := cmp.Diff(tc.wantPartials, partials); diff != "" {
+				t.Errorf("partial responses (-want +got):\n%s", diff)
+			}
+			if final == nil {
+				t.Fatal("no final response")
+			}
+			got := &model.LLMResponse{Content: final.Content, FinishReason: final.FinishReason, UsageMetadata: final.UsageMetadata, CustomMetadata: final.CustomMetadata}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("final response (-want +got):\n%s", diff)
+			}
+			checkRequests(t, api, tc.wantTokens, tc.wantOutputSoFar)
+		})
 	}
-	if final.FinishReason != genai.FinishReasonMaxTokens {
-		t.Errorf("final finish reason = %q, want %q", final.FinishReason, genai.FinishReasonMaxTokens)
-	}
-	checkRequests(t, api, []string{""}, []string{""})
 }
 
 // TestContinuation_GenerateStreamGivesUp checks that a streamed generation the
