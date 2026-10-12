@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -1008,4 +1009,76 @@ func TestContinuation_RetriesResumingRequest(t *testing.T) {
 		}
 		checkRequests(t, api, []string{"", "t1"}, []string{"", "one "})
 	})
+}
+
+func TestSetFalse(t *testing.T) {
+	type withField struct {
+		AutomaticContinuation *bool
+		Other                 int
+	}
+	type withoutField struct{ Other int }
+	type otherType struct{ AutomaticContinuation bool }
+	tests := []struct {
+		name      string
+		got, want any
+	}{
+		{
+			name: "unset field set to false",
+			got:  &withField{Other: 1},
+			want: &withField{AutomaticContinuation: genai.Ptr(false), Other: 1},
+		},
+		{
+			name: "true field set to false",
+			got:  &withField{AutomaticContinuation: genai.Ptr(true), Other: 1},
+			want: &withField{AutomaticContinuation: genai.Ptr(false), Other: 1},
+		},
+		{
+			name: "false field stays false",
+			got:  &withField{AutomaticContinuation: genai.Ptr(false), Other: 1},
+			want: &withField{AutomaticContinuation: genai.Ptr(false), Other: 1},
+		},
+		{
+			name: "struct without the field unchanged",
+			got:  &withoutField{Other: 1},
+			want: &withoutField{Other: 1},
+		},
+		{
+			name: "field that is not *bool unchanged",
+			got:  &otherType{AutomaticContinuation: true},
+			want: &otherType{AutomaticContinuation: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setFalse(tt.got, automaticContinuationField)
+			if diff := cmp.Diff(tt.want, tt.got); diff != "" {
+				t.Errorf("setFalse() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("existing pointer not written through", func(t *testing.T) {
+		callers := genai.Ptr(true)
+		setFalse(&withField{AutomaticContinuation: callers}, automaticContinuationField)
+		if !*callers {
+			t.Error("setFalse wrote false through the existing pointer, which a shallow copy shares with the caller's config")
+		}
+	})
+}
+
+func TestTurnOffAutomaticContinuation(t *testing.T) {
+	config := &genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0.5)}
+	turnOffAutomaticContinuation(config)
+	field := reflect.ValueOf(config).Elem().FieldByName("AutomaticContinuation")
+	if !field.IsValid() {
+		// The genai release in this build has no such field. Only one of
+		// the two branches runs, depending on the genai version.
+		if diff := cmp.Diff(&genai.GenerateContentConfig{Temperature: genai.Ptr[float32](0.5)}, config); diff != "" {
+			t.Errorf("turnOffAutomaticContinuation changed a config without the field (-want +got):\n%s", diff)
+		}
+		return
+	}
+	if got, ok := field.Interface().(*bool); !ok || got == nil || *got {
+		t.Errorf("AutomaticContinuation = %v, want false", field.Interface())
+	}
 }

@@ -132,6 +132,7 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	contents, config := req.Contents, req.Config
 	for {
 		requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+		turnOffAutomaticContinuation(requestConfig)
 		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, requestConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to call model: %w", err)
@@ -169,6 +170,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			var parts []*genai.Part
 			var usage *genai.GenerateContentResponseUsageMetadata
 			requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+			turnOffAutomaticContinuation(requestConfig)
 			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, requestConfig) {
 				if err != nil {
 					yield(nil, err)
