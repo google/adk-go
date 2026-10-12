@@ -56,7 +56,7 @@ const (
 	minScoreRatio = 0.1
 
 	toolDescription = "Discover tools that are not yet loaded. Describe your task in natural language, " +
-		"use select:tool_a,tool_b for exact names, or a regex such as get_.*_file. " +
+		"use select:tool_a,tool_b for exact names, or a regex over tool names such as get_.*_file. " +
 		"Natural-language results match tool names, descriptions, and argument metadata. " +
 		"Results may include an optional connected_skill hint; load the relevant skill if your application supports it. " +
 		"After searching, finish this model response. Call discovered tools in the next model response, not alongside search_tools."

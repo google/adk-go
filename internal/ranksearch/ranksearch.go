@@ -20,17 +20,23 @@ package ranksearch
 import (
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"slices"
-	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 )
 
 const (
-	// maxQueryLen caps the search query length to keep ranking cheap and reject
-	// pasted-in garbage.
+	// maxQueryLen caps the query length, which bounds the BM25 query terms and
+	// rejects pasted-in garbage. It does not bound the cost of a regex, because
+	// a counted repeat makes a short pattern large. maxPatternSize does that.
 	maxQueryLen = 200
+	// maxPatternSize caps the estimated compiled size of a regex query. The
+	// matcher's work per input byte grows with that size, and a counted repeat
+	// such as .{0,999} multiplies it: 24 of them fit in maxQueryLen and compile
+	// to about 48,000 instructions. A larger pattern is matched as a literal.
+	maxPatternSize = 256
 	// selectPrefix marks the exact-name query form: "select:name1,name2".
 	selectPrefix = "select:"
 	// nameRepeat is how many times an item's name tokens are repeated in its
@@ -75,9 +81,10 @@ type Config struct {
 // of them for a ranked query, instead of reporting that nothing matched.
 //
 //   - "select:a,b" loads items by exact name (no cap, reports unknown names).
-//   - A query with regex metacharacters matches names/descriptions as a regex.
-//     If it matches nothing and contains whitespace, it is treated as prose
-//     that happens to contain punctuation and ranked by BM25 instead.
+//   - A query with regex metacharacters matches names as a regex, which keeps
+//     the matcher's input short. If it matches nothing and contains
+//     whitespace, it is treated as prose that happens to contain punctuation
+//     and ranked by BM25 instead.
 //   - Anything else is ranked by BM25 over each item's token bag.
 func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Config) ([]Match, string) {
 	query = strings.TrimSpace(query)
@@ -223,34 +230,16 @@ func bm25Matches(eligible []Item, query string, cfg Config) []Match {
 }
 
 // regexMatches matches query as a case-insensitive regex against eligible item
-// names and descriptions, ranking name matches before description-only matches,
-// both alphabetically.
+// names, sorted by name.
 func regexMatches(eligible []Item, query string, cfg Config) []Match {
 	matchFn := buildMatchFn(query)
-	type hit struct {
-		match     Match
-		nameMatch bool
-	}
-	var hits []hit
+	var matches []Match
 	for _, it := range eligible {
-		nameHit := matchFn(it.Name)
-		if nameHit || matchFn(it.Description) {
-			hits = append(hits, hit{
-				match:     Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)},
-				nameMatch: nameHit,
-			})
+		if matchFn(it.Name) {
+			matches = append(matches, Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)})
 		}
 	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].nameMatch != hits[j].nameMatch {
-			return hits[i].nameMatch
-		}
-		return hits[i].match.Name < hits[j].match.Name
-	})
-	matches := make([]Match, len(hits))
-	for i, h := range hits {
-		matches[i] = h.match
-	}
+	slices.SortFunc(matches, func(a, b Match) int { return strings.Compare(a.Name, b.Name) })
 	return matches
 }
 
@@ -292,14 +281,38 @@ func looksLikeRegex(query string) bool {
 }
 
 // buildMatchFn returns a case-insensitive regexp matcher. If query is a valid
-// regexp, it is used as-is; otherwise it falls back to a literal substring match.
+// regexp no larger than maxPatternSize, it is used as-is; otherwise it falls
+// back to a literal substring match.
 func buildMatchFn(query string) func(string) bool {
-	re, err := regexp.Compile("(?i)" + query)
-	if err != nil {
-		// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
-		re = regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD")))
+	pattern := "(?i)" + query
+	// Size the parse tree first: compiling a large pattern costs as much as the
+	// cap is there to prevent.
+	if parsed, err := syntax.Parse(pattern, syntax.Perl); err == nil && patternSize(parsed) <= maxPatternSize {
+		if re, err := regexp.Compile(pattern); err == nil {
+			return re.MatchString
+		}
 	}
-	return re.MatchString
+	// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
+	return regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD"))).MatchString
+}
+
+// patternSize estimates how many instructions re compiles to, and stops
+// counting once the estimate passes maxPatternSize. A counted repeat multiplies
+// the size of its operand.
+func patternSize(re *syntax.Regexp) int {
+	n := 1
+	if re.Op == syntax.OpLiteral {
+		n = len(re.Rune)
+	}
+	for _, sub := range re.Sub {
+		if n += patternSize(sub); n > maxPatternSize {
+			return n
+		}
+	}
+	if re.Op == syntax.OpRepeat {
+		n *= max(re.Min, re.Max, 1)
+	}
+	return n
 }
 
 // truncateRunes caps s at maxBytes without splitting a multi-byte UTF-8 rune. A

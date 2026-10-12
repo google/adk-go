@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 const testMaxDescLen = 200
@@ -447,31 +448,64 @@ func TestRank_RelevanceFloorDropsWeakMatches(t *testing.T) {
 	}
 }
 
-// TestRank_RegexListsNameMatchesFirst checks that regex results put name
-// matches before description-only matches, each group sorted by name. The order
-// decides which tools survive the MaxResults cap.
-func TestRank_RegexListsNameMatchesFirst(t *testing.T) {
+// TestRank_RegexMatchesNamesOnly checks that a regex matches item names, sorted
+// by name, and not descriptions. The order decides which items survive the
+// MaxResults cap.
+func TestRank_RegexMatchesNamesOnly(t *testing.T) {
 	items := makeItems(
 		[2]string{"a_tool", "fetches books"},
 		[2]string{"z_books", "unrelated"},
 		[2]string{"m_books", "unrelated"},
 	)
 	matches, _ := Rank(items, "book.*", nil, testCfg())
-	if diff := cmp.Diff([]string{"m_books", "z_books", "a_tool"}, names(matches)); diff != "" {
+	if diff := cmp.Diff([]string{"m_books", "z_books"}, names(matches)); diff != "" {
 		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
 	}
 }
 
 // TestRank_InvalidPatternMatchesLiterally checks that a query that does not
-// compile as a regex is matched as a case-insensitive literal substring.
+// compile as a regex is matched against names as a case-insensitive literal
+// substring.
 func TestRank_InvalidPatternMatchesLiterally(t *testing.T) {
 	items := makeItems(
-		[2]string{"beta_tool", "runs (Beta) features"},
-		[2]string{"other_tool", "beta without a parenthesis"},
+		[2]string{"beta(v2)_tool", "runs beta features"},
+		[2]string{"other_tool", "runs (v2 features"},
 	)
-	matches, _ := Rank(items, "(beta", nil, testCfg())
-	if diff := cmp.Diff([]string{"beta_tool"}, names(matches)); diff != "" {
+	matches, _ := Rank(items, "(V2", nil, testCfg())
+	if diff := cmp.Diff([]string{"beta(v2)_tool"}, names(matches)); diff != "" {
 		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRank_LargePatternMatchesLiterally checks that a pattern whose counted
+// repeat makes it larger than maxPatternSize is matched as a literal, while a
+// smaller one is still a regex.
+func TestRank_LargePatternMatchesLiterally(t *testing.T) {
+	items := makeItems([2]string{"fix_tool", "fixes things"})
+	for query, want := range map[string][]string{
+		".{0,100}x": {"fix_tool"},
+		".{0,999}x": nil,
+		// Each pattern below matches the empty string as a regex, so whether
+		// fix_tool comes back shows how it was matched. A literal counts each
+		// rune, and an unbounded repeat counts its minimum.
+		"(?:fix_tool){0,20}": {"fix_tool"},
+		"(?:fix_tool){0,30}": nil,
+		"(?:x?){150,}":       nil,
+	} {
+		matches, _ := Rank(items, query, nil, testCfg())
+		if diff := cmp.Diff(want, names(matches), cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("Rank(%q) names mismatch (-want +got):\n%s", query, diff)
+		}
+	}
+}
+
+// TestBuildMatchFn_SizesPatternBeforeCompiling checks that a large pattern is
+// rejected before regexp compiles it. Compiling this one allocates about 72,000
+// times and takes tens of milliseconds on every search.
+func TestBuildMatchFn_SizesPatternBeforeCompiling(t *testing.T) {
+	query := strings.Repeat(".{0,999}", 24) + "QQQQQQQ"
+	if allocs := testing.AllocsPerRun(1, func() { buildMatchFn(query) }); allocs > 1000 {
+		t.Errorf("buildMatchFn() allocated %v times, want at most 1000", allocs)
 	}
 }
 
