@@ -69,8 +69,8 @@ func TestDeleteMissingVersion(t *testing.T) {
 	svc := newGCSServiceForTesting("bucket")
 	if err := svc.Delete(t.Context(), &artifact.DeleteRequest{
 		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: 1,
-	}); err != nil {
-		t.Errorf("Delete(missing version) = %v, want nil", err)
+	}); !errors.Is(err, storage.ErrObjectNotExist) {
+		t.Errorf("Delete(missing version) = %v, want %v", err, storage.ErrObjectNotExist)
 	}
 }
 
@@ -81,8 +81,8 @@ func TestDeleteVersionErrors(t *testing.T) {
 		wantErr error
 	}{
 		{name: "success"},
-		{name: "not found", err: storage.ErrObjectNotExist},
-		{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist)},
+		{name: "not found", err: storage.ErrObjectNotExist, wantErr: storage.ErrObjectNotExist},
+		{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist), wantErr: storage.ErrObjectNotExist},
 		{name: "permission denied", err: fs.ErrPermission, wantErr: fs.ErrPermission},
 		{name: "canceled", err: context.Canceled, wantErr: context.Canceled},
 	} {
