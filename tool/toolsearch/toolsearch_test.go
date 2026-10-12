@@ -1267,3 +1267,22 @@ func TestSearch_DiscoveriesSurviveReload(t *testing.T) {
 		})
 	}
 }
+
+// TestNew_SkillHintOnlyWithAnnotations checks that the default description
+// mentions connected_skill only when SkillAnnotations is set, since no result
+// carries one otherwise.
+func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
+	base := &staticToolset{tools: makeTools(toolDef{"list_folders", "list folders"})}
+	for _, tc := range []struct {
+		annotations map[string]string
+		want        bool
+	}{
+		{nil, false},
+		{map[string]string{"list_folders": "folder-browser"}, true},
+	} {
+		gts := mustNew(t, base, Config{SkillAnnotations: tc.annotations})
+		if got := strings.Contains(gts.searchTool.Description(), "connected_skill"); got != tc.want {
+			t.Errorf("SkillAnnotations %v: description mentions connected_skill = %t, want %t", tc.annotations, got, tc.want)
+		}
+	}
+}

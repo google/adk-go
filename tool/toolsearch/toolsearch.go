@@ -58,8 +58,11 @@ const (
 	toolDescription = "Discover tools that are not yet loaded. Describe your task in natural language, " +
 		"use select:tool_a,tool_b for exact names, or a regex over tool names such as get_.*_file. " +
 		"Natural-language results match tool names, descriptions, and argument metadata. " +
-		"Results may include an optional connected_skill hint; load the relevant skill if your application supports it. " +
 		"After searching, finish this model response. Call discovered tools in the next model response, not alongside search_tools."
+
+	// skillHint follows toolDescription only when SkillAnnotations is set, since
+	// no result carries a connected_skill otherwise.
+	skillHint = " Results may include an optional connected_skill hint; load the relevant skill if your application supports it."
 )
 
 // Config tunes the gating toolset.
@@ -122,10 +125,14 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 		}
 	}
 
+	description := toolDescription
+	if len(cfg.SkillAnnotations) > 0 {
+		description += skillHint
+	}
 	searchTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        ToolName,
-			Description: ranksearch.DescribeSearch(toolDescription, gated),
+			Description: ranksearch.DescribeSearch(description, gated),
 		},
 		func(ctx agent.Context, args searchArgs) (searchOutput, error) {
 			return executeSearch(ctx, args, base, g.coreNames, g.skillAnnotations, maxResults)
