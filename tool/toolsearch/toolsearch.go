@@ -82,6 +82,11 @@ type Config struct {
 	// SkillAnnotations maps tool names to skill names so search results carry
 	// a connected_skill hint pointing the model at the relevant skill.
 	SkillAnnotations map[string]string
+	// Description replaces the default description of the search tool, for
+	// example to name the app's own domains. Empty keeps the default, which
+	// also explains connected_skill when SkillAnnotations is set. GatedToolNames
+	// are appended to either.
+	Description string
 	// MaxResults caps BM25 and regex matches, not exact selections.
 	// Defaults to 8 when zero or negative.
 	MaxResults int
@@ -125,9 +130,12 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 		}
 	}
 
-	description := toolDescription
-	if len(cfg.SkillAnnotations) > 0 {
-		description += skillHint
+	description := cfg.Description
+	if description == "" {
+		description = toolDescription
+		if len(cfg.SkillAnnotations) > 0 {
+			description += skillHint
+		}
 	}
 	searchTool, err := functiontool.New(
 		functiontool.Config{

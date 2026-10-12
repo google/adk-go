@@ -1268,6 +1268,21 @@ func TestSearch_DiscoveriesSurviveReload(t *testing.T) {
 	}
 }
 
+// TestNew_Description checks that Config.Description replaces the default
+// description of the search tool and that gated tool names are still appended.
+func TestNew_Description(t *testing.T) {
+	base := &staticToolset{tools: makeTools(toolDef{"list_controls", "list controls"})}
+	gts := mustNew(t, base, Config{
+		Description:      "Search compliance tools by topic: controls, obligations, frameworks.",
+		GatedToolNames:   []string{"list_controls"},
+		SkillAnnotations: map[string]string{"list_controls": "compliance"},
+	})
+	want := ranksearch.DescribeSearch("Search compliance tools by topic: controls, obligations, frameworks.", []string{"list_controls"})
+	if got := gts.searchTool.Description(); got != want {
+		t.Errorf("search tool description = %q, want %q", got, want)
+	}
+}
+
 // TestNew_SkillHintOnlyWithAnnotations checks that the default description
 // mentions connected_skill only when SkillAnnotations is set, since no result
 // carries one otherwise.
