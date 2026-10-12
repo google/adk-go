@@ -176,7 +176,7 @@ func collectAgents(ctx context.Context, appName string, root agent.Agent) map[st
 		if llmAgent, ok := a.(llminternal.Agent); ok {
 			name := a.Name()
 			if _, clash := agents[name]; clash {
-				log.Printf("app-info: two different agents are named %q; describing the first one found", name)
+				log.Printf("app-info: two different agents are named %q; describing the first one found", name) //nolint:forbidigo // the request still succeeds, so there is no error to return
 			} else {
 				agents[name] = describe(ctx, appName, a, llminternal.Reveal(llmAgent))
 			}
@@ -306,7 +306,7 @@ func resolveTools(ctx context.Context, appName, agentName string, state *llminte
 		}
 		tsTools, err := ts.Tools(toolsetCtx)
 		if err != nil {
-			log.Printf("app-info: agent %q: skipping toolset %q, which could not list its tools (%T)", agentName, ts.Name(), err)
+			log.Printf("app-info: agent %q: skipping toolset %q, which could not list its tools (%T)", agentName, ts.Name(), err) //nolint:forbidigo // the request still succeeds without this toolset, so there is no error to return
 			continue
 		}
 		tools = append(tools, tsTools...)

@@ -44,7 +44,7 @@ const experimentalWarning = "[EXPERIMENTAL] /apps/{app_name}/app-info: This feat
 func Handler(loader agent.Loader) http.HandlerFunc {
 	var warnOnce sync.Once
 	return func(w http.ResponseWriter, r *http.Request) {
-		warnOnce.Do(func() { log.Print(experimentalWarning) })
+		warnOnce.Do(func() { log.Print(experimentalWarning) }) //nolint:forbidigo // a notice to the operator, not an error, so there is nothing to return
 		if loader == nil {
 			http.Error(w, "no agent loader configured", http.StatusServiceUnavailable)
 			return
