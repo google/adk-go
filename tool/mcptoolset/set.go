@@ -68,13 +68,17 @@ type MetadataProvider func(ctx agent.Context) (map[string]any, error)
 //	}
 //	defer mcpTools.(io.Closer).Close()
 //
-//	llmagent.New(llmagent.Config{
+//	a, err := llmagent.New(llmagent.Config{
 //		Name:        "agent_name",
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
 //		Toolsets:    []tool.Toolset{mcpTools},
 //	})
+//	if err != nil {
+//		return err
+//	}
+//	_ = a // Use a with a runner before returning, while mcpTools is still open.
 func New(cfg Config) (tool.Toolset, error) {
 	transport, err := buildTransport(cfg)
 	if err != nil {
