@@ -90,7 +90,8 @@ func TestTokenize_NoEmptyTokens(t *testing.T) {
 }
 
 // TestStem_PluralCollapses verifies singular and plural forms tokenize equally so
-// "book" matches "books", including sibilant "-es" plurals.
+// "book" matches "books", including sibilant "-es" plurals, "-ases" plurals of
+// words in "-as" and "-ase", and "-as" plurals of words in "-a".
 func TestStem_PluralCollapses(t *testing.T) {
 	for singular, plural := range map[string]string{
 		"book":     "books",
@@ -106,6 +107,13 @@ func TestStem_PluralCollapses(t *testing.T) {
 		"box":      "boxes",
 		"use":      "uses",
 		"axe":      "axes",
+		"alias":    "aliases",
+		"canvas":   "canvases",
+		"release":  "releases",
+		"base":     "bases",
+		"gas":      "gases",
+		"schema":   "schemas",
+		"idea":     "ideas",
 	} {
 		if got, want := tokenize(plural), tokenize(singular); !slices.Equal(got, want) {
 			t.Errorf("tokenize(%q) = %v, want %v", plural, got, want)

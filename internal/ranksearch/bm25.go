@@ -116,17 +116,24 @@ func tokenize(s string) []string {
 // minimal — not a full Porter stemmer. It covers the common "-ies", sibilant
 // "-es", and "-s" plurals while leaving non-plural endings ("-ss", "-us") and
 // short words untouched. A sibilant "-es" plural is ambiguous ("processes" is
-// "process" plus "es", "databases" is "database" plus "s"), so singulars ending
-// in a sibilant plus "e" also drop the "e": both "database" and "databases"
-// become "databas".
+// "process" plus "es", "cases" is "case" plus "s"), so singulars ending in a
+// sibilant plus "e" also drop the "e": both "case" and "cases" become "cas".
+// A longer "-ases" plural is ambiguous the same way ("aliases" is "alias" plus
+// "es", "databases" is "database" plus "s"), so it drops "ses" and a singular
+// in "-ase" drops "se": "alias" and "aliases" become "alia", "database" and
+// "databases" become "databa".
 func stem(tok string) string {
 	switch {
 	case len(tok) > 4 && strings.HasSuffix(tok, "ies"):
 		return tok[:len(tok)-3] + "y" // policies -> policy, activities -> activity
+	case len(tok) > 5 && strings.HasSuffix(tok, "ases"):
+		return tok[:len(tok)-3] // aliases -> alia, databases -> databa
+	case len(tok) > 4 && strings.HasSuffix(tok, "ase"):
+		return tok[:len(tok)-2] // database -> databa, release -> relea
 	case len(tok) > 4 && endsWithAny(tok, "ses", "xes", "zes", "ches", "shes"):
 		return tok[:len(tok)-2] // processes -> process, statuses -> status, boxes -> box
 	case len(tok) > 3 && endsWithAny(tok, "se", "xe", "ze", "che", "she"):
-		return tok[:len(tok)-1] // database -> databas, cache -> cach, size -> siz
+		return tok[:len(tok)-1] // case -> cas, cache -> cach, size -> siz
 	case strings.HasSuffix(tok, "ss") || strings.HasSuffix(tok, "us"):
 		return tok // process, address, status, nexus — not plurals
 	case len(tok) > 3 && strings.HasSuffix(tok, "s"):
