@@ -311,6 +311,14 @@ jobs:
               if (pr.labels.nodes.some(l => l.name === LABEL)) continue;
               // A deleted account or a bot such as dependabot: nobody to nudge.
               if (!pr.author || isBot(pr.author)) continue;
+              // The takeover rule is for external contributions, not the
+              // maintainers' own pull requests.
+              const authorWrite = await hasWriteAccess(pr.author.login);
+              if (authorWrite === null) {
+                core.warning(`#${pr.number}: permission lookup failed, skipping`);
+                continue;
+              }
+              if (authorWrite) continue;
 
               const when = await activity(pr);
               if (when.unclassified) {
