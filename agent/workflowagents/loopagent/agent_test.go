@@ -122,7 +122,7 @@ func TestNewLoopAgent(t *testing.T) {
 			},
 		},
 		{
-			name: "loop with escalate function returns sumarization",
+			name: "loop with escalate function returns summarization",
 			args: args{
 				maxIterations: 2,
 				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, false), newCustomAgent(t, 1)},
@@ -167,7 +167,7 @@ func TestNewLoopAgent(t *testing.T) {
 			},
 		},
 		{
-			name: "loop with escalate function returns sumarization",
+			name: "loop with escalate function returns summarization",
 			args: args{
 				maxIterations: 2,
 				subAgents:     []agent.Agent{newLmmAgentWithFunctionCall(t, 0, true), newCustomAgent(t, 1)},

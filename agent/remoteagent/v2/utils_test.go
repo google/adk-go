@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
@@ -639,6 +640,43 @@ func TestNewMessage_ResumeKeepsMixedFunctionResponsesAsData(t *testing.T) {
 			b, _ := json.Marshal(p)
 			t.Fatalf("part[%d] = %s, want function_response data", i, b)
 		}
+	}
+}
+
+func TestNewMessage_BeforeRunCallReusesRemoteCallID(t *testing.T) {
+	const remoteName = "remote-agent"
+	remoteCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "reused", Name: "lookup"}})
+	remoteCall.CustomMetadata = adka2a.ToCustomMetadata("completed-task", "remote-context")
+	completed := newEventFromParts(remoteName, genai.NewPartFromText("completed reply"))
+	completed.CustomMetadata = adka2a.ToCustomMetadata("completed-task", "remote-context")
+	response := func() *session.Event {
+		return newEventFromParts("user", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			ID: "reused", Name: "lookup", Response: map[string]any{"ok": true},
+		}})
+	}
+	cachedCall := newEventFromParts(remoteName, &genai.Part{FunctionCall: &genai.FunctionCall{ID: "reused", Name: "lookup"}})
+	cachedCall.CustomMetadata = map[string]any{plugininternal.BeforeRunReplyKey: true}
+	ctx := newTestInvocationContext(t, remoteName,
+		remoteCall, response(), completed,
+		newEventFromParts("user", genai.NewPartFromText("cached question")),
+		cachedCall,
+		response(),
+	)
+	msg, err := newMessage(ctx, A2AConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.TaskID != "" || msg.ContextID != "remote-context" {
+		t.Error("local call resumed a completed task or lost the remote context")
+	}
+	want := []*a2a.Part{
+		a2a.NewTextPart("cached question"),
+		a2a.NewTextPart("For context:"),
+		a2a.NewTextPart("[remote-agent] called tool lookup with parameters: map[]"),
+		a2a.NewTextPart(`Tool lookup returned: {"ok":true}`),
+	}
+	if !cmp.Equal(msg.Parts, a2a.ContentParts(want)) {
+		t.Error("local call and response were not replayed as contextual text")
 	}
 }
 

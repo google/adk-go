@@ -367,7 +367,7 @@ func TestAgentNode_DeclaredSingleTurnWithExplicitIncludeContents_KeepsHistory(t 
 
 // IncludeContents is an unvalidated string, so a typo must not be read as an
 // explicit request for history. Only the real IncludeContentsDefault opts out of
-// the placement; anything unrecognised falls back to it, as the merge base did by
+// the placement; anything unrecognized falls back to it, as the merge base did by
 // forcing "none". Getting this wrong hands a one-shot node the whole transcript.
 func TestAgentNode_UnrecognisedIncludeContents_DoesNotDefeatThePlacement(t *testing.T) {
 	t.Parallel()
@@ -787,7 +787,7 @@ func TestAgentNode_Run_SeededOverAToolContext_ErrorsRatherThanPanics(t *testing.
 // AgentNode.Run is exported and now resolves a mode, which reads ctx. It must
 // reject a nil context rather than dereference it, the way RunLLMAgentAsNode
 // does. The merge base panicked on a nil ctx too — a few lines lower, building
-// params — so this turns a crash into an error rather than changing behaviour.
+// params — so this turns a crash into an error rather than changing behavior.
 func TestAgentNode_Run_NilContext_Errors(t *testing.T) {
 	t.Parallel()
 
@@ -1030,7 +1030,7 @@ func TestAgentNode_ASingleTurnPlacementDoesNotReachASameNamedUndeclaredDescendan
 	}
 }
 
-// The enumerated behaviour change that had no test: a composite's UNDECLARED
+// The enumerated behavior change that had no test: a composite's UNDECLARED
 // child, re-entered as a transfer target, runs chat where the merge base ran
 // single_turn.
 //
