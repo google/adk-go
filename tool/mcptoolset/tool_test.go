@@ -16,6 +16,7 @@ package mcptoolset
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -23,6 +24,28 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 )
+
+func TestConvertToolOmitsAbsentOutputSchema(t *testing.T) {
+	converted, err := convertTool(&mcp.Tool{
+		Name:        "test_tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, nil, false, nil, nil)
+	if err != nil {
+		t.Fatalf("convertTool() failed: %v", err)
+	}
+
+	data, err := json.Marshal(converted.(*mcpTool).Declaration())
+	if err != nil {
+		t.Fatalf("json.Marshal() failed: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("json.Unmarshal() failed: %v", err)
+	}
+	if _, ok := fields["responseJsonSchema"]; ok {
+		t.Error("responseJsonSchema must be omitted when the MCP tool has no output schema")
+	}
+}
 
 type fixedResultMCPClient struct {
 	result *mcp.CallToolResult
