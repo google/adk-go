@@ -165,11 +165,15 @@ func (c *testContext) FunctionCallID() string { return "test-function-call-id" }
 func (c *testContext) SearchMemory(context.Context, string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (c *testContext) AgentName() string                                       { return "test-agent" }
-func (c *testContext) InvocationID() string                                    { return "test-invocation-id" }
-func (c *testContext) AppName() string                                         { return "test-app" }
-func (c *testContext) Branch() string                                          { return "test-branch" }
-func (c *testContext) SessionID() string                                       { return "test-session-id" }
+
+func (c *testContext) AgentName() string { return "test-agent" }
+
+func (c *testContext) InvocationID() string { return "test-invocation-id" }
+func (c *testContext) AppName() string      { return "test-app" }
+func (c *testContext) Branch() string       { return "test-branch" }
+
+func (c *testContext) SessionID() string { return "test-session-id" }
+
 func (c *testContext) UserID() string                                          { return "test-user-id" }
 func (m *testContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
 

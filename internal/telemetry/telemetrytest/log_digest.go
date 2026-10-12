@@ -16,54 +16,32 @@ package telemetrytest
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+
+	"google.golang.org/adk/v2/internal/telemetry"
 )
 
-// LogDigest is a deterministic snapshot of one OTel log record:
-// the event name, attributes, and the body decoded to a Go value.
+// LogDigest is a deterministic snapshot of one log record.
 type LogDigest struct {
-	EventName  string
-	Attributes map[string]any
-	Body       any // JSON-normalized: int64 values are returned as float64
+	EventName  string         `json:"event_name"`
+	Body       any            `json:"body"`
+	Attributes map[string]any `json:"attributes"`
 }
 
 func buildLogDigest(r *sdklog.Record) *LogDigest {
 	attrs := map[string]any{}
 	r.WalkAttributes(func(kv attribute.KeyValue) bool {
-		attrs[string(kv.Key)] = logValueToAny(kv.Value)
+		attrs[string(kv.Key)] = normalizeAttribute(string(kv.Key), telemetry.FromLogValue(kv.Value))
 		return true
 	})
 	return &LogDigest{
 		EventName:  r.EventName(),
+		Body:       telemetry.FromLogValue(r.Body()),
 		Attributes: attrs,
-		Body:       jsonRoundTrip(logValueToAny(r.Body())),
 	}
-}
-
-// jsonRoundTrip marshals v to JSON and unmarshals the result back
-// into a fresh any. This normalises:
-//   - numeric types (int64, float64 → float64),
-//   - string-valued bodies (returned as plain Go strings),
-//   - structured bodies (returned as map[string]any / []any).
-//
-// On marshal/unmarshal failure the input value is returned
-// unchanged; cmp.Diff will then surface the unconverted shape and
-// the test author can fix the body rendering.
-func jsonRoundTrip(v any) any {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return v
-	}
-	var out any
-	if err := json.Unmarshal(b, &out); err != nil {
-		return v
-	}
-	return out
 }
 
 // InMemoryLogExporter is a minimal in-memory log record sink for tests.
@@ -100,47 +78,4 @@ func (e *InMemoryLogExporter) Records() []sdklog.Record {
 	out := make([]sdklog.Record, len(e.records))
 	copy(out, e.records)
 	return out
-}
-
-// logValueToAny converts an OTel attribute.Value to a plain Go value
-// (string, int64, float64, bool, []any, map[string]any).
-func logValueToAny(v attribute.Value) any {
-	switch v.Type() {
-	case attribute.BOOL:
-		return v.AsBool()
-	case attribute.BOOLSLICE:
-		return v.AsBoolSlice()
-	case attribute.FLOAT64:
-		return v.AsFloat64()
-	case attribute.FLOAT64SLICE:
-		return v.AsFloat64Slice()
-	case attribute.INT64:
-		return v.AsInt64()
-	case attribute.INT64SLICE:
-		return v.AsInt64Slice()
-	case attribute.STRING:
-		return v.AsString()
-	case attribute.STRINGSLICE:
-		return v.AsStringSlice()
-	case attribute.BYTESLICE:
-		return v.AsByteSlice()
-	case attribute.SLICE:
-		s := v.AsSlice()
-		out := make([]any, len(s))
-		for i, e := range s {
-			out[i] = logValueToAny(e)
-		}
-		return out
-	case attribute.MAP:
-		m := v.AsMap()
-		out := make(map[string]any, len(m))
-		for _, kv := range m {
-			out[string(kv.Key)] = logValueToAny(kv.Value)
-		}
-		return out
-	case attribute.EMPTY:
-		return nil
-	default:
-		return fmt.Sprintf("<unknown attribute.Type %v>", v.Type())
-	}
 }

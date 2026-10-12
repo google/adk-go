@@ -83,7 +83,7 @@ type InvocationContext interface {
 
 // StartNodeSpan emits an OpenTelemetry span and returns a derived context with the new Span.
 // Emits:
-// - invoke_workflow <workflow_name> if provided with [OperationNode] or workflow agent.
+// - invoke_workflow <workflow_name> if provided with a workflow agent.
 // - invoke_agent <agent_name> if provided with non-workflow agent.
 // - invoke_node <node_name> if provided with a generic node.
 // - otherwise doesn't start any new span and returns the input context unchanged.

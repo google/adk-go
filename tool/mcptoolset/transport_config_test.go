@@ -26,6 +26,32 @@ import (
 
 const testEndpoint = "https://mcp.example/mcp"
 
+func TestNewRequiresConnection(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+	}{
+		{name: "empty config"},
+		{
+			name: "client without transport",
+			cfg: Config{
+				Client: mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, err := New(tt.cfg)
+			if err == nil {
+				t.Fatal("New() succeeded without a transport or endpoint")
+			}
+			if ts != nil {
+				t.Error("New() returned a toolset on configuration error")
+			}
+		})
+	}
+}
+
 func TestBuildTransport(t *testing.T) {
 	// Shared inputs for the wrap/passthrough cases. buildTransport must never
 	// mutate a caller-supplied transport or client, so sharing these across

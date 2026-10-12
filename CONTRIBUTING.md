@@ -6,6 +6,7 @@ We'd love to accept your patches and contributions to this project.
 -   [Branches](#branches)
     -   [Backporting to `v1`](#backporting-to-v1)
 -   [Multi-Module Development](#multi-module-development)
+-   [Experimental features](#experimental-features)
 -   [Before you begin](#before-you-begin)
     -   [Sign our Contributor License Agreement](#sign-our-contributor-license-agreement)
     -   [Review our community guidelines](#review-our-community-guidelines)
@@ -158,6 +159,45 @@ leaves the PR queued so a later `v1` change can still let it land on its own.
 - **Version Coupling**: Each submodule's `go.mod` will specify the minimum version of `google.golang.org/adk/v2` it depends on. Submodules can be released independently of the core module and each other.
 - **go.work Impact**: `go.work` is for local development only and does not affect how modules are versioned, tagged, or fetched by consumers.
 
+## Experimental features
+
+A feature whose API or behavior is not settled yet lives under `exp/`, in a
+package of its own, such as `exp/appinfo`. Anything there may change or be
+removed in a later version without notice, and [`exp/doc.go`](exp/doc.go) tells
+users so.
+
+Use `exp/` when a feature has to ship before its design is final: it serves an
+outside contract that is still being agreed, or its API needs real use before
+anyone can commit to it. A feature ready for the compatibility promise goes
+straight into the stable packages, and a helper only ADK itself uses goes in
+`internal/`.
+
+A package under `exp/`:
+
+-   **Is part of the root module.** `exp/<feature>` is a package of
+    `google.golang.org/adk/v2`, not a separate module. It is released with
+    everything else and can use the module's `internal/` packages.
+-   **Adds what it needs elsewhere as stable API.** An accessor the feature
+    needs in a stable package is ordinary API there, under the normal
+    compatibility rules, and it stays when the experiment goes. Add only what is
+    useful on its own.
+-   **Has no `Experimental` or `X` in its names.** The import path already says
+    it. Name things as they will be named once stable, so that graduating is a
+    move rather than a rename.
+-   **Is listed in `exp/doc.go`**, and its own package doc says it is
+    experimental.
+
+`apidiff` checks `exp/` like every other package, so an incompatible change
+there still fails it. Label the PR `breaking-change`: under `exp/` the break is
+allowed, and the label records it rather than asking for an exception. Title it
+`feat(exp): …` or `fix(exp): …` so it reaches the release notes, which are how
+users of the feature find out. Do not mark it with `!` or a `BREAKING CHANGE:`
+footer, because release-please reads either as a new major version.
+
+A feature that proves itself moves out of `exp/` into the stable packages, and
+the compatibility rules apply to it from then on. One that does not may be
+removed.
+
 ## Before you begin
 
 ### Sign our Contributor License Agreement
@@ -209,6 +249,11 @@ information on using pull requests.
     `Related: #<number>`. Describe the problem and the solution in the PR
     description as well, following the structure of our issue templates.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
+-   Library code must not write diagnostics to stdout, stderr, the standard
+    `log` package's logger or `slog`'s default logger, and `golangci-lint`
+    rejects it. See
+    [Logging and error messages](AGENTS.md#logging-and-error-messages) in
+    `AGENTS.md` for the levels to use and what to do instead.
 -   Use [Conventional Commits](https://www.conventionalcommits.org/) — `feat:`,
     `fix:`, `docs:` and so on, optionally scoped as `fix(runner):` — in the PR
     title, and in the commit subject too on a single-commit PR, where that is

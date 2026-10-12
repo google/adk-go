@@ -211,7 +211,7 @@ func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any)
 
 			// Based on expected fields defined in ArrowSchema
 			switch f.Name {
-			case "timestamp":
+			case timestampField:
 				if v, ok := val.(time.Time); ok {
 					fieldVector.(*array.TimestampBuilder).Append(arrow.Timestamp(v.UnixMicro()))
 				} else {

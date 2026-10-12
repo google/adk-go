@@ -43,7 +43,8 @@ type Config struct {
 
 // New creates a new Workflow agent. A single returned agent
 // instance can serve many concurrent sessions: the per-invocation
-// run state lives in session.State, not on the agent. A paused
+// run state is rebuilt from session event history on a resume turn
+// rather than held on the agent. A paused
 // workflow resumes on a follow-up turn when the user submits a
 // FunctionResponse targeting the InterruptID emitted by the
 // paused node.
@@ -85,9 +86,9 @@ func New(cfg Config) (agent.Agent, error) {
 // Workflow.Run (fresh turn) and Workflow.Resume (resume turn).
 // The dispatch decision is made by inspecting ctx.UserContent for
 // a FunctionResponse targeting a previously-emitted RequestInput.
-// The workflow's RunState lives in session.State, not on this
-// struct, so a single *workflowAgent safely services many
-// concurrent sessions.
+// The workflow's RunState is reconstructed from session event
+// history on a resume turn, rather than held on this struct, so a
+// single *workflowAgent safely services many concurrent sessions.
 type workflowAgent struct {
 	workflow *workflow.Workflow
 }
@@ -123,8 +124,9 @@ func (a *workflowAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Even
 // detectResume inspects the inbound user message for FunctionResponses
 // targeting a previously-emitted RequestInput. Returns the
 // responses map keyed by InterruptID (suitable for
-// Workflow.Resume), the RunState loaded from session, and true if
-// this turn is a resume; (nil, nil, false) for a fresh turn.
+// Workflow.Resume), the RunState reconstructed from session history,
+// and true if this turn is a resume; (nil, nil, false) for a fresh
+// turn.
 func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]any, *workflow.RunState, bool, error) {
 	frs := utils.FunctionResponses(ctx.UserContent())
 	if len(frs) == 0 {

@@ -155,6 +155,12 @@ func (c *AgentGraphAPIController) loadAgent(rw http.ResponseWriter, req *http.Re
 		http.Error(rw, err.Error(), http.StatusNotFound)
 		return nil, false
 	}
+	// A Loader may return a nil agent with a nil error. Dereferencing it
+	// panics, which drops the connection without any HTTP response.
+	if loaded == nil {
+		http.Error(rw, "agent "+appName+" not found", http.StatusNotFound)
+		return nil, false
+	}
 	return loaded, true
 }
 

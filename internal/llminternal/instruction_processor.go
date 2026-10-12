@@ -69,11 +69,18 @@ func instructionsRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 // The regex to find placeholders like {variable} or {artifact.file_name}.
 var placeholderRegex = regexp.MustCompile(`{+[^{}]*}+`)
 
+// A placeholder directly after one of these bytes is literal text, e.g.
+// "${expression}" or "\{expression}". adk-python expresses this as the
+// negative lookbehind (?<![\$\{\\]), which RE2 does not support. The { from
+// that lookbehind is not needed here: {+ always starts a match at the first
+// brace of a run, so a match is never preceded by {.
+const literalPlaceholderPrefixes = `$\`
+
 func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agentState *State) error {
 	if agentState.InstructionProvider != nil {
 		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
 		if err != nil {
-			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
+			return fmt.Errorf("failed to evaluate instruction provider: %w", err)
 		}
 
 		utils.AppendInstructions(req, instruction)
@@ -209,6 +216,12 @@ func InjectSessionState(ctx agent.InvocationContext, template string) (string, e
 
 	for _, matchIndexes := range matches {
 		startIndex, endIndex := matchIndexes[0], matchIndexes[1]
+
+		// Leave literal placeholders in place; they are copied with the
+		// surrounding text.
+		if startIndex > 0 && strings.IndexByte(literalPlaceholderPrefixes, template[startIndex-1]) >= 0 {
+			continue
+		}
 
 		// Append the text between the last match and this one
 		result.WriteString(template[lastIndex:startIndex])

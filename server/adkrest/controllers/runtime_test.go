@@ -140,10 +140,11 @@ func TestRunSSEHandler(t *testing.T) {
 		{
 			name: "success case",
 			results: []testAgentResult{
-				{event: makeEvent("invocation-1", "testApp", "Hello from agent"), err: nil},
+				// Non-ASCII text: the stream must carry it through as UTF-8.
+				{event: makeEvent("invocation-1", "testApp", "Hello from agent: 72°F"), err: nil},
 			},
 			wantStatus: http.StatusOK,
-			wantBody:   []string{"data: {", "Hello from agent"},
+			wantBody:   []string{"data: {", "Hello from agent: 72°F"},
 		},
 		{
 			name: "error case",
@@ -230,6 +231,12 @@ func TestRunSSEHandler(t *testing.T) {
 			// Verify response
 			if rr.Code != tt.wantStatus {
 				t.Errorf("expected status %d, got %d", tt.wantStatus, rr.Code)
+			}
+
+			// Without the charset, clients that apply the legacy ISO-8859-1
+			// default for text/* mojibake every non-ASCII rune in the stream.
+			if got, want := rr.Header().Get("Content-Type"), "text/event-stream; charset=UTF-8"; got != want {
+				t.Errorf("Content-Type = %q, want %q", got, want)
 			}
 
 			body := rr.Body.String()

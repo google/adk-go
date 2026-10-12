@@ -209,7 +209,7 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 			// Although not used, we need to pass childCtx for early return in case of an error.
 			content, err := t.loadIndividualArtifact(childCtx, artifactsService, artifactName)
 			if err != nil {
-				return fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
+				return err
 			}
 			results[i] = content
 			return nil

@@ -38,7 +38,9 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
-// Handles both streaming and non-streaming versions
+// Handles both streaming and non-streaming versions. A zero sseWriteTimeout
+// means 120 seconds. A negative one means no write deadline, which also clears
+// the http.Server's WriteTimeout.
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
 	// Validated here rather than left to the first request. A compaction config
 	// is rejected inside runner.New, which the request handlers call, so an
@@ -88,14 +90,14 @@ func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPaylo
 		return nil, fmt.Errorf("ListClassMethods() failed: %w", err)
 	}
 
-	log.Println("Supported methods:")
+	log.Println("Supported methods:") //nolint:forbidigo // pre-slog call site
 	for _, m := range methods {
 		sb := &strings.Builder{}
 		err = json.NewEncoder(sb).Encode(m)
 		if err != nil {
 			return nil, fmt.Errorf("json.NewEncoder failed: %w", err)
 		}
-		log.Println(sb.String())
+		log.Println(sb.String()) //nolint:forbidigo // pre-slog call site
 	}
 
 	return router, nil
@@ -106,7 +108,7 @@ func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
 	return router
 }
 
-// listNonStreamHandlers returnes a list of handlers for non-streaming methods
+// listNonStreamHandlers returns a list of handlers for non-streaming methods
 func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewCreateSessionHandler(config.SessionService, agentEngineID, "async_create_session", "async"),
@@ -116,7 +118,7 @@ func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []meth
 	}
 }
 
-// listStreamHandlers returnes a list of handlers for streaming methods
+// listStreamHandlers returns a list of handlers for streaming methods
 func listStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewStreamQueryHandler(config, agentEngineID, "async_stream_query", "async_stream"),

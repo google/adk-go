@@ -33,13 +33,15 @@ type CredentialProvider interface {
 	// and deadlines.
 	//
 	// A provider that needs the acting user's identity (for example the GCP
-	// provider, which keys on the user) recovers the ADK context from ctx via a
-	// shared helper introduced together with the first provider that needs it —
-	// so identity rides on the one ADK context rather than an auth-specific key.
+	// provider, which keys on the user) recovers it from ctx via
+	// IdentityFromContext in the agent package — so identity rides on the one
+	// ADK context rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
-	// non-interactively, Credential returns a *ConsentRequiredError carrying the
-	// authorization URI; the tool layer turns that into a human-in-the-loop
+	// non-interactively, Credential returns an error wrapping a
+	// *ConsentRequiredError that carries the authorization URI — find it with
+	// errors.As, since a provider may wrap it. The tool layer turns that into a
+	// human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
 	Credential(ctx context.Context) (Credential, error)
 }
@@ -68,7 +70,9 @@ type ConsentRequiredError struct {
 	// Nonce is an opaque value echoed back to correlate the consent response.
 	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
-	// Key is the credential-store key to resume the flow under.
+	// Key is an opaque, caller-defined identifier for the credential this flow
+	// will produce, for a consumer that has to resume the flow later. It is not a
+	// [CredentialKey], which identifies a [CredentialStore] entry.
 	Key string
 }
 
@@ -163,8 +167,12 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
-			// Stricter than adk-python (scopes optional there): an explicit-key
-			// access token is scope-bound, so no scopes = unusable — fail fast.
+			// An explicit-key access token is scope-bound, so no scopes = unusable.
+			// This runs on the first Credential call, not in ServiceAccount, which
+			// returns no error and so cannot fail at construction. adk-python
+			// rejects the same case at the same point, when it first exchanges the
+			// key (service_account_exchanger.py), and defaults scopes only for
+			// default credentials, as adcTokenSource does below.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}

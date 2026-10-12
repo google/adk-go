@@ -80,14 +80,6 @@ import "context"
 // comparable, and an agent.Agent in a context key would panic on an
 // implementation whose dynamic type is not.
 
-// The two values agent/llmagent's IncludeContents constants carry. Duplicated
-// as untyped constants because llminternal cannot import llmagent, which
-// depends on it.
-const (
-	includeContentsNone    = "none"
-	includeContentsDefault = "default"
-)
-
 // ResolveMode returns declared when set, else byPlacement.
 func ResolveMode(declared, byPlacement Mode) Mode {
 	if declared == ModeUnset {
