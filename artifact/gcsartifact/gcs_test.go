@@ -64,6 +64,44 @@ func TestGCSArtifactService(t *testing.T) {
 	tests.TestArtifactService(t, "GCS", factory)
 }
 
+func TestDeleteMissingVersion(t *testing.T) {
+	svc := newGCSServiceForTesting("bucket")
+	if err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+		AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: 1,
+	}); !errors.Is(err, storage.ErrObjectNotExist) {
+		t.Errorf("Delete(missing version) = %v, want %v", err, storage.ErrObjectNotExist)
+	}
+}
+
+func TestDeleteVersionErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantErr error
+	}{
+		{name: "success"},
+		{name: "not found", err: storage.ErrObjectNotExist, wantErr: storage.ErrObjectNotExist},
+		{name: "wrapped not found", err: fmt.Errorf("delete: %w", storage.ErrObjectNotExist), wantErr: storage.ErrObjectNotExist},
+		{name: "permission denied", err: fs.ErrPermission, wantErr: fs.ErrPermission},
+		{name: "canceled", err: context.Canceled, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := newGCSServiceForTesting("bucket")
+			if _, err := svc.Save(t.Context(), saveReq()); err != nil {
+				t.Fatalf("Save() failed: %v", err)
+			}
+			svc.bucket.(*fakeBucket).deleteErr = tc.err
+
+			err := svc.Delete(t.Context(), &artifact.DeleteRequest{
+				AppName: "app", UserID: "user", SessionID: "session", FileName: "file", Version: 1,
+			})
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Delete() = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // TestGCSArtifactServiceConcurrentSave checks that concurrent saves of the same
 // artifact get distinct versions and none is overwritten. Pre-fix, colliding
 // savers picked the same version and clobbered each other.
@@ -393,6 +431,8 @@ type fakeBucket struct {
 	// client library's wrapped storage.ErrObjectNotExist (see
 	// TestNotFoundIsWrappedSentinel).
 	attrsErr error
+
+	deleteErr error
 }
 
 // object returns a handle to the named blob, creating an empty backing store on
@@ -487,9 +527,20 @@ func (o *fakeObject) attrs(ctx context.Context) (*storage.ObjectAttrs, error) {
 
 // delete removes the object from the in-memory store.
 func (o *fakeObject) delete(ctx context.Context) error {
+	if o.bucket != nil {
+		o.bucket.mu.Lock()
+		forced := o.bucket.deleteErr
+		o.bucket.mu.Unlock()
+		if forced != nil {
+			return forced
+		}
+	}
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if !b.exists {
+		return storage.ErrObjectNotExist
+	}
 	b.exists = false
 	b.data = nil
 	return nil
