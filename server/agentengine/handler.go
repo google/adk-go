@@ -35,7 +35,9 @@ import (
 )
 
 // NewHandler creates and returns an http.Handler for the AgentEngine API.
-// Handles both streaming and non-streaming versions
+// Handles both streaming and non-streaming versions. A zero sseWriteTimeout
+// means 120 seconds. A negative one means no write deadline, which also clears
+// the http.Server's WriteTimeout.
 func NewHandler(config *launcher.Config, sseWriteTimeout time.Duration, maxPayloadSize int64, agentEngineID string) (http.Handler, error) {
 	router := mux.NewRouter().StrictSlash(true)
 

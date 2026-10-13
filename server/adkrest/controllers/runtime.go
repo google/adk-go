@@ -34,6 +34,10 @@ import (
 	"google.golang.org/adk/session"
 )
 
+// defaultSSETimeout is the write deadline for an SSE response when none is
+// configured. It matches the web launcher's --sse-write-timeout default.
+const defaultSSETimeout = 120 * time.Second
+
 // RuntimeAPIController is the controller for the Runtime API.
 type RuntimeAPIController struct {
 	sseTimeout        time.Duration
@@ -56,7 +60,14 @@ type RuntimeAPIController struct {
 const maxLiveMessageBytes = 16 << 20 // 16 MiB
 
 // NewRuntimeAPIController creates the controller for the Runtime API.
+//
+// sseTimeout is the write deadline for a /run_sse response, measured from
+// when the request arrives. Zero means 120 seconds. Negative means no
+// deadline, which also clears the http.Server's WriteTimeout.
 func NewRuntimeAPIController(sessionService session.Service, memoryService memory.Service, agentLoader agent.Loader, artifactService artifact.Service, sseTimeout time.Duration, pluginConfig runner.PluginConfig, autoCreateSession bool) *RuntimeAPIController {
+	if sseTimeout == 0 {
+		sseTimeout = defaultSSETimeout
+	}
 	return &RuntimeAPIController{sessionService: sessionService, memoryService: memoryService, agentLoader: agentLoader, artifactService: artifactService, sseTimeout: sseTimeout, pluginConfig: pluginConfig, autoCreateSession: autoCreateSession}
 }
 
@@ -110,7 +121,10 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.Request) {
 	// set custom deadlines for this request - it overrides server-wide timeouts
 	rc := http.NewResponseController(rw)
-	deadline := time.Now().Add(c.sseTimeout)
+	var deadline time.Time // the zero time clears any deadline
+	if c.sseTimeout > 0 {
+		deadline = time.Now().Add(c.sseTimeout)
+	}
 	err := rc.SetWriteDeadline(deadline)
 	if err != nil {
 		http.Error(rw, "failed to set write deadline: "+err.Error(), http.StatusInternalServerError)
