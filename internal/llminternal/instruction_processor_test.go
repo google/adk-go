@@ -17,6 +17,7 @@ package llminternal
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"iter"
 	"strings"
 	"testing"
@@ -34,14 +35,15 @@ import (
 func TestInjectSessionState(t *testing.T) {
 	// Define the structure for our test cases
 	testCases := []struct {
-		name             string                 // Name of the sub-test
-		template         string                 // Input template string
-		state            map[string]any         // Initial session state
-		artifacts        map[string]*genai.Part // Artifacts for the mock service
-		expectNilService bool                   // Flag to test with a nil artifact service
-		want             string                 // Expected successful output
-		wantErr          bool                   // Whether we expect an error
-		wantErrMsg       string                 // A substring of the expected error message
+		name                  string                 // Name of the sub-test
+		template              string                 // Input template string
+		state                 map[string]any         // Initial session state
+		artifacts             map[string]*genai.Part // Artifacts for the mock service
+		customArtifactService artifact.Service       // Optional custom artifact service (overrides default)
+		expectNilService      bool                   // Flag to test with a nil artifact service
+		want                  string                 // Expected successful output
+		wantErr               bool                   // Whether we expect an error
+		wantErrMsg            string                 // A substring of the expected error message
 	}{
 		// Corresponds to: test_inject_session_state
 		{
@@ -174,6 +176,21 @@ func TestInjectSessionState(t *testing.T) {
 			},
 			want: "Optional artifact: ",
 		},
+		// Systemic artifact error on an optional placeholder must propagate, not silently render empty.
+		{
+			name:                  "optional artifact with systemic backend error propagates",
+			template:              "Content: {artifact.my_file?}",
+			customArtifactService: &errArtifactService{err: errArtifactBackendDown},
+			wantErr:               true,
+			wantErrMsg:            "backend down",
+		},
+		// fs.ErrNotExist returned by the service still renders empty for optional placeholders.
+		{
+			name:                  "optional artifact with fs.ErrNotExist renders empty",
+			template:              "Content: {artifact.my_file?}",
+			customArtifactService: &errArtifactService{err: fs.ErrNotExist},
+			want:                  "Content: ",
+		},
 		// Corresponds to: test_inject_session_state_artifact_service_not_initialized_raises_value_error
 		{
 			name:             "artifact service not initialized",
@@ -237,8 +254,12 @@ And another optional artifact:
 			// Setup Artifacts
 			var artifacts agent.Artifacts
 			if !tc.expectNilService {
+				svc := artifact.Service(artifact.InMemoryService())
+				if tc.customArtifactService != nil {
+					svc = tc.customArtifactService
+				}
 				artifacts = &artifactinternal.Artifacts{
-					Service:   artifact.InMemoryService(),
+					Service:   svc,
 					AppName:   "testApp",
 					UserID:    "testUser",
 					SessionID: "testSession",
@@ -281,6 +302,38 @@ And another optional artifact:
 
 var errDatabaseFailure = errors.New("database connection refused")
 
+// errArtifactBackendDown is a sentinel for a systemic artifact service failure.
+var errArtifactBackendDown = errors.New("backend down")
+
+// errArtifactService is a mock artifact.Service that always returns a fixed error from Load.
+type errArtifactService struct {
+	err error
+}
+
+func (s *errArtifactService) Save(_ context.Context, _ *artifact.SaveRequest) (*artifact.SaveResponse, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func (s *errArtifactService) Load(_ context.Context, _ *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	return nil, s.err
+}
+
+func (s *errArtifactService) Delete(_ context.Context, _ *artifact.DeleteRequest) error {
+	return errors.ErrUnsupported
+}
+
+func (s *errArtifactService) List(_ context.Context, _ *artifact.ListRequest) (*artifact.ListResponse, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func (s *errArtifactService) Versions(_ context.Context, _ *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
+	return nil, errors.ErrUnsupported
+}
+
+func (s *errArtifactService) GetArtifactVersion(_ context.Context, _ *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
+	return nil, errors.ErrUnsupported
+}
+
 type errorMockState struct{}
 
 func (s *errorMockState) Get(key string) (any, error) {
@@ -290,7 +343,7 @@ func (s *errorMockState) Get(key string) (any, error) {
 	return nil, session.ErrStateKeyNotExist
 }
 
-func (s *errorMockState) Set(key string, val any) error {
+func (s *errorMockState) Set(_ string, _ any) error {
 	return nil
 }
 
