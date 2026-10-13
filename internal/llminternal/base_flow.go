@@ -363,16 +363,20 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 // gives a dropped or reset connection the same verdict on both goroutines and
 // on every platform.
 //
-// Timeouts do not get one verdict. gorilla/websocket replaces any net.Error
-// whose Temporary() is true with its own type (hideTempErr), and ETIMEDOUT
-// counts as temporary, so over ws:// a timed-out read or write loses the
-// *net.OpError and is fatal. Over wss:// a timed-out read is hidden the same
-// way, but crypto/tls wraps a failed write in an error whose Temporary() is
-// always false, so the sender keeps the *net.OpError and resumes. The reader
-// and the sender can therefore disagree about one timed-out wss:// connection.
-// On Windows a TCP timeout is WSAETIMEDOUT (10060), which Go does not treat
-// as temporary, so it keeps the *net.OpError and resumes on both goroutines.
-// The text match before the type check treated it as fatal.
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
