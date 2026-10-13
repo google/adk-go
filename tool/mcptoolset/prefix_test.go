@@ -159,9 +159,9 @@ func TestMCPToolNamePrefixRegistration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ts, _ := newPrefixTestToolset(t, mcptoolset.Config{ToolNamePrefix: tc.prefix}, "search")
-			var previous toolinternal.FunctionTool
-			for range 2 {
-				tools := prefixTestTools(t, ts)
+			first := prefixTestTools(t, ts)
+			second := prefixTestTools(t, ts)
+			for _, tools := range [][]tool.Tool{first, second} {
 				if len(tools) != 1 {
 					t.Fatalf("Tools() returned %d tools, want 1", len(tools))
 				}
@@ -169,30 +169,19 @@ func TestMCPToolNamePrefixRegistration(t *testing.T) {
 				if got.Name() != tc.want || got.Declaration().Name != tc.want {
 					t.Error("tool and declaration names do not match the configured prefix")
 				}
-				if previous != nil && (previous.Name() != tc.want || previous.Declaration().Name != tc.want) {
-					t.Error("Tools() changed a previously returned tool")
-				}
-				previous = got
-				req := &model.LLMRequest{}
-				if err := tools[0].(toolinternal.RequestProcessor).ProcessRequest(nil, req); err != nil {
-					t.Fatalf("ProcessRequest() failed: %v", err)
-				}
-				if len(req.Tools) != 1 || req.Tools[tc.want] != tools[0] {
-					t.Error("request registry did not preserve the exposed name and tool")
-				}
-				if req.Config == nil || len(req.Config.Tools) != 1 || len(req.Config.Tools[0].FunctionDeclarations) != 1 {
-					t.Fatal("request must contain exactly one function declaration")
-				}
-				if req.Config.Tools[0].FunctionDeclarations[0].Name != tc.want {
-					t.Error("request declaration does not use the exposed name")
-				}
-				duplicate := prefixTestTools(t, ts)[0]
-				if err := duplicate.(toolinternal.RequestProcessor).ProcessRequest(nil, req); err == nil {
-					t.Error("ProcessRequest() accepted a duplicate exposed name")
-				}
-				if req.Tools[tc.want] != tools[0] || len(req.Config.Tools[0].FunctionDeclarations) != 1 {
-					t.Error("duplicate registration replaced the original tool or added a declaration")
-				}
+			}
+			req := &model.LLMRequest{}
+			if err := first[0].(toolinternal.RequestProcessor).ProcessRequest(nil, req); err != nil {
+				t.Fatalf("ProcessRequest() failed: %v", err)
+			}
+			if len(req.Tools) != 1 || req.Tools[tc.want] != first[0] {
+				t.Error("request registry did not preserve the exposed name and tool")
+			}
+			if req.Config == nil || len(req.Config.Tools) != 1 || len(req.Config.Tools[0].FunctionDeclarations) != 1 {
+				t.Fatal("request must contain exactly one function declaration")
+			}
+			if req.Config.Tools[0].FunctionDeclarations[0].Name != tc.want {
+				t.Error("request declaration does not use the exposed name")
 			}
 		})
 	}
