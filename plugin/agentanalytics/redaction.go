@@ -77,9 +77,9 @@ var sensitiveKeys = map[string]struct{}{
 var (
 	uriTokenRe           = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
 	authHeaderRe         = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
-	authSchemeRe         = regexp.MustCompile(`(?i)\b(bearer|basic)\s+("[^"]*"|'[^']*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	authSchemeRe         = regexp.MustCompile(`(?i)\b(bearer|basic)\s+("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
 	jsonKeyValTokenRe    = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*("([^"\\]|\\.)*"|[^\s,}\]]+)`)
-	textKeyValTokenRe    = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)\s*([=:])\s*("[^"]*"|'[^']*'|\[[^\]\r\n\s]+\][^\s,;)"'\]&]*|[^\s,;)"'\]&]+)`)
+	textKeyValTokenRe    = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)\s*([=:])\s*("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"'\]&]*|[^\s,;)"'\]&]+)`)
 	quotedSensitiveKeyRe = regexp.MustCompile(`(?i)["'][\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*["']`)
 )
 

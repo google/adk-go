@@ -948,6 +948,31 @@ func TestRedactErrorMessage(t *testing.T) {
 			msg:  `failed: {"temp:cache=foo": "SYNTHETIC_SECRET"}`,
 			want: `failed: {"temp:cache=[REDACTED]":"[REDACTED]"}`,
 		},
+		{
+			name: "bare password with escaped double quote in quoted value redacts the whole value",
+			msg:  `failed: password="prefix\"suffix"`,
+			want: `failed: password="[REDACTED]"`,
+		},
+		{
+			name: "bare password with escaped single quote in quoted value redacts the whole value",
+			msg:  `failed: password='prefix\'suffix'`,
+			want: `failed: password='[REDACTED]'`,
+		},
+		{
+			name: "bare temp key with escaped double quote in quoted value redacts the whole value",
+			msg:  `failed: temp:cache="prefix\"suffix"`,
+			want: `failed: temp:cache="[REDACTED]"`,
+		},
+		{
+			name: "bare temp key with colon and escaped double quote in quoted value redacts the whole value",
+			msg:  `failed: temp:cache: "prefix\"suffix"`,
+			want: `failed: temp:cache:"[REDACTED]"`,
+		},
+		{
+			name: "Bearer token with escaped double quote in quoted value redacts the whole value",
+			msg:  `failed: Bearer "prefix\"suffix"`,
+			want: `failed: Bearer [REDACTED]`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
