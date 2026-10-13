@@ -35,7 +35,7 @@ const (
 	// maxPatternSize caps the estimated compiled size of a regex query. The
 	// matcher's work per input byte grows with that size, and a counted repeat
 	// such as .{0,999} multiplies it: 24 of them fit in maxQueryLen and compile
-	// to about 48,000 instructions. A larger pattern is matched as a literal.
+	// to about 48,000 instructions. A larger pattern is not run.
 	maxPatternSize = 256
 	// selectPrefix marks the exact-name query form: "select:name1,name2".
 	selectPrefix = "select:"
@@ -82,9 +82,12 @@ type Config struct {
 //
 //   - "select:a,b" loads items by exact name (no cap, reports unknown names).
 //   - A query with regex metacharacters matches names as a regex, which keeps
-//     the matcher's input short. If it matches nothing and contains
-//     whitespace, it is treated as prose that happens to contain punctuation
-//     and ranked by BM25 instead.
+//     the matcher's input short. If it matches no name and either contains
+//     whitespace or uses no operator in patternOnlyChars, it is treated as
+//     punctuated keywords or prose, such as node.js or a question, and ranked
+//     by BM25 instead. Otherwise the note says that patterns match names
+//     only. A pattern larger than maxPatternSize is not run, and the note says
+//     why.
 //   - Anything else is ranked by BM25 over each item's token bag.
 func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Config) ([]Match, string) {
 	query = strings.TrimSpace(query)
@@ -101,6 +104,12 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 		return selectByName(items, rest, alreadyAvailable, cfg)
 	}
 
+	q := compileQuery(query)
+	if q.tooLarge {
+		return nil, "pattern not run: counted repeats such as {1,128} make it too large — " +
+			"use .*, a smaller count, or keywords"
+	}
+
 	var eligible, available []Item
 	for _, it := range items {
 		if alreadyAvailable[it.Name] {
@@ -110,10 +119,14 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 		}
 	}
 
-	all, note := matchQuery(eligible, query, cfg)
+	all, note := q.match(eligible, cfg)
 	if len(all) == 0 {
-		if had, _ := matchQuery(available, query, cfg); len(had) > 0 {
+		if had, _ := q.match(available, cfg); len(had) > 0 {
 			return nil, alreadyAvailableNote(had, cfg)
+		}
+		if q.matchName != nil && !q.keywordFallback {
+			return nil, fmt.Sprintf("no %s names match this pattern — patterns match names only, "+
+				"so search by keywords to match descriptions", cfg.ItemNoun)
 		}
 		return nil, noMatchNote(cfg)
 	}
@@ -131,18 +144,63 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 	return all, note
 }
 
-// matchQuery runs a regex or BM25 query over items.
-func matchQuery(items []Item, query string, cfg Config) ([]Match, string) {
+// compiledQuery is a query prepared once per Rank call, since preparing a
+// regex can cost far more than matching it.
+type compiledQuery struct {
+	text string
+	// matchName matches an item name, and is nil for a BM25 query.
+	matchName func(string) bool
+	// keywordFallback ranks by BM25 when matchName matches no name.
+	keywordFallback bool
+	// tooLarge means the pattern exceeds maxPatternSize and is not run.
+	tooLarge bool
+}
+
+// compileQuery prepares query as a BM25 query, a case-insensitive name regex,
+// or, when it does not compile, a literal substring of names. A pattern larger
+// than maxPatternSize is marked too large and not compiled.
+func compileQuery(query string) compiledQuery {
+	q := compiledQuery{text: query}
 	if !looksLikeRegex(query) {
-		return bm25Matches(items, query, cfg), ""
+		return q
 	}
-	matches := regexMatches(items, query, cfg)
-	// A pattern rarely contains whitespace, and a question such as "how do
-	// I list books?" does. Ranking a real pattern by its words would return
-	// items the pattern excluded.
-	if len(matches) == 0 && strings.ContainsFunc(query, unicode.IsSpace) {
-		return bm25Matches(items, query, cfg), "no matches as a pattern, showing keyword matches"
+	// Ranking a pattern that matched nothing by its words would return items
+	// the pattern excluded. Keywords and prose carry no pattern-only operator,
+	// or carry whitespace, which a pattern rarely does.
+	q.keywordFallback = !strings.ContainsAny(query, patternOnlyChars) || strings.ContainsFunc(query, unicode.IsSpace)
+	// Size the parse tree first: compiling a large pattern costs as much as the
+	// cap is there to prevent.
+	parsed, err := syntax.Parse("(?i)"+query, syntax.Perl)
+	if err == nil && patternSize(parsed) > maxPatternSize {
+		q.tooLarge = true
+		return q
 	}
+	if err == nil {
+		if re, err := regexp.Compile("(?i)" + query); err == nil {
+			q.matchName = re.MatchString
+			return q
+		}
+	}
+	// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
+	q.matchName = regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD"))).MatchString
+	return q
+}
+
+// match runs q over items. Name matches are sorted by name.
+func (q compiledQuery) match(items []Item, cfg Config) ([]Match, string) {
+	if q.matchName == nil {
+		return bm25Matches(items, q.text, cfg), ""
+	}
+	var matches []Match
+	for _, it := range items {
+		if q.matchName(it.Name) {
+			matches = append(matches, Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)})
+		}
+	}
+	if len(matches) == 0 && q.keywordFallback {
+		return bm25Matches(items, q.text, cfg), "no matches as a pattern, showing keyword matches"
+	}
+	slices.SortFunc(matches, func(a, b Match) int { return strings.Compare(a.Name, b.Name) })
 	return matches, ""
 }
 
@@ -229,20 +287,6 @@ func bm25Matches(eligible []Item, query string, cfg Config) []Match {
 	return matches
 }
 
-// regexMatches matches query as a case-insensitive regex against eligible item
-// names, sorted by name.
-func regexMatches(eligible []Item, query string, cfg Config) []Match {
-	matchFn := buildMatchFn(query)
-	var matches []Match
-	for _, it := range eligible {
-		if matchFn(it.Name) {
-			matches = append(matches, Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)})
-		}
-	}
-	slices.SortFunc(matches, func(a, b Match) int { return strings.Compare(a.Name, b.Name) })
-	return matches
-}
-
 // BuildTokens builds an item's BM25 token bag: its name (repeated to weight name
 // matches highest), its description, and any extra strings (e.g. argument names
 // and descriptions). Each input is tokenized.
@@ -274,26 +318,15 @@ func DescribeSearch(baseDescription string, itemNames []string) string {
 		strings.Join(names, ", ")
 }
 
+// patternOnlyChars are the regex metacharacters that keywords and prose rarely
+// contain. The others, . + ? ( ), appear in queries such as node.js, C++ and
+// questions.
+const patternOnlyChars = `*[]|^$\{}`
+
 // looksLikeRegex reports whether query contains regex metacharacters, in which
-// case it is treated as a name pattern rather than a natural-language query.
+// case it is first matched against names as a pattern.
 func looksLikeRegex(query string) bool {
 	return strings.ContainsAny(query, `.*+?[]()|^$\{}`)
-}
-
-// buildMatchFn returns a case-insensitive regexp matcher. If query is a valid
-// regexp no larger than maxPatternSize, it is used as-is; otherwise it falls
-// back to a literal substring match.
-func buildMatchFn(query string) func(string) bool {
-	pattern := "(?i)" + query
-	// Size the parse tree first: compiling a large pattern costs as much as the
-	// cap is there to prevent.
-	if parsed, err := syntax.Parse(pattern, syntax.Perl); err == nil && patternSize(parsed) <= maxPatternSize {
-		if re, err := regexp.Compile(pattern); err == nil {
-			return re.MatchString
-		}
-	}
-	// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
-	return regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD"))).MatchString
 }
 
 // patternSize estimates how many instructions re compiles to, and stops

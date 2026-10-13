@@ -477,49 +477,80 @@ func TestRank_InvalidPatternMatchesLiterally(t *testing.T) {
 	}
 }
 
-// TestRank_LargePatternMatchesLiterally checks that a pattern whose counted
-// repeat makes it larger than maxPatternSize is matched as a literal, while a
-// smaller one is still a regex.
-func TestRank_LargePatternMatchesLiterally(t *testing.T) {
+// TestRank_LargePatternIsNotRun checks that a pattern whose counted repeat
+// makes it larger than maxPatternSize is not run, and that the note says why,
+// while a smaller one still runs as a regex.
+func TestRank_LargePatternIsNotRun(t *testing.T) {
 	items := makeItems([2]string{"fix_tool", "fixes things"})
 	for query, want := range map[string][]string{
 		".{0,100}x": {"fix_tool"},
 		".{0,999}x": nil,
 		// Each pattern below matches the empty string as a regex, so whether
-		// fix_tool comes back shows how it was matched. A literal counts each
-		// rune, and an unbounded repeat counts its minimum.
+		// fix_tool comes back shows whether it ran. A literal counts each rune,
+		// and an unbounded repeat counts its minimum.
 		"(?:fix_tool){0,20}": {"fix_tool"},
 		"(?:fix_tool){0,30}": nil,
 		"(?:x?){150,}":       nil,
 	} {
-		matches, _ := Rank(items, query, nil, testCfg())
+		matches, note := Rank(items, query, nil, testCfg())
 		if diff := cmp.Diff(want, names(matches), cmpopts.EquateEmpty()); diff != "" {
 			t.Errorf("Rank(%q) names mismatch (-want +got):\n%s", query, diff)
+		}
+		if tooLarge := strings.Contains(note, "too large"); tooLarge != (want == nil) {
+			t.Errorf("Rank(%q) note = %q, want it to say the pattern is too large: %t", query, note, want == nil)
 		}
 	}
 }
 
-// TestBuildMatchFn_SizesPatternBeforeCompiling checks that a large pattern is
+// TestRank_PunctuatedKeywordsFallBackToKeywords checks that a query whose only
+// regex characters also appear in keywords, such as node.js or C++, is ranked by
+// keywords when it matches no name, while one that uses an operator only a
+// pattern needs stays empty.
+func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
+	items := makeItems(
+		[2]string{"run_script", "Runs Node.js scripts"},
+		[2]string{"compile_code", "Compiles C++ sources"},
+		[2]string{"list_invoices", "Lists unpaid invoices. Supports filters."},
+		[2]string{"price_lookup", "look up a price for v1.2 products"},
+	)
+	for query, want := range map[string][]string{
+		"node.js":   {"run_script"},
+		"C++":       {"compile_code"},
+		"invoices.": {"list_invoices"},
+		"v1.2":      {"price_lookup"},
+		"node.*js":  nil,
+	} {
+		matches, note := Rank(items, query, nil, testCfg())
+		if diff := cmp.Diff(want, names(matches), cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("Rank(%q) names mismatch (-want +got):\n%s", query, diff)
+		}
+		wantNote := "no matches as a pattern"
+		if want == nil {
+			wantNote = "patterns match names only"
+		}
+		if !strings.Contains(note, wantNote) {
+			t.Errorf("Rank(%q) note = %q, want it to contain %q", query, note, wantNote)
+		}
+	}
+}
+
+// TestCompileQuery_SizesPatternBeforeCompiling checks that a large pattern is
 // rejected before regexp compiles it. Compiling this one allocates about 72,000
 // times and takes tens of milliseconds on every search.
-func TestBuildMatchFn_SizesPatternBeforeCompiling(t *testing.T) {
+func TestCompileQuery_SizesPatternBeforeCompiling(t *testing.T) {
 	query := strings.Repeat(".{0,999}", 24) + "QQQQQQQ"
-	if allocs := testing.AllocsPerRun(1, func() { buildMatchFn(query) }); allocs > 1000 {
-		t.Errorf("buildMatchFn() allocated %v times, want at most 1000", allocs)
+	if allocs := testing.AllocsPerRun(1, func() { compileQuery(query) }); allocs > 1000 {
+		t.Errorf("compileQuery() allocated %v times, want at most 1000", allocs)
 	}
 }
 
 // TestRank_InvalidUTF8PatternDoesNotPanic checks the literal fallback for a
 // query with invalid UTF-8, which regexp rejects even after QuoteMeta. Dropping
-// the invalid byte instead of replacing it would match the "$" alone.
+// the invalid byte instead of replacing it would match the "$" in the name.
 func TestRank_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
-	items := makeItems([2]string{"get_price", "returns a price in $"})
-	matches, note := Rank(items, "$\xdc", nil, testCfg())
-	if len(matches) != 0 {
+	items := makeItems([2]string{"price_$_tool", "returns a price"})
+	if matches, _ := Rank(items, "$\xdc", nil, testCfg()); len(matches) != 0 {
 		t.Errorf("Rank() = %v, want no matches", names(matches))
-	}
-	if want := noMatchNote(testCfg()); note != want {
-		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }
 
