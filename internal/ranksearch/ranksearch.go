@@ -18,6 +18,7 @@
 package ranksearch
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"regexp"
@@ -41,7 +42,7 @@ const (
 	// so this roughly bounds how many states a byte can cost. Only roughly: the
 	// estimate comes from a parse without case folding (see compileQuery), and
 	// a pattern that turns folding off with (?-i) can compile to many times it,
-	// 14 times in the worst case found. It does not bound parse time (see
+	// 19 times for one of 199 runes. It does not bound parse time (see
 	// maxQueryLen). A counted repeat such as .{0,999} multiplies the size: 24 of
 	// them fit in maxQueryLen and compile to about 48,000 instructions. A larger
 	// pattern is not run.
@@ -184,8 +185,8 @@ type compiledQuery struct {
 	// literal substring for punctuated keywords or prose. It is nil for a
 	// query without regex metacharacters and for a pattern that is not run.
 	matchName func(string) bool
-	// keywordFallback ranks the query by BM25 when no name contains it, because
-	// it is punctuated keywords or prose rather than a pattern.
+	// keywordFallback ranks the query by BM25 when no new name contains it,
+	// because it is punctuated keywords or prose rather than a pattern.
 	keywordFallback bool
 	// notRun is the note explaining why a pattern was not run, if it was not.
 	// It is never set for prose, which is ranked by keywords instead.
@@ -196,13 +197,13 @@ type compiledQuery struct {
 }
 
 // compileQuery prepares a query with regex metacharacters. It is a pattern if
-// it contains one of patternMarkers, if its parse tree uses a repeat (see
-// usesRepeat), or if it fails to parse in a way punctuated keywords do not (see
-// keywordParseError). A pattern is matched against names as a case-insensitive
-// regex. A pattern larger than maxPatternSize, or one that does not parse, is
-// not run. Any other query is punctuated keywords, and so is any query with
-// whitespace, which marks prose. It is matched against names as a
-// case-insensitive literal substring, then by BM25. Matching it as a regex
+// it contains one of patternMarkers or if its parse tree uses a repeat (see
+// usesRepeat), judging a query that does not parse as it would be once fixed
+// (see repeatsOnceParsed). A pattern is matched against names as a
+// case-insensitive regex. A pattern larger than maxPatternSize, or one that
+// does not parse, is not run. Any other query is punctuated keywords, and so is
+// any query with whitespace, which marks prose. It is matched against names as
+// a case-insensitive literal substring, then by BM25. Matching it as a regex
 // would make PDF? match "update", and ranking a pattern that matched nothing by
 // its words would return the items it excluded.
 func compileQuery(query string) compiledQuery {
@@ -211,7 +212,8 @@ func compileQuery(query string) compiledQuery {
 		return q
 	}
 	prose := strings.ContainsFunc(query, unicode.IsSpace)
-	markers := patternMarkers.MatchString(query)
+	// An invalid byte would hide a marker, as in .\xff+.
+	markers := patternMarkers.MatchString(strings.ToValidUTF8(query, ""))
 	// Size a parse without the (?i) the compile adds. Compiling a large pattern
 	// is itself slow, and case folding is the slow part of parsing a wide
 	// character class, though a query that sets (?i) itself is folded here too.
@@ -219,10 +221,10 @@ func compileQuery(query string) compiledQuery {
 	// repeat multiplies the difference, so the estimate can be well off in
 	// either direction (see maxPatternSize).
 	parsed, err := syntax.Parse(query, syntax.Perl)
-	isPattern := markers || err == nil && usesRepeat(parsed)
+	isPattern := markers || repeatsOnceParsed(query, parsed, err)
 	if err != nil {
 		var perr *syntax.Error
-		isPattern = errors.As(err, &perr) && (markers || !keywordParseError(perr.Code))
+		isPattern = isPattern && errors.As(err, &perr)
 		if isPattern && !prose {
 			q.notRun = notRunNote(perr)
 		}
@@ -255,34 +257,144 @@ func notRunNote(perr *syntax.Error) string {
 // patternMarkers matches syntax that keywords rarely contain but patterns do: a
 // character class, an alternation, an anchor, a counted repeat including the
 // {,n} form Go reads as text, a (? group or (* verb, an escape such as \d, \b,
-// \. or \x5f, .* or a similar repeat of any character, a possessive *+ or ?+,
-// and a group followed by a word, as in (user)_file. A ? or + after an
-// underscore marks a tool-name pattern such as list_files?, since keywords such
-// as forecast? have none. After a hyphen or a camelCase hump it does not, since
-// keywords such as e-mail? and iOS? have them, so listFiles? is read as
-// keywords. Reading the text rather than the parse tree also catches a pattern
-// the parser simplifies, such as [.] becoming a literal, and one that does not
-// parse, such as ^get_.*+_record$. A bare ., as in node.js, and a group on its
-// own or after a word, as in (SMTP), invoice(s) or fetch(), are not markers. A
-// keyword such as US$ or C:\temp trips it, and is then matched as a pattern.
+// \. or \x5f, a .+ or a possessive *+ or ?+, and a group followed by a word,
+// as in (user)_file. A ? or + after an underscore marks a tool-name pattern
+// such as list_files?, since keywords such as forecast? have none. After a
+// hyphen or a camelCase hump it does not, since keywords such as e-mail? and
+// iOS? have them, so listFiles? is read as keywords. Reading the text rather
+// than the parse tree also catches a pattern the parser simplifies, such as [.]
+// becoming a literal, and one that does not parse, such as ^get_.*+_record$. A
+// bare ., as in node.js, and a group on its own or after a word, as in (SMTP),
+// invoice(s) or fetch(), are not markers. A keyword such as US$ or C:\temp
+// trips it, and is then matched as a pattern.
 var patternMarkers = regexp.MustCompile(
-	`[\[|^$]|\(\?|\(\*|\\.|\.[*+?]|[*?]\+|\{,?\d|_.*[?+]|\)\w`)
+	`[\[|^$]|\(\?|\(\*|\\.|\.\+|[*?]\+|\{,?\d|_.*[?+]|\)\w`)
 
-// keywordParseError reports whether a parse error is one that punctuated
-// keywords produce, such as C++, (beta or a leading *, rather than syntax Go's
-// regexp rejects in a deliberate pattern, such as lookaround, a backreference
-// or a repeat count over 1000. A pattern can produce these too, so a query
-// that also contains one of patternMarkers is a pattern. A Windows path such
-// as C:\Users fails the way a backreference does, and so gets the note that
-// its pattern was not run.
-func keywordParseError(code syntax.ErrorCode) bool {
-	switch code {
-	case syntax.ErrInvalidRepeatOp, syntax.ErrMissingRepeatArgument, syntax.ErrMissingParen,
-		syntax.ErrUnexpectedParen, syntax.ErrTrailingBackslash, syntax.ErrInvalidUTF8:
+// repeatsOnceParsed reports whether query, which has none of patternMarkers,
+// is a pattern by its parse tree (see usesRepeat). A query that does not parse
+// is fixed first. Its invalid UTF-8 and a trailing backslash are deleted. Its
+// parentheses are then balanced, either by adding the missing ones at its ends
+// or by deleting any fewest set of them (see anyBalancing), and its stray
+// repeats are deleted after that (see deleteStrayRepeats). It is a pattern if
+// any of these fixes leaves a pattern, or a query that still does not parse.
+// So get_users**_record, (get_users*_record and node.(js? are patterns, and so
+// are some queries that look like keywords: tel(+48, *user* and why???, and
+// (beta? and C+), which closing turns into a ? or + inside a group. C++, C++17
+// and (beta are keywords. A pattern that is one only by its group, such as
+// (user)_file, reads as keywords once it loses its ), since (user_file cannot
+// be told apart from (beta.
+func repeatsOnceParsed(query string, parsed *syntax.Regexp, err error) bool {
+	if err == nil {
+		return usesRepeat(parsed)
+	}
+	b := []byte(strings.TrimSuffix(strings.ToValidUTF8(query, ""), `\`))
+	opens, closes := unbalanced(b)
+	closed := slices.Concat(bytes.Repeat([]byte("("), closes), b, bytes.Repeat([]byte(")"), opens))
+	return balancedIsPattern(closed) || anyBalancing(b, opens, closes, balancedIsPattern)
+}
+
+// balancedIsPattern reports whether b, a query with balanced parentheses, is a
+// pattern once its stray repeats are deleted, or still does not parse.
+func balancedIsPattern(b []byte) bool {
+	text := deleteStrayRepeats(b)
+	if patternMarkers.Match(text) {
 		return true
 	}
-	return false
+	re, err := syntax.Parse(string(text), syntax.Perl)
+	return err != nil || usesRepeat(re)
 }
+
+// unbalanced returns how many of the ( and how many of the ) in b have no
+// partner.
+func unbalanced(b []byte) (opens, closes int) {
+	for _, c := range b {
+		switch {
+		case c == '(':
+			opens++
+		case c != ')':
+		case opens == 0:
+			closes++
+		default:
+			opens--
+		}
+	}
+	return opens, closes
+}
+
+// maxBalancingSteps bounds the search in anyBalancing.
+const maxBalancingSteps = 256
+
+// anyBalancing reports whether f returns true for b with any fewest set of
+// parentheses deleted that balances it, given that opens of its ( and closes of
+// its ) have no partner. It reports true, as for a pattern, once the search
+// takes more than maxBalancingSteps steps. f must not keep its argument.
+func anyBalancing(b []byte, opens, closes int, f func([]byte) bool) bool {
+	kept := make([]byte, 0, len(b))
+	steps := 0
+	var walk func(i, depth, opens, closes int) bool
+	walk = func(i, depth, opens, closes int) bool {
+		if steps++; steps > maxBalancingSteps {
+			return true
+		}
+		n := len(kept)
+		defer func() { kept = kept[:n] }()
+		for ; i < len(b); i++ {
+			c := b[i]
+			if c == '(' && opens > 0 && walk(i+1, depth, opens-1, closes) ||
+				c == ')' && closes > 0 && walk(i+1, depth, opens, closes-1) {
+				return true
+			}
+			switch {
+			case c == '(':
+				depth++
+			case c == ')' && depth == 0:
+				return false
+			case c == ')':
+				depth--
+			}
+			kept = append(kept, c)
+		}
+		return depth == 0 && f(kept)
+	}
+	return walk(0, 0, opens, closes)
+}
+
+// deleteStrayRepeats deletes from a query with balanced parentheses each ++,
+// since keywords such as C++17 have one, and then each run of *, + and ? with
+// nothing to repeat, at the start or after a (, as in *node or (+48). After a (
+// it keeps a ? from the run, since (? starts a flag group, which patternMarkers
+// catches. So getusers++record is keywords, while patternMarkers keeps
+// getx.++record a pattern.
+func deleteStrayRepeats(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	var run []byte
+	for _, c := range b {
+		if isRepeatOp(c) {
+			run = append(run, c)
+			continue
+		}
+		out = append(keptOfRun(out, run), c)
+		run = run[:0]
+	}
+	return keptOfRun(out, run)
+}
+
+// keptOfRun appends to out what deleteStrayRepeats keeps of run.
+func keptOfRun(out, run []byte) []byte {
+	run = bytes.ReplaceAll(run, []byte("++"), nil)
+	switch {
+	case len(out) == 0:
+		return out
+	case out[len(out)-1] == '(':
+		if slices.Contains(run, '?') {
+			out = append(out, '?')
+		}
+		return out
+	}
+	return append(out, run...)
+}
+
+func isRepeatOp(c byte) bool { return c == '*' || c == '+' || c == '?' }
 
 // nameMatches returns the items whose name q matches, sorted by name.
 func (q compiledQuery) nameMatches(items []Item, cfg Config) []Match {

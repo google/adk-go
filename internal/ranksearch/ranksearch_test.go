@@ -16,6 +16,7 @@ package ranksearch
 
 import (
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strings"
 	"testing"
@@ -553,6 +554,15 @@ func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
 		"node)":         {"run_script"},
 		"node\\":        {"run_script"},
 		"Objective-C++": {"compile_code"},
+		"C++17":         {"compile_code"},
+		"(C++)":         {"compile_code"},
+		"(+js)":         {"run_script"},
+		"node)(js":      {"run_script"},
+		"node+\xdc":     {"run_script"},
+		"convert())":    {"convert_document"},
+		// A ] or a brace without a digit is text to Go's regexp.
+		"node]":  {"run_script"},
+		"{node}": {"run_script"},
 		// A trailing ? or + on one character is still keywords.
 		"sources?": {"compile_code"},
 		"node+":    {"run_script"},
@@ -563,9 +573,7 @@ func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
 		"nodeScripts?":  {"run_script"},
 		"node-scripts?": {"run_script"},
 		// Each of these is a pattern by its text alone (see patternMarkers).
-		"node.*js":      nil,
 		"node.+js":      nil,
-		"node.?js":      nil,
 		"node.+":        nil,
 		"node.{2}js":    nil,
 		"node.{,2}js":   nil,
@@ -599,6 +607,8 @@ func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
 		"node_script+":  nil,
 		"(node)_js":     nil,
 		// Each of these is a pattern only by a repeat in its parse tree.
+		"node.*js":   nil,
+		"node.?js":   nil,
 		"nodes*js":   nil,
 		"nodes*":     nil,
 		"nodes+js":   nil,
@@ -622,10 +632,11 @@ func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
 	}
 }
 
-// TestRank_UnsupportedPatternIsNotRun checks that a pattern using syntax Go's
-// regexp rejects, such as lookaround, is not ranked by its words, which would
-// return the tools it excluded, and that the note says why. Prose with such
-// syntax is still ranked by keywords.
+// TestRank_UnsupportedPatternIsNotRun checks that a pattern Go's regexp
+// rejects, for syntax it lacks such as lookaround or for a typo such as
+// get_users**_record, is not ranked by its words, which would return the tools
+// it excluded, and that the note says why. Prose with such syntax is still
+// ranked by keywords.
 func TestRank_UnsupportedPatternIsNotRun(t *testing.T) {
 	items := makeItems(
 		[2]string{"get_user_file", "fetch a user's file"},
@@ -650,13 +661,47 @@ func TestRank_UnsupportedPatternIsNotRun(t *testing.T) {
 		"^getuser)":        "unexpected )",
 		"getuser)$":        "unexpected )",
 		"(*FAIL)":          "missing argument to repetition operator",
-		"getx.**record":    "invalid nested repetition operator",
 		"getx.+*record":    "invalid nested repetition operator",
-		"getx.?*record":    "invalid nested repetition operator",
 		"getusers*+record": "invalid nested repetition operator",
 		"getuser?+record":  "invalid nested repetition operator",
 		"getx\\w++record":  "invalid nested repetition operator",
 		"getx{2}+":         "invalid nested repetition operator",
+		// Each of these has no marker, and is a pattern by repeatsOnceParsed.
+		"get_users**_record":  "invalid nested repetition operator",
+		"getusers**record":    "invalid nested repetition operator",
+		"(get_users*_record":  "missing closing )",
+		"get_users*_record)":  "unexpected )",
+		"*getusers*record":    "missing argument to repetition operator",
+		"getusers*record\\":   "trailing backslash at end of expression",
+		"getusers*record\xdc": "invalid UTF-8",
+		"getx.**record":       "invalid nested repetition operator",
+		"getx.?*record":       "invalid nested repetition operator",
+		// Each of these lost a parenthesis. Adding one at the start or the end
+		// makes it a pattern, and deleting one does not.
+		"node.(js?":     "missing closing )",
+		"node.js)?":     "unexpected )",
+		"getx+)+record": "unexpected )",
+		// Each of these hides a marker behind an invalid byte.
+		"getx.\xff++record": "invalid UTF-8",
+		"(\xff*FAIL)":       "invalid UTF-8",
+		// Each of these is a pattern by its marker alone, since deleting what
+		// breaks it leaves keywords.
+		"getx.++record": "invalid nested repetition operator",
+		"*+getusers":    "missing argument to repetition operator",
+		"?+getusers":    "missing argument to repetition operator",
+		// Deleting the first ( leaves keywords, and deleting the second leaves
+		// a pattern, so this is a pattern.
+		"(getusers(+record)": "missing argument to repetition operator",
+		// Deleting both parentheses leaves a pattern, and adding their partners
+		// does not.
+		"getusers)(+record": "unexpected )",
+		// Each of these looks like keywords, but one way of fixing it leaves a
+		// pattern: deleting the first *, deleting the (, or closing the (.
+		"*node*":  "missing argument to repetition operator",
+		"tel(+48": "missing argument to repetition operator",
+		"(beta?":  "missing closing )",
+		// This still does not parse once fixed.
+		"why???": "invalid nested repetition operator",
 	} {
 		matches, note := Rank(items, query, nil, testCfg())
 		if len(matches) != 0 {
@@ -673,6 +718,84 @@ func TestRank_UnsupportedPatternIsNotRun(t *testing.T) {
 	if diff := cmp.Diff([]string{"delete_user_record"}, names(matches)); diff != "" || !strings.Contains(note, "showing keyword matches") {
 		t.Errorf("Rank(prose) = %v, note %q, want delete_user_record ranked by keywords (-want +got):\n%s", names(matches), note, diff)
 	}
+}
+
+// TestRank_BalancingSearchIsBounded checks that a query whose parentheses take
+// more than maxBalancingSteps steps to balance counts as a pattern, which is
+// not run, while one that takes no more is classified as usual.
+func TestRank_BalancingSearchIsBounded(t *testing.T) {
+	items := makeItems([2]string{"run_script", "Runs Node.js scripts"})
+	// Nine ( and five ) take exactly maxBalancingSteps steps.
+	matches, note := Rank(items, "(((((((((node)))))", nil, testCfg())
+	if diff := cmp.Diff([]string{"run_script"}, names(matches)); diff != "" || !strings.Contains(note, "showing keyword matches") {
+		t.Errorf("Rank(nine) = %v, note %q, want run_script by keywords (-want +got):\n%s", names(matches), note, diff)
+	}
+	// Ten take more.
+	matches, note = Rank(items, "((((((((((node)))))", nil, testCfg())
+	if len(matches) != 0 || !strings.HasPrefix(note, "pattern not run: missing closing )") {
+		t.Errorf("Rank(ten) = %v, note %q, want no matches and a note that the pattern was not run", names(matches), note)
+	}
+}
+
+// TestCompileQuery_BrokenPatternStaysPattern checks that a pattern with a typo
+// of a kind punctuated keywords also have is still a pattern, and so is not
+// ranked by its words. It tries every pattern of up to four characters from a
+// small alphabet, with each typo at every place it fits. A doubled + is not
+// tried, since a ++ is read as text (see deleteStrayRepeats). Nor is losing a )
+// from a pattern with no *, + or ?, or with a ()+, since one that is a pattern
+// only by its group reads as keywords once it loses its ) (see
+// repeatsOnceParsed).
+func TestCompileQuery_BrokenPatternStaysPattern(t *testing.T) {
+	queries := []string{""}
+	for i := 0; i < len(queries); i++ {
+		if len(queries[i]) < 4 {
+			for _, c := range "a_.*+?()" {
+				queries = append(queries, queries[i]+string(c))
+			}
+		}
+	}
+	for _, p := range queries {
+		if !looksLikeRegex(p) || compileQuery(p).keywordFallback {
+			continue
+		}
+		if _, err := syntax.Parse(p, syntax.Perl); err != nil {
+			continue
+		}
+		groupOnly := !strings.ContainsAny(p, "*+?") || strings.Contains(p, "()+")
+		for _, typo := range typos(p) {
+			if groupOnly && strings.Count(typo, ")") < strings.Count(p, ")") {
+				continue
+			}
+			if compileQuery(typo).keywordFallback {
+				t.Errorf("compileQuery(%q) is keywords, want a pattern like %q", typo, p)
+			}
+		}
+	}
+}
+
+// typos returns p with each typo punctuated keywords also have: a (, a ) or an
+// invalid byte added anywhere, one of its ( or ) deleted, a *, + or ? at the
+// start or after a (, a doubled * or ?, and a trailing backslash.
+func typos(p string) []string {
+	var out []string
+	insert := func(i int, s string) { out = append(out, p[:i]+s+p[i:]) }
+	for i := 0; i <= len(p); i++ {
+		for _, s := range []string{"(", ")", "\xff"} {
+			insert(i, s)
+		}
+		if i == 0 || p[i-1] == '(' {
+			for _, s := range []string{"*", "+", "?"} {
+				insert(i, s)
+			}
+		}
+		if i > 0 && (p[i-1] == '*' || p[i-1] == '?') {
+			insert(i, p[i-1:i])
+		}
+		if i < len(p) && (p[i] == '(' || p[i] == ')') {
+			out = append(out, p[:i]+p[i+1:])
+		}
+	}
+	return append(out, p+`\`)
 }
 
 // TestRank_AlreadyAvailableNameMatches checks that a pattern whose only name
