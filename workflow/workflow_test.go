@@ -60,7 +60,7 @@ func (m *MockInvocationContext) WithICDelta(d *agent.InvocationContextDelta) age
 }
 
 // newMockCtx returns a fresh MockInvocationContext backed by
-// t.Context(), which is automatically cancelled when the test ends
+// t.Context(), which is automatically canceled when the test ends
 // — preventing leaked scheduler goroutines from outliving the test.
 func newMockCtx(t *testing.T) *MockInvocationContext {
 	t.Helper()
@@ -277,7 +277,7 @@ func (n *CustomRouteNode) Run(ctx agent.Context, input any) iter.Seq2[*session.E
 func TestWorkflowRouting(t *testing.T) {
 	// testTracker collects the names of nodes that ran. The
 	// scheduler runs sibling nodes concurrently, so appends must be
-	// serialised.
+	// serialized.
 	type testTracker struct {
 		mu       sync.Mutex
 		executed []string
@@ -388,7 +388,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a, Route: StringRoute("branchA")},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"B"},
@@ -412,7 +412,7 @@ func TestWorkflowRouting(t *testing.T) {
 				return []Edge{
 					{From: Start, To: x},
 					{From: x, To: a},
-					{From: x, To: b, Route: (Default)},
+					{From: x, To: b, Route: Default},
 				}
 			},
 			expectedExec: []string{"A", "B"},
@@ -633,5 +633,46 @@ func TestEndToEndInputValidationFlow(t *testing.T) {
 
 	if !strings.Contains(receivedInput, "hello_intent") {
 		t.Errorf("expected json payload at the end to contain 'hello_intent', got %q", receivedInput)
+	}
+}
+
+// A *genai.Part element can be nil
+// userInput must skip those rather than dereference them.
+func TestWorkflowRunSkipsNilUserContentParts(t *testing.T) {
+	hi := &genai.Part{Text: "hi"}
+
+	for _, tc := range []struct {
+		name  string
+		parts []*genai.Part
+		want  any
+	}{
+		{"leading", []*genai.Part{nil, hi}, "hi"},
+		{"middle", []*genai.Part{hi, nil, hi}, "hihi"},
+		{"trailing", []*genai.Part{hi, nil}, "hi"},
+		{"only", []*genai.Part{nil}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			echo := NewFunctionNode("echo", func(ctx agent.Context, input any) (any, error) {
+				return input, nil
+			}, defaultNodeConfig)
+			w := mustNew(t, Chain(Start, echo))
+
+			mockCtx := newMockCtx(t)
+			mockCtx.userContent = &genai.Content{Parts: tc.parts}
+
+			var got any
+			for ev, err := range w.Run(mockCtx) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if ev.Output != nil {
+					got = ev.Output
+				}
+			}
+
+			if got != tc.want {
+				t.Errorf("seed input = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

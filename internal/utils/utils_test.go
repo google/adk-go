@@ -67,3 +67,34 @@ func TestPopulateClientFunctionCallIDUsesProvider(t *testing.T) {
 		t.Errorf("preset function call ID = %q, want it left untouched (%q)", got, "keep")
 	}
 }
+
+// A *genai.Part element can be nil, so the accessors must skip nil entries
+// instead of dereferencing them.
+func TestPartAccessorsSkipNilParts(t *testing.T) {
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{Name: "call"}}
+	resp := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "resp"}}
+	text := &genai.Part{Text: "hi"}
+
+	for _, tc := range []struct {
+		name  string
+		parts func(keep *genai.Part) []*genai.Part
+		want  int
+	}{
+		{"leading", func(keep *genai.Part) []*genai.Part { return []*genai.Part{nil, keep} }, 1},
+		{"middle", func(keep *genai.Part) []*genai.Part { return []*genai.Part{keep, nil, keep} }, 2},
+		{"trailing", func(keep *genai.Part) []*genai.Part { return []*genai.Part{keep, nil} }, 1},
+		{"only", func(keep *genai.Part) []*genai.Part { return []*genai.Part{nil} }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := utils.FunctionCalls(&genai.Content{Parts: tc.parts(call)}); len(got) != tc.want {
+				t.Errorf("FunctionCalls() returned %d calls, want %d", len(got), tc.want)
+			}
+			if got := utils.FunctionResponses(&genai.Content{Parts: tc.parts(resp)}); len(got) != tc.want {
+				t.Errorf("FunctionResponses() returned %d responses, want %d", len(got), tc.want)
+			}
+			if got := utils.TextParts(&genai.Content{Parts: tc.parts(text)}); len(got) != tc.want {
+				t.Errorf("TextParts() returned %d texts, want %d", len(got), tc.want)
+			}
+		})
+	}
+}

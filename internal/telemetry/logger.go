@@ -167,7 +167,7 @@ func LogResponse(ctx context.Context, resp *model.LLMResponse, backend genai.Bac
 // logSystemMessage logs the system message from the request.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aisystemmessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
-// * The spec requires a "role" body field, but it's ommited.
+// * The spec requires a "role" body field, but it's omitted.
 func logSystemMessage(ctx context.Context, req *model.LLMRequest, genAISystem *attribute.KeyValue) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.system.message")
@@ -183,7 +183,7 @@ func logSystemMessage(ctx context.Context, req *model.LLMRequest, genAISystem *a
 // logUserMessage logs the user message from the request.
 // Semconv reference: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/gen-ai/gen-ai-events.md#event-gen_aiusermessage.
 // NOTE: The current implementation doesn't fully follow the spec, but aims for consistency with ADK Python. The differences are:
-// * The spec requires a "role" body field, but it's ommited. If the role is set in [genai.Content], then it will be available in body.content.role.
+// * The spec requires a "role" body field, but it's omitted. If the role is set in [genai.Content], then it will be available in body.content.role.
 func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *attribute.KeyValue) {
 	record := log.Record{}
 	record.SetEventName("gen_ai.user.message")

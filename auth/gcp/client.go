@@ -17,19 +17,23 @@ package gcp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/auth"
 )
 
@@ -49,16 +53,58 @@ const (
 // routed to the Agent Identity service (same split as adk-python).
 var connectorResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/connectors/[^/]+$`)
 
+// authProviderResourceRE matches an Agent Identity resource name. Together with
+// connectorResourceRE it is the full set [NewProvider] accepts. The client
+// itself is looser, routing any non-connector name to Agent Identity.
+var authProviderResourceRE = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/authProviders/[^/]+$`)
+
 // resourceNameRE bounds a resource name to the characters GCP resource names
-// use, so it can't inject extra path segments, a query, or a fragment into the
-// request URL it is interpolated into. A separate ".." check blocks path
-// traversal (dots are allowed so domain-style ids still pass).
-var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~/-]+$`)
+// use. It cannot inject a query, a fragment, an authority or a percent-escape
+// into the request URL the name is interpolated into. Extra path segments are
+// allowed, since a resource name is itself a path. The colon is allowed for
+// domain-scoped project ids (projects/example.com:my-project/...) — the name is
+// always appended after the endpoint and a version segment (/v1 for Agent
+// Identity, /v1alpha for the connector), so it can never be read as a scheme.
+var resourceNameRE = regexp.MustCompile(`^[A-Za-z0-9._~:/-]+$`)
+
+// validateResource rejects a resource name that cannot be safely interpolated
+// into a request URL, or that would not survive path normalization — an empty,
+// "." or ".." segment blocks traversal, and also keeps the name the caller
+// validated identical to the one connectorResourceRE routes on. [NewProvider]
+// applies it at wiring time too, so a malformed name fails once rather than on
+// every request.
+func validateResource(name string) error {
+	if !resourceNameRE.MatchString(name) {
+		return fmt.Errorf("resource %q has invalid characters", name)
+	}
+	for seg := range strings.SplitSeq(name, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("resource %q has an empty or relative path segment", name)
+		}
+	}
+	return nil
+}
 
 // Sentinel errors from [Client.RetrieveCredential]; callers test with errors.Is.
 var (
 	// ErrConsentRejected means the end user rejected the consent request.
 	ErrConsentRejected = errors.New("gcp: user consent rejected")
+	// ErrMalformedResponse means a 2xx body failed JSON decoding — that arm and no
+	// other. A 2xx that overruns the 1 MiB cap before the decoder sees it, or that
+	// decodes cleanly but names an empty or unusable header, returns a plain error.
+	// So this replaces a *json.SyntaxError check rather than answering the broader
+	// question of whether the service sent back something unusable.
+	//
+	// It exists because the decode error is no longer wrapped with %w. The
+	// decoder's message quotes the token it choked on, which is service-controlled
+	// text that has to be scrubbed, and keeping the wrap would leave the unscrubbed
+	// original reachable through Unwrap.
+	//
+	// Every encoding/json error loses its type this way, not only *json.SyntaxError.
+	// TestDecodeErrorScrubsTheActingUser asserts on "cannot unmarshal number", which
+	// is a *json.UnmarshalTypeError, so the second one a caller could match on is
+	// demonstrated by this package's own tests.
+	ErrMalformedResponse = errors.New("gcp: credentials service returned an undecodable response")
 	// ErrPollTimeout means polling exceeded the poll timeout while the credential
 	// was still pending.
 	ErrPollTimeout = errors.New("gcp: timed out waiting for credentials")
@@ -70,7 +116,46 @@ var (
 type APIError struct {
 	// StatusCode is the HTTP status code of the response.
 	StatusCode int
-	// Body is the response body, truncated, useful for diagnosing the failure.
+	// Body is the response body, prepared for an error rather than verbatim: the
+	// request's own UserID and ContinueURI are removed WHERE THE SCRUB CAN MATCH
+	// THEM and replaced with "[redacted]", the text is lowercased wherever
+	// anything matched, and only the first kilobyte of the response is drawn on,
+	// with "..." marking that the rest was dropped. A kilobyte is also the ceiling
+	// on Body itself, which is not the same promise: one matched run becomes a
+	// ten-byte marker whatever it replaced, so bounding the source alone left the
+	// result several times larger.
+	//
+	// Removal is best effort, and the guarantee is narrower than removal: no value
+	// this package was given is recoverable from Body by this package's own
+	// decoder, unless the value is spelled entirely out of the characters of
+	// "[redacted]" and laid out as a run of them.
+	//
+	// That carve-out is deliberate. The marker is text this package writes, so a
+	// value found only inside one was never disclosed by the service, and counting
+	// it would suppress every response — a UserID of "e" occurs in "[redacted]".
+	// It cannot reach the values this path actually carries: the excused class is
+	// the substrings of "[redacted][redacted]…", which is eight distinct letters
+	// with no "@", ":" or "/" among them, so no address and no redirect URI is in
+	// it. A service can put such a marker in its own body and be excused the same
+	// way, since there is no telling its markers from ours.
+	//
+	// A value can also be partly legible. Where the UserID is a substring of the
+	// ContinueURI and the service spells the URI with escapes the scrub cannot
+	// match, the UserID's marker lands inside the URI and the rest of the URI
+	// reads plainly around it, as "my-[redacted].test/oauth/callback".
+	//
+	// It can also be none of the response. Where the identifiers could not be
+	// shown to be gone, Body is a fixed sentence saying so and bears no relation
+	// to what the service sent. A response too long to examine whole lands here
+	// too, since not looking is not the same as looking and finding nothing. There
+	// is no supported way to tell that case apart, so branch on StatusCode and
+	// treat Body as diagnostic text for a human rather than as something to match
+	// on.
+	//
+	// Otherwise it is still service-controlled. Render it with %q, as
+	// [APIError.Error] does — the service can put a newline in it directly, and an
+	// escaped one in the body is decoded on the way here, so "%s" into a log
+	// forges a second line.
 	Body string
 }
 
@@ -88,6 +173,46 @@ type Client struct {
 	connectorURL     string
 	pollTimeout      time.Duration
 	initialBackoff   time.Duration
+	// cacheSlot names this Client for the credential cache. What the services
+	// return depends on the endpoint asked and on the identity the ask is
+	// authenticated as, so two providers sharing one store must not share an
+	// entry unless their Clients agree on both.
+	//
+	// It is one value per Client, not one per identity, because this package
+	// cannot observe the identity a Client authenticates as. A caller-supplied
+	// HTTPClient is opaque by construction. So is Application Default
+	// Credentials: NewClient resolves it afresh on every call, so two ADC clients
+	// in one process need not be the same principal — the credentials file can be
+	// rewritten between them, and oauth2.HTTPClient in the context supplies the
+	// transport underneath the ADC one, which this package's own PollTimeout doc
+	// invites a caller to use. Erring towards a false miss costs a round trip;
+	// erring the other way discloses one principal's token to another.
+	//
+	// The converse is a precondition this package cannot enforce and states on
+	// Config.HTTPClient: one Client must not authenticate as several identities.
+	//
+	// The value is unique per process as well as within one, so a store that
+	// outlives the process — or is shared by two — misses rather than serving an
+	// entry written by a Client that no longer exists and cannot be identified.
+	cacheSlot string
+}
+
+// clientSeq numbers Clients within this process, and clientNonce separates one
+// process's numbering from another's. See the cacheSlot field.
+var (
+	clientSeq   atomic.Uint64
+	clientNonce = newClientNonce()
+)
+
+// nonceBytes is the width of clientNonce. 128 bits makes a collision between two
+// processes not worth reasoning about.
+const nonceBytes = 16
+
+func newClientNonce() string {
+	var b [nonceBytes]byte
+	// Documented never to fail, and it panics rather than returning short.
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // Config configures a [Client]. A nil *Config, or any zero-valued field, uses
@@ -97,6 +222,17 @@ type Config struct {
 	// from Application Default Credentials (cloud-platform scope). If set, it is
 	// used verbatim and ADC is not applied, so it must carry its own credentials
 	// and should refuse redirects for the reason [NewClient] describes.
+	//
+	// It must authenticate as one identity for the Client's whole life. A Client
+	// is a credential-cache dimension precisely because it is assumed to fix who
+	// the credential service mints on behalf of, and a transport that picks its
+	// credentials out of the request context breaks that assumption without this
+	// package being able to see it: every tenant would share one cache entry.
+	// Build a Client per identity instead.
+	//
+	// Two Clients are two cache dimensions even when built from one HTTPClient,
+	// so build a Client once per identity and share it. One per request resolves
+	// nothing from cache and leaves an entry behind per request.
 	HTTPClient *http.Client
 	// AgentIdentityEndpoint overrides the Agent Identity base URL (scheme+host).
 	// It is used as given, not parsed: an http:// value would send the ADC token
@@ -164,7 +300,43 @@ func NewClient(ctx context.Context, cfg *Config) (*Client, error) {
 		}
 		c.httpClient = hc
 	}
+	c.cacheSlot = joinFields(clientNonce, strconv.FormatUint(clientSeq.Add(1), 10))
 	return c, nil
+}
+
+// CacheKey returns the key a credential for scheme, retrieved through c on
+// behalf of id, is cached under — the key to hand
+// [auth.CredentialStore.Delete] to invalidate that credential ahead of its
+// expiry, on a consent revocation or a logout. It is the key the provider
+// itself files under, built from the same [agent.Identity] the provider reads
+// off the invocation. Only id.AppName and id.UserID take part: a credential
+// is shared across a user's sessions.
+//
+// Pass the same [ProviderScheme] the provider was built with, as it was then.
+// [NewProvider] copies Scopes, so changing the caller's slice afterwards changes
+// the key this computes but not the one the provider files under. A scheme
+// differing in any field names a different entry, and Delete of a key nothing
+// is filed under succeeds silently, so a mistake here reads as "already gone".
+//
+// It is meaningful only to the process that produced c, and only for as long as
+// c is alive: a Client is one cache dimension, so rebuilding it strands whatever
+// the old one cached. A Client that did not come from [NewClient] has no cache
+// dimension at all, names an entry nothing ever writes, and must not be used.
+func (c *Client) CacheKey(scheme ProviderScheme, id agent.Identity) auth.CredentialKey {
+	return auth.CredentialKey{AppName: id.AppName, UserID: id.UserID, Key: cacheSlot(c, scheme)}
+}
+
+// joinFields encodes fields as one unambiguous string, each prefixed with its
+// byte length. No delimiter occurring inside a field can then make two different
+// field lists encode alike, which joining on a separator alone allowed.
+func joinFields(fields ...string) string {
+	var b strings.Builder
+	for _, f := range fields {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return b.String()
 }
 
 // Request identifies the resource and acting user for a credential retrieval.
@@ -172,6 +344,24 @@ type Request struct {
 	// Resource is a full resource name. A name matching
 	// projects/*/locations/*/connectors/* is routed to the IAM Connector
 	// service; anything else (e.g. .../authProviders/*) to Agent Identity.
+	//
+	// Validated before anything is sent, and rejected with an error naming the
+	// reason. Letters, digits, and "._~/-:" are allowed, and every path segment
+	// must be non-empty and be neither "." nor "..". So a trailing slash, a
+	// doubled slash, and a relative segment are refused, while a domain-scoped
+	// project id such as projects/example.com:my-project/... is accepted.
+	//
+	// The segment rule is what keeps routing and normalization from disagreeing:
+	// the routing pattern above is matched on the name as given, and a name that
+	// normalizes to a different one would be routed by one and served as the
+	// other.
+	//
+	// Against v2.3.0, which took ^[A-Za-z0-9._~/-]+$ and refused any name
+	// containing "..", four shapes moved and one did not. Newly refused: a
+	// trailing slash, a doubled slash, and a "." segment. Newly accepted: the
+	// colon, and ".." INSIDE a segment, so projects/example..com/... is a name
+	// v2.3.0 refused and this one takes. Unchanged: a ".." segment was refused
+	// there by that substring test and is refused here by the segment rule.
 	Resource string
 	// UserID is the acting end user's identity. Required.
 	UserID string
@@ -182,19 +372,78 @@ type Request struct {
 	ContinueURI string
 }
 
+// Retrieval is the result of [Client.RetrieveCredential].
+type Retrieval struct {
+	// Credential authenticates outbound requests as the end user.
+	Credential auth.Credential
+	// ExpiresAt is the credential's expiry, or the zero time when the lifetime is
+	// unknown: the service reports none when the token may be permanent or when
+	// it cannot say, and one it reports that cannot be parsed arrives here the
+	// same way. A caller must not read the zero value as "expires now", and must
+	// not cache a credential carrying it.
+	ExpiresAt time.Time
+}
+
 // RetrieveCredential retrieves a credential for req, polling while the service
 // reports a non-interactive pending state (up to the configured poll timeout).
 // If interactive consent is required it returns an [auth.ConsentRequiredError].
-func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Credential, error) {
+//
+// Every error past validation names the resource. One client can serve several
+// resources, so a caller holding only the error — including a direct caller,
+// which has no provider to attribute it — must be able to tell which one failed.
+// Wrapped with %w throughout, so [ErrConsentRejected], [ErrPollTimeout] and
+// [auth.ConsentRequiredError] stay matchable.
+//
+// It returns a [*Retrieval] where v2.3.0 and v2.4.0 returned the
+// [auth.Credential] alone, so a caller written against either release stops
+// compiling and reads [Retrieval.Credential] instead.
+//
+// Matchable with [errors.Is] and [errors.As], and only with those. Naming the
+// resource wraps every error past validation, so a direct == against any of those
+// sentinels, or a bare type assertion to [*APIError], stops being true where it
+// was true in v2.3.0. A decode failure is now [ErrMalformedResponse] and no
+// longer carries the [encoding/json] error behind it, so [errors.As] against
+// *json.SyntaxError stops finding one.
+func (c *Client) RetrieveCredential(ctx context.Context, req Request) (_ *Retrieval, err error) {
 	if req.Resource == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a Resource")
 	}
 	if req.UserID == "" {
 		return nil, errors.New("gcp: RetrieveCredential requires a UserID")
 	}
-	if !resourceNameRE.MatchString(req.Resource) || strings.Contains(req.Resource, "..") {
-		return nil, fmt.Errorf("gcp: RetrieveCredential resource %q has invalid characters", req.Resource)
+	if err := validateResource(req.Resource); err != nil {
+		return nil, fmt.Errorf("gcp: RetrieveCredential: %w", err)
 	}
+	// Named once here rather than at each return: the two sentinels and the
+	// context error carried no resource at all, and the arms that did name it
+	// then had it named twice over on the provider path. Appended rather than
+	// prefixed, because the errors arriving here already open with the package
+	// name and a second one reads as a stutter.
+	//
+	// The resource and nothing else. This error reaches a tool, which feeds it to
+	// the model and persists it in the session, and every other id in scope comes
+	// off the request — a user id is commonly an email, and a session id arrives
+	// unvalidated from the request path. The resource is configuration.
+	//
+	// Adding nothing else is not sufficient on its own, because an [APIError]
+	// carries up to a kilobyte of the service's own response, and a service that
+	// rejects a request commonly quotes back what it rejected. That scrub happens
+	// at the single place an APIError is built, which is the only one that can do
+	// it correctly — see doPost.
+	//
+	// It deliberately does NOT happen again here. Re-running redact over an
+	// already-scrubbed Body cannot find a real occurrence, because the first pass
+	// removed them all, and it can find a spurious one: a user id of "e" matches
+	// inside the "[redacted]" marker itself and rewrites it to
+	// "[r[redacted]dact[redacted]d]", nesting once per pass and destroying the
+	// operator's error along the way. A second scrub that can only corrupt is
+	// worse than none, so this defer decorates and nothing else.
+	defer func() {
+		if err == nil {
+			return
+		}
+		err = fmt.Errorf("%w (resource %q)", err, req.Resource)
+	}()
 
 	retrieve := c.retrieveAgentIdentity
 	if connectorResourceRE.MatchString(req.Resource) {
@@ -210,21 +459,29 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 		}
 		switch o := res.(type) {
 		case credOutcome:
-			return mapCredential(o.header, o.token)
+			cred, err := mapCredential(o.header, o.token, req.UserID, req.ContinueURI)
+			if err != nil {
+				return nil, err
+			}
+			return &Retrieval{Credential: cred, ExpiresAt: o.expiresAt}, nil
 		case consentOutcome:
 			return nil, &auth.ConsentRequiredError{AuthURI: o.authURI, Nonce: o.nonce}
 		case rejectedOutcome:
-			return nil, fmt.Errorf("%w for %q", ErrConsentRejected, req.Resource)
+			return nil, ErrConsentRejected
 		case pendingOutcome:
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				return nil, fmt.Errorf("%w for %q", ErrPollTimeout, req.Resource)
+				return nil, ErrPollTimeout
 			}
-			wait := min(backoff, remaining)
+			// A timer rather than time.After: the caller giving up is an ordinary
+			// way out of this loop, and time.After holds the runtime timer until
+			// it fires whether anyone is still waiting or not.
+			timer := time.NewTimer(min(backoff, remaining))
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return nil, ctx.Err()
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			backoff = min(backoff*2, maxBackoff)
 		default:
@@ -238,8 +495,12 @@ func (c *Client) RetrieveCredential(ctx context.Context, req Request) (auth.Cred
 type outcome interface{ isOutcome() }
 
 type (
-	// credOutcome carries a successfully retrieved {header, token} credential.
-	credOutcome struct{ header, token string }
+	// credOutcome carries a successfully retrieved {header, token} credential and
+	// its expiry (zero when the service does not report one).
+	credOutcome struct {
+		header, token string
+		expiresAt     time.Time
+	}
 	// pendingOutcome means retrieval is still pending; poll again.
 	pendingOutcome struct{}
 	// consentOutcome means interactive consent is required at authURI.
@@ -256,11 +517,54 @@ func (pendingOutcome) isOutcome()  {}
 func (consentOutcome) isOutcome()  {}
 func (rejectedOutcome) isOutcome() {}
 
-// credentialPayload is the {header, token} success shape shared by both services
-// (under "success" for Agent Identity, "response" for the IAM Connector operation).
+// credentialPayload is the success shape shared by both services (under
+// "success" for Agent Identity, "response" for the IAM Connector operation): the
+// {header, token} pair plus the token's expiry. An empty expireTime means the
+// service can't say when the token expires (possibly permanent), so callers must
+// not treat it as "expires now".
 type credentialPayload struct {
 	Token  string `json:"token"`
 	Header string `json:"header"`
+	// ExpireTime is RFC 3339, and empty when the service reports no expiry.
+	//
+	// For Agent Identity the name is the one in the published API surface
+	// (https://agentidentitycredentials.googleapis.com/$discovery/rest?version=v1,
+	// Success.expireTime), which also warns that the token may be revoked, or
+	// expire slightly early through clock skew, before the time it names. The IAM
+	// Connector service publishes no discovery document to anonymous callers, so
+	// its field is assumed to be the same name and shape; if it is not, a
+	// connector credential reports no lifetime and is never cached.
+	ExpireTime lenientTime `json:"expireTime"`
+}
+
+// lenientTime is a JSON string that declines to fail. Only the cache reads this
+// field, and the IAM Connector's shape for it is an assumption, so a value of an
+// unexpected type must cost a cache entry rather than the whole retrieval — the
+// credential itself is perfectly usable without an expiry.
+type lenientTime string
+
+func (t *lenientTime) UnmarshalJSON(b []byte) error {
+	var s string
+	if json.Unmarshal(b, &s) == nil {
+		*t = lenientTime(s)
+	}
+	return nil
+}
+
+// parseExpireTime parses the service's expiry into a time.Time, collapsing an
+// absent one and an unparseable one to the same zero time. Callers read that as
+// "lifetime unknown" and decline to cache, which is the safe reading of both:
+// the service omits the field when the token may be permanent or when it cannot
+// say, and a value it sent but we cannot read tells us no more than silence.
+func parseExpireTime(v lenientTime) time.Time {
+	if v == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, string(v))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // retrieveRequest is the JSON body for both services' credentials:retrieve RPC
@@ -272,9 +576,18 @@ type retrieveRequest struct {
 }
 
 // mapCredential maps the service's {header, token} tuple to an [auth.Credential]:
-// an "Authorization: Bearer" header becomes a bearer credential; any other header
+// an "Authorization: Bearer" header becomes a bearer credential. Any other header
 // name becomes a header-based API key.
-func mapCredential(header, token string) (auth.Credential, error) {
+//
+// secrets are the caller-supplied values to scrub from the rejection below: the
+// header name is service-controlled and reaches an error, so it gets the same
+// treatment as a response body and an operation message.
+//
+// It is not the only other one. A consent URI reaches [auth.ConsentRequiredError]
+// unscrubbed on purpose, because it is the URL the acting user must visit and an
+// identifier in it is load-bearing rather than a leak — see that type's docs. So
+// count the paths before assuming a new arm here is covered.
+func mapCredential(header, token string, secrets ...string) (auth.Credential, error) {
 	if header == "" || token == "" {
 		return nil, errors.New("gcp: credentials service returned an empty header or token")
 	}
@@ -288,14 +601,14 @@ func mapCredential(header, token string) (auth.Credential, error) {
 	// Rejecting an unusable name here keeps the failure at the cause: net/http
 	// would otherwise accept the credential and abort the eventual request.
 	if !validHeaderFieldName(header) {
-		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", truncateForError(header))
+		return nil, fmt.Errorf("gcp: credentials service returned %q, which is not a usable HTTP header name", redactedForError(header, secrets...))
 	}
 	key := auth.APIKeyCredential{Name: header, Value: token}
 	return auth.WithHeaders(key, map[string]string{"X-Goog-Api-Key": token}), nil
 }
 
 // doPost sends body as JSON to url and decodes a JSON response into out.
-func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
+func (c *Client) doPost(ctx context.Context, url string, body, out any, secrets ...string) error {
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("gcp: marshal request: %w", err)
@@ -323,13 +636,24 @@ func (c *Client) doPost(ctx context.Context, url string, body, out any) error {
 	// Classify the status before the size check, so an oversized error page still
 	// reports the status — the most actionable field — instead of only its size.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return &APIError{StatusCode: resp.StatusCode, Body: truncateForError(strings.TrimSpace(string(data)))}
+		return &APIError{StatusCode: resp.StatusCode, Body: redactedForError(strings.TrimSpace(string(data)), secrets...)}
 	}
 	if len(data) > maxBody {
 		return fmt.Errorf("gcp: credentials service response exceeded %d bytes", maxBody)
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("gcp: decode response: %w", err)
+		// Scrubbed and capped like the body above, and wrapped in a sentinel rather
+		// than in the decoder's own error. A decoder message quotes the token it
+		// choked on — a userId echoed back as a JSON number where a string was
+		// expected lands in "cannot unmarshal number 1035…" — so it carries service
+		// text, and keeping %w on the original would leave that text reachable
+		// unscrubbed through Unwrap. [ErrMalformedResponse] is what a caller matches
+		// instead of *json.SyntaxError, which this stops satisfying.
+		//
+		// %q like the other two service-text sites. A decoder message can carry a
+		// byte the service chose, and unescapeJSON can turn an escape in it into a
+		// real control character, so it is quoted rather than pasted.
+		return fmt.Errorf("%w: %q", ErrMalformedResponse, redactedForError(err.Error(), secrets...))
 	}
 	return nil
 }
@@ -350,28 +674,4 @@ func validHeaderFieldName(s string) bool {
 		}
 	}
 	return true
-}
-
-// maxErrorBody caps service-controlled text carried into an error.
-const maxErrorBody = 1024
-
-// truncateForError caps an error body so a large (e.g. HTML gateway) response
-// doesn't bloat the returned error.
-func truncateForError(s string) string {
-	const max = maxErrorBody
-	if len(s) <= max {
-		return s
-	}
-	// Back up to a rune boundary so a multi-byte rune straddling the cap isn't
-	// sliced into a mangled partial rune. Bounded: the body need not be UTF-8 at
-	// all, and an unbounded scan over continuation bytes would walk to 0 and
-	// discard every byte of diagnostic context.
-	cut := max
-	for i := 0; i < utf8.UTFMax-1 && cut > 0 && !utf8.RuneStart(s[cut]); i++ {
-		cut--
-	}
-	if !utf8.RuneStart(s[cut]) {
-		cut = max
-	}
-	return s[:cut] + "..."
 }

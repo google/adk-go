@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"net/http"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -55,6 +56,15 @@ type A2AServerConfig struct {
 	AgentCardProvider func(ctx context.Context) (*a2a.AgentCard, error)
 	// ClientProvider is used to create an [A2AClient] implementation.
 	ClientProvider A2AClientProvider
+	// OwnsAuthScope reports that this SDK installed the auth transport on
+	// ClientProvider, so it also owns the credential scope on every outgoing
+	// call. When false — no Auth at all, or the caller wired their own — their scope
+	// is left alone. See [AttachAuthScope].
+	OwnsAuthScope bool
+	// CardFetchClient, when set, is the client that applies the remote agent's
+	// credential, so a card fetched on this agent's behalf is authenticated
+	// too. Set together with OwnsAuthScope.
+	CardFetchClient *http.Client
 }
 
 func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {

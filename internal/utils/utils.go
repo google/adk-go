@@ -83,7 +83,7 @@ func FunctionCalls(c *genai.Content) (ret []*genai.FunctionCall) {
 		return nil
 	}
 	for _, p := range c.Parts {
-		if p.FunctionCall != nil {
+		if p != nil && p.FunctionCall != nil {
 			ret = append(ret, p.FunctionCall)
 		}
 	}
@@ -96,7 +96,7 @@ func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 		return nil
 	}
 	for _, p := range c.Parts {
-		if p.FunctionResponse != nil {
+		if p != nil && p.FunctionResponse != nil {
 			ret = append(ret, p.FunctionResponse)
 		}
 	}
@@ -109,7 +109,7 @@ func TextParts(c *genai.Content) (ret []string) {
 		return nil
 	}
 	for _, p := range c.Parts {
-		if p.Text != "" {
+		if p != nil && p.Text != "" {
 			ret = append(ret, p.Text)
 		}
 	}

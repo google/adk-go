@@ -510,7 +510,7 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
-				// Since it retursn non nil, the next callback won't be executed.
+				// Since it returns non nil, the next callback won't be executed.
 				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},
@@ -581,7 +581,7 @@ func TestToolCallback(t *testing.T) {
 			DisallowTransferToPeers:  true,
 			Tools:                    []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
-				// Since it retursn non nil, the next callback won't be executed.
+				// Since it returns non nil, the next callback won't be executed.
 				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
 				},

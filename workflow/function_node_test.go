@@ -641,6 +641,60 @@ func TestEmittingFunctionNode_EmitProgressBeforeOutput(t *testing.T) {
 	}
 }
 
+func TestEmittingFunctionNode_StopsAfterConsumerExits(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   EmittingFunctionFn[any, string]
+	}{
+		{
+			name: "returns emit error",
+			fn: func(_ agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+				if err := emit(&session.Event{}); err != nil {
+					return "", err
+				}
+				return "done", nil
+			},
+		},
+		{
+			name: "ignores emit error",
+			fn: func(_ agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+				_ = emit(&session.Event{})
+				return "done", nil
+			},
+		},
+		{
+			name: "returns independent error",
+			fn: func(_ agent.Context, _ any, emit func(*session.Event) error) (string, error) {
+				_ = emit(&session.Event{})
+				return "", errors.New("body failed")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			worker := NewEmittingFunctionNode("worker", test.fn, defaultNodeConfig)
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("FunctionNode.Run panicked after consumer break: %v", r)
+				}
+			}()
+
+			count := 0
+			for _, err := range worker.Run(agent.NewContext(newSeededMockCtx(t)), nil) {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				count++
+				break
+			}
+			if count != 1 {
+				t.Errorf("consumed %d events, want 1", count)
+			}
+		})
+	}
+}
+
 // Input schema constraints (e.g. maxLength) must be enforced even when
 // the input already arrives as type IN, i.e. on the type-assertion-hit
 // path that skips ConvertToWithJSONSchema.

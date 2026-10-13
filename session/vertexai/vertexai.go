@@ -140,7 +140,10 @@ func (s *vertexAiService) AppendEvent(ctx context.Context, sess session.Session,
 	if sess.ID() == "" || event == nil {
 		return fmt.Errorf("session_id and event are required, got session_id: %q, event_id: %t", sess.ID(), event == nil)
 	}
-	err := s.client.appendEvent(ctx, sess.AppName(), sess.ID(), event)
+	// temp: keys are scoped to the current invocation and must not reach storage.
+	// The local session below still receives the untrimmed event, which is what
+	// keeps them readable for the rest of the invocation.
+	err := s.client.appendEvent(ctx, sess.AppName(), sess.ID(), trimTempDeltaState(event))
 	if err != nil {
 		return fmt.Errorf("failed to append event: %w", err)
 	}

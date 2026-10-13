@@ -236,12 +236,12 @@ func TestSubScheduler_RehydrateCache_InvocationScope(t *testing.T) {
 			ctx.sess = &eventsSession{events: tc.events}
 			sub := newDynamicSubScheduler(agent.NewContext(ctx), "wf", noopEmit).(*dynamicSubScheduler)
 
-			out, ok := sub.lookupCachedOutput(childPath)
+			res, ok := sub.awaitOrLead(childPath)
 			if ok != tc.wantHit {
-				t.Fatalf("lookupCachedOutput(%q) hit = %v, want %v (out=%v)", childPath, ok, tc.wantHit, out)
+				t.Fatalf("awaitOrLead(%q) hit = %v, want %v (res=%+v)", childPath, ok, tc.wantHit, res)
 			}
-			if ok && out != tc.wantValue {
-				t.Errorf("cached output = %v, want %v", out, tc.wantValue)
+			if ok && res.out != tc.wantValue {
+				t.Errorf("cached output = %v, want %v", res.out, tc.wantValue)
 			}
 		})
 	}

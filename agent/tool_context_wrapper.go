@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/adkcontext"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -29,6 +30,7 @@ import (
 // toolContextWrapper is used to emit log entries for unexpected calls - those
 // related to node-context methods when an agent.Context is used as a tool context.
 type toolContextWrapper struct {
+	adkcontext.Marker
 	context Context
 }
 
@@ -50,13 +52,13 @@ func (c *toolContextWrapper) WithAgentCancel() (Context, context.CancelFunc) {
 
 // WithAgentTimeout implements [Context].
 func (c *toolContextWrapper) WithAgentTimeout(timeout time.Duration) (Context, context.CancelFunc) {
-	log.Print("WithAgentTimeout() is not supported for tool context")
+	log.Print("WithAgentTimeout() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil, nil
 }
 
 // InvocationContext implements [Context].
 func (c *toolContextWrapper) InvocationContext() InvocationContext {
-	log.Print("InvocationContext() is not supported for tool context")
+	log.Print("InvocationContext() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
@@ -67,30 +69,30 @@ func (c *toolContextWrapper) SubScheduler() DynamicSubScheduler {
 
 // Agent implements [Context].
 func (c *toolContextWrapper) Agent() Agent {
-	log.Print("Agent() is not supported for tool context")
+	log.Print("Agent() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
 // EndInvocation implements [Context].
 func (c *toolContextWrapper) EndInvocation() {
-	log.Print("EndInvocation() is not supported for tool context")
+	log.Print("EndInvocation() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 }
 
 // Ended implements [Context].
 func (c *toolContextWrapper) Ended() bool {
-	log.Print("Ended() is not supported for tool context")
+	log.Print("Ended() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return false
 }
 
 // IsolationScope implements [Context].
 func (c *toolContextWrapper) IsolationScope() string {
-	log.Print("IsolationScope() is not supported for tool context")
+	log.Print("IsolationScope() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return ""
 }
 
 // Memory implements [Context].
 func (c *toolContextWrapper) Memory() Memory {
-	log.Print("Memory() is not supported for tool context")
+	log.Print("Memory() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
@@ -101,43 +103,43 @@ func (c *toolContextWrapper) Path() string {
 
 // ResumedInput implements [Context].
 func (c *toolContextWrapper) ResumedInput(interruptID string) (any, bool) {
-	log.Print("ResumedInput() is not supported for tool context")
+	log.Print("ResumedInput() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil, false
 }
 
 // RunConfig implements [Context].
 func (c *toolContextWrapper) RunConfig() *RunConfig {
-	log.Print("RunConfig() is not supported for tool context")
+	log.Print("RunConfig() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
 // RunID implements [Context].
 func (c *toolContextWrapper) RunID() string {
-	log.Print("RunID() is not supported for tool context")
+	log.Print("RunID() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return ""
 }
 
 // Session implements [Context].
 func (c *toolContextWrapper) Session() session.Session {
-	log.Print("Session() is not supported for tool context")
+	log.Print("Session() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
 // WithBranch implements [Context].
 func (c *toolContextWrapper) WithBranch(branch string) Context {
-	log.Print("WithBranch() is not supported for tool context")
+	log.Print("WithBranch() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
 // WithContext implements [Context].
 func (c *toolContextWrapper) WithContext(ctx context.Context) InvocationContext {
-	log.Print("WithContext() is not supported for tool context")
+	log.Print("WithContext() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
 // WithAgentContext implements [Context].
 func (c *toolContextWrapper) WithAgentContext(ctx context.Context) Context {
-	log.Print("WithAgentContext() is not supported for tool context")
+	log.Print("WithAgentContext() is not supported for tool context") //nolint:forbidigo // pre-slog call site
 	return nil
 }
 
@@ -241,6 +243,12 @@ func (c *toolContextWrapper) UserID() string {
 
 // Value implements [Context].
 func (c *toolContextWrapper) Value(key any) any {
+	// Fails closed rather than dereferencing: this is reached from
+	// http.RoundTripper on the caller's goroutine, where net/http does not
+	// recover, and a hand-built wrapper can hold neither.
+	if c == nil || c.context == nil {
+		return nil
+	}
 	return c.context.Value(key)
 }
 

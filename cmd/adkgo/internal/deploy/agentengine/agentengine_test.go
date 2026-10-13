@@ -123,6 +123,13 @@ func TestPrepareDockerfile_UsesGoModVersion(t *testing.T) {
 	if !strings.Contains(string(content), `["/app/agent", "web"`) {
 		t.Errorf("Dockerfile CMD does not run the receiver's execFile:\n%s", content)
 	}
+	// The web server defaults to loopback now, so the container CMD must opt
+	// back into all interfaces or Agent Engine cannot reach it. The receiver's
+	// port is pinned as well, so a dropped -host or a read of the global fails
+	// here rather than emitting an address nothing listens on.
+	if !strings.Contains(string(content), `["/app/agent", "web", "-host", "0.0.0.0", "-port", "9091"`) {
+		t.Errorf("Dockerfile CMD must bind the web server to all interfaces with -host 0.0.0.0:\n%s", content)
+	}
 }
 
 // TestDefaultBuilderGoVersionIsNotPinned guards that the last-resort tag stays a
