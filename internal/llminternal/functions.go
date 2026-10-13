@@ -24,6 +24,33 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
+const (
+	FinishTaskToolName      = "finish_task"
+	FinishTaskSuccessResult = "Task completed."
+)
+
+// IsFinishTaskSuccessFR reports whether ev is the successful FunctionResponse from FinishTaskTool.
+func IsFinishTaskSuccessFR(ev *session.Event) bool {
+	if ev == nil {
+		return false
+	}
+	for _, fr := range utils.FunctionResponses(ev.Content) {
+		if fr == nil || fr.Name != FinishTaskToolName {
+			continue
+		}
+		if fr.Response == nil {
+			return false
+		}
+		v, ok := fr.Response["result"]
+		if !ok {
+			return false
+		}
+		s, ok := v.(string)
+		return ok && s == FinishTaskSuccessResult
+	}
+	return false
+}
+
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
 // NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,

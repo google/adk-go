@@ -24,14 +24,20 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 const (
-	FinishTaskToolName      = "finish_task"
-	FinishTaskSuccessResult = "Task completed."
+	FinishTaskToolName      = llminternal.FinishTaskToolName
+	FinishTaskSuccessResult = llminternal.FinishTaskSuccessResult
 )
+
+// IsFinishTaskSuccessFR reports whether ev is the successful FunctionResponse from FinishTaskTool.
+func IsFinishTaskSuccessFR(ev *session.Event) bool {
+	return llminternal.IsFinishTaskSuccessFR(ev)
+}
 
 // NewFinishTaskTool allows the model to signal that the agent has completed its
 // task. On success it sets `tool_context.actions.finish_task` with a

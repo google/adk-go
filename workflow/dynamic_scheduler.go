@@ -21,6 +21,7 @@ import (
 	"sync"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
@@ -197,7 +198,10 @@ func (s *dynamicSubScheduler) rehydrateCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for ev := range sess.Events().All() {
-		if ev == nil || ev.Output == nil || ev.NodeInfo == nil {
+		if ev == nil || ev.NodeInfo == nil {
+			continue
+		}
+		if ev.Output == nil && !ev.NodeInfo.MessageAsOutput && !llminternal.IsFinishTaskSuccessFR(ev) {
 			continue
 		}
 		if invocationID != "" && ev.InvocationID != invocationID {

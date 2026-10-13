@@ -263,8 +263,9 @@ func messageText(event *session.Event) (text string, ok bool) {
 	return string(b), true
 }
 
-// childEventOutput returns the output an event carries: its Output, or
-// the model text when MessageAsOutput is set.
+// childEventOutput returns the output an event carries: its Output,
+// the model text when MessageAsOutput is set, or nil when finish_task
+// succeeded with a null result.
 func childEventOutput(event *session.Event) (any, bool) {
 	if event.Output != nil {
 		return event.Output, true
@@ -273,6 +274,9 @@ func childEventOutput(event *session.Event) (any, bool) {
 		if text, ok := messageText(event); ok {
 			return text, true
 		}
+	}
+	if llminternal.IsFinishTaskSuccessFR(event) {
+		return nil, true
 	}
 	return nil, false
 }

@@ -326,26 +326,24 @@ func extractFinishTaskFC(ev *session.Event) *genai.FunctionCall {
 
 // isFinishTaskSuccessFR reports whether this event is the successful
 // FunctionResponse from FinishTaskTool.
-// The first finish_task FR decides. A non-success FR (e.g.
-// validation error) returns false so the caller keeps iterating and
-// the LLM gets a chance to retry.
 func isFinishTaskSuccessFR(ev *session.Event) bool {
-	if ev == nil {
+	return llminternal.IsFinishTaskSuccessFR(ev)
+}
+
+func hasFinishTaskSuccessFR(sess session.Session, scope string) bool {
+	if sess == nil {
 		return false
 	}
-	for _, fr := range utils.FunctionResponses(ev.Content) {
-		if fr == nil || fr.Name != workflowinternal.FinishTaskToolName {
+	for ev := range sess.Events().All() {
+		if ev == nil {
 			continue
 		}
-		if fr.Response == nil {
-			return false
+		if scope != "" && ev.IsolationScope != scope {
+			continue
 		}
-		v, ok := fr.Response["result"]
-		if !ok {
-			return false
+		if llminternal.IsFinishTaskSuccessFR(ev) {
+			return true
 		}
-		s, ok := v.(string)
-		return ok && s == workflowinternal.FinishTaskSuccessResult
 	}
 	return false
 }
@@ -594,13 +592,14 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			yield(nil, err)
 			return false
 		}
-		if out == nil {
+		if out == nil && !hasFinishTaskSuccessFR(ctx.Session(), fc.ID) {
 			// Task sub-agent drained its iterator without ever
 			// calling finish_task (e.g. it emitted a natural-
 			// language question to the user and is waiting for
 			// the reply). runTask only sets ev.Output when it
 			// observes a successful finish_task FR, so out==nil
-			// means the task did not actually finish.
+			// without a successful finish_task FR means the task
+			// did not actually finish.
 			//
 			// Treating this as a completion would (a) synthesize
 			// a misleading delegation-closing FR, and (b) route

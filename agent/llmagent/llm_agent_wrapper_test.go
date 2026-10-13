@@ -1171,6 +1171,189 @@ func TestChatTask_ValidationErrorDrivesRetry(t *testing.T) {
 	}
 }
 
+// TestChatTask_NullableNullResultResumesCoordinator verifies that a task agent
+// with a nullable OutputSchema can finish with null (via finish_task(result=null)),
+// and the coordinator is properly resumed with a synthesized FR carrying output: null.
+func TestChatTask_NullableNullResultResumesCoordinator(t *testing.T) {
+	t.Parallel()
+	const (
+		coordName = "coord"
+		taskName  = "nullable_doer"
+		fcID      = "fc-nullable-task"
+	)
+	schema := &genai.Schema{
+		Type:     genai.TypeString,
+		Nullable: genai.Ptr(true),
+	}
+
+	taskLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{{
+			Content: fcContent("ft-null", "finish_task", map[string]any{"result": nil}),
+		}},
+	}
+	taskAgent := makeLLMAgent(t, taskName,
+		withMode(llmagent.ModeTask),
+		withOutputSchema(schema),
+		func(c *llmagent.Config) { c.Model = taskLLM },
+	)
+
+	coordLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{Content: fcContent(fcID, taskName, map[string]any{"request": "fetch optional data"})},
+			{Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{genai.NewPartFromText("coordinator resumed after null task result")},
+			}},
+		},
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      coordName,
+		Model:     coordLLM,
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{taskAgent},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := runChatCoordinatorOneTurn(t, coord, "go")
+
+	var sawTaskSuccessFR bool
+	var synthesizedFR *genai.FunctionResponse
+	var coordFinalReply string
+
+	for _, ev := range events {
+		if ev == nil || ev.Content == nil {
+			continue
+		}
+		if ev.Author == taskName {
+			for _, p := range ev.Content.Parts {
+				if p != nil && p.FunctionResponse != nil && p.FunctionResponse.Name == "finish_task" {
+					if v, ok := p.FunctionResponse.Response["result"].(string); ok &&
+						v == workflowinternal.FinishTaskSuccessResult {
+						sawTaskSuccessFR = true
+					}
+				}
+			}
+		}
+		if ev.Author == "user" {
+			for _, p := range ev.Content.Parts {
+				if p != nil && p.FunctionResponse != nil && p.FunctionResponse.Name == taskName {
+					synthesizedFR = p.FunctionResponse
+				}
+			}
+		}
+		if ev.Author == coordName {
+			for _, p := range ev.Content.Parts {
+				if p != nil && p.Text != "" && !p.Thought {
+					coordFinalReply = p.Text
+				}
+			}
+		}
+	}
+
+	if !sawTaskSuccessFR {
+		t.Error("expected task agent finish_task(result=null) to be accepted with a success FR")
+	}
+	if synthesizedFR == nil {
+		t.Fatal("expected coordinator to receive a synthesized FR for the task delegation, but got none")
+	}
+	if val, ok := synthesizedFR.Response["output"]; !ok || val != nil {
+		t.Errorf("expected synthesized FR Response[\"output\"] to be nil (null), got %v", val)
+	}
+	if coordFinalReply != "coordinator resumed after null task result" {
+		t.Errorf("coordinator final reply = %q, want %q", coordFinalReply, "coordinator resumed after null task result")
+	}
+}
+
+// TestChatTask_NonNullableNullResultRejectsAndRetries verifies that a task agent
+// with a non-nullable OutputSchema rejects finish_task(result=null) with a validation error,
+// forcing the model to retry with a valid non-null result.
+func TestChatTask_NonNullableNullResultRejectsAndRetries(t *testing.T) {
+	t.Parallel()
+	const (
+		coordName = "coord"
+		taskName  = "strict_doer"
+		fcID      = "fc-strict-task"
+	)
+	schema := &genai.Schema{
+		Type:     genai.TypeString,
+		Nullable: genai.Ptr(false),
+	}
+
+	// Task LLM: first turn issues finish_task with result=null (invalid).
+	// After validation error FR, second turn issues finish_task with result="valid_str".
+	taskLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{Content: fcContent("ft-bad-null", "finish_task", map[string]any{"result": nil})},
+			{Content: fcContent("ft-good-str", "finish_task", map[string]any{"result": "valid_str"})},
+		},
+	}
+	taskAgent := makeLLMAgent(t, taskName,
+		withMode(llmagent.ModeTask),
+		withOutputSchema(schema),
+		func(c *llmagent.Config) { c.Model = taskLLM },
+	)
+
+	coordLLM := &scriptedLLM{
+		turns: []*model.LLMResponse{
+			{Content: fcContent(fcID, taskName, map[string]any{"request": "fetch strict data"})},
+			{Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{genai.NewPartFromText("coordinator finished")},
+			}},
+		},
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      coordName,
+		Model:     coordLLM,
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{taskAgent},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := runChatCoordinatorOneTurn(t, coord, "go")
+
+	var finishFCs int
+	var sawErrorFR bool
+	var sawSuccessFR bool
+
+	for _, ev := range events {
+		if ev == nil || ev.Author != taskName || ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p == nil {
+				continue
+			}
+			if p.FunctionCall != nil && p.FunctionCall.Name == "finish_task" {
+				finishFCs++
+			}
+			if p.FunctionResponse != nil && p.FunctionResponse.Name == "finish_task" {
+				if _, hasErr := p.FunctionResponse.Response["error"]; hasErr {
+					sawErrorFR = true
+				}
+				if v, ok := p.FunctionResponse.Response["result"].(string); ok &&
+					v == workflowinternal.FinishTaskSuccessResult {
+					sawSuccessFR = true
+				}
+			}
+		}
+	}
+
+	if finishFCs != 2 {
+		t.Errorf("expected 2 finish_task FCs (bad null then good str), got %d", finishFCs)
+	}
+	if !sawErrorFR {
+		t.Error("expected FinishTaskTool to return an error FR for non-nullable result=null")
+	}
+	if !sawSuccessFR {
+		t.Error("expected FinishTaskTool to return a success FR for corrected result='valid_str'")
+	}
+}
+
 // TestChatCoordinator_ResumesUnresolvedTaskFC verifies that on
 // the first user turn, the coordinator emits a task FC but no
 // matching FR is produced (we simulate this by stopping the runner
