@@ -29,6 +29,7 @@ import (
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
+// New returns an error if Transport is not provided.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
@@ -47,6 +48,9 @@ import (
 //		},
 //	})
 func New(cfg Config) (tool.Toolset, error) {
+	if cfg.Transport == nil {
+		return nil, fmt.Errorf("mcptoolset: set Config.Transport")
+	}
 	return &set{
 		mcpClient:                   newConnectionRefresher(cfg.Client, cfg.Transport),
 		toolFilter:                  cfg.ToolFilter,
