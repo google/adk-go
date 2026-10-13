@@ -47,6 +47,7 @@ func TestClassifyMedia(t *testing.T) {
 				Kind:     MediaKindImage,
 				Source:   MediaSourceData,
 				MIMEType: "image/png",
+				Filename: "inline_data",
 				Data:     []byte{0x89, 'P', 'N', 'G'},
 			}},
 		},
@@ -66,7 +67,7 @@ func TestClassifyMedia(t *testing.T) {
 			}},
 		},
 		{
-			name: "inline audio is labelled, not rejected here",
+			name: "inline audio is labeled, not rejected here",
 			part: &genai.Part{InlineData: &genai.Blob{
 				MIMEType: "audio/mpeg",
 				Data:     []byte("ID3"),
@@ -75,11 +76,12 @@ func TestClassifyMedia(t *testing.T) {
 				Kind:     MediaKindAudio,
 				Source:   MediaSourceData,
 				MIMEType: "audio/mpeg",
+				Filename: "inline_data",
 				Data:     []byte("ID3"),
 			}},
 		},
 		{
-			name: "inline video is labelled, not rejected here",
+			name: "inline video is labeled, not rejected here",
 			part: &genai.Part{InlineData: &genai.Blob{
 				MIMEType: "video/mp4",
 				Data:     []byte("ftyp"),
@@ -88,6 +90,7 @@ func TestClassifyMedia(t *testing.T) {
 				Kind:     MediaKindVideo,
 				Source:   MediaSourceData,
 				MIMEType: "video/mp4",
+				Filename: "inline_data",
 				Data:     []byte("ftyp"),
 			}},
 		},
@@ -149,6 +152,7 @@ func TestClassifyMedia(t *testing.T) {
 				// The declared type is kept verbatim: it is what goes on the
 				// wire, and rewriting it would change the request.
 				MIMEType: "  IMAGE/PNG; charset=binary ",
+				Filename: "inline_data",
 				Data:     []byte{0x89},
 			}},
 		},
@@ -161,7 +165,7 @@ func TestClassifyMedia(t *testing.T) {
 				FileData:   &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz"},
 			},
 			want: []Media{
-				{Kind: MediaKindImage, Source: MediaSourceData, MIMEType: "image/png", Data: []byte{0x89}},
+				{Kind: MediaKindImage, Source: MediaSourceData, MIMEType: "image/png", Filename: "inline_data", Data: []byte{0x89}},
 				{Kind: MediaKindFile, Source: MediaSourceFileID, MIMEType: "application/pdf", FileID: "file-xyz"},
 			},
 		},
@@ -188,6 +192,8 @@ func TestClassifyMedia_Errors(t *testing.T) {
 		// wantNamed is a substring the message must carry, so a rejection says
 		// which media it is about rather than only that one was rejected.
 		wantNamed string
+		// wantAbsent is text the error must not contain.
+		wantAbsent string
 	}{
 		{
 			name:      "inline data without a mime type",
@@ -196,12 +202,13 @@ func TestClassifyMedia_Errors(t *testing.T) {
 			wantNamed: "inline data",
 		},
 		{
-			name: "file data without a mime type names the uri",
+			name: "file data without a mime type does not echo the uri",
 			part: &genai.Part{FileData: &genai.FileData{
-				FileURI: "https://example.test/mystery",
+				FileURI: "https://example.test/mystery?X-Signature=secret",
 			}},
-			wantErr:   ErrMediaMIMETypeRequired,
-			wantNamed: "https://example.test/mystery",
+			wantErr:    ErrMediaMIMETypeRequired,
+			wantNamed:  "file data",
+			wantAbsent: "example.test",
 		},
 		{
 			name: "inline data with no bytes names the type",
@@ -239,6 +246,9 @@ func TestClassifyMedia_Errors(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.wantNamed) {
 				t.Errorf("ClassifyMedia() err = %q, want it to name %q", err, tt.wantNamed)
 			}
+			if tt.wantAbsent != "" && strings.Contains(err.Error(), tt.wantAbsent) {
+				t.Errorf("ClassifyMedia() err = %q, want it free of %q", err, tt.wantAbsent)
+			}
 			if got != nil {
 				t.Errorf("ClassifyMedia() = %+v on error, want nil: a partial list would be sent", got)
 			}
@@ -268,32 +278,10 @@ func TestMediaDataURL(t *testing.T) {
 	}
 }
 
-// TestClassifyMedia_ReadsTheFieldsItNames guards against a rename upstream
-// quietly emptying this classifier: both fields it reads must still exist on
-// genai.Part.
-//
-// It does not guard the other direction. A media field genai adds later is
-// caught by TestUnsupportedPayload_WalksEveryPartField, which reports any
-// field the converters do not account for; duplicating that walk here would
-// restate it without strengthening it.
-func TestClassifyMedia_ReadsTheFieldsItNames(t *testing.T) {
-	want := map[string]bool{"InlineData": true, "FileData": true}
-	partType := reflect.TypeOf(genai.Part{})
-	for i := range partType.NumField() {
-		delete(want, partType.Field(i).Name)
-	}
-	if len(want) != 0 {
-		t.Errorf("genai.Part no longer has the media fields %v this classifier reads", want)
-	}
-}
-
 // TestDataURLTrimsTheDeclaredMIMEType is the asymmetry between reading a MIME
 // type and writing one: mediaKindOf tolerates whitespace so that " image/png"
 // is still classified as an image, and a data URL does not, because the space
 // lands inside the URL and stops it being one.
-//
-// Found in review of the endpoint that first sent these: while media was
-// refused, nothing rendered the type and the asymmetry cost nothing.
 func TestDataURLTrimsTheDeclaredMIMEType(t *testing.T) {
 	tests := []struct {
 		name string

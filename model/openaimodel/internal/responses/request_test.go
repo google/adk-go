@@ -455,12 +455,10 @@ func describeInput(items oairesponses.ResponseInputParam) []string {
 // describeImage renders an image content part as
 // "img/<detail>:<field>=<value>".
 //
-// The field is named rather than just its value, because the bug this change
-// fixes moves a value from one field to another without altering it: an
-// uploaded image sent as image_url carries the very same "file-…" string that
-// file_id would have carried, so a rendering that showed only the value read
-// identically before and after the fix and held nothing. Proven by mutation —
-// swapping the two fields left the first version of this test green.
+// The field is named rather than just its value, because a mix-up between
+// fields moves a value without altering it: an uploaded image sent as
+// image_url carries the very same "file-…" string that file_id would carry,
+// so a rendering that showed only the value would pass either way.
 //
 // The detail is included in every case rather than tested once: the field is
 // api:"required" and omitzero at the same time, so a value that goes missing
@@ -841,10 +839,6 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 	}
 }
 
-// TestBuildParams_NoContentsSentinelIdentity pins which requests get the
-// bare shared.ErrNoContents and which get it wrapped, because a caller comparing with
-// == rather than errors.Is sees only the bare one. Only a drop that suppressed
-// text the model would otherwise have seen earns the wrap.
 // userContent and modelContent wrap parts in a turn of the given role.
 func userContent(parts ...*genai.Part) *genai.Content {
 	return &genai.Content{Role: string(genai.RoleUser), Parts: parts}
@@ -858,9 +852,9 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 // produce through the content field this endpoint has for it.
 //
 // Kind and source are crossed rather than sampled because they vary
-// independently and the pairing is the part that was wrong before: an image
-// behind a file id used to go out as a location for the server to fetch, which
-// is a request for a string that is not a URL.
+// independently and the pairing is what matters: an image behind a file id
+// must not go out as a location for the server to fetch, which would be a
+// request for a string that is not a URL.
 func TestBuildParams_Media(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -895,13 +889,20 @@ func TestBuildParams_Media(t *testing.T) {
 			// filename is optional on this endpoint, so an unnamed file goes
 			// out without one rather than under a name nobody chose. Whether
 			// the server minds is a question for the live run.
-			name: "inline_file_without_a_display_name_sends_no_filename",
+			name: "inline_file_without_a_display_name_falls_back_to_inline_data",
 			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}}},
-			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ=="},
+			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#inline_data"},
 		},
 		{
 			name: "uploaded_file_stays_a_file_id",
 			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz"}},
+			want: []string{"in/user:file:file_id=file-xyz"},
+		},
+		{
+			// The filename rides only with inline data, as in adk-python: a
+			// file id already names the file.
+			name: "a_display_name_is_not_sent_with_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz", DisplayName: "report.pdf"}},
 			want: []string{"in/user:file:file_id=file-xyz"},
 		},
 		{
@@ -917,7 +918,7 @@ func TestBuildParams_Media(t *testing.T) {
 			// catch-all field, not a guess about the bytes.
 			name: "an_unrecognized_type_travels_as_a_file",
 			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/x-tar", Data: []byte{1}}},
-			want: []string{"in/user:file:file_data=data:application/x-tar;base64,AQ=="},
+			want: []string{"in/user:file:file_data=data:application/x-tar;base64,AQ==#inline_data"},
 		},
 		{
 			// Classified by the shared code, refused here: the rejection names
@@ -935,7 +936,7 @@ func TestBuildParams_Media(t *testing.T) {
 			wantErrText: "video/mp4",
 		},
 		{
-			// Unlabelled bytes are refused rather than called
+			// Unlabeled bytes are refused rather than called
 			// application/octet-stream, which would tell the server they were
 			// opaque when in truth nobody had looked.
 			name:    "inline_media_without_a_mime_type_is_refused",
@@ -1017,13 +1018,58 @@ func TestBuildParams_MediaKeepsItsPlaceAroundACall(t *testing.T) {
 	}
 }
 
-// TestBuildParams_ImageDetailReachesTheWire reads the detail off the marshalled
+// TestBuildParams_MediaInOnePartKeepsItsPlace pins the order for a single part
+// that carries text, media and a call or a response together: the text, then
+// the media, in one message, then the call or its result. The cases before
+// this one put the media and the call in different contents, so the flush at
+// the end of a content would order them whatever the media loop did.
+func TestBuildParams_MediaInOnePartKeepsItsPlace(t *testing.T) {
+	image := &genai.Blob{MIMEType: "image/png", Data: []byte{1}}
+	tests := []struct {
+		name  string
+		prior []*genai.Content
+		part  *genai.Part
+		want  []string
+	}{
+		{
+			name: "call",
+			part: &genai.Part{
+				Text:         "look at this",
+				InlineData:   image,
+				FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+			},
+			want: []string{"in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "call:lookup/c1"},
+		},
+		{
+			name:  "response",
+			prior: []*genai.Content{modelContent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}})},
+			part: &genai.Part{
+				Text:             "look at this",
+				InlineData:       image,
+				FunctionResponse: &genai.FunctionResponse{Name: "lookup", ID: "c1", Response: map[string]any{"ok": true}},
+			},
+			want: []string{"call:lookup/c1", "in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "output:c1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: append(tt.prior, userContent(tt.part))})
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildParams_ImageDetailReachesTheWire reads the detail off the marshaled
 // request rather than off the param.
 //
-// The param-level checks above cannot see the failure this one is for: Detail
-// is tagged api:"required" and omitzero together, so a value left unset
-// disappears during marshalling and the server, not the compiler, decides what
-// was meant.
+// Detail is tagged api:"required" and omitzero together, so a value left
+// unset disappears during marshaling and the server, not the compiler, decides
+// what was meant. This test checks the bytes that would be sent.
 func TestBuildParams_ImageDetailReachesTheWire(t *testing.T) {
 	params, err := buildParams("fallback", &model.LLMRequest{Contents: []*genai.Content{
 		userContent(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}),
@@ -1036,13 +1082,17 @@ func TestBuildParams_ImageDetailReachesTheWire(t *testing.T) {
 		t.Fatalf("json.Marshal() err = %v", err)
 	}
 	if want := `"detail":"auto"`; !strings.Contains(string(body), want) {
-		t.Errorf("request body = %s, want it to carry %s", body, want)
+		t.Errorf("marshaled request is missing %s", want)
 	}
 	if want := `"type":"input_image"`; !strings.Contains(string(body), want) {
-		t.Errorf("request body = %s, want it to carry %s", body, want)
+		t.Errorf("marshaled request is missing %s", want)
 	}
 }
 
+// TestBuildParams_NoContentsSentinelIdentity pins which requests get the
+// bare shared.ErrNoContents and which get it wrapped, because a caller comparing with
+// == rather than errors.Is sees only the bare one. Only a drop that suppressed
+// text the model would otherwise have seen earns the wrap.
 func TestBuildParams_NoContentsSentinelIdentity(t *testing.T) {
 	tests := []struct {
 		name     string

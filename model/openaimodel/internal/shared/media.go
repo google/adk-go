@@ -34,8 +34,8 @@ const (
 	MediaKindAudio MediaKind = "audio"
 	// MediaKindVideo is a MIME type in the video/ tree.
 	MediaKindVideo MediaKind = "video"
-	// MediaKindFile is any other MIME type, application/pdf being the one the
-	// endpoints have a field for.
+	// MediaKindFile is any other MIME type. Responses sends every file kind
+	// as an input_file.
 	MediaKindFile MediaKind = "file"
 )
 
@@ -108,11 +108,11 @@ func (m Media) DataURL() string {
 // both presents them in that order and the content list has to keep it.
 //
 // It returns nil for a part carrying no media. It rejects media it cannot
-// label rather than guessing one: a missing MIME type used to become
-// application/octet-stream, which told the server the bytes were opaque when
-// in fact nobody had looked.
+// label rather than guessing one. Defaulting a missing MIME type to
+// application/octet-stream, as adk-python does, would tell the server the
+// bytes are opaque when in fact nobody has looked.
 //
-// Deciding whether a labelled kind is sendable is left to the caller, because
+// Deciding whether a labeled kind is sendable is left to the caller, because
 // that is the half the two endpoints answer differently.
 func ClassifyMedia(part *genai.Part) ([]Media, error) {
 	if part == nil {
@@ -148,13 +148,26 @@ func classifyInlineData(blob *genai.Blob) (Media, error) {
 		Kind:     mediaKindOf(blob.MIMEType),
 		Source:   MediaSourceData,
 		MIMEType: blob.MIMEType,
-		Filename: blob.DisplayName,
+		Filename: inlineFilename(blob.DisplayName),
 		Data:     blob.Data,
 	}, nil
 }
 
+// defaultInlineFilename names inline bytes that arrive without a display name.
+// A file sent as data needs a filename on the Responses API, and adk-python
+// fills the same gap with the same value.
+const defaultInlineFilename = "inline_data"
+
+func inlineFilename(displayName string) string {
+	if displayName == "" {
+		return defaultInlineFilename
+	}
+	return displayName
+}
+
 // classifyFileData labels media held somewhere else, splitting an uploaded
-// file id from a location to fetch. The split is made on the URI alone: an
+// file id from a location to fetch. Errors name the kind of source and never
+// the URI, which can be a presigned URL whose query string carries a secret. The split is made on the URI alone: an
 // image uploaded to the provider is still a file id, and sending it as a
 // location would ask the server to fetch a string that is not one.
 func classifyFileData(fd *genai.FileData) (Media, error) {
@@ -162,7 +175,7 @@ func classifyFileData(fd *genai.FileData) (Media, error) {
 		return Media{}, fmt.Errorf("%w: file data", ErrMediaURIRequired)
 	}
 	if fd.MIMEType == "" {
-		return Media{}, fmt.Errorf("%w: file data %s", ErrMediaMIMETypeRequired, fd.FileURI)
+		return Media{}, fmt.Errorf("%w: file data", ErrMediaMIMETypeRequired)
 	}
 	m := Media{
 		Kind:     mediaKindOf(fd.MIMEType),

@@ -150,14 +150,13 @@ func TestReplayedReasoning_MediaStillDisqualifies(t *testing.T) {
 	}
 }
 
-// TestUnsupportedPayload_MediaResolutionIsLostNoLongerSilently covers the one
-// field whose meaning changed when an endpoint started sending media.
+// TestUnsupportedPayload_MediaResolutionIsLostNoLongerSilently covers the
+// qualifiers that ride on media.
 //
-// MediaResolution qualifies media. While the media itself was refused, the
-// qualifier went with it and the caller heard about the media; now that the
-// media goes out, a resolution no wire field carries would be a request
-// quietly downgraded. So on a part whose media is sent it is reported, and on
-// a part with no media — where it qualifies nothing — it stays accounted for.
+// MediaResolution and VideoMetadata qualify media. A qualifier no wire field
+// carries, on a part whose media does go out, would be a request quietly
+// downgraded, so it is reported. On a part with no media it qualifies nothing
+// and stays accounted for.
 func TestUnsupportedPayload_MediaResolutionIsLostNoLongerSilently(t *testing.T) {
 	high := &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionHigh}
 	tests := []struct {
@@ -182,9 +181,23 @@ func TestUnsupportedPayload_MediaResolutionIsLostNoLongerSilently(t *testing.T) 
 			want: "MediaResolution",
 		},
 		{
+			// A GIF part with an FPS: the image is sent, the FPS has no field.
+			name: "video_metadata_on_media_that_is_sent_is_reported",
+			part: &genai.Part{
+				InlineData:    &genai.Blob{MIMEType: "image/gif", Data: []byte{1}},
+				VideoMetadata: &genai.VideoMetadata{},
+			},
+			want: "VideoMetadata",
+		},
+		{
 			// Nothing for it to qualify, so nothing is lost by dropping it.
 			name: "without_media_it_qualifies_nothing",
 			part: &genai.Part{Text: "hi", MediaResolution: high},
+			want: "",
+		},
+		{
+			name: "video_metadata_without_media_qualifies_nothing",
+			part: &genai.Part{Text: "hi", VideoMetadata: &genai.VideoMetadata{}},
 			want: "",
 		},
 	}

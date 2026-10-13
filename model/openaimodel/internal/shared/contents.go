@@ -109,7 +109,7 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 	rest.ThoughtSignature = nil // no request field on either endpoint carries one
 	rest.FunctionCall = nil     // sent as a call
 	rest.FunctionResponse = nil // sent as the call's result
-	rest.VideoMetadata = nil    // qualifies video, which neither endpoint sends
+	rest.VideoMetadata = nil    // qualifies media, and see below
 	rest.MediaResolution = nil  // qualifies media, and see below
 	rest.PartMetadata = nil     // caller bookkeeping, never content
 
@@ -117,13 +117,17 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 		if field == PartFieldMedia {
 			rest.InlineData = nil // the caller has a wire field for the bytes
 			rest.FileData = nil   // and for the id or location naming them
-			// A qualifier is only harmless while the thing it qualifies is
-			// refused: unsent media takes its resolution down with it and the
-			// caller is told about the media. Once the media does go out, a
-			// resolution nobody carries is a request quietly downgraded, so
-			// it is restored to the account and reported.
-			if part.MediaResolution != nil && (part.InlineData != nil || part.FileData != nil) {
+			// A qualifier is only harmless while nothing is sent for it to
+			// qualify. On a part that carries media, MediaResolution and
+			// VideoMetadata are reported by name, because no wire field
+			// carries them and sending the media without them would be a
+			// request quietly downgraded. This is decided by the part, not by
+			// whether the endpoint ends up sending the media: for audio or
+			// video, or media on a model turn, the qualifier is named in the
+			// error ahead of the MIME-type or assistant-turn error.
+			if part.InlineData != nil || part.FileData != nil {
 				rest.MediaResolution = part.MediaResolution
+				rest.VideoMetadata = part.VideoMetadata
 			}
 		}
 	}

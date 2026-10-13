@@ -237,9 +237,9 @@ type bufferedContent struct {
 // ResponseInputImageParam tags Detail as api:"required" and omitzero at the
 // same time, so an unset value does not fail to compile — it vanishes from the
 // request and the server decides what was meant. "auto" is therefore sent
-// explicitly rather than left to a default. A genai.Part carries no notion of
-// detail, and giving a caller a way to choose belongs to genai.Content rather
-// than to this converter.
+// explicitly rather than left to a default. genai.Part.MediaResolution is the
+// caller's way to ask for a level, and it is refused while media is sent
+// rather than mapped onto this field; see shared.UnsupportedPayload.
 const imageInputDetail = oairesponses.ResponseInputImageDetailAuto
 
 // newMessage builds an easy input message for an already-normalized role.
@@ -314,16 +314,15 @@ func newMediaContent(m shared.Media) (oairesponses.ResponseInputContentUnionPara
 		default:
 			return oairesponses.ResponseInputContentUnionParam{}, fmt.Errorf("openai: unsupported media source: %s", m.Source)
 		}
-		// filename is optional on this endpoint, so an unnamed file is sent
-		// without one rather than under a name nobody chose. Should a derived
-		// name be ruled endpoint-neutral, it arrives in Media.Filename and is
-		// carried here unchanged.
-		if m.Filename != "" {
+		// The filename travels only with inline data, as in adk-python: a
+		// file id or a URL already names the file. The classifier supplies a
+		// fallback name for inline bytes that have none.
+		if m.Source == shared.MediaSourceData && m.Filename != "" {
 			file.Filename = param.NewOpt(m.Filename)
 		}
 		return oairesponses.ResponseInputContentUnionParam{OfInputFile: &file}, nil
 	default:
-		// Audio and video are labelled by the classifier and refused here:
+		// Audio and video are labeled by the classifier and refused here:
 		// the Responses input has no field for either, and naming the type
 		// the part declared says more than naming the field it arrived in.
 		return oairesponses.ResponseInputContentUnionParam{}, fmt.Errorf("%w: %s", shared.ErrUnsupportedMIMEType, m.MIMEType)
