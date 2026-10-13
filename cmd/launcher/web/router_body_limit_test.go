@@ -86,7 +86,7 @@ func TestBuildRouterAppliesBodyLimitMiddlewareToSublauncherTriggerRoutes(t *test
 
 	// A request body well under the limit decodes successfully.
 	smallRec := httptest.NewRecorder()
-	router.ServeHTTP(smallRec, httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", strings.NewReader(`{"message":{"data":"small"}}`)))
+	router.ServeHTTP(smallRec, httptest.NewRequest(http.MethodPost, "http://localhost/api/apps/my-app/trigger/pubsub", strings.NewReader(`{"message":{"data":"small"}}`)))
 	if smallRec.Code != http.StatusNoContent {
 		t.Fatalf("small request: got status %d, want %d (%s)", smallRec.Code, http.StatusNoContent, smallRec.Body.String())
 	}
@@ -97,7 +97,7 @@ func TestBuildRouterAppliesBodyLimitMiddlewareToSublauncherTriggerRoutes(t *test
 	// would return 204, so the test fails on regression.
 	oversized := `{"message":{"data":"` + strings.Repeat("a", 8192) + `"}}`
 	oversizedRec := httptest.NewRecorder()
-	router.ServeHTTP(oversizedRec, httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", strings.NewReader(oversized)))
+	router.ServeHTTP(oversizedRec, httptest.NewRequest(http.MethodPost, "http://localhost/api/apps/my-app/trigger/pubsub", strings.NewReader(oversized)))
 	if oversizedRec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized request: got status %d, want %d (%s)", oversizedRec.Code, http.StatusBadRequest, oversizedRec.Body.String())
 	}
@@ -183,7 +183,7 @@ func TestBuildRouterBaseRouterHonorsEmbedderPayloadLimit(t *testing.T) {
 
 	// A body under the embedder's limit decodes successfully.
 	smallRec := httptest.NewRecorder()
-	router.ServeHTTP(smallRec, httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", strings.NewReader(`{"message":{"data":"small"}}`)))
+	router.ServeHTTP(smallRec, httptest.NewRequest(http.MethodPost, "http://localhost/api/apps/my-app/trigger/pubsub", strings.NewReader(`{"message":{"data":"small"}}`)))
 	if smallRec.Code != http.StatusNoContent {
 		t.Fatalf("small request: got status %d, want %d (%s)", smallRec.Code, http.StatusNoContent, smallRec.Body.String())
 	}
@@ -193,7 +193,7 @@ func TestBuildRouterBaseRouterHonorsEmbedderPayloadLimit(t *testing.T) {
 	// raw flag instead of the resolved config.
 	oversized := `{"message":{"data":"` + strings.Repeat("a", int(embedderLimit)+1024) + `"}}`
 	oversizedRec := httptest.NewRecorder()
-	router.ServeHTTP(oversizedRec, httptest.NewRequest(http.MethodPost, "/api/apps/my-app/trigger/pubsub", strings.NewReader(oversized)))
+	router.ServeHTTP(oversizedRec, httptest.NewRequest(http.MethodPost, "http://localhost/api/apps/my-app/trigger/pubsub", strings.NewReader(oversized)))
 	if oversizedRec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized request: got status %d, want %d (%s)", oversizedRec.Code, http.StatusBadRequest, oversizedRec.Body.String())
 	}
