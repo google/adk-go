@@ -124,14 +124,14 @@ func newFakeService(t *testing.T) (session.Service, *fakeSessions) {
 	return s, fake
 }
 
-// A delete requested by a non-owner must be rejected and must not reach the
-// backend's DeleteSession.
-func TestDelete_wrongUser_deniedAndNotDeleted(t *testing.T) {
+// A delete requested by a non-owner must not reach the backend's DeleteSession.
+// It is a no-op, the same as deleting a missing session, which is also what the
+// in-memory and database services do.
+func TestDelete_wrongUser_isNoOp(t *testing.T) {
 	s, fake := newFakeService(t)
 
-	err := s.Delete(t.Context(), &session.DeleteRequest{AppName: "123", UserID: "user2", SessionID: "owned"})
-	if err == nil || !strings.Contains(err.Error(), "does not belong to user") {
-		t.Errorf("cross-user Delete: got %v, want an ownership error", err)
+	if err := s.Delete(t.Context(), &session.DeleteRequest{AppName: "123", UserID: "user2", SessionID: "owned"}); err != nil {
+		t.Errorf("cross-user Delete: got %v, want nil", err)
 	}
 	if got := fake.deletes.Load(); got != 0 {
 		t.Errorf("DeleteSession RPCs = %d, want 0", got)
