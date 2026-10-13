@@ -18,6 +18,7 @@
 package ranksearch
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"regexp/syntax"
@@ -31,15 +32,19 @@ const (
 	// maxQueryLen caps the query length, which bounds the BM25 query terms and
 	// how long a regex takes to parse, and rejects pasted-in garbage. Parsing
 	// is slow for case-insensitive character classes over wide ranges of runes.
-	// The slowest query found, one class of 66 such ranges, makes a search take
-	// about 0.2 s.
+	// The slowest query found, a class of 64 such ranges after its own (?i),
+	// which gets it folded twice (see compileQuery), makes a search take about
+	// 0.35 s.
 	maxQueryLen = 200
 	// maxPatternSize caps the estimated compiled size of a regex query. The
 	// matcher tracks at most one state per instruction for each byte of input,
-	// so this bounds how many states a byte can cost, though not parse time
-	// (see maxQueryLen). A counted repeat such as .{0,999} multiplies the size:
-	// 24 of them fit in maxQueryLen and compile to about 48,000 instructions. A
-	// larger pattern is not run.
+	// so this roughly bounds how many states a byte can cost. Only roughly: the
+	// estimate comes from a parse without case folding (see compileQuery), and
+	// a pattern that turns folding off with (?-i) can compile to many times it,
+	// 14 times in the worst case found. It does not bound parse time (see
+	// maxQueryLen). A counted repeat such as .{0,999} multiplies the size: 24 of
+	// them fit in maxQueryLen and compile to about 48,000 instructions. A larger
+	// pattern is not run.
 	maxPatternSize = 256
 	// selectPrefix marks the exact-name query form: "select:name1,name2".
 	selectPrefix = "select:"
@@ -85,13 +90,14 @@ type Config struct {
 // of them for a ranked query, instead of reporting that nothing matched.
 //
 //   - "select:a,b" loads items by exact name (no cap, reports unknown names).
-//   - A query with regex metacharacters matches names as a regex, which keeps
-//     the matcher's input short. If it matches no name and either contains
-//     whitespace or uses no operator in patternOnlyChars, it is treated as
-//     punctuated keywords or prose, such as node.js or a question, and ranked
-//     by BM25 instead. Otherwise the note says that patterns match names
-//     only. A pattern larger than maxPatternSize is not run, and the note says
-//     why.
+//   - A query with regex metacharacters is matched against names, which keeps
+//     the matcher's input short: as a regex if it is a pattern, and as a
+//     literal substring if it is punctuated keywords or prose (see
+//     compileQuery). If no new name matches, punctuated keywords and prose are
+//     ranked by BM25 instead, and a pattern reports a match among the already
+//     available names or says that patterns match names only. A pattern that
+//     is larger than maxPatternSize, or does not parse, is not run, and unless
+//     the query is prose, the note says why.
 //   - Anything else is ranked by BM25 over each item's token bag.
 func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Config) ([]Match, string) {
 	query = strings.TrimSpace(query)
@@ -109,9 +115,8 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 	}
 
 	q := compileQuery(query)
-	if q.tooLarge {
-		return nil, "pattern not run: counted repeats such as {1,128} make it too large — " +
-			"use .*, a smaller count, or keywords"
+	if q.notRun != "" {
+		return nil, q.notRun
 	}
 
 	var eligible, available []Item
@@ -123,14 +128,35 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 		}
 	}
 
-	all, note := q.match(eligible, cfg)
-	if len(all) == 0 {
-		if had, _ := q.match(available, cfg); len(had) > 0 {
-			return nil, alreadyAvailableNote(had, cfg)
-		}
-		if q.matchName != nil && !q.keywordFallback {
+	var all []Match
+	var note string
+	if q.hasMeta {
+		all = q.nameMatches(eligible, cfg)
+		if len(all) == 0 && !q.keywordFallback {
+			if had := q.nameMatches(available, cfg); len(had) > 0 {
+				return nil, alreadyAvailableNote(had, cfg)
+			}
 			return nil, fmt.Sprintf("no %s names match this pattern — patterns match names only, "+
 				"so search by keywords to match descriptions", cfg.ItemNoun)
+		}
+		if len(all) == 0 {
+			all, note = bm25Matches(eligible, query, cfg),
+				fmt.Sprintf("no new %s names contain the query, showing keyword matches", cfg.ItemNoun)
+		}
+	} else {
+		all = bm25Matches(eligible, query, cfg)
+	}
+	if len(all) == 0 {
+		had := q.nameMatches(available, cfg)
+		if len(had) == 0 {
+			had = bm25Matches(available, query, cfg)
+		}
+		if len(had) > 0 {
+			return nil, alreadyAvailableNote(had, cfg)
+		}
+		if q.regexHint {
+			return nil, fmt.Sprintf("no %ss matched as keywords — to match %s names as a pattern, "+
+				"add .* or a character class", cfg.ItemNoun, cfg.ItemNoun)
 		}
 		return nil, noMatchNote(cfg)
 	}
@@ -151,51 +177,117 @@ func Rank(items []Item, query string, alreadyAvailable map[string]bool, cfg Conf
 // compiledQuery is a query prepared once per Rank call, since preparing a
 // regex can cost far more than matching it.
 type compiledQuery struct {
-	text string
-	// matchName matches an item name, and is nil for a BM25 query.
+	// hasMeta is set for a query with regex metacharacters, which is matched
+	// against names before anything else.
+	hasMeta bool
+	// matchName matches an item name: as a regex for a pattern, and as a
+	// literal substring for punctuated keywords or prose. It is nil for a
+	// query without regex metacharacters and for a pattern that is not run.
 	matchName func(string) bool
-	// keywordFallback ranks by BM25 when matchName matches no name.
+	// keywordFallback ranks the query by BM25 when no name contains it, because
+	// it is punctuated keywords or prose rather than a pattern.
 	keywordFallback bool
-	// tooLarge means the pattern exceeds maxPatternSize and is not run.
-	tooLarge bool
+	// notRun is the note explaining why a pattern was not run, if it was not.
+	// It is never set for prose, which is ranked by keywords instead.
+	notRun string
+	// regexHint is set for punctuated keywords that would also parse as a
+	// regex, such as fore.ast, so that finding nothing says how to write one.
+	regexHint bool
 }
 
-// compileQuery prepares query as a BM25 query, a case-insensitive name regex,
-// or, when it does not compile, a literal substring of names. A pattern larger
-// than maxPatternSize is marked too large and not compiled.
+// compileQuery prepares a query with regex metacharacters. It is a pattern if
+// it contains one of patternMarkers, if its parse tree uses a repeat (see
+// usesRepeat), or if it fails to parse in a way punctuated keywords do not (see
+// keywordParseError). A pattern is matched against names as a case-insensitive
+// regex. A pattern larger than maxPatternSize, or one that does not parse, is
+// not run. Any other query is punctuated keywords, and so is any query with
+// whitespace, which marks prose. It is matched against names as a
+// case-insensitive literal substring, then by BM25. Matching it as a regex
+// would make PDF? match "update", and ranking a pattern that matched nothing by
+// its words would return the items it excluded.
 func compileQuery(query string) compiledQuery {
-	q := compiledQuery{text: query}
-	if !looksLikeRegex(query) {
+	q := compiledQuery{hasMeta: looksLikeRegex(query)}
+	if !q.hasMeta {
 		return q
 	}
-	// Ranking a pattern that matched nothing by its words would return items
-	// the pattern excluded. Keywords and prose carry no pattern-only operator,
-	// or carry whitespace, which a pattern rarely does.
-	q.keywordFallback = !strings.ContainsAny(query, patternOnlyChars) || strings.ContainsFunc(query, unicode.IsSpace)
-	// Size a parse without (?i) before compiling. Compiling a large pattern is
-	// itself slow, and case folding is the slow part of parsing a wide character
-	// class. Without folding, alternatives that differ only in case are counted
-	// separately, which errs toward a larger estimate.
+	prose := strings.ContainsFunc(query, unicode.IsSpace)
+	markers := patternMarkers.MatchString(query)
+	// Size a parse without the (?i) the compile adds. Compiling a large pattern
+	// is itself slow, and case folding is the slow part of parsing a wide
+	// character class, though a query that sets (?i) itself is folded here too.
+	// Folding changes which alternatives the parser can merge, and a counted
+	// repeat multiplies the difference, so the estimate can be well off in
+	// either direction (see maxPatternSize).
 	parsed, err := syntax.Parse(query, syntax.Perl)
-	if err == nil && patternSize(parsed) > maxPatternSize {
-		q.tooLarge = true
-		return q
-	}
-	if err == nil {
-		if re, err := regexp.Compile("(?i)" + query); err == nil {
-			q.matchName = re.MatchString
-			return q
+	isPattern := markers || err == nil && usesRepeat(parsed)
+	if err != nil {
+		var perr *syntax.Error
+		isPattern = errors.As(err, &perr) && (markers || !keywordParseError(perr.Code))
+		if isPattern && !prose {
+			q.notRun = notRunNote(perr)
 		}
+	} else if !prose && patternSize(parsed) > maxPatternSize {
+		q.notRun = "pattern not run: counted repeats such as {1,128} make it too large — " +
+			"use .*, a smaller count, or keywords"
 	}
-	// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
-	q.matchName = regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD"))).MatchString
+	q.keywordFallback = prose || !isPattern
+	q.regexHint = !isPattern && !prose && err == nil
+	switch {
+	case q.keywordFallback:
+		// QuoteMeta keeps invalid UTF-8, which regexp rejects even in a literal.
+		q.matchName = regexp.MustCompile("(?i)" + regexp.QuoteMeta(strings.ToValidUTF8(query, "\uFFFD"))).MatchString
+	case q.notRun == "":
+		// A query that parses also parses with (?i) in front.
+		q.matchName = regexp.MustCompile("(?i)" + query).MatchString
+	}
 	return q
 }
 
-// match runs q over items. Name matches are sorted by name.
-func (q compiledQuery) match(items []Item, cfg Config) ([]Match, string) {
+// notRunNote explains why a pattern that does not parse was not run.
+func notRunNote(perr *syntax.Error) string {
+	if perr.Expr == "" {
+		return fmt.Sprintf("pattern not run: %s — use a simpler pattern or keywords", perr.Code)
+	}
+	return fmt.Sprintf("pattern not run: %s: `%s` — use a simpler pattern or keywords",
+		perr.Code, strings.ToValidUTF8(perr.Expr, "\uFFFD"))
+}
+
+// patternMarkers matches syntax that keywords rarely contain but patterns do: a
+// character class, an alternation, an anchor, a counted repeat including the
+// {,n} form Go reads as text, a (? group or (* verb, an escape such as \d, \b,
+// \. or \x5f, .* or a similar repeat of any character, a possessive *+ or ?+,
+// and a group followed by a word, as in (user)_file. A ? or + after an
+// underscore marks a tool-name pattern such as list_files?, since keywords such
+// as forecast? have none. After a hyphen or a camelCase hump it does not, since
+// keywords such as e-mail? and iOS? have them, so listFiles? is read as
+// keywords. Reading the text rather than the parse tree also catches a pattern
+// the parser simplifies, such as [.] becoming a literal, and one that does not
+// parse, such as ^get_.*+_record$. A bare ., as in node.js, and a group on its
+// own or after a word, as in (SMTP), invoice(s) or fetch(), are not markers. A
+// keyword such as US$ or C:\temp trips it, and is then matched as a pattern.
+var patternMarkers = regexp.MustCompile(
+	`[\[|^$]|\(\?|\(\*|\\.|\.[*+?]|[*?]\+|\{,?\d|_.*[?+]|\)\w`)
+
+// keywordParseError reports whether a parse error is one that punctuated
+// keywords produce, such as C++, (beta or a leading *, rather than syntax Go's
+// regexp rejects in a deliberate pattern, such as lookaround, a backreference
+// or a repeat count over 1000. A pattern can produce these too, so a query
+// that also contains one of patternMarkers is a pattern. A Windows path such
+// as C:\Users fails the way a backreference does, and so gets the note that
+// its pattern was not run.
+func keywordParseError(code syntax.ErrorCode) bool {
+	switch code {
+	case syntax.ErrInvalidRepeatOp, syntax.ErrMissingRepeatArgument, syntax.ErrMissingParen,
+		syntax.ErrUnexpectedParen, syntax.ErrTrailingBackslash, syntax.ErrInvalidUTF8:
+		return true
+	}
+	return false
+}
+
+// nameMatches returns the items whose name q matches, sorted by name.
+func (q compiledQuery) nameMatches(items []Item, cfg Config) []Match {
 	if q.matchName == nil {
-		return bm25Matches(items, q.text, cfg), ""
+		return nil
 	}
 	var matches []Match
 	for _, it := range items {
@@ -203,11 +295,8 @@ func (q compiledQuery) match(items []Item, cfg Config) ([]Match, string) {
 			matches = append(matches, Match{Name: it.Name, Description: truncateRunes(it.Description, cfg.MaxDescLen)})
 		}
 	}
-	if len(matches) == 0 && q.keywordFallback {
-		return bm25Matches(items, q.text, cfg), "no matches as a pattern, showing keyword matches"
-	}
 	slices.SortFunc(matches, func(a, b Match) int { return strings.Compare(a.Name, b.Name) })
-	return matches, ""
+	return matches
 }
 
 func noMatchNote(cfg Config) string {
@@ -324,15 +413,40 @@ func DescribeSearch(baseDescription string, itemNames []string) string {
 		strings.Join(names, ", ")
 }
 
-// patternOnlyChars are the regex metacharacters that keywords and prose rarely
-// contain. The others, . + ? ( ), appear in queries such as node.js, C++ and
-// questions.
-const patternOnlyChars = `*[]|^$\{}`
-
 // looksLikeRegex reports whether query contains regex metacharacters, in which
-// case it is first matched against names as a pattern.
+// case it is first matched against names (see compileQuery).
 func looksLikeRegex(query string) bool {
 	return strings.ContainsAny(query, `.*+?[]()|^$\{}`)
+}
+
+// usesRepeat reports whether re uses a repeat other than a trailing ? or + on
+// a literal, as in "forecast?" or "node+". A literal there is one character
+// unless written as (?:...), which patternMarkers catches. patternMarkers also
+// catches every class, alternation, anchor, word boundary and counted repeat,
+// so this need only look for *, + and ?. A ? or + anywhere else counts, so
+// PDF?. is a pattern while PDF? is keywords.
+func usesRepeat(re *syntax.Regexp) bool {
+	if isTrailingPunctuation(re) {
+		return false
+	}
+	if re.Op == syntax.OpConcat && isTrailingPunctuation(re.Sub[len(re.Sub)-1]) {
+		return slices.ContainsFunc(re.Sub[:len(re.Sub)-1], hasRepeat)
+	}
+	return hasRepeat(re)
+}
+
+// isTrailingPunctuation reports whether re is a ? or + on a literal.
+func isTrailingPunctuation(re *syntax.Regexp) bool {
+	return (re.Op == syntax.OpQuest || re.Op == syntax.OpPlus) && re.Sub[0].Op == syntax.OpLiteral
+}
+
+// hasRepeat reports whether re or any part of it is a *, + or ? repeat.
+func hasRepeat(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpStar, syntax.OpPlus, syntax.OpQuest:
+		return true
+	}
+	return slices.ContainsFunc(re.Sub, hasRepeat)
 }
 
 // patternSize estimates how many instructions re compiles to, and stops

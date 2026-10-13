@@ -105,24 +105,27 @@ func TestRank_KeywordMatch(t *testing.T) {
 	checkNames(t, names(matches), []string{"list_books", "get_book"}, []string{"list_authors"})
 }
 
-// TestRank_InvalidRegexFallsBackToLiteral verifies an invalid regex pattern
-// falls back to literal substring matching rather than erroring.
+// TestRank_InvalidRegexFallsBackToLiteral verifies that an invalid regex without
+// pattern syntax is treated as keywords, rather than erroring or being reported
+// as a pattern that was not run.
 func TestRank_InvalidRegexFallsBackToLiteral(t *testing.T) {
 	items := makeItems(
 		[2]string{"list_books", "list all books"},
 		[2]string{"get_author", "get author"},
 	)
-	// "(unclosed[bracket" is an invalid regex; the literal fallback matches nothing.
-	matches, note := Rank(items, "(unclosed[bracket", nil, testCfg())
+	// "(unclosed" is an invalid regex without pattern syntax, so it is matched
+	// as a literal, which matches nothing, and then by keywords.
+	matches, note := Rank(items, "(unclosed", nil, testCfg())
 	if len(matches) != 0 {
 		t.Errorf("Rank() = %v, want no matches", names(matches))
 	}
-	if note == "" {
-		t.Error("Rank() note is empty, want a no-match note")
+	if want := noMatchNote(testCfg()); note != want {
+		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }
 
-// TestRank_RegexPattern verifies valid regex patterns are used as-is.
+// TestRank_RegexPattern verifies that a pattern is matched against names as a
+// regex.
 func TestRank_RegexPattern(t *testing.T) {
 	items := makeItems(
 		[2]string{"get_library_book", "retrieve a book for a library"},
@@ -268,16 +271,19 @@ func TestRank_SelectSkipsAlreadyAvailable(t *testing.T) {
 // multi-byte UTF-8 character.
 func TestRank_TruncatesAtRuneBoundary(t *testing.T) {
 	desc := strings.Repeat("x", testMaxDescLen-1) + "€" + strings.Repeat("x", 10)
-	matches, _ := Rank([]Item{item("t", desc)}, "t", nil, testCfg())
-	if len(matches) != 1 {
-		t.Fatalf("Rank() returned %d matches, want 1", len(matches))
-	}
-	got := matches[0].Description
-	if !utf8.ValidString(got) {
-		t.Error("truncated description is not valid UTF-8")
-	}
-	if len(got) > testMaxDescLen {
-		t.Errorf("len(description) = %d, want <= %d", len(got), testMaxDescLen)
+	// The first query is ranked by BM25 and the second matches the name.
+	for _, query := range []string{"t", "^t$"} {
+		matches, _ := Rank([]Item{item("t", desc)}, query, nil, testCfg())
+		if len(matches) != 1 {
+			t.Fatalf("Rank(%q) returned %d matches, want 1", query, len(matches))
+		}
+		got := matches[0].Description
+		if !utf8.ValidString(got) {
+			t.Errorf("Rank(%q): truncated description is not valid UTF-8", query)
+		}
+		if len(got) > testMaxDescLen {
+			t.Errorf("Rank(%q): len(description) = %d, want <= %d", query, len(got), testMaxDescLen)
+		}
 	}
 }
 
@@ -308,7 +314,7 @@ func TestDescribeSearch_NoNamesIsBaseDescription(t *testing.T) {
 
 // TestRank_NaturalLanguageWithRegexCharacters verifies a natural-language query
 // that happens to contain a regex metacharacter, such as a trailing question
-// mark, still finds items when it matches nothing as a pattern.
+// mark, still finds items when no name contains it.
 func TestRank_NaturalLanguageWithRegexCharacters(t *testing.T) {
 	items := makeItems(
 		[2]string{"list_books", "list all books"},
@@ -342,7 +348,7 @@ func TestRank_PatternThatMatchesNothingStaysEmpty(t *testing.T) {
 func TestRank_FallbackIsAnnounced(t *testing.T) {
 	items := makeItems([2]string{"list_books", "list all books"})
 	_, note := Rank(items, "how do I list books?", nil, testCfg())
-	const fallbackNote = "no matches as a pattern"
+	const fallbackNote = "showing keyword matches"
 	if !strings.Contains(note, fallbackNote) {
 		t.Errorf("Rank() note = %q, want it to contain %q", note, fallbackNote)
 	}
@@ -385,8 +391,8 @@ func TestRank_OnlyAlreadyAvailableMatchesSaySo(t *testing.T) {
 		t.Error("Rank(\"books\") with nothing available returned no matches")
 	}
 	// A query that matches nothing at all still says so.
-	if _, note := Rank(items, "weather", available, testCfg()); strings.Contains(note, "already available") {
-		t.Errorf("Rank(\"weather\") note = %q, want the no-match note", note)
+	if _, note := Rank(items, "weather", available, testCfg()); note != noMatchNote(testCfg()) {
+		t.Errorf("Rank(\"weather\") note = %q, want %q", note, noMatchNote(testCfg()))
 	}
 	// MaxResults 0 means no cap, so the note still names the item.
 	unlimited := testCfg()
@@ -464,9 +470,18 @@ func TestRank_RegexMatchesNamesOnly(t *testing.T) {
 	}
 }
 
-// TestRank_InvalidPatternMatchesLiterally checks that a query that does not
-// compile as a regex is matched against names as a case-insensitive literal
-// substring.
+// TestRank_RegexIsCaseInsensitive checks that a pattern matches a name whatever
+// the case of either.
+func TestRank_RegexIsCaseInsensitive(t *testing.T) {
+	matches, _ := Rank(makeItems([2]string{"getUserFile", "returns a file"}), "getuser.*", nil, testCfg())
+	if diff := cmp.Diff([]string{"getUserFile"}, names(matches)); diff != "" {
+		t.Errorf("Rank() names mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestRank_InvalidPatternMatchesLiterally checks that a query that fails to
+// parse the way punctuated keywords do is matched against names as a
+// case-insensitive literal substring.
 func TestRank_InvalidPatternMatchesLiterally(t *testing.T) {
 	items := makeItems(
 		[2]string{"beta(v2)_tool", "runs beta features"},
@@ -486,6 +501,8 @@ func TestRank_LargePatternIsNotRun(t *testing.T) {
 	for query, want := range map[string][]string{
 		".{0,100}x": {"fix_tool"},
 		".{0,999}x": nil,
+		// Whitespace marks prose, which is ranked by keywords instead.
+		"fixes things {0,999}": {"fix_tool"},
 		// Each pattern below matches the empty string as a regex, so whether
 		// fix_tool comes back shows whether it ran. A literal counts each rune,
 		// and an unbounded repeat counts its minimum.
@@ -503,34 +520,214 @@ func TestRank_LargePatternIsNotRun(t *testing.T) {
 	}
 }
 
-// TestRank_PunctuatedKeywordsFallBackToKeywords checks that a query whose only
-// regex characters also appear in keywords, such as node.js or C++, is ranked by
-// keywords when it matches no name, while one that uses an operator only a
-// pattern needs stays empty.
+// TestRank_PunctuatedKeywordsFallBackToKeywords checks that a query whose regex
+// characters also appear in keywords, such as node.js or C++, is ranked by
+// keywords when it matches no name, while one that uses a pattern operator stays
+// empty, including a repeat written with + or ? instead of *.
 func TestRank_PunctuatedKeywordsFallBackToKeywords(t *testing.T) {
 	items := makeItems(
 		[2]string{"run_script", "Runs Node.js scripts"},
 		[2]string{"compile_code", "Compiles C++ sources"},
 		[2]string{"list_invoices", "Lists unpaid invoices. Supports filters."},
 		[2]string{"price_lookup", "look up a price for v1.2 products"},
+		[2]string{"update_record", "update a record"},
+		[2]string{"convert_document", "convert PDF files to text"},
+		[2]string{"build_app", "Build an iOS or Android app"},
+		[2]string{"get_location", "returns the device location"},
 	)
 	for query, want := range map[string][]string{
 		"node.js":   {"run_script"},
 		"C++":       {"compile_code"},
 		"invoices.": {"list_invoices"},
 		"v1.2":      {"price_lookup"},
-		"node.*js":  nil,
+		"(scripts)": {"run_script"},
+		// A group on its own or after a word is still keywords.
+		"node(js)":   {"run_script"},
+		"invoice(s)": {"list_invoices"},
+		"convert()":  {"convert_document"},
+		// As a regex this would match the "pd" in update_record.
+		"PDF?": {"convert_document"},
+		// Each of these fails to parse the way punctuated keywords do.
+		"*node":         {"run_script"},
+		"(node":         {"run_script"},
+		"node)":         {"run_script"},
+		"node\\":        {"run_script"},
+		"Objective-C++": {"compile_code"},
+		// A trailing ? or + on one character is still keywords.
+		"sources?": {"compile_code"},
+		"node+":    {"run_script"},
+		"c+":       {"compile_code"},
+		// So is one after a hyphen or a camelCase hump, which keywords have. As a
+		// regex, iOS? would match the "io" in get_location.
+		"iOS?":          {"build_app"},
+		"nodeScripts?":  {"run_script"},
+		"node-scripts?": {"run_script"},
+		// Each of these is a pattern by its text alone (see patternMarkers).
+		"node.*js":      nil,
+		"node.+js":      nil,
+		"node.?js":      nil,
+		"node.+":        nil,
+		"node.{2}js":    nil,
+		"node.{,2}js":   nil,
+		"node\\x2ejs":   nil,
+		"node[a-z]js":   nil,
+		"node[.]js":     nil,
+		"node\\d":       nil,
+		"node\\Djs":     nil,
+		"node\\sjs":     nil,
+		"node\\Sjs":     nil,
+		"node\\Wjs":     nil,
+		"node\\pLjs":    nil,
+		"node\\PLjs":    nil,
+		"node|deno":     nil,
+		"node|node":     nil,
+		"^node":         nil,
+		"\\Anode":       nil,
+		"js$":           nil,
+		"js\\z":         nil,
+		"no$de":         nil,
+		"js\\b":         nil,
+		"js\\B":         nil,
+		"(?m)^node":     nil,
+		"(?:run)?js":    nil,
+		"node(?:s)?":    nil,
+		"(?i)node":      nil,
+		"(?:node)":      nil,
+		"node\\.js":     nil,
+		"\\Qnode\\E":    nil,
+		"node_scripts?": nil,
+		"node_script+":  nil,
+		"(node)_js":     nil,
+		// Each of these is a pattern only by a repeat in its parse tree.
+		"nodes*js":   nil,
+		"nodes*":     nil,
+		"nodes+js":   nil,
+		"node?js":    nil,
+		"(run)?js":   nil,
+		"node.(js)?": nil,
+		"node.(js?)": nil,
+		"nodes*j?":   nil,
 	} {
 		matches, note := Rank(items, query, nil, testCfg())
 		if diff := cmp.Diff(want, names(matches), cmpopts.EquateEmpty()); diff != "" {
 			t.Errorf("Rank(%q) names mismatch (-want +got):\n%s", query, diff)
 		}
-		wantNote := "no matches as a pattern"
+		wantNote := "showing keyword matches"
 		if want == nil {
 			wantNote = "patterns match names only"
 		}
 		if !strings.Contains(note, wantNote) {
 			t.Errorf("Rank(%q) note = %q, want it to contain %q", query, note, wantNote)
+		}
+	}
+}
+
+// TestRank_UnsupportedPatternIsNotRun checks that a pattern using syntax Go's
+// regexp rejects, such as lookaround, is not ranked by its words, which would
+// return the tools it excluded, and that the note says why. Prose with such
+// syntax is still ranked by keywords.
+func TestRank_UnsupportedPatternIsNotRun(t *testing.T) {
+	items := makeItems(
+		[2]string{"get_user_file", "fetch a user's file"},
+		[2]string{"delete_user_record", "delete a record"},
+	)
+	for query, want := range map[string]string{
+		"^(?!delete).*_record$": "invalid or unsupported Perl syntax",
+		"_record\\Z":            "invalid escape sequence",
+		"^get_[a-z]{1,2000}$":   "invalid repeat count",
+		"[z-a]_record":          "invalid character class range",
+		"(?<!delete)_record$":   "invalid named capture",
+		"^get_[a-z_+_record$":   "missing closing ]",
+		// Each of these fails with an error that punctuated keywords also
+		// produce, but its text shows a pattern.
+		"^get\\":                "trailing backslash at end of expression",
+		"$\xdc":                 "invalid UTF-8",
+		"^get_.*+_record$":      "invalid nested repetition operator",
+		"get_users*+_record":    "invalid nested repetition operator",
+		"^(get|list_.*_record$": "missing closing )",
+		"^(get|delete)_.*)$":    "unexpected )",
+		// Each of these shows one marker only.
+		"^getuser)":        "unexpected )",
+		"getuser)$":        "unexpected )",
+		"(*FAIL)":          "missing argument to repetition operator",
+		"getx.**record":    "invalid nested repetition operator",
+		"getx.+*record":    "invalid nested repetition operator",
+		"getx.?*record":    "invalid nested repetition operator",
+		"getusers*+record": "invalid nested repetition operator",
+		"getuser?+record":  "invalid nested repetition operator",
+		"getx\\w++record":  "invalid nested repetition operator",
+		"getx{2}+":         "invalid nested repetition operator",
+	} {
+		matches, note := Rank(items, query, nil, testCfg())
+		if len(matches) != 0 {
+			t.Errorf("Rank(%q) = %v, want no matches", query, names(matches))
+		}
+		if !strings.HasPrefix(note, "pattern not run: ") || !strings.Contains(note, want) {
+			t.Errorf("Rank(%q) note = %q, want it to say the pattern was not run because of %q", query, note, want)
+		}
+		if strings.Contains(note, "``") || !utf8.ValidString(note) {
+			t.Errorf("Rank(%q) note = %q, want no empty quote and valid UTF-8", query, note)
+		}
+	}
+	matches, note := Rank(items, "delete (?!x) record", nil, testCfg())
+	if diff := cmp.Diff([]string{"delete_user_record"}, names(matches)); diff != "" || !strings.Contains(note, "showing keyword matches") {
+		t.Errorf("Rank(prose) = %v, note %q, want delete_user_record ranked by keywords (-want +got):\n%s", names(matches), note, diff)
+	}
+}
+
+// TestRank_AlreadyAvailableNameMatches checks that a pattern whose only name
+// match is already available says so, while punctuated keywords rank the other
+// tools by keywords first, as plain keywords do, and report an already
+// available name match only when nothing else matches.
+func TestRank_AlreadyAvailableNameMatches(t *testing.T) {
+	available := map[string]bool{"get_forecast": true, "go1.26_tool": true}
+	items := makeItems(
+		[2]string{"get_forecast", "returns the forecast"},
+		[2]string{"weather_alerts", "weather alerts for a forecast region"},
+	)
+	for _, tc := range []struct {
+		items      []Item
+		query      string
+		want       []string
+		wantInNote string
+	}{
+		{items, "^get_forecast$", nil, "already available: get_forecast"},
+		// As a regex, forecast? would match get_forecast and report it as
+		// already available, so this row guards the classification.
+		{items, "forecast?", []string{"weather_alerts"}, "showing keyword matches"},
+		// Only the literal name match finds this one: BM25 sees "o1" and "2",
+		// and the name's tokens are "go1", "26" and "tool".
+		{makeItems([2]string{"go1.26_tool", "unrelated"}), "o1.2", nil, "already available: go1.26_tool"},
+		// The same keyword ranks an eligible tool by keywords first.
+		{makeItems([2]string{"go1.26_tool", "unrelated"}, [2]string{"release_notes", "notes for o1 2"}), "o1.2", []string{"release_notes"}, "showing keyword matches"},
+	} {
+		matches, note := Rank(tc.items, tc.query, available, testCfg())
+		if diff := cmp.Diff(tc.want, names(matches), cmpopts.EquateEmpty()); diff != "" {
+			t.Errorf("Rank(%q) names mismatch (-want +got):\n%s", tc.query, diff)
+		}
+		if !strings.Contains(note, tc.wantInNote) {
+			t.Errorf("Rank(%q) note = %q, want it to contain %q", tc.query, note, tc.wantInNote)
+		}
+	}
+}
+
+// TestRank_KeywordsThatParseAsRegexSayHowToWriteOne checks that punctuated
+// keywords that find nothing, but would also parse as a regex, are told how to
+// write a pattern instead, while ones that do not parse, and prose, get the
+// plain note.
+func TestRank_KeywordsThatParseAsRegexSayHowToWriteOne(t *testing.T) {
+	items := makeItems([2]string{"get_forecast", "returns the weather"})
+	for query, want := range map[string]string{
+		"fore.ast":         "add .* or a character class",
+		"(forest":          noMatchNote(testCfg()),
+		"how is fore.ast?": noMatchNote(testCfg()),
+	} {
+		matches, note := Rank(items, query, nil, testCfg())
+		if len(matches) != 0 {
+			t.Errorf("Rank(%q) = %v, want no matches", query, names(matches))
+		}
+		if !strings.Contains(note, want) {
+			t.Errorf("Rank(%q) note = %q, want it to contain %q", query, note, want)
 		}
 	}
 }
@@ -545,27 +742,33 @@ func TestCompileQuery_SizesPatternBeforeCompiling(t *testing.T) {
 	}
 }
 
-// TestRank_ParsesRegexOnce checks that a search parses a case-insensitive regex
-// once. Case folding a wide character class is the slow part, about 3 ms per
-// class, and each extra parse pays it again.
-func TestRank_ParsesRegexOnce(t *testing.T) {
+// TestRank_FoldsCaseAtMostOnce checks that a search folds case no more than once
+// for a regex that does not set (?i) itself. Case folding a wide character class
+// is the slow part, about 3 ms per class, and each extra case-insensitive parse
+// pays it again.
+func TestRank_FoldsCaseAtMostOnce(t *testing.T) {
 	query := strings.Repeat("[B-\U0010ffff]", 10)
-	// The name is shorter than the pattern, so nothing matches and Rank goes on
-	// to the already-available items, here none.
-	items := makeItems([2]string{"x_tool", "unrelated"})
+	// The names are shorter than the pattern, so nothing matches and Rank goes
+	// on to the already-available y_tool.
+	items := makeItems([2]string{"x_tool", "unrelated"}, [2]string{"y_tool", "unrelated"})
+	available := map[string]bool{"y_tool": true}
 	compile := testing.AllocsPerRun(1, func() { _, _ = regexp.Compile("(?i)" + query) })
-	if got := testing.AllocsPerRun(1, func() { Rank(items, query, nil, testCfg()) }); got > 1.5*compile {
+	if got := testing.AllocsPerRun(1, func() { Rank(items, query, available, testCfg()) }); got > 1.5*compile {
 		t.Errorf("Rank() allocated %v times, want at most 1.5 times the %v of one compile", got, compile)
 	}
 }
 
 // TestRank_InvalidUTF8PatternDoesNotPanic checks the literal fallback for a
 // query with invalid UTF-8, which regexp rejects even after QuoteMeta. Dropping
-// the invalid byte instead of replacing it would match the "$" in the name.
+// the invalid byte instead of replacing it would match the "(" in the name.
 func TestRank_InvalidUTF8PatternDoesNotPanic(t *testing.T) {
-	items := makeItems([2]string{"price_$_tool", "returns a price"})
-	if matches, _ := Rank(items, "$\xdc", nil, testCfg()); len(matches) != 0 {
+	items := makeItems([2]string{"price_(_tool", "returns a price"})
+	matches, note := Rank(items, "(\xdc", nil, testCfg())
+	if len(matches) != 0 {
 		t.Errorf("Rank() = %v, want no matches", names(matches))
+	}
+	if want := noMatchNote(testCfg()); note != want {
+		t.Errorf("Rank() note = %q, want %q", note, want)
 	}
 }
 
