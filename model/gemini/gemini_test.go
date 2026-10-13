@@ -398,45 +398,52 @@ func TestPreserveEmptyTextThoughtSignaturePartsMapSlices(t *testing.T) {
 }
 
 func TestModel_PreservesClientExtrasRequestProvider(t *testing.T) {
-	var requestBody []byte
-	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
-		var err error
-		requestBody, err = io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": {"application/json"}},
-			Body: io.NopCloser(strings.NewReader(
-				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`,
-			)),
-		}, nil
-	})
-	testModel, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
-		Backend:    genai.BackendVertexAI,
-		Project:    "test-project",
-		Location:   "eu",
-		HTTPClient: &http.Client{Transport: transport},
-		HTTPOptions: genai.HTTPOptions{ExtrasRequestProvider: func(body map[string]any) map[string]any {
-			body["clientMarker"] = "preserved"
-			return body
-		}},
-	})
-	if err != nil {
-		t.Fatalf("NewModel() error = %v", err)
-	}
-	for _, err := range testModel.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hello")}, false) {
-		if err != nil {
-			t.Fatalf("GenerateContent() error = %v", err)
-		}
-	}
-	var body map[string]any
-	if err := json.Unmarshal(requestBody, &body); err != nil {
-		t.Fatalf("json.Unmarshal(request body) error = %v", err)
-	}
-	if got := body["clientMarker"]; got != "preserved" {
-		t.Errorf("client provider marker = %#v, want preserved", got)
+	// Both request paths, since each wires the client provider separately.
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			var requestBody []byte
+			transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				var err error
+				requestBody, err = io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				contentType, responseBody := "application/json", `{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`
+				if stream {
+					contentType, responseBody = "text/event-stream", "data: "+responseBody+"\n\n"
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {contentType}},
+					Body:       io.NopCloser(strings.NewReader(responseBody)),
+				}, nil
+			})
+			testModel, err := NewModel(t.Context(), "gemini-3-flash-preview", &genai.ClientConfig{
+				Backend:    genai.BackendVertexAI,
+				Project:    "test-project",
+				Location:   "eu",
+				HTTPClient: &http.Client{Transport: transport},
+				HTTPOptions: genai.HTTPOptions{ExtrasRequestProvider: func(body map[string]any) map[string]any {
+					body["clientMarker"] = "preserved"
+					return body
+				}},
+			})
+			if err != nil {
+				t.Fatalf("NewModel() error = %v", err)
+			}
+			for _, err := range testModel.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hello")}, stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			var body map[string]any
+			if err := json.Unmarshal(requestBody, &body); err != nil {
+				t.Fatalf("json.Unmarshal(request body) error = %v", err)
+			}
+			if got := body["clientMarker"]; got != "preserved" {
+				t.Errorf("client provider marker = %#v, want preserved", got)
+			}
+		})
 	}
 }
 
