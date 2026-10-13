@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -439,5 +440,54 @@ func TestLoopAgentStopsOnSubAgentError(t *testing.T) {
 	}
 	if nextLLM.callCounter != 0 {
 		t.Errorf("next agent's model called %d times after worker failed, want 0", nextLLM.callCounter)
+	}
+}
+
+// adk-python's LoopAgent returns immediately when it has no sub-agents
+// (loop_agent.py: `if not self.sub_agents: return`). Without MaxIterations the
+// Go loop had nothing to escalate, error or count down, so it spun forever.
+func TestLoopAgentWithoutSubAgentsEnds(t *testing.T) {
+	loopAgent, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{Name: "loop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: loopAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var (
+		events   []*session.Event
+		firstErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			events = append(events, ev)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("LoopAgent with no sub-agents and no MaxIterations did not end")
+	}
+	if firstErr != nil {
+		t.Errorf("LoopAgent with no sub-agents returned error %v, want none", firstErr)
+	}
+	if len(events) != 0 {
+		t.Errorf("LoopAgent with no sub-agents yielded %d events, want none", len(events))
 	}
 }
