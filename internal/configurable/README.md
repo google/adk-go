@@ -28,7 +28,8 @@ prefixes or wildcards are supported. Use `args: []` for no arguments; `[""]`
 passes one empty string. Missing or null `args`, null array elements, and unknown
 fields are rejected. An empty `allowed_servers` array denies all local servers.
 Policy JSON field names are matched case-insensitively; argument values are
-matched exactly. Duplicate keys are accepted.
+matched exactly. Duplicate keys in the same object are rejected, including
+case variants and escaped spellings of the same key.
 
 Pass the policy flag **before** any launcher arguments:
 

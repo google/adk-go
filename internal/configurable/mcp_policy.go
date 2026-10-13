@@ -15,6 +15,7 @@
 package configurable
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -37,7 +39,7 @@ func (e *mcpConfigError) Error() string {
 	// Only expose diagnostics built from schema types and positions, never the
 	// decoder's message: it can include field names or values from the input.
 	switch cause := e.cause.(type) {
-	case *mcpNullArgumentError:
+	case *mcpNullArgumentError, *mcpDuplicateFieldError:
 		return fmt.Sprintf("%s: %s", e.operation, cause)
 	case *json.SyntaxError:
 		return fmt.Sprintf("%s: invalid JSON at byte %d", e.operation, cause.Offset)
@@ -56,6 +58,10 @@ type mcpNullArgumentError struct{ index int }
 func (e *mcpNullArgumentError) Error() string {
 	return fmt.Sprintf("args[%d]: expected string, got null", e.index)
 }
+
+type mcpDuplicateFieldError struct{}
+
+func (*mcpDuplicateFieldError) Error() string { return "duplicate JSON field" }
 
 type mcpPolicyKey struct{}
 
@@ -110,7 +116,8 @@ type configCacheKey struct {
 // Unlike Python's opt-in for all stdio configs, this requires exact approvals
 // to meet the command and argument restrictions in issue #1569.
 func WithMCPPolicy(ctx context.Context, r io.Reader) (context.Context, error) {
-	dec := json.NewDecoder(r)
+	var data bytes.Buffer
+	dec := json.NewDecoder(io.TeeReader(r, &data))
 	dec.DisallowUnknownFields()
 	var policy mcpPolicy
 	if err := dec.Decode(&policy); err != nil {
@@ -121,6 +128,10 @@ func WithMCPPolicy(ctx context.Context, r io.Reader) (context.Context, error) {
 			return nil, fmt.Errorf("MCP policy must contain exactly one JSON object")
 		}
 		return nil, &mcpConfigError{"decode trailing MCP policy data", err}
+	}
+	// encoding/json can merge repeated fields into an approval no entry declared.
+	if err := rejectDuplicateMCPPolicyFields(json.NewDecoder(&data)); err != nil {
+		return nil, &mcpConfigError{"decode MCP policy", err}
 	}
 	if policy.AllowedServers == nil {
 		return nil, fmt.Errorf("MCP policy requires an allowed_servers array")
@@ -140,6 +151,38 @@ func WithMCPPolicy(ctx context.Context, r io.Reader) (context.Context, error) {
 		server.resolvedCommand = command
 	}
 	return context.WithValue(ctx, mcpPolicyKey{}, &policy), nil
+}
+
+func rejectDuplicateMCPPolicyFields(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	var fields []string
+	for dec.More() {
+		if delim == '{' {
+			token, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			name := token.(string)
+			for _, field := range fields {
+				if strings.EqualFold(field, name) {
+					return &mcpDuplicateFieldError{}
+				}
+			}
+			fields = append(fields, name)
+		}
+		if err := rejectDuplicateMCPPolicyFields(dec); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 func mcpPolicyFromContext(ctx context.Context) *mcpPolicy {

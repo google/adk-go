@@ -124,6 +124,10 @@ func TestWithMCPPolicyInvalid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	other, err := json.Marshal(policyExecutable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct{ name, policy string }{
 		{"malformed", "{"},
 		{"null", "null"},
@@ -138,12 +142,18 @@ func TestWithMCPPolicyInvalid(t *testing.T) {
 		{"null after string argument", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":["approved",null]}]}`},
 		{"non-string args", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":[1]}]}`},
 		{"prefix option", `{"allowed_servers":[{"command":` + string(quoted) + `,"args_prefix":[]}]}`},
+		{"duplicate servers inherit args", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":["approved"]}],"allowed_servers":[{"command":` + string(other) + `}]}`},
+		{"duplicate servers inherit command", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":["approved"]}],"allowed_servers":[{"args":["other"]}]}`},
+		{"duplicate servers mixed case", `{"allowed_servers":[],"ALLOWED_SERVERS":[]}`},
+		{"duplicate servers escaped key", `{"allowed_servers":[],"allowed\u005fservers":[]}`},
+		{"duplicate command", `{"allowed_servers":[{"command":` + string(quoted) + `,"command":` + string(other) + `,"args":[]}]}`},
+		{"duplicate args", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":[],"args":["other"]}]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, err := WithMCPPolicy(context.Background(), strings.NewReader(tt.policy))
 			if err == nil || ctx != nil {
-				t.Fatalf("WithMCPPolicy() = %v, %v; want nil context and error", ctx, err)
+				t.Fatalf("WithMCPPolicy() returned context=%t, error type=%T; want nil context and error", ctx != nil, err)
 			}
 		})
 	}
