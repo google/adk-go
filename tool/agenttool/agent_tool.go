@@ -186,7 +186,7 @@ func (t *agentTool) Run(toolCtx agent.ToolContext, args any) (map[string]any, er
 		MemoryService:   memory.InMemoryService(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create runner")
+		return nil, fmt.Errorf("failed to create runner for agent %s: %w", t.agent.Name(), err)
 	}
 
 	stateMap := make(map[string]any)
