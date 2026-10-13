@@ -40,7 +40,9 @@ type Service interface {
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
 	Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error)
-	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
+	// Delete deletes an artifact. If req.Version is 0, all versions are deleted,
+	// and deleting an artifact that does not exist is not an error. If req.Version
+	// is set and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
