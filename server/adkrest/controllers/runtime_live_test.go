@@ -1147,7 +1147,9 @@ func TestNewRuntimeAPIController_LiveKeepalive(t *testing.T) {
 		wantKeepalive time.Duration
 		wantPing      time.Duration
 	}{
-		{name: "default", wantKeepalive: defaultLiveKeepaliveTimeout, wantPing: defaultLiveKeepaliveTimeout / 2},
+		// A literal rather than the constant: 1.x has no field to change it, so the
+		// value is the contract. See defaultLiveKeepaliveTimeout for its origin.
+		{name: "default", wantKeepalive: 40 * time.Second, wantPing: 20 * time.Second},
 		{name: "explicit value", set: time.Minute, wantKeepalive: time.Minute, wantPing: 30 * time.Second},
 		{name: "negative turns it off", set: -1, wantKeepalive: -1},
 		{
