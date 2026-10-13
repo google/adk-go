@@ -681,7 +681,7 @@ func (c *RuntimeAPIController) acquireLiveSlot() (release func(), ok bool) {
 // handler of the keepalive, so a peer that stops responding is dropped. The
 // keepalive's deadlines are set around each read and write, from
 // [RuntimeAPIController.liveDeadline]. It returns the function that stops the
-// pinger, which the caller must call, and a context that is cancelled once a
+// pinger, which the caller must call, and a context that is canceled once a
 // ping cannot be written within the timeout.
 func (c *RuntimeAPIController) applyLiveConnLimits(ws *websocket.Conn) (stop func(), peerGone context.Context) {
 	if c.maxLiveMessageBytes > 0 {

@@ -35,7 +35,7 @@ import (
 	"google.golang.org/adk/v2/telemetry"
 )
 
-// apiConfig contains parametres for lauching ADK REST API
+// apiConfig contains parameters for launching ADK REST API
 type apiConfig struct {
 	frontendAddress string
 	pathPrefix      string
@@ -194,7 +194,7 @@ func (w *redirectRewriter) WriteHeader(code int) {
 			w.Header().Set("Location", w.prefix+loc)
 		}
 		if !w.safeMethod {
-			// 301 and 302 licence a client to re-issue the request as a GET,
+			// 301 and 302 license a client to re-issue the request as a GET,
 			// which would land on a different handler. 308 and 307 mean the
 			// same thing but keep the method and the body.
 			switch code {

@@ -125,13 +125,14 @@ func (m *geminiModel) modelName(req *model.LLMRequest) string {
 }
 
 // generate calls the model synchronously returning result from the first
-// candidate, resuming a generation the model paused with CONTINUATION.
+// candidate, resuming a generation the model paused at its per-request limit.
 func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
 	c := newContinuation(req.Contents, req.Config, m.retryResends(req.Config))
 	clientProvider := m.client.ClientConfig().HTTPOptions.ExtrasRequestProvider
 	contents, config := req.Contents, req.Config
 	for {
 		requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+		turnOffAutomaticContinuation(requestConfig)
 		resp, err := m.client.Models.GenerateContent(ctx, m.modelName(req), contents, requestConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to call model: %w", err)
@@ -148,15 +149,15 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 			c.keepMetadata(candidate)
 		}
 		var ok bool
-		if contents, config, ok = c.advance(continuationToken(resp), parts, resp.UsageMetadata); !ok {
+		if contents, config, ok = c.advance(c.resumeToken(resp), parts, resp.UsageMetadata); !ok {
 			return converters.Genai2LLMResponse(c.complete(resp)), nil
 		}
 	}
 }
 
 // generateStream returns a stream of responses from the model, resuming a
-// generation the model paused with CONTINUATION in a new stream that feeds the
-// same aggregator.
+// generation the model paused at its per-request limit in a new stream that
+// feeds the same aggregator.
 func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest) iter.Seq2[*model.LLMResponse, error] {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 
@@ -169,6 +170,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 			var parts []*genai.Part
 			var usage *genai.GenerateContentResponseUsageMetadata
 			requestConfig := configPreservingEmptyTextThoughtSignatures(config, clientProvider)
+			turnOffAutomaticContinuation(requestConfig)
 			for resp, err := range m.client.Models.GenerateContentStream(ctx, m.modelName(req), contents, requestConfig) {
 				if err != nil {
 					yield(nil, err)
@@ -183,7 +185,7 @@ func (m *geminiModel) generateStream(ctx context.Context, req *model.LLMRequest)
 						// Copied before the aggregator sees them.
 						parts = appendParts(parts, candidate.Content.Parts)
 					}
-					if t := continuationToken(resp); t != nil {
+					if t := c.resumeToken(resp); t != nil {
 						token = t
 						if c.willResume(t) {
 							// The generation goes on in the next stream, so

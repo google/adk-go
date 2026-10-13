@@ -218,7 +218,7 @@ func TraceCompactionResult(span trace.Span, params TraceCompactionResultParams) 
 	// seconds it reports the year 1754, which turned three seconds of history
 	// into a range 271 years wide on a span that otherwise says the compaction
 	// succeeded. The reference implementation omits the key instead, and an
-	// absent attribute is the one form a consumer can recognise as missing.
+	// absent attribute is the one form a consumer can recognize as missing.
 	if ts := ev.Actions.Compaction.StartTimestamp; !ts.IsZero() {
 		attrs = append(attrs, genAICompactionStartTimestamp.Float64(epochSeconds(ts)))
 	}

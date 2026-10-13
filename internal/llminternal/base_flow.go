@@ -317,7 +317,7 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
-// tornDown reports whether the session was closed or the invocation cancelled.
+// tornDown reports whether the session was closed or the invocation canceled.
 func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
 	select {
 	case <-sess.done:
@@ -509,7 +509,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				cancelConn()
 				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
 				if isReconnect {
-					// genai returns without closing the socket it dialled when
+					// genai returns without closing the socket it dialed when
 					// the setup write fails, and it dials with a context-less
 					// dialer, so cancelConn cannot release it either. Each
 					// budgeted redial against such an endpoint strands one fd

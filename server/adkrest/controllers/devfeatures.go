@@ -50,7 +50,7 @@ const NotInstalledDetail = "not installed"
 
 // NewNotImplementedHandler returns a handler that reports 501 for a route ADK
 // Go serves but does not implement. 501 tells a client the endpoint is
-// recognised and the feature is missing, which is the difference between "this
+// recognized and the feature is missing, which is the difference between "this
 // server is a different version" and "this server cannot do that".
 func NewNotImplementedHandler(feature, detail string) http.HandlerFunc {
 	return func(rw http.ResponseWriter, _ *http.Request) {

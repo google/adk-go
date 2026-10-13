@@ -339,7 +339,7 @@ func originHost(origin string) string {
 // so that it can be compared with an Origin that has been through
 // [NormalizeOrigin].
 //
-// Forwarded and X-Forwarded-* are honoured here, unlike in the rebinding check:
+// Forwarded and X-Forwarded-* are honored here, unlike in the rebinding check:
 // behind a proxy they are the only record of what the browser actually
 // addressed, and a mismatch here costs a legitimate caller a 403.
 func effectiveRequestOrigin(r *http.Request) string {

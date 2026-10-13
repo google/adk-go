@@ -111,7 +111,7 @@ func TestBuildParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	if got, want := out.Content[0].OfOutputText.Text, "hello there"; got != want {
 		t.Errorf("assistant text = %q, want %q", got, want)
 	}
-	// Verify the wire format OpenAI actually receives. Asserting the marshalled
+	// Verify the wire format OpenAI actually receives. Asserting the marshaled
 	// JSON rather than the structs is what makes these checks meaningful: Type
 	// elides its zero value to "output_text", ID is dropped when empty, and
 	// Status is `omitzero`, so none of the three is observable on the struct.
@@ -297,7 +297,7 @@ func TestBuildParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("json.Unmarshal() err = %v", err)
 	}
-	// Failures report the schema alone, never the marshalled request, which
+	// Failures report the schema alone, never the marshaled request, which
 	// carries the prompt.
 	sent := payload.Text.Format.Schema
 	props, _ := sent["properties"].(map[string]any)
@@ -2610,7 +2610,7 @@ func redact(v string) string {
 // The timeout is applied inside the returned closure, so it must derive from
 // the context the caller passed rather than overwrite it: assigning to the
 // captured variable would leave the second range starting from the deadline the
-// first one had already cancelled, failing instantly and for a reason the
+// first one had already canceled, failing instantly and for a reason the
 // caller could not see.
 func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
 	for _, stream := range []bool{false, true} {

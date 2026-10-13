@@ -243,7 +243,7 @@ func WithStateSchema(s *jsonschema.Resolved) Option {
 // An empty name adds no prefix, so this workflow's nodes are recorded
 // under the bare node path.
 //
-// Optional Option values configure engine behaviour
+// Optional Option values configure engine behavior
 // (concurrency cap, etc.); see WithMaxConcurrency.
 func New(name string, edges []Edge, opts ...Option) (*Workflow, error) {
 	if err := validateNodes(edges); err != nil {

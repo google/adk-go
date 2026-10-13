@@ -477,7 +477,7 @@ func waitsForOutput(node Node) bool {
 // cached for a failure or an interrupt, so a later sequential call finds
 // no entry and re-runs the child, as before.
 //
-// A blocked caller is released early if s.parentCtx is cancelled, and its
+// A blocked caller is released early if s.parentCtx is canceled, and its
 // outcome is then that cancellation — the leader keeps the slot and
 // finishes on its own.
 func (s *dynamicSubScheduler) awaitOrLead(childPath string) (runResult, bool) {
