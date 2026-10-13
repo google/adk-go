@@ -1353,3 +1353,16 @@ func TestStreamedArgumentOutOfRangeIndexDropped(t *testing.T) {
 		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
 	}
 }
+
+// TestProcessResponseNilCandidate is a regression test: a streamed chunk whose
+// first candidate is nil (degenerate chunks are reachable per converters.go)
+// must not panic when checking FinishReason.
+func TestProcessResponseNilCandidate(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{nil}}
+	for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+		if err != nil {
+			t.Fatalf("ProcessResponse yielded error: %v", err)
+		}
+	}
+}
