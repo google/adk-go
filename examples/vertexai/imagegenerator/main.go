@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -151,7 +152,7 @@ func saveImage(ctx agent.ToolContext, input saveImageInput) (saveImageResult, er
 
 	if resp.Part.InlineData == nil || len(resp.Part.InlineData.Data) == 0 {
 		log.Printf("Artifact '%s' has no inline data", filename)
-		return saveImageResult{}, err
+		return saveImageResult{}, fmt.Errorf("artifact %q has no inline data", filename)
 	}
 
 	// Ensure the filename has a .png extension for the local file.
