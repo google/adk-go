@@ -15,6 +15,7 @@
 package ranksearch
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -541,6 +542,20 @@ func TestCompileQuery_SizesPatternBeforeCompiling(t *testing.T) {
 	query := strings.Repeat(".{0,999}", 24) + "QQQQQQQ"
 	if allocs := testing.AllocsPerRun(1, func() { compileQuery(query) }); allocs > 1000 {
 		t.Errorf("compileQuery() allocated %v times, want at most 1000", allocs)
+	}
+}
+
+// TestRank_ParsesRegexOnce checks that a search parses a case-insensitive regex
+// once. Case folding a wide character class is the slow part, about 3 ms per
+// class, and each extra parse pays it again.
+func TestRank_ParsesRegexOnce(t *testing.T) {
+	query := strings.Repeat("[B-\U0010ffff]", 10)
+	// The name is shorter than the pattern, so nothing matches and Rank goes on
+	// to the already-available items, here none.
+	items := makeItems([2]string{"x_tool", "unrelated"})
+	compile := testing.AllocsPerRun(1, func() { _, _ = regexp.Compile("(?i)" + query) })
+	if got := testing.AllocsPerRun(1, func() { Rank(items, query, nil, testCfg()) }); got > 1.5*compile {
+		t.Errorf("Rank() allocated %v times, want at most 1.5 times the %v of one compile", got, compile)
 	}
 }
 

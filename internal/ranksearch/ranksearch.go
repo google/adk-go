@@ -29,13 +29,17 @@ import (
 
 const (
 	// maxQueryLen caps the query length, which bounds the BM25 query terms and
-	// rejects pasted-in garbage. It does not bound the cost of a regex, because
-	// a counted repeat makes a short pattern large. maxPatternSize does that.
+	// how long a regex takes to parse, and rejects pasted-in garbage. Parsing
+	// is slow for case-insensitive character classes over wide ranges of runes.
+	// The slowest query found, one class of 66 such ranges, makes a search take
+	// about 0.2 s.
 	maxQueryLen = 200
 	// maxPatternSize caps the estimated compiled size of a regex query. The
-	// matcher's work per input byte grows with that size, and a counted repeat
-	// such as .{0,999} multiplies it: 24 of them fit in maxQueryLen and compile
-	// to about 48,000 instructions. A larger pattern is not run.
+	// matcher tracks at most one state per instruction for each byte of input,
+	// so this bounds how many states a byte can cost, though not parse time
+	// (see maxQueryLen). A counted repeat such as .{0,999} multiplies the size:
+	// 24 of them fit in maxQueryLen and compile to about 48,000 instructions. A
+	// larger pattern is not run.
 	maxPatternSize = 256
 	// selectPrefix marks the exact-name query form: "select:name1,name2".
 	selectPrefix = "select:"
@@ -168,9 +172,11 @@ func compileQuery(query string) compiledQuery {
 	// the pattern excluded. Keywords and prose carry no pattern-only operator,
 	// or carry whitespace, which a pattern rarely does.
 	q.keywordFallback = !strings.ContainsAny(query, patternOnlyChars) || strings.ContainsFunc(query, unicode.IsSpace)
-	// Size the parse tree first: compiling a large pattern costs as much as the
-	// cap is there to prevent.
-	parsed, err := syntax.Parse("(?i)"+query, syntax.Perl)
+	// Size a parse without (?i) before compiling. Compiling a large pattern is
+	// itself slow, and case folding is the slow part of parsing a wide character
+	// class. Without folding, alternatives that differ only in case are counted
+	// separately, which errs toward a larger estimate.
+	parsed, err := syntax.Parse(query, syntax.Perl)
 	if err == nil && patternSize(parsed) > maxPatternSize {
 		q.tooLarge = true
 		return q
