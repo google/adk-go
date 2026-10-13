@@ -86,6 +86,7 @@ func New(cfg Config) (tool.Toolset, error) {
 	}
 	return &set{
 		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		toolNamePrefix:              cfg.ToolNamePrefix,
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -152,8 +153,16 @@ type Config struct {
 	// would fight over the same request.
 	Auth auth.CredentialProvider
 
+	// ToolNamePrefix, when non-empty, exposes each tool as "<prefix>_<name>".
+	// For example, "docs" changes "search" to "docs_search". MCP calls still
+	// use the original server-side name. An empty prefix leaves names unchanged.
+	// Tool callbacks and confirmation providers receive the exposed name.
+	// When using tool.FilterToolset, predicates also see the exposed name.
+	ToolNamePrefix string
+
 	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
+	// It runs before ToolNamePrefix is applied, so predicates see original names.
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
@@ -182,6 +191,7 @@ type Config struct {
 
 type set struct {
 	mcpClient                   *connectionRefresher
+	toolNamePrefix              string
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
@@ -222,6 +232,11 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
 			continue
+		}
+
+		if s.toolNamePrefix != "" {
+			t.name = s.toolNamePrefix + "_" + t.originalName
+			t.funcDeclaration.Name = t.name
 		}
 
 		adkTools = append(adkTools, t)
