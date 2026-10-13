@@ -15,6 +15,8 @@
 package agentanalytics
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"google.golang.org/adk/v2/session"
 )
@@ -45,16 +48,18 @@ const (
 )
 
 // sensitiveKeys holds normalized (lowercase, "-" replaced by "_") map keys
-// whose values are always redacted. It is the adk-python list plus a few
-// common credential names.
+// whose values are always redacted. It is the adk-python list plus "bearer",
+// "passphrase" and "x_goog_api_key". Envelope names such as "credentials" are
+// deliberately not listed: the credential fields nested under them are
+// redacted one by one. isSensitiveKey and the text patterns also match these
+// names without separators, as in the camelCase apiKey or the Go field name
+// APIKey.
 var sensitiveKeys = map[string]struct{}{
 	"access_token":          {},
 	"api_key":               {},
 	"authorization":         {},
 	"bearer":                {},
 	"client_secret":         {},
-	"credential":            {},
-	"credentials":           {},
 	"google_access_id":      {},
 	"id_token":              {},
 	"passphrase":            {},
@@ -69,19 +74,134 @@ var sensitiveKeys = map[string]struct{}{
 	"x_amz_credential":      {},
 	"x_amz_signature":       {},
 	"x_api_key":             {},
+	"x_goog_api_key":        {},
 	"x_goog_credential":     {},
 	"x_goog_security_token": {},
 	"x_goog_signature":      {},
 }
 
+// sensitiveKeyNames holds the names in sensitiveKeys with "_" removed, the
+// form in which isSensitiveKey compares keys.
+var sensitiveKeyNames = func() map[string]struct{} {
+	names := make(map[string]struct{}, len(sensitiveKeys))
+	for k := range sensitiveKeys {
+		names[removeKeySeparators(k)] = struct{}{}
+	}
+	return names
+}()
+
 var (
-	uriTokenRe           = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
-	authHeaderRe         = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
-	authSchemeRe         = regexp.MustCompile(`(?i)\b(bearer|basic)\s+("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
-	jsonKeyValTokenRe    = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*("([^"\\]|\\.)*"|[^\s,}\]]+)`)
-	textKeyValTokenRe    = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)\s*([=:])\s*("([^"\\]|\\.)*"|'([^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"'\]&]*|[^\s,;)"'\]&]+)`)
-	quotedSensitiveKeyRe = regexp.MustCompile(`(?i)["'][\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*["']`)
+	uriTokenRe   = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
+	authHeaderRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
+	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
+	// contains quotes, ")" or "]", so the bare value stops there and keeps
+	// the surrounding JSON or prose intact.
+	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	// basicTokenRe matches a candidate basic credential, which
+	// redactBasicCredential redacts only if it is valid base64.
+	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)\s+([A-Za-z0-9+/]+={0,2})`)
+	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
+	// textKeyValTokenRe matches key=value and key: value pairs. As in
+	// adk-python, the key may be quoted (Python dict reprs use single
+	// quotes); it may also be quoted with escaped quotes, as in JSON text
+	// formatted with %q.
+	textKeyValTokenRe = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)((?:\\?["'])?)\s*([=:])\s*(` + sensitiveValueRegex(`\s,;&}`) + `)`)
+	// quotedSensitiveKeyRe detects a quoted sensitive key that is followed by
+	// a key-value delimiter. A quoted sensitive word in prose, such as
+	// `What does "token" mean?`, is not a key.
+	quotedSensitiveKeyRe = regexp.MustCompile(`(?i)["'][\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*["'][\s\p{Z}]*[:=]`)
 )
+
+// patternWords holds words of which every match of authHeaderRe,
+// bearerTokenRe, basicTokenRe, jsonKeyValTokenRe, textKeyValTokenRe and
+// quotedSensitiveKeyRe contains at least one, once the text is folded by
+// foldPatternText: the sensitive key names without separators (which include
+// "authorization", "apikey" and "bearer"), the "temp:" prefix and the "basic"
+// scheme. A name that contains another, such as "accesstoken", which contains
+// "token", is left out, since the text then contains the shorter name too.
+var patternWords = func() []string {
+	words := append([]string{"basic", session.KeyPrefixTemp}, slices.Collect(maps.Keys(sensitiveKeyNames))...)
+	minimal := slices.DeleteFunc(slices.Clone(words), func(w string) bool {
+		return slices.ContainsFunc(words, func(other string) bool {
+			return other != w && strings.Contains(w, other)
+		})
+	})
+	slices.Sort(minimal)
+	return minimal
+}()
+
+// mayMatchTextPatterns reports whether s contains one of patternWords,
+// ignoring case. When it does not, none of the credential text patterns can
+// match s, so the regular expressions, which are slow on long text, need
+// not run over it.
+func mayMatchTextPatterns(s string) bool {
+	folded := foldPatternText(s)
+	for _, w := range patternWords {
+		if strings.Contains(folded, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// foldPatternText lowercases the ASCII letters of s and removes "-" and "_",
+// as the patterns accept key names with either separator or none (api_key,
+// api-key, apiKey). It also replaces the two non-ASCII letters that (?i)
+// matches against ASCII ones, U+017F (long s) and U+212A (Kelvin sign), with
+// "s" and "k".
+func foldPatternText(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			switch {
+			case 'A' <= c && c <= 'Z':
+				b = append(b, c+'a'-'A')
+			case c != '-' && c != '_':
+				b = append(b, c)
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch r {
+		case '\u017f':
+			b = append(b, 's')
+		case '\u212a':
+			b = append(b, 'k')
+		default:
+			b = append(b, s[i:i+size]...)
+		}
+		i += size
+	}
+	return string(b)
+}
+
+// hasQuotedSensitiveKey reports whether quotedSensitiveKeyRe matches s.
+func hasQuotedSensitiveKey(s string) bool {
+	return mayMatchTextPatterns(s) && quotedSensitiveKeyRe.MatchString(s)
+}
+
+// sensitiveValueRegex returns the pattern for the value that follows a
+// sensitive key: a double- or single-quoted string, a string quoted with
+// escaped quotes (\" or \'), or a run of characters other than those in
+// bareStop. For key=value text, bareStop is adk-python's `\s,;&}`, so that a
+// value such as "abc)rest" or "//rest" is redacted as a whole.
+func sensitiveValueRegex(bareStop string) string {
+	return `"(?:[^"\\]|\\.)*"` +
+		`|'(?:[^'\\]|\\.)*'` +
+		`|` + escapedQuotedRegex(`"`) +
+		`|` + escapedQuotedRegex(`'`) +
+		`|[^` + bareStop + `]+`
+}
+
+// escapedQuotedRegex returns the pattern for a string delimited by \q, as
+// produced by quoting JSON text again (for example with %q). Inside it, a
+// doubled backslash starts an escape of the inner text (\\\" is an escaped
+// quote within the value), so the string ends only at an unpaired \q.
+func escapedQuotedRegex(q string) string {
+	return `\\` + q + `(?:\\\\(?:\\\\|\\` + q + `|[^\\` + q + `])|\\[^\\` + q + `]|[^\\` + q + `])*\\` + q
+}
 
 // sensitiveKeyRegex returns an alternation of the sensitive key names for
 // keys read inside quotes, where a "temp:" key name may contain "=" and ":".
@@ -99,11 +219,14 @@ func bareSensitiveKeyRegex() string {
 	return sensitiveKeyAlternation(`temp:[^=:"'\s\r\n,}]+`)
 }
 
+// sensitiveKeyAlternation returns an alternation of tempKey and the sensitive
+// key names, in which each "_" may also be written as "-" or left out, so that
+// api_key, api-key, apiKey and APIKey all match.
 func sensitiveKeyAlternation(tempKey string) string {
 	parts := make([]string, 0, len(sensitiveKeys)+1)
 	parts = append(parts, tempKey)
 	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
-		parts = append(parts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_-]"))
+		parts = append(parts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_-]?"))
 	}
 	return strings.Join(parts, "|")
 }
@@ -112,18 +235,45 @@ func normalizeKey(k string) string {
 	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(k)), "-", "_")
 }
 
-// isSensitiveKey reports whether the value stored under k must be redacted:
-// k names a credential, or it is a session "temp:" key, which holds
-// invocation-scoped scratch data.
-func isSensitiveKey(k string) bool {
-	n := normalizeKey(k)
-	if _, ok := sensitiveKeys[n]; ok {
-		return true
-	}
-	return strings.HasPrefix(n, session.KeyPrefixTemp)
+// removeKeySeparators returns k without its "_" and "-" separators.
+func removeKeySeparators(k string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r == '-' {
+			return -1
+		}
+		return r
+	}, k)
 }
 
+// isSensitiveKey reports whether the value stored under k must be redacted:
+// k names a credential, or it is a session "temp:" key, which holds
+// invocation-scoped scratch data. Credential names are compared ignoring
+// case, the "_" and "-" separators, and a "user:" or "app:" state prefix, so
+// that api_key, api-key, apiKey, the Go field name APIKey and the state key
+// user:api_key all match.
+func isSensitiveKey(k string) bool {
+	n := strings.ToLower(strings.TrimSpace(k))
+	if strings.HasPrefix(n, session.KeyPrefixTemp) {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(n, session.KeyPrefixUser); ok {
+		n = rest
+	} else {
+		n = strings.TrimPrefix(n, session.KeyPrefixApp)
+	}
+	_, ok := sensitiveKeyNames[removeKeySeparators(strings.TrimSpace(n))]
+	return ok
+}
+
+// canonicalizeCredentialMarker decodes nested ASCII \u, \x and percent
+// escapes, and escaped quotes (\" and \'), in one pass. The result is used
+// for detection only: callers keep the original text unless the canonical
+// form exposes a credential construct.
 func canonicalizeCredentialMarker(s string) string {
+	if !strings.ContainsAny(s, `\%`) {
+		// Every escape starts with "\" or "%".
+		return s
+	}
 	var output []rune
 	for _, r := range s {
 		output = append(output, r)
@@ -143,6 +293,9 @@ func canonicalizeCredentialMarker(s string) string {
 				isHexRune(output[n-2]) && isHexRune(output[n-1]) {
 				escapeStart = n - 3
 				digits = string(output[n-2:])
+			} else if n >= 2 && output[n-2] == '\\' && (output[n-1] == '"' || output[n-1] == '\'') {
+				output = append(output[:n-2], output[n-1])
+				continue
 			}
 			if escapeStart < 0 {
 				break
@@ -166,7 +319,11 @@ func isHexRune(r rune) bool {
 // segments matching a sensitive key name redact both that segment and the
 // following value segment. Values of sensitive query parameters or fragment
 // key-value pairs, and of the "key" parameter used for API keys, are replaced
-// with "[REDACTED]". The bool result reports whether the URI was changed.
+// with "[REDACTED]". As in adk-python, every other path segment, query key and
+// value, and the fragment are scrubbed with the text patterns, so credentials
+// in a nested URL (?next=https://host/cb?access_token=...), a fragment
+// (#/cb?access_token=...) or a segment (/token:...) are redacted too. The bool
+// result reports whether the URI was changed.
 func sanitizeURI(raw string) (string, bool) {
 	if raw == "" {
 		return raw, false
@@ -199,6 +356,11 @@ func sanitizeURI(raw string) (string, bool) {
 			u.RawFragment = sanitizedFrag
 			fragmentChanged = true
 		}
+		if safeFragment, ok := redactURIComponent(u.Fragment); ok {
+			u.Fragment = safeFragment
+			u.RawFragment = ""
+			fragmentChanged = true
+		}
 	}
 	if !pathChanged && !queryChanged && !fragmentChanged {
 		return raw, false
@@ -227,16 +389,30 @@ func sanitizePathSegments(escapedPath string) (escaped, unescaped string, change
 			redactNext = true
 			continue
 		}
-		if rawKey, _, hasEq := strings.Cut(seg, "="); hasEq {
+		if rawKey, value, hasEq := strings.Cut(seg, "="); hasEq {
 			canonKey := canonicalizeCredentialMarker(rawKey)
 			if isSensitiveKey(canonKey) || normalizeKey(canonKey) == "key" {
+				if isRedactedMarker(value) {
+					// Already redacted, as when redacted text is
+					// scrubbed again.
+					continue
+				}
 				if rawLeft, _, hasRawEq := strings.Cut(rawSeg, "="); hasRawEq {
 					segments[i] = rawLeft + "=" + escapedRedacted
 				} else {
 					segments[i] = url.PathEscape(canonKey) + "=" + escapedRedacted
 				}
 				changed = true
+				continue
 			}
+		}
+		decoded, err := url.PathUnescape(rawSeg)
+		if err != nil {
+			decoded = rawSeg
+		}
+		if safeSeg, ok := redactURIComponent(decoded); ok {
+			segments[i] = url.PathEscape(safeSeg)
+			changed = true
 		}
 	}
 	if !changed {
@@ -250,17 +426,40 @@ func sanitizePathSegments(escapedPath string) (escaped, unescaped string, change
 	return escaped, unescaped, true
 }
 
+// sanitizeQueryPairs redacts the values of sensitive keys in raw, a query
+// string or a fragment of "&"-separated pairs. For a fragment
+// (requireEquals), pairs without "=" are skipped and the caller scrubs the
+// whole fragment as text; for a query, the key and value of every other pair
+// are scrubbed as text.
 func sanitizeQueryPairs(raw string, requireEquals bool) (string, bool) {
 	pairs := strings.Split(raw, "&")
 	changed := false
 	for i, pair := range pairs {
-		rawKey, _, hasEq := strings.Cut(pair, "=")
+		rawKey, rawValue, hasEq := strings.Cut(pair, "=")
 		if requireEquals && !hasEq {
 			continue
 		}
 		key := canonicalizeCredentialMarker(rawKey)
 		if isSensitiveKey(key) || normalizeKey(key) == "key" {
+			if hasEq && isRedactedMarker(rawValue) {
+				// Already redacted, as when redacted text is scrubbed
+				// again: re-encoding "[REDACTED]" is not a change.
+				continue
+			}
 			pairs[i] = rawKey + "=" + url.QueryEscape(redactedValue)
+			changed = true
+			continue
+		}
+		if requireEquals {
+			continue
+		}
+		safeKey, keyChanged := redactQueryComponent(rawKey)
+		safeValue, valueChanged := redactQueryComponent(rawValue)
+		if keyChanged || valueChanged {
+			pairs[i] = safeKey
+			if hasEq {
+				pairs[i] += "=" + safeValue
+			}
 			changed = true
 		}
 	}
@@ -268,6 +467,36 @@ func sanitizeQueryPairs(raw string, requireEquals bool) (string, bool) {
 		return raw, false
 	}
 	return strings.Join(pairs, "&"), true
+}
+
+// redactQueryComponent scrubs one escaped query key or value as text and
+// returns it escaped again.
+func redactQueryComponent(raw string) (string, bool) {
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		decoded = raw
+	}
+	safe, changed := redactURIComponent(decoded)
+	if !changed {
+		return raw, false
+	}
+	return url.QueryEscape(safe), true
+}
+
+// redactURIComponent scrubs one decoded URI component (a path segment, a
+// query key or value, or the fragment) with the text patterns, as adk-python
+// does, and fails closed when decoding an escape in it exposes a credential
+// pattern. A URL nested in the component is not parsed again, which keeps
+// the work linear; its key-value pairs are still matched as text.
+func redactURIComponent(s string) (string, bool) {
+	if s == "" || isKnownSentinel(s) {
+		return s, false
+	}
+	scrubbed := scrubTextPatterns(s)
+	if exposesEncodedPattern(scrubbed, scrubTextPatterns) {
+		return redactedSensitiveTextPlaceholder, true
+	}
+	return scrubbed, scrubbed != s
 }
 
 func trimBOMAndSpace(s string) string {
@@ -332,11 +561,10 @@ func hasCandidateQuotedSensitiveKey(s string, depth int) bool {
 	if len(s) > maxInspectableJSONTextBytes {
 		s = s[:maxInspectableJSONTextBytes]
 	}
-	if quotedSensitiveKeyRe.MatchString(s) {
+	if hasQuotedSensitiveKey(s) {
 		return true
 	}
-	canon := canonicalizeCredentialMarker(s)
-	if quotedSensitiveKeyRe.MatchString(canon) {
+	if canon := canonicalizeCredentialMarker(s); canon != s && hasQuotedSensitiveKey(canon) {
 		return true
 	}
 
@@ -377,11 +605,10 @@ func hasCandidateQuotedSensitiveKey(s string, depth int) bool {
 				} else {
 					candidate = canonicalizeCredentialMarker(rawCandidate)
 				}
-				if isSensitiveKey(candidate) {
-					return true
-				}
-				if canonKey := canonicalizeCredentialMarker(candidate); isSensitiveKey(canonKey) {
-					return true
+				if isSensitiveKey(candidate) || isSensitiveKey(canonicalizeCredentialMarker(candidate)) {
+					if followedByKeyDelimiter(s[i+1:]) {
+						return true
+					}
 				}
 				if strings.ContainsAny(candidate, `"'`) {
 					if hasCandidateQuotedSensitiveKey(candidate, depth+1) {
@@ -394,6 +621,19 @@ func hasCandidateQuotedSensitiveKey(s string, depth int) bool {
 	return false
 }
 
+// followedByKeyDelimiter reports whether rest, the text after a quoted
+// string, starts with a key-value delimiter (":" or "=") after optional
+// whitespace.
+func followedByKeyDelimiter(rest string) bool {
+	for _, r := range rest {
+		if unicode.IsSpace(r) || unicode.In(r, unicode.Z) {
+			continue
+		}
+		return r == ':' || r == '='
+	}
+	return false
+}
+
 func hasCredentialPattern(s string) bool {
 	if scrubErrorText(s) != s {
 		return true
@@ -401,7 +641,7 @@ func hasCredentialPattern(s string) bool {
 	if hasCandidateQuotedSensitiveKey(s, 0) {
 		return true
 	}
-	return quotedSensitiveKeyRe.MatchString(canonicalizeCredentialMarker(s))
+	return hasQuotedSensitiveKey(canonicalizeCredentialMarker(s))
 }
 
 func isPositivelyHarmlessProse(raw, trimmed string) bool {
@@ -421,10 +661,37 @@ func isPositivelyHarmlessProse(raw, trimmed string) bool {
 	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
 		return true
 	}
-	// Quote-led prose (e.g. `"see {this}" she said`) is only harmless prose when it is a single
-	// quoted phrase followed by prose words, not a quoted JSON literal or nested quoted fragment.
-	if strings.HasPrefix(trimmed, `"`) && strings.Count(trimmed, `"`) == 2 && !strings.HasSuffix(trimmed, `"`) {
-		return true
+	// Quote-led text is prose on the same basis (e.g. `"Hello," she said
+	// [laughing]. "Bye."` or `"What does [this] mean?"`), unless a quoted
+	// string in it decodes to a credential: the text may be a JSON string
+	// literal, whose escapes the checks above do not all decode.
+	return strings.HasPrefix(trimmed, `"`) && !hasJSONEscapedCredential(raw)
+}
+
+// hasJSONEscapedCredential reports whether the text between two consecutive
+// quotes in s, read as a JSON string, holds a credential pattern once
+// decoded. canonicalizeCredentialMarker leaves JSON escapes such as \t alone,
+// so "Bearer\tSECRET" hides a bearer token from the checks on the raw text.
+// Each pair of consecutive quotes is tried, whichever quote opens a string;
+// s must not contain an escaped quote, so the work stays linear in len(s).
+func hasJSONEscapedCredential(s string) bool {
+	if !strings.Contains(s, `\`) {
+		return false
+	}
+	open := strings.IndexByte(s, '"')
+	for open >= 0 {
+		n := strings.IndexByte(s[open+1:], '"')
+		if n < 0 {
+			return false
+		}
+		closing := open + 1 + n
+		if quoted := s[open : closing+1]; strings.Contains(quoted, `\`) {
+			var decoded string
+			if json.Unmarshal([]byte(quoted), &decoded) == nil && hasAnyCredentialMarker(decoded) {
+				return true
+			}
+		}
+		open = closing
 	}
 	return false
 }
@@ -522,11 +789,19 @@ func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitize
 	return string(b), true, valLost
 }
 
+// inspectQuotedFragments reports whether a quoted fragment of s decodes to
+// text that needs redaction, or could not be decoded and starts like an
+// encoded container. The callers have already scanned all of s for
+// credential markers, so the work here stays linear in len(s).
 func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
 	if depth >= maxSanitizeDepth {
 		return true
 	}
 	fragments := 0
+	// A quote before failedUntil was read as an escaped quote by a decode
+	// that started at an earlier quote and failed at failedUntil. A decode
+	// starting at it would fail at the same point, so it is not repeated.
+	failedUntil := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] != '"' {
 			continue
@@ -539,13 +814,25 @@ func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
 			return true
 		}
 		sub := s[i:]
+		if i < failedUntil {
+			if startsLikeEncodedContainer(sub) {
+				return true
+			}
+			continue
+		}
 		dec := json.NewDecoder(strings.NewReader(sub))
 		var decoded string
 		if err := dec.Decode(&decoded); err != nil {
-			afterQuote := trimBOMAndSpace(sub[1:])
-			if strings.HasPrefix(afterQuote, "{") || strings.HasPrefix(afterQuote, "[") ||
-				strings.HasPrefix(afterQuote, `\`) || strings.HasPrefix(afterQuote, `"`) ||
-				hasAnyCredentialMarker(sub) {
+			var syntaxErr *json.SyntaxError
+			switch {
+			case errors.Is(err, io.ErrUnexpectedEOF):
+				failedUntil = len(s)
+			case errors.As(err, &syntaxErr) && syntaxErr.Offset > 1:
+				// Offset counts the byte that caused the error, which may
+				// itself be a quote that starts a decodable fragment.
+				failedUntil = i + int(syntaxErr.Offset) - 1
+			}
+			if startsLikeEncodedContainer(sub) {
 				return true
 			}
 			continue
@@ -558,6 +845,17 @@ func inspectQuotedFragments(s string, depth int, budget *nodeBudget) bool {
 		}
 	}
 	return false
+}
+
+// startsLikeEncodedContainer reports whether s, a quoted fragment that could
+// not be decoded, starts like an encoded JSON container. Like adk-python, it
+// looks only at the first character after the quote.
+func startsLikeEncodedContainer(s string) bool {
+	afterQuote := strings.TrimLeftFunc(s[1:], func(r rune) bool {
+		return unicode.IsSpace(r) || r == '\ufeff'
+	})
+	return strings.HasPrefix(afterQuote, "{") || strings.HasPrefix(afterQuote, "[") ||
+		strings.HasPrefix(afterQuote, `\`) || strings.HasPrefix(afterQuote, `"`)
 }
 
 func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, contentLost bool) {
@@ -729,6 +1027,11 @@ func redactErrorMessage(msg string) string {
 	}
 	if strings.HasPrefix(trimmed, `"`) {
 		if redacted, ok, _ := redactJSONTextWithBudget(msg, 0, budget); ok {
+			// As in sanitizeRawText, quote-led prose that only failed JSON
+			// parsing is kept.
+			if redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(msg, trimmed) {
+				return msg
+			}
 			return scrubErrorText(redacted)
 		}
 	}
@@ -778,60 +1081,242 @@ func scrubErrorText(msg string) string {
 }
 
 func scrubErrorTokens(msg string) string {
-	msg = uriTokenRe.ReplaceAllStringFunc(msg, func(token string) string {
-		trimmed := strings.TrimRight(token, ".,;:)]}")
-		suffix := token[len(trimmed):]
-		sanitized, changed := sanitizeURI(trimmed)
-		if !changed {
-			return token
+	if strings.Contains(msg, "://") {
+		msg = uriTokenRe.ReplaceAllStringFunc(msg, func(token string) string {
+			trimmed := trimTrailingPunctuation(token)
+			suffix := token[len(trimmed):]
+			sanitized, changed := sanitizeURI(trimmed)
+			if !changed {
+				return token
+			}
+			return sanitized + suffix
+		})
+	}
+	return scrubTextPatterns(msg)
+}
+
+// trimTrailingPunctuation strips the punctuation that may follow a URI or a
+// value in text, such as a closing parenthesis or a full stop, from s. A "]"
+// that closes a redaction placeholder, as in access_token=[REDACTED], is
+// kept, so that scrubbing redacted text again changes nothing.
+func trimTrailingPunctuation(s string) string {
+	trimmed := strings.TrimRight(s, ".,;:)]}")
+	// A placeholder holds no trimmed punctuation, so at most its closing
+	// "]" was trimmed.
+	if withBracket := s[:min(len(trimmed)+1, len(s))]; strings.HasSuffix(withBracket, "]") {
+		if open := strings.LastIndexByte(trimmed, '['); open >= 0 && isKnownSentinel(withBracket[open:]) {
+			return withBracket
 		}
-		return sanitized + suffix
-	})
-	msg = authHeaderRe.ReplaceAllString(msg, "${1}: "+redactedValue)
-	msg = authSchemeRe.ReplaceAllStringFunc(msg, func(match string) string {
-		sub := authSchemeRe.FindStringSubmatch(match)
-		if len(sub) < 3 {
-			return redactedValue
+	}
+	return trimmed
+}
+
+// scrubTextPatterns redacts Authorization and API-key headers, bearer and
+// basic credentials, and the values of sensitive key-value pairs in s.
+func scrubTextPatterns(s string) string {
+	if !mayMatchTextPatterns(s) {
+		return s
+	}
+	s = authHeaderRe.ReplaceAllString(s, "${1}: "+redactedValue)
+	s = replaceMatches(s, bearerTokenRe, redactBearerToken)
+	s = replaceMatches(s, basicTokenRe, redactBasicCredential)
+	s = replaceMatches(s, jsonKeyValTokenRe, redactJSONKeyValue)
+	return replaceMatches(s, textKeyValTokenRe, redactTextKeyValue)
+}
+
+// replaceMatches replaces each match of re in s with the text returned by
+// repl, which receives the submatch indexes of the match and also returns
+// where the replaced text ends; it may extend past the match. The search
+// resumes there, so the replaced spans never overlap.
+func replaceMatches(s string, re *regexp.Regexp, repl func(s string, loc []int) (string, int)) string {
+	var b strings.Builder
+	last, pos := 0, 0
+	for pos < len(s) {
+		loc := re.FindStringSubmatchIndex(s[pos:])
+		if loc == nil {
+			break
 		}
-		val := strings.TrimSpace(sub[2])
-		cleanVal := strings.Trim(val, `"'`)
-		if cleanVal == redactedValue {
-			return match
+		for i, v := range loc {
+			if v >= 0 {
+				loc[i] = v + pos
+			}
 		}
-		return sub[1] + " " + redactedValue
-	})
-	msg = jsonKeyValTokenRe.ReplaceAllStringFunc(msg, func(match string) string {
-		sub := jsonKeyValTokenRe.FindStringSubmatch(match)
-		if len(sub) < 2 || !isSensitiveKey(sub[1]) {
-			return match
+		replacement, end := repl(s, loc)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(replacement)
+		last = end
+		pos = max(end, loc[0]+1)
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// redactBearerToken replaces a bearerTokenRe match. As in adk-python, "bearer
+// of" followed by a space is prose ("the bearer of bad news"), not a token.
+func redactBearerToken(s string, loc []int) (string, int) {
+	end := loc[5]
+	value := s[loc[4]:end]
+	if rest := s[loc[4]:]; len(rest) >= 2 && strings.EqualFold(rest[:2], "of") {
+		if r, _ := utf8.DecodeRuneInString(rest[2:]); len(rest) == 2 || unicode.IsSpace(r) {
+			return s[loc[0]:end], end
 		}
-		return `"` + sub[1] + `":"` + redactedValue + `"`
-	})
-	msg = textKeyValTokenRe.ReplaceAllStringFunc(msg, func(match string) string {
-		sub := textKeyValTokenRe.FindStringSubmatch(match)
-		if len(sub) < 4 || !isSensitiveKey(sub[1]) {
-			return match
+	}
+	if inner, _ := unquoteValue(value); isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return s[loc[2]:loc[3]] + " " + redactedValue, end
+}
+
+// maxBasicCredentialBytes is adk-python's _MAX_BASIC_AUTH_TOKEN_CHARS.
+const maxBasicCredentialBytes = 16 * 1024
+
+// redactBasicCredential replaces a basicTokenRe match when it holds a basic
+// credential, using adk-python's test: the base64 token must not run on
+// into more base64 characters and must decode, and it must be padded or
+// decode to "user:password". An over-long token is always redacted. Prose
+// such as "a basic HTTP server" or "basic auth" is kept.
+func redactBasicCredential(s string, loc []int) (string, int) {
+	end := loc[5]
+	encoded := s[loc[4]:end]
+	if end < len(s) && isBase64Byte(s[end]) {
+		return s[loc[0]:end], end
+	}
+	if len(encoded) <= maxBasicCredentialBytes {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || (!strings.Contains(encoded, "=") && !bytes.Contains(decoded, []byte(":"))) {
+			return s[loc[0]:end], end
 		}
-		val := strings.TrimSpace(sub[3])
-		cleanVal := strings.Trim(val, `"'`)
-		if cleanVal == redactedValue || strings.EqualFold(cleanVal, "%5bredacted%5d") || cleanVal == redactedURIPlaceholder {
-			return match
+	}
+	return s[loc[2]:loc[3]] + " " + redactedValue, end
+}
+
+func isBase64Byte(c byte) bool {
+	return 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '+' || c == '/' || c == '='
+}
+
+// redactJSONKeyValue replaces a jsonKeyValTokenRe match with
+// "key":"[REDACTED]".
+func redactJSONKeyValue(s string, loc []int) (string, int) {
+	end := sensitiveValueEnd(s, loc[4], loc[5])
+	if inner, _ := unquoteValue(s[loc[4]:end]); isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
+}
+
+// redactTextKeyValue replaces a textKeyValTokenRe match, keeping the key, its
+// quote, the delimiter and the quotes around the value.
+func redactTextKeyValue(s string, loc []int) (string, int) {
+	end := sensitiveValueEnd(s, loc[8], loc[9])
+	inner, quote := unquoteValue(s[loc[8]:end])
+	if isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+}
+
+// sensitiveValueEnd returns the end of the value matched at s[start:end]. A
+// value that opens a JSON object or array, such as the one in
+// {"token": {"value": "..."}}, is extended to its closing bracket, or to the
+// end of s if it is not closed, so that the fields nested in it are redacted
+// together with it. Brackets inside strings do not count, including strings
+// delimited by escaped quotes, as in JSON text formatted with %q.
+func sensitiveValueEnd(s string, start, end int) int {
+	if c := s[start]; c != '{' && c != '[' {
+		return end
+	}
+	depth := 0
+	// quote is the quote of the string being skipped. escaped reports that
+	// the string was opened with an escaped quote (\" or \'); only the same
+	// escaped quote closes it (see escapedQuotedRegex).
+	var quote byte
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			if c != '\\' || i+1 == len(s) {
+				break
+			}
+			switch s[i+1] {
+			case quote:
+				quote, escaped = 0, false
+				i++
+			case '\\':
+				// An escape of the inner text. The escaped character may
+				// itself be escaped, as in \\\" or \\\\.
+				i += 2
+				if i < len(s) && s[i] == '\\' {
+					i++
+				}
+			default:
+				i++
+			}
+		case c == '\\':
+			if quote == 0 && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\'') {
+				quote, escaped = s[i+1], true
+			}
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+			if depth == 0 {
+				return max(end, i+1)
+			}
 		}
-		if sub[2] == ":" && strings.HasPrefix(sub[3], "//") {
-			return match
+	}
+	return len(s)
+}
+
+// unquoteValue strips one pair of quotes (", ', \" or \') from a matched
+// value and returns the content and the quote.
+func unquoteValue(v string) (inner, quote string) {
+	for _, q := range []string{`\"`, `\'`, `"`, `'`} {
+		if len(v) >= 2*len(q) && strings.HasPrefix(v, q) && strings.HasSuffix(v, q) {
+			return v[len(q) : len(v)-len(q)], q
 		}
-		quoteChar := ""
-		if strings.HasPrefix(val, `"`) && strings.HasSuffix(val, `"`) {
-			quoteChar = `"`
-		} else if strings.HasPrefix(val, `'`) && strings.HasSuffix(val, `'`) {
-			quoteChar = `'`
-		}
-		return sub[1] + sub[2] + quoteChar + redactedValue + quoteChar
-	})
-	return msg
+	}
+	return v, ""
+}
+
+// isRedactedMarker reports whether v, possibly percent-encoded, is a
+// placeholder written by an earlier redaction pass.
+func isRedactedMarker(v string) bool {
+	if isKnownSentinel(v) {
+		return true
+	}
+	if decoded, err := url.PathUnescape(v); err == nil && decoded != v {
+		return isKnownSentinel(decoded)
+	}
+	return false
+}
+
+// isRedactedValue reports whether v, a matched value without its quotes, is
+// a placeholder written by an earlier redaction pass, possibly followed by
+// punctuation that ends the sentence, as in "[REDACTED]." or "[REDACTED])".
+// Decoding a redacted URI can leave a placeholder next to such punctuation,
+// which is not part of a credential.
+func isRedactedValue(v string) bool {
+	return isRedactedMarker(v) || isRedactedMarker(trimTrailingPunctuation(v))
 }
 
 func hasEncodedCredentialMarker(msg string) bool {
+	return exposesEncodedPattern(msg, scrubErrorTokens)
+}
+
+// exposesEncodedPattern reports whether decoding the escapes in msg exposes a
+// pattern that scrub would redact.
+func exposesEncodedPattern(msg string, scrub func(string) string) bool {
 	if msg == "" || isKnownSentinel(msg) {
 		return false
 	}
@@ -841,7 +1326,7 @@ func hasEncodedCredentialMarker(msg string) bool {
 	if canon == cleaned {
 		return false
 	}
-	return scrubErrorTokens(canon) != canon
+	return scrub(canon) != canon
 }
 
 func hasAnyCredentialMarker(s string) bool {
@@ -855,7 +1340,10 @@ func hasAnyCredentialMarker(s string) bool {
 		return true
 	}
 	canon := canonicalizeCredentialMarker(s)
-	return quotedSensitiveKeyRe.MatchString(canon) || scrubErrorTokens(canon) != canon
+	if hasQuotedSensitiveKey(canon) {
+		return true
+	}
+	return canon != s && scrubErrorTokens(canon) != canon
 }
 
 // applyContentFormatter runs formatter on payload. It fails closed: if the

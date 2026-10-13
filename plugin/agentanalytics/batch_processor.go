@@ -55,6 +55,10 @@ type BatchProcessor struct {
 }
 
 // NewBatchProcessor creates a new BatchProcessor instance.
+//
+// Only the values carried by ctx are used: its cancellation and deadline are
+// ignored, so canceling ctx neither stops nor drains the processor. Only
+// Close stops it, writing any queued rows within Config.ShutdownTimeout.
 func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config) (*BatchProcessor, error) {
 	config = applyDefaults(config)
 	denied, err := validateConfig(config)
@@ -84,7 +88,9 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 	}, nil
 }
 
-// Start begins the background goroutine to process and flush the queue periodically.
+// Start launches the background goroutine that flushes the queue every
+// Config.BatchFlushIntv. The goroutine runs until Close is called; later calls
+// to Start have no effect.
 func (b *BatchProcessor) Start() {
 	if b.started.CompareAndSwap(false, true) {
 		go func() {
@@ -96,9 +102,6 @@ func (b *BatchProcessor) Start() {
 				select {
 				case <-b.stop:
 					return
-				case <-b.ctx.Done():
-					b.drainRemaining()
-					return
 				case <-ticker.C:
 					b.flush()
 				}
@@ -107,25 +110,35 @@ func (b *BatchProcessor) Start() {
 	}
 }
 
-// Append adds a row to the processor queue asynchronously.
+// Append adds a row to the processor queue asynchronously. If the queue is
+// full, the row is dropped and a warning is logged.
 func (b *BatchProcessor) Append(row map[string]any) {
-	b.appendMu.RLock()
-	if b.closed.Load() {
-		b.appendMu.RUnlock()
-		return
+	dropped, shouldFlush := b.enqueue(row)
+	// Log and flush only after enqueue has released appendMu, so that a
+	// panicking Logger cannot leave the lock held and block Close.
+	if dropped && b.config.Logger != nil {
+		b.config.Logger.Println("WARNING: BigQuery event queue is full, dropping event.")
 	}
-	var shouldFlush bool
-	select {
-	case b.queue <- row:
-		shouldFlush = len(b.queue) == b.config.BatchSize
-	default:
-		if b.config.Logger != nil {
-			b.config.Logger.Println("WARNING: BigQuery event queue is full, dropping event.")
-		}
-	}
-	b.appendMu.RUnlock()
 	if shouldFlush {
 		go b.flush()
+	}
+}
+
+// enqueue offers row to the queue while holding appendMu for reading, so that
+// Close cannot mark the processor closed mid-send. It reports whether the row
+// was dropped because the queue was full and whether the queue has just
+// reached BatchSize rows. Rows offered after Close are discarded silently.
+func (b *BatchProcessor) enqueue(row map[string]any) (dropped, shouldFlush bool) {
+	b.appendMu.RLock()
+	defer b.appendMu.RUnlock()
+	if b.closed.Load() {
+		return false, false
+	}
+	select {
+	case b.queue <- row:
+		return false, len(b.queue) == b.config.BatchSize
+	default:
+		return true, false
 	}
 }
 

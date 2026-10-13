@@ -40,6 +40,13 @@ type Logger interface {
 // An all-zero RetryConfig{} is populated from [DefaultConfig] (MaxRetries: 3,
 // InitialDelay: 100ms, MaxDelay: 10s, Multiplier: 2.0); to disable retries,
 // set MaxRetries: 0 alongside a non-zero InitialDelay, MaxDelay, or Multiplier.
+//
+// Retries never extend a write beyond Config.ShutdownTimeout. Each batch
+// write made by a background or run-end flush, including its retries and the
+// backoff between them, ends when ShutdownTimeout expires, and the writes made
+// while Close drains the queue share a single ShutdownTimeout. If the attempts
+// and backoff allowed by a RetryConfig take longer than that, retrying stops
+// when the timeout expires and the batch is dropped.
 type RetryConfig struct {
 	MaxRetries   int
 	InitialDelay time.Duration
@@ -65,12 +72,12 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
-// logging, sensitive-key redaction, and run-end flushing are enabled by
-// default; DisableSessionMetadata, DisableSensitiveKeyRedaction, and
-// DisableFlushOnRunEnd opt out of each. Created and upgraded tables carry label
-// adk_schema_version="2" ([SchemaVersion]), while attributes.adk.schema_version
-// on each row is "1". Recursive payload sanitization is bounded by
-// maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+// logging, redaction of sensitive keys and credentials, and run-end flushing
+// are enabled by default; DisableSessionMetadata, DisableSensitiveKeyRedaction,
+// and DisableFlushOnRunEnd opt out of each. Created and upgraded tables carry
+// label adk_schema_version="2" ([SchemaVersion]), while
+// attributes.adk.schema_version on each row is "1". Recursive payload
+// sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
 	Enabled        bool
 	ProjectID      string
@@ -92,8 +99,12 @@ type Config struct {
 	// DisableMultiModalContent is true.
 	LogMultiModalContent bool
 
-	// ShutdownTimeout bounds each batch write (background and run-end flushes)
-	// and the drain of queued rows during Close.
+	// ShutdownTimeout bounds each batch write made by a background or run-end
+	// flush, including all retries and the backoff between them (see
+	// [RetryConfig]), and separately bounds the whole drain of queued rows
+	// during Close. Rows whose write is still unfinished when the timeout
+	// expires are dropped. It does not bound a run-end flush as a whole; see
+	// DisableFlushOnRunEnd.
 	ShutdownTimeout time.Duration
 
 	// Injected logger.
@@ -114,9 +125,14 @@ type Config struct {
 	// Sensitive-key redaction still applies.
 	CaptureFullMessageContent bool
 
-	// DisableSensitiveKeyRedaction turns off automatic redaction of
-	// credential-like keys (for example api_key, password or token) and
-	// "temp:" state keys.
+	// DisableSensitiveKeyRedaction turns off all automatic redaction, not only
+	// the redaction of sensitive keys. When true, values under credential-like
+	// keys (for example api_key, password or token) and "temp:" state keys,
+	// credentials in URIs, Authorization headers and Bearer or Basic
+	// credentials, sensitive keys in JSON embedded in text, and credentials in
+	// error_message are all written unredacted. When false, key names match
+	// regardless of case and of "_" or "-", so apiKey, APIKey and api-key are
+	// redacted like api_key.
 	DisableSensitiveKeyRedaction bool
 
 	// ContentFormatter, if set, is applied to each event's raw payload before
@@ -150,8 +166,11 @@ type Config struct {
 
 	// DisableFlushOnRunEnd stops the synchronous best-effort flush when an
 	// invocation completes. When false (the default), AfterRunCallback flushes
-	// queued events (bounded by ShutdownTimeout), skipping the flush if a
-	// background flush is already running.
+	// queued events, skipping the flush if a background flush is already
+	// running. ShutdownTimeout bounds each batch write, not the flush as a
+	// whole: the flush keeps writing batches while at least BatchSize rows are
+	// queued, so during a BigQuery outage under steady load AfterRunCallback
+	// can block for several ShutdownTimeout periods.
 	DisableFlushOnRunEnd bool
 
 	// DisableSchemaUpgrade skips automatic additive schema upgrades on

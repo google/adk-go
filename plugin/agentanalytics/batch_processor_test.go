@@ -315,6 +315,54 @@ func TestBatchProcessor_QueueFull(t *testing.T) {
 	}
 }
 
+// panickingLogger is a Logger whose Println, which reports a dropped event,
+// panics.
+type panickingLogger struct {
+	printlnCalls atomic.Int32
+}
+
+func (*panickingLogger) Printf(string, ...any) {}
+
+func (l *panickingLogger) Println(...any) {
+	l.printlnCalls.Add(1)
+	panic("logger failed")
+}
+
+// TestBatchProcessor_QueueFullPanickingLoggerDoesNotDeadlockClose checks that
+// a Logger panicking while it reports a dropped event, a panic that the
+// plugin recovers, does not leave the processor locked so that Close hangs.
+func TestBatchProcessor_QueueFullPanickingLoggerDoesNotDeadlockClose(t *testing.T) {
+	logger := &panickingLogger{}
+	p, _, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+		c.QueueMaxSize = 1
+		c.BatchSize = 100
+		c.BatchFlushIntv = time.Hour
+		c.Logger = logger
+	})
+
+	// The first message fills the queue. The second is dropped, and the
+	// logger panics while reporting it.
+	for range 2 {
+		if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("OnUserMessageCallback() error = %v", err)
+		}
+	}
+	if got := logger.printlnCalls.Load(); got != 1 {
+		t.Fatalf("Logger.Println calls = %d, want 1 for the dropped event", got)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not return after the logger panicked on a dropped event")
+	}
+}
+
 func TestBatchProcessor_ContentPartsEdgeCases(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
@@ -1069,4 +1117,101 @@ func TestBatchProcessor_ConcurrentStartAndClose(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// stallingWriteServer reads the first AppendRows request of each stream and
+// then never answers, like a stalled BigQuery backend.
+type stallingWriteServer struct {
+	storagepb.UnimplementedBigQueryWriteServer
+	received chan struct{}
+}
+
+func (s *stallingWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	if _, err := stream.Recv(); err != nil {
+		return err
+	}
+	select {
+	case s.received <- struct{}{}:
+	case <-stream.Context().Done():
+		return stream.Context().Err()
+	}
+	<-stream.Context().Done()
+	return stream.Context().Err()
+}
+
+// TestBatchProcessor_StalledAppendRowsEndsAtShutdownTimeout checks that a
+// write whose AppendRows response never arrives is abandoned once
+// ShutdownTimeout expires, both in a flush (as at the end of a run) and in the
+// drain during Close, instead of blocking them indefinitely.
+func TestBatchProcessor_StalledAppendRowsEndsAtShutdownTimeout(t *testing.T) {
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &stallingWriteServer{received: make(chan struct{}, 2)}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	t.Cleanup(func() { _ = writeClient.Close() })
+
+	config := DefaultConfig()
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.ShutdownTimeout = 200 * time.Millisecond
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	bp.Start()
+
+	// runWithin runs f and returns how long it took, failing the test if f
+	// does not return within 5 seconds.
+	runWithin := func(name string, f func()) time.Duration {
+		t.Helper()
+		start := time.Now()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			f()
+		}()
+		select {
+		case <-done:
+			return time.Since(start)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not return while the AppendRows response was stalled", name)
+			return 0
+		}
+	}
+	awaitRequest := func(name string) {
+		t.Helper()
+		select {
+		case <-srv.received:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("server did not receive the batch written by %s", name)
+		}
+	}
+
+	bp.Append(map[string]any{"event_type": "stalled_flush_row"})
+	if elapsed := runWithin("flush", bp.flush); elapsed < config.ShutdownTimeout {
+		t.Errorf("flush returned after %v, before ShutdownTimeout (%v) expired", elapsed, config.ShutdownTimeout)
+	}
+	awaitRequest("flush")
+
+	bp.Append(map[string]any{"event_type": "stalled_drain_row"})
+	runWithin("Close", bp.Close)
+	awaitRequest("Close")
 }

@@ -168,6 +168,16 @@ func NewBigQueryAgentAnalyticsPluginWithConfig(
 }
 
 // NewBigQueryAgentAnalyticsPluginWithClients creates a newly configured analytics plugin using the provided BigQuery clients.
+//
+// It creates the events table if it does not exist and, unless
+// DisableSchemaUpgrade is set, adds any missing columns to an existing table.
+// ctx bounds this table setup; background writes use only its values (see
+// [NewBatchProcessor]).
+//
+// The plugin owns writeClient and closes it when the plugin is closed. It
+// also closes writeClient right away when config.Enabled is false, and before
+// it returns any error, such as an invalid config or a table that cannot be
+// read, created or upgraded.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -175,12 +185,15 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	writeClient *bqstorage.BigQueryWriteClient,
 ) (*baseplugin.Plugin, error) {
 	if !config.Enabled {
+		// The disabled plugin never writes, so it does not keep writeClient.
+		closeWriteClient(writeClient, config)
 		// Return empty plugin wrapped
 		return baseplugin.New(baseplugin.Config{Name: pluginName})
 	}
 	config = applyDefaults(config)
 	deniedColumns, err := validateConfig(config)
 	if err != nil {
+		closeWriteClient(writeClient, config)
 		return nil, err
 	}
 	validateEventFilterLists(config)
@@ -188,34 +201,9 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	// Ensure table exists and has all required columns (done once per instance)
 	tableSchema := projectEventsSchema(deniedColumns)
 	tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
-	if meta, err := tableRef.Metadata(ctx); err != nil {
-		config.logf("Table %s not found. Creating it...", config.TableName)
-		err = tableRef.Create(ctx, &bq.TableMetadata{
-			Schema: tableSchema,
-			Labels: map[string]string{
-				"adk_schema_version": SchemaVersion,
-			},
-			// Partition by DAY on timestamp for parity with adk-python and adk-java.
-			TimePartitioning: &bq.TimePartitioning{
-				Field: timestampField,
-				Type:  bq.DayPartitioningType,
-			},
-			Clustering: &bq.Clustering{
-				Fields: config.ClusteringFields,
-			},
-		})
-		if err != nil {
-			config.logf("Failed to create BigQuery table %v: %v", config.TableName, err)
-		}
-	} else if !config.DisableSchemaUpgrade {
-		if err := upgradeExistingTable(ctx, tableRef, meta, tableSchema); err != nil {
-			if writeClient != nil {
-				if closeErr := writeClient.Close(); closeErr != nil {
-					config.logf("failed to close BigQuery write client: %v", closeErr)
-				}
-			}
-			return nil, fmt.Errorf("failed to upgrade BigQuery table %s schema: %w", config.TableName, err)
-		}
+	if err := ensureTable(ctx, tableRef, tableSchema, config); err != nil {
+		closeWriteClient(writeClient, config)
+		return nil, err
 	}
 
 	// Determine destination stream
@@ -223,9 +211,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 
 	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
-		if closeErr := writeClient.Close(); closeErr != nil {
-			config.logf("failed to close BigQuery write client: %v", closeErr)
-		}
+		closeWriteClient(writeClient, config)
 		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
 	processor.Start()
@@ -267,6 +253,73 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			return nil
 		},
 	})
+}
+
+// ensureTable makes sure the events table exists with every column in
+// schema. A missing table is created. An existing table, including one that
+// another writer creates concurrently, gains any missing columns unless
+// DisableSchemaUpgrade is set. Any other failure to read, create or upgrade the
+// table is returned, so that the plugin never starts against a table it cannot
+// write to.
+func ensureTable(ctx context.Context, tableRef *bq.Table, schema bq.Schema, config Config) error {
+	meta, err := tableRef.Metadata(ctx)
+	if hasHTTPStatus(err, http.StatusNotFound) {
+		config.logf("Table %s not found. Creating it...", config.TableName)
+		err = tableRef.Create(ctx, &bq.TableMetadata{
+			Schema: schema,
+			Labels: map[string]string{
+				"adk_schema_version": SchemaVersion,
+			},
+			// Partition by DAY on timestamp for parity with adk-python and adk-java.
+			TimePartitioning: &bq.TimePartitioning{
+				Field: timestampField,
+				Type:  bq.DayPartitioningType,
+			},
+			Clustering: &bq.Clustering{
+				Fields: config.ClusteringFields,
+			},
+		})
+		if err == nil {
+			return nil
+		}
+		if !hasHTTPStatus(err, http.StatusConflict) {
+			return fmt.Errorf("failed to create BigQuery table %s: %w", config.TableName, err)
+		}
+		// Another writer created the table first, possibly with an older
+		// schema; handle it like any existing table.
+		if config.DisableSchemaUpgrade {
+			return nil
+		}
+		meta, err = tableRef.Metadata(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get BigQuery table %s metadata: %w", config.TableName, err)
+	}
+	if config.DisableSchemaUpgrade {
+		return nil
+	}
+	if err := upgradeExistingTable(ctx, tableRef, meta, schema); err != nil {
+		return fmt.Errorf("failed to upgrade BigQuery table %s schema: %w", config.TableName, err)
+	}
+	return nil
+}
+
+// hasHTTPStatus reports whether err is a BigQuery API error with the given
+// HTTP status code.
+func hasHTTPStatus(err error, code int) bool {
+	var apiErr *googleapi.Error
+	return errors.As(err, &apiErr) && apiErr.Code == code
+}
+
+// closeWriteClient closes a write client that the plugin will not use,
+// logging any error.
+func closeWriteClient(writeClient *bqstorage.BigQueryWriteClient, config Config) {
+	if writeClient == nil {
+		return
+	}
+	if err := writeClient.Close(); err != nil {
+		config.logf("failed to close BigQuery write client: %v", err)
+	}
 }
 
 func upgradeExistingTable(ctx context.Context, tableRef *bq.Table, meta *bq.TableMetadata, required bq.Schema) error {

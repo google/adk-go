@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -511,6 +512,55 @@ func TestSmartTruncate_RedactsSensitiveKeys(t *testing.T) {
 			noRedact: true,
 			want:     `{"payload":"{\"api_key\":\"secret\"}"}`,
 		},
+		{
+			name: "camelCase and unseparated credential keys",
+			obj: map[string]any{
+				"accessToken":    "a",
+				"APIKey":         "k",
+				"clientSecret":   "c",
+				"XGoogAPIKey":    "g",
+				"x_goog_api_key": "x",
+				"apikey":         "p",
+				"tokenCount":     3,
+				"api_key_id":     "id",
+				"secretName":     "projects/p/secrets/s",
+			},
+			want: `{"APIKey":"[REDACTED]","XGoogAPIKey":"[REDACTED]","accessToken":"[REDACTED]",` +
+				`"api_key_id":"id","apikey":"[REDACTED]","clientSecret":"[REDACTED]",` +
+				`"secretName":"projects/p/secrets/s","tokenCount":3,"x_goog_api_key":"[REDACTED]"}`,
+		},
+		{
+			name: "struct fields by Go name",
+			obj: struct {
+				APIKey       string
+				ClientSecret string
+				Name         string
+			}{APIKey: "k", ClientSecret: "c", Name: "n"},
+			want: `{"APIKey":"[REDACTED]","ClientSecret":"[REDACTED]","Name":"n"}`,
+		},
+		{
+			name: "session user and app keys",
+			obj: map[string]any{
+				"user:api_key":     "k",
+				"app:clientSecret": "c",
+				"USER:Token":       "t",
+				"user:name":        "n",
+				"app:theme":        "dark",
+			},
+			want: `{"USER:Token":"[REDACTED]","app:clientSecret":"[REDACTED]","app:theme":"dark",` +
+				`"user:api_key":"[REDACTED]","user:name":"n"}`,
+		},
+		{
+			name: "JSON-encoded string with camelCase keys has sensitive keys redacted",
+			obj:  map[string]any{"payload": `{"accessToken":"tok","keep":"ok"}`},
+			want: `{"payload":"{\"accessToken\":\"[REDACTED]\",\"keep\":\"ok\"}"}`,
+		},
+		{
+			name:     "redaction off keeps camelCase and prefixed keys",
+			obj:      map[string]any{"accessToken": "a", "user:api_key": "k"},
+			noRedact: true,
+			want:     `{"accessToken":"a","user:api_key":"k"}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -693,6 +743,46 @@ func TestSanitizeURI(t *testing.T) {
 			uri:         "https://example.test/api%255Fkey=SECRET",
 			want:        "https://example.test/api%255Fkey=%5BREDACTED%5D",
 			wantChanged: true,
+		},
+		{
+			name:        "access token in a fragment route",
+			uri:         "https://example.com/app#/cb?access_token=SECRET123",
+			want:        "https://example.com/app#/cb?access_token=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "access token in a URL nested in a query value",
+			uri:         "https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123",
+			want:        "https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment token:value",
+			uri:         "https://example.com/token:SECRET123/file.png",
+			want:        "https://example.com/token:%5BREDACTED%5D/file.png",
+			wantChanged: true,
+		},
+		{
+			name:        "access token after a semicolon in a query value",
+			uri:         "https://example.com/a?a=1;access_token=SECRET123",
+			want:        "https://example.com/a?a=1%3Baccess_token%3D%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "camelCase and unseparated credential parameters",
+			uri:         "https://example.com/a?apiKey=abc&accessToken=def&apikey=ghi&tokenCount=5",
+			want:        "https://example.com/a?apiKey=%5BREDACTED%5D&accessToken=%5BREDACTED%5D&apikey=%5BREDACTED%5D&tokenCount=5",
+			wantChanged: true,
+		},
+		{
+			name: "query value mentioning basic",
+			uri:  "https://example.com/search?q=basic%20recipes",
+			want: "https://example.com/search?q=basic%20recipes",
+		},
+		{
+			name: "query value mentioning bearer of",
+			uri:  "https://example.com/search?q=bearer+of+bad+news#the-bearer-of-bad-news",
+			want: "https://example.com/search?q=bearer+of+bad+news#the-bearer-of-bad-news",
 		},
 		{name: "user information", uri: "https://user:secret@example.com/a", want: redactedURIPlaceholder, wantChanged: true},
 		{name: "unparsable", uri: "://missing-scheme", want: redactedURIPlaceholder, wantChanged: true},
@@ -946,7 +1036,9 @@ func TestRedactErrorMessage(t *testing.T) {
 		{
 			name: "embedded JSON with equals sign in quoted temp key redacts the value",
 			msg:  `failed: {"temp:cache=foo": "SYNTHETIC_SECRET"}`,
-			want: `failed: {"temp:cache=[REDACTED]":"[REDACTED]"}`,
+			// As in adk-python, the key=value pass reads "temp:cache" as the
+			// key and redacts the rest of the text up to "}" as its value.
+			want: `failed: {"temp:cache=[REDACTED]}`,
 		},
 		{
 			name: "bare password with escaped double quote in quoted value redacts the whole value",
@@ -972,6 +1064,241 @@ func TestRedactErrorMessage(t *testing.T) {
 			name: "Bearer token with escaped double quote in quoted value redacts the whole value",
 			msg:  `failed: Bearer "prefix\"suffix"`,
 			want: `failed: Bearer [REDACTED]`,
+		},
+		{
+			name: "JSON quoted with %q redacts the escaped value",
+			msg:  `token exchange failed: "{\"access_token\": \"SECRET123\"}"`,
+			want: `token exchange failed: "{\"access_token\":\"[REDACTED]\"}"`,
+		},
+		{
+			name: "value quoted with escaped double quotes redacts the whole value",
+			msg:  `failed: password=\"SECRET123\"`,
+			want: `failed: password=\"[REDACTED]\"`,
+		},
+		{
+			name: "value quoted with escaped single quotes redacts the whole value",
+			msg:  `failed: password=\'SECRET123\'`,
+			want: `failed: password=\'[REDACTED]\'`,
+		},
+		{
+			name: "single-quoted key redacts the value",
+			msg:  `bad config: {'api_key': 'SECRET123'}`,
+			want: `bad config: {'api_key':'[REDACTED]'}`,
+		},
+		{
+			name: "credentials envelope redacts the nested token",
+			msg:  `auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
+			want: `auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+		},
+		{
+			name: "object under a sensitive key is redacted whole",
+			msg:  `auth failed: {"token": {"value": "SECRET123"}}`,
+			want: `auth failed: {"token":"[REDACTED]"}`,
+		},
+		{
+			name: "token object under a sensitive key is redacted whole",
+			msg:  `auth failed: {"token": {"access_token": "SECRET123", "expires_in": 3600}} retrying`,
+			want: `auth failed: {"token":"[REDACTED]"} retrying`,
+		},
+		{
+			name: "bare value with a parenthesis is redacted whole",
+			msg:  "failed: password=abc)SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value starting with a parenthesis is redacted whole",
+			msg:  "failed: password=)SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value starting with slashes is redacted whole",
+			msg:  "failed: password: //SECRET123",
+			want: "failed: password:[REDACTED]",
+		},
+		{
+			name: "bare value with a bracket is redacted whole",
+			msg:  "failed: password=abc]SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value with a quote is redacted whole",
+			msg:  `failed: password=abc"SECRET123`,
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "basic credential that decodes to user:password is redacted",
+			msg:  "auth failed: basic dXNlcjpwYXNz",
+			want: "auth failed: basic [REDACTED]",
+		},
+		{
+			name: "padded basic credential is redacted",
+			msg:  "auth failed: Basic dXNlcg==",
+			want: "auth failed: Basic [REDACTED]",
+		},
+		{
+			name: "unpadded basic value without a colon is kept",
+			msg:  "auth failed: basic YWJj",
+			want: "auth failed: basic YWJj",
+		},
+		{
+			name: "basic followed by a word is kept",
+			msg:  "basic auth not configured",
+			want: "basic auth not configured",
+		},
+		{
+			name: "basic in prose is kept",
+			msg:  "Write a basic HTTP server in Go",
+			want: "Write a basic HTTP server in Go",
+		},
+		{
+			name: "bearer of in prose is kept",
+			msg:  "I'm the bearer of bad news",
+			want: "I'm the bearer of bad news",
+		},
+		{
+			name: "bearer token starting with of is redacted",
+			msg:  "auth failed: Bearer of-SECRET123",
+			want: "auth failed: Bearer [REDACTED]",
+		},
+		{
+			name: "markdown link mentioning basic is kept",
+			msg:  "[Basic usage](https://example.com/docs)",
+			want: "[Basic usage](https://example.com/docs)",
+		},
+		{
+			name: "quoted sensitive word in prose is kept",
+			msg:  `[Q] What does "token" mean?`,
+			want: `[Q] What does "token" mean?`,
+		},
+		{
+			name: "URL with basic in a query value is kept",
+			msg:  "GET https://example.com/search?q=basic%20recipes failed",
+			want: "GET https://example.com/search?q=basic%20recipes failed",
+		},
+		{
+			name: "key with a Kelvin sign, which case-insensitive matching folds to k, is redacted",
+			msg:  "failed: TO\u212aEN=SECRET123",
+			want: "failed: TO\u212aEN=[REDACTED]",
+		},
+		{
+			name: "key with a long s, which case-insensitive matching folds to s, is redacted",
+			msg:  "failed: pa\u017f\u017fword=SECRET123",
+			want: "failed: pa\u017f\u017fword=[REDACTED]",
+		},
+		{
+			name: "camelCase keys in key=value and key: value text are redacted",
+			msg:  "auth failed: accessToken=SECRET123 apiKey: SECRET456",
+			want: "auth failed: accessToken=[REDACTED] apiKey:[REDACTED]",
+		},
+		{
+			name: "x_goog_api_key in key=value text is redacted",
+			msg:  "request failed: x_goog_api_key=SECRET123",
+			want: "request failed: x_goog_api_key=[REDACTED]",
+		},
+		{
+			name: "x-goog-api-key header is redacted",
+			msg:  "request failed: x-goog-api-key: SECRET123",
+			want: "request failed: x-goog-api-key: [REDACTED]",
+		},
+		{
+			name: "Go struct printed with %+v has credential fields redacted",
+			msg:  "bad config: {APIKey:SECRET123 ClientSecret:SECRET456 Region:us}",
+			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED] Region:us}",
+		},
+		{
+			name: "JSON error with a camelCase sensitive key",
+			msg:  `{"accessToken":"SECRET123","message":"denied"}`,
+			want: `{"accessToken":"[REDACTED]","message":"denied"}`,
+		},
+		{
+			name: "embedded JSON with a camelCase sensitive key",
+			msg:  `token exchange failed: {"accessToken": "SECRET123", "expiresIn": 3600}`,
+			want: `token exchange failed: {"accessToken":"[REDACTED]", "expiresIn": 3600}`,
+		},
+		{
+			name: "session user and app keys in key=value text are redacted",
+			msg:  "failed: user:api_key=SECRET123 app:clientSecret=SECRET456",
+			want: "failed: user:api_key=[REDACTED] app:clientSecret=[REDACTED]",
+		},
+		{
+			name: "keys that only contain a sensitive key name are kept",
+			msg:  "failed: tokenCount=5 api_key_id=abc secretName=projects/p/secrets/s",
+			want: "failed: tokenCount=5 api_key_id=abc secretName=projects/p/secrets/s",
+		},
+		{
+			name: "hyphenated sensitive keys are redacted",
+			msg:  "failed: x-api-key=SECRET123 refresh-token=SECRET456",
+			want: "failed: x-api-key=[REDACTED] refresh-token=[REDACTED]",
+		},
+		{
+			name: "command-line flags are redacted",
+			msg:  "mysql -u root --password=SECRET123 failed",
+			want: "mysql -u root --password=[REDACTED] failed",
+		},
+		{
+			name: "command-line flag with a hyphenated key is redacted",
+			msg:  "--api-key=SECRET123",
+			want: "--api-key=[REDACTED]",
+		},
+		{
+			name: "command-line flags with hyphenated token keys are redacted",
+			msg:  "exec failed: tool --token=SECRET123 --access-token=SECRET456 github-token=SECRET789",
+			want: "exec failed: tool --token=[REDACTED] --access-token=[REDACTED] github-token=[REDACTED]",
+		},
+		{
+			name: "hyphenated header ending in token is redacted",
+			msg:  "X-Auth-Token: SECRET123",
+			want: "X-Auth-Token:[REDACTED]",
+		},
+		{
+			name: "upper-case hyphenated header ending in token is redacted",
+			msg:  "PRIVATE-TOKEN: SECRET123",
+			want: "PRIVATE-TOKEN:[REDACTED]",
+		},
+		{
+			name: "credential in a nested URL in text is redacted in place",
+			msg:  "see https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123 for details",
+			want: "see https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D for details",
+		},
+		{
+			name: "credential in a nested URL that ends a sentence is redacted in place",
+			msg:  "redirected to https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123.",
+			want: "redirected to https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D.",
+		},
+		{
+			name: "credential in a nested URL in parentheses is redacted in place",
+			msg:  "see (https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123) for details",
+			want: "see (https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D) for details",
+		},
+		{
+			name: "URL with a credential query value and another escape is redacted in place",
+			msg:  "GET https://example.com/cb?access_token=SECRET123&q=a%20b failed",
+			want: "GET https://example.com/cb?access_token=%5BREDACTED%5D&q=a%20b failed",
+		},
+		{
+			name: "URL with a credential path segment and another escape is redacted in place",
+			msg:  "GET https://example.com/v1/access_token=SECRET123 failed at 100%25",
+			want: "GET https://example.com/v1/access_token=%5BREDACTED%5D failed at 100%25",
+		},
+		{
+			name: "object quoted with %q whose string field holds a closing brace is redacted whole",
+			msg:  `auth failed: "{\"token\": {\"label\": \"a},\", \"val\": \"SECRET123\"}}"`,
+			want: `auth failed: "{\"token\":[REDACTED]}"`,
+		},
+		{
+			name: "array quoted with %q whose string field holds a closing bracket is redacted whole",
+			msg:  `auth failed: "{\"token\": [\"a],\", \"SECRET123\"], \"expires_in\": 3600}"`,
+			want: `auth failed: "{\"token\":[REDACTED], \"expires_in\": 3600}"`,
+		},
+		{
+			name: "quote-led prose with brackets is kept",
+			msg:  `"Hello," she said [laughing]. "Bye."`,
+			want: `"Hello," she said [laughing]. "Bye."`,
+		},
+		{
+			name: "quoted JSON string whose escape hides a bearer token fails closed",
+			msg:  `"Bearer\tSECRET123"`,
+			want: unparseableJSONPlaceholder,
 		},
 	}
 	for _, tt := range tests {
@@ -1099,6 +1426,103 @@ func TestSanitizeRawText(t *testing.T) {
 		}
 		if !strings.Contains(string(got), "AAAA") {
 			t.Errorf("expected document content to be preserved")
+		}
+	})
+
+	t.Run("text without credentials is unchanged", func(t *testing.T) {
+		proseSamples := []string{
+			"Write a basic HTTP server in Go",
+			"I'm the bearer of bad news",
+			"basic auth not configured",
+			"[Basic usage](https://example.com/docs)",
+			`[Q] What does "token" mean?`,
+			"See https://example.com/search?q=basic%20recipes for ideas",
+			`"Hello," she said [laughing]. "Bye."`,
+			`"Hello," she said {quietly}. "Bye."`,
+			`"What does [this] mean?"`,
+		}
+		for _, prose := range proseSamples {
+			got, lost := sanitizeRawText(prose)
+			if got != prose || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", prose, got, lost, prose)
+			}
+		}
+	})
+
+	t.Run("quote-led text with a JSON string that decodes to a credential fails closed", func(t *testing.T) {
+		// The checks on the raw text do not decode \t, so these are only
+		// caught by reading the quoted strings as JSON.
+		samples := []string{
+			`"Bearer\tSECRET123"`,
+			`"Bearer\tSECRET123" was rejected`,
+			`"Hi" then "Bearer\tSECRET123"`,
+		}
+		for _, s := range samples {
+			got, lost := sanitizeRawText(s)
+			if got != unparseableJSONPlaceholder || !lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", s, got, lost, unparseableJSONPlaceholder)
+			}
+		}
+	})
+
+	t.Run("credentials in quoted or nested values are redacted", func(t *testing.T) {
+		tests := []struct {
+			raw  string
+			want string
+		}{
+			{`token exchange failed: "{\"access_token\": \"SECRET123\"}"`, `token exchange failed: "{\"access_token\":\"[REDACTED]\"}"`},
+			{`failed: password=\"SECRET123\"`, `failed: password=\"[REDACTED]\"`},
+			{`bad config: {'api_key': 'SECRET123'}`, `bad config: {'api_key':'[REDACTED]'}`},
+			{
+				`auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
+				`auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+			},
+			{`auth failed: {"token": {"value": "SECRET123"}}`, `auth failed: {"token":"[REDACTED]"}`},
+			{"failed: password=abc)SECRET123", "failed: password=[REDACTED]"},
+			{"failed: password: //SECRET123", "failed: password:[REDACTED]"},
+			{
+				`auth failed: "{\"token\": {\"label\": \"a},\", \"val\": \"SECRET123\"}}"`,
+				`auth failed: "{\"token\":[REDACTED]}"`,
+			},
+			{
+				"see https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123 for details",
+				"see https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D for details",
+			},
+			{
+				"GET https://example.com/cb?access_token=SECRET123&q=a%20b failed",
+				"GET https://example.com/cb?access_token=%5BREDACTED%5D&q=a%20b failed",
+			},
+		}
+		for _, tt := range tests {
+			got, lost := sanitizeRawText(tt.raw)
+			if got != tt.want || !lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tt.raw, got, lost, tt.want)
+			}
+		}
+	})
+
+	t.Run("quoted fragments are inspected in linear time", func(t *testing.T) {
+		filler := strings.Repeat("b", 100_000)
+		samples := map[string]string{
+			// Each fragment fails to decode at its line break.
+			"broken fragments": `"a" ` + strings.Repeat("\"x\n", 64) + filler,
+			// A key word lets the text through the credential pattern
+			// prefilter, so scanning the rest of the text again for each
+			// fragment would show.
+			"broken fragments with a key word": `"a" ` + strings.Repeat("\"token\n", 64) + filler,
+			// The fragment never ends, and each escaped quote in it starts
+			// another fragment that would be decoded to the end of the text.
+			"unterminated fragment with escaped quotes": `"a" "` + strings.Repeat(`x\"`, 62) + filler,
+		}
+		for name, text := range samples {
+			start := time.Now()
+			got, lost := sanitizeRawText(text)
+			if d := time.Since(start); d > time.Second {
+				t.Errorf("%s: sanitizeRawText took %v for a 100 KB text", name, d)
+			}
+			if got != text || lost {
+				t.Errorf("%s: sanitizeRawText changed text without credentials (lost = %v)", name, lost)
+			}
 		}
 	})
 }

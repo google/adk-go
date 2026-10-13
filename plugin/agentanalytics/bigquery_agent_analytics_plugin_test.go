@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -39,9 +40,11 @@ import (
 	"cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"google.golang.org/adk/v2/agent"
@@ -245,8 +248,18 @@ func setupTestPlugin(t *testing.T) (*baseplugin.Plugin, chan *storagepb.AppendRo
 
 // setupTestPluginWithConfig creates a plugin that writes to a fake BigQuery
 // Storage Write server, whose requests are delivered on the returned channel.
-// mutate, if set, adjusts the test configuration first.
+// mutate, if set, adjusts the test configuration first. The plugin is closed
+// when the test ends.
 func setupTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
+	t.Helper()
+	p, requestsChan, mCtx := newTestPluginWithConfig(t, mutate)
+	t.Cleanup(func() { _ = p.Close() })
+	return p, requestsChan, mCtx
+}
+
+// newTestPluginWithConfig is setupTestPluginWithConfig for tests that close
+// the plugin themselves.
+func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Plugin, chan *storagepb.AppendRowsRequest, *mockInvocationContext) {
 	t.Helper()
 	ctx := context.Background()
 	config := DefaultConfig()
@@ -297,7 +310,6 @@ func setupTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
-	t.Cleanup(func() { _ = p.Close() })
 
 	mCtx := &mockInvocationContext{
 		ctx:          ctx,
@@ -1053,6 +1065,41 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 				t.Errorf("error_message %q did not preserve sk-live when redaction was disabled", errMsg)
 			}
 		})
+	}
+}
+
+// TestSensitiveKeyRedaction_GoNamesAndStatePrefixes checks that sensitive keys
+// match regardless of case and separators, so camelCase keys and Go field names
+// are redacted, and that session keys with a user: or app: prefix match on the
+// name after the prefix.
+func TestSensitiveKeyRedaction_GoNamesAndStatePrefixes(t *testing.T) {
+	const secret = "SECRET123"
+	p, requests, mCtx := setupTestPlugin(t)
+	mCtx.state = mapState{"user:api_key": secret, "app:clientSecret": secret, "user:theme": "dark"}
+	args := map[string]any{"accessToken": secret, "x-goog-api-key": secret, "tokenCount": 3}
+	result := map[string]any{"credentials": struct {
+		APIKey       string
+		ClientSecret string
+		Region       string
+	}{APIKey: secret, ClientSecret: secret, Region: "us"}}
+	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, args))
+	errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, args, result, nil))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	startRow := onlyRowOfType(t, rows, EventToolStarting)
+	checkJSONAt(t, jsonObjectColumn(t, startRow, "content"),
+		`{"accessToken":"[REDACTED]","x-goog-api-key":"[REDACTED]","tokenCount":3}`, "args")
+	checkJSONAt(t, jsonObjectColumn(t, startRow, "attributes"),
+		`{"user:api_key":"[REDACTED]","app:clientSecret":"[REDACTED]","user:theme":"dark"}`, "session_metadata", "state")
+	checkJSONAt(t, jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
+		`{"credentials":{"APIKey":"[REDACTED]","ClientSecret":"[REDACTED]","Region":"us"}}`, "result")
+	for _, row := range rows {
+		if s := fmt.Sprint(row); strings.Contains(s, secret) {
+			t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+		}
 	}
 }
 
@@ -2081,6 +2128,264 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 	}
 }
 
+// TestNewBigQueryAgentAnalyticsPlugin_TableSetup checks how construction
+// treats table metadata and creation errors: only a missing table (404) is
+// created, a table that another writer created first (409) is read again and
+// upgraded, and any other error fails construction and closes the write
+// client.
+func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
+	var legacySchema bq.Schema
+	for _, f := range EventsSchema() {
+		if f.Name != eventIDField {
+			legacySchema = append(legacySchema, f)
+		}
+	}
+	legacyFields, err := legacySchema.ToJSONFields()
+	if err != nil {
+		t.Fatalf("ToJSONFields: %v", err)
+	}
+	legacyTable := fmt.Sprintf(`{"etag":"etag-1","schema":{"fields":%s}}`, legacyFields)
+
+	tests := []struct {
+		name           string
+		disableUpgrade bool
+		// getStatuses holds the status of each table metadata request in
+		// turn; http.StatusOK returns a table without event_id.
+		getStatuses []int
+		// postStatus is the status of the table creation request.
+		postStatus int
+		wantGets   int
+		wantPost   bool
+		wantPatch  bool
+		wantErr    string
+		// wantErrCode is the status of the BigQuery API error that the
+		// construction error wraps.
+		wantErrCode int
+	}{
+		{
+			name:        "metadata error other than 404 fails without creating the table",
+			getStatuses: []int{http.StatusForbidden},
+			wantGets:    1,
+			wantErr:     "failed to get BigQuery table test-table metadata",
+			wantErrCode: http.StatusForbidden,
+		},
+		{
+			name:        "409 from create reads the table again and upgrades it",
+			getStatuses: []int{http.StatusNotFound, http.StatusOK},
+			postStatus:  http.StatusConflict,
+			wantGets:    2,
+			wantPost:    true,
+			wantPatch:   true,
+		},
+		{
+			name:           "409 from create with DisableSchemaUpgrade keeps the table as is",
+			disableUpgrade: true,
+			getStatuses:    []int{http.StatusNotFound},
+			postStatus:     http.StatusConflict,
+			wantGets:       1,
+			wantPost:       true,
+		},
+		{
+			name:        "create error other than 409 fails",
+			getStatuses: []int{http.StatusNotFound},
+			postStatus:  http.StatusForbidden,
+			wantGets:    1,
+			wantPost:    true,
+			wantErr:     "failed to create BigQuery table test-table",
+			wantErrCode: http.StatusForbidden,
+		},
+		{
+			name:        "metadata error after a 409 from create fails",
+			getStatuses: []int{http.StatusNotFound, http.StatusForbidden},
+			postStatus:  http.StatusConflict,
+			wantGets:    2,
+			wantPost:    true,
+			wantErr:     "failed to get BigQuery table test-table metadata",
+			wantErrCode: http.StatusForbidden,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			config := DefaultConfig()
+			config.ProjectID = "test-project"
+			config.DatasetID = "test-dataset"
+			config.TableName = "test-table"
+			config.DisableSchemaUpgrade = tt.disableUpgrade
+
+			respond := func(status int, body string) *http.Response {
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
+			}
+			apiError := func(status int) *http.Response {
+				return respond(status, fmt.Sprintf(`{"error":{"code":%d,"message":"status %d"}}`, status, status))
+			}
+			const tablePath = "/datasets/test-dataset/tables/test-table"
+			var gets, posts, patches int
+			var patchedColumns []string
+			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
+				switch {
+				case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, tablePath):
+					gets++
+					if gets > len(tt.getStatuses) {
+						t.Errorf("unexpected table metadata request #%d", gets)
+						return apiError(http.StatusBadRequest), nil
+					}
+					if status := tt.getStatuses[gets-1]; status != http.StatusOK {
+						return apiError(status), nil
+					}
+					return respond(http.StatusOK, legacyTable), nil
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test-dataset/tables"):
+					posts++
+					return apiError(tt.postStatus), nil
+				case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, tablePath):
+					patches++
+					body, _ := io.ReadAll(r.Body)
+					var patch struct {
+						Schema struct {
+							Fields []struct {
+								Name string `json:"name"`
+							} `json:"fields"`
+						} `json:"schema"`
+					}
+					if err := json.Unmarshal(body, &patch); err != nil {
+						t.Errorf("unmarshal patch request: %v", err)
+					}
+					for _, f := range patch.Schema.Fields {
+						patchedColumns = append(patchedColumns, f.Name)
+					}
+					return respond(http.StatusOK, string(body)), nil
+				}
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				return apiError(http.StatusBadRequest), nil
+			}}
+			bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(&http.Client{Transport: transport}))
+			if err != nil {
+				t.Fatalf("bq.NewClient: %v", err)
+			}
+			conn, writeClient := newTestWriteClient(t)
+
+			p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+			if p != nil {
+				t.Cleanup(func() { _ = p.Close() })
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want an error containing %q", err, tt.wantErr)
+				}
+				var apiErr *googleapi.Error
+				if !errors.As(err, &apiErr) || apiErr.Code != tt.wantErrCode {
+					t.Errorf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want it to wrap a BigQuery API error with code %d", err, tt.wantErrCode)
+				}
+				if state := conn.GetState(); state != connectivity.Shutdown {
+					t.Errorf("write client connection state = %v, want %v after a failed construction", state, connectivity.Shutdown)
+				}
+			} else if err != nil {
+				t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() unexpected error: %v", err)
+			}
+			if gets != tt.wantGets {
+				t.Errorf("table metadata requests = %d, want %d", gets, tt.wantGets)
+			}
+			if gotPost := posts > 0; gotPost != tt.wantPost {
+				t.Errorf("table created = %v, want %v", gotPost, tt.wantPost)
+			}
+			if gotPatch := patches > 0; gotPatch != tt.wantPatch {
+				t.Errorf("table schema patched = %v, want %v", gotPatch, tt.wantPatch)
+			}
+			if tt.wantPatch && !slices.Contains(patchedColumns, eventIDField) {
+				t.Errorf("patched columns = %v, want them to include %s", patchedColumns, eventIDField)
+			}
+		})
+	}
+}
+
+// newTestWriteClient returns a write client connected to a fake BigQuery
+// Storage Write server, and its connection, whose state shows whether the
+// client was closed.
+func newTestWriteClient(t *testing.T) (*grpc.ClientConn, *bqstorage.BigQueryWriteClient) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+	return conn, writeClient
+}
+
+// TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient
+// checks that construction closes the write client it was given when it
+// returns before table setup: on an invalid config, and when the plugin is
+// disabled and so never writes.
+func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+		// wantErr is empty when construction must succeed.
+		wantErr string
+	}{
+		{
+			name:    "invalid BatchSize",
+			mutate:  func(c *Config) { c.BatchSize = -1 },
+			wantErr: "BatchSize and QueueMaxSize must be >= 1",
+		},
+		{
+			name:    "invalid PayloadColumnDenylist",
+			mutate:  func(c *Config) { c.PayloadColumnDenylist = []string{"bogus"} },
+			wantErr: `unsupported PayloadColumnDenylist entry "bogus"`,
+		},
+		{
+			name:   "disabled",
+			mutate: func(c *Config) { c.Enabled = false },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			config := DefaultConfig()
+			config.ProjectID = "test-project"
+			config.DatasetID = "test-dataset"
+			config.TableName = "test-table"
+			tt.mutate(&config)
+			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
+				t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				return nil, errors.New("unexpected request")
+			}}
+			bqClient, err := bq.NewClient(ctx, config.ProjectID, option.WithHTTPClient(&http.Client{Transport: transport}))
+			if err != nil {
+				t.Fatalf("bq.NewClient: %v", err)
+			}
+			conn, writeClient := newTestWriteClient(t)
+
+			p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+			if p != nil {
+				t.Cleanup(func() { _ = p.Close() })
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want an error containing %q", err, tt.wantErr)
+				}
+			} else if err != nil || p == nil {
+				t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() = (%v, %v), want a plugin", p, err)
+			}
+			if state := conn.GetState(); state != connectivity.Shutdown {
+				t.Errorf("write client connection state = %v, want %v", state, connectivity.Shutdown)
+			}
+		})
+	}
+}
+
 func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
@@ -2311,6 +2616,297 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestQuotedFragmentCost(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{
+			name: "broken fragments",
+			text: `"a" ` + strings.Repeat("\"x\n", 64) + strings.Repeat("b", 100_000),
+		},
+		{
+			// A key word lets the text through the credential pattern
+			// prefilter, so the patterns run over all of it, for content
+			// and again for content_parts. At 50 KB that stays well within
+			// the bound under -race, while scanning the rest of the text
+			// again for each of the 64 fragments takes many times longer.
+			name: "broken fragments with a key word",
+			text: `"a" ` + strings.Repeat("\"token\n", 64) + strings.Repeat("b", 50_000),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, _, mCtx := setupTestPlugin(t)
+			start := time.Now()
+			_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", tt.text))
+			if d := time.Since(start); d > time.Second {
+				t.Errorf("OnUserMessageCallback took %v for a %d KB message", d, len(tt.text)/1000)
+			}
+		})
+	}
+}
+
+func TestQuotedJSONSecretSurvives(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	body := `{"access_token": "SECRET123"}`
+	_, _ = p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, fmt.Errorf("token exchange failed: %q", body))
+	p.AfterRunCallback()(mCtx)
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	row := onlyRowOfType(t, rows, EventToolError)
+	if msg := fmt.Sprint(row["error_message"]); strings.Contains(msg, "SECRET123") {
+		t.Errorf("error_message = %s", msg)
+	}
+}
+
+// TestCredentialShapesNeverReachARow checks that a value under a sensitive
+// key is redacted from error_message, content and content_parts, whatever
+// quoting or nesting the key or the value uses.
+func TestCredentialShapesNeverReachARow(t *testing.T) {
+	const secret = "SECRET123"
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "JSON quoted with %q",
+			text: fmt.Sprintf("token exchange failed: %q", `{"access_token": "SECRET123"}`),
+			want: `token exchange failed: "{\"access_token\":\"[REDACTED]\"}"`,
+		},
+		{
+			name: "value quoted with escaped quotes",
+			text: `failed: password=\"SECRET123\"`,
+			want: `failed: password=\"[REDACTED]\"`,
+		},
+		{
+			name: "single-quoted key",
+			text: `bad config: {'api_key': 'SECRET123'}`,
+			want: `bad config: {'api_key':'[REDACTED]'}`,
+		},
+		{
+			name: "credentials envelope",
+			text: `auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
+			want: `auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+		},
+		{
+			name: "object under a sensitive key",
+			text: `auth failed: {"token": {"value": "SECRET123"}}`,
+			want: `auth failed: {"token":"[REDACTED]"}`,
+		},
+		{
+			name: "object quoted with %q whose string field holds a closing brace",
+			text: fmt.Sprintf("auth failed: %q", `{"token": {"label": "a},", "val": "SECRET123"}}`),
+			want: `auth failed: "{\"token\":[REDACTED]}"`,
+		},
+		{
+			name: "bare value with a parenthesis",
+			text: "failed: password=abc)SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value starting with a parenthesis",
+			text: "failed: password=)SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value starting with slashes",
+			text: "failed: password: //SECRET123",
+			want: "failed: password:[REDACTED]",
+		},
+		{
+			name: "camelCase keys",
+			text: "auth failed: accessToken=SECRET123 apiKey: SECRET123",
+			want: "auth failed: accessToken=[REDACTED] apiKey:[REDACTED]",
+		},
+		{
+			name: "Go struct printed with %+v",
+			text: fmt.Sprintf("bad config: %+v", struct{ APIKey, ClientSecret, Region string }{"SECRET123", "SECRET123", "us"}),
+			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED] Region:us}",
+		},
+		{
+			name: "x_goog_api_key",
+			text: "request failed: x_goog_api_key=SECRET123",
+			want: "request failed: x_goog_api_key=[REDACTED]",
+		},
+		{
+			name: "session user key",
+			text: "failed: user:api_key=SECRET123",
+			want: "failed: user:api_key=[REDACTED]",
+		},
+		{
+			name: "embedded JSON with a camelCase key",
+			text: `token exchange failed: {"accessToken": "SECRET123", "expiresIn": 3600}`,
+			want: `token exchange failed: {"accessToken":"[REDACTED]", "expiresIn": 3600}`,
+		},
+		{
+			name: "command-line flag",
+			text: "mysql -u root --password=SECRET123 failed",
+			want: "mysql -u root --password=[REDACTED] failed",
+		},
+		{
+			name: "command-line flag with a hyphenated key",
+			text: "--api-key=SECRET123",
+			want: "--api-key=[REDACTED]",
+		},
+		{
+			name: "hyphenated header ending in token",
+			text: "X-Auth-Token: SECRET123",
+			want: "X-Auth-Token:[REDACTED]",
+		},
+		{
+			name: "upper-case hyphenated header ending in token",
+			text: "PRIVATE-TOKEN: SECRET123",
+			want: "PRIVATE-TOKEN:[REDACTED]",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, tt.want)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, tt.want)
+			}
+			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != tt.want {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, tt.want)
+			}
+			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+				}
+			}
+		})
+	}
+}
+
+// TestFileDataURICredentialsAreRedacted checks that credentials in the path,
+// a nested URL, a query value or the fragment of a FileData URI do not reach
+// content_parts.uri.
+func TestFileDataURICredentialsAreRedacted(t *testing.T) {
+	uris := []struct {
+		uri  string
+		want string
+	}{
+		{
+			uri:  "https://example.com/app#/cb?access_token=SECRET123",
+			want: "https://example.com/app#/cb?access_token=%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/login?next=https://api.example.com/cb?access_token=SECRET123",
+			want: "https://example.com/login?next=https%3A%2F%2Fapi.example.com%2Fcb%3Faccess_token%3D%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/token:SECRET123/file.png",
+			want: "https://example.com/token:%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/a?a=1;access_token=SECRET123",
+			want: "https://example.com/a?a=1%3Baccess_token%3D%5BREDACTED%5D",
+		},
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	content := &genai.Content{Role: "user"}
+	for _, u := range uris {
+		content.Parts = append(content.Parts, &genai.Part{FileData: &genai.FileData{MIMEType: "image/png", FileURI: u.uri}})
+	}
+	var errs callbackErrors
+	errs.add(p.OnUserMessageCallback()(mCtx, content))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+	parts, _ := userRow["content_parts"].([]map[string]any)
+	if len(parts) != len(uris) {
+		t.Fatalf("content_parts = %v, want %d parts", parts, len(uris))
+	}
+	for i, u := range uris {
+		if got := parts[i]["uri"]; got != u.want {
+			t.Errorf("content_parts[%d].uri = %v, want %q", i, got, u.want)
+		}
+	}
+	if got := userRow["is_truncated"]; got != true {
+		t.Errorf("is_truncated = %v, want true", got)
+	}
+}
+
+// TestTextWithoutCredentialsIsUnchanged checks that text that mentions an
+// authorization scheme or a sensitive word, but carries no credential, is
+// written unchanged and is not marked as truncated.
+func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
+	texts := []string{
+		"Write a basic HTTP server in Go",
+		"I'm the bearer of bad news",
+		"basic auth not configured",
+		"[Basic usage](https://example.com/docs)",
+		`[Q] What does "token" mean?`,
+		"See https://example.com/search?q=basic%20recipes for ideas",
+		`"Hello," she said [laughing]. "Bye."`,
+		`"What does [this] mean?"`,
+	}
+	for _, text := range texts {
+		t.Run(text, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", text)))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "lookup"}, nil, errors.New(text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != text {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, text)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != text {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, text)
+			}
+			if got := userRow["is_truncated"]; got != false {
+				t.Errorf("USER_MESSAGE_RECEIVED is_truncated = %v, want false", got)
+			}
+			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != text {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, text)
+			}
+		})
+	}
+
+	t.Run("file URI", func(t *testing.T) {
+		const uri = "https://example.com/search?q=basic%20recipes"
+		p, requests, mCtx := setupTestPlugin(t)
+		var errs callbackErrors
+		errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
+			Role:  "user",
+			Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
+		}))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+		if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
+			t.Errorf("content_parts = %v, want uri %q", parts, uri)
+		}
+		if got := userRow["is_truncated"]; got != false {
+			t.Errorf("is_truncated = %v, want false", got)
+		}
+	})
 }
 
 func TestToolErrorDeduplication_RecoveredMissingAndScoped(t *testing.T) {
