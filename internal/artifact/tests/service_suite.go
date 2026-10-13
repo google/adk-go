@@ -56,6 +56,13 @@ func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (
 		}
 		testArtifactService_UserScoped(ctx, t, srv, name)
 	})
+	t.Run(fmt.Sprintf("Test%sArtifactService_ListSessionNamedUser", name), func(t *testing.T) {
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %T", err)
+		}
+		testArtifactService_ListSessionNamedUser(t, srv)
+	})
 	t.Run(fmt.Sprintf("Test%sArtifactService_GetArtifactVersion", name), func(t *testing.T) {
 		ctx := t.Context()
 		// Create the service using the factory for this sub-test.
@@ -65,6 +72,60 @@ func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (
 		}
 		testArtifactService_GetArtifactVersion(ctx, t, srv, name)
 	})
+}
+
+func testArtifactService_ListSessionNamedUser(t *testing.T, srv artifact.Service) {
+	for _, file := range []struct {
+		sessionID string
+		fileName  string
+	}{
+		{"user", "private.txt"},
+		{"user", "private.txt"}, // Multiple versions must not duplicate filenames.
+		{"user", "user:shared.txt"},
+		{"other-session", "user:shared.txt"},
+		{"other-session", "other.txt"},
+	} {
+		if _, err := srv.Save(t.Context(), &artifact.SaveRequest{
+			AppName: "app", UserID: "u", SessionID: file.sessionID,
+			FileName: file.fileName, Part: genai.NewPartFromText("fixture"),
+		}); err != nil {
+			t.Fatalf("Save failed: %T", err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		sessionID string
+		want      []string
+	}{
+		{
+			name:      "owner retains private and shared artifacts",
+			sessionID: "user",
+			want:      []string{"private.txt", "user:shared.txt"},
+		},
+		{
+			name:      "other session sees only its own and shared artifacts",
+			sessionID: "other-session",
+			want:      []string{"other.txt", "user:shared.txt"},
+		},
+		{
+			name:      "empty session sees only shared artifacts",
+			sessionID: "empty-session",
+			want:      []string{"user:shared.txt"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := srv.List(t.Context(), &artifact.ListRequest{
+				AppName: "app", UserID: "u", SessionID: tc.sessionID,
+			})
+			if err != nil {
+				t.Fatalf("List failed: %T", err)
+			}
+			if !slices.Equal(resp.FileNames, tc.want) {
+				t.Error("List must return only the session's own and user-scoped filenames, sorted and without duplicates")
+			}
+		})
+	}
 }
 
 func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service, testSuffix string) {

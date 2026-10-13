@@ -98,7 +98,10 @@ func buildSessionPrefix(appName, userID, sessionID string) string {
 }
 
 func buildUserPrefix(appName, userID string) string {
-	return fmt.Sprintf("%s/%s/user/", appName, userID)
+	// Session ID "user" shares this path with user-scoped artifacts, so include
+	// the filename namespace to exclude its private files. Python rejects the
+	// ID instead, but Go already accepts it.
+	return fmt.Sprintf("%s/%s/user/user:", appName, userID)
 }
 
 const (
