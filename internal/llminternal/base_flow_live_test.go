@@ -76,15 +76,17 @@ func startClosableLiveServer(t *testing.T, serveConn func(connNum int, conn *web
 	var upgrader websocket.Upgrader
 	var connCount atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Count before the upgrade: a client whose dial returned is then
+		// guaranteed to observe this connection in the count. The genai version
+		// 1.x pins returns from Live.Connect without waiting for setupComplete,
+		// so counting any later lets a test read the count first.
+		connNum := int(connCount.Add(1))
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("websocket upgrade failed: %v", err)
 			return
 		}
 		defer func() { _ = conn.Close() }()
-		// Count before the setup exchange: a client that saw setupComplete is
-		// then guaranteed to observe this connection in the count.
-		connNum := int(connCount.Add(1))
 		if _, _, err := conn.ReadMessage(); err != nil {
 			t.Errorf("reading setup frame failed: %v", err)
 			return
