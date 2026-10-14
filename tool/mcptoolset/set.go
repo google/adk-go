@@ -198,31 +198,27 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
-// reservedToolNames are names this framework itself puts on the wire, in two classes.
+// reservedToolNames are the names the framework puts on the wire itself, out of band
+// from anything this toolset can observe: set_model_response is injected when the agent
+// declares an output schema, transfer_to_agent when auto flow applies to the agent, and
+// finish_task and task_completed by the workflow agents. The framework, not the model,
+// resolves those names back out of the request, so a server tool holding one changes
+// which implementation runs -- and since the toolset cannot tell whether the framework
+// will register its own, it withholds all four unconditionally.
 //
-// Dispatch names are resolved back out of the request by the framework rather than by
-// the model, so a server tool holding one of them changes which implementation runs.
-//
-// In-model built-ins (google_search and the rest) are registered through
-// RegisterToolFactory in internal/configurable and append to the request's config
-// tools; they are listed here because a second tool answering to the same name leaves
-// the model, not the framework, choosing between them.
-//
-// Only names this repository actually defines belong here. google_maps is the Java
-// spelling (the Go tool is google_maps_grounding), and vertex_ai_search and
-// code_execution appear in no Go tool, so listing them would refuse names this port
+// Names the *application* configures are deliberately not listed. The in-model built-ins
+// (google_search, url_context, google_maps_grounding) and the tool packages
+// exitlooptool, loadmemorytool and loadartifactstool all appear in the agent's own tool
+// list, so a server tool sharing one of those names is a collision only when the
+// application actually configured the built-in, and the framework reports it where the
+// full tool list is known. Withholding them here instead dropped a server's own
+// google_search for an agent that had configured no built-in search -- a name this port
 // never had a problem with.
 var reservedToolNames = map[string]struct{}{
-	"set_model_response":    {},
-	"transfer_to_agent":     {},
-	"finish_task":           {},
-	"task_completed":        {},
-	"exit_loop":             {},
-	"load_artifacts":        {},
-	"load_memory":           {},
-	"google_search":         {},
-	"google_maps_grounding": {},
-	"url_context":           {},
+	"set_model_response": {},
+	"transfer_to_agent":  {},
+	"finish_task":        {},
+	"task_completed":     {},
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.

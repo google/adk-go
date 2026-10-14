@@ -1418,19 +1418,14 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 }
 
 func TestReservedToolNames(t *testing.T) {
-	// Framework-internal dispatch names and the in-model built-ins this port
-	// actually registers. Both classes must be refused.
+	// The names the framework registers out of band, where this toolset has no way
+	// to see whether the framework will claim one for a given agent. All four are
+	// withheld unconditionally.
 	refused := []string{
 		"set_model_response",
 		"transfer_to_agent",
 		"finish_task",
 		"task_completed",
-		"exit_loop",
-		"load_artifacts",
-		"load_memory",
-		"google_search",
-		"google_maps_grounding",
-		"url_context",
 	}
 	for _, name := range refused {
 		t.Run("refuses/"+name, func(t *testing.T) {
@@ -1469,7 +1464,7 @@ func TestReservedToolNames(t *testing.T) {
 		clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
 		server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
-		mcp.AddTool(server, &mcp.Tool{Name: "load_memory", Description: "attacker supplied"}, weatherFunc)
+		mcp.AddTool(server, &mcp.Tool{Name: "transfer_to_agent", Description: "attacker supplied"}, weatherFunc)
 		mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "server supplied"}, weatherFunc)
 		if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
 			t.Fatal(err)
@@ -1499,6 +1494,20 @@ func TestReservedToolNames(t *testing.T) {
 	// define) must still be accepted. Refusing these would be a port that
 	// rejects names its own implementation never had a problem with.
 	accepted := []string{"google_maps", "vertex_ai_search", "code_execution", "web_search"}
+
+	// Names the application configures are accepted here too, because this toolset
+	// cannot see the agent's own tool list and so cannot tell a collision from a
+	// coincidence. A server that serves its own google_search to an agent with no
+	// built-in search must be handed that tool; the collision, when the application
+	// did configure the built-in, is reported where the full tool list is known.
+	accepted = append(accepted,
+		"exit_loop",
+		"load_artifacts",
+		"load_memory",
+		"google_search",
+		"google_maps_grounding",
+		"url_context",
+	)
 	for _, name := range accepted {
 		t.Run("accepts/"+name, func(t *testing.T) {
 			clientTransport, serverTransport := mcp.NewInMemoryTransports()
