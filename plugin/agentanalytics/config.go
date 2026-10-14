@@ -173,8 +173,16 @@ type Config struct {
 	// can block for several ShutdownTimeout periods.
 	DisableFlushOnRunEnd bool
 
-	// DisableSchemaUpgrade skips automatic additive schema upgrades on
-	// existing BigQuery tables during plugin initialization.
+	// DisableSchemaUpgrade stops the plugin from adding missing columns to an
+	// existing table during initialization; a missing table is still created.
+	// The schema of an existing table is then neither inspected nor upgraded,
+	// so the table must already have every column that the plugin writes:
+	// every column of [EventsSchema], including event_id, except those in
+	// PayloadColumnDenylist. Otherwise construction succeeds, but every
+	// AppendRows call fails with "Input schema has more fields than BigQuery
+	// schema" and every row is dropped. When false (the default), missing
+	// columns are added, which needs the bigquery.tables.update permission; a
+	// table that already has every column is not updated.
 	DisableSchemaUpgrade bool
 
 	// EnableOTelCorrelation also writes the ambient OpenTelemetry trace and

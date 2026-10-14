@@ -48,18 +48,29 @@ const (
 )
 
 // sensitiveKeys holds normalized (lowercase, "-" replaced by "_") map keys
-// whose values are always redacted. It is the adk-python list plus "bearer",
-// "passphrase" and "x_goog_api_key". Envelope names such as "credentials" are
-// deliberately not listed: the credential fields nested under them are
-// redacted one by one. isSensitiveKey and the text patterns also match these
+// whose values are always redacted. It is the adk-python list plus
+// "aws_secret_access_key", "aws_session_token", "bearer", "credential",
+// "credentials", "passphrase", "secret_access_key", "session_token" and
+// "x_goog_api_key". A value under "credential" or "credentials" in a map, in
+// JSON text, in a Python dict or in a Go struct printed with %+v is redacted
+// as a whole, so that no field of a credentials envelope, such as the AWS STS
+// result {"Credentials": {"AccessKeyId": ..., "SecretAccessKey": ...,
+// "SessionToken": ...}}, is logged, whatever its name. In YAML or other
+// key: value text, the fields under "credentials:" are not redacted as a
+// whole: each is redacted only if its own name is sensitive (see
+// nestsSensitiveKey). isSensitiveKey and the text patterns also match these
 // names without separators, as in the camelCase apiKey or the Go field name
 // APIKey.
 var sensitiveKeys = map[string]struct{}{
 	"access_token":          {},
 	"api_key":               {},
 	"authorization":         {},
+	"aws_secret_access_key": {},
+	"aws_session_token":     {},
 	"bearer":                {},
 	"client_secret":         {},
+	"credential":            {},
+	"credentials":           {},
 	"google_access_id":      {},
 	"id_token":              {},
 	"passphrase":            {},
@@ -68,6 +79,8 @@ var sensitiveKeys = map[string]struct{}{
 	"proxy_authorization":   {},
 	"refresh_token":         {},
 	"secret":                {},
+	"secret_access_key":     {},
+	"session_token":         {},
 	"sig":                   {},
 	"signature":             {},
 	"token":                 {},
@@ -104,8 +117,22 @@ var (
 	// textKeyValTokenRe matches key=value and key: value pairs. As in
 	// adk-python, the key may be quoted (Python dict reprs use single
 	// quotes); it may also be quoted with escaped quotes, as in JSON text
-	// formatted with %q.
-	textKeyValTokenRe = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)((?:\\?["'])?)\s*([=:])\s*(` + sensitiveValueRegex(`\s,;&}`) + `)`)
+	// formatted with %q. Unlike adk-python's, a bare value does not stop at
+	// "}", so a value such as "ab}rest" is redacted as a whole;
+	// redactTextKeyValue leaves out the "}" and "]" that end the value and
+	// close a bracket opened before the key, as in the %+v output
+	// {APIKey:...}.
+	textKeyValTokenRe = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)((?:\\?["'])?)\s*([=:])\s*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	// nestedKeyNameRe matches a value that is itself a sensitive key name
+	// (see nestsSensitiveKey): the name, possibly after a quote, which may
+	// be escaped, and the first words of a compound name, ending in a
+	// character other than a letter, a digit or "_", such as the "X-Auth-"
+	// of X-Auth-Token, the "spring.datasource." of
+	// spring.datasource.password or the "db/" of db/password.
+	nestedKeyNameRe = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:[^\s"'\\]*[^\w\s"'\\])?(?:` + bareSensitiveKeyRegex() + `)$`)
+	// quotedValueRe matches a quoted value (see quotedValueRegex) at the
+	// start of a text.
+	quotedValueRe = regexp.MustCompile(`^(?:` + quotedValueRegex() + `)`)
 	// quotedSensitiveKeyRe detects a quoted sensitive key that is followed by
 	// a key-value delimiter. A quoted sensitive word in prose, such as
 	// `What does "token" mean?`, is not a key.
@@ -185,14 +212,20 @@ func hasQuotedSensitiveKey(s string) bool {
 // sensitiveValueRegex returns the pattern for the value that follows a
 // sensitive key: a double- or single-quoted string, a string quoted with
 // escaped quotes (\" or \'), or a run of characters other than those in
-// bareStop. For key=value text, bareStop is adk-python's `\s,;&}`, so that a
-// value such as "abc)rest" or "//rest" is redacted as a whole.
+// bareStop. For key=value text, bareStop is `\s,;&`, adk-python's class
+// without "}", so that a value such as "abc)rest", "ab}rest" or "//rest" is
+// redacted as a whole.
 func sensitiveValueRegex(bareStop string) string {
+	return quotedValueRegex() + `|[^` + bareStop + `]+`
+}
+
+// quotedValueRegex returns the pattern for a quoted value: a double- or
+// single-quoted string, or a string quoted with escaped quotes (\" or \').
+func quotedValueRegex() string {
 	return `"(?:[^"\\]|\\.)*"` +
 		`|'(?:[^'\\]|\\.)*'` +
 		`|` + escapedQuotedRegex(`"`) +
-		`|` + escapedQuotedRegex(`'`) +
-		`|[^` + bareStop + `]+`
+		`|` + escapedQuotedRegex(`'`)
 }
 
 // escapedQuotedRegex returns the pattern for a string delimited by \q, as
@@ -1121,7 +1154,10 @@ func scrubTextPatterns(s string) string {
 	s = replaceMatches(s, bearerTokenRe, redactBearerToken)
 	s = replaceMatches(s, basicTokenRe, redactBasicCredential)
 	s = replaceMatches(s, jsonKeyValTokenRe, redactJSONKeyValue)
-	return replaceMatches(s, textKeyValTokenRe, redactTextKeyValue)
+	var brackets openBrackets
+	return replaceMatches(s, textKeyValTokenRe, func(s string, loc []int) (string, int) {
+		return redactTextKeyValue(s, loc, &brackets)
+	})
 }
 
 // replaceMatches replaces each match of re in s with the text returned by
@@ -1208,14 +1244,204 @@ func redactJSONKeyValue(s string, loc []int) (string, int) {
 }
 
 // redactTextKeyValue replaces a textKeyValTokenRe match, keeping the key, its
-// quote, the delimiter and the quotes around the value.
-func redactTextKeyValue(s string, loc []int) (string, int) {
-	end := sensitiveValueEnd(s, loc[8], loc[9])
-	inner, quote := unquoteValue(s[loc[8]:end])
+// quote, the delimiter and the quotes around the value. A value that is itself
+// a sensitive key, as in the YAML "credentials:\n  token: ...", is left in
+// place, so that the pair it starts is matched and redacted on its own (see
+// nestsSensitiveKey). A quoted value ends at its closing quote. A value that
+// opens a JSON object or array is extended as in sensitiveValueEnd. A bare
+// value runs on past any "}" or "]" in it and is redacted as a whole, except
+// for the "}" and "]" at its end that close a bracket opened before the key,
+// and the punctuation after them (see trimEnclosingClosers), as in the %+v
+// output {APIKey:...} or [{APIKey:...}]. brackets counts the brackets opened
+// before the key.
+func redactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, int) {
+	open := brackets.before(s, loc[0])
+	start, end := loc[8], loc[9]
+	if nestsSensitiveKey(s, start, end) {
+		return s[loc[0]:start], start
+	}
+	if _, quote := unquoteValue(s[start:end]); quote == "" {
+		// rest is where the text after a JSON object or array value starts.
+		rest := sensitiveValueEnd(s, start, start)
+		end = rest + len(trimEnclosingClosers(s[rest:max(end, rest)], open))
+	}
+	brackets.skip(end)
+	if end == start {
+		// Only closing brackets follow the delimiter, as in {Password:}.
+		return s[loc[0]:end], end
+	}
+	inner, quote := unquoteValue(s[start:end])
 	if isRedactedValue(inner) {
 		return s[loc[0]:end], end
 	}
 	return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+}
+
+// maxNestedKeyLen is the length of the longest value that nestsSensitiveKey
+// may take for a key. A longer value is redacted, so that it is not matched
+// again from each key in it.
+const maxNestedKeyLen = 128
+
+// nestsSensitiveKey reports whether the value matched at s[start:end] is a
+// sensitive key rather than a value, as in the YAML "credentials:\n  token:
+// ..." or the text "credentials: token = ...". That is the case only when
+// the whole value is a sensitive key name (see nestedKeyNameRe) that ends
+// with a delimiter or is followed by one, and a value follows the
+// delimiter, so that the pair that the name starts is matched and redacted
+// on its own; a quoted name must be followed by a delimiter. A value made of
+// such a name and a delimiter followed by the start of a quoted value that
+// runs on past it, as in credentials: password="a b", is a key too. So is a
+// value made of such a name, a delimiter and a redacted value, as in
+// "token:[REDACTED]", so that scrubbing redacted text again changes nothing.
+// Any other value, such as the quoted 'token: abc def', abc-token:def, or an
+// abc-token: with no value after it, is not a key, and neither is a value
+// that opens a JSON object or array, so that a credentials envelope written
+// that way is redacted as a whole. Only the value, if it is at most
+// maxNestedKeyLen bytes long, and the whitespace, the delimiter and the start
+// of the next value after it, up to the next whitespace, ",", ";" or "&", or
+// to the character after the closing quote of a quoted value that starts in
+// the value or after it, are read.
+func nestsSensitiveKey(s string, start, end int) bool {
+	if end-start > maxNestedKeyLen || s[start] == '{' || s[start] == '[' {
+		return false
+	}
+	v := s[start:end]
+	if inner, quote := unquoteValue(v); quote != "" {
+		return nestedKeyNameRe.MatchString(inner) && valueFollowsDelimiter(s, end)
+	}
+	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
+		return nestedKeyNameRe.MatchString(v[:len(v)-1]) && valueStartsAt(s, end)
+	}
+	if followedByDelimiter(s, end) {
+		return nestedKeyNameRe.MatchString(v) && valueFollowsDelimiter(s, end)
+	}
+	// A name and a delimiter followed by a quoted value that holds
+	// whitespace, ",", ";" or "&", as in credentials: password="a b", where
+	// the value matched ends inside the quoted value.
+	if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') &&
+		len(quotedValueRe.FindString(s[start+q:])) > end-start-q &&
+		nestedKeyNameRe.MatchString(v[:q-1]) && valueStartsAt(s, start+q) {
+		return true
+	}
+	// A pair that an earlier pass redacted, as in "token:[REDACTED]", or
+	// token:"[REDACTED]"} in the %+v output of a struct.
+	i := strings.LastIndexAny(v, ":=")
+	if i <= 0 {
+		return false
+	}
+	inner, _ := unquoteValue(trimTrailingPunctuation(v[i+1:]))
+	return isRedactedValue(inner) && nestedKeyNameRe.MatchString(v[:i])
+}
+
+// regexpSpace holds the bytes that \s matches in a regular expression such
+// as textKeyValTokenRe.
+const regexpSpace = "\t\n\f\r "
+
+// followedByDelimiter reports whether a key-value delimiter, ":" or "=",
+// follows s[:i], possibly after whitespace.
+func followedByDelimiter(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], regexpSpace)
+	return rest != "" && (rest[0] == ':' || rest[0] == '=')
+}
+
+// valueFollowsDelimiter reports whether a key-value delimiter follows s[:i],
+// possibly after whitespace, and a value starts after the delimiter (see
+// valueStartsAt).
+func valueFollowsDelimiter(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], regexpSpace)
+	return rest != "" && (rest[0] == ':' || rest[0] == '=') && valueStartsAt(rest, 1)
+}
+
+// valueStartsAt reports whether a value that can be redacted starts in s at
+// i, possibly after whitespace. The value read is a quoted value (see
+// quotedValueRegex) that ends there (see quotedValueEnds), which runs on
+// past any whitespace in it to its closing quote, or else the first run of
+// bytes, up to the next whitespace, ",", ";" or "&". It must hold a byte
+// other than whitespace and the closing brackets, quotes and punctuation
+// that may end a value (see trimEnclosingClosers), unlike the "}" that
+// closes the struct in the text {Password:abc-token: }, the unclosed quote
+// in {Password:abc-token: "} or the empty quotes in {Password:abc-token: ""}.
+func valueStartsAt(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], regexpSpace)
+	if q := quotedValueRe.FindString(rest); q != "" && quotedValueEnds(rest, len(q)) {
+		rest, _ = unquoteValue(q)
+	} else if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
+		rest = rest[:n]
+	}
+	return strings.Trim(rest, regexpSpace+closingPunctuation) != ""
+}
+
+// quotedValueEnds reports whether the quoted value s[:n] at the start of s
+// ends there: s ends after it, or goes on with a character that is not a
+// letter, a digit, "_" or the quote that the value starts with. Otherwise
+// its quotes close one string and open the next rather than enclose a
+// value, as do the quotes around " for user " in the text
+// "password=abc-token: " for user "bob"".
+func quotedValueEnds(s string, n int) bool {
+	after := s[n:]
+	if after == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(after)
+	if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	_, quote := unquoteValue(s[:n])
+	return !strings.HasPrefix(after, quote)
+}
+
+// openBrackets counts the brackets, "{" or "[", that are open in a text read
+// from its start. A closing bracket with none open is ignored.
+type openBrackets struct {
+	pos   int // s[:pos] has been read or skipped
+	depth int
+}
+
+// before reads s up to i and returns the number of brackets open there.
+func (b *openBrackets) before(s string, i int) int {
+	for ; b.pos < i; b.pos++ {
+		switch s[b.pos] {
+		case '{', '[':
+			b.depth++
+		case '}', ']':
+			b.depth = max(b.depth-1, 0)
+		}
+	}
+	return b.depth
+}
+
+// skip moves past s[:i] without reading it, as for a redacted value, so that
+// scrubbing redacted text again changes nothing.
+func (b *openBrackets) skip(i int) {
+	b.pos = max(b.pos, i)
+}
+
+// closingPunctuation holds the closing brackets, closing quotes and
+// punctuation that may follow the text of a bare value, as in the %q output
+// "{APIKey:...}".
+const closingPunctuation = `}])"'\:.`
+
+// trimEnclosingClosers returns v, the text of a value, without the "}" and
+// "]" at its end that close brackets opened before it, at most open of them,
+// and without the punctuation after them, such as the closing quote in the
+// %q output "{APIKey:...}". A "}" or "]" followed by anything else, as in
+// "ab}rest", or one that closes a bracket opened in v, stays in v.
+func trimEnclosingClosers(v string, open int) string {
+	tail := len(strings.TrimRight(v, closingPunctuation))
+	var inner openBrackets
+	depth := inner.before(v, tail)
+	var closers []int
+	for i := tail; i < len(v); i++ {
+		if v[i] == '}' || v[i] == ']' {
+			closers = append(closers, i)
+		}
+	}
+	// The first depth closers close brackets opened in v; at most open of
+	// the others close brackets opened before it.
+	if j := max(depth, len(closers)-open); j < len(closers) {
+		return v[:closers[j]]
+	}
+	return v
 }
 
 // sensitiveValueEnd returns the end of the value matched at s[start:end]. A

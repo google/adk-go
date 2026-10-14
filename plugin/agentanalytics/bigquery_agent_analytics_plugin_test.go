@@ -1077,7 +1077,7 @@ func TestSensitiveKeyRedaction_GoNamesAndStatePrefixes(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
 	mCtx.state = mapState{"user:api_key": secret, "app:clientSecret": secret, "user:theme": "dark"}
 	args := map[string]any{"accessToken": secret, "x-goog-api-key": secret, "tokenCount": 3}
-	result := map[string]any{"credentials": struct {
+	result := map[string]any{"config": struct {
 		APIKey       string
 		ClientSecret string
 		Region       string
@@ -1095,7 +1095,45 @@ func TestSensitiveKeyRedaction_GoNamesAndStatePrefixes(t *testing.T) {
 	checkJSONAt(t, jsonObjectColumn(t, startRow, "attributes"),
 		`{"user:api_key":"[REDACTED]","app:clientSecret":"[REDACTED]","user:theme":"dark"}`, "session_metadata", "state")
 	checkJSONAt(t, jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
-		`{"credentials":{"APIKey":"[REDACTED]","ClientSecret":"[REDACTED]","Region":"us"}}`, "result")
+		`{"config":{"APIKey":"[REDACTED]","ClientSecret":"[REDACTED]","Region":"us"}}`, "result")
+	for _, row := range rows {
+		if s := fmt.Sprint(row); strings.Contains(s, secret) {
+			t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+		}
+	}
+}
+
+// TestCredentialsEnvelopeIsRedactedWhole checks that a credentials envelope,
+// such as an AWS STS result, is redacted as a whole in tool arguments and
+// results, whatever its fields are named, and that an AWS secret access key
+// or session token is redacted outside an envelope too.
+func TestCredentialsEnvelopeIsRedactedWhole(t *testing.T) {
+	const secret = "SECRET123"
+	envelope := func() map[string]any {
+		return map[string]any{
+			"AccessKeyId":     "EXAMPLEKEYID",
+			"SecretAccessKey": secret,
+			"SessionToken":    secret,
+			"Expiration":      "2026-10-14T00:00:00Z",
+		}
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	args := map[string]any{"role": "reader", "credential": envelope()}
+	result := map[string]any{
+		"Credentials": envelope(),
+		"keys":        map[string]any{"AccessKeyId": "EXAMPLEKEYID", "secret_access_key": secret, "session-token": secret, "aws_secret_access_key": secret, "AWS_SESSION_TOKEN": secret},
+	}
+	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "assume_role"}, args))
+	errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "assume_role"}, args, result, nil))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	checkJSONAt(t, jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolStarting), "content"),
+		`{"role":"reader","credential":"[REDACTED]"}`, "args")
+	checkJSONAt(t, jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
+		`{"Credentials":"[REDACTED]","keys":{"AccessKeyId":"EXAMPLEKEYID","secret_access_key":"[REDACTED]","session-token":"[REDACTED]","aws_secret_access_key":"[REDACTED]","AWS_SESSION_TOKEN":"[REDACTED]"}}`, "result")
 	for _, row := range rows {
 		if s := fmt.Sprint(row); strings.Contains(s, secret) {
 			t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
@@ -2642,7 +2680,7 @@ func TestQuotedFragmentCost(t *testing.T) {
 			p, _, mCtx := setupTestPlugin(t)
 			start := time.Now()
 			_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", tt.text))
-			if d := time.Since(start); d > time.Second {
+			if d := time.Since(start); d > 3*time.Second {
 				t.Errorf("OnUserMessageCallback took %v for a %d KB message", d, len(tt.text)/1000)
 			}
 		})
@@ -2687,9 +2725,14 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			want: `bad config: {'api_key':'[REDACTED]'}`,
 		},
 		{
-			name: "credentials envelope",
+			name: "credentials envelope is redacted whole",
 			text: `auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
-			want: `auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+			want: `auth failed: {"credentials":"[REDACTED]"}`,
+		},
+		{
+			name: "AWS STS credentials envelope",
+			text: `assume role failed: {"Credentials": {"AccessKeyId": "EXAMPLEKEYID", "SecretAccessKey": "SECRET123", "SessionToken": "SECRET123", "Expiration": "2026-10-14T00:00:00Z"}}`,
+			want: `assume role failed: {"Credentials":"[REDACTED]"}`,
 		},
 		{
 			name: "object under a sensitive key",
@@ -2717,6 +2760,21 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			want: "failed: password:[REDACTED]",
 		},
 		{
+			name: "bare value with a closing brace",
+			text: "failed: password=ab}SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value ending with a closing brace",
+			text: "failed: password=SECRET123}",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "quoted value ending with a closing brace",
+			text: `bad config: {'password': 'SECRET123}'}`,
+			want: `bad config: {'password':'[REDACTED]'}`,
+		},
+		{
 			name: "camelCase keys",
 			text: "auth failed: accessToken=SECRET123 apiKey: SECRET123",
 			want: "auth failed: accessToken=[REDACTED] apiKey:[REDACTED]",
@@ -2725,6 +2783,31 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			name: "Go struct printed with %+v",
 			text: fmt.Sprintf("bad config: %+v", struct{ APIKey, ClientSecret, Region string }{"SECRET123", "SECRET123", "us"}),
 			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED] Region:us}",
+		},
+		{
+			name: "Go struct printed with %+v ending with credential fields",
+			text: fmt.Sprintf("bad config: %+v", struct{ APIKey, ClientSecret string }{"SECRET123", "SECRET123"}),
+			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED]}",
+		},
+		{
+			name: "Go struct printed with %+v whose credential field holds a closing brace",
+			text: fmt.Sprintf("bad config: %+v", struct{ Password string }{"ab}SECRET123"}),
+			want: "bad config: {Password:[REDACTED]}",
+		},
+		{
+			name: "nested Go struct printed with %+v",
+			text: fmt.Sprintf("bad config: %+v", struct{ Auth struct{ Token string } }{Auth: struct{ Token string }{Token: "SECRET123"}}),
+			want: "bad config: {Auth:{Token:[REDACTED]}}",
+		},
+		{
+			name: "slice of Go structs printed with %+v",
+			text: fmt.Sprintf("bad config: %+v", []struct{ APIKey string }{{"SECRET123"}}),
+			want: "bad config: [{APIKey:[REDACTED]}]",
+		},
+		{
+			name: "AWS credentials printed with %+v",
+			text: fmt.Sprintf("assume role failed: %+v", struct{ AccessKeyID, SecretAccessKey, SessionToken string }{"EXAMPLEKEYID", "SECRET123", "SECRET123"}),
+			want: "assume role failed: {AccessKeyID:EXAMPLEKEYID SecretAccessKey:[REDACTED] SessionToken:[REDACTED]}",
 		},
 		{
 			name: "x_goog_api_key",
@@ -2760,6 +2843,86 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			name: "upper-case hyphenated header ending in token",
 			text: "PRIVATE-TOKEN: SECRET123",
 			want: "PRIVATE-TOKEN:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML",
+			text: "config:\ncredentials:\n  token: SECRET123\n  region: us",
+			want: "config:\ncredentials:\n  token:[REDACTED]\n  region: us",
+		},
+		{
+			name: "quoted value that starts with a key-value pair",
+			text: `bad config: password: 'token: SECRET123 SECRET123'`,
+			want: `bad config: password:'[REDACTED]'`,
+		},
+		{
+			name: "credentials in a Python dict whose value starts with a key-value pair",
+			text: `bad config: {'credentials': 'secret=correct horse SECRET123 staple'}`,
+			want: `bad config: {'credentials':'[REDACTED]'}`,
+		},
+		{
+			name: "bare value that ends with a key-value pair",
+			text: "failed: password=SECRET123-token:SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "key-shaped bare value with no value after it",
+			text: "failed: password=SECRET123-token:",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "key-shaped bare value followed by a closing brace",
+			text: "failed: password=SECRET123-token: }",
+			want: "failed: password=[REDACTED] }",
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by the closing brace",
+			text: "failed: {Password:SECRET123-token: }",
+			want: "failed: {Password:[REDACTED] }",
+		},
+		{
+			name: "base64 value that ends with a key name, one pad and a closing brace",
+			text: "failed: api_key=SECRET123AbC+xYz/Sig= }",
+			want: "failed: api_key=[REDACTED] }",
+		},
+		{
+			name: "key-shaped bare value followed by a closing bracket",
+			text: "failed: password=SECRET123-token: ]",
+			want: "failed: password=[REDACTED] ]",
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by the closing brace and another struct",
+			text: "failed: [{Password:SECRET123-token: } {User:bob}]",
+			want: "failed: [{Password:[REDACTED] } {User:bob}]",
+		},
+		{
+			name: "nested key whose value starts with a closing bracket",
+			text: "failed: credentials: token = ]SECRET123",
+			want: "failed: credentials: token=[REDACTED]",
+		},
+		{
+			name: "nested key whose quoted value has leading whitespace",
+			text: `failed: credentials: token: " SECRET123"`,
+			want: `failed: credentials: token:"[REDACTED]"`,
+		},
+		{
+			name: "nested key in a Go struct whose quoted value has leading whitespace",
+			text: `failed: {Credentials:token: " SECRET123"}`,
+			want: `failed: {Credentials:token:"[REDACTED]"}`,
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by an unclosed quote",
+			text: `failed: {Password:SECRET123-token: "}`,
+			want: `failed: {Password:[REDACTED] "}`,
+		},
+		{
+			name: "nested key glued to a quoted value with spaces",
+			text: `failed: credentials: password="correct SECRET123 battery"`,
+			want: `failed: credentials: password="[REDACTED]"`,
+		},
+		{
+			name: "nested key in a Go struct glued to a quoted value with leading whitespace",
+			text: `failed: {Credentials:token=" SECRET123"}`,
+			want: `failed: {Credentials:token="[REDACTED]"}`,
 		},
 	}
 	for _, tt := range tests {

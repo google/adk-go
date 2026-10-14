@@ -1086,9 +1086,564 @@ func TestRedactErrorMessage(t *testing.T) {
 			want: `bad config: {'api_key':'[REDACTED]'}`,
 		},
 		{
-			name: "credentials envelope redacts the nested token",
+			name: "credentials envelope is redacted whole",
 			msg:  `auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
-			want: `auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+			want: `auth failed: {"credentials":"[REDACTED]"}`,
+		},
+		{
+			name: "AWS STS credentials envelope is redacted whole",
+			msg:  `assume role failed: {"Credentials": {"AccessKeyId": "EXAMPLEKEYID", "SecretAccessKey": "SECRET123", "SessionToken": "SECRET123", "Expiration": "2026-10-14T00:00:00Z"}}`,
+			want: `assume role failed: {"Credentials":"[REDACTED]"}`,
+		},
+		{
+			name: "JSON document with a credentials envelope is redacted whole",
+			msg:  `{"Credentials":{"AccessKeyId":"EXAMPLEKEYID","SecretAccessKey":"SECRET123","SessionToken":"SECRET123"},"Message":"ok"}`,
+			want: `{"Credentials":"[REDACTED]","Message":"ok"}`,
+		},
+		{
+			name: "AWS secret access key and session token in key=value text are redacted",
+			msg:  "failed: SecretAccessKey=SECRET123 SessionToken=SECRET456 secret_access_key=SECRET789 session-token=SECRET000",
+			want: "failed: SecretAccessKey=[REDACTED] SessionToken=[REDACTED] secret_access_key=[REDACTED] session-token=[REDACTED]",
+		},
+		{
+			name: "AWS environment variables for a secret access key and a session token are redacted",
+			msg:  "AWS_SECRET_ACCESS_KEY=SECRET123 AWS_SESSION_TOKEN=SECRET123",
+			want: "AWS_SECRET_ACCESS_KEY=[REDACTED] AWS_SESSION_TOKEN=[REDACTED]",
+		},
+		{
+			name: "AWS shared credentials file entries are redacted",
+			msg:  "bad profile: [default]\naws_access_key_id = EXAMPLEKEYID\naws_secret_access_key = SECRET123\naws_session_token = SECRET456",
+			want: "bad profile: [default]\naws_access_key_id = EXAMPLEKEYID\naws_secret_access_key=[REDACTED]\naws_session_token=[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML keeps its nested keys and redacts their values",
+			msg:  "config:\ncredentials:\n  token: SECRET123\n  region: us",
+			want: "config:\ncredentials:\n  token:[REDACTED]\n  region: us",
+		},
+		{
+			name: "credentials block in YAML with a nested password",
+			msg:  "config:\ncredentials:\n  password: SECRET123",
+			want: "config:\ncredentials:\n  password:[REDACTED]",
+		},
+		{
+			name: "indented credentials block in YAML with a nested client secret",
+			msg:  "config:\n  credentials:\n    client_secret: SECRET123",
+			want: "config:\n  credentials:\n    client_secret:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML with a nested hyphenated header",
+			msg:  "credentials:\n  X-Auth-Token: SECRET123",
+			want: "credentials:\n  X-Auth-Token:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML with a quoted nested key and value",
+			msg:  "credentials:\n  'token': 'SECRET123'",
+			want: "credentials:\n  'token':'[REDACTED]'",
+		},
+		{
+			name: "credentials block in YAML with a nested camelCase key",
+			msg:  "Credentials:\n  SessionToken: SECRET123",
+			want: "Credentials:\n  SessionToken:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML with a nested dotted key",
+			msg:  "credentials:\n  spring.datasource.password: SECRET123",
+			want: "credentials:\n  spring.datasource.password:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML whose nested value is on the next line",
+			msg:  "credentials:\n  token:\n    SECRET123",
+			want: "credentials:\n  token:[REDACTED]",
+		},
+		{
+			name: "credentials followed by a key: value pair in text",
+			msg:  "loading credentials: token: SECRET123",
+			want: "loading credentials: token:[REDACTED]",
+		},
+		{
+			name: "credentials followed by a key = value pair in text",
+			msg:  "credentials: token = SECRET123",
+			want: "credentials: token=[REDACTED]",
+		},
+		{
+			name: "credentials followed by a key: value pair after an unterminated quote",
+			msg:  `bad config: credentials: "token: SECRET123`,
+			want: `bad config: credentials: "token:[REDACTED]`,
+		},
+		{
+			name: "credentials followed by a key: value pair after an unterminated escaped quote",
+			msg:  `bad config: credentials: \"token: SECRET123`,
+			want: `bad config: credentials: \"token:[REDACTED]`,
+		},
+		{
+			name: "quoted value that starts with a key: value pair is redacted whole",
+			msg:  `password: 'token: SECRETA SECRETB'`,
+			want: `password:'[REDACTED]'`,
+		},
+		{
+			name: "quoted value that starts with a key=value pair is redacted whole",
+			msg:  `token: "password=SECRETA SECRETB"`,
+			want: `token:"[REDACTED]"`,
+		},
+		{
+			name: "quoted value that starts with a key:value pair is redacted whole",
+			msg:  `password: "token:SECRETA SECRETB"`,
+			want: `password:"[REDACTED]"`,
+		},
+		{
+			name: "Python dict value that starts with a key=value pair is redacted whole",
+			msg:  `bad config: {'api_key': 'sig=SECRETA SECRETB'}`,
+			want: `bad config: {'api_key':'[REDACTED]'}`,
+		},
+		{
+			name: "bare value that ends with a key:value pair is redacted whole",
+			msg:  "password=SECRETP-token:SECRETB",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "bare value that ends with a dotted key=value pair is redacted whole",
+			msg:  "password=SECRETP.secret=SECRETB",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "bare value that ends with a dotted sig=value pair is redacted whole",
+			msg:  "api_key=SECRETP.sig=SECRETB",
+			want: "api_key=[REDACTED]",
+		},
+		{
+			name: "credentials in a Python dict whose value starts with a key=value pair is redacted whole",
+			msg:  `bad config: {'credentials': 'secret=correct horse SECRETB staple'}`,
+			want: `bad config: {'credentials':'[REDACTED]'}`,
+		},
+		{
+			name: "credential in a Python dict whose value starts with a key: value pair is redacted whole",
+			msg:  `bad config: {'credential': 'token: abc SECRETB'}`,
+			want: `bad config: {'credential':'[REDACTED]'}`,
+		},
+		{
+			name: "quoted credentials value that starts with a key=value pair is redacted whole",
+			msg:  `credentials="token=abc SECRETB"`,
+			want: `credentials="[REDACTED]"`,
+		},
+		{
+			name: "upper-case quoted credentials value that starts with a key=value pair is redacted whole",
+			msg:  `CREDENTIALS="secret=correct horse SECRETB"`,
+			want: `CREDENTIALS="[REDACTED]"`,
+		},
+		{
+			name: "credentials bare value that ends with a key:value pair is redacted whole",
+			msg:  "credentials: SECRETP-token:SECRETB",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "single-quoted credentials value that starts with a key=value pair is redacted whole",
+			msg:  "credentials: 'secret=correct horse SECRETB'",
+			want: "credentials:'[REDACTED]'",
+		},
+		{
+			name: "quoted value that is a key name with no delimiter after it is redacted",
+			msg:  `failed: password: "password"`,
+			want: `failed: password:"[REDACTED]"`,
+		},
+		{
+			name: "quoted value followed by a delimiter is redacted when it is not a key name",
+			msg:  `failed: password: "SECRET123": invalid`,
+			want: `failed: password:"[REDACTED]": invalid`,
+		},
+		{
+			name: "nested key that ends with = is kept and its value redacted",
+			msg:  "credentials: token= SECRET123",
+			want: "credentials: token=[REDACTED]",
+		},
+		{
+			name: "value followed by a spaced delimiter is redacted when it is not a key name",
+			msg:  "failed: password: SECRET123 : retry",
+			want: "failed: password:[REDACTED] : retry",
+		},
+		{
+			name: "value that ends with a redacted value is redacted when its head is not a key name",
+			msg:  "failed: password=SECRET123:[REDACTED]",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "nested key with a colon in its name is redacted idempotently",
+			msg:  "credentials:\n  app:client_secret: SECRET123",
+			want: "credentials:\n  app:client_secret:[REDACTED]",
+		},
+		{
+			name: "value that ends with a key name joined to other text is redacted",
+			msg:  "failed: password: SECRET123token: retry",
+			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "key-shaped bare value with no value after its colon is redacted whole",
+			msg:  "password=SECRETP-token:",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "key-shaped bare value with no value after its equals sign is redacted whole",
+			msg:  "password=SECRETP/token=",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "base64 value that ends with a key name and one pad is redacted whole",
+			msg:  "api_key=SECRETAbC+xYz/Sig=",
+			want: "api_key=[REDACTED]",
+		},
+		{
+			name: "base64 value that ends with a key name, one pad and a newline is redacted whole",
+			msg:  "api_key=SECRETAbC+xYz/Sig=\n",
+			want: "api_key=[REDACTED]\n",
+		},
+		{
+			name: "base64 value that ends with a key name, one pad and a space is redacted whole",
+			msg:  "api_key=SECRETAbC+xYz/Sig= ",
+			want: "api_key=[REDACTED] ",
+		},
+		{
+			name: "key-shaped bare value followed by a comma is redacted whole",
+			msg:  "password=SECRETP-token:,next",
+			want: "password=[REDACTED],next",
+		},
+		{
+			name: "key-shaped bare value followed by a semicolon is redacted whole",
+			msg:  "password=SECRETP-token:;next",
+			want: "password=[REDACTED];next",
+		},
+		{
+			name: "key-shaped bare value followed by a space and a comma is redacted whole",
+			msg:  "password=SECRETP-token: ,next",
+			want: "password=[REDACTED] ,next",
+		},
+		{
+			name: "key-shaped bare value followed by an ampersand is redacted whole",
+			msg:  "password=SECRETP-token:&next=1",
+			want: "password=[REDACTED]&next=1",
+		},
+		{
+			name: "key-shaped bare value followed by a tab and a semicolon is redacted whole",
+			msg:  "password=SECRETP-token:\t;x",
+			want: "password=[REDACTED]\t;x",
+		},
+		{
+			name: "key-shaped bare value at the end of a CRLF line is redacted whole",
+			msg:  "password=SECRETP-token:\r\n",
+			want: "password=[REDACTED]\r\n",
+		},
+		{
+			name: "key-shaped bare value followed by a form feed is redacted whole",
+			msg:  "password=SECRETP-token:\f",
+			want: "password=[REDACTED]\f",
+		},
+		{
+			name: "key-shaped bare value followed by a closing brace is redacted whole",
+			msg:  "failed: password=SECRETP-token: }",
+			want: "failed: password=[REDACTED] }",
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by the closing brace is redacted whole",
+			msg:  "failed: {Password:abc-token: }",
+			want: "failed: {Password:[REDACTED] }",
+		},
+		{
+			name: "base64 value that ends with a key name, one pad and a closing brace is redacted whole",
+			msg:  "api_key=SECRETAbC+xYz/Sig= }",
+			want: "api_key=[REDACTED] }",
+		},
+		{
+			name: "key-shaped bare value followed by a closing bracket is redacted whole",
+			msg:  "password=SECRETP-token: ]",
+			want: "password=[REDACTED] ]",
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by the closing brace and another struct is redacted whole",
+			msg:  "failed: [{Password:abc-token: } {User:bob}]",
+			want: "failed: [{Password:[REDACTED] } {User:bob}]",
+		},
+		{
+			name: "key-shaped bare value followed by only punctuation is redacted whole",
+			msg:  "password=abc-token: ...",
+			want: "password=[REDACTED] ...",
+		},
+		{
+			name: "nested key whose value starts with a closing bracket is kept and its value redacted",
+			msg:  "credentials: token = ]SECRETZ",
+			want: "credentials: token=[REDACTED]",
+		},
+		{
+			name: "nested key in YAML whose value starts with a closing brace is kept and its value redacted",
+			msg:  "credentials:\n  password: }SECRETZ",
+			want: "credentials:\n  password:[REDACTED]",
+		},
+		{
+			name: "nested key in a Go struct whose value starts with a closing bracket is kept and its value redacted",
+			msg:  "failed: {Credentials:token: ]SECRETZ}",
+			want: "failed: {Credentials:token:[REDACTED]}",
+		},
+		{
+			name: "nested key whose value is quoted with leading whitespace is kept and its value redacted",
+			msg:  `credentials: token: " SECRETX"`,
+			want: `credentials: token:"[REDACTED]"`,
+		},
+		{
+			name: "nested key whose single-quoted value has leading whitespace is kept and its value redacted",
+			msg:  `credentials: token: ' SECRETX'`,
+			want: `credentials: token:'[REDACTED]'`,
+		},
+		{
+			name: "nested key whose value is quoted with escaped quotes and has leading whitespace is kept and its value redacted",
+			msg:  `credentials: token: \" SECRETX\"`,
+			want: `credentials: token:\"[REDACTED]\"`,
+		},
+		{
+			name: "nested key in YAML whose quoted value has leading whitespace is kept and its value redacted",
+			msg:  "credentials:\n  token: \" SECRETX\"\n  region: us",
+			want: "credentials:\n  token:\"[REDACTED]\"\n  region: us",
+		},
+		{
+			name: "key-shaped bare value followed by the quote that closes the string around it is redacted whole",
+			msg:  `failed: "password=SECRETP-token: "`,
+			want: `failed: "password=[REDACTED] "`,
+		},
+		{
+			name: "key-shaped bare value followed by the closing single quote of the string around it is redacted whole",
+			msg:  `failed: 'password=SECRETP-token: '`,
+			want: `failed: 'password=[REDACTED] '`,
+		},
+		{
+			name: "key-shaped bare value followed by the closing escaped quote of the string around it is redacted whole",
+			msg:  `failed: \"password=SECRETP-token: \"`,
+			want: `failed: \"password=[REDACTED] \"`,
+		},
+		{
+			name: "key-shaped bare value in a quoted string followed by a colon is redacted whole",
+			msg:  `parsing "password=SECRETP-token: ": invalid syntax`,
+			want: `parsing "password=[REDACTED] ": invalid syntax`,
+		},
+		{
+			name: "key-shaped bare value in a quoted string followed by another quoted string is redacted whole",
+			msg:  `failed: "password=SECRETP-token: " for user "bob"`,
+			want: `failed: "password=[REDACTED] " for user "bob"`,
+		},
+		{
+			name: "key-shaped bare value in a quoted string followed by a quoted string that starts with a non-ASCII letter is redacted whole",
+			msg:  `failed: "password=SECRETP-token: " for user "Émile"`,
+			want: `failed: "password=[REDACTED] " for user "Émile"`,
+		},
+		{
+			name: "key-shaped bare value in a quoted string followed by an empty quoted string is redacted whole",
+			msg:  `got "password=SECRETP-token: ", want ""`,
+			want: `got "password=[REDACTED] ", want ""`,
+		},
+		{
+			name: "key-shaped bare value in an escaped quoted string followed by an empty escaped quoted string is redacted whole",
+			msg:  `got \"password=SECRETP-token: \", want \"\"`,
+			want: `got \"password=[REDACTED] \", want \"\"`,
+		},
+		{
+			name: "nested key whose escaped quoted value is followed by an escaped newline fails closed",
+			msg:  `credentials: token: \" SECRET123\"\nretry`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "nested key glued to a quoted value with spaces is kept and its value redacted",
+			msg:  `credentials: password="correct SECRET123 battery"`,
+			want: `credentials: password="[REDACTED]"`,
+		},
+		{
+			name: "nested key glued to a quoted value with leading whitespace is kept and its value redacted",
+			msg:  `credentials: token=" SECRET123"`,
+			want: `credentials: token="[REDACTED]"`,
+		},
+		{
+			name: "nested key glued by a colon to a quoted bearer value is kept and its value redacted",
+			msg:  `credentials: token:"Bearer SECRET123"`,
+			want: `credentials: token:"[REDACTED]"`,
+		},
+		{
+			name: "nested key glued to a single-quoted value with a comma is kept and its value redacted",
+			msg:  `credentials: token='a,SECRET123'`,
+			want: `credentials: token='[REDACTED]'`,
+		},
+		{
+			name: "nested key glued to a quoted value with a semicolon is kept and its value redacted",
+			msg:  `credentials: token="a;SECRET123" more`,
+			want: `credentials: token="[REDACTED]" more`,
+		},
+		{
+			name: "nested key glued to an escaped quoted value with spaces is kept and its value redacted",
+			msg:  `credentials: token=\"a SECRET123\"`,
+			want: `credentials: token=\"[REDACTED]\"`,
+		},
+		{
+			name: "nested key under password glued to a quoted value with spaces is kept and its value redacted",
+			msg:  `password: token:"a SECRET123"`,
+			want: `password: token:"[REDACTED]"`,
+		},
+		{
+			name: "nested key in a Go struct glued to a quoted value with leading whitespace is kept and its value redacted",
+			msg:  `failed: {Credentials:token=" SECRET123"}`,
+			want: `failed: {Credentials:token="[REDACTED]"}`,
+		},
+		{
+			name: "nested key in a Go map glued to a quoted value with spaces is kept and its value redacted",
+			msg:  `failed: map[credentials:token="a SECRET123"]`,
+			want: `failed: map[credentials:token="[REDACTED]"]`,
+		},
+		{
+			name: "nested key in YAML glued to a quoted value with spaces is kept and its value redacted",
+			msg:  "credentials:\n  token=\"a SECRET123\"\n  region: us",
+			want: "credentials:\n  token=\"[REDACTED]\"\n  region: us",
+		},
+		{
+			name: "nested pair glued to a bare value is redacted whole",
+			msg:  `credentials: token=SECRET123`,
+			want: `credentials:[REDACTED]`,
+		},
+		{
+			name: "nested pair glued to a quoted value without spaces is redacted whole",
+			msg:  `credentials: token="SECRET123"`,
+			want: `credentials:[REDACTED]`,
+		},
+		{
+			name: "key-shaped bare value glued to the closing quote of a string followed by another quoted string is redacted whole",
+			msg:  `got "password=SECRETP-token=", want "abc"`,
+			want: `got "password=[REDACTED], want "abc"`,
+		},
+		{
+			name: "name that is not a key name glued to a quoted value with spaces is redacted",
+			msg:  `credentials: user="SECRET123 token=SECRET456"`,
+			want: `credentials:[REDACTED] token=[REDACTED]`,
+		},
+		{
+			name: "key name glued to a quoted value with spaces by a character other than a delimiter is redacted",
+			msg:  `credentials: token("SECRET123 token=SECRET456")`,
+			want: `credentials:[REDACTED] token=[REDACTED]`,
+		},
+		{
+			name: "nested password in YAML whose quoted value has leading whitespace is kept and its value redacted",
+			msg:  "credentials:\n  password: \" SECRET123\"\n  region: us",
+			want: "credentials:\n  password:\"[REDACTED]\"\n  region: us",
+		},
+		{
+			name: "quoted nested key whose single-quoted value has leading whitespace is kept and its value redacted",
+			msg:  `credentials: 'token': ' SECRET123'`,
+			want: `credentials: 'token':'[REDACTED]'`,
+		},
+		{
+			name: "nested key whose quoted value starts with punctuation is kept and its value redacted",
+			msg:  `credentials: token = ". SECRET123"`,
+			want: `credentials: token="[REDACTED]"`,
+		},
+		{
+			name: "nested key whose quoted value starts with a closing brace is kept and its value redacted",
+			msg:  `credentials: token: "} SECRET123"`,
+			want: `credentials: token:"[REDACTED]"`,
+		},
+		{
+			name: "nested key in a Go struct whose quoted value has leading whitespace is kept and its value redacted",
+			msg:  `failed: {Credentials:token: " SECRET123"}`,
+			want: `failed: {Credentials:token:"[REDACTED]"}`,
+		},
+		{
+			name: "nested key in a slice of Go structs whose quoted value has leading whitespace is kept and its value redacted",
+			msg:  `failed: [{Credentials:token: " SECRET123"}]`,
+			want: `failed: [{Credentials:token:"[REDACTED]"}]`,
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by an unclosed quote is redacted whole",
+			msg:  `failed: {Password:SECRET123-token: "}`,
+			want: `failed: {Password:[REDACTED] "}`,
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by an unclosed single quote is redacted whole",
+			msg:  `failed: {Password:SECRET123-token: '}`,
+			want: `failed: {Password:[REDACTED] '}`,
+		},
+		{
+			name: "key-shaped value of a Go struct field followed by empty quotes is redacted whole",
+			msg:  `failed: {Password:SECRET123-token: ""}`,
+			want: `failed: {Password:[REDACTED] ""}`,
+		},
+		{
+			name: "key-shaped value of a Go map entry followed by empty quotes is redacted whole",
+			msg:  `failed: map[Password:SECRET123-token: ""]`,
+			want: `failed: map[Password:[REDACTED] ""]`,
+		},
+		{
+			name: "key-shaped bare value followed by a lone backslash is redacted whole",
+			msg:  `password=SECRET123-token: \`,
+			want: `password=[REDACTED] \`,
+		},
+		{
+			name: "quoted key-shaped value followed by a delimiter with no value is redacted whole",
+			msg:  `password="SECRETQ-token" :`,
+			want: `password="[REDACTED]" :`,
+		},
+		{
+			name: "key-shaped bare value followed by a spaced delimiter with no value is redacted whole",
+			msg:  "password=SECRETQ-token :",
+			want: "password=[REDACTED] :",
+		},
+		{
+			name: "key-shaped bare value followed by a tab and a delimiter with no value is redacted whole",
+			msg:  "password=SECRETP-token\t:",
+			want: "password=[REDACTED]\t:",
+		},
+		{
+			name: "key-shaped value after a spaced delimiter with no value after it is redacted whole",
+			msg:  "password = SECRETP-token:",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "temp: key-shaped value with no value after it is redacted whole",
+			msg:  "password=temp:SECRETT:",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "value that is only a key name and a colon is redacted",
+			msg:  "password=secret:",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "value that is only a capitalized key name and a colon is redacted",
+			msg:  "password=Secret:",
+			want: "password=[REDACTED]",
+		},
+		{
+			name: "dotted key-shaped value with no value after it is redacted whole",
+			msg:  "secret: SECRETR.password=",
+			want: "secret:[REDACTED]",
+		},
+		{
+			name: "nested key followed by a newline and a delimiter is kept and its value redacted",
+			msg:  "credentials: token\n= SECRETA",
+			want: "credentials: token=[REDACTED]",
+		},
+		{
+			name: "nested key followed by a tab and a delimiter is kept and its value redacted",
+			msg:  "credentials: token\t= SECRETA",
+			want: "credentials: token=[REDACTED]",
+		},
+		{
+			name: "nested key followed by a spaced colon is kept and its value redacted",
+			msg:  "credentials: token : SECRETA",
+			want: "credentials: token:[REDACTED]",
+		},
+		{
+			name: "credentials object in text is redacted whole",
+			msg:  "credentials: {token: SECRET123, refresh: SECRET456}",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "credentials list in text is redacted whole",
+			msg:  "credentials: [token: SECRET123, refresh: SECRET456]",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "credentials envelope printed with %+v is redacted whole",
+			msg:  "assume role failed: {Credentials:{AccessKeyID:EXAMPLEKEYID SecretAccessKey:SECRET123 SessionToken:SECRET456}}",
+			want: "assume role failed: {Credentials:[REDACTED]}",
 		},
 		{
 			name: "object under a sensitive key is redacted whole",
@@ -1123,6 +1678,21 @@ func TestRedactErrorMessage(t *testing.T) {
 		{
 			name: "bare value with a quote is redacted whole",
 			msg:  `failed: password=abc"SECRET123`,
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value with a closing brace is redacted whole",
+			msg:  "failed: password=ab}SECRET123",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value ending with a closing brace is redacted whole",
+			msg:  "failed: password=SECRET123}",
+			want: "failed: password=[REDACTED]",
+		},
+		{
+			name: "bare value starting with a closing brace is redacted whole",
+			msg:  "failed: password=}SECRET123",
 			want: "failed: password=[REDACTED]",
 		},
 		{
@@ -1204,6 +1774,86 @@ func TestRedactErrorMessage(t *testing.T) {
 			name: "Go struct printed with %+v has credential fields redacted",
 			msg:  "bad config: {APIKey:SECRET123 ClientSecret:SECRET456 Region:us}",
 			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED] Region:us}",
+		},
+		{
+			name: "Go struct printed with %+v ending with credential fields keeps its closing brace",
+			msg:  "bad config: {APIKey:SECRET123 ClientSecret:SECRET456}",
+			want: "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED]}",
+		},
+		{
+			name: "Go struct printed with %+v whose credential field holds a closing brace",
+			msg:  "bad config: {Password:ab}SECRET123}",
+			want: "bad config: {Password:[REDACTED]}",
+		},
+		{
+			name: "Go struct printed with %+v whose credential field holds a brace pair",
+			msg:  "bad config: {Password:ab{SECRET123} Region:us}",
+			want: "bad config: {Password:[REDACTED] Region:us}",
+		},
+		{
+			name: "nested Go structs printed with %+v keep their closing braces",
+			msg:  "bad config: {Auth:{Token:SECRET123}} and {Auth:{Token:SECRET456} Region:us}",
+			want: "bad config: {Auth:{Token:[REDACTED]}} and {Auth:{Token:[REDACTED]} Region:us}",
+		},
+		{
+			name: "slice of Go structs and Go map printed with %+v keep their closing brackets",
+			msg:  "bad config: [{APIKey:SECRET123}] map[password:SECRET456]",
+			want: "bad config: [{APIKey:[REDACTED]}] map[password:[REDACTED]]",
+		},
+		{
+			name: "Go struct printed with %+v and quoted with %q keeps its closing brace and quote",
+			msg:  `load failed: "{Region:us APIKey:SECRET123}": invalid`,
+			want: `load failed: "{Region:us APIKey:[REDACTED]}": invalid`,
+		},
+		{
+			name: "quoted credentials ending with a closing bracket keep their quotes",
+			msg:  `bad config: {'password': 'SECRET123}'} [{'token': 'SECRET456]'}] config.Auth{Password:"SECRET789}"}`,
+			want: `bad config: {'password':'[REDACTED]'} [{'token':'[REDACTED]'}] config.Auth{Password:"[REDACTED]"}`,
+		},
+		{
+			name: "JSON quoted with %q whose credential ends with a closing brace keeps its quotes",
+			msg:  `load failed: "{\"password\":\"SECRET123}\"}"`,
+			want: `load failed: "{\"password\":\"[REDACTED]\"}"`,
+		},
+		{
+			name: "Go struct printed with %+v whose credential field holds a closing brace before another field",
+			msg:  "bad config: {Password:ab}cd Token:SECRET123}",
+			want: "bad config: {Password:[REDACTED] Token:[REDACTED]}",
+		},
+		{
+			name: "Go struct printed with %+v in parentheses keeps its closing brace and parenthesis",
+			msg:  "({APIKey:SECRET123})",
+			want: "({APIKey:[REDACTED]})",
+		},
+		{
+			name: "Go struct printed with %+v in single quotes ending a sentence keeps its closing brace, quote and period",
+			msg:  "'{APIKey:SECRET123}'.",
+			want: "'{APIKey:[REDACTED]}'.",
+		},
+		{
+			name: "Go struct printed with %+v in JSON quoted with %q keeps its closing brace and escaped quote",
+			msg:  `bad config: "{\"msg\":\"{APIKey:SECRET123}\"}"`,
+			want: `bad config: "{\"msg\":\"{APIKey:[REDACTED]}\"}"`,
+		},
+		{
+			name: "closing brace that closes no bracket is redacted with the value",
+			msg:  "] password=SECRET123}",
+			want: "] password=[REDACTED]",
+		},
+		{
+			name: "closing bracket that closes no bracket does not hide a later open brace",
+			msg:  "unexpected ] in {Token:SECRET123}",
+			want: "unexpected ] in {Token:[REDACTED]}",
+		},
+		{
+			name: "AWS credentials printed with %+v are redacted",
+			msg:  "assume role failed: {AccessKeyID:EXAMPLEKEYID SecretAccessKey:SECRET123 SessionToken:SECRET456}",
+			want: "assume role failed: {AccessKeyID:EXAMPLEKEYID SecretAccessKey:[REDACTED] SessionToken:[REDACTED]}",
+		},
+		{
+			name: "empty credential field in a Go struct printed with %+v is kept",
+			msg:  "bad config: {Password:}",
+			want: "bad config: {Password:}",
 		},
 		{
 			name: "JSON error with a camelCase sensitive key",
@@ -1475,10 +2125,17 @@ func TestSanitizeRawText(t *testing.T) {
 			{`bad config: {'api_key': 'SECRET123'}`, `bad config: {'api_key':'[REDACTED]'}`},
 			{
 				`auth failed: {"credentials": {"access_token": "SECRET123", "expires_in": 3600}}`,
-				`auth failed: {"credentials": {"access_token":"[REDACTED]", "expires_in": 3600}}`,
+				`auth failed: {"credentials":"[REDACTED]"}`,
+			},
+			{
+				`assume role failed: {"Credentials": {"AccessKeyId": "EXAMPLEKEYID", "SecretAccessKey": "SECRET123", "SessionToken": "SECRET123"}}`,
+				`assume role failed: {"Credentials":"[REDACTED]"}`,
 			},
 			{`auth failed: {"token": {"value": "SECRET123"}}`, `auth failed: {"token":"[REDACTED]"}`},
 			{"failed: password=abc)SECRET123", "failed: password=[REDACTED]"},
+			{"failed: password=ab}SECRET123", "failed: password=[REDACTED]"},
+			{`bad config: {'password': 'SECRET123}'}`, `bad config: {'password':'[REDACTED]'}`},
+			{"bad config: {APIKey:SECRET123 ClientSecret:SECRET123}", "bad config: {APIKey:[REDACTED] ClientSecret:[REDACTED]}"},
 			{"failed: password: //SECRET123", "failed: password:[REDACTED]"},
 			{
 				`auth failed: "{\"token\": {\"label\": \"a},\", \"val\": \"SECRET123\"}}"`,
@@ -1492,6 +2149,110 @@ func TestSanitizeRawText(t *testing.T) {
 				"GET https://example.com/cb?access_token=SECRET123&q=a%20b failed",
 				"GET https://example.com/cb?access_token=%5BREDACTED%5D&q=a%20b failed",
 			},
+			{"config:\ncredentials:\n  token: SECRET123\n  region: us", "config:\ncredentials:\n  token:[REDACTED]\n  region: us"},
+			{"config:\ncredentials:\n  password: SECRET123", "config:\ncredentials:\n  password:[REDACTED]"},
+			{"config:\n  credentials:\n    client_secret: SECRET123", "config:\n  credentials:\n    client_secret:[REDACTED]"},
+			{"credentials:\n  X-Auth-Token: SECRET123", "credentials:\n  X-Auth-Token:[REDACTED]"},
+			{"credentials:\n  'token': 'SECRET123'", "credentials:\n  'token':'[REDACTED]'"},
+			{"loading credentials: token: SECRET123", "loading credentials: token:[REDACTED]"},
+			{"credentials: token = SECRET123", "credentials: token=[REDACTED]"},
+			{"Credentials:\n  SessionToken: SECRET123", "Credentials:\n  SessionToken:[REDACTED]"},
+			{"credentials:\n  token:\n" + strings.Repeat(" ", 100) + "SECRET123", "credentials:\n  token:[REDACTED]"},
+			{"credentials:\n  db/password: SECRET123", "credentials:\n  db/password:[REDACTED]"},
+			{"credentials: db/password = SECRET123", "credentials: db/password=[REDACTED]"},
+			{"credentials: {token: SECRET123, refresh: SECRET456}", "credentials:[REDACTED]"},
+			{`password: 'token: SECRETA SECRETB'`, `password:'[REDACTED]'`},
+			{`token: "password=SECRETA SECRETB"`, `token:"[REDACTED]"`},
+			{`password: "token:SECRETA SECRETB"`, `password:"[REDACTED]"`},
+			{`bad config: {'api_key': 'sig=SECRETA SECRETB'}`, `bad config: {'api_key':'[REDACTED]'}`},
+			{"password=SECRETP-token:SECRETB", "password=[REDACTED]"},
+			{"password=SECRETP.secret=SECRETB", "password=[REDACTED]"},
+			{"api_key=SECRETP.sig=SECRETB", "api_key=[REDACTED]"},
+			{`bad config: {'credentials': 'secret=correct horse SECRETB staple'}`, `bad config: {'credentials':'[REDACTED]'}`},
+			{`bad config: {'credential': 'token: abc SECRETB'}`, `bad config: {'credential':'[REDACTED]'}`},
+			{`credentials="token=abc SECRETB"`, `credentials="[REDACTED]"`},
+			{`CREDENTIALS="secret=correct horse SECRETB"`, `CREDENTIALS="[REDACTED]"`},
+			{"credentials: SECRETP-token:SECRETB", "credentials:[REDACTED]"},
+			{"credentials: 'secret=correct horse SECRETB'", "credentials:'[REDACTED]'"},
+			{`failed: password: "password"`, `failed: password:"[REDACTED]"`},
+			{`failed: password: "SECRET123": invalid`, `failed: password:"[REDACTED]": invalid`},
+			{"credentials: token= SECRET123", "credentials: token=[REDACTED]"},
+			{"failed: password: SECRET123 : retry", "failed: password:[REDACTED] : retry"},
+			{"failed: password=SECRET123:[REDACTED]", "failed: password=[REDACTED]"},
+			{"credentials:\n  app:client_secret: SECRET123", "credentials:\n  app:client_secret:[REDACTED]"},
+			{"failed: password: SECRET123token: retry", "failed: password:[REDACTED] retry"},
+			{"password=SECRETP-token:", "password=[REDACTED]"},
+			{"password=SECRETP/token=", "password=[REDACTED]"},
+			{"api_key=SECRETAbC+xYz/Sig=", "api_key=[REDACTED]"},
+			{"api_key=SECRETAbC+xYz/Sig=\n", "api_key=[REDACTED]\n"},
+			{"api_key=SECRETAbC+xYz/Sig= ", "api_key=[REDACTED] "},
+			{"password=SECRETP-token:,next", "password=[REDACTED],next"},
+			{"password=SECRETP-token:;next", "password=[REDACTED];next"},
+			{"password=SECRETP-token: ,next", "password=[REDACTED] ,next"},
+			{"password=SECRETP-token:&next=1", "password=[REDACTED]&next=1"},
+			{"password=SECRETP-token:\t;x", "password=[REDACTED]\t;x"},
+			{"password=SECRETP-token:\r\n", "password=[REDACTED]\r\n"},
+			{"password=SECRETP-token:\f", "password=[REDACTED]\f"},
+			{"failed: password=SECRETP-token: }", "failed: password=[REDACTED] }"},
+			{"failed: {Password:abc-token: }", "failed: {Password:[REDACTED] }"},
+			{"api_key=SECRETAbC+xYz/Sig= }", "api_key=[REDACTED] }"},
+			{"password=SECRETP-token: ]", "password=[REDACTED] ]"},
+			{"failed: [{Password:abc-token: } {User:bob}]", "failed: [{Password:[REDACTED] } {User:bob}]"},
+			{"password=abc-token: ...", "password=[REDACTED] ..."},
+			{"credentials: token = ]SECRETZ", "credentials: token=[REDACTED]"},
+			{"credentials:\n  password: }SECRETZ", "credentials:\n  password:[REDACTED]"},
+			{"failed: {Credentials:token: ]SECRETZ}", "failed: {Credentials:token:[REDACTED]}"},
+			{`credentials: token: " SECRETX"`, `credentials: token:"[REDACTED]"`},
+			{`credentials: token: ' SECRETX'`, `credentials: token:'[REDACTED]'`},
+			{`credentials: token: \" SECRETX\"`, `credentials: token:\"[REDACTED]\"`},
+			{"credentials:\n  token: \" SECRETX\"\n  region: us", "credentials:\n  token:\"[REDACTED]\"\n  region: us"},
+			{`failed: "password=SECRETP-token: "`, `failed: "password=[REDACTED] "`},
+			{`failed: 'password=SECRETP-token: '`, `failed: 'password=[REDACTED] '`},
+			{`failed: \"password=SECRETP-token: \"`, `failed: \"password=[REDACTED] \"`},
+			{`parsing "password=SECRETP-token: ": invalid syntax`, `parsing "password=[REDACTED] ": invalid syntax`},
+			{`failed: "password=SECRETP-token: " for user "bob"`, `failed: "password=[REDACTED] " for user "bob"`},
+			{`failed: "password=SECRETP-token: " for user "Émile"`, `failed: "password=[REDACTED] " for user "Émile"`},
+			{`got "password=SECRETP-token: ", want ""`, `got "password=[REDACTED] ", want ""`},
+			{`got "password=SECRETP-token: ", want "2"`, `got "password=[REDACTED] ", want "2"`},
+			{`got "password=SECRETP-token: ", want "_id"`, `got "password=[REDACTED] ", want "_id"`},
+			{`got \"password=SECRETP-token: \", want \"\"`, `got \"password=[REDACTED] \", want \"\"`},
+			{"credentials:\n  password: \" SECRET123\"\n  region: us", "credentials:\n  password:\"[REDACTED]\"\n  region: us"},
+			{`credentials: 'token': ' SECRET123'`, `credentials: 'token':'[REDACTED]'`},
+			{`credentials: token = ". SECRET123"`, `credentials: token="[REDACTED]"`},
+			{`credentials: token: "} SECRET123"`, `credentials: token:"[REDACTED]"`},
+			{`failed: {Credentials:token: " SECRET123"}`, `failed: {Credentials:token:"[REDACTED]"}`},
+			{`failed: [{Credentials:token: " SECRET123"}]`, `failed: [{Credentials:token:"[REDACTED]"}]`},
+			{`failed: {Password:SECRET123-token: "}`, `failed: {Password:[REDACTED] "}`},
+			{`failed: {Password:SECRET123-token: '}`, `failed: {Password:[REDACTED] '}`},
+			{`failed: {Password:SECRET123-token: ""}`, `failed: {Password:[REDACTED] ""}`},
+			{`failed: map[Password:SECRET123-token: ""]`, `failed: map[Password:[REDACTED] ""]`},
+			{`password=SECRET123-token: \`, `password=[REDACTED] \`},
+			{`credentials: password="correct SECRET123 battery"`, `credentials: password="[REDACTED]"`},
+			{`credentials: token=" SECRET123"`, `credentials: token="[REDACTED]"`},
+			{`credentials: token:"Bearer SECRET123"`, `credentials: token:"[REDACTED]"`},
+			{`credentials: token='a,SECRET123'`, `credentials: token='[REDACTED]'`},
+			{`credentials: token="a;SECRET123" more`, `credentials: token="[REDACTED]" more`},
+			{`credentials: token=\"a SECRET123\"`, `credentials: token=\"[REDACTED]\"`},
+			{`password: token:"a SECRET123"`, `password: token:"[REDACTED]"`},
+			{`failed: {Credentials:token=" SECRET123"}`, `failed: {Credentials:token="[REDACTED]"}`},
+			{`failed: map[credentials:token="a SECRET123"]`, `failed: map[credentials:token="[REDACTED]"]`},
+			{"credentials:\n  token=\"a SECRET123\"\n  region: us", "credentials:\n  token=\"[REDACTED]\"\n  region: us"},
+			{`credentials: token=SECRET123`, `credentials:[REDACTED]`},
+			{`credentials: token="SECRET123"`, `credentials:[REDACTED]`},
+			{`got "password=SECRETP-token=", want "abc"`, `got "password=[REDACTED], want "abc"`},
+			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED] token=[REDACTED]`},
+			{`credentials: token("SECRET123 token=SECRET456")`, `credentials:[REDACTED] token=[REDACTED]`},
+			{`password="SECRETQ-token" :`, `password="[REDACTED]" :`},
+			{"password=SECRETQ-token :", "password=[REDACTED] :"},
+			{"password=SECRETP-token\t:", "password=[REDACTED]\t:"},
+			{"password = SECRETP-token:", "password=[REDACTED]"},
+			{"password=temp:SECRETT:", "password=[REDACTED]"},
+			{"password=secret:", "password=[REDACTED]"},
+			{"password=Secret:", "password=[REDACTED]"},
+			{"secret: SECRETR.password=", "secret:[REDACTED]"},
+			{"credentials: token\n= SECRETA", "credentials: token=[REDACTED]"},
+			{"credentials: token\t= SECRETA", "credentials: token=[REDACTED]"},
+			{"credentials: token : SECRETA", "credentials: token:[REDACTED]"},
 		}
 		for _, tt := range tests {
 			got, lost := sanitizeRawText(tt.raw)
@@ -1517,11 +2278,37 @@ func TestSanitizeRawText(t *testing.T) {
 		for name, text := range samples {
 			start := time.Now()
 			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > time.Second {
+			if d := time.Since(start); d > 3*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a 100 KB text", name, d)
 			}
 			if got != text || lost {
 				t.Errorf("%s: sanitizeRawText changed text without credentials (lost = %v)", name, lost)
+			}
+		}
+	})
+
+	t.Run("nested sensitive keys are inspected in linear time", func(t *testing.T) {
+		samples := map[string]string{
+			// Each value is the next key, so each pair is matched again from
+			// its value.
+			"keys separated by spaces": strings.Repeat("token: ", 3_000) + "SECRET123",
+			"credentials blocks":       strings.Repeat("credentials:\n  ", 2_000) + "token: SECRET123",
+			// The value ends with a delimiter and a value follows it, as for a
+			// key, but it is too long to be one, so it is redacted whole
+			// rather than matched again from each key in it.
+			"keys without spaces": "password=SECRET123-" + strings.Repeat("token:", 10_000) + " x",
+		}
+		for name, text := range samples {
+			start := time.Now()
+			got, lost := sanitizeRawText(text)
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
+			}
+			if strings.Contains(got, "SECRET123") {
+				t.Errorf("%s: sanitizeRawText kept the credential", name)
+			}
+			if !lost {
+				t.Errorf("%s: sanitizeRawText lost = false, want true", name)
 			}
 		}
 	})

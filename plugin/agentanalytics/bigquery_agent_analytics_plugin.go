@@ -255,12 +255,13 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	})
 }
 
-// ensureTable makes sure the events table exists with every column in
-// schema. A missing table is created. An existing table, including one that
-// another writer creates concurrently, gains any missing columns unless
-// DisableSchemaUpgrade is set. Any other failure to read, create or upgrade the
-// table is returned, so that the plugin never starts against a table it cannot
-// write to.
+// ensureTable makes sure the events table exists. A missing table is created
+// with every column in schema. An existing table, including one that another
+// writer creates concurrently, gains any columns in schema that it lacks.
+// With DisableSchemaUpgrade, the schema of an existing table is neither
+// inspected nor upgraded, so a table that lacks a column in schema is not
+// detected here: the plugin starts, and every write to the table fails. Any
+// other failure to read, create or upgrade the table is returned.
 func ensureTable(ctx context.Context, tableRef *bq.Table, schema bq.Schema, config Config) error {
 	meta, err := tableRef.Metadata(ctx)
 	if hasHTTPStatus(err, http.StatusNotFound) {
