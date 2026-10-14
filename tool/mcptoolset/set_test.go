@@ -1419,13 +1419,16 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 
 func TestReservedToolNames(t *testing.T) {
 	// The names the framework registers out of band, where this toolset has no way
-	// to see whether the framework will claim one for a given agent. All four are
-	// withheld unconditionally.
+	// to see whether the framework will claim one for a given agent. All of them are
+	// withheld unconditionally, as ADK Python and ADK Kotlin do.
 	refused := []string{
 		"set_model_response",
 		"transfer_to_agent",
 		"finish_task",
 		"task_completed",
+		"adk_request_confirmation",
+		"adk_request_credential",
+		"adk_request_input",
 	}
 	for _, name := range refused {
 		t.Run("refuses/"+name, func(t *testing.T) {

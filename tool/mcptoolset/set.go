@@ -200,11 +200,13 @@ func (*set) IsLongRunning() bool {
 
 // reservedToolNames are the names the framework puts on the wire itself, out of band
 // from anything this toolset can observe: set_model_response is injected when the agent
-// declares an output schema, transfer_to_agent when auto flow applies to the agent, and
-// finish_task and task_completed by the workflow agents. The framework, not the model,
-// resolves those names back out of the request, so a server tool holding one changes
-// which implementation runs -- and since the toolset cannot tell whether the framework
-// will register its own, it withholds all four unconditionally.
+// declares an output schema, transfer_to_agent when auto flow applies to the agent,
+// finish_task and task_completed by the workflow agents, and the adk_request_* names by
+// the confirmation, credential-request and workflow-input paths. The framework, not the
+// model, resolves those names back out of the request, so a server tool holding one
+// changes which implementation runs -- and since the toolset cannot tell whether the
+// framework will register its own, it withholds all of them unconditionally. ADK Python
+// and ADK Kotlin skip the same set from MCP servers.
 //
 // Names the *application* configures are deliberately not listed. The in-model built-ins
 // (google_search, url_context, google_maps_grounding) and the tool packages
@@ -215,10 +217,13 @@ func (*set) IsLongRunning() bool {
 // google_search for an agent that had configured no built-in search -- a name this port
 // never had a problem with.
 var reservedToolNames = map[string]struct{}{
-	"set_model_response": {},
-	"transfer_to_agent":  {},
-	"finish_task":        {},
-	"task_completed":     {},
+	"set_model_response":       {},
+	"transfer_to_agent":        {},
+	"finish_task":              {},
+	"task_completed":           {},
+	"adk_request_confirmation": {},
+	"adk_request_credential":   {},
+	"adk_request_input":        {},
 }
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
