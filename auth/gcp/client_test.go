@@ -942,6 +942,11 @@ func TestServiceErrorsRedactTheActingUser(t *testing.T) {
 	// Where one contains the other they are redacted as one range, which is
 	// TestRedactAcrossSeveralSecrets' subject rather than this test's.
 	const uri = "https://app.test/cb?state=opaque"
+	// Bearer material the Agent Identity route sends as forceRefreshToken.
+	// Deliberately not shaped like a real access token, which the repository's
+	// secret scan rejects even in a fixture. The "/" makes it an unusable header
+	// name, so mapCredential's arm is reachable.
+	const prior = "prior-token/not-a-real-one"
 
 	for _, tc := range []struct {
 		name        string
@@ -1002,6 +1007,20 @@ func TestServiceErrorsRedactTheActingUser(t *testing.T) {
 		wantAbsent:  []string{uri},
 		wantPresent: []string{"not a usable HTTP header name"},
 	}, {
+		name:        "an error body echoing the prior token",
+		resource:    authProviderResource,
+		status:      http.StatusBadRequest,
+		body:        "invalid forceRefreshToken: " + prior,
+		wantAbsent:  []string{prior},
+		wantPresent: []string{"invalid forcerefreshtoken"},
+	}, {
+		name:        "an unusable header name echoing the prior token",
+		resource:    authProviderResource,
+		status:      http.StatusOK,
+		body:        `{"success":{"header":"X-` + prior + `","token":"t"}}`,
+		wantAbsent:  []string{prior},
+		wantPresent: []string{"not a usable HTTP header name"},
+	}, {
 		// The negative control. An error carrying neither identifier has to come
 		// back whole, or the rows above are satisfied by dropping all service
 		// text rather than by scrubbing it.
@@ -1019,7 +1038,7 @@ func TestServiceErrorsRedactTheActingUser(t *testing.T) {
 			defer srv.Close()
 
 			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
-				Resource: tc.resource, UserID: user, ContinueURI: uri,
+				Resource: tc.resource, UserID: user, ContinueURI: uri, PriorToken: prior,
 			})
 			if err == nil {
 				t.Fatal("RetrieveCredential() = nil error, want the service's error")

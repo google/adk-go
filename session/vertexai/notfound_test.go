@@ -57,19 +57,18 @@ func TestGet_permissionDenied_isNotErrNotFound(t *testing.T) {
 	}
 }
 
-// A session that exists but belongs to someone else is not a missing session:
-// reporting it as one would let a caller distinguish "no such session" from
-// "not yours" by probing, and would have the REST layer answer 404 for what is
-// really a refusal.
-func TestGet_wrongUser_isNotErrNotFound(t *testing.T) {
+// A session that belongs to someone else must be reported as missing, as the
+// in-memory and database services report it, since they look sessions up by
+// user. Otherwise the REST layer answers 500 for it instead of 404.
+func TestGet_wrongUser_wrapsErrNotFound(t *testing.T) {
 	s, _ := newFakeService(t)
 
 	_, err := s.Get(t.Context(), &session.GetRequest{AppName: "123", UserID: "user2", SessionID: "owned"})
 	if err == nil {
-		t.Fatalf("Get(other user's session) error = nil, want an ownership error")
+		t.Fatalf("Get(other user's session) error = nil, want an error wrapping session.ErrNotFound")
 	}
-	if errors.Is(err, session.ErrNotFound) {
-		t.Errorf("Get(other user's session) error = %v, want an error that is NOT session.ErrNotFound", err)
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("Get(other user's session) error = %v, want an error wrapping session.ErrNotFound", err)
 	}
 }
 
