@@ -59,7 +59,7 @@ func NewStreamingResponseAggregator() *streamingResponseAggregator {
 func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp := converters.Genai2LLMResponse(genResp)
-		if len(genResp.Candidates) > 0 {
+		if len(genResp.Candidates) > 0 && genResp.Candidates[0] != nil {
 			candidate := genResp.Candidates[0]
 			resp.TurnComplete = candidate.FinishReason != ""
 		}
