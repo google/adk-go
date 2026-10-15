@@ -63,7 +63,7 @@ func (m *Model) generate(ctx context.Context, params oairesponses.ResponseNewPar
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Shadowed, not reassigned: the closure captures ctx by reference, so
 		// assigning to it would leave the second range over this sequence
-		// starting from the deadline the first one already cancelled.
+		// starting from the deadline the first one already canceled.
 		ctx := ctx
 		// Bounds the call, retries included, and is released when the caller
 		// stops consuming.

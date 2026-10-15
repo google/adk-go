@@ -317,7 +317,7 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
-// tornDown reports whether the session was closed or the invocation cancelled.
+// tornDown reports whether the session was closed or the invocation canceled.
 func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
 	select {
 	case <-sess.done:
@@ -509,7 +509,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				cancelConn()
 				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
 				if isReconnect {
-					// genai returns without closing the socket it dialled when
+					// genai returns without closing the socket it dialed when
 					// the setup write fails, and it dials with a context-less
 					// dialer, so cancelConn cannot release it either. Each
 					// budgeted redial against such an endpoint strands one fd
@@ -995,6 +995,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		useStream := false
 		if rc := ctx.RunConfig(); rc != nil {
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
+
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
 		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {

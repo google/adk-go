@@ -399,7 +399,7 @@ func TestBuildParams_CallOutsideModelTurnRejected(t *testing.T) {
 }
 
 // TestApplyGenerationConfig_EndpointOnlyFields covers the three settings
-// Chat Completions honours that the Responses path rejects outright.
+// Chat Completions honors that the Responses path rejects outright.
 func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	seed := int32(42)
 	freq := float32(0.5)
