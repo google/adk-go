@@ -322,7 +322,7 @@ func TestContinuation_GenerateStreamKeepsMetadata(t *testing.T) {
 	}
 	api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
 		"":   {withMetadata(candidate("one ", "CONTINUATION", "t1"), "q1", "https://example.com/a")},
-		"t1": {withMetadata(candidate("two ", "CONTINUATION", "t2"), "q2", "")},
+		"t1": {withMetadata(candidate("two ", "CONTINUATION", "t2"), "q2", "https://example.com/b")},
 		"t2": {candidate("three", "STOP", "")},
 	}}
 	var final *model.LLMResponse
@@ -340,7 +340,7 @@ func TestContinuation_GenerateStreamKeepsMetadata(t *testing.T) {
 	if diff := cmp.Diff(&genai.GroundingMetadata{WebSearchQueries: []string{"q2"}}, final.GroundingMetadata); diff != "" {
 		t.Errorf("final grounding metadata (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(&genai.CitationMetadata{Citations: []*genai.Citation{{URI: "https://example.com/a"}}}, final.CitationMetadata); diff != "" {
+	if diff := cmp.Diff(&genai.CitationMetadata{Citations: []*genai.Citation{{URI: "https://example.com/b"}}}, final.CitationMetadata); diff != "" {
 		t.Errorf("final citation metadata (-want +got):\n%s", diff)
 	}
 	checkRequests(t, api, []string{"", "t1", "t2"})

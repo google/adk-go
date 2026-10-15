@@ -1608,6 +1608,19 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
+// AutomaticContinuation has no effect on these APIs, which never pause a
+// generation with CONTINUATION, so a config shared with a Gemini model that
+// sets it must be accepted.
+func TestApplyGenerationConfigAcceptsAutomaticContinuation(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprint(on), func(t *testing.T) {
+			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)}); err != nil {
+				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 // ThinkingConfig is honored rather than rejected, mapping onto effort-based
 // reasoning. Summary rides on IncludeThoughts alone: it requires a verified
 // OpenAI organization, so sending it unasked would fail every reasoning call an
