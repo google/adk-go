@@ -198,29 +198,29 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
-// reservedToolNames are the names the framework puts on the wire itself, out of band
-// from anything this toolset can observe: set_model_response is injected when the agent
-// declares an output schema, transfer_to_agent when auto flow applies to the agent,
-// finish_task and task_completed by the workflow agents, and the adk_request_* names by
-// the confirmation, credential-request and workflow-input paths. The framework, not the
-// model, resolves those names back out of the request, so a server tool holding one
-// changes which implementation runs -- and since the toolset cannot tell whether the
-// framework will register its own, it withholds all of them unconditionally. ADK Python
-// and ADK Kotlin skip the same set from MCP servers.
+// reservedToolNames are the names the framework synthesizes and interprets itself, and
+// never registers as a tool: the confirmation, credential-request and workflow-input
+// paths build these function calls directly (see toolconfirmation.FunctionCallName,
+// requestEUCFunctionCallName and workflow.WorkflowInputFunctionCallName) instead of
+// packaging a declaration into the request. Because nothing is ever registered under
+// them, no duplicate-name check downstream can notice a server that also answers to one,
+// and a model call carrying that name is resolved by the framework rather than by the
+// server. They are therefore withheld unconditionally.
 //
-// Names the *application* configures are deliberately not listed. The in-model built-ins
-// (google_search, url_context, google_maps_grounding) and the tool packages
-// exitlooptool, loadmemorytool and loadartifactstool all appear in the agent's own tool
-// list, so a server tool sharing one of those names is a collision only when the
-// application actually configured the built-in, and the framework reports it where the
-// full tool list is known. Withholding them here instead dropped a server's own
-// google_search for an agent that had configured no built-in search -- a name this port
-// never had a problem with.
+// No other name belongs here. A name the framework *does* register goes into the request
+// as a tool, so a server tool sharing it is caught by appendTools or toolutils.PackTool,
+// which fail with "duplicate tool: %q" and name it. Withholding those here instead would
+// drop a server's tool for every agent that does not register the colliding one, which is
+// the common case: set_model_response is only injected for an agent with an output
+// schema, transfer_to_agent only when auto flow applies, and finish_task and
+// task_completed only inside the workflow agents.
+//
+// Names the application configures (the in-model built-ins google_search, url_context and
+// google_maps_grounding, and the exitlooptool, loadmemorytool and loadartifactstool
+// packages) are equally absent: they appear in the agent's own tool list, so the same
+// duplicate-name check reports a real collision and a server with no such built-in
+// configured keeps its tool.
 var reservedToolNames = map[string]struct{}{
-	"set_model_response":       {},
-	"transfer_to_agent":        {},
-	"finish_task":              {},
-	"task_completed":           {},
 	"adk_request_confirmation": {},
 	"adk_request_credential":   {},
 	"adk_request_input":        {},
