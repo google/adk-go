@@ -80,7 +80,7 @@ func appendInstructions(ctx agent.InvocationContext, req *model.LLMRequest, agen
 	if agentState.InstructionProvider != nil {
 		instruction, err := agentState.InstructionProvider(icontext.NewReadonlyContext(ctx))
 		if err != nil {
-			return fmt.Errorf("failed to evaluate global instruction provider: %w", err)
+			return fmt.Errorf("failed to evaluate instruction provider: %w", err)
 		}
 
 		utils.AppendInstructions(req, instruction)

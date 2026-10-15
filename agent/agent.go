@@ -93,7 +93,9 @@ type Config struct {
 	// BeforeAgentCallbacks are called sequentially before the agent starts its
 	// run. See [BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []BeforeAgentCallback
-	// Run is the function that defines the agent's behavior.
+	// Run is the function that defines the agent's behavior. An agent without
+	// one can be built, for example as a node in an agent tree, but running it
+	// yields an error.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
 	// AfterAgentCallbacks are called sequentially after the agent completes its
 	// run. See [AfterAgentCallback] for when they are skipped and how return
@@ -184,6 +186,13 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		if nodeCtx.Ended() {
+			return
+		}
+
+		// Matches adk-python, where an agent without a run implementation is
+		// constructed fine and fails when run.
+		if a.run == nil {
+			yield(nil, fmt.Errorf("agent %q has no Run function", a.name))
 			return
 		}
 
