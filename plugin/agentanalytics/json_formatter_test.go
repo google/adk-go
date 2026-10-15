@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
@@ -1348,6 +1349,286 @@ func TestRedactErrorMessage(t *testing.T) {
 			want: "failed: password:[REDACTED] retry",
 		},
 		{
+			name: "value that only ends in a key name before a wrapped error is redacted with the pair it starts",
+			msg:  "connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused",
+			want: "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused",
+		},
+		{
+			name: "quoted value that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password="SECRET123-secret": invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name: "single-quoted value that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password='SECRET123-secret': invalid`,
+			want: `login failed: password='[REDACTED]'`,
+		},
+		{
+			name: "value quoted with escaped quotes that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password=\"SECRET123-secret\": invalid`,
+			want: `login failed: password=\"[REDACTED]\"`,
+		},
+		{
+			name: "quoted value that only ends in a key name before a spaced delimiter is redacted with the pair it starts",
+			msg:  `login failed: password="SECRET123-secret" : invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name: "value that only ends in a hyphenated key name is redacted with the pair it starts",
+			msg:  "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
+		},
+		{
+			name: "token that only ends in a key name in prose is redacted with the pair it starts",
+			msg:  "my login is token=abc-SECRET123-token: please check",
+			want: "my login is token=[REDACTED] check",
+		},
+		{
+			name: "value that only ends in a dotted key name is redacted with the pair it starts",
+			msg:  "password=svc.SECRET123.password: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "upper-case value that only ends in a key name is redacted with the pair it starts",
+			msg:  "PASSWORD=DEV-SECRET123-PASSWORD: DIAL TCP",
+			want: "PASSWORD=[REDACTED] TCP",
+		},
+		{
+			name: "credentials value that only ends in a key name is redacted with the pair it starts",
+			msg:  "credentials=dev-SECRET123-password: dial tcp",
+			want: "credentials=[REDACTED] tcp",
+		},
+		{
+			name: "value that only ends in a key name before a spaced delimiter is redacted with the pair it starts",
+			msg:  "failed: password: SECRET123-token = SECRET456 retry",
+			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "compound key name on the line of credentials is redacted with its value",
+			msg:  "credentials: X-Amz-Security-Token: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "temp: value ending in a key name before a wrapped error is redacted with the pair it starts",
+			msg:  "password=temp:SECRET123-token: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "temp: value before a wrapped error is redacted with the pair it starts",
+			msg:  "password=temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "user:temp: value before a wrapped error is redacted with the pair it starts",
+			msg:  "password=user:temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "app:temp: value before a wrapped error is redacted with the pair it starts",
+			msg:  "password=app:temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "quoted temp: value before a wrapped error is redacted with the pair it starts",
+			msg:  `password="temp:SECRET123": dial tcp`,
+			want: `password="[REDACTED]" tcp`,
+		},
+		{
+			name: "temp: key on the line of credentials is redacted with its value",
+			msg:  "credentials: temp:foo: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "temp: key on an indented line under credentials is kept and its value redacted",
+			msg:  "credentials:\n  temp:foo: SECRET123",
+			want: "credentials:\n  temp:foo:[REDACTED]",
+		},
+		{
+			name: "user:temp: key on an indented line under credentials is kept and its value redacted",
+			msg:  "credentials:\n  user:temp:foo: SECRET123",
+			want: "credentials:\n  user:temp:foo:[REDACTED]",
+		},
+		{
+			name: "prefixed JSON object with a credential after an escaped line break fails closed",
+			msg:  `POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefix with bracket tag before JSON object with a credential after an escaped line break fails closed",
+			msg:  `POST /v1/login [400]: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bracket-led log line before JSON object with only an escaped-newline credential fails closed",
+			msg:  `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`,
+			want: unparseableJSONPlaceholder,
+		},
+		{
+			name: "bracket-prefixed JSON object with a credential after an escaped line break and a raw marker fails closed",
+			msg:  `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want: unparseableJSONPlaceholder,
+		},
+		{
+			name: "JSON object followed by trailing status text with a credential after an escaped line break fails closed",
+			msg:  `POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed JSON array with a credential after an escaped line break fails closed",
+			msg:  `POST /v1/login: 400: ["retry\npassword=dev-SECRET123-password"]`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object with a credential after an escaped line break and a bare pair in the last field redacts each pair",
+			msg:  `{"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\"","code":"token=abc"}`,
+			want: `{"code":"token=[REDACTED]","msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+		},
+		{
+			name: "JSON object whose string ends with a value ending in a key name before a word redacts the pair",
+			msg:  `{"msg":"retry\npassword=dev-SECRET123-password: dial"}`,
+			want: `{"msg":"retry\npassword=[REDACTED]"}`,
+		},
+		{
+			name: "JSON object with a password after an escaped line break and a final value ending in a key name redacts both",
+			msg:  `{"msg":"retry\npassword=hunter2val token=abc-SECRET123-token: dial"}`,
+			want: `{"msg":"retry\npassword=[REDACTED] token=[REDACTED]"}`,
+		},
+		{
+			name: "JSON array whose string ends with a value ending in a key name before a word redacts the pair",
+			msg:  `["retry\npassword=dev-SECRET123-password: dial"]`,
+			want: `["retry\npassword=[REDACTED]"]`,
+		},
+		{
+			name: "JSON object whose string ends with a value ending in a key name redacts the pair",
+			msg:  `{"msg":"retry\npassword=dev-SECRET123-password"}`,
+			want: `{"msg":"retry\npassword=[REDACTED]"}`,
+		},
+		{
+			name: "JSON array whose string ends with a value ending in a key name redacts the pair",
+			msg:  `["retry\npassword=dev-SECRET123-password"]`,
+			want: `["retry\npassword=[REDACTED]"]`,
+		},
+		{
+			name: "stray quote before JSON object with an escaped-newline credential fails closed",
+			msg:  `bad token " in body: {"msg":"retry\npassword=SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped quote before JSON object with an escaped-newline credential fails closed",
+			msg:  `flag \"foo: {"msg":"retry\npassword=SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "non-JSON backslash before escaped quote and escaped-newline credential fails closed",
+			msg:  `err: "dir C:\work\"retry\npassword=SECRET123"`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "truncated unclosed JSON error body with an escaped-newline credential fails closed",
+			msg:  `upstream error: {"error":"login failed\npassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "single-quoted Python dict with an escaped-newline credential fails closed",
+			msg:  `{'error': 'retry\npassword=SECRET123'}`,
+			want: unparseableJSONPlaceholder,
+		},
+		{
+			name: "prefixed single-quoted Python dict with an escaped-newline credential fails closed",
+			msg:  `bad config: {'error': 'retry\npassword=SECRET123'}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "unquoted escaped log line with an escaped-newline credential fails closed",
+			msg:  `err=retry\npassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped backspace before a credential fails closed",
+			msg:  `retry\bpassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped form feed before a credential fails closed",
+			msg:  `retry\fpassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped carriage return before a credential fails closed",
+			msg:  `retry\rpassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped tab before a credential fails closed",
+			msg:  `retry\tpassword=SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped slash in a URL with userinfo credentials fails closed",
+			msg:  `https:\/\/user:SECRET123@example.com`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "deeply backslash-escaped double quote before a key word with no value is kept",
+			msg:  strings.Repeat(`\`, 256) + `"token`,
+			want: strings.Repeat(`\`, 256) + `"token`,
+		},
+		{
+			name: "deeply backslash-escaped single quote before a key word with no value is kept",
+			msg:  strings.Repeat(`\`, 256) + `'token`,
+			want: strings.Repeat(`\`, 256) + `'token`,
+		},
+		{
+			name: "escaped backslash before a unicode-escaped space in a bearer token fails closed",
+			msg:  `Bearer\\u0020SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "Windows path without credentials is preserved",
+			msg:  `C:\new\file.txt`,
+			want: `C:\new\file.txt`,
+		},
+		{
+			name: "value that only ends in a key name glued to a quoted value is redacted with it",
+			msg:  `failed: password: dev-SECRET123-token="a SECRET123 b" retry`,
+			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "value that only ends in a key name before a nested key is redacted with the pair that key starts",
+			msg:  "password=a-SECRET123-token: token: SECRET456 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "values that only end in key names one after another are redacted together",
+			msg:  "password=a-SECRET123-token: b-SECRET123-token: c-SECRET123-token: SECRET456 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "Go struct field whose value only ends in a key name is redacted with the pair it starts",
+			msg:  "failed: {Password:a-SECRET123-token: SECRET456} retry",
+			want: "failed: {Password:[REDACTED]} retry",
+		},
+		{
+			name: "Go map entry whose value only ends in a key name is redacted with the pair it starts",
+			msg:  "failed: map[password:a-SECRET123-token: SECRET456 user:bob]",
+			want: "failed: map[password:[REDACTED] user:bob]",
+		},
+		{
+			name: "value that only ends in a key name before a redacted value is redacted",
+			msg:  "failed: token=abc-SECRET123-token:[REDACTED] retry",
+			want: "failed: token=[REDACTED] retry",
+		},
+		{
+			name: "credentials block in YAML with a nested hyphenated compound key",
+			msg:  "credentials:\n  X-Amz-Security-Token: SECRET123",
+			want: "credentials:\n  X-Amz-Security-Token:[REDACTED]",
+		},
+		{
+			name: "hyphenated header name after credentials is kept and its value redacted",
+			msg:  "credentials: X-Auth-Token: SECRET123",
+			want: "credentials: X-Auth-Token:[REDACTED]",
+		},
+		{
 			name: "key-shaped bare value with no value after its colon is redacted whole",
 			msg:  "password=SECRETP-token:",
 			want: "password=[REDACTED]",
@@ -2022,6 +2303,146 @@ func TestRedactErrorMessage(t *testing.T) {
 			msg:  `"Bearer\tSECRET123"`,
 			want: unparseableJSONPlaceholder,
 		},
+		{
+			name: "JSON object where earlier token value ends with escaped newline before value ending in key name",
+			msg:  `{"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want: `{"msg":"token=[REDACTED]\npassword:[REDACTED]"}`,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows escaped newline before value ending in key name",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where earlier compound key value ends with escaped newline before password",
+			msg:  `{"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want: `{"msg":"secret:[REDACTED]\npassword:[REDACTED]"}`,
+		},
+		{
+			name: "prefixed JSON object where earlier compound key value swallows escaped newline before password",
+			msg:  `POST /v1/login: 400: {"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where password colon is followed by escaped newline and space",
+			msg:  `{"msg":"password:\n SECRET123"}`,
+			want: `{"msg":"password:[REDACTED]"}`,
+		},
+		{
+			name: "prefixed JSON object where password colon is followed by escaped newline and space",
+			msg:  `POST /v1/login: 400: {"msg":"password:\n SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed single-quoted Python dict where earlier token swallows escaped newline before password",
+			msg:  `bad config: {'error': 'token=abc\npassword: SECRET123'}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "truncated JSON error body where earlier token swallows escaped newline before password",
+			msg:  `upstream error: {"error":"token=abc\npassword: SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare token value ending with escaped quote before password key",
+			msg:  `token=abc\"password\": SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed quoted string where earlier token swallows escaped newline before password",
+			msg:  `upstream failed: "token=abc\npassword: SECRET123"`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows percent-encoded newline before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc%0Apassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows double-escaped unicode newline before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\\u000apassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows escaped newline and unicode colon before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\npassword\u003a SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			msg:  `{"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want: `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where earlier token swallows percent-escaped backslash and n before password",
+			msg:  `{"msg":"token=abc%5Cnpassword: SECRET123"}`,
+			want: `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows hex-escaped backslash and n before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\x5cnpassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "prefixed JSON object where earlier token swallows unicode-escaped backslash and unicode n before password",
+			msg:  `POST /v1/login: 400: {"msg":"token=abc\u005c\u006epassword: SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where password colon is followed by escaped backspace and space",
+			msg:  `{"msg":"password:\b SECRET123"}`,
+			want: `{"msg":"password:[REDACTED]"}`,
+		},
+		{
+			name: "prefixed JSON object where password colon is followed by escaped backspace and space",
+			msg:  `POST /v1/login: 400: {"msg":"password:\b SECRET123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "plain text where password colon is followed by escaped backspace and space",
+			msg:  `password:\b SECRET123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "JSON object where password colon is followed by unicode backspace and space",
+			msg:  `{"msg":"password:\u0008 SECRET123"}`,
+			want: `{"msg":"password:[REDACTED]"}`,
+		},
+		{
+			name: "JSON object where password colon is followed by unicode vertical tab and space",
+			msg:  `{"msg":"password:\u000b SECRET123"}`,
+			want: `{"msg":"password:[REDACTED]"}`,
+		},
+		{
+			name: "JSON object where password colon is followed by unicode NUL and space",
+			msg:  `{"msg":"password:\u0000 SECRET123"}`,
+			want: `{"msg":"password:[REDACTED]"}`,
+		},
+		{
+			name: "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			msg:  "failed: {Password:abc-token: }\bSECRET123",
+			want: "failed: {Password:[REDACTED]",
+		},
+		{
+			name: "Go struct field ending in key name followed by space, backspace byte and closing brace",
+			msg:  "failed: {Password:abc-token: \b}",
+			want: "failed: {Password:[REDACTED] \b}",
+		},
+		{
+			name: "caller-supplied redaction placeholders splitting secret after escaped newline fail closed",
+			msg:  `password:\n [REDACTED]a[REDACTED]u[REDACTED]t[REDACTED]h[REDACTED] authorization=1 authorization=2`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "caller-supplied redaction placeholders with nonce prefix splitting secret after escaped newline fail closed",
+			msg:  `password:\n [REDACTED]zzRedactedLiteral[REDACTED]a[REDACTED]u[REDACTED]t[REDACTED]h[REDACTED] authorization=1 authorization=2`,
+			want: redactedSensitiveTextPlaceholder,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2231,7 +2652,13 @@ func TestSanitizeRawText(t *testing.T) {
 			{"Credentials:\n  SessionToken: SECRET123", "Credentials:\n  SessionToken:[REDACTED]"},
 			{"credentials:\n  token:\n" + strings.Repeat(" ", 100) + "SECRET123", "credentials:\n  token:[REDACTED]"},
 			{"credentials:\n  db/password: SECRET123", "credentials:\n  db/password:[REDACTED]"},
-			{"credentials: db/password = SECRET123", "credentials: db/password=[REDACTED]"},
+			{"credentials: db/password = SECRET123", "credentials:[REDACTED]"},
+			{"connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused", "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused"},
+			{`login failed: password="SECRET123-secret": invalid`, `login failed: password="[REDACTED]"`},
+			{"api_key=prodSECRET123-api-key: permission denied", "api_key=[REDACTED]"},
+			{"my login is token=abc-SECRET123-token: please check", "my login is token=[REDACTED] check"},
+			{"credentials: X-Amz-Security-Token: SECRET123", "credentials:[REDACTED]"},
+			{"password=a-SECRET123-token: token: SECRET456 retry", "password=[REDACTED] retry"},
 			{"credentials: {token: SECRET123, refresh: SECRET456}", "credentials:[REDACTED]"},
 			{`password: 'token: SECRETA SECRETB'`, `password:'[REDACTED]'`},
 			{`token: "password=SECRETA SECRETB"`, `token:"[REDACTED]"`},
@@ -2325,12 +2752,147 @@ func TestSanitizeRawText(t *testing.T) {
 			{"credentials: token\n= SECRETA", "credentials: token=[REDACTED]"},
 			{"credentials: token\t= SECRETA", "credentials: token=[REDACTED]"},
 			{"credentials: token : SECRETA", "credentials: token:[REDACTED]"},
+			{"password=temp:SECRET123-token: dial tcp", "password=[REDACTED] tcp"},
+			{"password=temp:SECRET123: dial tcp", "password=[REDACTED] tcp"},
+			{"password=user:temp:SECRET123: dial tcp", "password=[REDACTED] tcp"},
+			{"password=app:temp:SECRET123: dial tcp", "password=[REDACTED] tcp"},
+			{`password="temp:SECRET123": dial tcp`, `password="[REDACTED]" tcp`},
+			{"credentials: temp:foo: SECRET123", "credentials:[REDACTED]"},
+			{"credentials:\n  temp:foo: SECRET123", "credentials:\n  temp:foo:[REDACTED]"},
+			{"credentials:\n  user:temp:foo: SECRET123", "credentials:\n  user:temp:foo:[REDACTED]"},
+			{`{"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\"","code":"token=abc"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login [400]: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`, redactedSensitiveTextPlaceholder},
+			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`, unparseableJSONPlaceholder},
+			{`[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`, unparseableJSONPlaceholder},
+			{`POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password=SECRET123"}`, `{"msg":"password=[REDACTED]}`},
+			{`{"msg":"retry\npassword=dev-SECRET123-password: dial"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"retry\npassword=hunter2val token=abc-SECRET123-token: dial"}`, redactedSensitiveTextPlaceholder},
+			{`["retry\npassword=dev-SECRET123-password: dial"]`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"retry\npassword=dev-SECRET123-password"}`, redactedSensitiveTextPlaceholder},
+			{`["retry\npassword=dev-SECRET123-password"]`, redactedSensitiveTextPlaceholder},
+			{`bad token " in body: {"msg":"retry\npassword=SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`flag \"foo: {"msg":"retry\npassword=SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`err: "dir C:\work\"retry\npassword=SECRET123"`, redactedSensitiveTextPlaceholder},
+			{`upstream error: {"error":"login failed\npassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`{'error': 'retry\npassword=SECRET123'}`, unparseableJSONPlaceholder},
+			{`bad config: {'error': 'retry\npassword=SECRET123'}`, redactedSensitiveTextPlaceholder},
+			{`err=retry\npassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`retry\bpassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`retry\fpassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`retry\npassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`retry\rpassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`retry\tpassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{`https:\/\/user:SECRET123@example.com`, redactedSensitiveTextPlaceholder},
+			{"Basic%20" + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 300)+":SECRET123:"+strings.Repeat("b", 285))), redactedSensitiveTextPlaceholder},
+			{`Basic\t` + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 300)+":SECRET123:"+strings.Repeat("b", 285))), redactedSensitiveTextPlaceholder},
+			{"https%3A//maps.googleapis.com/maps/api/geocode/json?address=" + strings.Repeat("a", 300) + "&key=SECRET123&sensor=" + strings.Repeat("b", 300), redactedSensitiveTextPlaceholder},
+			{`https:\/\/maps.googleapis.com/maps/api/geocode/json?address=` + strings.Repeat("a", 300) + "&key=SECRET123&sensor=" + strings.Repeat("b", 300), redactedSensitiveTextPlaceholder},
+			{"https%3A//" + strings.Repeat("a", 260) + ":SECRET123@example.com/" + strings.Repeat("b", 260), redactedSensitiveTextPlaceholder},
+			{strings.Repeat(`\`, 256) + `npassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{strings.Repeat(`\`, 256) + `tpassword=SECRET123`, redactedSensitiveTextPlaceholder},
+			{"password" + strings.Repeat(`\`, 256) + "u003dSECRET123", redactedSensitiveTextPlaceholder},
+			{strings.Repeat(`\`, 600) + `"password": "SECRET123"`, strings.Repeat(`\`, 600) + `"password":"[REDACTED]"`},
+			{`Bearer\\u0020SECRET123`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password:\n SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"password:\n SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`bad config: {'error': 'token=abc\npassword: SECRET123'}`, redactedSensitiveTextPlaceholder},
+			{`upstream error: {"error":"token=abc\npassword: SECRET123`, redactedSensitiveTextPlaceholder},
+			{`token=abc\"password\": SECRET123`, redactedSensitiveTextPlaceholder},
+			{`upstream failed: "token=abc\npassword: SECRET123"`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc%0Apassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\\u000apassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\npassword\u003a SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"token=abc\u005cnpassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\u005cnpassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"token=abc%5Cnpassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\x5cnpassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"token=abc\u005c\u006epassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password:\b SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`POST /v1/login: 400: {"msg":"password:\b SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`password:\b SECRET123`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password:\u0008 SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password:\u000b SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{`{"msg":"password:\u0000 SECRET123"}`, redactedSensitiveTextPlaceholder},
+			{"failed: {Password:abc-token: }\bSECRET123", "failed: {Password:[REDACTED]"},
+			{"failed: {Password:abc-token: \b}", "failed: {Password:[REDACTED] \b}"},
+			{"credentials:\n  password=SECRET123-token: OTHER456", "credentials:\n  password=[REDACTED]"},
+			{`password=abc-token: " SECRET123"`, "password=[REDACTED]"},
+			{`password=abc-token: ' SECRET123'`, "password=[REDACTED]"},
+			{`password=abc-token: \" SECRET123\"`, `password=[REDACTED]`},
+			{`password:\n [REDACTED]a[REDACTED]u[REDACTED]t[REDACTED]h[REDACTED] authorization=1 authorization=2`, redactedSensitiveTextPlaceholder},
+			{`GET https://example.com?token=SECRET123 hello\nworld`, `GET https://example.com?token=%5BREDACTED%5D hello\nworld`},
 		}
 		for _, tt := range tests {
 			got, lost := sanitizeRawText(tt.raw)
 			if got != tt.want || !lost {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tt.raw, got, lost, tt.want)
 			}
+			truncJSON, truncated, err := SmartTruncate(tt.raw, 4096)
+			var trunc string
+			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != tt.want || !truncated {
+				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%q, true, nil)", tt.raw, truncJSON, truncated, err, tt.want)
+			}
+		}
+		for _, depth := range []int{5, 9} {
+			nested := `"retry\npassword=SECRET123"`
+			for range depth {
+				b, err := json.Marshal(nested)
+				if err != nil {
+					t.Fatalf("json.Marshal: %v", err)
+				}
+				nested = string(b)
+			}
+			prefixed := "upstream: " + nested
+			if got := redactErrorMessage(prefixed); got != redactedSensitiveTextPlaceholder {
+				t.Errorf("redactErrorMessage(%d-deep) = %q, want %q", depth, got, redactedSensitiveTextPlaceholder)
+			}
+			if got, lost := sanitizeRawText(prefixed); got != redactedSensitiveTextPlaceholder || !lost {
+				t.Errorf("sanitizeRawText(%d-deep) = (%q, %v), want (%q, true)", depth, got, lost, redactedSensitiveTextPlaceholder)
+			}
+		}
+		if got, want := scrubErrorText(`{"msg":"password=SECRET123"}`), `{"msg":"password=[REDACTED]}`; got != want {
+			t.Errorf("scrubErrorText unescaped JSON pair = %q, want %q", got, want)
+		}
+		for _, harmless := range []string{
+			`C:\new\file.txt`,
+			`{"msg":"talk to Ken\ntomorrow"}`,
+			`GET [REDACTED_SENSITIVE_URI] [REDACTED] %5BREDACTED%5D hello\nworld`,
+			`{"sep":"` + strings.Repeat(`\\`, 128) + `"}`,
+			`{"sep":"` + strings.Repeat(`\\`, 300) + `"}`,
+			`"` + strings.Repeat(`\`, 300) + `"`,
+			`hello: "` + strings.Repeat(`\`, 256) + `"`,
+			"design review notes; " + strings.Repeat(`\`, 256) + "next",
+			strings.Repeat(`\`, 256) + `"token`,
+			strings.Repeat(`\`, 256) + `'token`,
+			"path " + strings.Repeat(`\`, 256) + "/end",
+			"mytoken=1" + strings.Repeat(" ", 56) + "a-b: x",
+			"foosig: 1" + strings.Repeat(" ", 52) + "temp: ",
+		} {
+			if got := redactErrorMessage(harmless); got != harmless {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", harmless, got, harmless)
+			}
+			if got, lost := sanitizeRawText(harmless); got != harmless || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", harmless, got, lost, harmless)
+			}
+		}
+		for _, pair := range []struct{ raw, want string }{
+			{`{"msg":"hello\nworld","token":"SECRET123"}`, `{"msg":"hello\nworld","token":"[REDACTED]"}`},
+			{`{"path":"C:\\users\\deadbeef","token":"SECRET123"}`, `{"path":"C:\\users\\deadbeef","token":"[REDACTED]"}`},
+			{`{"msg":"hello [REDACTED]\nworld","token":"SECRET123"}`, `{"msg":"hello [REDACTED]\nworld","token":"[REDACTED]"}`},
+			{`{"sep":"` + strings.Repeat(`\\`, 128) + `","token":"SECRET123"}`, `{"sep":"` + strings.Repeat(`\\`, 128) + `","token":"[REDACTED]"}`},
+		} {
+			if got, lost := sanitizeRawText(pair.raw); got != pair.want || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
+			}
+		}
+		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
+			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
 		}
 	})
 
@@ -2381,6 +2943,192 @@ func TestSanitizeRawText(t *testing.T) {
 			}
 			if !lost {
 				t.Errorf("%s: sanitizeRawText lost = false, want true", name)
+			}
+		}
+	})
+
+	t.Run("pattern words with long backslash runs are inspected in linear time", func(t *testing.T) {
+		unchanged := map[string]string{
+			"300 backslashes": "design review notes; " + strings.Repeat(`\`, 300) + " end",
+			"50KB prose":      strings.Repeat("design review notes; ", 2_500) + strings.Repeat(`\`, 256) + " end",
+			"105KB prose":     strings.Repeat("design review notes; ", 5_000) + strings.Repeat(`\`, 256) + " end",
+			"55KB multiline colon prose with backslashes":               strings.Repeat("design: review=notes;\n", 2_500) + strings.Repeat(`\`, 256) + " end",
+			"55KB multiline colon prose with quoted backslashes":        strings.Repeat("design: review=notes;\n", 2_500) + `"` + strings.Repeat(`\`, 300) + `"`,
+			"110KB multiline colon prose with quoted backslashes":       strings.Repeat("design: review=notes;\n", 5_000) + `"` + strings.Repeat(`\`, 300) + `"`,
+			"53KB contractions and basic prose with quoted backslashes": strings.Repeat("a basic user's design; ", 2_300) + `"` + strings.Repeat(`\`, 300) + `"`,
+			"105KB quoted colons with Windows path":                     strings.Repeat(`see "design": user notes; `, 4_100) + `C:\\users\\alice`,
+		}
+		for name, text := range unchanged {
+			start := time.Now()
+			if got := redactErrorMessage(text); got != text {
+				t.Errorf("%s: redactErrorMessage redacted clean text (len=%d)", name, len(got))
+			}
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("%s: redactErrorMessage took %v for a %d-byte text", name, d, len(text))
+			}
+			start = time.Now()
+			got, lost := sanitizeRawText(text)
+			if d := time.Since(start); d > 3*time.Second {
+				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
+			}
+			if got != text || lost {
+				t.Errorf("%s: sanitizeRawText modified clean text (len=%d, lost=%v)", name, len(got), lost)
+			}
+		}
+
+		withCred := strings.Repeat("design review notes; ", 2_500) + `retry\npassword=SECRET123`
+		start := time.Now()
+		got, lost := sanitizeRawText(withCred)
+		if d := time.Since(start); d > 3*time.Second {
+			t.Errorf("escaped credential after 50KB prose: sanitizeRawText took %v", d)
+		}
+		if got != redactedSensitiveTextPlaceholder || !lost {
+			t.Errorf("escaped credential after 50KB prose: sanitizeRawText = (%q, %v), want (%q, true)", got, lost, redactedSensitiveTextPlaceholder)
+		}
+	})
+
+	t.Run("keys quoted with escapes and padded with a Unicode space fail closed", func(t *testing.T) {
+		// The quotes around each key are written as escapes, and a Unicode
+		// space before the delimiter keeps the decoded pair from matching
+		// the credential patterns, so only the check for a quoted sensitive
+		// key in the decoded text finds it.
+		samples := []string{
+			"[\\u0022AUTHORIZATION\\u0022\u00a0: \\u0022SECRET123\\u0022]",
+			"{\\u0022password\\u0022\u00a0: \\u0022SECRET123\\u0022}",
+			"[%22password%22\u3000: %22SECRET123%22]",
+			"{\\x22api_key\\x22\u00a0= \\x22SECRET123\\x22}",
+			"{\\u0027secret\\u0027\u2009:\\u0027SECRET123\\u0027}",
+			// The same with literal quotes, and without the Unicode space.
+			"[\"password\"\u00a0: \"SECRET123\"]",
+			"[\\u0022password\\u0022: \\u0022SECRET123\\u0022]",
+		}
+		for _, s := range samples {
+			if got, lost := sanitizeRawText(s); got != unparseableJSONPlaceholder || !lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", s, got, lost, unparseableJSONPlaceholder)
+			}
+			if got := redactErrorMessage(s); got != unparseableJSONPlaceholder {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", s, got, unparseableJSONPlaceholder)
+			}
+		}
+	})
+
+	t.Run("escaped keys and delimiters across long whitespace runs fail closed", func(t *testing.T) {
+		// Only the spans of a text over 8 KiB around its escapes are
+		// decoded, so each span must reach across the whitespace between
+		// the key, the delimiter and the value, however long it is.
+		prose := strings.Repeat("lorem ipsum dolor sit amet\n", 340)
+		spaces := func(n int) string { return strings.Repeat(" ", n) }
+		tests := []struct {
+			name string
+			raw  string
+			// want is the result of sanitizeRawText, redactErrorMessage and
+			// SmartTruncate. scrubErrorText returns
+			// redactedSensitiveTextPlaceholder for every raw.
+			want string
+		}{
+			{"escaped key, spaces, delimiter", "pass\\u0077ord" + spaces(9000) + ": SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key and delimiter, spaces", "pass\\u0077ord:" + spaces(9000) + "SECRET123", redactedSensitiveTextPlaceholder},
+			{"key, spaces, escaped delimiter", "password" + spaces(9000) + "\\u003a SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key, spaces around the delimiter", prose + "pass\\u0077ord" + spaces(6000) + ":" + spaces(6000) + "SECRET123", redactedSensitiveTextPlaceholder},
+			{"long word, escaped key, spaces, delimiter", strings.Repeat("x", 8300) + " pass\\u0077ord" + spaces(5000) + ": SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key, spaces and a line break, delimiter", "pass\\u0077ord" + spaces(3000) + "\n" + spaces(3000) + ": SECRET123" + spaces(3000), redactedSensitiveTextPlaceholder},
+			// The span reaches 512 bytes past the escape before it is
+			// widened.
+			{"escaped key, 400 spaces and a line break, delimiter", prose + "pass\\u0077ord" + spaces(400) + "\n: SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key, 513 spaces and a line break, delimiter", prose + "pass\\u0077ord" + spaces(513) + "\n: SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key and delimiter, 520 spaces and a line break", prose + "pass\\u0077ord:" + spaces(520) + "\nSECRET123", redactedSensitiveTextPlaceholder},
+			{"key and escaped delimiter, 600 spaces and a line break", prose + "password\\u003a" + spaces(600) + "\nSECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key, 600 line breaks, delimiter", prose + "pass\\u0077ord" + strings.Repeat("\n", 600) + ": SECRET123", redactedSensitiveTextPlaceholder},
+			{"escaped key and delimiter, 520 tabs and a line break", prose + "api\\u005fkey =" + strings.Repeat("\t", 520) + "\nSECRET123", redactedSensitiveTextPlaceholder},
+			{"key, spaces, delimiter, spaces, value in escaped quotes", prose + "password" + spaces(6000) + ":" + spaces(6000) + "\\u0022a SECRET123\\u0022", redactedSensitiveTextPlaceholder},
+			{"escaped tab, bearer, spaces, token", strings.Repeat("a ", 5000) + "\\tBearer" + spaces(9000) + "SECRET123", redactedSensitiveTextPlaceholder},
+			{"quoted key, 5,000 spaces, escaped delimiter, prose", "{\"password\"" + spaces(5000) + "\\u003a \"SECRET123\"}" + strings.Repeat(" x", 2000), unparseableJSONPlaceholder},
+			// Spans are joined across a gap of up to 64 KiB between quotes.
+			{"quoted key, 60,000 spaces, escaped delimiter", "{\"password\"" + spaces(60_000) + "\\u003a \"SECRET123\"}", unparseableJSONPlaceholder},
+			{"quoted key, 70,000 spaces, escaped delimiter", "{\"password\"" + spaces(70_000) + "\\u003a \"SECRET123\"}", unparseableJSONPlaceholder},
+		}
+		for _, tt := range tests {
+			if got, lost := sanitizeRawText(tt.raw); got != tt.want || !lost {
+				t.Errorf("%s: sanitizeRawText = (%.80q, %v), want (%q, true)", tt.name, got, lost, tt.want)
+			}
+			if got := redactErrorMessage(tt.raw); got != tt.want {
+				t.Errorf("%s: redactErrorMessage = %.80q, want %q", tt.name, got, tt.want)
+			}
+			if got := scrubErrorText(tt.raw); got != redactedSensitiveTextPlaceholder {
+				t.Errorf("%s: scrubErrorText = %.80q, want %q", tt.name, got, redactedSensitiveTextPlaceholder)
+			}
+			truncJSON, _, err := SmartTruncate(tt.raw, 1<<20)
+			var trunc string
+			if err != nil || json.Unmarshal(truncJSON, &trunc) != nil || trunc != tt.want {
+				t.Errorf("%s: SmartTruncate = (%.80s, %v), want %q", tt.name, truncJSON, err, tt.want)
+			}
+		}
+	})
+
+	t.Run("a quote after an even run of backslashes is not an escaped quote", func(t *testing.T) {
+		// The backslashes escape each other, so the quote does not hide a
+		// quoted key from the checks on the raw text, and prose that ends
+		// a Windows path with it is kept.
+		prose := `[INFO] saved to "C:\\" ok`
+		if got := redactErrorMessage(prose); got != prose {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", prose, got, prose)
+		}
+		// A key quoted that way is still found, as is one quoted with
+		// escaped quotes.
+		for _, s := range []string{
+			`[INFO] \\"password\\": \\"SECRET123\\"`,
+			`[INFO] \"password\": \"SECRET123\"`,
+		} {
+			if got, lost := sanitizeRawText(s); got != unparseableJSONPlaceholder || !lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", s, got, lost, unparseableJSONPlaceholder)
+			}
+			if got := redactErrorMessage(s); got != unparseableJSONPlaceholder {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", s, got, unparseableJSONPlaceholder)
+			}
+		}
+	})
+
+	t.Run("key-value pairs with one kind of delimiter are redacted in linear time", func(t *testing.T) {
+		// Each text repeats sensitive key-value pairs that use only ":" or
+		// only "=". Looking for the next delimiter of the other kind anew
+		// after each match would scan the rest of the text once per match.
+		scale := 4
+		if raceEnabled {
+			// The race detector slows the scans about twentyfold.
+			scale = 64
+		}
+		for _, tc := range []struct {
+			name string
+			unit string
+			size int
+			// kept are the parts of unit that redaction must remove.
+			kept []string
+		}{
+			{"colons", "token: a: b: c: d ", 4 << 20, []string{"token: a"}},
+			{"equals signs", "'a'='b' secret='' ", 4 << 20, []string{"secret=''"}},
+			// Both the JSON and the text pass match each pair with a
+			// regular expression, which takes longer per byte.
+			{"JSON members", `"token": "x", "password": "y", `, 1 << 20, []string{`"x"`, `"y"`}},
+		} {
+			text := strings.Repeat(tc.unit, tc.size/scale/len(tc.unit))
+			for _, redact := range []struct {
+				name string
+				fn   func(string) string
+			}{
+				{"sanitizeRawText", func(s string) string { got, _ := sanitizeRawText(s); return got }},
+				{"redactErrorMessage", redactErrorMessage},
+				{"scrubErrorText", scrubErrorText},
+			} {
+				start := time.Now()
+				got := redact.fn(text)
+				if d := time.Since(start); d > 3*time.Second {
+					t.Errorf("%s: %s took %v for a %d-byte text", tc.name, redact.name, d, len(text))
+				}
+				for _, k := range tc.kept {
+					if strings.Contains(got, k) {
+						t.Errorf("%s: %s kept %q", tc.name, redact.name, k)
+					}
+				}
 			}
 		}
 	})
