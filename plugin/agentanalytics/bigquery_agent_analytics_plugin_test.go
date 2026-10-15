@@ -2680,7 +2680,7 @@ func TestQuotedFragmentCost(t *testing.T) {
 			p, _, mCtx := setupTestPlugin(t)
 			start := time.Now()
 			_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", tt.text))
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > linearTimeBound {
 				t.Errorf("OnUserMessageCallback took %v for a %d KB message", d, len(tt.text)/1000)
 			}
 		})
@@ -2959,9 +2959,560 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 	}
 }
 
+// TestValueEndingInKeyName checks that a credential whose value only ends in
+// a sensitive key name, as in the text that fmt.Errorf("password=%s: %w", ...)
+// writes before a wrapped error, is redacted from error_message, content,
+// content_parts and tool results, and that no row holds a credential. When
+// the text is a JSON object or array whose string also holds a credential
+// that an escape hides from the text patterns, error_message redacts each
+// pair, while content, content_parts and tool results are written as
+// [REDACTED_SENSITIVE_TEXT], also when redacting another string of the JSON
+// text leaves it invalid. When such JSON text follows other text, all four
+// are written as [REDACTED_SENSITIVE_TEXT]. The same holds when the escape
+// that hides the credential is one that JSON does not define, such as \0 or
+// \e, when it is an ANSI sequence, with ESC written itself or spelled, or when
+// it is a percent-encoded byte outside ASCII.
+func TestValueEndingInKeyName(t *testing.T) {
+	secrets := []string{
+		"SECRET123", "hunter2", "s3cr3t", "bob pw", "SECRETX9", "SECRETX12", "SECRETX15", "4815162342",
+		"HID0081X", "HID0105X", "HID0112X", "HID0113X", "HID0114X", "HID0115X", "HID0116X", "HID0117X", "HID0118X", "HID0119X",
+		"ROWSECRET2", "AMZSECRET2", "ROWSECRET3", "AMZSECRET3",
+		"LONGSSECRET1", "LONGSSECRET2", "LONGSSECRET3",
+		"ZXSECRET9", "SV1", "!@#$%^*()_+?",
+	}
+	// jsonDetail is JSON text whose string holds a password after an
+	// escaped line break.
+	const jsonDetail = `{"detail":"retry\npassword=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`
+	tests := []struct {
+		name string
+		text string
+		// want is the error_message, and also the content.text_summary,
+		// content_parts text and content.result.output unless wantContent
+		// is set.
+		want        string
+		wantContent string
+	}{
+		{
+			name: "password before a wrapped error",
+			text: "connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused",
+			want: "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused",
+		},
+		{
+			name: "quoted password before an error",
+			text: `login failed: password="SECRET123-secret": invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name: "API key before a wrapped error",
+			text: "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
+		},
+		{
+			name: "token in prose",
+			text: "my login is token=abc-SECRET123-token: please check",
+			want: "my login is token=[REDACTED] check",
+		},
+		{
+			name:        "password after an escaped line break in a JSON message",
+			text:        `{"msg":"retry\npassword=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON error",
+			text:        `{"error":"connect failed\npassword=hunter2 credentials: user/password:\"bob pw\""}`,
+			want:        `{"error":"connect failed\npassword=[REDACTED] credentials:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// Redacting "token=abc" takes the closing quote of its
+			// string with it, which leaves the JSON text invalid.
+			name:        "password after an escaped line break in a JSON message with another pair",
+			text:        `{"msg":"retry\npassword=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\"","code":"token=abc"}`,
+			want:        `{"code":"token=[REDACTED]","msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON error with another pair",
+			text:        `{"error":"connect failed\npassword=hunter2 credentials: user/password:\"bob pw\"","id":"token=abc"}`,
+			want:        `{"error":"connect failed\npassword=[REDACTED] credentials:[REDACTED]","id":"token=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON array with another pair",
+			text:        `["retry\npassword=hunter2","token=abc"]`,
+			want:        `["retry\npassword=[REDACTED]","token=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line separator in a JSON message with another pair",
+			text:        `{"msg":"retry\u2028password=hunter2","code":"token=abc"}`,
+			want:        `{"code":"token=[REDACTED]","msg":"retry\u2028password=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line separator in a JSON array with another pair",
+			text:        `["retry\u2028password=hunter2","token=abc"]`,
+			want:        `["retry\u2028password=[REDACTED]","token=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line separator in a JSON array",
+			text:        `["retry\u2028password=hunter2"]`,
+			want:        `["retry\u2028password=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The escaped line break is taken for the value of
+			// "secret", which leaves SECRETX9 in place when the text is
+			// redacted as it is written.
+			name:        "escaped line break taken for the value of a key in a JSON message",
+			text:        `{"detail":"secret:\n  SECRETX9 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"detail":"secret:[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The value of "password" runs across the escaped line break
+			// and takes the key "token" with it, which leaves the value
+			// of that key in place when the text is redacted as it is
+			// written.
+			name:        "password value that runs across an escaped line break into the next key in a JSON message",
+			text:        `{"detail":"password = X\ntoken : 'SECRETX12' vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"detail":"password=[REDACTED]\ntoken:'[REDACTED]' vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password value that runs across an escaped line break into an unquoted next key in a JSON message",
+			text:        `{"msg":"password=X\ntoken: hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"msg":"password=[REDACTED]\ntoken:[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped line break in JSON text after an HTTP status",
+			text: "POST /v1/login: 400 Bad Request: " + jsonDetail,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped line break in JSON text after a message",
+			text: "tool failed: " + jsonDetail,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped line break in JSON text quoted with %q",
+			text: fmt.Sprintf("error: %q", jsonDetail),
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped line separator in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\u2028password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped line separator in JSON text after a message",
+			text: `tool failed: {"msg":"retry\u2028password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped paragraph separator in JSON text after a message",
+			text: `tool failed: {"msg":"retry\u2029password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped no-break space in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\u00a0password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// Python's json.dumps writes every character outside ASCII
+			// with its code.
+			name: "password after escaped letters in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail": "\u767b\u5f55\u5931\u8d25password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password value that runs across an escaped line break into the next key in JSON text after a message",
+			text: `tool failed: {"msg":"password=X\ntoken: hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password value that runs across an escaped line break into the next key in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"password = X\ntoken : 'SECRETX12' vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped line break taken for the value of a key in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"secret:\n  SECRETX9 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		// The escaped quotes of JSON text quoted again hide a quoted key
+		// name, which is then taken for the value of the key before it,
+		// so SECRETX15, the value of the key it names, is left in place
+		// when the text is redacted as it is written.
+		{
+			name: "quoted key name of JSON text quoted again after a key in JSON text after a message",
+			text: `tool failed: {"e":"credentials: \\\"password\\\": SECRETX15 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "quoted key name of JSON text quoted again before an equals sign after a key in JSON text after a message",
+			text: `tool failed: {"e":"credentials: \\\"api-key\\\" = SECRETX15 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "quoted value of JSON text quoted again that only ends in a key name in JSON text after a message",
+			text: `tool failed: {"e":"password=\\\"dev-SECRET123-password\\\": SECRETX15 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "quoted key name of JSON text quoted again after a key in JSON text after a message without a compound value",
+			text: `tool failed: {"e":"credentials: \\\"password\\\": SECRETX15"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "quoted key name of JSON text quoted again before an equals sign after a key in a JSON message",
+			text:        `{"msg":"a,token = \\\"api-key\\\" = SECRETX15 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"msg":"a,token = \\\"api-key\\\"=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "quoted key name of JSON text quoted again after a key in a JSON message without a compound value",
+			text:        `{"e":"credentials: \\\"password\\\": SECRETX15"}`,
+			want:        `{"e":"credentials: \\\"password\\\":[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		// Go and C string literals accept octal escapes, such as \012
+		// for a line break.
+		{
+			name: "password after an octal escape in JSON text after a message",
+			text: `tool failed: {"msg":"retry\012password=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "octal escape taken for the value of a key in JSON text after a message",
+			text: `tool failed: {"detail":"secret:\012  SECRETX9 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password value that runs across an octal escape into the next key in JSON text after a message",
+			text: `tool failed: {"msg":"password=X\012token: hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an octal escape in JSON text after a message without a compound value",
+			text: `tool failed: {"msg":"retry\012password=hunter2"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The value holds only digits, and its word also holds
+			// another pair.
+			name: "password value that runs across an escaped line break into a key whose digits share their word with another pair in JSON text after a message",
+			text: `tool failed: {"msg":"password=X\ntoken: 4815162342,api_key=abc123"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		// An escape that JSON does not define, but that a reader of other
+		// formats accepts, leaves no word boundary before a key, and nor
+		// does the last letter of an ANSI sequence.
+		{
+			name: "password after an escaped NUL in JSON text after a message",
+			text: `tool failed: {"msg":"retry\0password=HID0081X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped ESC in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\epassword=HID0105X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped ANSI sequence in JSON text after a message",
+			text: `tool failed: {"msg":"retry\e[31mpassword=ROWSECRET2 credentials: X-Amz-Security-Token: \"AMZSECRET2\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an ANSI sequence of ESC bytes in JSON text after a message",
+			text: "tool failed: {\"msg\":\"retry\x1b[31mpassword=ROWSECRET3 credentials: X-Amz-Security-Token: \\\"AMZSECRET3\\\"\"}",
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after a short octal escape in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\12password=HID0112X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped bell in JSON text after a message",
+			text: `tool failed: {"msg":"retry\7password=HID0113X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after a percent-encoded no-break space in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry%C2%A0password=HID0114X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an ANSI sequence with a hex escape for ESC in JSON text after a message",
+			text: `tool failed: {"msg":"retry\x1b[31mpassword=HID0115X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an ANSI sequence with a Unicode escape for ESC in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\u001b[31mpassword=HID0116X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an ANSI sequence with an octal escape for ESC in JSON text after a message",
+			text: `tool failed: {"msg":"retry\033[31mpassword=HID0117X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password after an escaped digit in JSON text after an HTTP status",
+			text: `POST /v1/login: 400 Bad Request: {"detail":"retry\8password=HID0118X vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "password in ANSI sequences in a message",
+			text: "connect failed: \x1b[1mpassword=HID0119X\x1b[0m",
+			want: redactedSensitiveTextPlaceholder,
+		},
+		// The text patterns do not read the escape \u017f as the letter s,
+		// which they match ignoring case, but a decoded string of JSON text
+		// holds it, so content, content_parts and tool results are replaced
+		// as a whole, and error_message redacts the decoded string.
+		{
+			name:        "key spelled with an escaped long s in a JSON message",
+			text:        `{"m":"\u017fecret=LONGSSECRET1 ok","id":1}`,
+			want:        `{"id":1,"m":"ſecret=[REDACTED] ok"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "key spelled with an escaped long s in a JSON array",
+			text:        `["\u017fecret=LONGSSECRET2 ok",1]`,
+			want:        `["ſecret=[REDACTED] ok",1]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "key spelled with an escaped long s in a JSON message with another pair",
+			text:        `{"m":"\u017fecret=LONGSSECRET3 ok","code":"token=abc"}`,
+			want:        `{"code":"token=[REDACTED]","m":"ſecret=[REDACTED] ok"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "punctuation-only password attached to another pair after a consumed key in JSON text after a message",
+			text: `tool failed: {"msg":"token=X\u2028password: !@#$%^*()_+?,api_key=abc123 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "punctuation-only password attached to another pair after a consumed key in a JSON message",
+			text:        `{"msg":"token=X\npassword: !@#$%^*()_+?,api_key=abc123 done"}`,
+			want:        `{"msg":"token=[REDACTED]\npassword:[REDACTED],api_key=[REDACTED] done"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "count-balanced secret repeated in prose after a consumed key in a JSON message",
+			text:        `{"msg":"password=Y\ntoken: abc123 api_key=Z\nabc123 more","id":7}`,
+			want:        `{"id":7,"msg":"password=[REDACTED]\ntoken:[REDACTED] api_key=[REDACTED]\nabc123 more"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "count-balanced secret repeated in prose after a consumed key in JSON text after a message",
+			text: `tool failed: {"msg":"password=Y\ntoken: SV1 api_key=Z\nSV1 more","id":7}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "percent-encoded line break in a JSON message where a bare value consumes the next key",
+			text:        `{"msg":"password=X%0Atoken: ZXSECRET9 end","x":"y"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]","x":"y"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "percent-encoded line break taken for the value of a key in a JSON message",
+			text:        `{"msg":"secret:%0A  ZXSECRET9","x":"y"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]","x":"y"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "percent-encoded space taken for the value of a key in a JSON message",
+			text:        `{"msg":"secret:%20  ZXSECRET9","x":"y"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]","x":"y"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped long s in JSON text after a message",
+			text: `tool failed: {"m":"\u017fecret=ZXSECRET9"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "percent-encoded long s in JSON text after a message",
+			text: `tool failed: {"m":"%C5%BFecret=ZXSECRET9"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped Kelvin sign in JSON text after a message",
+			text: `tool failed: {"m":"api_\u212aey=ZXSECRET9"}`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "db"}, nil, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			wantContent := tt.want
+			if tt.wantContent != "" {
+				wantContent = tt.wantContent
+			}
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, wantContent)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, wantContent)
+			}
+			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != wantContent {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, wantContent)
+			}
+			for _, row := range rows {
+				s := fmt.Sprint(row)
+				for _, secret := range secrets {
+					if strings.Contains(s, secret) {
+						t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestKeyNameSpelledWithFoldedLetter checks that a sensitive key name spelled
+// with U+017F (long s) for "s" or U+212A (Kelvin sign) for "k", which the
+// patterns match ignoring case, is read as a key wherever one is, whether it
+// is the value of another key, ends such a value, follows "/" or starts the
+// text, so that its value is redacted from error_message, content,
+// content_parts and tool results, and that no row holds the credential.
+func TestKeyNameSpelledWithFoldedLetter(t *testing.T) {
+	const secret = "SECONDSECRET"
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{
+			name: "compound key name after credentials",
+			text: "credentials: db/ſecret: SECONDSECRET",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "key name after credentials",
+			text: "credentials: ſecret: SECONDSECRET",
+			want: "credentials: ſecret:[REDACTED]",
+		},
+		{
+			name: "compound key name in a YAML credentials block",
+			text: "credentials:\n  db/ſecret: SECONDSECRET",
+			want: "credentials:\n  db/ſecret:[REDACTED]",
+		},
+		{
+			name: "key name in a YAML credentials block",
+			text: "credentials:\n  ſecret: SECONDSECRET",
+			want: "credentials:\n  ſecret:[REDACTED]",
+		},
+		{
+			name: "value that only ends in the key name",
+			text: "password=dev-ſecret: SECONDSECRET retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "quoted value that only ends in the key name",
+			text: `password="AAA-ſecret": SECONDSECRET`,
+			want: `password="[REDACTED]"`,
+		},
+		{
+			name: "value that only ends in a signature key name",
+			text: "password=dev-ſignature: SECONDSECRET retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "secret access key name after credentials",
+			text: "credentials: ſecret-access-key: SECONDSECRET",
+			want: "credentials: ſecret-access-key:[REDACTED]",
+		},
+		{
+			name: "compound session token name after credentials",
+			text: "credentials: db/ſeſsion_token: SECONDSECRET",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "key name after a value that only ends in a key name",
+			text: "password=a-token: ſecret: SECONDSECRET retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "compound key name with a Kelvin sign after credentials",
+			text: "credentials: db/api_\u212aey: SECONDSECRET",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "state key name with a user prefix after credentials",
+			text: "credentials: user:ſecret: SECONDSECRET",
+			want: "credentials: user:ſecret:[REDACTED]",
+		},
+		{
+			name: "key name at the start of the text",
+			text: "ſecret: SECONDSECRET",
+			want: "ſecret:[REDACTED]",
+		},
+		{
+			name: "Go struct printed with %+v",
+			text: "bad config: {ſecret:SECONDSECRET}",
+			want: "bad config: {ſecret:[REDACTED]}",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, tt.want)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, tt.want)
+			}
+			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != tt.want {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, tt.want)
+			}
+			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+				}
+			}
+		})
+	}
+}
+
 // TestFileDataURICredentialsAreRedacted checks that credentials in the path,
-// a nested URL, a query value or the fragment of a FileData URI do not reach
-// content_parts.uri.
+// a nested URL, a query value or the fragment of a FileData URI, also after a
+// key name spelled with U+017F (long s) or U+212A (Kelvin sign), as written
+// or percent-encoded, do not reach content_parts.uri or any other column.
 func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 	uris := []struct {
 		uri  string
@@ -2982,6 +3533,74 @@ func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 		{
 			uri:  "https://example.com/a?a=1;access_token=SECRET123",
 			want: "https://example.com/a?a=1%3Baccess_token%3D%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/ſecret/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/%C5%BFecret/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/api_\u212aey/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/api_%E2%84%AAey/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/file.png?%C5%BFecret=SECONDSECRET",
+			want: "https://example.com/file.png?%C5%BFecret=%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/file.png?api_%E2%84%AAey=SECONDSECRET",
+			want: "https://example.com/file.png?api_%E2%84%AAey=%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/%25C5%25BFecret/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/api_%25E2%2584%25AAey/SECONDSECRET/file.png",
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/%25C5%25BFecret=SECONDSECRET/file.png",
+			want: "https://example.com/%25C5%25BFecret=%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  "https://example.com/file.png?%25C5%25BFecret=SECONDSECRET",
+			want: "https://example.com/file.png?%25C5%25BFecret=%5BREDACTED%5D",
+		},
+		{
+			uri:  `https://example.com/\u017fecret/SECONDSECRET/file.png`,
+			want: "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  `https://example.com/\u017fecret=SECONDSECRET/file.png`,
+			want: "https://example.com/%5Cu017fecret=%5BREDACTED%5D/file.png",
+		},
+		{
+			uri:  `https://example.com/file.png?\u017fecret=SECONDSECRET`,
+			want: `https://example.com/file.png?\u017fecret=%5BREDACTED%5D`,
+		},
+		{
+			uri:  `https://example.com/file.png?api_\u212aey=SECONDSECRET`,
+			want: `https://example.com/file.png?api_\u212aey=%5BREDACTED%5D`,
+		},
+		{
+			uri:  `https://example.com/file.png#\u017fecret=SECONDSECRET`,
+			want: "https://example.com/file.png#%5Cu017fecret=%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/a?a=1;ſecret=SECONDSECRET",
+			want: "https://example.com/a?a=1%3B%C5%BFecret%3D%5BREDACTED%5D",
+		},
+		{
+			uri:  "https://example.com/v1/token%3DSECRET123=1/file.png",
+			want: "https://example.com/v1/token=%5BREDACTED%5D/file.png",
 		},
 	}
 	p, requests, mCtx := setupTestPlugin(t)
@@ -3007,6 +3626,14 @@ func TestFileDataURICredentialsAreRedacted(t *testing.T) {
 	}
 	if got := userRow["is_truncated"]; got != true {
 		t.Errorf("is_truncated = %v, want true", got)
+	}
+	for _, row := range rows {
+		s := fmt.Sprint(row)
+		for _, secret := range []string{"SECRET123", "SECONDSECRET"} {
+			if strings.Contains(s, secret) {
+				t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+			}
+		}
 	}
 }
 

@@ -556,6 +556,15 @@ func TestSmartTruncate_RedactsSensitiveKeys(t *testing.T) {
 			want: `{"payload":"{\"accessToken\":\"[REDACTED]\",\"keep\":\"ok\"}"}`,
 		},
 		{
+			name: "auth token header names",
+			obj: map[string]any{
+				"X-Auth-Token": "a",
+				"x_auth_token": "b",
+				"payload":      `{"X-Auth-Token":"c","keep":"ok"}`,
+			},
+			want: `{"X-Auth-Token":"[REDACTED]","payload":"{\"X-Auth-Token\":\"[REDACTED]\",\"keep\":\"ok\"}","x_auth_token":"[REDACTED]"}`,
+		},
+		{
 			name:     "redaction off keeps camelCase and prefixed keys",
 			obj:      map[string]any{"accessToken": "a", "user:api_key": "k"},
 			noRedact: true,
@@ -742,6 +751,194 @@ func TestSanitizeURI(t *testing.T) {
 			name:        "double-escaped path segment api_key=value",
 			uri:         "https://example.test/api%255Fkey=SECRET",
 			want:        "https://example.test/api%255Fkey=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		// A key name spelled with U+017F (long s) or U+212A (Kelvin sign),
+		// as written or percent-encoded.
+		{
+			name:        "path segment pair with a long s",
+			uri:         "https://example.com/ſecret/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded path segment pair with a long s",
+			uri:         "https://example.com/%C5%BFecret/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment pair with a Kelvin sign",
+			uri:         "https://example.com/api_\u212aey/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded path segment pair with a Kelvin sign",
+			uri:         "https://example.com/api_%E2%84%AAey/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment key=value with a long s",
+			uri:         "https://example.com/ſecret=SECONDSECRET/x",
+			want:        "https://example.com/%C5%BFecret=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded path segment key=value with a long s",
+			uri:         "https://example.com/%C5%BFecret=SECONDSECRET/x",
+			want:        "https://example.com/%C5%BFecret=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "query key with a long s",
+			uri:         "https://example.com/cb?ſecret=SECONDSECRET",
+			want:        "https://example.com/cb?ſecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded query key with a long s",
+			uri:         "https://example.com/cb?%C5%BFecret=SECONDSECRET",
+			want:        "https://example.com/cb?%C5%BFecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "query key with a Kelvin sign",
+			uri:         "https://example.com/cb?api_\u212aey=SECONDSECRET",
+			want:        "https://example.com/cb?api_\u212aey=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded query key with a Kelvin sign",
+			uri:         "https://example.com/cb?api_%E2%84%AAey=SECONDSECRET",
+			want:        "https://example.com/cb?api_%E2%84%AAey=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "fragment key with a long s",
+			uri:         "https://example.com/cb#ſecret=SECONDSECRET",
+			want:        "https://example.com/cb#%C5%BFecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded fragment key with a long s",
+			uri:         "https://example.com/cb#%C5%BFecret=SECONDSECRET",
+			want:        "https://example.com/cb#%C5%BFecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "double-percent-encoded path segment pair with a long s",
+			uri:         "https://example.com/%25C5%25BFecret/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "double-percent-encoded path segment pair with a Kelvin sign",
+			uri:         "https://example.com/api_%25E2%2584%25AAey/SECONDSECRET/x",
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "double-percent-encoded path segment key=value with a long s",
+			uri:         "https://example.com/%25C5%25BFecret=SECONDSECRET/x",
+			want:        "https://example.com/%25C5%25BFecret=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "double-percent-encoded query key with a long s",
+			uri:         "https://example.com/cb?%25C5%25BFecret=SECONDSECRET",
+			want:        "https://example.com/cb?%25C5%25BFecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "double-percent-encoded query key with a Kelvin sign",
+			uri:         "https://example.com/cb?api_%25E2%2584%25AAey=SECONDSECRET",
+			want:        "https://example.com/cb?api_%25E2%2584%25AAey=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped path segment pair with a long s",
+			uri:         `https://example.com/\u017fecret/SECONDSECRET/x`,
+			want:        "https://example.com/%5BREDACTED%5D/%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped path segment key=value with a long s",
+			uri:         `https://example.com/\u017fecret=SECONDSECRET/x`,
+			want:        "https://example.com/%5Cu017fecret=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped path segment token:value with a long s",
+			uri:         `https://example.com/\u017fecret:SECONDSECRET/x`,
+			want:        "https://example.com/%5BREDACTED_SENSITIVE_TEXT%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped query key with a long s",
+			uri:         `https://example.com/cb?\u017fecret=SECONDSECRET`,
+			want:        `https://example.com/cb?\u017fecret=%5BREDACTED%5D`,
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped query key with a Kelvin sign",
+			uri:         `https://example.com/cb?api_\u212aey=SECONDSECRET`,
+			want:        `https://example.com/cb?api_\u212aey=%5BREDACTED%5D`,
+			wantChanged: true,
+		},
+		{
+			name:        "semicolon query value with a long s",
+			uri:         "https://example.com/a?a=1;ſecret=SECONDSECRET",
+			want:        "https://example.com/a?a=1%3B%C5%BFecret%3D%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "percent-encoded semicolon query value with a long s",
+			uri:         "https://example.com/a?a=1;%C5%BFecret=SECONDSECRET",
+			want:        "https://example.com/a?a=1%3B%C5%BFecret%3D%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped semicolon query value with a long s",
+			uri:         `https://example.com/a?a=1;\u017fecret=SECONDSECRET`,
+			want:        "https://example.com/a?a=%5BREDACTED_SENSITIVE_TEXT%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "unicode-escaped fragment key with a long s",
+			uri:         `https://example.com/cb#\u017fecret=SECONDSECRET`,
+			want:        "https://example.com/cb#%5Cu017fecret=%5BREDACTED%5D",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment with percent-encoded equals before raw equals",
+			uri:         "https://example.com/v1/token%3DSECRET123=1/x",
+			want:        "https://example.com/v1/token=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment with double-percent-encoded equals before raw equals",
+			uri:         "https://example.com/v1/token%253DSECRET123=1/x",
+			want:        "https://example.com/v1/token=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment with unicode-escaped equals before raw equals",
+			uri:         `https://example.com/v1/token\u003dSECRET123=1/x`,
+			want:        "https://example.com/v1/token=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment with unicode-escaped long s and double-percent-encoded equals",
+			uri:         `https://example.com/v1/\u017fecret%253DSECRET123=1/x`,
+			want:        "https://example.com/v1/secret=%5BREDACTED%5D/x",
+			wantChanged: true,
+		},
+		{
+			name:        "path segment with unicode-escaped Kelvin sign and double-percent-encoded equals",
+			uri:         `https://example.com/v1/api_\u212aey%253DSECRET123=1/x`,
+			want:        "https://example.com/v1/api_key=%5BREDACTED%5D/x",
 			wantChanged: true,
 		},
 		{
@@ -1274,6 +1471,206 @@ func TestRedactErrorMessage(t *testing.T) {
 			name: "value that ends with a key name joined to other text is redacted",
 			msg:  "failed: password: SECRET123token: retry",
 			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "value that only ends in a key name before a wrapped error is redacted with the pair it starts",
+			msg:  "connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused",
+			want: "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused",
+		},
+		{
+			name: "quoted value that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password="SECRET123-secret": invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name: "single-quoted value that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password='SECRET123-secret': invalid`,
+			want: `login failed: password='[REDACTED]'`,
+		},
+		{
+			name: "value quoted with escaped quotes that only ends in a key name is redacted with the pair it starts",
+			msg:  `login failed: password=\"SECRET123-secret\": invalid`,
+			want: `login failed: password=\"[REDACTED]\"`,
+		},
+		{
+			name: "quoted value that only ends in a key name before a spaced delimiter is redacted with the pair it starts",
+			msg:  `login failed: password="SECRET123-secret" : invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name: "value that only ends in a hyphenated key name is redacted with the pair it starts",
+			msg:  "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
+		},
+		{
+			name: "token that only ends in a key name in prose is redacted with the pair it starts",
+			msg:  "my login is token=abc-SECRET123-token: please check",
+			want: "my login is token=[REDACTED] check",
+		},
+		{
+			name: "value that only ends in a dotted key name is redacted with the pair it starts",
+			msg:  "password=svc.SECRET123.password: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "upper-case value that only ends in a key name is redacted with the pair it starts",
+			msg:  "PASSWORD=DEV-SECRET123-PASSWORD: DIAL TCP",
+			want: "PASSWORD=[REDACTED] TCP",
+		},
+		{
+			name: "credentials value that only ends in a key name is redacted with the pair it starts",
+			msg:  "credentials=dev-SECRET123-password: dial tcp",
+			want: "credentials=[REDACTED] tcp",
+		},
+		{
+			name: "value that only ends in a key name before a spaced delimiter is redacted with the pair it starts",
+			msg:  "failed: password: SECRET123-token = SECRET456 retry",
+			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "compound key name on the line of credentials is redacted with its value",
+			msg:  "credentials: X-Amz-Security-Token: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "value that only ends in a key name glued to a quoted value is redacted with it",
+			msg:  `failed: password: dev-SECRET123-token="a SECRET123 b" retry`,
+			want: "failed: password:[REDACTED] retry",
+		},
+		{
+			name: "value that only ends in a key name before a nested key is redacted with the pair that key starts",
+			msg:  "password=a-SECRET123-token: token: SECRET456 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "values that only end in key names one after another are redacted together",
+			msg:  "password=a-SECRET123-token: b-SECRET123-token: c-SECRET123-token: SECRET456 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "Go struct field whose value only ends in a key name is redacted with the pair it starts",
+			msg:  "failed: {Password:a-SECRET123-token: SECRET456} retry",
+			want: "failed: {Password:[REDACTED]} retry",
+		},
+		{
+			name: "Go map entry whose value only ends in a key name is redacted with the pair it starts",
+			msg:  "failed: map[password:a-SECRET123-token: SECRET456 user:bob]",
+			want: "failed: map[password:[REDACTED] user:bob]",
+		},
+		{
+			name: "value that only ends in a key name before a redacted value is redacted",
+			msg:  "failed: token=abc-SECRET123-token:[REDACTED] retry",
+			want: "failed: token=[REDACTED] retry",
+		},
+		{
+			name: "credentials block in YAML with a nested hyphenated compound key",
+			msg:  "credentials:\n  X-Amz-Security-Token: SECRET123",
+			want: "credentials:\n  X-Amz-Security-Token:[REDACTED]",
+		},
+		{
+			name: "hyphenated header name after credentials is kept and its value redacted",
+			msg:  "credentials: X-Auth-Token: SECRET123",
+			want: "credentials: X-Auth-Token:[REDACTED]",
+		},
+		{
+			name: "key name with an app state prefix after credentials is kept and its value redacted",
+			msg:  "credentials: app:token: SECRET123",
+			want: "credentials: app:token:[REDACTED]",
+		},
+		{
+			name: "compound key name spelled with a long s on the line of credentials is redacted with its value",
+			msg:  "credentials: db/ſecret: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "key name spelled with a long s after credentials is kept and its value redacted",
+			msg:  "credentials: ſecret: SECRET123",
+			want: "credentials: ſecret:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML with a nested compound key spelled with a long s",
+			msg:  "credentials:\n  db/ſecret: SECRET123",
+			want: "credentials:\n  db/ſecret:[REDACTED]",
+		},
+		{
+			name: "credentials block in YAML with a nested key spelled with a long s",
+			msg:  "credentials:\n  ſecret: SECRET123",
+			want: "credentials:\n  ſecret:[REDACTED]",
+		},
+		{
+			name: "value that only ends in a key name spelled with a long s is redacted with the pair it starts",
+			msg:  "password=dev-ſecret: SECRET123 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "quoted value that only ends in a key name spelled with a long s is redacted with the pair it starts",
+			msg:  `password="AAA-ſecret": SECRET123`,
+			want: `password="[REDACTED]"`,
+		},
+		{
+			name: "value that only ends in a signature key name spelled with a long s is redacted with the pair it starts",
+			msg:  "password=dev-ſignature: SECRET123 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "secret access key name spelled with a long s after credentials is kept and its value redacted",
+			msg:  "credentials: ſecret-access-key: SECRET123",
+			want: "credentials: ſecret-access-key:[REDACTED]",
+		},
+		{
+			name: "compound session token name spelled with long s letters is redacted with its value",
+			msg:  "credentials: db/ſeſsion_token: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "key name spelled with a long s after a value that only ends in a key name is redacted with it",
+			msg:  "password=a-token: ſecret: SECRET123 retry",
+			want: "password=[REDACTED] retry",
+		},
+		{
+			name: "compound key name spelled with a Kelvin sign on the line of credentials is redacted with its value",
+			msg:  "credentials: db/api_\u212aey: SECRET123",
+			want: "credentials:[REDACTED]",
+		},
+		{
+			name: "key name spelled with a long s at the start of the text",
+			msg:  "ſecret: SECRET123",
+			want: "ſecret:[REDACTED]",
+		},
+		{
+			name: "key name spelled with a long s after a word",
+			msg:  "dbſecret: SECRET123",
+			want: "dbſecret:[REDACTED]",
+		},
+		{
+			name: "key name after a word in a script without case",
+			msg:  "登录失败token=SECRET123",
+			want: "登录失败token=[REDACTED]",
+		},
+		{
+			name: "key name spelled with a long s after a word in a script without case",
+			msg:  "登录失败ſecret=SECRET123",
+			want: "登录失败ſecret=[REDACTED]",
+		},
+		{
+			name: "JSON key name spelled with a long s",
+			msg:  `{"ſecret":"SECRET123"}`,
+			want: `{"ſecret":"[REDACTED]"}`,
+		},
+		{
+			name: "bracket in a redacted value that only ends in a key name closes nothing after it",
+			msg:  "failed: password=a[b-token: x token=SECRET123}",
+			want: "failed: password=[REDACTED] token=[REDACTED]",
+		},
+		{
+			name: "auth token header name in a JSON object",
+			msg:  `{"X-Auth-Token":"SECRET123","id":7}`,
+			want: `{"X-Auth-Token":"[REDACTED]","id":7}`,
+		},
+		{
+			name: "auth token key in a Go map",
+			msg:  "bad headers: map[x_auth_token:SECRET123]",
+			want: "bad headers: map[x_auth_token:[REDACTED]]",
 		},
 		{
 			name: "key-shaped bare value with no value after its colon is redacted whole",
@@ -1964,6 +2361,13 @@ func TestRedactErrorMessage(t *testing.T) {
 	}
 }
 
+// linearTimeBound is how long redacting one of the texts that check that
+// redaction takes linear time may take. It leaves room for -race on a loaded
+// machine, where one of them has taken 3.4s, while redaction that scanned the
+// rest of such a text again for each fragment or pair in it would take many
+// times longer.
+const linearTimeBound = 5 * time.Second
+
 func TestSanitizeRawText(t *testing.T) {
 	t.Run("deeply quoted credential text remains unparseable blob", func(t *testing.T) {
 		payload := `{"\u0061pi_key": "secret_credential_value"`
@@ -2159,7 +2563,13 @@ func TestSanitizeRawText(t *testing.T) {
 			{"Credentials:\n  SessionToken: SECRET123", "Credentials:\n  SessionToken:[REDACTED]"},
 			{"credentials:\n  token:\n" + strings.Repeat(" ", 100) + "SECRET123", "credentials:\n  token:[REDACTED]"},
 			{"credentials:\n  db/password: SECRET123", "credentials:\n  db/password:[REDACTED]"},
-			{"credentials: db/password = SECRET123", "credentials: db/password=[REDACTED]"},
+			{"credentials: db/password = SECRET123", "credentials:[REDACTED]"},
+			{"connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused", "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused"},
+			{`login failed: password="SECRET123-secret": invalid`, `login failed: password="[REDACTED]"`},
+			{"api_key=prodSECRET123-api-key: permission denied", "api_key=[REDACTED]"},
+			{"my login is token=abc-SECRET123-token: please check", "my login is token=[REDACTED] check"},
+			{"credentials: X-Amz-Security-Token: SECRET123", "credentials:[REDACTED]"},
+			{"password=a-SECRET123-token: token: SECRET456 retry", "password=[REDACTED] retry"},
 			{"credentials: {token: SECRET123, refresh: SECRET456}", "credentials:[REDACTED]"},
 			{`password: 'token: SECRETA SECRETB'`, `password:'[REDACTED]'`},
 			{`token: "password=SECRETA SECRETB"`, `token:"[REDACTED]"`},
@@ -2278,7 +2688,7 @@ func TestSanitizeRawText(t *testing.T) {
 		for name, text := range samples {
 			start := time.Now()
 			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > linearTimeBound {
 				t.Errorf("%s: sanitizeRawText took %v for a 100 KB text", name, d)
 			}
 			if got != text || lost {
@@ -2301,7 +2711,7 @@ func TestSanitizeRawText(t *testing.T) {
 		for name, text := range samples {
 			start := time.Now()
 			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > linearTimeBound {
 				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
 			}
 			if strings.Contains(got, "SECRET123") {
@@ -2312,6 +2722,691 @@ func TestSanitizeRawText(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCredentialHiddenByEscape checks that text in which an escape, such as
+// the \n or \u2028 of JSON text in an error, comes right before a key, which
+// leaves no word boundary before the key, or in which an escape hides a pair
+// from the text patterns in another way, is written as
+// [REDACTED_SENSITIVE_TEXT], while a key that follows such an escape and a
+// space, or that comes before it, has its value redacted in place, and text
+// whose escapes hide no credential is written as it is. An escape that the
+// format of the text does not define, such as \0 or \e, an ANSI sequence and
+// a percent-encoded byte outside ASCII hide a key in the same way.
+func TestCredentialHiddenByEscape(t *testing.T) {
+	// `\\n` is the \n of JSON text quoted again. Go's JSON encoder writes
+	// U+2028 and U+2029 as `\u2028` and `\u2029`, and Python's json.dumps
+	// writes every character outside ASCII, such as U+8D25, with its code.
+	// `\012` is the octal escape of a line break, which Go and C string
+	// literals accept, as they do `\0` and `\7`, with fewer digits. Shell
+	// strings accept `\e` and `\E` for ESC, which starts the ANSI sequences
+	// that color terminal output, such as "\x1b[31m", and ESC is also
+	// spelled `\x1b`, `\u001b`, `\U0000001b`, `\033` and `\33`. A reader may
+	// accept an escape that the format of the text does not define, such as
+	// `\d`, `\8` or `\_`, and "%C2%A0" is a no-break space in a URL.
+	for _, esc := range []string{
+		`\a`, `\b`, `\f`, `\n`, `\r`, `\t`, `\v`, `\\n`, `\u2028`, `\u2029`, `\u00a0`, `\u8d25`, `\x85`, `\xA`, `\U2028`, `\U0001F600`, `\012`,
+		// Octal escapes of fewer or more digits.
+		`\0`, `\7`, `\12`, `\400`,
+		// Letters, digits and "_" that no JSON encoder writes.
+		`\e`, `\E`, `\d`, `\z`, `\8`, `\9`, `\_`,
+		// ANSI sequences with and without parameters or intermediate
+		// bytes, whose last character is a letter or "_".
+		"\x1b[31m", "\x1b[0m", "\x1b[1;31m", "\x1b[?25l", "\x1b[2K", "\x1b[1 q", "\x1b[1_",
+		`\e[31m`, `\E[0m`, `\e[1;31m`, `\\e[31m`, `\x1b[31m`, `\x1B[31m`, `\u001b[31m`, `\u001B[31m`, `\U0000001b[31m`, `\033[31m`, `\33[31m`,
+		// Percent-encoded bytes outside ASCII, ASCII control bytes and spaces.
+		`%C2%A0`, `%c2%a0`, `%E2%80%A8`, `%F0%9F%98%80`, `%0A`, `%20`, `%250A`, `%2520`,
+	} {
+		msg := "request failed: retry" + esc + "password=SECRET123"
+		if got := redactErrorMessage(msg); got != redactedSensitiveTextPlaceholder {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", msg, got, redactedSensitiveTextPlaceholder)
+		}
+		if got, lost := sanitizeRawText(msg); got != redactedSensitiveTextPlaceholder || !lost {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", msg, got, lost, redactedSensitiveTextPlaceholder)
+		}
+		b, _, err := SmartTruncate(map[string]any{"output": msg}, -1)
+		if want := `{"output":"` + redactedSensitiveTextPlaceholder + `"}`; err != nil || string(b) != want {
+			t.Errorf("SmartTruncate({output: %q}) = (%s, %v), want %s", msg, b, err, want)
+		}
+	}
+	tests := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{
+			name: "key after an escaped line break and a space",
+			msg:  `request failed: retry\n password=SECRET123`,
+			want: `request failed: retry\n password=[REDACTED]`,
+		},
+		{
+			name: "key after an escaped line separator and a space",
+			msg:  `request failed: retry\u2028 password=SECRET123`,
+			want: `request failed: retry\u2028 password=[REDACTED]`,
+		},
+		{
+			name: "key after an escaped line break with another pair in its word",
+			msg:  `request failed: retry\npassword=SECRET123,token=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "key after an escaped line separator with another pair in its word",
+			msg:  `request failed: retry\u2028password=SECRET123,token=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The value has no letter or digit, and its word also holds a
+			// pair that the scrub redacts, so the word as written is not
+			// a word of the text read with its escapes as spaces. Only
+			// the scrub of the written text, read so, finds the
+			// credential.
+			name: "key after an escaped line break with another pair in the word of a value with no letter or digit",
+			msg:  `request failed: retry\npassword=#$%!,token=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped line break in a bare value",
+			msg:  `note: password=SECRET123\nretry`,
+			want: `note: password=[REDACTED]`,
+		},
+		{
+			name: "escaped line separator in a bare value",
+			msg:  `note: password=SECRET123\u2028retry`,
+			want: `note: password=[REDACTED]`,
+		},
+		// A bare value runs across an escape, so the key after the escape
+		// is redacted as part of the value before it, and the value of
+		// that key would be written without it. Ending a bare value at
+		// such an escape would instead write the rest of a password that
+		// holds a backslash and one of the letters of these escapes.
+		{
+			name: "bare value that runs across an escaped line break into the next key",
+			msg:  `password = X\ntoken : 'S'`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "nested bare value that runs across an escaped line break into the next key",
+			msg:  `access-token : spring.datasource.password = X\ntoken : 'S'`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The value of the key after the escape appears again later
+			// in the text, which is not a pair.
+			name: "bare value that runs across an escaped line break into a key whose value appears again",
+			msg:  `password=X\ntoken: abc123 (token abc123 expired)`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The escape is taken for the value of the key, as in YAML
+			// in a JSON string.
+			name: "escaped line break taken for the value of a key",
+			msg:  `secret:\n  SECRETX9 vault: ok`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The word of the value also holds a pair that both scrubs
+			// redact, so the runs of letters and digits in the word find
+			// the value.
+			name: "bare value that runs across an escaped line break into a key whose value shares its word with another pair",
+			msg:  `password=X\ntoken: hunter2,api_key=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// As above, but the value holds only digits, which make up a
+			// run too.
+			name: "bare value that runs across an escaped line break into a key whose digits share their word with another pair",
+			msg:  `password=X\ntoken: 123456,api_key=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped line break taken for the value of a key before a value that shares its word with another pair",
+			msg:  `secret:\n  SECRETX9;token=abc vault: ok`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// The value has no letter or digit, so only its whole word
+			// finds it.
+			name: "bare value that runs across an escaped line break into a key whose value has no letter or digit",
+			msg:  `password=X\ntoken: #$%!`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// No backslash of the \\n of JSON text quoted again is left
+			// over for the key to take as its value.
+			name: "escaped line break of JSON text quoted again taken for the value of a key",
+			msg:  `secret:\\n  SECRETX9 vault: ok`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "octal escape taken for the value of a key",
+			msg:  `secret:\012  SECRETX9 vault: ok`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across an octal escape into the next key",
+			msg:  `password=X\012token: hunter2`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		// The escaped quotes of JSON text quoted again hide a quoted key
+		// name, which is then taken for the value of the key before it,
+		// and the value of the key it names would be written without it.
+		{
+			name: "quoted key name of JSON text quoted again after a key",
+			msg:  `credentials: \\\"password\\\": SECRETX9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "quoted key name of JSON text quoted again before an equals sign after a key",
+			msg:  `credentials: \\\"api-key\\\" = SECRETX9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "key name in escaped single quotes after a key",
+			msg:  `credentials: \\\'password\\\': SECRETX9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "quoted value of JSON text quoted again that only ends in a key name",
+			msg:  `password=\\\"dev-SECRET123-password\\\": SECRETX9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "key name after an escaped line break that starts no pair",
+			msg:  `retry\npassword reset required`,
+			want: `retry\npassword reset required`,
+		},
+		{
+			name: "escapes in a Windows path",
+			msg:  `open C:\temp\new\report.txt: access denied`,
+			want: `open C:\temp\new\report.txt: access denied`,
+		},
+		{
+			name: "escaped ampersand in a URL",
+			msg:  `see https://example.com/cb?a=1\u0026b=2`,
+			want: `see https://example.com/cb?a=1\u0026b=2`,
+		},
+		{
+			name: "escaped quotes of JSON text quoted again in text with a pair",
+			msg:  `failed: {"e":"user \\\"bob\\\" password=SECRET123 rejected"}`,
+			want: `failed: {"e":"user \\\"bob\\\" password=[REDACTED] rejected"}`,
+		},
+		{
+			name: "octal escapes in a quoted file name in text with a pair",
+			msg:  `git: "caf\303\251.txt" not found; password=SECRET123`,
+			want: `git: "caf\303\251.txt" not found; password=[REDACTED]`,
+		},
+		{
+			name: "short octal escape taken for the value of a key",
+			msg:  `secret:\12  SECRETX9 vault: ok`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across a short octal escape into the next key",
+			msg:  `password=X\7token: hunter2`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across an ANSI sequence into the next key",
+			msg:  "password=X\x1b[31mtoken: hunter2",
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across an escaped ANSI sequence into the next key",
+			msg:  `password=X\e[31mtoken: hunter2`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			// Bold is the usual way that a log marks a pair, and the
+			// sequence that starts it ends in the letter m.
+			name: "pair in an ANSI sequence",
+			msg:  "login failed \x1b[1mpassword=SECRET123\x1b[0m",
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "pair in an escaped ANSI sequence",
+			msg:  `login failed \e[1mpassword=SECRET123\e[0m`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "key after an ANSI sequence and a space",
+			msg:  "\x1b[31m password=SECRET123",
+			want: "\x1b[31m password=[REDACTED]",
+		},
+		{
+			name: "key after an escaped ANSI sequence and a space",
+			msg:  `\e[31m password=SECRET123`,
+			want: `\e[31m password=[REDACTED]`,
+		},
+		{
+			name: "key after a percent-encoded character outside ASCII and a space",
+			msg:  `user caf%C3%A9 password=SECRET123 denied`,
+			want: `user caf%C3%A9 password=[REDACTED] denied`,
+		},
+		{
+			name: "escapes in a Windows path in text with a pair",
+			msg:  `open C:\Users\admin\x.txt: access denied; password=SECRET123`,
+			want: `open C:\Users\admin\x.txt: access denied; password=[REDACTED]`,
+		},
+		{
+			name: "ANSI sequences in text without a pair",
+			msg:  "\x1b[31merror:\x1b[0m connection refused",
+			want: "\x1b[31merror:\x1b[0m connection refused",
+		},
+		{
+			name: "escaped ANSI sequences in text without a pair",
+			msg:  `\e[31merror:\e[0m connection refused`,
+			want: `\e[31merror:\e[0m connection refused`,
+		},
+		{
+			name: "pattern escapes in text without a pair",
+			msg:  `pattern \d+\s*\w+ did not match`,
+			want: `pattern \d+\s*\w+ did not match`,
+		},
+		{
+			name: "percent-encoded characters outside ASCII in a URL without a pair",
+			msg:  `see https://example.com/caf%C3%A9?q=1`,
+			want: `see https://example.com/caf%C3%A9?q=1`,
+		},
+		{
+			name: "punctuation-only password attached to another pair after a consumed key",
+			msg:  `token=X\u2028password: !@#$%^*()_+?,api_key=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "count-balanced secret repeated in prose after a consumed key",
+			msg:  `password=Y\ntoken: SV1 api_key=Z\nSV1 more`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "percent-encoded line break taken for the value of a key",
+			msg:  `secret:%0A  ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "percent-encoded space taken for the value of a key",
+			msg:  `secret:%20  ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across a percent-encoded line break into the next key",
+			msg:  `password=X%0Atoken: ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped long s in a key name",
+			msg:  `\u017fecret=ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "percent-encoded long s in a key name",
+			msg:  `%C5%BFecret=ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped Kelvin sign in a key name",
+			msg:  `api_\u212aey=ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across an escaped line break into a key with an escaped long s",
+			msg:  `password=X\n\u017fecret: ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across a percent-encoded line break into a key with a percent-encoded long s",
+			msg:  `password=X%0A%C5%BFecret: ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "bare value that runs across an escaped line break into a key with an escaped Kelvin sign",
+			msg:  `password=X\napi_\u212aey: ZXSECRET9`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name: "escaped line break taken for the value of a key before a punctuation-only secret attached to another pair",
+			msg:  `secret:\n  !@#$%^*()_+?,token=abc123`,
+			want: redactedSensitiveTextPlaceholder,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := redactErrorMessage(tt.msg); got != tt.want {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tt.msg, got, tt.want)
+			}
+			wantLost := tt.want != tt.msg
+			if got, lost := sanitizeRawText(tt.msg); got != tt.want || lost != wantLost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, %v)", tt.msg, got, lost, tt.want, wantLost)
+			}
+		})
+	}
+}
+
+// TestDecodedCredentialSurvives checks that the text written for a JSON object
+// or array is replaced as a whole when it still holds a credential in a
+// decoded string, or when the scrub has left it invalid and the text it was
+// written for held one, and only then.
+func TestDecodedCredentialSurvives(t *testing.T) {
+	tests := []struct {
+		name    string
+		in, out string
+		want    bool
+	}{
+		{
+			name: "object whose string holds a password after an escaped line break",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  `{"msg":"retry\npassword=x"}`,
+			want: true,
+		},
+		{
+			name: "array whose string holds a password after an escaped line break",
+			in:   `["retry\npassword=x"]`,
+			out:  `["retry\npassword=x"]`,
+			want: true,
+		},
+		{
+			name: "object left invalid by the scrub of another string",
+			in:   `{"msg":"retry\npassword=x","code":"token=y"}`,
+			out:  `{"msg":"retry\npassword=x","code":"token=[REDACTED]}`,
+			want: true,
+		},
+		{
+			name: "array left invalid by the scrub of another string",
+			in:   `["retry\npassword=x","token=y"]`,
+			out:  `["retry\npassword=x","token=[REDACTED]]`,
+			want: true,
+		},
+		{
+			// The scrub has redacted the only credential, but the text it
+			// wrote cannot be decoded to tell.
+			name: "object left invalid by the scrub of its only credential",
+			in:   `{"msg":"ok","code":"token=y"}`,
+			out:  `{"msg":"ok","code":"token=[REDACTED]}`,
+			want: true,
+		},
+		{
+			name: "valid object whose scrub erased a key and left its punctuation-only value",
+			in:   `{"msg":"token=X\npassword: !@#$%^*()_+?,api_key=abc123 done"}`,
+			out:  `{"msg":"token=[REDACTED] !@#$%^*()_+?,api_key=[REDACTED] done"}`,
+			want: true,
+		},
+		{
+			name: "valid object whose scrub erased a key and left a count-balanced secret",
+			in:   `{"msg":"password=Y\ntoken: SV1 api_key=Z\nSV1 more","id":7}`,
+			out:  `{"msg":"password=[REDACTED] SV1 api_key=[REDACTED] more","id":7}`,
+			want: true,
+		},
+		{
+			name: "object cut short",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  ` {"msg":"b"`,
+			want: true,
+		},
+		{
+			name: "object whose hidden password has been redacted",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  `{"msg":"retry\npassword=[REDACTED]"}`,
+			want: false,
+		},
+		{
+			name: "object without a credential",
+			in:   `{"msg":"ok"}`,
+			out:  `{"msg":"ok"}`,
+			want: false,
+		},
+		{
+			name: "bracket-led prose",
+			in:   `[INFO] retry\npassword=x`,
+			out:  `[INFO] retry\npassword=x`,
+			want: false,
+		},
+		{
+			name: "prose",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  "note",
+			want: false,
+		},
+		{
+			name: "sensitive text placeholder",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  redactedSensitiveTextPlaceholder,
+			want: false,
+		},
+		{
+			name: "unparseable JSON placeholder",
+			in:   `{"msg":"retry\npassword=x"}`,
+			out:  unparseableJSONPlaceholder,
+			want: false,
+		},
+		{
+			name: "nested JSON string whose keys were reordered on redaction",
+			in:   `{"payload":"{\"api_key\":\"secret\",\"nested\":{\"token\":\"tok\"},\"keep\":\"ok\"}"}`,
+			out:  `{"payload":"{\"api_key\":\"[REDACTED]\",\"keep\":\"ok\",\"nested\":{\"token\":\"[REDACTED]\"}}"}`,
+			want: false,
+		},
+		{
+			name: "nested JSON string with consumed key leaving punctuation-only password",
+			in:   `{"payload":"{\"msg\":\"token=X\\npassword: !@#$%^*()_+?,api_key=abc123 done\"}"}`,
+			out:  `{"payload":"{\"msg\":\"token=[REDACTED] !@#$%^*()_+?,api_key=[REDACTED] done\"}"}`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := decodedCredentialSurvives(tt.in, tt.out); got != tt.want {
+				t.Errorf("decodedCredentialSurvives(%q, %q) = %v, want %v", tt.in, tt.out, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestJSONTextWithDecodedCredentialIsReplaced checks that sanitizeRawText and
+// the string values that SmartTruncate writes replace JSON text as a whole
+// when one of its strings holds a credential once decoded that survives the
+// raw text scrub, or when redacting a bare value in the last string leaves the
+// JSON text invalid.
+func TestJSONTextWithDecodedCredentialIsReplaced(t *testing.T) {
+	tests := []struct {
+		name, text, secret string
+	}{
+		{
+			name:   "long s in a string of an object",
+			text:   `{"m":"\u017fecret=LONGSSECRET1 ok","id":1}`,
+			secret: "LONGSSECRET1",
+		},
+		{
+			name:   "Kelvin sign in a string of an object",
+			text:   `{"m":"to\u212aen=KELVINSECRET1 ok","id":1}`,
+			secret: "KELVINSECRET1",
+		},
+		{
+			name:   "long s in a string of an array",
+			text:   `["\u017fecret=LONGSSECRET2 ok",1]`,
+			secret: "LONGSSECRET2",
+		},
+		{
+			name:   "long s after an escaped surrogate pair",
+			text:   `{"m":"\ud83d\ude00\u017fecret=LONGSSECRET3 ok"}`,
+			secret: "LONGSSECRET3",
+		},
+		{
+			// Redacting "token=abc" takes the closing quote of its string
+			// with it, which leaves the object invalid, so the text that
+			// was written is checked instead.
+			name:   "long s in an object that redacting another pair leaves invalid",
+			text:   `{"m":"\u017fecret=LONGSSECRET4 ok","code":"token=abc"}`,
+			secret: "LONGSSECRET4",
+		},
+		{
+			name:   "object left invalid by the scrub of its only credential",
+			text:   `{"msg":"ok","code":"token=LONGSSECRET5"}`,
+			secret: "LONGSSECRET5",
+		},
+		{
+			name:   "array left invalid by the scrub of its only credential",
+			text:   `["token=LONGSSECRET6"]`,
+			secret: "LONGSSECRET6",
+		},
+		{
+			name:   "valid object where a bare value consumes the next key and leaves a punctuation-only password",
+			text:   `{"msg":"token=X\npassword: !@#$%^*()_+?,api_key=abc123 done"}`,
+			secret: "!@#$%^*()_+?",
+		},
+		{
+			name:   "valid object where a bare value consumes the next key and leaves a count-balanced secret",
+			text:   `{"msg":"password=Y\ntoken: SV1 api_key=Z\nSV1 more","id":7}`,
+			secret: "SV1",
+		},
+		{
+			name:   "nested JSON string where a bare value consumes the next key and leaves a punctuation-only password",
+			text:   `{"payload":"{\"msg\":\"token=X\\npassword: !@#$%^*()_+?,api_key=abc123 done\"}"}`,
+			secret: "!@#$%^*()_+?",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, lost := sanitizeRawText(tt.text); got != redactedSensitiveTextPlaceholder || !lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tt.text, got, lost, redactedSensitiveTextPlaceholder)
+			}
+			for _, v := range []struct {
+				name string
+				obj  any
+				want string
+			}{
+				{"string", tt.text, `"` + redactedSensitiveTextPlaceholder + `"`},
+				{"value of a map", map[string]any{"output": tt.text}, `{"output":"` + redactedSensitiveTextPlaceholder + `"}`},
+				{"value of a slice", []any{tt.text}, `["` + redactedSensitiveTextPlaceholder + `"]`},
+				{"bytes", []byte(tt.text), `"` + redactedSensitiveTextPlaceholder + `"`},
+			} {
+				got, truncated, err := SmartTruncate(v.obj, -1)
+				if err != nil || string(got) != v.want || !truncated || strings.Contains(string(got), tt.secret) {
+					t.Errorf("SmartTruncate(%s %q) = (%s, %v, %v), want (%s, true, nil)", v.name, tt.text, got, truncated, err, v.want)
+				}
+			}
+		})
+	}
+}
+
+func TestNestedJSONStringPreservesOuterStructure(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		secrets []string
+		keeps   []string
+	}{
+		{
+			name:    "nested JSON object string with reordered keys",
+			in:      `{"payload":"{\"api_key\":\"secret\",\"nested\":{\"token\":\"tok_secret_1\"},\"keep\":\"ok\"}"}`,
+			want:    `{"payload":"{\"api_key\":\"[REDACTED]\",\"keep\":\"ok\",\"nested\":{\"token\":\"[REDACTED]\"}}"}`,
+			secrets: []string{"secret", "tok_secret_1"},
+			keeps:   []string{`\"keep\":\"ok\"`},
+		},
+		{
+			name:    "nested JSON object string with spaces after colons",
+			in:      `{"payload":"{\"api_key\": \"SECRET123\", \"keep\": \"ok\"}"}`,
+			want:    `{"payload":"{\"api_key\":\"[REDACTED]\",\"keep\":\"ok\"}"}`,
+			secrets: []string{"SECRET123"},
+			keeps:   []string{`\"keep\":\"ok\"`},
+		},
+		{
+			name:    "nested JSON array string with object element",
+			in:      `{"arr":"[{\"password\":\"pw_secret_1\",\"id\":1}]"}`,
+			want:    `{"arr":"[{\"id\":1,\"password\":\"[REDACTED]\"}]"}`,
+			secrets: []string{"pw_secret_1"},
+			keeps:   []string{`\"id\":1`},
+		},
+		{
+			name:    "nested JSON object string with duplicate keys",
+			in:      `{"payload":"{\"data\":{\"api_key\":\"secret\"},\"data\":\"ok\"}"}`,
+			want:    `{"payload":"{\"data\":\"ok\"}"}`,
+			secrets: []string{"secret"},
+			keeps:   []string{`\"data\":\"ok\"`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, lost := sanitizeRawText(tt.in)
+			if got != tt.want || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", tt.in, got, lost, tt.want)
+			}
+			for _, secret := range tt.secrets {
+				if strings.Contains(got, secret) {
+					t.Errorf("sanitizeRawText(%q) leaked secret %q in %q", tt.in, secret, got)
+				}
+			}
+			for _, keep := range tt.keeps {
+				if !strings.Contains(got, keep) {
+					t.Errorf("sanitizeRawText(%q) lost expected substring %q in %q", tt.in, keep, got)
+				}
+			}
+			gotBytes, truncated, err := SmartTruncate(tt.in, -1)
+			wantQuoted, _ := json.Marshal(tt.want)
+			if err != nil || string(gotBytes) != string(wantQuoted) || truncated {
+				t.Errorf("SmartTruncate(%q) = (%s, %v, %v), want (%s, false, nil)", tt.in, gotBytes, truncated, err, wantQuoted)
+			}
+		})
+	}
+}
+
+// TestNestedPairEnd checks where nestedPairEnd ends the text to redact,
+// including when no pair starts where it is told one does, which
+// nestsSensitiveKey rules out for the calls in redactTextKeyValue: the rest of
+// the text is then redacted, rather than none of it.
+func TestNestedPairEnd(t *testing.T) {
+	tests := []struct {
+		name       string
+		s          string
+		pair, open int
+		want       int
+	}{
+		{
+			name: "pair",
+			s:    "token: abc def",
+			want: len("token: abc"),
+		},
+		{
+			name: "pair whose value is the name of another pair",
+			s:    "token: token: abc def",
+			want: len("token: token: abc"),
+		},
+		{
+			name: "pair after the start of the text",
+			s:    "password=a-token: abc def",
+			pair: len("password=a-"),
+			want: len("password=a-token: abc"),
+		},
+		{
+			name: "pair in a bracket opened before the key",
+			s:    "{Password:a-token:abc} def",
+			pair: len("{Password:a-"),
+			open: 1,
+			want: len("{Password:a-token:abc"),
+		},
+		{
+			name: "no pair",
+			s:    "x: abc def",
+			want: len("x: abc def"),
+		},
+		{
+			name: "no pair in a bracket opened before the key",
+			s:    "x: abc def}",
+			open: 1,
+			want: len("x: abc def"),
+		},
+		{
+			name: "pair after the given start",
+			s:    "x /token: abc def",
+			pair: len("x "),
+			want: len("x /token: abc def"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nestedPairEnd(tt.s, tt.pair, tt.open); got != tt.want {
+				t.Errorf("nestedPairEnd(%q, %d, %d) = %d, want %d", tt.s, tt.pair, tt.open, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestSmartTruncate_NodeBudgetLimit(t *testing.T) {
