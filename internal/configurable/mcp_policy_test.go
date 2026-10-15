@@ -146,8 +146,11 @@ func TestWithMCPPolicyInvalid(t *testing.T) {
 		{"duplicate servers inherit command", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":["approved"]}],"allowed_servers":[{"args":["other"]}]}`},
 		{"duplicate servers mixed case", `{"allowed_servers":[],"ALLOWED_SERVERS":[]}`},
 		{"duplicate servers escaped key", `{"allowed_servers":[],"allowed\u005fservers":[]}`},
+		{"duplicate servers long s", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":["approved"]}],"allowed_ſervers":[{"command":` + string(other) + `}]}`},
 		{"duplicate command", `{"allowed_servers":[{"command":` + string(quoted) + `,"command":` + string(other) + `,"args":[]}]}`},
+		{"non-adjacent duplicate command", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":[],"command":` + string(other) + `}]}`},
 		{"duplicate args", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":[],"args":["other"]}]}`},
+		{"duplicate args long s", `{"allowed_servers":[{"command":` + string(quoted) + `,"args":[],"argſ":["other"]}]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
