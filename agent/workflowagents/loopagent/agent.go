@@ -32,7 +32,9 @@ type Config struct {
 
 	// If MaxIterations == 0, then LoopAgent runs indefinitely or until any
 	// sub-agent escalates. A sub-agent error ends the loop regardless of
-	// MaxIterations.
+	// MaxIterations. A canceled context ends the loop with the context's
+	// error. A LoopAgent with no sub-agents returns immediately without
+	// yielding any event or error.
 	MaxIterations uint
 }
 
@@ -77,7 +79,22 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 	count := a.maxIterations
 
 	return func(yield func(*session.Event, error) bool) {
+		// Without sub-agents there is nothing to run, escalate or fail. With
+		// MaxIterations == 0 the loop would spin forever, and with it set the
+		// loop would only count down through empty passes. Return at once in
+		// both cases, as adk-python does.
+		if len(ctx.Agent().SubAgents()) == 0 {
+			return
+		}
 		for {
+			// A pass can yield no events (for example when every sub-agent is
+			// empty), so the consumer never gets a chance to stop the loop.
+			// Stop on cancellation here and yield the context's error.
+			if err := ctx.Err(); err != nil {
+				yield(nil, err)
+				return
+			}
+
 			shouldExit := false
 			for _, subAgent := range ctx.Agent().SubAgents() {
 				for event, err := range subAgent.Run(ctx) {

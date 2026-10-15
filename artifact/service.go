@@ -40,7 +40,9 @@ type Service interface {
 	// Load loads an artifact from the storage.
 	// The artifact is a file identified by the appName, userID, sessionID and fileName.
 	Load(ctx context.Context, req *LoadRequest) (*LoadResponse, error)
-	// Delete deletes an artifact. Deleting a non-existing entry is not an error.
+	// Delete deletes an artifact. If req.Version is 0, all versions are deleted,
+	// and deleting an artifact that does not exist is not an error. If req.Version
+	// is set and that version does not exist, implementations may return an error.
 	Delete(ctx context.Context, req *DeleteRequest) error
 	// List lists all the artifact filenames within a session.
 	List(ctx context.Context, req *ListRequest) (*ListResponse, error)
@@ -56,7 +58,7 @@ type requiredField struct {
 	Value string
 }
 
-// SaveRequest is the parameter for [ArtifactService.Save].
+// SaveRequest is the parameter for [Service.Save].
 type SaveRequest struct {
 	AppName, UserID, SessionID, FileName string
 	// Part is the artifact to store.
@@ -127,12 +129,12 @@ func validateFileName(name string) error {
 	return nil
 }
 
-// SaveResponse is the return type of [ArtifactService.Save].
+// SaveResponse is the return type of [Service.Save].
 type SaveResponse struct {
 	Version int64
 }
 
-// LoadRequest is the parameter for [ArtifactService.Load].
+// LoadRequest is the parameter for [Service.Load].
 type LoadRequest struct {
 	AppName, UserID, SessionID, FileName string
 
@@ -166,13 +168,13 @@ func (req *LoadRequest) Validate() error {
 	return nil
 }
 
-// LoadResponse is the return type of [ArtifactService.Load].
+// LoadResponse is the return type of [Service.Load].
 type LoadResponse struct {
 	// Part is the artifact stored.
 	Part *genai.Part
 }
 
-// DeleteRequest is the parameter for [ArtifactService.Delete].
+// DeleteRequest is the parameter for [Service.Delete].
 type DeleteRequest struct {
 	AppName, UserID, SessionID, FileName string
 
@@ -206,7 +208,7 @@ func (req *DeleteRequest) Validate() error {
 	return nil
 }
 
-// ListRequest is the parameter for [ArtifactService.List].
+// ListRequest is the parameter for [Service.List].
 type ListRequest struct {
 	AppName, UserID, SessionID string
 }
@@ -230,12 +232,12 @@ func (req *ListRequest) Validate() error {
 	return nil
 }
 
-// ListResponse is the return type of [ArtifactService.List].
+// ListResponse is the return type of [Service.List].
 type ListResponse struct {
 	FileNames []string
 }
 
-// VersionsRequest is the parameter for [ArtifactService.Versions].
+// VersionsRequest is the parameter for [Service.Versions].
 type VersionsRequest struct {
 	AppName, UserID, SessionID, FileName string
 }
@@ -266,7 +268,7 @@ func (req *VersionsRequest) Validate() error {
 	return nil
 }
 
-// VersionsResponse is the parameter for [ArtifactService.Versions].
+// VersionsResponse is the return type of [Service.Versions].
 type VersionsResponse struct {
 	Versions []int64
 }
@@ -294,7 +296,7 @@ type ArtifactVersion struct {
 	MimeType string
 }
 
-// GetArtifactVersionRequest is the parameter for [ArtifactService.GetArtifactVersion].
+// GetArtifactVersionRequest is the parameter for [Service.GetArtifactVersion].
 type GetArtifactVersionRequest struct {
 	AppName, UserID, SessionID, FileName string
 
@@ -328,7 +330,7 @@ func (req *GetArtifactVersionRequest) Validate() error {
 	return nil
 }
 
-// GetArtifactVersionResponse is the return type of [ArtifactService.GetArtifactVersion].
+// GetArtifactVersionResponse is the return type of [Service.GetArtifactVersion].
 type GetArtifactVersionResponse struct {
 	ArtifactVersion *ArtifactVersion
 }

@@ -16,9 +16,12 @@ package loopagent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -27,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -440,4 +444,160 @@ func TestLoopAgentStopsOnSubAgentError(t *testing.T) {
 	if nextLLM.callCounter != 0 {
 		t.Errorf("next agent's model called %d times after worker failed, want 0", nextLLM.callCounter)
 	}
+}
+
+// adk-python's LoopAgent returns immediately when it has no sub-agents
+// (loop_agent.py: `if not self.sub_agents: return`). Without MaxIterations the
+// Go loop had nothing to escalate, error or count down, so it spun forever.
+func TestLoopAgentWithoutSubAgentsEnds(t *testing.T) {
+	loopAgent, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{Name: "loop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: loopAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var (
+		events   []*session.Event
+		firstErr error
+	)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			events = append(events, ev)
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("LoopAgent with no sub-agents and no MaxIterations did not end")
+	}
+	if firstErr != nil {
+		t.Errorf("LoopAgent with no sub-agents returned error %v, want none", firstErr)
+	}
+	if len(events) != 0 {
+		t.Errorf("LoopAgent with no sub-agents yielded %d events, want none", len(events))
+	}
+}
+
+func TestLoopAgentStopsOnContextCancellation(t *testing.T) {
+	// An empty SequentialAgent yields no events, so nothing in the loop body
+	// returns control to the consumer. Only the context can end the run.
+	empty, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "empty"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name          string
+		maxIterations uint
+		newContext    func(t *testing.T) context.Context
+		wantErr       error
+	}{
+		{
+			name:          "deadline with unlimited iterations",
+			maxIterations: 0,
+			newContext:    withDeadline,
+			wantErr:       context.DeadlineExceeded,
+		},
+		{
+			name:          "deadline with MaxIterations set",
+			maxIterations: math.MaxUint,
+			newContext:    withDeadline,
+			wantErr:       context.DeadlineExceeded,
+		},
+		{
+			name:          "cancel with unlimited iterations",
+			maxIterations: 0,
+			newContext:    withCancelAfterDelay,
+			wantErr:       context.Canceled,
+		},
+		{
+			name:          "cancel with MaxIterations set",
+			maxIterations: math.MaxUint,
+			newContext:    withCancelAfterDelay,
+			wantErr:       context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loopAgent, err := loopagent.New(loopagent.Config{
+				AgentConfig:   agent.Config{Name: "loop", SubAgents: []agent.Agent{empty}},
+				MaxIterations: tt.maxIterations,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "test_app", Agent: loopAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := tt.newContext(t)
+
+			type result struct {
+				event *session.Event
+				err   error
+			}
+			done := make(chan []result, 1)
+			go func() {
+				var got []result
+				for event, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+					got = append(got, result{event, err})
+				}
+				done <- got
+			}()
+
+			select {
+			case got := <-done:
+				if len(got) == 0 {
+					t.Fatal("got no results, want a final context error")
+				}
+				for i, res := range got[:len(got)-1] {
+					if res.err != nil {
+						t.Errorf("result %d has error %v before the end, want the context error last", i, res.err)
+					}
+				}
+				if last := got[len(got)-1]; !errors.Is(last.err, tt.wantErr) {
+					t.Errorf("last error = %v, want %v", last.err, tt.wantErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("loop agent did not stop after its context was canceled")
+			}
+		})
+	}
+}
+
+func withDeadline(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+	return ctx
+}
+
+func withCancelAfterDelay(t *testing.T) context.Context {
+	ctx, cancel := context.WithCancel(t.Context())
+	timer := time.AfterFunc(50*time.Millisecond, cancel)
+	t.Cleanup(func() {
+		timer.Stop()
+		cancel()
+	})
+	return ctx
 }
