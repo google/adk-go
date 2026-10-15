@@ -1861,6 +1861,12 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"SafetySettings":   true,
 		"ResponseMIMEType": true,
 	}
+	// Fields that have no effect on these APIs, so accepting them drops
+	// nothing: AutomaticContinuation resumes a generation paused with
+	// CONTINUATION, which the OpenAI APIs never do.
+	noEffect := map[string]bool{
+		"AutomaticContinuation": true,
+	}
 	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
 	for _, field := range shared.UnsupportedConfigFields {
 		rejected[field.Name] = true
@@ -1872,7 +1878,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		if cfgType.Field(i).PkgPath != "" {
 			continue // unexported, not settable by callers
 		}
-		if !translated[name] && !namedError[name] && !rejected[name] {
+		if !translated[name] && !namedError[name] && !noEffect[name] && !rejected[name] {
 			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
 		}
 	}
