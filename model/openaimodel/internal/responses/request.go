@@ -150,7 +150,7 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// package cannot send is named even when text or a call rides on
 			// the same part and would otherwise have carried it out unnoticed.
 			// Media is excluded from the report because this endpoint emits it
-			// below; Chat Completions still reports it until it can.
+			// below, as Chat Completions does.
 			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
