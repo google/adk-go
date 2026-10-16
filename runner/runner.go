@@ -687,11 +687,23 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		// A function response goes back to the agent that made the call, on
+		// the branch it ran on (adk-python find_agent_to_run and
+		// restore_branch_from_history). Re-running the root would run agents
+		// that never saw the call, and they fail on the unmatched response.
+		agentToRun, branch := r.rootAgent, ""
+		if ev := handleUserFunctionCallResponse(storedSession.Events(), msg); ev != nil {
+			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil {
+				agentToRun, branch = sub, ev.Branch
+			}
+		}
+
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:    artifacts,
 			Memory:       memoryImpl,
 			Session:      storedSession,
-			Agent:        r.rootAgent,
+			Branch:       branch,
+			Agent:        agentToRun,
 			UserContent:  msg,
 			RunConfig:    &cfg,
 			InvocationID: resolveInvocationID(storedSession, msg),
@@ -716,7 +728,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range r.rootAgent.Run(ctx) {
+		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
 				// The model-call budget is spent for the whole invocation, so
 				// nothing that runs after this can reach a model. Ending here
@@ -730,7 +742,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
 				return
