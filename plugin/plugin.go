@@ -18,6 +18,8 @@
 package plugin
 
 import (
+	"sync"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -48,6 +50,9 @@ type Config struct {
 	AfterToolCallback   llmagent.AfterToolCallback
 	OnToolErrorCallback llmagent.OnToolErrorCallback
 
+	// CloseFunc releases what the plugin holds, such as buffered data that
+	// must be flushed. [Plugin.Close] calls it at most once. Nil means there is
+	// nothing to release.
 	CloseFunc func() error
 }
 
@@ -67,15 +72,13 @@ func New(cfg Config) (*Plugin, error) {
 		beforeToolCallback:    cfg.BeforeToolCallback,
 		afterToolCallback:     cfg.AfterToolCallback,
 		onToolErrorCallback:   cfg.OnToolErrorCallback,
-		closeFunc:             cfg.CloseFunc,
 	}
 
-	// Ensure closeFunc is never nil so p.Close() doesn't panic
-	if p.closeFunc == nil {
-		p.closeFunc = func() error {
-			return nil
-		}
+	closeFunc := cfg.CloseFunc
+	if closeFunc == nil {
+		closeFunc = func() error { return nil }
 	}
+	p.closeFunc = sync.OnceValue(closeFunc)
 
 	return p, nil
 }
@@ -110,7 +113,10 @@ func (p *Plugin) Name() string {
 	return p.name
 }
 
-// Close safely calls the internal close function.
+// Close calls the plugin's [Config.CloseFunc]. Only the first call runs it,
+// and every call returns the error from that first run, so Close is safe to
+// call more than once and from several goroutines. A call made while the first
+// is still running waits for it to finish.
 func (p *Plugin) Close() error {
 	return p.closeFunc()
 }
