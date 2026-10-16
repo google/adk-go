@@ -240,6 +240,16 @@ func TestCreateSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			name:           "mismatched session id in path and request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      id,
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "otherSession",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    fmt.Errorf("sessionId in request body does not match session_id in URL path"),
+		},
+		{
 			name:           "user id is missing",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID: fakes.SessionKey{

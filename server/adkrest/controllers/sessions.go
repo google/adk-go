@@ -75,6 +75,12 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			return
 		}
 	}
+	if sessionID.ID == "" {
+		sessionID.ID = createSessionRequest.SessionID
+	} else if createSessionRequest.SessionID != "" && createSessionRequest.SessionID != sessionID.ID {
+		http.Error(rw, "sessionId in request body does not match session_id in URL path", http.StatusBadRequest)
+		return
+	}
 	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
@@ -84,14 +90,10 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 }
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {
-	id := sessionID.ID
-	if id == "" {
-		id = createSessionRequest.SessionID
-	}
 	session, err := c.service.Create(ctx, &session.CreateRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
-		SessionID: id,
+		SessionID: sessionID.ID,
 		State:     createSessionRequest.State,
 	})
 	if err != nil {
