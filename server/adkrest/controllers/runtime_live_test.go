@@ -34,6 +34,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/server/adkrest/internal/fakes"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
@@ -121,12 +122,6 @@ func startRunLiveServer(
 ) (wsURL string, exits <-chan struct{}) {
 	t.Helper()
 
-	baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
-	if err != nil {
-		t.Fatalf("agent.New() failed: %v", err)
-	}
-	liveAgent := &mockLiveAgent{Agent: baseAgent, runLiveFn: runLiveFn}
-
 	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
 	cfg.SessionService = &fakes.FakeSessionService{
 		Sessions: map[fakes.SessionKey]fakes.TestSession{
@@ -138,7 +133,13 @@ func startRunLiveServer(
 			},
 		},
 	}
-	cfg.AgentLoader = agent.NewSingleLoader(liveAgent)
+	if cfg.AgentLoader == nil {
+		baseAgent, err := agent.New(agent.Config{Name: testLiveAppName})
+		if err != nil {
+			t.Fatalf("agent.New() failed: %v", err)
+		}
+		cfg.AgentLoader = agent.NewSingleLoader(&mockLiveAgent{Agent: baseAgent, runLiveFn: runLiveFn})
+	}
 
 	controller := NewRuntimeAPIControllerWithConfig(cfg)
 	handlerExits := make(chan struct{}, testMaxHandlerExits)
@@ -407,40 +408,83 @@ func TestRunLiveHandler_ClientDisconnectStopsLiveRun(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			liveSession := newRecordingLiveSession()
-			iteratorStarted := make(chan struct{})
-			iteratorDone := make(chan struct{})
-			conn, handlerDone := dialRunLiveHandler(t, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-				return liveSession, func(yield func(*session.Event, error) bool) {
-					close(iteratorStarted)
-					defer close(iteratorDone)
-					<-liveSession.closed
-				}, nil
-			})
+	for _, layout := range []string{"direct", "sequential", "nested sequential", "two children"} {
+		t.Run(layout, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					liveSession := newRecordingLiveSession()
+					defer func() { _ = liveSession.Close() }()
+					tailSession := newRecordingLiveSession()
+					defer func() { _ = tailSession.Close() }()
+					iteratorStarted := make(chan struct{})
+					iteratorDone := make(chan struct{})
+					leafName := testLiveAppName
+					if layout != "direct" {
+						leafName = "first"
+					}
+					base, err := agent.New(agent.Config{Name: leafName})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var root agent.Agent = &mockLiveAgent{Agent: base, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+						return liveSession, func(yield func(*session.Event, error) bool) {
+							close(iteratorStarted)
+							defer close(iteratorDone)
+							<-liveSession.closed
+						}, nil
+					}}
+					if layout != "direct" {
+						children := []agent.Agent{root}
+						if layout == "two children" {
+							tail, err := agent.New(agent.Config{Name: "tail"})
+							if err != nil {
+								t.Fatal(err)
+							}
+							children = append(children, &mockLiveAgent{Agent: tail, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+								return tailSession, func(func(*session.Event, error) bool) { <-tailSession.closed }, nil
+							}})
+						}
+						sequenceName := testLiveAppName
+						if layout == "nested sequential" {
+							sequenceName = "inner"
+						}
+						root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: sequenceName, SubAgents: children}})
+						if err != nil {
+							t.Fatal(err)
+						}
+						if layout == "nested sequential" {
+							root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: testLiveAppName, SubAgents: []agent.Agent{root}}})
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					wsURL, handlerDone := startRunLiveServer(t, RuntimeAPIControllerConfig{AgentLoader: agent.NewSingleLoader(root)}, nil)
+					conn := dialLive(t, wsURL)
 
-			select {
-			case <-iteratorStarted:
-			case <-time.After(time.Second):
-				t.Fatal("live event iterator did not start")
-			}
+					select {
+					case <-iteratorStarted:
+					case <-time.After(time.Second):
+						t.Fatal("live event iterator did not start")
+					}
 
-			if err := tt.disconnect(conn); err != nil {
-				t.Fatalf("disconnecting WebSocket client failed: %v", err)
-			}
+					if err := tt.disconnect(conn); err != nil {
+						t.Fatalf("disconnecting WebSocket client failed: %v", err)
+					}
 
-			select {
-			case <-liveSession.closed:
-			case <-time.After(time.Second):
-				t.Fatal("live session was not closed after the WebSocket client disconnected")
+					select {
+					case <-liveSession.closed:
+					case <-time.After(time.Second):
+						t.Fatal("live session was not closed after the WebSocket client disconnected")
+					}
+					select {
+					case <-iteratorDone:
+					case <-time.After(time.Second):
+						t.Fatal("live event iterator did not exit after the session was closed")
+					}
+					waitForHandlerExit(t, handlerDone)
+				})
 			}
-			select {
-			case <-iteratorDone:
-			case <-time.After(time.Second):
-				t.Fatal("live event iterator did not exit after the session was closed")
-			}
-			waitForHandlerExit(t, handlerDone)
 		})
 	}
 }
@@ -1282,56 +1326,87 @@ func (s *blockingSendLiveSession) Close() error {
 
 func TestRunLiveHandler_FailedPingEndsHandlerWhileSendBlocks(t *testing.T) {
 	const keepalive = 200 * time.Millisecond
+	for _, depth := range []int{0, 1, 2} {
+		t.Run([]string{"direct", "sequential", "nested sequential"}[depth], func(t *testing.T) {
+			sess := &blockingSendLiveSession{entered: make(chan struct{}), closed: make(chan struct{})}
+			defer func() { _ = sess.Close() }()
+			iteratorStarted := make(chan struct{})
+			var iteratorOnce sync.Once
+			leafName := testLiveAppName
+			if depth > 0 {
+				leafName = "first"
+			}
+			base, err := agent.New(agent.Config{Name: leafName})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var root agent.Agent = &mockLiveAgent{Agent: base, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return sess, func(func(*session.Event, error) bool) {
+					iteratorOnce.Do(func() { close(iteratorStarted) })
+					<-sess.closed
+				}, nil
+			}}
+			for i := 0; i < depth; i++ {
+				name := "inner"
+				if i == depth-1 {
+					name = testLiveAppName
+				}
+				root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: []agent.Agent{root}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	sess := &blockingSendLiveSession{entered: make(chan struct{}), closed: make(chan struct{})}
-	t.Cleanup(func() { _ = sess.Close() })
-	base, err := agent.New(agent.Config{Name: testLiveAppName})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
-	controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
-		SessionService: &fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{
-			id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: time.Now()},
-		}},
-		AgentLoader: agent.NewSingleLoader(&mockLiveAgent{Agent: base, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-			// A quiet agent: no events until the session closes.
-			return sess, func(func(*session.Event, error) bool) { <-sess.closed }, nil
-		}}),
-		LiveKeepaliveTimeout: keepalive,
-	})
-	exited := make(chan struct{})
-	handler := NewErrorHandler(controller.RunLiveHandler)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		defer close(exited)
-		handler(rw, req)
-	}))
-	listener := &stallingListener{Listener: server.Listener, conns: make(chan *stallingConn, 1)}
-	server.Listener = listener
-	server.Start()
-	t.Cleanup(server.Close)
+			id := fakes.SessionKey{AppName: testLiveAppName, UserID: testLiveUserID, SessionID: testLiveSessionID}
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService: &fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{
+					id: {Id: id, SessionState: fakes.TestState{}, SessionEvents: fakes.TestEvents{}, UpdatedAt: time.Now()},
+				}},
+				AgentLoader:          agent.NewSingleLoader(root),
+				MaxLiveSessions:      1,
+				LiveKeepaliveTimeout: keepalive,
+			})
+			exited := make(chan struct{}, testMaxHandlerExits)
+			handler := NewErrorHandler(controller.RunLiveHandler)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+				defer func() { exited <- struct{}{} }()
+				handler(rw, req)
+			}))
+			listener := &stallingListener{Listener: server.Listener, conns: make(chan *stallingConn, 1)}
+			server.Listener = listener
+			server.Start()
+			t.Cleanup(server.Close)
 
-	conn := dialLive(t, "ws"+strings.TrimPrefix(server.URL, "http")+
-		"/run_live?appName="+testLiveAppName+"&userId="+testLiveUserID+"&sessionId="+testLiveSessionID)
-	serverConn := <-listener.conns
-	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pcm")); err != nil {
-		t.Fatal(err)
-	}
-	// The reader is now inside Send, where it neither reads nor has a read
-	// deadline armed, and the agent emits nothing, so only the failed ping
-	// below can end the handler.
-	select {
-	case <-sess.entered:
-	case <-time.After(time.Second):
-		t.Fatal("client message never reached the live session's Send")
-	}
-	serverConn.stall()
-	defer serverConn.unstall()
+			wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/run_live?appName=" + testLiveAppName + "&userId=" + testLiveUserID + "&sessionId=" + testLiveSessionID
+			conn := dialLive(t, wsURL)
+			serverConn := <-listener.conns
+			select {
+			case <-iteratorStarted:
+			case <-time.After(time.Second):
+				t.Fatal("live event iterator did not start")
+			}
+			if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pcm")); err != nil {
+				t.Fatal(err)
+			}
+			// The reader is now inside Send, where it neither reads nor has a read
+			// deadline armed, and the agent emits nothing, so only the failed ping
+			// below can end the handler.
+			select {
+			case <-sess.entered:
+			case <-time.After(time.Second):
+				t.Fatal("client message never reached the live session's Send")
+			}
+			serverConn.stall()
+			defer serverConn.unstall()
 
-	select {
-	case <-exited:
-	case <-time.After(5 * keepalive):
-		t.Errorf("handler still running %v after the peer stopped accepting writes", 5*keepalive)
+			select {
+			case <-exited:
+			case <-time.After(5 * keepalive):
+				t.Errorf("handler still running %v after the peer stopped accepting writes", 5*keepalive)
+			}
+
+			dialLive(t, wsURL)
+		})
 	}
 }
 
