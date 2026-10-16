@@ -15,6 +15,7 @@
 package models_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	ev := session.Event{
 		ID:             "e1",
+		Timestamp:      time.Unix(1733040000, 0).UTC(),
 		Author:         "agent",
 		IsolationScope: "scope-1",
 		Routes:         []string{"next-node", "fallback"},
@@ -44,7 +46,30 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		},
 	}
 
-	back := models.ToSessionEvent(models.FromSessionEvent(ev))
+	restEvent := models.FromSessionEvent(ev)
+	if restEvent.Timestamp != 1733040000 {
+		t.Errorf("FromSessionEvent().Timestamp = %d, want 1733040000", restEvent.Timestamp)
+	}
+	rawJSON, err := json.Marshal(restEvent)
+	if err != nil {
+		t.Fatalf("json.Marshal(restEvent) failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rawJSON, &wire); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON) failed: %v", err)
+	}
+	if gotTS, ok := wire["timestamp"].(float64); !ok || int64(gotTS) != 1733040000 {
+		t.Errorf("wire[\"timestamp\"] = %v, want 1733040000", wire["timestamp"])
+	}
+
+	back := models.ToSessionEvent(restEvent)
+
+	if !back.Timestamp.Equal(ev.Timestamp) {
+		t.Errorf("Timestamp = %v, want %v", back.Timestamp, ev.Timestamp)
+	}
+	if zeroBack := models.ToSessionEvent(models.FromSessionEvent(session.Event{})); !zeroBack.Timestamp.IsZero() {
+		t.Errorf("zero Timestamp round-trip = %v, want zero time.Time", zeroBack.Timestamp)
+	}
 
 	if back.IsolationScope != ev.IsolationScope {
 		t.Errorf("IsolationScope = %q, want %q", back.IsolationScope, ev.IsolationScope)
