@@ -18,10 +18,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
@@ -239,19 +242,19 @@ func TestGenerateContent(t *testing.T) {
 	invocationID := "test-invocation-id"
 	tests := []struct {
 		name         string
-		startParams  StartGenerateContentSpanParams
-		resultParams TraceGenerateContentResultParams
+		startParams  GenerateContentParams
+		resultParams generateContentResult
 		wantName     string
 		wantStatus   codes.Code
 		wantAttrs    map[attribute.Key]string
 	}{
 		{
 			name: "Success",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:        10,
@@ -280,11 +283,11 @@ func TestGenerateContent(t *testing.T) {
 			// the model as input and reports them outside PromptTokenCount, so
 			// input_tokens must be the sum of the two.
 			name: "ToolUsePromptTokensCountAsInput",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Response: &model.LLMResponse{
 					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
 						PromptTokenCount:        10,
@@ -304,11 +307,11 @@ func TestGenerateContent(t *testing.T) {
 		},
 		{
 			name: "Error",
-			startParams: StartGenerateContentSpanParams{
+			startParams: GenerateContentParams{
 				ModelName:    "test-model",
 				InvocationID: invocationID,
 			},
-			resultParams: TraceGenerateContentResultParams{
+			resultParams: generateContentResult{
 				Error: errTest,
 			},
 			wantName:   "generate_content test-model",
@@ -327,8 +330,8 @@ func TestGenerateContent(t *testing.T) {
 			exporter := setupTestTracer(t)
 			ctx := t.Context()
 
-			_, span := StartGenerateContentSpan(ctx, tc.startParams)
-			TraceGenerateContentResult(span, tc.resultParams)
+			_, span := startGenerateContentSpan(ctx, tc.startParams)
+			traceGenerateContentResult(span, tc.resultParams)
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -415,8 +418,8 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			exporter := setupTestTracer(t)
-			_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
-			TraceGenerateContentResult(span, TraceGenerateContentResultParams{Response: tc.response, Error: tc.err})
+			_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "test-model"})
+			traceGenerateContentResult(span, generateContentResult{Response: tc.response, Error: tc.err})
 			span.End()
 
 			spans := exporter.GetSpans()
@@ -440,9 +443,9 @@ func TestTraceGenerateContentResult_MapsFinishReason(t *testing.T) {
 
 func TestTraceGenerateContentResult_NilResponseNilErrorLeavesSpanSuccessful(t *testing.T) {
 	exporter := setupTestTracer(t)
-	_, span := StartGenerateContentSpan(t.Context(), StartGenerateContentSpanParams{ModelName: "test-model"})
+	_, span := startGenerateContentSpan(t.Context(), GenerateContentParams{ModelName: "test-model"})
 
-	TraceGenerateContentResult(span, TraceGenerateContentResultParams{})
+	traceGenerateContentResult(span, generateContentResult{})
 	span.End()
 
 	spans := exporter.GetSpans()
@@ -539,6 +542,94 @@ func TestExecuteTool(t *testing.T) {
 	}
 }
 
+func TestTraceMergedToolCallsResult(t *testing.T) {
+	for _, tc := range []struct {
+		schemaVersion string
+		want          map[attribute.Key]string
+	}{
+		{otelSemconv136, map[attribute.Key]string{
+			semconv.GenAIOperationNameKey:   "execute_tool",
+			semconv.GenAIToolNameKey:        mergeToolName,
+			semconv.GenAIToolDescriptionKey: mergeToolName,
+			gcpVertexAgentToolCallArgsName:  "N/A",
+			gcpVertexAgentToolResponseName:  "null",
+		}},
+		{"otel_semconv_1_44", map[attribute.Key]string{
+			semconv.GenAIOperationNameKey:   "execute_tool",
+			semconv.GenAIToolNameKey:        mergeToolName,
+			semconv.GenAIToolDescriptionKey: mergeToolName,
+		}},
+	} {
+		t.Run(tc.schemaVersion, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schemaVersion})
+			exporter := setupTestTracer(t)
+
+			_, span := StartTrace(t.Context(), "execute_tool (merged)")
+			TraceMergedToolCallsResult(span, nil, nil)
+			span.End()
+
+			if diff := cmp.Diff(tc.want, attributesToMap(exporter.GetSpans()[0].Attributes)); diff != "" {
+				t.Errorf("attributes mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestExecuteTool_OmitsWhatIsUnknown(t *testing.T) {
+	setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44", captureMessageContentEnvVar: "SPAN_ONLY"})
+	exporter := setupTestTracer(t)
+
+	_, span := StartExecuteToolSpan(t.Context(), StartExecuteToolSpanParams{ToolName: "t"})
+	TraceToolResult(span, TraceToolResultParams{Description: "d", ResponseEvent: &session.Event{ID: "e", LLMResponse: model.LLMResponse{
+		Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "t"}}}},
+	}}})
+	span.End()
+
+	want := map[attribute.Key]string{
+		semconv.GenAIOperationNameKey:   "execute_tool",
+		semconv.GenAIToolNameKey:        "t",
+		semconv.GenAIToolDescriptionKey: "d",
+		gcpVertexAgentEventID:           "e",
+	}
+	if diff := cmp.Diff(want, attributesToMap(exporter.GetSpans()[0].Attributes)); diff != "" {
+		t.Errorf("attributes mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestInvokeWorkflowNested(t *testing.T) {
+	for _, tc := range []struct {
+		schemaVersion string
+		want          bool
+	}{{otelSemconv136, false}, {"otel_semconv_1_44", true}} {
+		t.Run(tc.schemaVersion, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schemaVersion})
+			exporter := setupTestTracer(t)
+
+			ctx, outer := startInvokeWorkflowSpan(t.Context(), "outer", "s")
+			_, inner := startInvokeWorkflowSpan(ctx, "inner", "s")
+			inner.End()
+			outer.End()
+
+			for _, s := range exporter.GetSpans() {
+				_, nested := attributesToMap(s.Attributes)[genAIWorkflowNested]
+				if want := tc.want && s.Name == "invoke_workflow inner"; nested != want {
+					t.Errorf("%s: nested = %t, want %t", s.Name, nested, want)
+				}
+			}
+		})
+	}
+}
+
+func setEnvForTesting(t *testing.T, env map[string]string) {
+	t.Helper()
+	// Runs after t.Setenv restores the environment.
+	t.Cleanup(ApplyEnv)
+	for k, v := range env {
+		t.Setenv(k, v)
+	}
+	ApplyEnv()
+}
+
 func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 	t.Helper()
 	exporter := tracetest.NewInMemoryExporter()
@@ -546,11 +637,7 @@ func setupTestTracer(t *testing.T) *tracetest.InMemoryExporter {
 		sdktrace.WithSyncer(exporter),
 	)
 
-	originalTracer := tracer
-	tracer = tp.Tracer("test")
-	t.Cleanup(func() {
-		tracer = originalTracer
-	})
+	OverrideTracerForTesting(t, tp)
 	return exporter
 }
 
@@ -560,4 +647,62 @@ func attributesToMap(attrs []attribute.KeyValue) map[attribute.Key]string {
 		m[attr.Key] = attr.Value.Emit()
 	}
 	return m
+}
+
+func TestErrorType(t *testing.T) {
+	apiErr := genai.APIError{Code: 429}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"api error", apiErr, "429"},
+		{"wrapped api error", fmt.Errorf("model call: %w", apiErr), "429"},
+		{"other error", errors.New("boom"), "*errors.errorString"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := errorType(tc.err).Value.AsString(); got != tc.want {
+				t.Errorf("errorType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSchemaURL(t *testing.T) {
+	for _, tc := range []struct {
+		schema string
+		want   string
+	}{
+		{"otel_semconv_1_36", semconv.SchemaURL},
+		{"otel_semconv_1_44", "https://opentelemetry.io/schemas/1.44.0"},
+		{"", "https://opentelemetry.io/schemas/1.44.0"},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			spans := setupTestTracer(t)
+			logs := &inMemoryExporter{}
+			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
+			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) { yield(&model.LLMResponse{}, nil) }
+			}
+			params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}}
+			for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+			}
+
+			if len(spans.GetSpans()) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans.GetSpans()))
+			}
+			if got := spans.GetSpans()[0].InstrumentationScope.SchemaURL; got != tc.want {
+				t.Errorf("span schema URL = %q, want %q", got, tc.want)
+			}
+			if len(logs.records) == 0 {
+				t.Fatal("no log records emitted")
+			}
+			for _, r := range logs.records {
+				if got := r.InstrumentationScope().SchemaURL; got != tc.want {
+					t.Errorf("log record %s schema URL = %q, want %q", r.EventName(), got, tc.want)
+				}
+			}
+		})
+	}
 }
