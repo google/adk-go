@@ -35,6 +35,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
+	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
@@ -5260,29 +5262,59 @@ func TestRunningAgentChildren(t *testing.T) {
 	}
 }
 
-// TestInvocationTrace_RecordChildrenReplacesTheParent records the sub-agents of
-// a workflow agent and then those of an LLM agent that has a sub-agent of the
-// same name. The later tree replaces the parent, and the workflow agent no
-// longer keeps the sub-agent apart from its siblings.
+// TestInvocationTrace_RecordChildrenReplacesTheParent starts a workflow agent
+// and an LLM agent that both have a sub-agent named "worker" on separate node
+// paths. Recording configured children per activation on spanRecord keeps the
+// workflow agent's sub-agents apart from open siblings while letting the LLM
+// agent's sub-agents transfer to peers, without either activation overwriting
+// the other.
 func TestInvocationTrace_RecordChildrenReplacesTheParent(t *testing.T) {
-	inv := newInvocationTrace(context.Background(), "", time.Now())
-	inv.recordChildren(agentChildren{parent: "sequence", nonLLM: true, names: []string{"worker", "other"}})
-	if got := inv.parentAgent["worker"]; got != "sequence" {
-		t.Errorf("parent of worker = %q, want %q", got, "sequence")
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invocationID = "inv-per-activation-children"
+
+	workerSeq, otherSeq := newTestAgent(t, "worker"), newTestAgent(t, "other")
+	sequence := newTestAgent(t, "sequence", workerSeq, otherSeq)
+
+	workerLLM, err := llmagent.New(llmagent.Config{Name: "worker"})
+	if err != nil {
+		t.Fatalf("llmagent.New(worker): %v", err)
 	}
-	if got := inv.sequentialParent["worker"]; got != "sequence" {
-		t.Errorf("workflow parent of worker = %q, want %q", got, "sequence")
+	peerLLM, err := llmagent.New(llmagent.Config{Name: "peer"})
+	if err != nil {
+		t.Fatalf("llmagent.New(peer): %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		SubAgents: []agent.Agent{peerLLM, workerLLM},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
 	}
 
-	inv.recordChildren(agentChildren{parent: "coordinator", names: []string{"worker"}})
-	if got := inv.parentAgent["worker"]; got != "coordinator" {
-		t.Errorf("parent of worker = %q, want %q", got, "coordinator")
+	seqSpan := tm.pushAgentSpan(contextRunning(sequence), identity{invocationID: invocationID, agentName: "sequence", path: "root/sequence@1"})
+	coordSpan := tm.pushAgentSpan(contextRunning(coordinator), identity{invocationID: invocationID, agentName: "coordinator", path: "root/coordinator@2"})
+
+	// Under coordinator (an LLM agent), peer starts and stays open when worker
+	// starts; worker is parented to peer (peer transfer).
+	peerSpan := tm.pushAgentSpan(ctx, identity{invocationID: invocationID, agentName: "peer", path: "root/coordinator@2"})
+	if peerSpan.parentSpanID != coordSpan.spanID {
+		t.Errorf("peer parent = %q, want coordinator %q", peerSpan.parentSpanID, coordSpan.spanID)
 	}
-	if got, ok := inv.sequentialParent["worker"]; ok {
-		t.Errorf("workflow parent of worker = %q, want none: its parent is an LLM agent", got)
+	coordWorkerSpan := tm.pushAgentSpan(ctx, identity{invocationID: invocationID, agentName: "worker", path: "root/coordinator@2"})
+	if coordWorkerSpan.parentSpanID != peerSpan.spanID {
+		t.Errorf("coordinator worker parent = %q, want peer %q", coordWorkerSpan.parentSpanID, peerSpan.spanID)
 	}
-	if got := inv.sequentialParent["other"]; got != "sequence" {
-		t.Errorf("workflow parent of other = %q, want %q: the second tree does not name it", got, "sequence")
+
+	// Under sequence (a non-LLM workflow agent), worker starts and stays open
+	// when other starts; other skips worker and is parented to sequence.
+	seqWorkerSpan := tm.pushAgentSpan(ctx, identity{invocationID: invocationID, agentName: "worker", path: "root/sequence@1"})
+	if seqWorkerSpan.parentSpanID != seqSpan.spanID {
+		t.Errorf("sequence worker parent = %q, want sequence %q", seqWorkerSpan.parentSpanID, seqSpan.spanID)
+	}
+	seqOtherSpan := tm.pushAgentSpan(ctx, identity{invocationID: invocationID, agentName: "other", path: "root/sequence@1"})
+	if seqOtherSpan.parentSpanID != seqSpan.spanID {
+		t.Errorf("sequence other parent = %q, want sequence %q rather than sibling %q", seqOtherSpan.parentSpanID, seqSpan.spanID, seqWorkerSpan.spanID)
 	}
 }
 
@@ -5463,97 +5495,655 @@ func (m *streamingPartialThenBlockLLM) GenerateContent(_ context.Context, _ *mod
 	}
 }
 
+// blockingUntilContextDoneLLM signals entered when GenerateContent begins and
+// blocks until ctx is done before returning.
+type blockingUntilContextDoneLLM struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingUntilContextDoneLLM) Name() string { return "blocking-until-context-done-llm" }
+
+func (m *blockingUntilContextDoneLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.once.Do(func() { close(m.entered) })
+		<-ctx.Done()
+	}
+}
+
+// waitThenStreamPartialLLM waits for ready to close before yielding a partial
+// streamed chunk, and then yields a final response if the caller keeps reading.
+type waitThenStreamPartialLLM struct {
+	ready     <-chan struct{}
+	chunkText string
+	finalText string
+}
+
+func (m *waitThenStreamPartialLLM) Name() string { return "wait-then-stream-partial-llm" }
+
+func (m *waitThenStreamPartialLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		select {
+		case <-m.ready:
+		case <-ctx.Done():
+			return
+		}
+		if !yield(&model.LLMResponse{
+			Content: textContent("model", m.chunkText),
+			Partial: true,
+		}, nil) {
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      textContent("model", m.finalText),
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
 // TestRunner_StopReadingMidStream_IsNotAnError verifies that when the caller
 // runs with StreamingModeSSE and breaks out of the runner.Run iterator after
 // receiving a partial streamed chunk, the invocation completes with
-// INVOCATION_COMPLETED rather than INVOCATION_ERROR + AGENT_ERROR.
+// INVOCATION_COMPLETED rather than INVOCATION_ERROR + AGENT_ERROR across
+// single-agent, sequential, loop, and parallel roots (including when a parallel
+// sibling has an in-flight model call that has not yet delivered a token).
 func TestRunner_StopReadingMidStream_IsNotAnError(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	bot, err := llmagent.New(llmagent.Config{
-		Name:  "bot",
-		Model: &streamingPartialThenBlockLLM{chunkText: "hello ", finalText: "hello world"},
-	})
-	if err != nil {
-		t.Fatalf("llmagent.New: %v", err)
-	}
-	r := newTestRunner(t, bot, p)
-
-	var sawPartial bool
-	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
-		StreamingMode: agent.StreamingModeSSE,
-	}) {
+	newStreamingBot := func(t *testing.T, name string) agent.Agent {
+		t.Helper()
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  name,
+			Model: &streamingPartialThenBlockLLM{chunkText: "hello ", finalText: "hello world"},
+		})
 		if err != nil {
-			t.Fatalf("r.Run error: %v", err)
+			t.Fatalf("llmagent.New(%s): %v", name, err)
 		}
-		if ev != nil && ev.Partial {
-			sawPartial = true
-			break
-		}
-	}
-	if !sawPartial {
-		t.Fatal("did not observe a partial event in StreamingModeSSE")
+		return bot
 	}
 
-	rows := collectRows(t, requests, untilInvocationEnd)
-	requireInvocationCompletedOK(t, rows)
+	t.Run("single streaming agent", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		r := newTestRunner(t, newStreamingBot(t, "bot"), p)
+
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatal("did not observe a partial event in StreamingModeSSE")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("sequential root", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "seq_root",
+				SubAgents: []agent.Agent{newStreamingBot(t, "bot"), newStreamingBot(t, "step2")},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New: %v", err)
+		}
+		r := newTestRunner(t, seq, p)
+
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatal("did not observe a partial event in StreamingModeSSE")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("loop root", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		loop, err := loopagent.New(loopagent.Config{
+			MaxIterations: 2,
+			AgentConfig: agent.Config{
+				Name:      "loop_root",
+				SubAgents: []agent.Agent{newStreamingBot(t, "bot")},
+			},
+		})
+		if err != nil {
+			t.Fatalf("loopagent.New: %v", err)
+		}
+		r := newTestRunner(t, loop, p)
+
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatal("did not observe a partial event in StreamingModeSSE")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+
+	t.Run("parallel root with sibling model call in flight", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		slowEntered := make(chan struct{})
+		slow, err := llmagent.New(llmagent.Config{
+			Name:  "slow",
+			Model: &blockingUntilContextDoneLLM{entered: slowEntered},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(slow): %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &waitThenStreamPartialLLM{
+				ready:     slowEntered,
+				chunkText: "hello ",
+				finalText: "hello world",
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		par, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "par_root",
+				SubAgents: []agent.Agent{bot, slow},
+			},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New: %v", err)
+		}
+		r := newTestRunner(t, par, p)
+
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatal("did not observe a partial event in StreamingModeSSE")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+	})
+}
+
+// flakyOnFirstPassLLM fails on call 1 and returns a valid final response on
+// call 2+.
+type flakyOnFirstPassLLM struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+	reply string
+}
+
+func (m *flakyOnFirstPassLLM) Name() string { return "flaky-on-first-pass-llm" }
+
+func (m *flakyOnFirstPassLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.mu.Lock()
+		m.calls++
+		call := m.calls
+		m.mu.Unlock()
+		if call == 1 {
+			yield(nil, m.err)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      textContent("model", m.reply),
+			TurnComplete: true,
+		}, nil)
+	}
 }
 
 // TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError
 // verifies that when a sub-agent's model call fails and the caller continues
 // iterating runner.Run until exhaustion (so ADK runs AfterAgentCallback on the
-// ancestors), the invocation still terminates with INVOCATION_ERROR and emits
-// AGENT_ERROR for the failed sub-agent and its open ancestors without blaming
-// a sibling that succeeded.
+// ancestors or retries the child in a LoopAgent), the invocation still
+// terminates with INVOCATION_ERROR.
 func TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	modelErr := errors.New("subagent model failure 503")
+	t.Run("sequential sub-agent fails after sibling succeeds", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		modelErr := errors.New("subagent model failure 503")
 
-	okChild, err := llmagent.New(llmagent.Config{
-		Name:  "ok_child",
-		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}},
+		okChild, err := llmagent.New(llmagent.Config{
+			Name:  "ok_child",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(ok_child): %v", err)
+		}
+		failChild, err := llmagent.New(llmagent.Config{
+			Name:  "fail_child",
+			Model: &failingLLM{err: modelErr},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(fail_child): %v", err)
+		}
+		root, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "root",
+				SubAgents: []agent.Agent{okChild, failChild},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New(root): %v", err)
+		}
+		r := newTestRunner(t, root, p)
+
+		var errs []error
+		for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(errs) == 0 {
+			t.Fatal("expected runner.Run to yield an error")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got INVOCATION_COMPLETED after sub-agent model failure when caller kept reading; event types: %v", eventTypes(rows))
+		}
+		invRow := onlyRowOfType(t, rows, EventInvocationError)
+		if invRow["error_message"] != modelErr.Error() {
+			t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invRow["error_message"], modelErr.Error())
+		}
+		gotErrors := agentErrorCounts(rows)
+		if gotErrors["ok_child"] != 0 {
+			t.Errorf("ok_child got %d AGENT_ERROR rows, want 0", gotErrors["ok_child"])
+		}
 	})
-	if err != nil {
-		t.Fatalf("llmagent.New(ok_child): %v", err)
-	}
-	failChild, err := llmagent.New(llmagent.Config{
-		Name:  "fail_child",
-		Model: &failingLLM{err: modelErr},
+
+	t.Run("loop agent child fails on pass 1 and succeeds on pass 2", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		modelErr := errors.New("pass 1 model failure 503")
+
+		flakyChild, err := llmagent.New(llmagent.Config{
+			Name:  "flaky_child",
+			Model: &flakyOnFirstPassLLM{err: modelErr, reply: "recovered on pass 2"},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(flaky_child): %v", err)
+		}
+		loop, err := loopagent.New(loopagent.Config{
+			MaxIterations: 2,
+			AgentConfig: agent.Config{
+				Name:      "loop_root",
+				SubAgents: []agent.Agent{flakyChild},
+			},
+		})
+		if err != nil {
+			t.Fatalf("loopagent.New(loop_root): %v", err)
+		}
+		r := newTestRunner(t, loop, p)
+
+		var errs []error
+		for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(errs) == 0 {
+			t.Fatal("expected runner.Run to yield an error on pass 1")
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got INVOCATION_COMPLETED after pass 1 model failure in LoopAgent; event types: %v", eventTypes(rows))
+		}
+		invRow := onlyRowOfType(t, rows, EventInvocationError)
+		if invRow["error_message"] != modelErr.Error() {
+			t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invRow["error_message"], modelErr.Error())
+		}
 	})
-	if err != nil {
-		t.Fatalf("llmagent.New(fail_child): %v", err)
+}
+
+// TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinatorActivation
+// verifies that when a chat-mode coordinator delegates to an llmagent configured
+// with llmagent.ModeTask:
+//  1. The task agent's finish_task FunctionResponse emits AGENT_COMPLETED for
+//     the task agent with its span_id, parent_span_id, and latency.
+//  2. When the coordinator re-enters Agent.Run on the same branch and path to
+//     continue after the task agent completes, the coordinator's first
+//     responded activation is retired so the second coordinator activation is
+//     parented to the invocation span rather than to the finished task agent or
+//     the first coordinator activation.
+//  3. If the coordinator's continuation fails, neither the completed task agent
+//     nor the first coordinator activation receives a spurious AGENT_ERROR row.
+func TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinatorActivation(t *testing.T) {
+	newTaskWorker := func(t *testing.T) agent.Agent {
+		t.Helper()
+		worker, err := llmagent.New(llmagent.Config{
+			Name:        "task_worker",
+			Description: "executes delegated tasks",
+			Mode:        llmagent.ModeTask,
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call-finish-task",
+										Name: "finish_task",
+										Args: map[string]any{"result": "delegated task finished"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(task_worker): %v", err)
+		}
+		return worker
 	}
-	root, err := sequentialagent.New(sequentialagent.Config{
-		AgentConfig: agent.Config{
-			Name:      "root",
-			SubAgents: []agent.Agent{okChild, failChild},
+
+	delegateCallResponse := &model.LLMResponse{
+		Content: &genai.Content{
+			Role: "model",
+			Parts: []*genai.Part{
+				{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call-task-worker",
+						Name: "task_worker",
+						Args: map[string]any{"request": "run the task"},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("happy path", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		taskWorker := newTaskWorker(t)
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			SubAgents: []agent.Agent{taskWorker},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					delegateCallResponse,
+					{Content: textContent("model", "all done"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		r := newTestRunner(t, coordinator, p)
+
+		for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		invSpan := placeOf(onlyRowOfType(t, rows, EventInvocationStarting)).span
+
+		var coordStarts, workerStarts, coordCompletes, workerCompletes []map[string]any
+		for _, row := range rowsOfType(rows, EventAgentStarting) {
+			switch row["agent"] {
+			case "coordinator":
+				coordStarts = append(coordStarts, row)
+			case "task_worker":
+				workerStarts = append(workerStarts, row)
+			}
+		}
+		for _, row := range rowsOfType(rows, EventAgentCompleted) {
+			switch row["agent"] {
+			case "coordinator":
+				coordCompletes = append(coordCompletes, row)
+			case "task_worker":
+				workerCompletes = append(workerCompletes, row)
+			}
+		}
+
+		if len(coordStarts) != 2 {
+			t.Fatalf("coordinator AGENT_STARTING count = %d, want 2", len(coordStarts))
+		}
+		for i, cs := range coordStarts {
+			if got := placeOf(cs).parent; got != invSpan {
+				t.Errorf("coordinator AGENT_STARTING[%d] parent_span_id = %q, want invocation span %q", i, got, invSpan)
+			}
+		}
+		if len(workerStarts) != 1 {
+			t.Fatalf("task_worker AGENT_STARTING count = %d, want 1", len(workerStarts))
+		}
+		if got, want := placeOf(workerStarts[0]).parent, placeOf(coordStarts[0]).span; got != want {
+			t.Errorf("task_worker AGENT_STARTING parent_span_id = %q, want first coordinator span %q", got, want)
+		}
+		if len(workerCompletes) != 1 {
+			t.Fatalf("task_worker AGENT_COMPLETED count = %d, want 1", len(workerCompletes))
+		}
+		if got, want := placeOf(workerCompletes[0]), placeOf(workerStarts[0]); got != want {
+			t.Errorf("task_worker AGENT_COMPLETED place = %+v, want %+v", got, want)
+		}
+		mustLatency(t, workerCompletes[0])
+
+		if len(coordCompletes) != 1 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 1", len(coordCompletes))
+		}
+		if got, want := placeOf(coordCompletes[0]), placeOf(coordStarts[1]); got != want {
+			t.Errorf("coordinator AGENT_COMPLETED place = %+v, want second coordinator activation %+v", got, want)
+		}
+		mustLatency(t, coordCompletes[0])
+	})
+
+	t.Run("continuation failure after task completion", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		taskWorker := newTaskWorker(t)
+		contErr := errors.New("continuation model failure")
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			SubAgents: []agent.Agent{taskWorker},
+			Model: &firstCallResponseThenErrLLM{
+				first: delegateCallResponse,
+				err:   contErr,
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+		r := newTestRunner(t, coordinator, p)
+
+		var gotErr error
+		for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "start"), agent.RunConfig{}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		if !errors.Is(gotErr, contErr) {
+			t.Fatalf("r.Run error = %v, want %v", gotErr, contErr)
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationError)
+		if diff := cmp.Diff(map[string]int{"coordinator": 1}, agentErrorCounts(rows)); diff != "" {
+			t.Errorf("AGENT_ERROR counts mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// firstCallResponseThenErrLLM returns first on call 1 and yields err on call 2+.
+type firstCallResponseThenErrLLM struct {
+	mu    sync.Mutex
+	calls int
+	first *model.LLMResponse
+	err   error
+}
+
+func (m *firstCallResponseThenErrLLM) Name() string { return "first-call-response-then-err-llm" }
+
+func (m *firstCallResponseThenErrLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.mu.Lock()
+		m.calls++
+		call := m.calls
+		m.mu.Unlock()
+		if call == 1 {
+			yield(m.first, nil)
+			return
+		}
+		yield(nil, m.err)
+	}
+}
+
+// TestProbe1_ConcurrentGraphParentsSameChildNames verifies that when a workflow
+// graph runs two sequential workflow agents (flow_a and flow_b) concurrently
+// and both have children with the same names ("gate" and "step"), each child's
+// AGENT_STARTING and AGENT_COMPLETED rows are parented to its own sequential
+// parent (flow_a or flow_b) rather than escaping to the root or invocation
+// span.
+func TestProbe1_ConcurrentGraphParentsSameChildNames(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+
+	gatesReady := make(chan struct{})
+	var gateArrivals sync.WaitGroup
+	gateArrivals.Add(2)
+	go func() {
+		gateArrivals.Wait()
+		close(gatesReady)
+	}()
+
+	newFlow := func(t *testing.T, flowName string) agent.Agent {
+		t.Helper()
+		gate, err := llmagent.New(llmagent.Config{
+			Name:  "gate",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "unused")}}},
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					gateArrivals.Done()
+					select {
+					case <-gatesReady:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+					return textContent("model", flowName+" gate shortcut"), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(%s/gate): %v", flowName, err)
+		}
+		step, err := llmagent.New(llmagent.Config{
+			Name:  "step",
+			Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", flowName+" step done"), TurnComplete: true}}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(%s/step): %v", flowName, err)
+		}
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{
+				Name:      flowName,
+				SubAgents: []agent.Agent{gate, step},
+			},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New(%s): %v", flowName, err)
+		}
+		return seq
+	}
+
+	flowA := newFlow(t, "flow_a")
+	flowB := newFlow(t, "flow_b")
+	nodeA, err := workflow.NewAgentNode(flowA, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(flow_a): %v", err)
+	}
+	nodeB, err := workflow.NewAgentNode(flowB, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(flow_b): %v", err)
+	}
+
+	root, err := workflowagent.New(workflowagent.Config{
+		Name: "root",
+		Edges: []workflow.Edge{
+			{From: workflow.Start, To: nodeA},
+			{From: workflow.Start, To: nodeB},
 		},
 	})
 	if err != nil {
-		t.Fatalf("sequentialagent.New(root): %v", err)
+		t.Fatalf("workflowagent.New(root): %v", err)
 	}
 	r := newTestRunner(t, root, p)
 
-	var errs []error
 	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
 		if err != nil {
-			errs = append(errs, err)
+			t.Fatalf("r.Run error: %v", err)
 		}
-	}
-	if len(errs) == 0 {
-		t.Fatal("expected runner.Run to yield an error")
 	}
 
 	rows := collectRows(t, requests, untilInvocationEnd)
-	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
-		t.Fatalf("got INVOCATION_COMPLETED after sub-agent model failure when caller kept reading; event types: %v", eventTypes(rows))
+	requireInvocationCompletedOK(t, rows)
+
+	var flowASpan, flowBSpan string
+	var gateParents, stepParents []string
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		switch row["agent"] {
+		case "flow_a":
+			flowASpan = placeOf(row).span
+		case "flow_b":
+			flowBSpan = placeOf(row).span
+		case "gate":
+			gateParents = append(gateParents, placeOf(row).parent)
+		case "step":
+			stepParents = append(stepParents, placeOf(row).parent)
+		}
 	}
-	invRow := onlyRowOfType(t, rows, EventInvocationError)
-	if invRow["error_message"] != modelErr.Error() {
-		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invRow["error_message"], modelErr.Error())
+	if flowASpan == "" || flowBSpan == "" {
+		t.Fatalf("missing flow spans: flow_a=%q flow_b=%q", flowASpan, flowBSpan)
 	}
-	gotErrors := agentErrorCounts(rows)
-	if gotErrors["ok_child"] != 0 {
-		t.Errorf("ok_child got %d AGENT_ERROR rows, want 0", gotErrors["ok_child"])
+	wantFlowSpans := []string{flowASpan, flowBSpan}
+	slices.Sort(wantFlowSpans)
+	slices.Sort(gateParents)
+	slices.Sort(stepParents)
+	if diff := cmp.Diff(wantFlowSpans, gateParents); diff != "" {
+		t.Errorf("gate AGENT_STARTING parent_span_id mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantFlowSpans, stepParents); diff != "" {
+		t.Errorf("step AGENT_STARTING parent_span_id mismatch (-want +got):\n%s", diff)
 	}
 }
 

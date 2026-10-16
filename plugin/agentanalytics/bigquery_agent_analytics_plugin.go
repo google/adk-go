@@ -643,6 +643,8 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			} else {
 				p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
 			}
+		} else if !ev.Partial {
+			p.traces.clearLastPartial(ctx, evID)
 		}
 		p.logEvent(ctx, id, legacyEventType, func() rowSpan {
 			return p.traces.eventSpan(ctx, evID, ev.Author, ev.Branch)
@@ -653,8 +655,35 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			d.author = ev.Author
 			d.customMetadata = ev.CustomMetadata
 		})
+		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
+			taskID := evID
+			taskID.agentName = ev.Author
+			taskID.branch = ev.Branch
+			p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan {
+				return p.traces.popAgentSpan(ctx, taskID)
+			}, nil)
+		}
 	}
 	return nil, nil
+}
+
+// hasTaskCompletedResponse reports whether c carries a successful
+// finish_task function response ("result": "Task completed."), which ends a
+// task-mode LLM agent in ADK without running its AfterAgentCallback.
+func hasTaskCompletedResponse(c *genai.Content) bool {
+	if c == nil {
+		return false
+	}
+	for _, part := range c.Parts {
+		if part == nil || part.FunctionResponse == nil {
+			continue
+		}
+		if part.FunctionResponse.Name == "finish_task" {
+			result, ok := part.FunctionResponse.Response["result"].(string)
+			return ok && result == "Task completed."
+		}
+	}
+	return false
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,

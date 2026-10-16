@@ -1802,8 +1802,13 @@ func TestAfterModelCallback_Status(t *testing.T) {
 		"error-code":     {"status": "OK"},
 		"message-only":   {"status": "OK", "error_message": "quota exceeded"},
 	}
+	rows := collectRows(t, requests, untilEventType(EventInvocationError))
+	invErr := onlyRowOfType(t, rows, EventInvocationError)
+	if invErr["error_message"] != "stream broken" {
+		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invErr["error_message"], "stream broken")
+	}
 	got := map[string]map[string]any{}
-	for _, row := range rowsOfType(collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse) {
+	for _, row := range rowsOfType(rows, EventLLMResponse) {
 		version, _ := lookup(jsonObjectColumn(t, row, "attributes"), "model_version")
 		columns := map[string]any{"status": row["status"]}
 		if msg, ok := row["error_message"]; ok {
