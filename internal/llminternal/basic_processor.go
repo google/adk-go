@@ -15,9 +15,12 @@
 package llminternal
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"reflect"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -38,7 +41,12 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 
 		state := llmAgent.internal()
 
-		req.Config = clone(state.GenerateContentConfig)
+		config, err := clone(state.GenerateContentConfig)
+		if err != nil {
+			yield(nil, fmt.Errorf("clone generation config: %w", err))
+			return
+		}
+		req.Config = config
 		if req.Config == nil {
 			req.Config = &genai.GenerateContentConfig{}
 		}
@@ -51,7 +59,13 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		// declaration (the model emits the value inside the finish_task
 		// FC args, not as a structured text response).
 		if state.Mode != ModeTask && state.OutputSchema != nil && !needOutputSchemaProcessor(state) {
-			req.Config.ResponseSchema = state.OutputSchema
+			// Unlike Python, isolate schema mutations made by model callbacks.
+			schema, err := clone(state.OutputSchema)
+			if err != nil {
+				yield(nil, fmt.Errorf("clone output schema: %w", err))
+				return
+			}
+			req.Config.ResponseSchema = schema
 			req.Config.ResponseMIMEType = "application/json"
 		}
 
@@ -60,85 +74,120 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 	}
 }
 
-// clone returns a deep copy of the src.
-// NOTE: this does not work for types with unexported fields.
-func clone[M any](src M) M {
-	val := reflect.ValueOf(src)
-
-	// Handle nil pointers
-	if val.Kind() == reflect.Pointer && val.IsNil() {
+// clone copies src's data containers, with time.Time values copied by value.
+// Inside an empty interface, values with unexported fields are preserved as an
+// independent json.RawMessage instead of retaining references to private state.
+// Other concrete types are preserved. Functions, channels, and unsafe pointers
+// are retained as-is. Unsupported types and excessive nesting return an error.
+func clone[M any](src M) (M, error) {
+	var dst M
+	if err := deepCopy(reflect.ValueOf(&src).Elem(), reflect.ValueOf(&dst).Elem(), 0); err != nil {
 		var zero M
-		return zero
+		return zero, err
 	}
-
-	srcIsPointer := val.Kind() == reflect.Pointer
-
-	// Dereference pointer to get the underlying value
-	if srcIsPointer {
-		val = val.Elem()
-	}
-
-	// Create a new instance of the same type
-	newVal := reflect.New(val.Type()).Elem()
-
-	// Recursively copy fields
-	deepCopy(val, newVal)
-
-	// Return as the original type
-	if srcIsPointer {
-		return newVal.Addr().Interface().(M)
-	}
-	return newVal.Interface().(M)
+	return dst, nil
 }
 
+// maxCloneDepth counts reflection steps, including pointers and interfaces,
+// to bound recursion through cyclic or excessively nested payloads.
+const maxCloneDepth = 1024
+
+var (
+	errCloneDepth      = errors.New("maximum clone depth exceeded")
+	errCloneUnexported = errors.New("cannot clone unexported field")
+)
+
+// cloneJSONError hides customer content while preserving the underlying error.
+type cloneJSONError struct{ err error }
+
+func (e *cloneJSONError) Error() string {
+	return "clone JSON value: serialization failed"
+}
+
+func (e *cloneJSONError) Unwrap() error { return e.err }
+
 // deepCopy copies src to dst using reflect.
-func deepCopy(src, dst reflect.Value) {
+func deepCopy(src, dst reflect.Value, depth int) error {
+	if depth > maxCloneDepth {
+		return fmt.Errorf("%w: limit %d (cyclic or excessively nested value)", errCloneDepth, maxCloneDepth)
+	}
 	switch src.Kind() {
 	case reflect.Struct:
 		t := src.Type()
+		if t == reflect.TypeFor[time.Time]() {
+			// time.Time's API supports value copying, including its location data.
+			dst.Set(src)
+			return nil
+		}
 		for i := 0; i < src.NumField(); i++ {
 			if !t.Field(i).IsExported() {
-				panic(fmt.Sprintf("deepCopy: unexported field %q in type %q", t.Field(i).Name, t.Name()))
+				return fmt.Errorf("%w %q in type %v", errCloneUnexported, t.Field(i).Name, t)
 			}
-			// Create a copy of the field and set it on the destination struct
-			fieldCopy := reflect.New(src.Field(i).Type()).Elem()
-			deepCopy(src.Field(i), fieldCopy)
-			dst.Field(i).Set(fieldCopy)
+			if err := deepCopy(src.Field(i), dst.Field(i), depth+1); err != nil {
+				return err
+			}
 		}
-	case reflect.Slice:
+	case reflect.Interface:
 		if src.IsNil() {
-			return
+			return nil
 		}
-		dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
+		valueCopy := reflect.New(src.Elem().Type()).Elem()
+		if err := deepCopy(src.Elem(), valueCopy, depth+1); err != nil {
+			if !errors.Is(err, errCloneUnexported) || src.Type().NumMethod() != 0 {
+				return err
+			}
+			// JSON preserves opaque payloads (including custom marshalers) without
+			// exposing private state or rounding numbers through float64.
+			raw, err := json.Marshal(src.Interface())
+			if err != nil {
+				return &cloneJSONError{err: err}
+			}
+			valueCopy = reflect.ValueOf(json.RawMessage(raw))
+		}
+		dst.Set(valueCopy)
+	case reflect.Array, reflect.Slice:
+		if src.Kind() == reflect.Slice {
+			if src.IsNil() {
+				return nil
+			}
+			dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Cap()))
+		}
 		for i := 0; i < src.Len(); i++ {
-			// Create a copy of each element and set it in the new slice
-			elemCopy := reflect.New(src.Index(i).Type()).Elem()
-			deepCopy(src.Index(i), elemCopy)
-			dst.Index(i).Set(elemCopy)
+			if err := deepCopy(src.Index(i), dst.Index(i), depth+1); err != nil {
+				return err
+			}
 		}
 	case reflect.Map:
 		if src.IsNil() {
-			return
+			return nil
 		}
-		dst.Set(reflect.MakeMap(src.Type()))
-		for _, key := range src.MapKeys() {
-			// Create copies of the key and value and set them in the new map
+		dst.Set(reflect.MakeMapWithSize(src.Type(), src.Len()))
+		for it := src.MapRange(); it.Next(); {
+			key, value := it.Key(), it.Value()
 			keyCopy := reflect.New(key.Type()).Elem()
-			deepCopy(key, keyCopy)
-			valCopy := reflect.New(src.MapIndex(key).Type()).Elem()
-			deepCopy(src.MapIndex(key), valCopy)
+			if err := deepCopy(key, keyCopy, depth+1); err != nil {
+				return err
+			}
+			if !keyCopy.Comparable() {
+				return fmt.Errorf("cloned map key of type %v is not comparable", key.Type())
+			}
+			valCopy := reflect.New(value.Type()).Elem()
+			if err := deepCopy(value, valCopy, depth+1); err != nil {
+				return err
+			}
 			dst.SetMapIndex(keyCopy, valCopy)
 		}
 	case reflect.Pointer:
 		if src.IsNil() {
-			return
+			return nil
 		}
-		// Create a new pointer and deep copy the underlying value
 		newPtr := reflect.New(src.Elem().Type())
-		deepCopy(src.Elem(), newPtr.Elem())
+		if err := deepCopy(src.Elem(), newPtr.Elem(), depth+1); err != nil {
+			return err
+		}
 		dst.Set(newPtr)
 	default:
-		// For basic types, direct assignment is sufficient
 		dst.Set(src)
 	}
+	return nil
 }
