@@ -24,6 +24,29 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
+const (
+	// stopStreamingFunctionCallName cancels streaming tools of a live session.
+	// The live flow serves the call itself, before it looks the name up in the
+	// tools of the invocation.
+	stopStreamingFunctionCallName = "stop_streaming"
+
+	// taskCompletedFunctionCallName ends the step of a sequential agent, which
+	// injects a tool under this name into every sub agent.
+	taskCompletedFunctionCallName = "task_completed"
+)
+
+// IsReservedToolName reports whether name is a function call name that the
+// flow dispatches itself. A tool advertising one of these names would be
+// invoked in place of the framework's own handling of the call.
+func IsReservedToolName(name string) bool {
+	switch name {
+	case requestEUCFunctionCallName, toolconfirmation.FunctionCallName, transferAgentName,
+		stopStreamingFunctionCallName, taskCompletedFunctionCallName:
+		return true
+	}
+	return false
+}
+
 // generateRequestConfirmationEvent creates a new Event containing
 // adk_request_confirmation function calls based on the requested confirmations.
 // NOTE: The trigger for this in ADK Go is usually a agent.Context.RequestConfirmation call,
