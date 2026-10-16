@@ -76,7 +76,10 @@ type spanRecord struct {
 	firstToken time.Time
 	// hasResponse reports whether the agent activation has produced a model
 	// response or an event with content or output, itself or through an
-	// activation that ran under it.
+	// activation that ran under it. The final event of an activation also
+	// settles the activations that still run under it, and an event of an
+	// author that has no open span settles the activation that it would
+	// have run under.
 	hasResponse bool
 }
 
@@ -124,6 +127,14 @@ type invocationTrace struct {
 	// that parent is a non-LLM workflow agent (such as a sequential or loop
 	// agent) rather than an llmagent whose sub-agents can transfer to peers.
 	sequentialParent map[string]string
+	// ancestryFromContext reports that the agent hierarchy was read from the
+	// parent map that the runner attaches to the callback context. That map
+	// describes the tree of the runner that runs this invocation, so it
+	// stays authoritative even when it is empty, because the runner runs an
+	// agent that has no parent: the ancestry that the traceManager learned
+	// from other runners, which may have run the same agent instance as a
+	// sub-agent, does not replace it.
+	ancestryFromContext bool
 	// agentStack holds the invocation span, followed by the spans of the
 	// running agents in the order they started. Agents that run
 	// concurrently, such as the sub-agents of a parallel agent or
@@ -243,9 +254,17 @@ func (inv *invocationTrace) rowSpan(rec *spanRecord, latency map[string]any) row
 // ctx, runner, and any rememberedRoot resolved from tm's agent-instance parent
 // map before acquiring inv.mu. runner is nil in callbacks that do not get the
 // agent directly.
+//
+// The parent map that the runner attaches to ctx describes the tree of the
+// runner of this invocation, so it is authoritative when ctx carries one,
+// even an empty map: the runner then runs an agent that has no parent.
+// rememberedRoot comes from the trees of earlier runners, which may have run
+// the same agent instance as a sub-agent, and is used only when ctx carries no
+// parent map.
 func (inv *invocationTrace) noteRootAgent(ctx context.Context, id identity, runner, rememberedRoot agent.Agent, useBranchFallback bool) {
-	if inv.configuredRoot == "" && len(inv.parentAgent) == 0 {
-		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); len(parents) > 0 {
+	if !inv.ancestryFromContext {
+		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); parents != nil {
+			inv.ancestryFromContext = true
 			for child, parent := range parents {
 				if pName := orZero(parent.Name); child != "" && pName != "" {
 					inv.parentAgent[child] = pName
@@ -266,7 +285,7 @@ func (inv *invocationTrace) noteRootAgent(ctx context.Context, id identity, runn
 	}
 	if runner != nil {
 		inv.recordAgentTree(runner)
-		if rememberedRoot != nil && rememberedRoot != runner {
+		if rememberedRoot != nil && rememberedRoot != runner && !inv.ancestryFromContext {
 			inv.recordAgentTree(rememberedRoot)
 			if inv.runnerAgent == nil {
 				inv.runnerAgent = rememberedRoot
@@ -340,6 +359,69 @@ func (inv *invocationTrace) recordAgentTree(root agent.Agent) {
 		}
 	}
 	walk(root)
+}
+
+// agentChildren are the sub-agents that are configured on a running agent.
+type agentChildren struct {
+	// parent is the name of the running agent.
+	parent string
+	// nonLLM reports that parent is a workflow agent, such as a sequential or
+	// loop agent, rather than an llmagent whose sub-agents can transfer to
+	// peers.
+	nonLLM bool
+	// names holds the names of the sub-agents.
+	names []string
+}
+
+// runningAgentChildren returns the sub-agents that are configured on the agent
+// that ctx runs, if that agent is named name. Agents that run as nodes of a
+// workflow graph need not be in the sub-agent tree of the agent that the runner
+// runs, so the agent hierarchy that the runner attaches to ctx can lack them.
+// It is the zero value if ctx does not expose its agent. The callback context
+// logs a warning from Agent, so the agent is read from the invocation context
+// that WithICDelta derives from it. SubAgents and Name are user code, so
+// callers must not hold a lock.
+func runningAgentChildren(ctx context.Context, name string) agentChildren {
+	return orZero(func() agentChildren {
+		c, ok := ctx.(interface {
+			WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
+		})
+		if !ok || name == "" {
+			return agentChildren{}
+		}
+		ic := c.WithICDelta(&agent.InvocationContextDelta{})
+		if ic == nil {
+			return agentChildren{}
+		}
+		a := ic.Agent()
+		if a == nil || a.Name() != name {
+			return agentChildren{}
+		}
+		children := agentChildren{parent: name, nonLLM: !isLLMAgent(a)}
+		for _, sub := range a.SubAgents() {
+			if sub == nil {
+				continue
+			}
+			if subName := sub.Name(); subName != "" {
+				children.names = append(children.names, subName)
+			}
+		}
+		return children
+	})
+}
+
+// recordChildren records the sub-agents of a running agent as its children in
+// the agent hierarchy, replacing the parent that an earlier tree recorded for
+// the same names.
+func (inv *invocationTrace) recordChildren(c agentChildren) {
+	for _, name := range c.names {
+		inv.parentAgent[name] = c.parent
+		if c.nonLLM {
+			inv.sequentialParent[name] = c.parent
+		} else {
+			delete(inv.sequentialParent, name)
+		}
+	}
 }
 
 // topAgentFromMap walks parents upward from start (or agentName) to the
@@ -416,7 +498,10 @@ func (inv *invocationTrace) findAgent(path, name, branch string) int {
 // the most recent agent whose branch and node path contain id, or the
 // invocation. When id has a configured non-LLM parent in inv.sequentialParent,
 // sibling spans that are not configured ancestors of id are skipped without
-// mutating agentStack on push.
+// mutating agentStack on push. The configured parents come from the agent tree
+// of the runner and from the sub-agents of each agent that started, so a
+// workflow agent that runs as a graph node outside that tree keeps its
+// sub-agents apart as well.
 func (inv *invocationTrace) parentFor(id identity) *spanRecord {
 	hasSequentialParent := inv.sequentialParent[id.agentName] != ""
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
@@ -696,14 +781,20 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 }
 
 // pushAgentSpan starts the span of an agent run and returns the place of
-// its AGENT_STARTING row.
+// its AGENT_STARTING row. The sub-agents that are configured on the starting
+// agent are recorded as its children before they start, so that agents that
+// run under a workflow agent outside the runner's agent tree, such as a graph
+// node, are parented like those of the tree.
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	// SubAgents is user code, so it is read before mu is taken.
+	children := runningAgentChildren(ctx, id.agentName)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.recordChildren(children)
 	rec := &spanRecord{
 		spanID:       newSpanID(),
 		parentSpanID: inv.parentFor(id).spanID,
@@ -792,29 +883,83 @@ type unclosedAgentSpan struct {
 // event with content or an output responded. The author's activation is
 // looked up from the event's author, branch and node path in id, as in
 // eventSpan, because the event callback gets the agent that the runner runs
-// rather than the author. The model calls still open under the activation end
-// without a row: ADK runs no AfterModelCallback for a call that a
-// BeforeModelCallback answered, so its response event is all that ends it.
-// The activation and the open activations that it runs under are marked as
-// responded. An event whose author has no open agent span changes nothing.
-func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string) {
+// rather than the author. calls holds the function call ID, or else the tool
+// name, of each function response of the event.
+//
+// If the author has an open agent span:
+//
+//   - The model calls still open under the activation end without a row: ADK
+//     runs no AfterModelCallback for a call that a BeforeModelCallback
+//     answered, so its response event is all that ends it. The unrecovered
+//     errors recorded for the activation end with them: the activation went
+//     on to respond, for example after a plugin recovered from a model error
+//     and an earlier plugin's AfterModelCallback answered the call, which
+//     stops the chain before this plugin's AfterModelCallback clears the
+//     error.
+//   - The tool calls of calls end without a row in the same way: an earlier
+//     plugin's AfterToolCallback that returns a result stops the chain before
+//     this plugin's, so the function response event is all that ends them.
+//     The other open tool calls stay open, because they have not responded.
+//   - The activation and the open activations that it runs under are marked
+//     as responded, and so are the open activations that still run under it,
+//     such as a sub-agent that a callback answered inside a custom agent that
+//     runs it itself: its event never reaches the runner and no
+//     AfterAgentCallback ends its span.
+//
+// If the author has no open agent span, for example because a callback of an
+// earlier plugin answered for it before this plugin saw it start, the response
+// arrived under the activation that the author would have run under. That
+// activation and the open activations that it runs under are marked as
+// responded. Nothing else changes.
+func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string, calls []string) {
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	i := inv.findAgent(id.path, author, branch)
 	if i <= 0 {
+		if author == "" || author == userAuthor {
+			return
+		}
+		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
+		if j := slices.Index(inv.agentStack, parent); j > 0 {
+			inv.markRespondedLocked(inv.lineageLocked(j))
+		}
 		return
 	}
 	owner := inv.agentStack[i]
+	for key, e := range inv.unrecoveredErrors {
+		if inv.activationOfLocked(e) == i {
+			delete(inv.unrecoveredErrors, key)
+		}
+	}
 	for key, rec := range inv.llmSpans {
 		if rec.parentSpanID == owner.spanID {
 			delete(inv.llmSpans, key)
 		}
 	}
+	for key, rec := range inv.toolSpans {
+		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) {
+			delete(inv.toolSpans, key)
+		}
+	}
 	inv.syncOpenCallsLocked()
-	lineage := inv.lineageLocked(i)
+	inv.markRespondedLocked(inv.lineageLocked(i))
+	// An activation is created after the one that it runs under, so one pass
+	// over the later spans finds all that run under the owner.
+	under := map[string]bool{owner.spanID: true}
+	for _, rec := range inv.agentStack[i+1:] {
+		if under[rec.parentSpanID] {
+			under[rec.spanID] = true
+		}
+	}
+	inv.markRespondedLocked(under)
+}
+
+// markRespondedLocked marks the open agent spans in spans, by span ID, as
+// responded.
+func (inv *invocationTrace) markRespondedLocked(spans map[string]bool) {
 	for _, rec := range inv.agentStack[1:] {
-		if lineage[rec.spanID] {
+		if spans[rec.spanID] {
 			rec.hasResponse = true
 		}
 	}
@@ -852,8 +997,9 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //
 //   - An unrecovered model error that a callback recorded, if any agent span
 //     is still open. A response to the failed model call, after a plugin
-//     recovered from the error, clears the error, and so does the normal end
-//     of its activation or of an activation that it runs under.
+//     recovered from the error, clears the error, and so do a final event of
+//     its activation and the normal end of its activation or of an activation
+//     that it runs under.
 //   - The error of ctx when the invocation was canceled. Cancellation is
 //     returned even when every agent span is closed, or when no agent ran at
 //     all, for example because a BeforeRunCallback canceled the invocation.
@@ -862,8 +1008,8 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //     without any error callback.
 //   - Otherwise, the most recent open agent span whose activation produced
 //     no response, neither a model response nor an event with content or
-//     output of its own or of an activation that ran under it, for example
-//     because its Run returned an error first.
+//     output of its own, of an activation that ran under it or of one that it
+//     ran under, for example because its Run returned an error first.
 //
 // The last two are reported with a synthetic error, and only if ctx was not
 // ended: an agent that a BeforeAgentCallback answered ends its node, so no
@@ -1195,6 +1341,12 @@ func toolKey(id identity, functionCallID, toolName string) string {
 		return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + functionCallID
 	}
 	return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + toolName
+}
+
+// toolKeyCall returns the function call ID, or else the tool name, that
+// toolKey put at the end of key.
+func toolKeyCall(key string) string {
+	return key[strings.LastIndexByte(key, 0)+1:]
 }
 
 // contextParentMap returns the child-to-parent agent map that ADK's runner

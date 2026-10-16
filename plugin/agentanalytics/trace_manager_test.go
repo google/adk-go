@@ -34,6 +34,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
@@ -4135,4 +4136,631 @@ func TestTraceManager_CancellationAttributesEveryOpenSpan(t *testing.T) {
 	if diff := cmp.Diff([]string{childStart.spanID, rootStart.spanID}, got); diff != "" {
 		t.Errorf("popUnclosedAgentSpans span IDs mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// requireInvocationCompletedOK fails the test unless rows end the invocation
+// with INVOCATION_COMPLETED, status OK, and hold neither an INVOCATION_ERROR
+// nor an AGENT_ERROR row: the run succeeded.
+func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
+	t.Helper()
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR for a run that succeeded, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	invRow := onlyRowOfType(t, rows, EventInvocationCompleted)
+	if invRow["status"] != "OK" {
+		t.Errorf("INVOCATION_COMPLETED status = %v, want OK", invRow["status"])
+	}
+	if diff := cmp.Diff(map[string]int{}, agentErrorCounts(rows)); diff != "" {
+		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestProbeAfterToolShortCircuitDoesNotFailSuccessfulEarlyStop runs an agent
+// that calls a tool and then answers. A plugin registered before the analytics
+// plugin may return a result from AfterToolCallback, which ends the chain of
+// plugin callbacks: the analytics plugin never sees the call complete although
+// it opened the call's span. The consumer stops reading at the final answer, so
+// ADK runs no AfterAgentCallback either. The function response event shows
+// that the call completed, so the successful run must not be reported as
+// failed for a tool call that is still open.
+func TestProbeAfterToolShortCircuitDoesNotFailSuccessfulEarlyStop(t *testing.T) {
+	tests := []struct {
+		name string
+		// earlierResult is what the earlier plugin's AfterToolCallback returns.
+		earlierResult     map[string]any
+		wantToolCompleted int
+	}{
+		{
+			name:              "earlier plugin replaces the tool result",
+			earlierResult:     map[string]any{"status": "replaced"},
+			wantToolCompleted: 0,
+		},
+		{
+			name:              "earlier plugin leaves the tool result",
+			wantToolCompleted: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			earlier, err := baseplugin.New(baseplugin.Config{
+				Name: "earlier_after_tool",
+				AfterToolCallback: func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+					return tc.earlierResult, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New: %v", err)
+			}
+			lookup, err := functiontool.New(functiontool.Config{
+				Name:        "lookup",
+				Description: "looks up a value",
+			}, func(agent.Context, struct{}) (struct{}, error) {
+				return struct{}{}, nil
+			})
+			if err != nil {
+				t.Fatalf("functiontool.New: %v", err)
+			}
+			callLookup := &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+				genai.NewPartFromFunctionCall("lookup", map[string]any{}),
+			}, genai.RoleModel)}
+			bot, err := llmagent.New(llmagent.Config{
+				Name: "bot",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					callLookup,
+					{Content: textContent("model", "all done")},
+				}},
+				Tools: []tool.Tool{lookup},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			r := newTestRunner(t, bot, earlier, p)
+
+			var events int
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "look it up"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run error after %d events: %v", events, err)
+				}
+				if ev == nil {
+					continue
+				}
+				events++
+				if ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "all done" {
+					break
+				}
+			}
+			if events != 3 {
+				t.Fatalf("consumed %d events, want 3: the function call, its response and the final answer", events)
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventToolStarting)); n != 1 {
+				t.Errorf("got %d TOOL_STARTING rows, want 1", n)
+			}
+			if n := len(rowsOfType(rows, EventToolCompleted)); n != tc.wantToolCompleted {
+				t.Errorf("got %d TOOL_COMPLETED rows, want %d", n, tc.wantToolCompleted)
+			}
+			requireInvocationCompletedOK(t, rows)
+		})
+	}
+}
+
+// newShortcutSequenceGraph returns the workflow agent "root", whose only node
+// is the sequential agent "sequence" of the agent "shortcut", which a
+// BeforeAgentCallback answers, and next. The sequence is a graph node, so it is
+// not among the SubAgents of root unless registerSequence is set.
+func newShortcutSequenceGraph(t *testing.T, next agent.Agent, registerSequence bool) agent.Agent {
+	t.Helper()
+	shortcut, err := llmagent.New(llmagent.Config{
+		Name:  "shortcut",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "never sent")}}},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				return textContent("model", "answered by callback"), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(shortcut): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "sequence", SubAgents: []agent.Agent{shortcut, next}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNode(seq, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode: %v", err)
+	}
+	cfg := workflowagent.Config{
+		Name:  "root",
+		Edges: []workflow.Edge{{From: workflow.Start, To: node}},
+	}
+	if registerSequence {
+		cfg.SubAgents = []agent.Agent{seq}
+	}
+	root, err := workflowagent.New(cfg)
+	if err != nil {
+		t.Fatalf("workflowagent.New: %v", err)
+	}
+	return root
+}
+
+// TestReview_GraphSequentialSiblingAfterShortcut runs a sequential agent as a
+// node of a workflow graph. Its first child is answered by a
+// BeforeAgentCallback, which leaves the child's span open, and its second
+// child must still run under the sequence rather than under that sibling. A
+// graph node is not among the SubAgents of the runner's root agent, so the
+// hierarchy of the sequence is not known from the configured agent tree.
+func TestReview_GraphSequentialSiblingAfterShortcut(t *testing.T) {
+	tests := []struct {
+		name             string
+		registerSequence bool
+	}{
+		{name: "sequence only as a graph node"},
+		{name: "sequence also in the SubAgents of root", registerSequence: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			next, err := llmagent.New(llmagent.Config{
+				Name:  "next",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "next answer")}}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(next): %v", err)
+			}
+			r := newTestRunner(t, newShortcutSequenceGraph(t, next, tc.registerSequence), p)
+
+			for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run error: %v", err)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			starts := rowsOfType(rows, EventAgentStarting)
+			if len(starts) != 4 {
+				t.Fatalf("got %d AGENT_STARTING rows, want 4; event types: %v", len(starts), eventTypes(rows))
+			}
+			places := map[string]tracePlace{}
+			for _, row := range starts {
+				name, _ := row["agent"].(string)
+				places[name] = placeOf(row)
+			}
+			if diff := cmp.Diff([]string{"next", "root", "sequence", "shortcut"}, slices.Sorted(maps.Keys(places))); diff != "" {
+				t.Fatalf("AGENT_STARTING agents mismatch (-want +got):\n%s", diff)
+			}
+			if got, want := places["sequence"].parent, places["root"].span; got != want {
+				t.Errorf("sequence parent_span_id = %q, want the span of root %q", got, want)
+			}
+			if got, want := places["shortcut"].parent, places["sequence"].span; got != want {
+				t.Errorf("shortcut parent_span_id = %q, want the span of sequence %q", got, want)
+			}
+			if got, want := places["next"].parent, places["sequence"].span; got != want {
+				t.Errorf("next parent_span_id = %q, want the span of sequence %q, not that of shortcut %q", got, want, places["shortcut"].span)
+			}
+			requireInvocationCompletedOK(t, rows)
+		})
+	}
+}
+
+// TestReview_GraphSequentialFailureDoesNotBlameShortcut fails the second child
+// of a sequential graph node after the first child was answered by a
+// BeforeAgentCallback. The consumer stops at the first error, so ADK runs no
+// AfterAgentCallback. Only the failing child and the agents it ran under get
+// AGENT_ERROR rows; the sibling that answered did not fail.
+func TestReview_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	modelErr := errors.New("model failure 500")
+	next, err := llmagent.New(llmagent.Config{Name: "next", Model: &failingLLM{err: modelErr}})
+	if err != nil {
+		t.Fatalf("llmagent.New(next): %v", err)
+	}
+	r := newTestRunner(t, newShortcutSequenceGraph(t, next, false), p)
+
+	var runErr error
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			runErr = err
+			break
+		}
+	}
+	if !errors.Is(runErr, modelErr) && (runErr == nil || runErr.Error() != modelErr.Error()) {
+		t.Fatalf("r.Run error = %v, want %v", runErr, modelErr)
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED after a model failure, want INVOCATION_ERROR; event types: %v", eventTypes(rows))
+	}
+	if diff := cmp.Diff(map[string]int{"next": 1, "sequence": 1, "root": 1}, agentErrorCounts(rows)); diff != "" {
+		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
+	}
+	invRow := onlyRowOfType(t, rows, EventInvocationError)
+	if invRow["error_message"] != modelErr.Error() {
+		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invRow["error_message"], modelErr.Error())
+	}
+}
+
+// TestReviewSharedSameAgentRoot shares one analytics plugin between a runner
+// whose tree is root -> worker and a runner of the same worker instance as an
+// independent root. The parent map of each runner is authoritative, including
+// an empty one: the root learned from the other runner's tree must not become
+// the root agent of the independent runner's invocation.
+func TestReviewSharedSameAgentRoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		treeFirst bool
+	}{
+		{name: "tree runner first", treeFirst: true},
+		{name: "standalone runner first"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			worker, err := llmagent.New(llmagent.Config{
+				Name:  "worker",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "worker answer"), TurnComplete: true}}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+			root, err := llmagent.New(llmagent.Config{
+				Name:      "root",
+				Model:     &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "root answer"), TurnComplete: true}}},
+				SubAgents: []agent.Agent{worker},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(root): %v", err)
+			}
+			// run runs r to its end and checks the root agent of every row.
+			run := func(r *runner.Runner, wantRoot string) {
+				t.Helper()
+				for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("r.Run (root %s): %v", wantRoot, err)
+					}
+				}
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				for _, row := range rows {
+					checkJSONAt(t, jsonObjectColumn(t, row, columnAttributes), fmt.Sprintf("%q", wantRoot), "root_agent_name")
+				}
+			}
+			tree := func() { run(newTestRunner(t, root, p), "root") }
+			standalone := func() { run(newTestRunner(t, worker, p), "worker") }
+			if tc.treeFirst {
+				tree()
+				standalone()
+			} else {
+				standalone()
+				tree()
+			}
+		})
+	}
+}
+
+// TestRunner_CustomParentSwallowsShortCircuitedChild_EmitsInvocationCompletedOK
+// runs a custom agent that runs its sub-agent itself, as a sequential agent
+// does, and keeps the sub-agent's events to itself. A BeforeAgentCallback
+// answers for the sub-agent, which leaves its span open, and its event never
+// reaches the runner. The consumer stops at the parent's own final event, so
+// ADK runs no AfterAgentCallback. That final event shows that the run
+// succeeded; the span left open by the sub-agent must not fail it.
+func TestRunner_CustomParentSwallowsShortCircuitedChild_EmitsInvocationCompletedOK(t *testing.T) {
+	tests := []struct {
+		name string
+		// respond sets the final response of the parent on its event, and
+		// isFinal reports whether an event carries it.
+		respond func(*session.Event)
+		isFinal func(*session.Event) bool
+	}{
+		{
+			name:    "content",
+			respond: func(ev *session.Event) { ev.Content = textContent("model", "parent answer") },
+			isFinal: func(ev *session.Event) bool { return ev.Content != nil },
+		},
+		{
+			name:    "output",
+			respond: func(ev *session.Event) { ev.Output = map[string]any{"answer": 42} },
+			isFinal: func(ev *session.Event) bool { return ev.Output != nil },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			sub, err := llmagent.New(llmagent.Config{
+				Name:  "sub",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "never sent")}}},
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						return textContent("model", "answered by callback"), nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(sub): %v", err)
+			}
+			parent, err := agent.New(agent.Config{
+				Name:      "parent",
+				SubAgents: []agent.Agent{sub},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for _, err := range sub.Run(ctx) {
+							_ = err
+						}
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						tc.respond(ev)
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(parent): %v", err)
+			}
+			r := newTestRunner(t, parent, p)
+
+			var gotFinal bool
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run error: %v", err)
+				}
+				if ev != nil && ev.Author == "parent" && tc.isFinal(ev) {
+					gotFinal = true
+					break
+				}
+			}
+			if !gotFinal {
+				t.Fatal("r.Run ended without the final event of the parent")
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventAgentStarting)); n != 2 {
+				t.Errorf("got %d AGENT_STARTING rows, want 2 (parent and sub)", n)
+			}
+			requireInvocationCompletedOK(t, rows)
+		})
+	}
+}
+
+// TestRunner_SequentialSiblingShortcutThenCustomChildFails_BlamesOnlyFailingChild
+// is the counterpart of the test above: the sibling that a BeforeAgentCallback
+// answered is settled by nothing, and the second child of the sequence, a
+// custom agent that fails without any model call, still gets an AGENT_ERROR row
+// together with the sequence.
+func TestRunner_SequentialSiblingShortcutThenCustomChildFails_BlamesOnlyFailingChild(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	child1, err := llmagent.New(llmagent.Config{
+		Name:  "child1",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "never sent")}}},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(agent.Context) (*genai.Content, error) {
+				return textContent("model", "answered by callback"), nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(child1): %v", err)
+	}
+	runErr := errors.New("custom child failure")
+	child2, err := agent.New(agent.Config{
+		Name: "child2",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, runErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child2): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "sequence", SubAgents: []agent.Agent{child1, child2}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New: %v", err)
+	}
+	r := newTestRunner(t, seq, p)
+
+	var gotErr error
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+	if !errors.Is(gotErr, runErr) {
+		t.Fatalf("r.Run error = %v, want %v", gotErr, runErr)
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED after a child failure, want INVOCATION_ERROR; event types: %v", eventTypes(rows))
+	}
+	if diff := cmp.Diff(map[string]int{"child2": 1, "sequence": 1}, agentErrorCounts(rows)); diff != "" {
+		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
+	}
+	onlyRowOfType(t, rows, EventInvocationError)
+}
+
+// TestRunner_PriorPluginAnswersOnlyChild_EmitsInvocationCompletedOK runs a
+// sequential agent whose only child is answered by the BeforeAgentCallback of
+// a plugin registered before the analytics plugin, so the analytics plugin
+// never opens the child's span. The child's answer reaches it as an event of an
+// agent that it has no span for. When the consumer stops at that answer, ADK
+// runs no AfterAgentCallback for the sequence, whose span is still open; the
+// answer shows that the run succeeded.
+func TestRunner_PriorPluginAnswersOnlyChild_EmitsInvocationCompletedOK(t *testing.T) {
+	tests := []struct {
+		name  string
+		drain bool
+	}{
+		{name: "consumer stops at the answer of the child"},
+		{name: "consumer drains the run", drain: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			earlier, err := baseplugin.New(baseplugin.Config{
+				Name: "earlier_before_agent",
+				BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+					if ctx.AgentName() == "child" {
+						return textContent("model", "answered by an earlier plugin"), nil
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New: %v", err)
+			}
+			child, err := llmagent.New(llmagent.Config{
+				Name:  "child",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "never sent")}}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(child): %v", err)
+			}
+			seq, err := sequentialagent.New(sequentialagent.Config{
+				AgentConfig: agent.Config{Name: "sequence", SubAgents: []agent.Agent{child}},
+			})
+			if err != nil {
+				t.Fatalf("sequentialagent.New: %v", err)
+			}
+			r := newTestRunner(t, seq, earlier, p)
+
+			var gotAnswer bool
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run error: %v", err)
+				}
+				if ev != nil && ev.Author == "child" && ev.Content != nil {
+					gotAnswer = true
+					if !tc.drain {
+						break
+					}
+				}
+			}
+			if !gotAnswer {
+				t.Fatal("r.Run ended without the answer of the child")
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventAgentStarting)); n != 1 {
+				t.Errorf("got %d AGENT_STARTING rows, want 1 (the sequence): the earlier plugin answers for the child first", n)
+			}
+			requireInvocationCompletedOK(t, rows)
+		})
+	}
+}
+
+// TestRunner_RecoveredModelErrorWithSkippedAfterModel_EmitsInvocationCompletedOK
+// fails a model call, recovers from the error in the agent's own
+// OnModelErrorCallback, and has a plugin registered before the analytics plugin
+// return the recovered response from its AfterModelCallback. That ends the
+// chain of plugin callbacks, so the analytics plugin sees the error but never
+// the response that recovers from it. The consumer stops at the final
+// response; it shows that the run succeeded.
+func TestRunner_RecoveredModelErrorWithSkippedAfterModel_EmitsInvocationCompletedOK(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	earlier, err := baseplugin.New(baseplugin.Config{
+		Name: "earlier_after_model",
+		AfterModelCallback: func(_ agent.Context, res *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+			return res, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &failingLLM{err: errors.New("model failure 503")},
+		OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+			func(agent.Context, *model.LLMRequest, error) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "fallback answer")}, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	r := newTestRunner(t, bot, earlier, p)
+
+	var gotAnswer bool
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+		if ev != nil && ev.Content != nil {
+			gotAnswer = true
+			break
+		}
+	}
+	if !gotAnswer {
+		t.Fatal("r.Run ended without the fallback answer")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventLLMError)); n != 1 {
+		t.Errorf("got %d LLM_ERROR rows, want 1", n)
+	}
+	if n := len(rowsOfType(rows, EventLLMResponse)); n != 0 {
+		t.Errorf("got %d LLM_RESPONSE rows, want 0: the earlier plugin ends the AfterModelCallback chain", n)
+	}
+	requireInvocationCompletedOK(t, rows)
+}
+
+// TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK pins
+// the registration order that the constructors document: the analytics plugin
+// is registered before a plugin whose OnEventCallback returns the event, which
+// ends the chain of event callbacks. The analytics plugin sees the event of the
+// custom agent, which carries an output and no content, so the run that the
+// consumer stops at that event is reported as completed.
+func TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	replacer, err := baseplugin.New(baseplugin.Config{
+		Name: "event_replacer",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			ev.CustomMetadata = map[string]any{"replaced": true}
+			return ev, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	customBot, err := agent.New(agent.Config{
+		Name: "custom_bot",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Output = map[string]any{"answer": 42}
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	r := newTestRunner(t, customBot, p, replacer)
+
+	var gotReplaced bool
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+		if ev != nil && ev.Output != nil {
+			gotReplaced = ev.CustomMetadata["replaced"] == true
+			break
+		}
+	}
+	if !gotReplaced {
+		t.Fatal("r.Run ended without the event that the second plugin replaced")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, legacyEventType)); n != 1 {
+		t.Errorf("got %d %s rows, want 1: the analytics plugin sees the event first", n, legacyEventType)
+	}
+	requireInvocationCompletedOK(t, rows)
 }

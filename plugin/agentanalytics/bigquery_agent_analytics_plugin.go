@@ -125,6 +125,15 @@ var knownEventTypes = newSet(
 )
 
 // NewBigQueryAgentAnalyticsPlugin creates a newly configured analytics plugin with default config.
+//
+// Register the plugin before any plugin whose callbacks return replacement
+// events, model responses, tool results or agent content. ADK runs the
+// callbacks of each kind in registration order and stops at the first plugin
+// that returns a non-nil result or an error, so a plugin that is registered
+// earlier hides what it replaces from this one. This plugin then misses the
+// rows of what was hidden and, because it infers failures from the callbacks
+// that it saw, it can end a successful run with AGENT_ERROR and
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -139,6 +148,15 @@ func NewBigQueryAgentAnalyticsPlugin(
 }
 
 // NewBigQueryAgentAnalyticsPluginWithConfig creates a newly configured analytics plugin.
+//
+// Register the plugin before any plugin whose callbacks return replacement
+// events, model responses, tool results or agent content. ADK runs the
+// callbacks of each kind in registration order and stops at the first plugin
+// that returns a non-nil result or an error, so a plugin that is registered
+// earlier hides what it replaces from this one. This plugin then misses the
+// rows of what was hidden and, because it infers failures from the callbacks
+// that it saw, it can end a successful run with AGENT_ERROR and
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -185,6 +203,15 @@ func NewBigQueryAgentAnalyticsPluginWithConfig(
 // also closes writeClient right away when config.Enabled is false, and before
 // it returns any error, such as an invalid config or a table that cannot be
 // read, created or upgraded.
+//
+// Register the plugin before any plugin whose callbacks return replacement
+// events, model responses, tool results or agent content. ADK runs the
+// callbacks of each kind in registration order and stops at the first plugin
+// that returns a non-nil result or an error, so a plugin that is registered
+// earlier hides what it replaces from this one. This plugin then misses the
+// rows of what was hidden and, because it infers failures from the callbacks
+// that it saw, it can end a successful run with AGENT_ERROR and
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -526,6 +553,12 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 // INVOCATION_COMPLETED: no plugin callback tells it apart from a successful
 // run whose caller stopped reading once it had the response.
 // popUnclosedAgentSpans documents the rules.
+//
+// The rules rely on this plugin seeing the callbacks of the run. ADK stops
+// each callback chain at the first plugin that returns a non-nil result or an
+// error, so the plugin has to be registered before plugins that return
+// replacement events, model responses, tool results or agent content; see
+// [NewBigQueryAgentAnalyticsPluginWithClients].
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
@@ -584,8 +617,14 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 // records that its author responded: ADK runs no AfterModelCallback for a
 // model call that a BeforeModelCallback answered, so the event is what ends
 // such a call, and a custom agent or workflow node may respond with an output
-// alone. Streamed partial events end nothing: AfterModelCallback ends the
-// model call with the final response, which carries the call's latency.
+// alone. The function responses of such an event end the tool calls that they
+// answer, which an earlier plugin's AfterToolCallback may have hidden from
+// this plugin. Streamed partial events end nothing: AfterModelCallback ends
+// the model call with the final response, which carries the call's latency.
+//
+// Because ADK stops an event callback chain at the first plugin that returns an
+// event, this callback does not run for events that an earlier-registered
+// plugin replaces; see [NewBigQueryAgentAnalyticsPluginWithClients].
 func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
 	defer p.recoverCallback(legacyEventType)
 	if ev != nil {
@@ -595,7 +634,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			evID.path = ev.NodeInfo.Path
 		}
 		if !ev.Partial && (ev.Content != nil || ev.Output != nil) {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch)
+			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
 		}
 		p.logEvent(ctx, id, legacyEventType, func() rowSpan {
 			return p.traces.eventSpan(ctx, evID, ev.Author, ev.Branch)
@@ -608,6 +647,25 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		})
 	}
 	return nil, nil
+}
+
+// functionResponseCalls returns the function call ID, or else the tool name,
+// of each function response in c: the part of the key that toolKey builds for
+// the tool call that the response answers.
+func functionResponseCalls(c *genai.Content) []string {
+	if c == nil {
+		return nil
+	}
+	var calls []string
+	for _, part := range c.Parts {
+		if part == nil || part.FunctionResponse == nil {
+			continue
+		}
+		if call := cmp.Or(part.FunctionResponse.ID, part.FunctionResponse.Name); call != "" {
+			calls = append(calls, call)
+		}
+	}
+	return calls
 }
 
 func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
