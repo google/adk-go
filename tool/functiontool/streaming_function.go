@@ -110,7 +110,7 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 		Description: f.Description(),
 	}
 	if f.inputSchema != nil {
-		decl.ParametersJsonSchema = f.inputSchema.Schema()
+		decl.ParametersJsonSchema = toolutils.SanitizeSchemaForVertex(f.inputSchema.Schema())
 	}
 
 	if f.cfg.IsLongRunning {

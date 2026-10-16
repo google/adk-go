@@ -764,6 +764,55 @@ func TestFunctionTool_CustomSchema(t *testing.T) {
 	})
 }
 
+func TestFunctionTool_SanitizesAnyOfInputSchema(t *testing.T) {
+	type Args struct {
+		Age *int `json:"age"`
+	}
+	ischema := &jsonschema.Schema{}
+	if err := json.Unmarshal([]byte(`{
+		"type":"object",
+		"properties":{
+			"age":{
+				"title":"Age",
+				"description":"the person's age, if known",
+				"anyOf":[{"type":"integer"},{"type":"null"}]
+			}
+		}
+	}`), ischema); err != nil {
+		t.Fatal(err)
+	}
+
+	ft, err := functiontool.New(functiontool.Config{
+		Name:        "create_payee",
+		Description: "creates a payee",
+		InputSchema: ischema,
+	}, func(ctx agent.Context, input Args) (any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	decl := ft.(interface{ Declaration() *genai.FunctionDeclaration }).Declaration()
+	raw, err := json.Marshal(decl.ParametersJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	age := out["properties"].(map[string]any)["age"].(map[string]any)
+	if _, ok := age["anyOf"]; !ok {
+		t.Fatalf("age missing anyOf: %#v", age)
+	}
+	if _, ok := age["title"]; ok {
+		t.Fatalf("title still alongside anyOf: %#v", age)
+	}
+	if _, ok := age["description"]; ok {
+		t.Fatalf("description still alongside anyOf: %#v", age)
+	}
+}
+
 func toolDeclaration(cfg *genai.GenerateContentConfig) *genai.FunctionDeclaration {
 	if cfg == nil || len(cfg.Tools) == 0 {
 		return nil
