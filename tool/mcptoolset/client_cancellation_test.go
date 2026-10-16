@@ -131,8 +131,8 @@ func TestSessionWaitCancellation(t *testing.T) {
 							t.Error("failed to close owner session")
 						}
 					}()
-					// A canceled call must not take even an available permit and disturb
-					// the cached session, including the refresh path's Ping/Close sequence.
+					// A canceled call must not disturb the cached session, even when the
+					// lock is free, including through the refresh path's Ping/Close sequence.
 					if _, err := acquire(waiterCtx); !errors.Is(err, wantErr) {
 						t.Errorf("already canceled call error=%v", err)
 					}
@@ -197,5 +197,63 @@ func TestSessionInitializationFailureRecovery(t *testing.T) {
 	}
 	if transport.calls.Load() != 2 {
 		t.Errorf("recovery connected more than once, calls=%d", transport.calls.Load())
+	}
+}
+
+// TestCloseWaitsForConnectionInProgress pins that Close takes the session lock
+// rather than racing a connection attempt. Without it, Close returns while the
+// attempt is still running and the session that attempt then stores is never
+// closed.
+func TestCloseWaitsForConnectionInProgress(t *testing.T) {
+	transport := &gatedSessionTransport{gate: make(chan struct{}), entered: make(chan struct{}, 16), server: mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)}
+	c := newConnectionRefresher(nil, transport)
+
+	ownerDone := make(chan *mcp.ClientSession, 1)
+	go func() {
+		session, err := c.getSession(t.Context())
+		if err != nil {
+			t.Errorf("getSession() error = %v", err)
+		}
+		ownerDone <- session
+	}()
+	<-transport.entered
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- c.Close() }()
+	select {
+	case <-closeDone:
+		close(transport.gate)
+		<-ownerDone
+		t.Fatal("Close returned while a connection attempt was in progress")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(transport.gate)
+	session := <-ownerDone
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if session == nil {
+		t.Fatal("connection attempt returned no session")
+	}
+	if err := session.Ping(t.Context(), nil); err == nil {
+		t.Error("session from the in-progress attempt is still open after Close")
+	}
+	if _, err := c.getSession(t.Context()); !errors.Is(err, mcp.ErrConnectionClosed) {
+		t.Errorf("getSession() after Close error = %v, want %v", err, mcp.ErrConnectionClosed)
+	}
+}
+
+// TestLockFailsOnDoneContext pins that lock fails on a done context even when
+// mu is free. select picks at random between the free mu and the done ctx, so
+// the loop makes a missing check fail every run rather than by chance.
+func TestLockFailsOnDoneContext(t *testing.T) {
+	c := newConnectionRefresher(nil, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for range 100 {
+		if err := c.lock(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatalf("lock() error = %v, want %v", err, context.Canceled)
+		}
 	}
 }
