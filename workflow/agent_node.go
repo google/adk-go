@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -34,6 +35,16 @@ import (
 type AgentNode struct {
 	BaseNode
 	agent agent.Agent
+
+	// derivedOutputSchema is the model-facing form of oschema, computed once
+	// here because oschema is fixed for the node's lifetime. It is bound into
+	// the invocation context on each Run (see llminternal.WithBoundOutputSchema)
+	// rather than written onto the wrapped agent's State: the same agent.Agent
+	// can back more than one node, so State is shared and a construction-time
+	// write there either races (TestNewAgentNode_ConcurrentWrappingIsRaceFree
+	// wraps one agent from 8 goroutines) or, without a race, lets whichever
+	// node was built last win for every placement of that agent.
+	derivedOutputSchema *genai.Schema
 }
 
 // newAgentNodeWithSchemasTyped creates a new node wrapping an agent with explicitly provided schemas.
@@ -57,10 +68,100 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	// via RunNode. Mirrors runner.newAgentNode.
 	cfg.EmitsOwnSpan = true
 
+	// oschema only reached BaseNode.ValidateOutput before this fix, so a typed
+	// node validated the model's reply against Output's shape on the way out
+	// without ever asking the model to produce that shape on the way in. Derive
+	// the model-facing form here; Run binds it per invocation (see
+	// llminternal.WithBoundOutputSchema) rather than writing it onto the
+	// agent's shared State, and an explicit llmagent.Config.OutputSchema is
+	// left untouched (llminternal.OutputSchemaFor prefers the declaration).
+	derivedOutputSchema, err := genaiSchemaFromResolved(oschema)
+	if err != nil {
+		return nil, fmt.Errorf("deriving model output schema for agent %q: %w", a.Name(), err)
+	}
+
 	return &AgentNode{
-		BaseNode: NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
-		agent:    a,
+		BaseNode:            NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
+		agent:               a,
+		derivedOutputSchema: derivedOutputSchema,
 	}, nil
+}
+
+// genaiSchemaFromResolved converts a resolved JSON Schema to the *genai.Schema
+// the model API expects, or nil for no real constraint (Output `any` marshals
+// to the bare `true`). Mirrors openaimodel.schemaToMap in reverse.
+func genaiSchemaFromResolved(resolved *jsonschema.Resolved) (*genai.Schema, error) {
+	if resolved == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(resolved.Schema())
+	if err != nil {
+		return nil, fmt.Errorf("marshaling resolved output schema: %w", err)
+	}
+	if string(raw) == "true" || string(raw) == "false" {
+		return nil, nil
+	}
+	var generic any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		return nil, fmt.Errorf("decoding resolved output schema: %w", err)
+	}
+	uppercaseSchemaTypes(generic)
+	raw, err = json.Marshal(generic)
+	if err != nil {
+		return nil, fmt.Errorf("re-encoding resolved output schema: %w", err)
+	}
+	var modelSchema genai.Schema
+	if err := json.Unmarshal(raw, &modelSchema); err != nil {
+		return nil, fmt.Errorf("decoding output schema as genai.Schema: %w", err)
+	}
+	return &modelSchema, nil
+}
+
+// uppercaseSchemaTypes rewrites every "type" keyword value to the
+// upper-case spelling genai.Schema.Type expects (STRING, OBJECT, ARRAY,
+// ...); jsonschema-go emits the standard lower-case JSON Schema spelling.
+func uppercaseSchemaTypes(val any) {
+	switch v := val.(type) {
+	case map[string]any:
+		if t, ok := v["type"]; ok {
+			switch tVal := t.(type) {
+			case string:
+				v["type"] = strings.ToUpper(tVal)
+			case []any:
+				applyNullableTypeArray(v, tVal)
+			}
+		}
+		for _, child := range v {
+			uppercaseSchemaTypes(child)
+		}
+	case []any:
+		for _, child := range v {
+			uppercaseSchemaTypes(child)
+		}
+	}
+}
+
+// applyNullableTypeArray collapses a JSON Schema type array (jsonschema-go's
+// ["null", X] for a Go pointer or omitempty field) into genai.Schema's
+// single-value Type plus Nullable, uppercasing what remains.
+func applyNullableTypeArray(v map[string]any, types []any) {
+	var rest []string
+	for _, t := range types {
+		s, ok := t.(string)
+		if !ok {
+			continue
+		}
+		if s == "null" {
+			v["nullable"] = true
+			continue
+		}
+		rest = append(rest, strings.ToUpper(s))
+	}
+	if len(rest) == 1 {
+		v["type"] = rest[0]
+	} else {
+		delete(v, "type")
+	}
 }
 
 // NewAgentNodeWithSchemas is a convenience wrapper for NewAgentNodeWithSchemasTyped[any, any].
@@ -124,6 +225,7 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			state := llminternal.Reveal(llmA)
 			mode := llminternal.ResolveMode(state.Mode, llminternal.ModeSingleTurn)
 			bound = llminternal.WithBoundMode(ctx, n.agent.Name(), state, mode)
+			bound = llminternal.WithBoundOutputSchema(bound, n.agent.Name(), state, n.derivedOutputSchema)
 		}
 
 		// Use existing agent context instead of implementing a new one.
