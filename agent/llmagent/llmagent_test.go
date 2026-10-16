@@ -448,6 +448,116 @@ func TestModelCallbacks(t *testing.T) {
 	}
 }
 
+// streamingTextModel streams two partial text deltas followed by the final
+// aggregated response, which carries the call's usage metadata.
+type streamingTextModel struct {
+	usage *genai.GenerateContentResponseUsageMetadata
+}
+
+func (m *streamingTextModel) Name() string { return "streaming-text" }
+
+func (m *streamingTextModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for _, delta := range []string{"Hello ", "world."} {
+			if !yield(&model.LLMResponse{Content: genai.NewContentFromText(delta, genai.RoleModel), Partial: true}, nil) {
+				return
+			}
+		}
+		yield(&model.LLMResponse{
+			Content:       genai.NewContentFromText("Hello world.", genai.RoleModel),
+			UsageMetadata: m.usage,
+		}, nil)
+	}
+}
+
+func TestAfterModelCallbackReplacementKeepsStreamingFields(t *testing.T) {
+	t.Parallel()
+
+	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 120, CandidatesTokenCount: 8, TotalTokenCount: 128}
+	ownUsage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1, CandidatesTokenCount: 1, TotalTokenCount: 2}
+
+	for _, tc := range []struct {
+		name        string
+		replacement func() *model.LLMResponse
+		wantUsage   []*genai.GenerateContentResponseUsageMetadata
+	}{
+		{
+			name: "replacement without usage inherits it",
+			replacement: func() *model.LLMResponse {
+				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel)}
+			},
+			wantUsage: []*genai.GenerateContentResponseUsageMetadata{nil, nil, usage},
+		},
+		{
+			name: "replacement with its own usage keeps it",
+			replacement: func() *model.LLMResponse {
+				return &model.LLMResponse{Content: genai.NewContentFromText("scrubbed", genai.RoleModel), UsageMetadata: ownUsage}
+			},
+			wantUsage: []*genai.GenerateContentResponseUsageMetadata{ownUsage, ownUsage, ownUsage},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var returned []*model.LLMResponse
+			a, err := llmagent.New(llmagent.Config{
+				Name:  "scrubbing_agent",
+				Model: &streamingTextModel{usage: usage},
+				AfterModelCallbacks: []llmagent.AfterModelCallback{
+					func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error) {
+						r := tc.replacement()
+						returned = append(returned, r)
+						return r, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("failed to create llm agent: %v", err)
+			}
+			runner := testutil.NewTestAgentRunner(t, a)
+			stream := runner.RunContentWithConfig(t, "test_session", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeSSE})
+			events, err := testutil.CollectEvents(stream)
+			if err != nil {
+				t.Fatalf("CollectEvents() error = %v", err)
+			}
+
+			var gotPartial []bool
+			var gotUsage []*genai.GenerateContentResponseUsageMetadata
+			for _, ev := range events {
+				gotPartial = append(gotPartial, ev.Partial)
+				gotUsage = append(gotUsage, ev.UsageMetadata)
+			}
+			if diff := cmp.Diff([]bool{true, true, false}, gotPartial); diff != "" {
+				t.Errorf("event Partial flags mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.wantUsage, gotUsage); diff != "" {
+				t.Errorf("event UsageMetadata mismatch (-want +got):\n%s", diff)
+			}
+
+			// Only the final response is a model turn; the deltas must not be
+			// persisted alongside it.
+			resp, err := runner.SessionService().Get(t.Context(), &session.GetRequest{AppName: "test_app", UserID: "test_user", SessionID: "test_session"})
+			if err != nil {
+				t.Fatalf("session Get() error = %v", err)
+			}
+			var modelTurns int
+			for ev := range resp.Session.Events().All() {
+				if ev.Author == "scrubbing_agent" {
+					modelTurns++
+				}
+			}
+			if modelTurns != 1 {
+				t.Errorf("persisted %d agent events, want 1", modelTurns)
+			}
+
+			// The callback's own response objects are not modified.
+			for _, r := range returned {
+				if r.Partial || (r.UsageMetadata != nil && r.UsageMetadata != ownUsage) {
+					t.Errorf("callback response was mutated: Partial=%v UsageMetadata=%v", r.Partial, r.UsageMetadata)
+				}
+			}
+		})
+	}
+}
+
 func TestToolCallback(t *testing.T) {
 	type Args struct {
 		Seed int `json:"seed"`
