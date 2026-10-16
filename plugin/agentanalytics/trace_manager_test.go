@@ -568,7 +568,7 @@ func TestTraceManager_ModelCallSpans(t *testing.T) {
 		errs.check(t)
 		p.AfterRunCallback()(mCtx)
 
-		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		rows := collectRows(t, requests, untilEventType(EventInvocationError))
 		llmError := onlyRowOfType(t, rows, EventLLMError)
 		if got, want := placeOf(llmError), placeOf(onlyRowOfType(t, rows, EventLLMRequest)); got != want {
 			t.Errorf("LLM_ERROR is at %+v, want the place of LLM_REQUEST %+v", got, want)
@@ -3488,10 +3488,9 @@ func TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK(t *testing.T) 
 
 // TestOnEvent_FinalContentOrOutputMarksAuthorResponded verifies which session
 // events show that their author responded, so that its agent span, left open
-// when the invocation terminates, is not reported as failed: a final event
-// with Content or with a typed Output, as the events of a custom agent or of a
-// workflow node carry. A streamed partial event, and an event with neither,
-// do not.
+// when the invocation terminates, is not reported as failed: an event (final or
+// streamed partial) with Content or with a typed Output, as the events of a
+// custom agent or of a workflow node carry. An event with neither does not.
 func TestOnEvent_FinalContentOrOutputMarksAuthorResponded(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -3501,8 +3500,9 @@ func TestOnEvent_FinalContentOrOutputMarksAuthorResponded(t *testing.T) {
 		{name: "content", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}}, wantResponded: true},
 		{name: "output", event: session.Event{Output: "result"}, wantResponded: true},
 		{name: "content and output", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}, Output: "result"}, wantResponded: true},
-		{name: "partial content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, Content: textContent("model", "h")}}, wantResponded: false},
-		{name: "partial output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}, Output: "result"}, wantResponded: false},
+		{name: "partial content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, Content: textContent("model", "h")}}, wantResponded: true},
+		{name: "partial output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}, Output: "result"}, wantResponded: true},
+		{name: "partial without content or output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}}, wantResponded: false},
 		{name: "neither content nor output", event: session.Event{}, wantResponded: false},
 	}
 	for _, tt := range tests {
@@ -4017,28 +4017,33 @@ func TestRunner_SubAgentCachedBeforeModelCallbackResponse_EmitsInvocationComplet
 	}
 }
 
-// TestTraceManager_ErrorOfNormallyEndedActivation_IsCleared records a model
-// error for an activation that then ends normally, as it does when the caller
-// keeps reading after the error and ADK runs the agent's AfterAgentCallback.
-// The error neither fails the invocation nor is attributed to the spans that
-// are still open when it terminates: a sibling that responded and the root.
-func TestTraceManager_ErrorOfNormallyEndedActivation_IsCleared(t *testing.T) {
+// TestTraceManager_ErrorOfNormallyEndedActivation_StillFailsInvocation records
+// a model error for an activation that then ends normally, as it does when the
+// caller keeps reading after the error and ADK runs the agent's
+// AfterAgentCallback. The error still fails the invocation, and a sibling that
+// responded is not blamed; when an ancestor ends while a descendant still has
+// an unrecovered error, the failing descendant and its ancestors stay open so
+// popUnclosedAgentSpans emits AGENT_ERROR for them.
+func TestTraceManager_ErrorOfNormallyEndedActivation_StillFailsInvocation(t *testing.T) {
 	tests := []struct {
 		name string
 		// failing is the activation whose model call fails. ended is the
 		// activation that ends normally: failing itself, or the activation
-		// that failing runs under, which retires failing's open span.
+		// that failing runs under.
 		failing, ended identity
+		wantUnclosed   []string
 	}{
 		{
-			name:    "failing activation ends",
-			failing: identity{agentName: "branch_a", path: "root/a"},
-			ended:   identity{agentName: "branch_a", path: "root/a"},
+			name:         "failing activation ends",
+			failing:      identity{agentName: "branch_a", path: "root/a"},
+			ended:        identity{agentName: "branch_a", path: "root/a"},
+			wantUnclosed: nil,
 		},
 		{
-			name:    "ancestor of failing activation ends",
-			failing: identity{agentName: "worker", path: "root/a/worker"},
-			ended:   identity{agentName: "branch_a", path: "root/a"},
+			name:         "ancestor of failing activation ends",
+			failing:      identity{agentName: "worker", path: "root/a/worker"},
+			ended:        identity{agentName: "branch_a", path: "root/a"},
+			wantUnclosed: []string{"worker"},
 		},
 	}
 	for _, tc := range tests {
@@ -4068,11 +4073,18 @@ func TestTraceManager_ErrorOfNormallyEndedActivation_IsCleared(t *testing.T) {
 			tm.popLLMSpan(ctx, siblingID, true)
 
 			unclosed, termErr := tm.popUnclosedAgentSpans(ctx, rootID)
-			if termErr != nil {
-				t.Errorf("popUnclosedAgentSpans termErr = %v, want nil: the failing activation ended normally", termErr)
+			if !errors.Is(termErr, modelErr) {
+				t.Errorf("popUnclosedAgentSpans termErr = %v, want %v", termErr, modelErr)
 			}
+			var got []string
 			for _, u := range unclosed {
-				t.Errorf("popUnclosedAgentSpans returned %q with error %v, want no span", u.agentName, u.err)
+				got = append(got, u.agentName)
+				if !errors.Is(u.err, modelErr) {
+					t.Errorf("unclosed %q err = %v, want %v", u.agentName, u.err, modelErr)
+				}
+			}
+			if diff := cmp.Diff(tc.wantUnclosed, got); diff != "" {
+				t.Errorf("popUnclosedAgentSpans agents mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -4155,7 +4167,7 @@ func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
 	}
 }
 
-// TestProbeAfterToolShortCircuitDoesNotFailSuccessfulEarlyStop runs an agent
+// TestRunner_AfterToolShortCircuit_EarlyStopDoesNotFail runs an agent
 // that calls a tool and then answers. A plugin registered before the analytics
 // plugin may return a result from AfterToolCallback, which ends the chain of
 // plugin callbacks: the analytics plugin never sees the call complete although
@@ -4163,7 +4175,7 @@ func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
 // ADK runs no AfterAgentCallback either. The function response event shows
 // that the call completed, so the successful run must not be reported as
 // failed for a tool call that is still open.
-func TestProbeAfterToolShortCircuitDoesNotFailSuccessfulEarlyStop(t *testing.T) {
+func TestRunner_AfterToolShortCircuit_EarlyStopDoesNotFail(t *testing.T) {
 	tests := []struct {
 		name string
 		// earlierResult is what the earlier plugin's AfterToolCallback returns.
@@ -4288,13 +4300,13 @@ func newShortcutSequenceGraph(t *testing.T, next agent.Agent, registerSequence b
 	return root
 }
 
-// TestReview_GraphSequentialSiblingAfterShortcut runs a sequential agent as a
+// TestRunner_GraphSequentialSiblingAfterShortcut runs a sequential agent as a
 // node of a workflow graph. Its first child is answered by a
 // BeforeAgentCallback, which leaves the child's span open, and its second
 // child must still run under the sequence rather than under that sibling. A
 // graph node is not among the SubAgents of the runner's root agent, so the
 // hierarchy of the sequence is not known from the configured agent tree.
-func TestReview_GraphSequentialSiblingAfterShortcut(t *testing.T) {
+func TestRunner_GraphSequentialSiblingAfterShortcut(t *testing.T) {
 	tests := []struct {
 		name             string
 		registerSequence bool
@@ -4347,12 +4359,12 @@ func TestReview_GraphSequentialSiblingAfterShortcut(t *testing.T) {
 	}
 }
 
-// TestReview_GraphSequentialFailureDoesNotBlameShortcut fails the second child
+// TestRunner_GraphSequentialFailureDoesNotBlameShortcut fails the second child
 // of a sequential graph node after the first child was answered by a
 // BeforeAgentCallback. The consumer stops at the first error, so ADK runs no
 // AfterAgentCallback. Only the failing child and the agents it ran under get
 // AGENT_ERROR rows; the sibling that answered did not fail.
-func TestReview_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
+func TestRunner_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
 	p, requests, _ := setupTestPlugin(t)
 	modelErr := errors.New("model failure 500")
 	next, err := llmagent.New(llmagent.Config{Name: "next", Model: &failingLLM{err: modelErr}})
@@ -4385,12 +4397,12 @@ func TestReview_GraphSequentialFailureDoesNotBlameShortcut(t *testing.T) {
 	}
 }
 
-// TestReviewSharedSameAgentRoot shares one analytics plugin between a runner
+// TestRunner_SharedSameAgentRoot shares one analytics plugin between a runner
 // whose tree is root -> worker and a runner of the same worker instance as an
 // independent root. The parent map of each runner is authoritative, including
 // an empty one: the root learned from the other runner's tree must not become
 // the root agent of the independent runner's invocation.
-func TestReviewSharedSameAgentRoot(t *testing.T) {
+func TestRunner_SharedSameAgentRoot(t *testing.T) {
 	tests := []struct {
 		name      string
 		treeFirst bool
@@ -5425,4 +5437,328 @@ func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T)
 			}
 		})
 	}
+}
+
+// streamingPartialThenBlockLLM yields one partial streamed chunk with text and
+// then yields a final response if the caller continues reading.
+type streamingPartialThenBlockLLM struct {
+	chunkText string
+	finalText string
+}
+
+func (m *streamingPartialThenBlockLLM) Name() string { return "streaming-partial-llm" }
+
+func (m *streamingPartialThenBlockLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !yield(&model.LLMResponse{
+			Content: textContent("model", m.chunkText),
+			Partial: true,
+		}, nil) {
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      textContent("model", m.finalText),
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
+// TestRunner_StopReadingMidStream_IsNotAnError verifies that when the caller
+// runs with StreamingModeSSE and breaks out of the runner.Run iterator after
+// receiving a partial streamed chunk, the invocation completes with
+// INVOCATION_COMPLETED rather than INVOCATION_ERROR + AGENT_ERROR.
+func TestRunner_StopReadingMidStream_IsNotAnError(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &streamingPartialThenBlockLLM{chunkText: "hello ", finalText: "hello world"},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	r := newTestRunner(t, bot, p)
+
+	var sawPartial bool
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
+	}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+		if ev != nil && ev.Partial {
+			sawPartial = true
+			break
+		}
+	}
+	if !sawPartial {
+		t.Fatal("did not observe a partial event in StreamingModeSSE")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+}
+
+// TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError
+// verifies that when a sub-agent's model call fails and the caller continues
+// iterating runner.Run until exhaustion (so ADK runs AfterAgentCallback on the
+// ancestors), the invocation still terminates with INVOCATION_ERROR and emits
+// AGENT_ERROR for the failed sub-agent and its open ancestors without blaming
+// a sibling that succeeded.
+func TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	modelErr := errors.New("subagent model failure 503")
+
+	okChild, err := llmagent.New(llmagent.Config{
+		Name:  "ok_child",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(ok_child): %v", err)
+	}
+	failChild, err := llmagent.New(llmagent.Config{
+		Name:  "fail_child",
+		Model: &failingLLM{err: modelErr},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(fail_child): %v", err)
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{okChild, failChild},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(root): %v", err)
+	}
+	r := newTestRunner(t, root, p)
+
+	var errs []error
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected runner.Run to yield an error")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED after sub-agent model failure when caller kept reading; event types: %v", eventTypes(rows))
+	}
+	invRow := onlyRowOfType(t, rows, EventInvocationError)
+	if invRow["error_message"] != modelErr.Error() {
+		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invRow["error_message"], modelErr.Error())
+	}
+	gotErrors := agentErrorCounts(rows)
+	if gotErrors["ok_child"] != 0 {
+		t.Errorf("ok_child got %d AGENT_ERROR rows, want 0", gotErrors["ok_child"])
+	}
+}
+
+// TestLogEvent_EventFiltersPreserveSpansLatencyAndInvocationCleanup verifies
+// that EventAllowlist and EventDenylist filter row emission in logEvent without
+// breaking span parenting, latency calculation, or endInvocation cleanup when
+// start events or INVOCATION_COMPLETED are filtered out.
+func TestLogEvent_EventFiltersPreserveSpansLatencyAndInvocationCleanup(t *testing.T) {
+	t.Run("allowlist keeps only completed rows with intact spans and latency", func(t *testing.T) {
+		p, requests, ctx := setupTestPluginWithConfig(t, func(cfg *Config) {
+			cfg.EventAllowlist = []string{EventLLMResponse, EventAgentCompleted, EventInvocationCompleted}
+		})
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(ctx))
+		errs.add(p.BeforeAgentCallback()(ctx))
+		errs.add(p.BeforeModelCallback()(ctx, &model.LLMRequest{}))
+		errs.add(p.AfterModelCallback()(ctx, &model.LLMResponse{Content: textContent("model", "done")}, nil))
+		errs.add(p.AfterAgentCallback()(ctx))
+		errs.check(t)
+		p.AfterRunCallback()(ctx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		if diff := cmp.Diff([]string{EventLLMResponse, EventAgentCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
+			t.Fatalf("filtered event types mismatch (-want +got):\n%s", diff)
+		}
+		llmResp := onlyRowOfType(t, rows, EventLLMResponse)
+		agentComp := onlyRowOfType(t, rows, EventAgentCompleted)
+		invComp := onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		if got, want := placeOf(llmResp).parent, placeOf(agentComp).span; got != want {
+			t.Errorf("LLM_RESPONSE parent_span_id = %q, want AGENT_COMPLETED span_id %q", got, want)
+		}
+		if got, want := placeOf(agentComp).parent, placeOf(invComp).span; got != want {
+			t.Errorf("AGENT_COMPLETED parent_span_id = %q, want INVOCATION_COMPLETED span_id %q", got, want)
+		}
+		mustLatency(t, llmResp)
+		mustLatency(t, agentComp)
+		mustLatency(t, invComp)
+	})
+
+	t.Run("denylist filtering INVOCATION_COMPLETED still cleans up invocation state", func(t *testing.T) {
+		p, requests, ctx := setupTestPluginWithConfig(t, func(cfg *Config) {
+			cfg.EventDenylist = []string{EventInvocationCompleted}
+		})
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(ctx))
+		errs.add(p.BeforeAgentCallback()(ctx))
+		errs.add(p.AfterAgentCallback()(ctx))
+		errs.check(t)
+		p.AfterRunCallback()(ctx)
+
+		rows := collectRows(t, requests, untilEventType(EventAgentCompleted))
+		if slices.Contains(eventTypes(rows), EventInvocationCompleted) {
+			t.Fatalf("denylisted EventInvocationCompleted was emitted: %v", eventTypes(rows))
+		}
+		firstParent := placeOf(onlyRowOfType(t, rows, EventAgentCompleted)).parent
+
+		// Starting a new run with the same invocation ID after AfterRunCallback
+		// must allocate a fresh invocation root span ID, proving endInvocation
+		// removed the finished invocation even though INVOCATION_COMPLETED was
+		// filtered out.
+		errs.add(p.BeforeAgentCallback()(ctx))
+		errs.check(t)
+		nextRows := collectRows(t, requests, untilEventType(EventAgentStarting))
+		secondParent := placeOf(onlyRowOfType(t, nextRows, EventAgentStarting)).parent
+		if secondParent == firstParent {
+			t.Errorf("subsequent callback reused invocation span_id %q; endInvocation did not clean up invocation state when INVOCATION_COMPLETED was denylisted", firstParent)
+		}
+	})
+}
+
+// TestTraceManager_EvictedTombstoneCapDropsOldestOnly verifies that when
+// tm.evicted reaches max(tm.maxTracked, 64), markEvictedLocked drops only the
+// oldest tombstone rather than clearing all tombstones.
+func TestTraceManager_EvictedTombstoneCapDropsOldestOnly(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	now := time.Unix(1000, 0)
+	tm.now = func() time.Time { return now }
+
+	// Trigger 65 evictions at distinct timestamps; the tombstone cap is max(1, 64) = 64.
+	var evictedIDs []string
+	for i := range 66 {
+		now = now.Add(time.Millisecond)
+		id := identity{invocationID: fmt.Sprintf("inv-%03d", i), agentName: "root"}
+		tm.pushAgentSpan(ctx, id)
+		if i < 65 {
+			evictedIDs = append(evictedIDs, id.invocationID)
+		}
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if got := len(tm.evicted); got != 64 {
+		t.Fatalf("len(tm.evicted) = %d, want 64", got)
+	}
+	if _, ok := tm.evicted[evictedIDs[0]]; ok {
+		t.Errorf("oldest tombstone %q is still present, want it evicted", evictedIDs[0])
+	}
+	for _, id := range evictedIDs[1:] {
+		if _, ok := tm.evicted[id]; !ok {
+			t.Errorf("recent tombstone %q was lost when cap was reached", id)
+		}
+	}
+}
+
+// TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan verifies that
+// when OnUserMessageCallback and BeforeRunCallback run without a caller OTel
+// span on ctx, and ADK's agent.Run subsequently attaches an OpenTelemetry span
+// starting at BeforeAgentCallback, the agent/model/tool rows emit the ambient
+// OTel trace_id and record it as adoptedTraceID so subsequent spanless
+// callbacks (OnEventCallback, AfterRunCallback) and capacity eviction
+// (markEvictedLocked) also use the adopted trace_id.
+func TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan(t *testing.T) {
+	const (
+		traceHex = "4bf92f3577b34da6a3ce929d0e0e4736"
+		spanHex  = "00f067aa0ba902b7"
+	)
+	traceID, _ := trace.TraceIDFromHex(traceHex)
+	spanID, _ := trace.SpanIDFromHex(spanHex)
+	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID})
+
+	t.Run("adopts first ambient span on agent, model, and tool rows and propagates to spanless OnEvent and AfterRun", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		agentCtx := *mCtx
+		agentCtx.ctx = trace.ContextWithSpanContext(mCtx.ctx, sc)
+		toolCtx := withFunctionCall(&agentCtx, "call-1")
+		lookupTool := &fakeTool{name: "lookup"}
+
+		var errs callbackErrors
+		// Caller starts with no OTel span on mCtx.
+		errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", "hello")))
+		errs.add(p.BeforeRunCallback()(mCtx))
+		// ADK's agent.Run opens an OTel span on agentCtx.
+		errs.add(p.BeforeAgentCallback()(&agentCtx))
+		errs.add(p.BeforeModelCallback()(&agentCtx, &model.LLMRequest{Model: "gemini-test"}))
+		errs.add(p.AfterModelCallback()(&agentCtx, &model.LLMResponse{Content: textContent("model", "calling lookup")}, nil))
+		errs.add(p.BeforeToolCallback()(toolCtx, lookupTool, nil))
+		errs.add(p.AfterToolCallback()(toolCtx, lookupTool, nil, map[string]any{"answer": "sunny"}, nil))
+		errs.add(p.AfterAgentCallback()(&agentCtx))
+		// OnEventCallback and AfterRunCallback run on outer mCtx (no ambient span).
+		ev := session.NewEvent(t.Context(), mCtx.invocationID)
+		ev.Author = mCtx.agentName
+		ev.Actions.StateDelta = map[string]any{"k": "v"}
+		errs.add(p.OnEventCallback()(mCtx, ev))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		userPlace := placeOf(onlyRowOfType(t, rows, EventUserMessageReceived))
+		invStartPlace := placeOf(onlyRowOfType(t, rows, EventInvocationStarting))
+		if userPlace.trace == "" || userPlace.trace == traceHex {
+			t.Errorf("USER_MESSAGE_RECEIVED trace_id = %q, want initial generated random trace ID (!= %q)", userPlace.trace, traceHex)
+		}
+		if invStartPlace.trace != userPlace.trace {
+			t.Errorf("INVOCATION_STARTING trace_id = %q, want %q", invStartPlace.trace, userPlace.trace)
+		}
+
+		for _, evType := range []string{
+			EventAgentStarting,
+			EventLLMRequest,
+			EventLLMResponse,
+			EventToolStarting,
+			EventToolCompleted,
+			EventAgentCompleted,
+			legacyEventType,
+			EventInvocationCompleted,
+		} {
+			row := onlyRowOfType(t, rows, evType)
+			if got := placeOf(row).trace; got != traceHex {
+				t.Errorf("%s trace_id = %q, want adopted ambient trace_id %q", evType, got, traceHex)
+			}
+		}
+	})
+
+	t.Run("capacity eviction preserves adopted trace_id for post-eviction AfterRun", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		id1 := identity{invocationID: "inv-adopted-evict-1", agentName: "root"}
+		id2 := identity{invocationID: "inv-adopted-evict-2", agentName: "root"}
+
+		// Start id1 without an ambient span.
+		startSpan := tm.invocationSpan(context.Background(), id1, nil)
+		if startSpan.traceID == traceHex {
+			t.Fatalf("initial traceID = %q, want random trace ID", startSpan.traceID)
+		}
+		// BeforeAgentCallback runs with ambient span, adopting traceHex.
+		otelCtx := trace.ContextWithSpanContext(context.Background(), sc)
+		agentSpan := tm.pushAgentSpan(otelCtx, id1)
+		if agentSpan.traceID != traceHex {
+			t.Fatalf("pushAgentSpan traceID = %q, want %q", agentSpan.traceID, traceHex)
+		}
+		tm.popAgentSpan(otelCtx, id1)
+
+		// Starting id2 evicts id1 into tm.evicted via markEvictedLocked.
+		tm.invocationSpan(context.Background(), id2, nil)
+
+		// Ending id1 without an ambient span restores the evicted tombstone,
+		// which must carry the adopted traceHex via inv.currentTraceID().
+		endSpan := tm.endInvocation(context.Background(), id1)
+		if endSpan.traceID != traceHex {
+			t.Errorf("post-eviction endInvocation traceID = %q, want adopted trace_id %q", endSpan.traceID, traceHex)
+		}
+	})
 }

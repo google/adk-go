@@ -74,12 +74,17 @@ type spanRecord struct {
 	// firstToken is the arrival time of the first streamed chunk of a
 	// model call that carries generated content.
 	firstToken time.Time
+	// streamed reports that a chunk of the streamed response of a model call
+	// has arrived. The call is making progress, so the agent that owns it did
+	// not fail even if its caller stops reading before the final response.
+	streamed bool
 	// hasResponse reports whether the agent activation has produced a model
-	// response or an event with content or output, itself or through an
-	// activation that ran under it. Such an event of an activation also
-	// settles the activations that still run under it, even if one of them
-	// fails later, and an event of an author that has no open span settles
-	// the activation that it would have run under.
+	// response or a final event with content, an output or a state or
+	// artifact change, itself or through an activation that ran under it.
+	// Such an event of an activation also settles the activations that still
+	// run under it in the event's own branch and node path, even if one of
+	// them fails later, and an event of an author that has no open span
+	// settles the activation that it would have run under.
 	hasResponse bool
 }
 
@@ -105,6 +110,16 @@ type invocationTrace struct {
 	// rootAgentAtomic holds the latest rootAgentName string for lock-free
 	// reads during eviction.
 	rootAgentAtomic atomic.Value
+	// ancestryFromContextAtomic reports whether ancestryFromContext has been
+	// set, so callers can skip walking ctx for a parent map before taking mu.
+	ancestryFromContextAtomic atomic.Bool
+	// adoptedTraceID holds the trace ID of the first OpenTelemetry span that a
+	// callback of the invocation ran in, when the invocation's own traceID was
+	// not taken from a span: ADK opens its first span after the callbacks that
+	// precede the agents, so the trace is only known from then on. Rows of
+	// callbacks that run in no span use it. Eviction reads it without holding
+	// mu.
+	adoptedTraceID atomic.Value
 
 	// traceID, rootSpanID and rootParentSpanID are initialized before inv is
 	// published in tm.invocations and are read-only afterwards.
@@ -119,7 +134,8 @@ type invocationTrace struct {
 	evicted        bool
 	// runnerAgent is the root agent of the tree that the runner runs. The
 	// agents of AGENT_STARTING rows are looked up in its tree.
-	runnerAgent agent.Agent
+	runnerAgent     agent.Agent
+	runnerAgentName string
 	// parentAgent maps each sub-agent name to its parent agent name in the
 	// configured agent tree.
 	parentAgent map[string]string
@@ -161,8 +177,12 @@ type invocationTrace struct {
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
 	// with the identity of the agent activation that reported each of them.
-	// An agent activation that ends normally clears the errors recorded for
-	// it and for the open activations that its end retires.
+	// An error stays recorded until a response to the failed call, or a final
+	// event of its activation or of an activation above it, clears it. The
+	// end of its activation does not: once ADK has yielded the error, the
+	// invocation failed, whatever the caller does next, and ADK still ends the
+	// activations above the failed one normally when the caller keeps
+	// reading.
 	unrecoveredErrors map[string]recordedError
 }
 
@@ -175,6 +195,10 @@ type recordedError struct {
 }
 
 func newInvocationTrace(ctx context.Context, traceID string, now time.Time) *invocationTrace {
+	return newInvocationTraceWithSpan(ambientSpanContext(ctx), traceID, now)
+}
+
+func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
 	root := &spanRecord{spanID: newSpanID(), kind: spanKindInvocation, start: now}
 	inv := &invocationTrace{
 		traceID:           cmp.Or(traceID, newTraceID()),
@@ -188,15 +212,23 @@ func newInvocationTrace(ctx context.Context, traceID string, now time.Time) *inv
 		completedTools:    map[string]*spanRecord{},
 		unrecoveredErrors: map[string]recordedError{},
 	}
-	// Continue the caller's OpenTelemetry trace, if any. Unlike adk-python,
-	// which reuses the ambient span ID as the invocation span ID, ADK Go's
-	// runner does not open a per-invocation OpenTelemetry span before
-	// invoking plugin callbacks, so a caller's long-lived request or server
-	// span would otherwise be reused as the span_id of multiple
-	// invocations. Allocating a child invocation span under the ambient
-	// span keeps each invocation's span tree distinct while preserving the
-	// caller's raw OpenTelemetry IDs in attributes.otel.
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+	// Continue the caller's OpenTelemetry trace, if any, with an invocation
+	// span that is a child of the caller's span. adk-python reuses the ambient
+	// span ID as the invocation span ID, but ADK Go's runner opens no
+	// per-invocation OpenTelemetry span before it invokes plugin callbacks,
+	// so a caller's long-lived request or server span would be reused as the
+	// span_id of every invocation that it serves. A child invocation span
+	// keeps the span trees of those invocations apart.
+	//
+	// Only the trace ID follows OpenTelemetry (see rowSpan), so that the rows
+	// keep joining the spans that ADK records for the same run. The span_id
+	// and parent_span_id columns are the plugin's own execution tree, as in
+	// adk-python, whose rows take them from the plugin's own span stack: the
+	// spans that ADK opens are never written to the table, so parents taken
+	// from them would point at spans that no row has. The ambient span IDs
+	// are only written, to attributes.otel, when EnableOTelCorrelation is
+	// set, which it is not by default.
+	if sc.IsValid() {
 		inv.traceID = sc.TraceID().String()
 		root.parentSpanID = sc.SpanID().String()
 		inv.rootParentSpanID = root.parentSpanID
@@ -238,11 +270,35 @@ func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.setRootAgentLocked(ev.rootAgentName)
 }
 
+// ambientSpanContext returns the OpenTelemetry SpanContext that ctx carries,
+// or the zero SpanContext if it carries none.
+func ambientSpanContext(ctx context.Context) trace.SpanContext {
+	if ctx == nil {
+		return trace.SpanContext{}
+	}
+	return orZero(func() trace.SpanContext { return trace.SpanContextFromContext(ctx) })
+}
+
+// ambientTraceID returns the trace ID of the OpenTelemetry span that ctx
+// carries, or "" if it carries none.
+func ambientTraceID(ctx context.Context) string {
+	sc := ambientSpanContext(ctx)
+	if !sc.IsValid() {
+		return ""
+	}
+	return sc.TraceID().String()
+}
+
 // rowSpan returns the place of a row that describes rec. latency is set on
-// rows that end rec.
-func (inv *invocationTrace) rowSpan(rec *spanRecord, latency map[string]any) rowSpan {
+// rows that end rec. ambient is the trace ID of the OpenTelemetry span that
+// the callback writing the row runs in, or "" if it runs in none.
+//
+// The ambient trace ID wins on every row, as in adk-python, so that the rows
+// of an invocation keep joining the spans that ADK records for it by trace
+// ID. See rowTraceID for the rows of callbacks that run in no span.
+func (inv *invocationTrace) rowSpan(rec *spanRecord, latency map[string]any, ambient string) rowSpan {
 	return rowSpan{
-		traceID:       inv.traceID,
+		traceID:       inv.rowTraceID(ambient),
 		spanID:        rec.spanID,
 		parentSpanID:  rec.parentSpanID,
 		latency:       latency,
@@ -250,89 +306,64 @@ func (inv *invocationTrace) rowSpan(rec *spanRecord, latency map[string]any) row
 	}
 }
 
-// noteRootAgent records the invocation's root agent and agent hierarchy from
-// ctx, runner, and any rememberedRoot resolved from tm's agent-instance parent
-// map before acquiring inv.mu. runner is nil in callbacks that do not get the
-// agent directly.
+// rowTraceID returns the trace ID of a row that a callback writes, when that
+// callback runs in the OpenTelemetry span of the trace ambient, or in no span
+// if ambient is empty.
 //
-// The parent map that the runner attaches to ctx describes the tree of the
-// runner of this invocation, so it is authoritative when ctx carries one,
-// even an empty map: the runner then runs an agent that has no parent.
-// rememberedRoot comes from the trees of earlier runners, which may have run
-// the same agent instance as a sub-agent, and is used only when ctx carries no
-// parent map.
-func (inv *invocationTrace) noteRootAgent(ctx context.Context, id identity, runner, rememberedRoot agent.Agent, useBranchFallback bool) {
-	if !inv.ancestryFromContext {
-		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); parents != nil {
-			inv.ancestryFromContext = true
-			for child, parent := range parents {
-				if pName := orZero(parent.Name); child != "" && pName != "" {
-					inv.parentAgent[child] = pName
-					if !isLLMAgent(parent) {
-						inv.sequentialParent[child] = pName
-					}
-				}
-				inv.recordAgentTree(parent)
-			}
-			if root := topAgentFromMap(runner, id.agentName, parents); root != nil {
-				inv.runnerAgent = root
-				if name := orZero(root.Name); name != "" {
-					inv.configuredRoot = name
-					inv.setRootAgentLocked(name)
-				}
-			}
-		}
+// The runner opens no span before the callbacks that precede the agents, and
+// ADK's own spans start with the agents', so the invocation has a trace ID of
+// its own until a callback runs in a span. The trace of the first such span
+// is adopted then, unless the caller's span already gave the invocation its
+// trace: the rows of callbacks that run in no span, such as the session
+// events and the end of the invocation, join the trace of the spans around
+// them instead of a trace that has no other span. Rows written earlier keep
+// the trace ID of their time.
+func (inv *invocationTrace) rowTraceID(ambient string) string {
+	if ambient == "" {
+		return inv.currentTraceID()
 	}
-	if runner != nil {
-		inv.recordAgentTree(runner)
-		if rememberedRoot != nil && rememberedRoot != runner && !inv.ancestryFromContext {
-			inv.recordAgentTree(rememberedRoot)
-			if inv.runnerAgent == nil {
-				inv.runnerAgent = rememberedRoot
-			}
-			if name := orZero(rememberedRoot.Name); name != "" && inv.configuredRoot == "" {
-				inv.configuredRoot = name
-				inv.setRootAgentLocked(name)
-			}
-		}
-		if inv.runnerAgent == nil || inv.isAncestorAgent(orZero(runner.Name), orZero(inv.runnerAgent.Name)) {
-			inv.runnerAgent = runner
-		}
-		if rName := orZero(runner.Name); rName != "" && inv.isAncestorAgent(rName, cmp.Or(inv.configuredRoot, inv.rootAgentName, id.agentName)) {
-			inv.configuredRoot = rName
-			inv.setRootAgentLocked(rName)
-		}
+	if inv.rootParentSpanID == "" {
+		inv.adoptedTraceID.CompareAndSwap(nil, ambient)
 	}
-	if inv.configuredRoot != "" {
-		inv.setRootAgentLocked(inv.configuredRoot)
-		return
-	}
-	if inv.rootAgentName == "" {
-		switch {
-		case runner != nil:
-			inv.setRootAgentLocked(cmp.Or(id.agentName, orZero(runner.Name)))
-		case useBranchFallback && id.branch != "":
-			root, _, _ := strings.Cut(id.branch, ".")
-			inv.setRootAgentLocked(root)
-		default:
-			inv.setRootAgentLocked(id.agentName)
-		}
-	}
+	return ambient
 }
 
-func isLLMAgent(a agent.Agent) bool {
-	if a == nil {
-		return false
+// currentTraceID returns the trace ID of the rows of callbacks that run in no
+// OpenTelemetry span. It does not need mu.
+func (inv *invocationTrace) currentTraceID() string {
+	if adopted, ok := inv.adoptedTraceID.Load().(string); ok {
+		return adopted
 	}
-	_, ok := orZero(func() any { return agentConfig(a) }).(llmagent.Config)
-	return ok
+	return inv.traceID
 }
 
-// recordAgentTree records the child-to-parent edges of root's sub-agent tree.
-func (inv *invocationTrace) recordAgentTree(root agent.Agent) {
+// agentEdge is a child-to-parent link in an agent sub-agent tree.
+type agentEdge struct {
+	child, parent string
+	nonLLM        bool
+}
+
+// rootAgentInput holds the agent-tree metadata extracted from ctx, runner, and
+// rememberedRoot before acquiring inv.mu, so user agent code and context
+// lookups never run under a lock.
+type rootAgentInput struct {
+	hasContextParents bool
+	contextEdges      []agentEdge
+	contextRoot       agent.Agent
+	contextRootName   string
+	runner            agent.Agent
+	runnerName        string
+	runnerEdges       []agentEdge
+	remembered        agent.Agent
+	rememberedName    string
+	rememberedEdges   []agentEdge
+}
+
+func walkAgentEdges(root agent.Agent) []agentEdge {
 	if root == nil {
-		return
+		return nil
 	}
+	var edges []agentEdge
 	visited := map[string]bool{}
 	var walk func(a agent.Agent)
 	walk = func(a agent.Agent) {
@@ -350,15 +381,126 @@ func (inv *invocationTrace) recordAgentTree(root agent.Agent) {
 				continue
 			}
 			if subName := orZero(sub.Name); subName != "" {
-				inv.parentAgent[subName] = parentName
-				if nonLLM {
-					inv.sequentialParent[subName] = parentName
-				}
+				edges = append(edges, agentEdge{child: subName, parent: parentName, nonLLM: nonLLM})
 				walk(sub)
 			}
 		}
 	}
 	walk(root)
+	return edges
+}
+
+func prepareRootAgentInput(ctx context.Context, inv *invocationTrace, id identity, runner, rememberedRoot agent.Agent) rootAgentInput {
+	var in rootAgentInput
+	if !inv.ancestryFromContextAtomic.Load() {
+		if parents := orZero(func() map[string]agent.Agent { return contextParentMap(ctx) }); parents != nil {
+			in.hasContextParents = true
+			for child, parent := range parents {
+				if pName := orZero(parent.Name); child != "" && pName != "" {
+					in.contextEdges = append(in.contextEdges, agentEdge{
+						child:  child,
+						parent: pName,
+						nonLLM: !isLLMAgent(parent),
+					})
+				}
+				in.contextEdges = append(in.contextEdges, walkAgentEdges(parent)...)
+			}
+			if root := topAgentFromMap(runner, id.agentName, parents); root != nil {
+				in.contextRoot = root
+				in.contextRootName = orZero(root.Name)
+			}
+		}
+	}
+	if runner != nil {
+		in.runner = runner
+		in.runnerName = orZero(runner.Name)
+		in.runnerEdges = walkAgentEdges(runner)
+		if rememberedRoot != nil && rememberedRoot != runner {
+			in.remembered = rememberedRoot
+			in.rememberedName = orZero(rememberedRoot.Name)
+			in.rememberedEdges = walkAgentEdges(rememberedRoot)
+		}
+	}
+	return in
+}
+
+func (inv *invocationTrace) applyEdgesLocked(edges []agentEdge) {
+	for _, e := range edges {
+		inv.parentAgent[e.child] = e.parent
+		if e.nonLLM {
+			inv.sequentialParent[e.child] = e.parent
+		}
+	}
+}
+
+// noteRootAgentLocked records the invocation's root agent and agent hierarchy
+// from in, which was collected before acquiring inv.mu.
+//
+// The parent map that the runner attaches to ctx describes the tree of the
+// runner of this invocation, so it is authoritative when ctx carries one,
+// even an empty map: the runner then runs an agent that has no parent.
+// remembered comes from the trees of earlier runners, which may have run
+// the same agent instance as a sub-agent, and is used only when ctx carries no
+// parent map.
+func (inv *invocationTrace) noteRootAgentLocked(id identity, in rootAgentInput, useBranchFallback bool) {
+	if !inv.ancestryFromContext && in.hasContextParents {
+		inv.ancestryFromContext = true
+		inv.ancestryFromContextAtomic.Store(true)
+		inv.applyEdgesLocked(in.contextEdges)
+		if in.contextRoot != nil {
+			inv.runnerAgent = in.contextRoot
+			inv.runnerAgentName = in.contextRootName
+			if in.contextRootName != "" {
+				inv.configuredRoot = in.contextRootName
+				inv.setRootAgentLocked(in.contextRootName)
+			}
+		}
+	}
+	if in.runner != nil {
+		inv.applyEdgesLocked(in.runnerEdges)
+		if in.remembered != nil && in.remembered != in.runner && !inv.ancestryFromContext {
+			inv.applyEdgesLocked(in.rememberedEdges)
+			if inv.runnerAgent == nil {
+				inv.runnerAgent = in.remembered
+				inv.runnerAgentName = in.rememberedName
+			}
+			if in.rememberedName != "" && inv.configuredRoot == "" {
+				inv.configuredRoot = in.rememberedName
+				inv.setRootAgentLocked(in.rememberedName)
+			}
+		}
+		if inv.runnerAgent == nil || inv.isAncestorAgent(in.runnerName, inv.runnerAgentName) {
+			inv.runnerAgent = in.runner
+			inv.runnerAgentName = in.runnerName
+		}
+		if in.runnerName != "" && inv.isAncestorAgent(in.runnerName, cmp.Or(inv.configuredRoot, inv.rootAgentName, id.agentName)) {
+			inv.configuredRoot = in.runnerName
+			inv.setRootAgentLocked(in.runnerName)
+		}
+	}
+	if inv.configuredRoot != "" {
+		inv.setRootAgentLocked(inv.configuredRoot)
+		return
+	}
+	if inv.rootAgentName == "" {
+		switch {
+		case in.runner != nil:
+			inv.setRootAgentLocked(cmp.Or(id.agentName, in.runnerName))
+		case useBranchFallback && id.branch != "":
+			root, _, _ := strings.Cut(id.branch, ".")
+			inv.setRootAgentLocked(root)
+		default:
+			inv.setRootAgentLocked(id.agentName)
+		}
+	}
+}
+
+func isLLMAgent(a agent.Agent) bool {
+	if a == nil {
+		return false
+	}
+	_, ok := orZero(func() any { return agentConfig(a) }).(llmagent.Config)
+	return ok
 }
 
 // agentChildren are the sub-agents that are configured on a running agent.
@@ -582,6 +724,7 @@ type evictedTrace struct {
 	spanID        string
 	parentSpanID  string
 	rootAgentName string
+	lastActive    int64
 }
 
 func newTraceManager() *traceManager {
@@ -662,40 +805,54 @@ func (tm *traceManager) rememberAgentTree(runner agent.Agent) agent.Agent {
 // get a trace that is not tracked, so that their rows still have IDs.
 func (tm *traceManager) invocation(ctx context.Context, id identity) *invocationTrace {
 	now := tm.now()
+	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
-		return newInvocationTrace(ctx, "", now)
+		return newInvocationTraceWithSpan(sc, "", now)
 	}
+	var warnIDs []string
+	var maxTracked int
+	var logf func(string, ...any)
 	tm.mu.Lock()
-	defer tm.mu.Unlock()
 	inv, ok := tm.invocations[id.invocationID]
 	if !ok {
 		ev, wasEvicted := tm.evicted[id.invocationID]
-		inv = newInvocationTrace(ctx, tm.traceIDFor(id.invocationID), now)
+		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 		if wasEvicted {
 			inv.restoreEvicted(ev)
 		}
 		tm.invocations[id.invocationID] = inv
 		tm.inserts++
-		tm.evictLocked(now, id.invocationID)
+		warnIDs = tm.evictLocked(now, id.invocationID)
+		maxTracked = tm.maxTracked
+		logf = tm.logf
 	}
 	inv.lastActive.Store(now.UnixNano())
+	tm.mu.Unlock()
+	if logf != nil {
+		for _, evictedID := range warnIDs {
+			logf("agentanalytics: trace manager capacity (%d) exceeded; evicting active invocation %q", maxTracked, evictedID)
+		}
+	}
 	return inv
 }
 
 // evictLocked drops invocations idle for longer than the TTL that have no
 // open model or tool calls, every sweepInterval insertions or when too many
 // are tracked, and then the least recently active ones while too many are
-// still tracked. keep is never dropped. tm.mu must be held.
-func (tm *traceManager) evictLocked(now time.Time, keep string) {
+// still tracked. keep is never dropped. It returns the IDs of active
+// invocations evicted due to capacity so callers can log after releasing
+// tm.mu. tm.mu must be held.
+func (tm *traceManager) evictLocked(now time.Time, keep string) []string {
 	cutoff := now.Add(-tm.ttl).UnixNano()
 	if tm.inserts%sweepInterval == 0 || len(tm.invocations) > tm.maxTracked {
 		for id, inv := range tm.invocations {
 			if id != keep && inv.lastActive.Load() < cutoff && !inv.hasOpenCalls() {
-				tm.markEvictedLocked(id, inv)
+				tm.markEvictedLocked(now, id, inv)
 				delete(tm.invocations, id)
 			}
 		}
 	}
+	var warnIDs []string
 	for len(tm.invocations) > tm.maxTracked {
 		oldestID, oldest := "", int64(0)
 		for id, inv := range tm.invocations {
@@ -704,30 +861,52 @@ func (tm *traceManager) evictLocked(now time.Time, keep string) {
 			}
 		}
 		if oldestID == "" {
-			return
+			break
 		}
 		evictedInv := tm.invocations[oldestID]
-		if (oldest >= cutoff || evictedInv.hasOpenCalls()) && tm.logf != nil {
-			tm.logf("agentanalytics: trace manager capacity (%d) exceeded; evicting active invocation %q", tm.maxTracked, oldestID)
+		if oldest >= cutoff || evictedInv.hasOpenCalls() {
+			warnIDs = append(warnIDs, oldestID)
 		}
-		tm.markEvictedLocked(oldestID, evictedInv)
+		tm.markEvictedLocked(now, oldestID, evictedInv)
 		delete(tm.invocations, oldestID)
 	}
+	return warnIDs
 }
 
-func (tm *traceManager) markEvictedLocked(invocationID string, inv *invocationTrace) {
-	if len(tm.evicted) >= max(tm.maxTracked, 64) {
-		clear(tm.evicted)
+func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, inv *invocationTrace) {
+	limit := max(tm.maxTracked, 64)
+	if _, exists := tm.evicted[invocationID]; !exists && len(tm.evicted) >= limit {
+		cutoff := now.Add(-tm.ttl).UnixNano()
+		for id, ev := range tm.evicted {
+			if ev.lastActive < cutoff {
+				delete(tm.evicted, id)
+			}
+		}
+		for len(tm.evicted) >= limit {
+			oldestID, oldest := "", int64(0)
+			for id, ev := range tm.evicted {
+				if oldestID == "" || ev.lastActive < oldest {
+					oldestID, oldest = id, ev.lastActive
+				}
+			}
+			if oldestID == "" {
+				break
+			}
+			delete(tm.evicted, oldestID)
+		}
 	}
 	var ev evictedTrace
 	if inv != nil {
 		rootAgent, _ := inv.rootAgentAtomic.Load().(string)
 		ev = evictedTrace{
-			traceID:       inv.traceID,
+			traceID:       inv.currentTraceID(),
 			spanID:        inv.rootSpanID,
 			parentSpanID:  inv.rootParentSpanID,
 			rootAgentName: rootAgent,
+			lastActive:    inv.lastActive.Load(),
 		}
+	} else {
+		ev.lastActive = now.UnixNano()
 	}
 	tm.evicted[invocationID] = ev
 }
@@ -739,17 +918,24 @@ func (tm *traceManager) markEvictedLocked(invocationID string, inv *invocationTr
 func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner agent.Agent) rowSpan {
 	inv := tm.invocation(ctx, id)
 	rememberedRoot := tm.rememberAgentTree(runner)
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, runner, rememberedRoot)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
-	inv.noteRootAgent(ctx, id, runner, rememberedRoot, false)
-	return inv.rowSpan(inv.agentStack[0], nil)
+	inv.noteRootAgentLocked(id, rootIn, false)
+	return inv.rowSpan(inv.agentStack[0], nil, ambient)
 }
 
 // endInvocation stops tracking the invocation and returns the place of its
 // INVOCATION_COMPLETED row, with the invocation latency if the invocation
 // was tracked from its start without being evicted mid-run.
 func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan {
+	sc := ambientSpanContext(ctx)
+	ambient := ""
+	if sc.IsValid() {
+		ambient = sc.TraceID().String()
+	}
 	var inv *invocationTrace
 	var ev evictedTrace
 	var wasEvicted bool
@@ -762,22 +948,24 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 		tm.mu.Unlock()
 	}
 	if inv == nil {
-		inv = newInvocationTrace(ctx, tm.traceIDFor(id.invocationID), tm.now())
+		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), tm.now())
 		if wasEvicted {
 			inv.restoreEvicted(ev)
 		}
-		inv.noteRootAgent(ctx, id, nil, nil, false)
-		return inv.rowSpan(inv.agentStack[0], nil)
+		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+		inv.noteRootAgentLocked(id, rootIn, false)
+		return inv.rowSpan(inv.agentStack[0], nil, ambient)
 	}
 	now := tm.now()
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, false)
+	inv.noteRootAgentLocked(id, rootIn, false)
 	var latency map[string]any
 	if inv.started && !inv.evicted {
 		latency = latencyOf(inv.agentStack[0], now)
 	}
-	return inv.rowSpan(inv.agentStack[0], latency)
+	return inv.rowSpan(inv.agentStack[0], latency, ambient)
 }
 
 // pushAgentSpan starts the span of an agent run and returns the place of
@@ -788,12 +976,14 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
 	// SubAgents is user code, so it is read before mu is taken.
 	children := runningAgentChildren(ctx, id.agentName)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	inv.recordChildren(children)
 	rec := &spanRecord{
 		spanID:       newSpanID(),
@@ -805,15 +995,16 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan 
 		start:        now,
 	}
 	inv.agentStack = append(inv.agentStack, rec)
-	return inv.rowSpan(rec, nil)
+	return inv.rowSpan(rec, nil, ambient)
 }
 
 // agentNamed returns the agent of id, looked up by name in the tree of the
 // agent that the runner runs, or nil if it is not found there.
 func (tm *traceManager) agentNamed(ctx context.Context, id identity) agent.Agent {
 	inv := tm.invocation(ctx, id)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	runner := inv.runnerAgent
 	inv.mu.Unlock()
 	if runner == nil {
@@ -827,47 +1018,55 @@ func (tm *traceManager) agentNamed(ctx context.Context, id identity) agent.Agent
 // AGENT_COMPLETED row. It never ends the invocation span: if the agent's
 // span is unknown, the row gets a span of its own and no latency.
 //
-// The errors recorded for the activations that end here are cleared: ADK
-// ended them normally, for example because a plugin recovered from the error
-// or because the caller kept reading after ADK yielded it, so they no longer
-// fail the invocation.
+// The activations that still run under the agent end with it: a sub-agent
+// that a BeforeAgentCallback answered never gets an AfterAgentCallback of its
+// own. A failed activation does not: one that has an unrecovered error
+// recorded, or that owns a model or tool call that never ended, stays open,
+// and so does the error, so that the end of the invocation reports the
+// failure. ADK ends the agents above a failed sub-agent normally when the
+// caller keeps reading after it yielded the error, and whether the
+// invocation failed must not depend on how the caller iterates.
 func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	i := inv.findAgent(id.path, id.agentName, id.branch)
 	if i < 0 {
-		return inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil)
+		return inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
 	}
 	rec := inv.agentStack[i]
-	// The recorded errors are attributed while the spans are still open.
-	errorSpans := make(map[string]string, len(inv.unrecoveredErrors))
-	for key, e := range inv.unrecoveredErrors {
+	// The failed activations and the open spans they run under are attributed
+	// while the spans are still open.
+	failed := inv.openCallOwnersLocked()
+	for j := range inv.agentStack {
+		if j > 0 && failed[inv.agentStack[j].spanID] {
+			maps.Copy(failed, inv.lineageLocked(j))
+		}
+	}
+	for _, e := range inv.unrecoveredErrors {
 		if j := inv.activationOfLocked(e); j > 0 {
-			errorSpans[key] = inv.agentStack[j].spanID
+			maps.Copy(failed, inv.lineageLocked(j))
 		}
 	}
 	inv.agentStack = slices.Delete(inv.agentStack, i, i+1)
 	// Also retire any unclosed descendant spans whose parentSpanID lineage
 	// reaches rec.spanID (for example, a sub-agent short-circuited in
-	// BeforeAgentCallback that never ran AfterAgentCallback).
+	// BeforeAgentCallback that never ran AfterAgentCallback), except the
+	// failed ones and what runs under them.
 	retired := map[string]bool{rec.spanID: true}
 	for idx := i; idx < len(inv.agentStack); {
-		if retired[inv.agentStack[idx].parentSpanID] {
-			retired[inv.agentStack[idx].spanID] = true
+		if d := inv.agentStack[idx]; retired[d.parentSpanID] && !failed[d.spanID] {
+			retired[d.spanID] = true
 			inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
 			continue
 		}
 		idx++
 	}
-	for key, spanID := range errorSpans {
-		if retired[spanID] {
-			delete(inv.unrecoveredErrors, key)
-		}
-	}
-	return inv.rowSpan(rec, latencyOf(rec, now))
+	return inv.rowSpan(rec, latencyOf(rec, now), ambient)
 }
 
 // unclosedAgentSpan records an unclosed agent span popped during invocation termination.
@@ -880,33 +1079,42 @@ type unclosedAgentSpan struct {
 }
 
 // completeResponse records that the author of a final, non-partial session
-// event with content or an output responded. The author's activation is
-// looked up from the event's author, branch and node path in id, as in
-// eventSpan, because the event callback gets the agent that the runner runs
-// rather than the author. calls holds the function call ID, or else the tool
-// name, of each function response of the event.
+// event with content, an output, or a state or artifact change responded. The
+// author's activation is looked up from the event's author, branch and node
+// path in id, as in eventSpan, because the event callback gets the agent that
+// the runner runs rather than the author. calls holds the function call ID, or
+// else the tool name, of each function response of the event.
 //
-// If the author has an open agent span:
+// If the author has an open agent span, the event settles the activation and
+// the open activations that run under it inside the event's own branch and node
+// path. An activation on another branch or in another node path is separate
+// work that the event says nothing about, for example another node of a
+// parallel workflow whose function node writes its events under the workflow
+// agent's name, so it stays as it is. The activation and the open activations
+// that it runs under are marked as responded, and so are the settled ones. For
+// each settled activation:
 //
-//   - The model calls still open under the activation end without a row: ADK
-//     runs no AfterModelCallback for a call that a BeforeModelCallback
-//     answered, so its response event is all that ends it. The unrecovered
-//     errors recorded for the activation end with them: the activation went
-//     on to respond, for example after a plugin recovered from a model error
-//     and an earlier plugin's AfterModelCallback answered the call, which
-//     stops the chain before this plugin's AfterModelCallback clears the
-//     error.
-//   - The tool calls of calls end without a row in the same way: an earlier
-//     plugin's AfterToolCallback that returns a result stops the chain before
-//     this plugin's, so the function response event is all that ends them.
-//     The other open tool calls stay open, because they have not responded.
-//   - The activation and the open activations that it runs under are marked
-//     as responded, and so are the open activations that still run under it,
-//     such as a sub-agent that a callback answered inside a custom agent that
-//     runs it itself: its event never reaches the runner and no
-//     AfterAgentCallback ends its span. A sub-agent that fails later without
-//     any callback is settled as well, so its failure is not reported:
-//     popUnclosedAgentSpans documents this trade-off.
+//   - The model calls still open under it end without a row: ADK runs no
+//     AfterModelCallback for a call that a BeforeModelCallback answered, so a
+//     response event of its agent, or of an agent above it, is all that ends
+//     the call.
+//   - The unrecovered errors recorded for the author's own activation end with
+//     them: it went on to respond, for example after a plugin recovered from a
+//     model error and an earlier plugin's AfterModelCallback answered the call,
+//     which stops the chain before this plugin's AfterModelCallback clears the
+//     error. Unrecovered errors of activations below it stay recorded, because
+//     a parent event does not mean that a failed sub-agent recovered.
+//   - The tool calls still open under it end without a row in the same way: an
+//     earlier plugin's AfterToolCallback that returns a result stops the chain
+//     before this plugin's, so a response event of its agent, or of an agent
+//     above it, is all that ends them. Only the open tool calls of the author
+//     itself are matched against calls, because they alone are answered by the
+//     function responses of the event: the others stay open, because they have
+//     not responded.
+//
+// A sub-agent that fails later, without any callback seeing the failure, is
+// settled as well, so its failure is not reported: popUnclosedAgentSpans
+// documents this trade-off. Errors recorded after the event still count.
 //
 // If the author has no open agent span, for example because a callback of an
 // earlier plugin answered for it before this plugin saw it start, the response
@@ -929,6 +1137,14 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		return
 	}
 	owner := inv.agentStack[i]
+	// An activation is created after the one that it runs under, so one pass
+	// over the later spans finds all that run under the owner.
+	under := map[string]bool{owner.spanID: true}
+	for _, rec := range inv.agentStack[i+1:] {
+		if under[rec.parentSpanID] && withinBranch(rec.branch, branch) && withinPath(rec.path, id.path, false) {
+			under[rec.spanID] = true
+		}
+	}
 	for key, e := range inv.unrecoveredErrors {
 		if inv.activationOfLocked(e) == i {
 			delete(inv.unrecoveredErrors, key)
@@ -946,14 +1162,6 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	}
 	inv.syncOpenCallsLocked()
 	inv.markRespondedLocked(inv.lineageLocked(i))
-	// An activation is created after the one that it runs under, so one pass
-	// over the later spans finds all that run under the owner.
-	under := map[string]bool{owner.spanID: true}
-	for _, rec := range inv.agentStack[i+1:] {
-		if under[rec.parentSpanID] {
-			under[rec.spanID] = true
-		}
-	}
 	inv.markRespondedLocked(under)
 }
 
@@ -997,11 +1205,9 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 // Plugin callbacks do not observe every failure, so the terminal error covers
 // only these detectable ones, in order of precedence:
 //
-//   - An unrecovered model error that a callback recorded, if any agent span
-//     is still open. A response to the failed model call, after a plugin
-//     recovered from the error, clears the error, and so do a final event of
-//     its activation and the normal end of its activation or of an activation
-//     that it runs under.
+//   - An unrecovered model error that a callback recorded. A response to the
+//     failed model call, after a plugin recovered from the error, clears the
+//     error, and so does a final event of its activation.
 //   - The error of ctx when the invocation was canceled. Cancellation is
 //     returned even when every agent span is closed, or when no agent ran at
 //     all, for example because a BeforeRunCallback canceled the invocation.
@@ -1024,9 +1230,6 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //     such as a custom agent that writes an event and then returns an error,
 //     or an AfterAgentCallback that returns an error. The callbacks see the
 //     same as for a caller that stopped reading once it had the response.
-//   - A model error of an activation that ADK still ends normally, running
-//     its AfterAgentCallback, because the caller kept reading after the
-//     error.
 //   - A sub-agent that fails without any callback after an agent that it
 //     runs under produced content, such as a custom agent that writes an
 //     event while its sub-agent runs. The event settles the activations that
@@ -1042,16 +1245,14 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) ([]unclosedAgentSpan, error) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, false)
+	inv.noteRootAgentLocked(id, rootIn, false)
 	var cancelErr error
 	if ctx != nil {
 		cancelErr = orZero(ctx.Err)
-	}
-	if len(inv.agentStack) <= 1 {
-		inv.agentStack = inv.agentStack[:1]
-		return nil, cancelErr
 	}
 
 	keys := slices.Sorted(maps.Keys(inv.unrecoveredErrors))
@@ -1082,6 +1283,11 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 
 	if primaryErr == nil {
 		primaryErr = cancelErr
+	}
+
+	if len(inv.agentStack) <= 1 {
+		inv.agentStack = inv.agentStack[:1]
+		return nil, primaryErr
 	}
 
 	if primaryErr == nil && !invocationEnded(ctx) {
@@ -1129,7 +1335,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 			spanErr = primaryErr
 		}
 		popped = append(popped, unclosedAgentSpan{
-			span:      inv.rowSpan(rec, latencyOf(rec, now)),
+			span:      inv.rowSpan(rec, latencyOf(rec, now), ambient),
 			agentName: rec.name,
 			branch:    rec.branch,
 			path:      rec.path,
@@ -1156,16 +1362,27 @@ func (inv *invocationTrace) activationOfLocked(e recordedError) int {
 	return inv.findAgent(e.id.path, e.id.agentName, e.id.branch)
 }
 
-// agentWithOpenCallLocked returns the index in agentStack of the most recent
-// open agent span that an open model or tool call runs under, or -1.
-func (inv *invocationTrace) agentWithOpenCallLocked() int {
+// openCallOwnersLocked returns the set of parent span IDs that currently own
+// an open model or tool call. A model call that has already delivered a
+// streamed chunk of generated content is excluded, because a caller that stops
+// reading mid-stream leaves the streaming call open without failing.
+func (inv *invocationTrace) openCallOwnersLocked() map[string]bool {
 	owners := map[string]bool{}
 	for _, rec := range inv.llmSpans {
-		owners[rec.parentSpanID] = true
+		if !rec.streamed {
+			owners[rec.parentSpanID] = true
+		}
 	}
 	for _, rec := range inv.toolSpans {
 		owners[rec.parentSpanID] = true
 	}
+	return owners
+}
+
+// agentWithOpenCallLocked returns the index in agentStack of the most recent
+// open agent span that an open model or tool call runs under, or -1.
+func (inv *invocationTrace) agentWithOpenCallLocked() int {
+	owners := inv.openCallOwnersLocked()
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		if owners[inv.agentStack[i].spanID] {
 			return i
@@ -1197,28 +1414,55 @@ func (inv *invocationTrace) lineageLocked(i int) map[string]bool {
 func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	key := llmKey(id)
 	rec := inv.newChild(inv.ownerOf(id), spanKindLLM, now)
 	inv.llmSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedModels, key)
-	return inv.rowSpan(rec, nil)
+	return inv.rowSpan(rec, nil, ambient)
 }
 
 // recordFirstToken records the arrival of a streamed chunk of generated
-// content of the running model call of an agent. Only the first chunk is
-// recorded; the caller decides which chunks carry generated content.
+// content of the running model call of an agent. Only the first chunk's
+// timestamp is recorded; every streamed chunk with generated content also marks
+// the call and its owning agent lineage as having responded, so a caller that
+// stops reading mid-stream is not treated as an unclosed-call failure.
 func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	if rec := inv.llmSpans[llmKey(id)]; rec != nil && rec.firstToken.IsZero() {
+	rec := inv.llmSpans[llmKey(id)]
+	if rec == nil {
+		return
+	}
+	rec.streamed = true
+	if rec.firstToken.IsZero() {
 		rec.firstToken = now
+	}
+	if i := inv.findAgent(id.path, id.agentName, id.branch); i > 0 {
+		inv.markRespondedLocked(inv.lineageLocked(i))
+	}
+}
+
+// recordStreamed marks the running model call of author (if any) and its
+// owning agent lineage as having delivered streamed output.
+func (tm *traceManager) recordStreamed(ctx context.Context, id identity, author, branch string) {
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	callID := identity{agentName: author, branch: branch, path: id.path}
+	if rec := inv.llmSpans[llmKey(callID)]; rec != nil {
+		rec.streamed = true
+	}
+	if i := inv.findAgent(id.path, author, branch); i > 0 {
+		inv.markRespondedLocked(inv.lineageLocked(i))
 	}
 }
 
@@ -1232,19 +1476,21 @@ func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded bool) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	key := llmKey(id)
 	rec := inv.llmSpans[key]
 	if rec == nil {
 		if responded {
 			if prev := inv.completedModels[key]; prev != nil {
 				delete(inv.completedModels, key)
-				return inv.rowSpan(prev, nil)
+				return inv.rowSpan(prev, nil, ambient)
 			}
 		}
-		return inv.rowSpan(inv.newChild(inv.ownerOf(id), spanKindLLM, now), nil)
+		return inv.rowSpan(inv.newChild(inv.ownerOf(id), spanKindLLM, now), nil, ambient)
 	}
 	delete(inv.llmSpans, key)
 	inv.syncOpenCallsLocked()
@@ -1258,7 +1504,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 			rec.firstToken = now
 		}
 	}
-	return inv.rowSpan(rec, latencyOf(rec, now))
+	return inv.rowSpan(rec, latencyOf(rec, now), ambient)
 }
 
 // pushToolSpan starts the span of a tool call and returns the place of its
@@ -1266,15 +1512,17 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.started = true
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	rec := inv.newChild(inv.ownerOf(id), spanKindTool, now)
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedTools, key)
-	return inv.rowSpan(rec, nil)
+	return inv.rowSpan(rec, nil, ambient)
 }
 
 // popToolSpan ends the span of a tool call and returns the place of its
@@ -1289,28 +1537,30 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, true)
+	inv.noteRootAgentLocked(id, rootIn, true)
 	if rec := inv.toolSpans[key]; rec != nil {
 		delete(inv.toolSpans, key)
 		inv.syncOpenCallsLocked()
 		if fromError {
 			inv.completedTools[key] = rec
 		}
-		return inv.rowSpan(rec, latencyOf(rec, now)), false
+		return inv.rowSpan(rec, latencyOf(rec, now), ambient), false
 	}
 	if !fromError {
 		if rec := inv.completedTools[key]; rec != nil {
 			delete(inv.completedTools, key)
-			return inv.rowSpan(rec, nil), true
+			return inv.rowSpan(rec, nil, ambient), true
 		}
 	}
 	rec := inv.newChild(inv.ownerOf(id), spanKindTool, now)
 	if fromError {
 		inv.completedTools[key] = rec
 	}
-	return inv.rowSpan(rec, nil), false
+	return inv.rowSpan(rec, nil, ambient), false
 }
 
 // eventSpan returns the place of a row that describes a session event: the
@@ -1320,13 +1570,15 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 // the root agent.
 func (tm *traceManager) eventSpan(ctx context.Context, id identity, author, branch string) rowSpan {
 	inv := tm.invocation(ctx, id)
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
-	inv.noteRootAgent(ctx, id, nil, nil, false)
+	inv.noteRootAgentLocked(id, rootIn, false)
 	if i := inv.findAgent(id.path, author, branch); i > 0 {
-		return inv.rowSpan(inv.agentStack[i], nil)
+		return inv.rowSpan(inv.agentStack[i], nil, ambient)
 	}
-	return inv.rowSpan(inv.agentStack[0], nil)
+	return inv.rowSpan(inv.agentStack[0], nil, ambient)
 }
 
 // newChild returns a new span under parent. It is not tracked.
@@ -1466,7 +1718,10 @@ func exportContextKey(key reflect.Value) (any, bool) {
 }
 
 // latencyOf returns the latency_ms object of a row that ends rec at end:
-// the total latency and, for model calls, the time to first token.
+// the total latency and, for model calls that produced a first token, the
+// time to first token. Unlike adk-python, LLM_ERROR rows also include
+// time_to_first_token_ms when a streamed chunk with generated content
+// arrived before the error.
 func latencyOf(rec *spanRecord, end time.Time) map[string]any {
 	latency := map[string]any{"total_ms": end.Sub(rec.start).Milliseconds()}
 	if !rec.firstToken.IsZero() {

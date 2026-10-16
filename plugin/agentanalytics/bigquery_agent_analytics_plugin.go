@@ -566,7 +566,9 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	id := identityOf(ctx)
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
 	if unrecErr == nil && ctx != nil {
-		// A canceled invocation failed even when no span is left open.
+		// A canceled invocation failed even when no span is left open, for
+		// example when canceled before any agent started or while post-run
+		// session compaction ran.
 		unrecErr = orZero(ctx.Err)
 	}
 	for _, u := range unclosed {
@@ -635,8 +637,12 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
-		if !ev.Partial && (ev.Content != nil || ev.Output != nil) {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+		if ev.Content != nil || ev.Output != nil {
+			if ev.Partial {
+				p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch)
+			} else {
+				p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			}
 		}
 		p.logEvent(ctx, id, legacyEventType, func() rowSpan {
 			return p.traces.eventSpan(ctx, evID, ev.Author, ev.Branch)
@@ -706,12 +712,16 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 	defer p.recoverCallback(EventLLMResponse)
 	id := identityOf(ctx)
 	if res != nil && res.Partial {
-		// A streamed chunk only times the first token, and only if it carries
+		// A streamed chunk marks the model call and its agent lineage as
+		// streaming so a caller that stops reading mid-stream is not mistaken
+		// for a failed call, and times the first token when the chunk carries
 		// generated content: a leading chunk of usage or role metadata is not
 		// the first token. adk-python writes a row for every chunk; the final
 		// response alone is written here so that token usage is counted once.
 		if hasGeneratedContent(res) {
 			p.traces.recordFirstToken(ctx, id)
+		} else {
+			p.traces.recordStreamed(ctx, id, id.agentName, id.branch)
 		}
 		return nil, nil
 	}
@@ -1118,14 +1128,11 @@ func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
 }
 
 // agentStartingData returns the AGENT_STARTING content and attributes of
-// agent a: the instruction of an LLM agent as content, and its description,
-// model, sub-agent names and, when an instruction provider builds the
-// instruction, instruction_source. When InstructionProvider is set on
-// llmagent.Config, attributes["instruction_source"] = "provider" is recorded
-// and content is nil; static Instruction is returned as content. adk-python
-// writes only the instruction for AGENT_STARTING; the attributes are Go
-// additions. An agent that inherits its model from an ancestor has no model
-// attribute, because ADK Go exposes no parent link on agent.Agent.
+// agent a, matching adk-python: the static instruction of an LLM agent as
+// content, and its description, model, sub-agent names and, when an
+// instruction provider builds the instruction, instruction_source ("provider",
+// with nil content). An agent that inherits its model from an ancestor has no
+// model attribute, because ADK Go exposes no parent link on agent.Agent.
 func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	attrs = map[string]any{}
 	if a == nil {
@@ -1369,7 +1376,7 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType s
 			row[columnLatencyMS] = string(b)
 		}
 	}
-	// The ambient OpenTelemetry span only feeds attributes.otel.
+	// The ambient OpenTelemetry span feeds trace_id (via spanFn) and attributes.otel.
 	span := trace.SpanContextFromContext(ctx)
 
 	truncated := p.addContent(row, eventType, d)

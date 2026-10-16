@@ -1092,7 +1092,7 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
@@ -1359,7 +1359,7 @@ func TestContentFormatter_PreservesExistingErrorMessage(t *testing.T) {
 	}
 	p.AfterRunCallback()(mCtx)
 
-	row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+	row := onlyRowOfType(t, collectRows(t, requests, untilInvocationEnd), EventLLMResponse)
 	if got := row["status"]; got != "ERROR" {
 		t.Errorf("status = %v, want ERROR", got)
 	}
@@ -1853,7 +1853,7 @@ func TestTruncation(t *testing.T) {
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			row := onlyRowOfType(t, rows, EventUserMessageReceived)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), strconv.Quote(tt.wantSummary), "text_summary")
 			if got := row["is_truncated"]; got != tt.wantTrunc {
