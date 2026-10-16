@@ -40,6 +40,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
@@ -52,20 +53,32 @@ const pluginName = "bigquery_agent_analytics"
 // by adk-python, so that rows from either language can be queried together.
 // This version of the plugin does not emit all of them yet.
 const (
-	EventUserMessageReceived       = "USER_MESSAGE_RECEIVED"
-	EventInvocationStarting        = "INVOCATION_STARTING"
-	EventInvocationCompleted       = "INVOCATION_COMPLETED"
-	EventAgentStarting             = "AGENT_STARTING"
-	EventAgentCompleted            = "AGENT_COMPLETED"
-	EventLLMRequest                = "LLM_REQUEST"
-	EventLLMResponse               = "LLM_RESPONSE"
-	EventLLMError                  = "LLM_ERROR"
-	EventToolStarting              = "TOOL_STARTING"
-	EventToolCompleted             = "TOOL_COMPLETED"
-	EventToolError                 = "TOOL_ERROR"
-	EventStateDelta                = "STATE_DELTA"
-	EventAgentTransfer             = "AGENT_TRANSFER"
-	EventEventCompaction           = "EVENT_COMPACTION"
+	EventUserMessageReceived = "USER_MESSAGE_RECEIVED"
+	EventInvocationStarting  = "INVOCATION_STARTING"
+	EventInvocationCompleted = "INVOCATION_COMPLETED"
+	EventAgentStarting       = "AGENT_STARTING"
+	EventAgentCompleted      = "AGENT_COMPLETED"
+	EventAgentError          = "AGENT_ERROR"
+	EventInvocationError     = "INVOCATION_ERROR"
+	EventLLMRequest          = "LLM_REQUEST"
+	// EventLLMResponse is written once per model call, on the final
+	// non-partial response. Streamed chunks with Partial set only feed
+	// latency_ms.time_to_first_token_ms on that final row.
+	EventLLMResponse   = "LLM_RESPONSE"
+	EventLLMError      = "LLM_ERROR"
+	EventToolStarting  = "TOOL_STARTING"
+	EventToolCompleted = "TOOL_COMPLETED"
+	EventToolError     = "TOOL_ERROR"
+	EventStateDelta    = "STATE_DELTA"
+	EventAgentTransfer = "AGENT_TRANSFER"
+	// EventEventCompaction is emitted when session.EventActions.Compaction is
+	// populated (or when session.Event.CustomMetadata carries "adk_compaction" on
+	// ADK versions prior to typed EventActions.Compaction).
+	EventEventCompaction = "EVENT_COMPACTION"
+	// EventAgentStateCheckpoint is emitted when session.Event.CustomMetadata
+	// carries "adk_agent_state" or "agent_state" (or terminal "end_of_agent" /
+	// "adk_end_of_agent" == true), mirroring adk-python's checkpoint rows while
+	// session.EventActions does not yet expose a typed agent-state field.
 	EventAgentStateCheckpoint      = "AGENT_STATE_CHECKPOINT"
 	EventToolPaused                = "TOOL_PAUSED"
 	EventHITLCredentialRequest     = "HITL_CREDENTIAL_REQUEST"
@@ -81,18 +94,14 @@ const (
 )
 
 const (
-	// legacyEventType is written for every session event passed to the
-	// OnEventCallback.
-	// TODO(haiyuan): replace it with the per-event rows that adk-python
-	// writes (STATE_DELTA, AGENT_TRANSFER, HITL_*, ...).
+	// legacyEventType is accepted in EventAllowlist and EventDenylist as an
+	// alias matching all session-event rows (STATE_DELTA, AGENT_RESPONSE, etc.)
+	// for backwards compatibility with filters written before the per-signal
+	// session event types.
 	legacyEventType = "EVENT"
 
 	// adkEnvelopeSchemaVersion is the version of the attributes.adk object.
 	adkEnvelopeSchemaVersion = "1"
-
-	// unknownToolOrigin is written to content.tool_origin of tool events.
-	// TODO(haiyuan): classify tools (LOCAL, MCP, A2A, ...) as adk-python does.
-	unknownToolOrigin = "UNKNOWN"
 
 	userAuthor = "user"
 
@@ -103,18 +112,18 @@ const (
 )
 
 // knownEventTypes holds the event types that EventAllowlist and
-// EventDenylist accept without a warning: the Event constants, the legacy
-// EVENT type and the error events that only adk-python writes.
+// EventDenylist accept without a warning: the Event constants and the legacy
+// EVENT type.
 var knownEventTypes = newSet(
-	EventUserMessageReceived, EventInvocationStarting, EventInvocationCompleted,
-	EventAgentStarting, EventAgentCompleted,
+	EventUserMessageReceived, EventInvocationStarting, EventInvocationCompleted, EventInvocationError,
+	EventAgentStarting, EventAgentCompleted, EventAgentError,
 	EventLLMRequest, EventLLMResponse, EventLLMError,
 	EventToolStarting, EventToolCompleted, EventToolError,
 	EventStateDelta, EventAgentTransfer, EventEventCompaction, EventAgentStateCheckpoint, EventToolPaused,
 	EventHITLCredentialRequest, EventHITLConfirmationRequest, EventHITLInputRequest,
 	EventHITLCredentialCompleted, EventHITLConfirmationCompleted, EventHITLInputCompleted,
 	EventA2AInteraction, EventAgentResponse, EventNodeOutput, EventNodeError,
-	legacyEventType, "AGENT_ERROR", "INVOCATION_ERROR",
+	legacyEventType,
 )
 
 // NewBigQueryAgentAnalyticsPlugin creates a newly configured analytics plugin with default config.
@@ -198,11 +207,42 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	}
 	validateEventFilterLists(config)
 
+	// The plugin owns, and closes, an offloader that it builds itself. One
+	// that the caller supplies stays the caller's. When content_parts is
+	// disabled or denied, nothing can be offloaded, so no Cloud Storage client
+	// is created.
+	_, partsDenied := deniedColumns[columnContentParts]
+	var ownedOffloader *gcsOffloader
+	if config.GCSOffloader == nil && config.GCSBucketName != "" {
+		if partsDenied || !config.logMultiModalContent() {
+			config.logf("agentanalytics: GCSBucketName %q is ignored because content_parts logging is disabled", config.GCSBucketName)
+		} else {
+			gcsOpts := config.GCSClientOptions
+			if len(gcsOpts) == 0 {
+				gcsOpts = config.ClientOptions
+			}
+			o, err := newGCSOffloader(ctx, config.GCSBucketName, gcsOpts...)
+			if err != nil {
+				if closeErr := writeClient.Close(); closeErr != nil {
+					config.logf("failed to close BigQuery write client: %v", closeErr)
+				}
+				return nil, fmt.Errorf("failed to create GCS offloader: %w", err)
+			}
+			ownedOffloader = o
+			config.GCSOffloader = o
+		}
+	}
+
 	// Ensure table exists and has all required columns (done once per instance)
 	tableSchema := projectEventsSchema(deniedColumns)
 	tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
 	if err := ensureTable(ctx, tableRef, tableSchema, config); err != nil {
 		closeWriteClient(writeClient, config)
+		if ownedOffloader != nil {
+			if closeErr := ownedOffloader.Close(); closeErr != nil {
+				config.logf("failed to close GCS offloader: %v", closeErr)
+			}
+		}
 		return nil, err
 	}
 
@@ -212,10 +252,17 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
 		closeWriteClient(writeClient, config)
+		if ownedOffloader != nil {
+			if closeErr := ownedOffloader.Close(); closeErr != nil {
+				config.logf("failed to close GCS offloader: %v", closeErr)
+			}
+		}
 		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
 	processor.Start()
 
+	traces := newTraceManager()
+	traces.logf = config.logf
 	p := &analyticsPlugin{
 		config:             config,
 		processor:          processor,
@@ -224,6 +271,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		deniedColumns:      deniedColumns,
 		finalResponseTools: newSet(config.FinalResponseToolNames...),
 		customMetadata:     newCustomMetadataFilter(config.CustomMetadataAllowlist),
+		traces:             traces,
 	}
 
 	return baseplugin.New(baseplugin.Config{
@@ -246,11 +294,18 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		OnToolErrorCallback: p.onToolError,
 
 		CloseFunc: func() error {
+			// The processor uploads while it flushes, so it goes first.
 			processor.Close()
-			if err := writeClient.Close(); err != nil {
-				return fmt.Errorf("failed to close BigQuery write client: %w", err)
+			var errs []error
+			if ownedOffloader != nil {
+				if err := ownedOffloader.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("failed to close GCS offloader: %w", err))
+				}
 			}
-			return nil
+			if err := writeClient.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("failed to close BigQuery write client: %w", err))
+			}
+			return errors.Join(errs...)
 		},
 	})
 }
@@ -331,7 +386,7 @@ func upgradeExistingTable(ctx context.Context, tableRef *bq.Table, meta *bq.Tabl
 	update := bq.TableMetadataToUpdate{Schema: merged}
 	update.SetLabel("adk_schema_version", SchemaVersion)
 	_, err = tableRef.Update(ctx, update, meta.ETag)
-	if !isPreconditionFailed(err) {
+	if !isBQPreconditionFailed(err) {
 		return err
 	}
 	latest, metaErr := tableRef.Metadata(ctx)
@@ -348,7 +403,7 @@ func upgradeExistingTable(ctx context.Context, tableRef *bq.Table, meta *bq.Tabl
 	return err
 }
 
-func isPreconditionFailed(err error) bool {
+func isBQPreconditionFailed(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -411,19 +466,28 @@ type analyticsPlugin struct {
 	deniedColumns      map[string]struct{}
 	finalResponseTools map[string]struct{}
 	customMetadata     customMetadataFilter
-	loggedToolErrors   sync.Map
+	traces             *traceManager
 }
 
 // eventData carries the event-specific parts of a row.
 type eventData struct {
+	// span places the row in the trace of its invocation.
+	span rowSpan
 	// content is the raw payload for the content and content_parts columns.
 	content any
 	// contentTruncated reports that content was truncated while it was built.
 	contentTruncated bool
+	// parts holds pre-formatted content_parts entries (e.g. for AGENT_RESPONSE).
+	parts []map[string]any
+	// partsTruncated reports that parts were truncated while they were built.
+	partsTruncated bool
 	// attributes are event-specific attributes, written next to the common
 	// ones.
 	attributes map[string]any
-	// errMsg is written to error_message.
+	// adkExtras holds extra fields merged into attributes.adk (e.g. pause_kind).
+	adkExtras map[string]any
+	// errMsg is written to error_message. Callbacks that set it also set
+	// failed.
 	errMsg string
 	// failed sets the status column to "ERROR".
 	failed         bool
@@ -446,82 +510,210 @@ func (p *analyticsPlugin) shouldLogEvent(eventType string) bool {
 	return true
 }
 
+// shouldLogSessionEvent applies EventDenylist and EventAllowlist for rows
+// derived from session.Event, preserving the legacy "EVENT" filter name as
+// an alias for the session-event family while keeping per-type denylist
+// precedence.
+func (p *analyticsPlugin) shouldLogSessionEvent(eventType string) bool {
+	if _, ok := p.denylist[legacyEventType]; ok {
+		return false
+	}
+	if _, ok := p.denylist[eventType]; ok {
+		return false
+	}
+	if len(p.allowlist) > 0 {
+		_, allowLegacy := p.allowlist[legacyEventType]
+		_, allowType := p.allowlist[eventType]
+		return allowLegacy || allowType
+	}
+	return true
+}
+
 func (p *analyticsPlugin) denied(column string) bool {
 	_, ok := p.deniedColumns[column]
 	return ok
 }
 
-// logEvent builds a row for eventType and queues it for writing. Logging
-// must never break the agent run, so a panic while the row is built drops
-// the row instead.
-func (p *analyticsPlugin) logEvent(ctx context.Context, eventType string, build func(*eventData)) {
+// recoverCallback logs and suppresses panics raised inside plugin callbacks so
+// that analytics logging never breaks the agent run.
+func (p *analyticsPlugin) recoverCallback(eventType string) {
+	if r := recover(); r != nil {
+		p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
+	}
+}
+
+// logEvent runs spanFn to update the trace manager and place the row, and if
+// eventType passes the event filters, builds and queues the row for writing.
+// Logging must never break the agent run, so a panic in spanFn or while the
+// row is built drops the row instead.
+//
+// spanFn always runs before shouldLogEvent so that the spans and latencies of
+// the rows that are written stay right when the event filters drop other rows.
+func (p *analyticsPlugin) logEvent(ctx context.Context, id identity, eventType string, spanFn func() rowSpan, build func(*eventData)) {
+	defer p.recoverCallback(eventType)
+	var span rowSpan
+	if spanFn != nil {
+		span = spanFn()
+	}
 	if !p.shouldLogEvent(eventType) {
 		return
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
-		}
-	}()
-	d := &eventData{}
+	p.writeEvent(ctx, id, eventType, span, build)
+}
+
+func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, eventType string, span rowSpan, build func(*eventData)) {
+	if !p.shouldLogSessionEvent(eventType) {
+		return
+	}
+	p.writeEvent(ctx, id, eventType, span, build)
+}
+
+func (p *analyticsPlugin) writeEvent(ctx context.Context, id identity, eventType string, span rowSpan, build func(*eventData)) {
+	defer p.recoverCallback(eventType)
+	d := &eventData{span: span}
 	if build != nil {
 		build(d)
 	}
-	p.processor.Append(p.buildRow(ctx, eventType, d))
+	p.processor.Append(p.buildRow(ctx, id, eventType, d))
 }
 
 func (p *analyticsPlugin) onUserMessage(ctx agent.InvocationContext, msg *genai.Content) (*genai.Content, error) {
-	p.logEvent(ctx, EventUserMessageReceived, func(d *eventData) {
+	id := identityOf(ctx)
+	var span rowSpan
+	p.logEvent(ctx, id, EventUserMessageReceived, func() rowSpan {
+		span = p.traces.invocationSpan(ctx, id, runnerAgentOf(ctx))
+		return span
+	}, func(d *eventData) {
 		d.content = msg
 		d.author = userAuthor
 	})
+	p.emitUserMessageSignalEvents(ctx, id, msg, span)
 	return nil, nil
 }
 
 func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content, error) {
-	p.logEvent(ctx, EventInvocationStarting, nil)
+	id := identityOf(ctx)
+	p.logEvent(ctx, id, EventInvocationStarting, func() rowSpan {
+		return p.traces.invocationSpan(ctx, id, runnerAgentOf(ctx))
+	}, nil)
 	return nil, nil
 }
 
+// afterRun ends the invocation. It writes an AGENT_ERROR row for each agent
+// span that the invocation's terminal error is attributed to, then
+// INVOCATION_ERROR if the invocation has a terminal error, or else
+// INVOCATION_COMPLETED.
+//
+// Only detectable failures are reported: unrecovered model errors,
+// cancellation, agents stopped with an open model or tool call, and open
+// agent spans whose activation produced no response. A run that fails after
+// producing a response, such as a custom agent that writes an event and then
+// returns an error, or an AfterAgentCallback that returns an error, ends with
+// INVOCATION_COMPLETED: no plugin callback tells it apart from a successful
+// run whose caller stopped reading once it had the response.
+// popUnclosedAgentSpans documents the rules.
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
+	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
-	p.loggedToolErrors.Range(func(k, _ any) bool {
-		if key, ok := k.(toolErrorIdentity); ok && key.invocationID == id.invocationID && key.sessionID == id.sessionID {
-			p.loggedToolErrors.Delete(k)
+	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
+	if unrecErr == nil && ctx != nil {
+		// A canceled invocation failed even when no span is left open.
+		unrecErr = orZero(ctx.Err)
+	}
+	for _, u := range unclosed {
+		agentID := id
+		if u.agentName != "" {
+			agentID.agentName = u.agentName
 		}
-		return true
-	})
-	p.logEvent(ctx, EventInvocationCompleted, nil)
+		agentID.branch = u.branch
+		agentID.path = u.path
+		p.logEvent(ctx, agentID, EventAgentError, func() rowSpan {
+			return u.span
+		}, func(d *eventData) {
+			d.failed = true
+			err := u.err
+			if err == nil {
+				err = unrecErr
+			}
+			if err != nil {
+				d.errMsg = err.Error()
+				d.content = map[string]any{"error_traceback": err.Error()}
+			}
+			d.author = u.agentName
+		})
+	}
+
+	if unrecErr != nil || len(unclosed) > 0 {
+		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
+			return p.traces.endInvocation(ctx, id)
+		}, func(d *eventData) {
+			d.failed = true
+			if unrecErr != nil {
+				d.errMsg = unrecErr.Error()
+				d.content = map[string]any{"error_traceback": unrecErr.Error()}
+			}
+		})
+	} else {
+		p.logEvent(ctx, id, EventInvocationCompleted, func() rowSpan {
+			return p.traces.endInvocation(ctx, id)
+		}, nil)
+	}
+
 	if p.config.flushOnRunEnd() {
-		p.processor.flush() // flush queue synchronously
+		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
 	}
 }
 
+// onEvent writes the row of a session event. The event callback gets the
+// agent that the runner runs, so the event is placed by its author, branch
+// and node path. A non-partial event with content also records that its
+// author responded: ADK runs no AfterModelCallback for a model call that a
+// BeforeModelCallback answered, so the event is what ends such a call.
+// Streamed partial events end nothing: AfterModelCallback ends the model call
+// with the final response, which carries the call's latency.
 func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+	defer p.recoverCallback(legacyEventType)
 	if ev != nil {
-		p.logEvent(ctx, legacyEventType, func(d *eventData) {
-			d.content = ev.Content
-			d.attributes = map[string]any{"event_author": ev.Author}
-			d.sourceEvent = ev
-			d.author = ev.Author
-			d.customMetadata = ev.CustomMetadata
-		})
+		id := identityOf(ctx)
+		evID := id
+		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
+			evID.path = ev.NodeInfo.Path
+		}
+		if !ev.Partial && ev.Content != nil {
+			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch)
+		}
 	}
+	defer p.recoverCallback(legacyEventType)
+	p.emitSessionEventSignals(ctx, ev)
 	return nil, nil
 }
 
 func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
-	p.logEvent(ctx, EventAgentStarting, nil)
+	id := identityOf(ctx)
+	p.logEvent(ctx, id, EventAgentStarting, func() rowSpan {
+		return p.traces.pushAgentSpan(ctx, id)
+	}, func(d *eventData) {
+		// The context that ADK gives agent callbacks logs a warning and
+		// returns nil from Agent, so the agent is looked up by name in the
+		// tree of the agent that the runner runs.
+		d.content, d.attributes = agentStartingData(p.traces.agentNamed(ctx, id))
+	})
 	return nil, nil
 }
 
 func (p *analyticsPlugin) afterAgent(ctx agent.Context) (*genai.Content, error) {
-	p.logEvent(ctx, EventAgentCompleted, nil)
+	id := identityOf(ctx)
+	p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan {
+		return p.traces.popAgentSpan(ctx, id)
+	}, nil)
 	return nil, nil
 }
 
 func (p *analyticsPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	p.logEvent(ctx, EventLLMRequest, func(d *eventData) {
+	id := identityOf(ctx)
+	p.logEvent(ctx, id, EventLLMRequest, func() rowSpan {
+		return p.traces.pushLLMSpan(ctx, id)
+	}, func(d *eventData) {
 		d.content = req
 		d.attributes = llmRequestAttributes(req)
 	})
@@ -529,12 +721,24 @@ func (p *analyticsPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) 
 }
 
 func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
+	defer p.recoverCallback(EventLLMResponse)
+	id := identityOf(ctx)
 	if res != nil && res.Partial {
-		// TODO(haiyuan): log partial responses, with time to first token, as
-		// adk-python does, without counting their usage twice.
+		// A streamed chunk only times the first token. adk-python writes a
+		// row for every chunk; the final response alone is written here so
+		// that token usage is counted once.
+		p.traces.recordFirstToken(ctx, id)
 		return nil, nil
 	}
-	p.logEvent(ctx, EventLLMResponse, func(d *eventData) {
+	key := llmKey(id)
+	if err != nil {
+		p.traces.recordError(ctx, id, key, err)
+	} else if res != nil {
+		p.traces.clearError(ctx, id, key)
+	}
+	p.logEvent(ctx, id, EventLLMResponse, func() rowSpan {
+		return p.traces.popLLMSpan(ctx, id, res != nil)
+	}, func(d *eventData) {
 		var errText string
 		if err != nil {
 			errText = err.Error()
@@ -555,7 +759,14 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 }
 
 func (p *analyticsPlugin) onModelError(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {
-	p.logEvent(ctx, EventLLMError, func(d *eventData) {
+	defer p.recoverCallback(EventLLMError)
+	id := identityOf(ctx)
+	if err != nil {
+		p.traces.recordError(ctx, id, llmKey(id), err)
+	}
+	p.logEvent(ctx, id, EventLLMError, func() rowSpan {
+		return p.traces.popLLMSpan(ctx, id, false)
+	}, func(d *eventData) {
 		d.failed = true
 		if err != nil {
 			d.errMsg = err.Error()
@@ -568,8 +779,15 @@ func (p *analyticsPlugin) onModelError(ctx agent.Context, req *model.LLMRequest,
 }
 
 func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[string]any) (map[string]any, error) {
-	p.logEvent(ctx, EventToolStarting, func(d *eventData) {
-		d.content = toolContent(toolName(t), "args", args)
+	defer p.recoverCallback(EventToolStarting)
+	id := identityOf(ctx)
+	callID := orZero(ctx.FunctionCallID)
+	name := toolName(t)
+	p.logEvent(ctx, id, EventToolStarting, func() rowSpan {
+		return p.traces.pushToolSpan(ctx, id, toolKey(id, callID, name))
+	}, func(d *eventData) {
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "args", args, origin)
 		var desc string
 		var longRunning bool
 		if t != nil {
@@ -580,68 +798,84 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 			"tool_description": desc,
 			"is_long_running":  longRunning,
 		}
-		d.functionCallID = ctx.FunctionCallID()
+		d.functionCallID = callID
 	})
 	return nil, nil
 }
 
 func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+	defer p.recoverCallback(EventToolCompleted)
+	id := identityOf(ctx)
+	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	_, alreadyLogged := p.loggedToolErrors.LoadAndDelete(newToolErrorIdentity(ctx, name))
-	if err != nil {
-		if !alreadyLogged {
-			p.emitToolError(ctx, name, args, err)
+	span, closedByError := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), false)
+	// A tool that waits for the user's confirmation fails with
+	// tool.ErrConfirmationRequired before it runs. adk-python returns the
+	// confirmation request as the tool's result, so, as there, the call
+	// completes with the error that ADK sends the model as its result.
+	confirmationRequired := errors.Is(err, tool.ErrConfirmationRequired)
+	if err != nil && !confirmationRequired {
+		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
+		// closedByError; when an earlier plugin short-circuited
+		// OnToolErrorCallback before onToolError ran, emit TOOL_ERROR here so
+		// the failed call still gets its terminal row.
+		if !closedByError {
+			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		}
 		return nil, nil
 	}
-	p.logEvent(ctx, EventToolCompleted, func(d *eventData) {
-		d.content = toolContent(name, "result", result)
-		d.functionCallID = ctx.FunctionCallID()
+	if confirmationRequired {
+		result = map[string]any{"error": err.Error()}
+	}
+	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "result", result, origin)
+		d.functionCallID = callID
 	})
+	if confirmationRequired {
+		// The tool has not run, so a final response tool has no response
+		// yet: AGENT_RESPONSE is written when the confirmed call runs.
+		return nil, nil
+	}
 	if _, ok := p.finalResponseTools[name]; ok {
-		p.logEvent(ctx, EventAgentResponse, func(d *eventData) {
+		p.logEvent(ctx, id, EventAgentResponse, func() rowSpan {
+			return p.traces.eventSpan(ctx, id, id.agentName, id.branch)
+		}, func(d *eventData) {
 			d.content = map[string]any{"response": args}
 			d.attributes = map[string]any{"source_tool": name}
-			d.functionCallID = ctx.FunctionCallID()
+			d.functionCallID = callID
 		})
 	}
 	return nil, nil
 }
 
 func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+	defer p.recoverCallback(EventToolError)
+	if errors.Is(err, tool.ErrConfirmationRequired) {
+		// The call waits for the user's confirmation and has not failed.
+		// Its span stays open for the TOOL_COMPLETED row of afterTool.
+		return nil, nil
+	}
+	id := identityOf(ctx)
+	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	p.loggedToolErrors.Store(newToolErrorIdentity(ctx, name), struct{}{})
-	p.emitToolError(ctx, name, args, err)
+	p.logToolError(ctx, id, t, func() rowSpan {
+		span, _ := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), true)
+		return span
+	}, name, callID, args, err)
 	return nil, nil
 }
 
-func (p *analyticsPlugin) emitToolError(ctx agent.Context, name string, args map[string]any, err error) {
-	p.logEvent(ctx, EventToolError, func(d *eventData) {
-		d.content = toolContent(name, "args", args)
+func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.Tool, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
+	p.logEvent(ctx, id, EventToolError, spanFn, func(d *eventData) {
+		origin := p.resolveToolOrigin(ctx, id, t, args)
+		d.content = toolContent(name, "args", args, origin)
 		d.failed = true
 		if err != nil {
 			d.errMsg = err.Error()
 		}
-		d.functionCallID = ctx.FunctionCallID()
+		d.functionCallID = callID
 	})
-}
-
-type toolErrorIdentity struct {
-	sessionID    string
-	invocationID string
-	branch       string
-	callID       string
-	toolName     string
-}
-
-func newToolErrorIdentity(ctx agent.Context, name string) toolErrorIdentity {
-	return toolErrorIdentity{
-		sessionID:    orZero(ctx.SessionID),
-		invocationID: orZero(ctx.InvocationID),
-		branch:       orZero(ctx.Branch),
-		callID:       orZero(ctx.FunctionCallID),
-		toolName:     name,
-	}
 }
 
 // toolName returns the name of t, or "" if t is nil or its Name method
@@ -653,11 +887,11 @@ func toolName(t tool.Tool) string {
 	return orZero(t.Name)
 }
 
-func toolContent(name, payloadKey string, payload map[string]any) map[string]any {
+func toolContent(name, payloadKey string, payload map[string]any, origin string) map[string]any {
 	return map[string]any{
 		"tool":        name,
 		payloadKey:    payload,
-		"tool_origin": unknownToolOrigin,
+		"tool_origin": cmp.Or(origin, ToolOriginUnknown),
 	}
 }
 
@@ -785,47 +1019,80 @@ func toolDeclarations(req *model.LLMRequest) []map[string]any {
 
 // llmRequestContent builds the LLM_REQUEST content the way adk-python does:
 // the role and text summary of each request message, and the summary of the
-// system instruction. When withParts is set it also returns the
-// content_parts of the messages followed by those of the system instruction.
-func llmRequestContent(req *model.LLMRequest, maxLen int, withParts, redact bool) (content map[string]any, parts []map[string]any, contentTruncated, partsTruncated bool) {
-	content = map[string]any{}
-	add := func(c *genai.Content) string {
-		summary, t := contentSummary(c, maxLen, redact)
-		contentTruncated = contentTruncated || t
-		if withParts {
-			ps, pt := formatContentParts(c, maxLen, redact)
-			parts = append(parts, ps...)
-			partsTruncated = partsTruncated || pt
-		}
-		return summary
+// system instruction. If parts is not nil, it also collects the content_parts
+// of the messages followed by those of the system instruction. The content
+// ordinal of a message is its index in req.Contents, which a nil message keeps
+// to itself, and that of the system instruction is len(req.Contents). The
+// ordinals keep the objects that hold the parts of one request apart.
+func llmRequestContent(req *model.LLMRequest, maxLen int, parts *partsCollector) (content map[string]any, contentTruncated bool) {
+	redact := false
+	if parts != nil {
+		redact = parts.opts.redact
 	}
-	var prompt []map[string]any
-	for _, c := range req.Contents {
+	content, contentTruncated, _ = buildLLMRequestContent(req, maxLen, redact, false, parts)
+	return content, contentTruncated
+}
+
+func buildLLMRequestContent(req *model.LLMRequest, maxLen int, redact, contentDenied bool, parts *partsCollector) (content map[string]any, contentTruncated bool, builder *contentSummaryBuilder) {
+	b := &contentSummaryBuilder{
+		isLLMRequest:  true,
+		contentDenied: contentDenied,
+		maxLen:        maxLen,
+		redact:        redact,
+	}
+	for i, c := range req.Contents {
 		if c == nil {
 			continue
 		}
 		role, t := sanitizeAndTruncateText(cmp.Or(c.Role, "unknown"), maxLen, redact)
-		contentTruncated = contentTruncated || t
-		prompt = append(prompt, map[string]any{"role": role, "content": add(c)})
-	}
-	if len(prompt) > 0 {
-		content["prompt"] = prompt
+		b.roleTruncated = b.roleTruncated || t
+		msg := newMessageSummary(c, i, maxLen, redact)
+		msg.role = role
+		msg.hasRole = true
+		b.messages = append(b.messages, msg)
+		if parts != nil {
+			parts.addContent(c, i)
+		}
 	}
 	if req.Config != nil && req.Config.SystemInstruction != nil {
-		content["system_prompt"] = add(req.Config.SystemInstruction)
+		ord := len(req.Contents)
+		msg := newMessageSummary(req.Config.SystemInstruction, ord, maxLen, redact)
+		msg.isSystem = true
+		b.messages = append(b.messages, msg)
+		if parts != nil {
+			parts.addContent(req.Config.SystemInstruction, ord)
+		}
 	}
-	return content, parts, contentTruncated, partsTruncated
+	if parts != nil {
+		for _, u := range parts.pending {
+			if u.isText {
+				b.omitTextFromSummary(u.contentOrd, u.partIdx)
+			}
+		}
+	}
+	content, contentTruncated = b.buildContent()
+	return content, contentTruncated, b
 }
 
-// llmResponseContent builds the LLM_RESPONSE content the way adk-python
+// buildLLMResponseContent builds the LLM_RESPONSE content the way adk-python
 // does: the formatted response and the token usage, plus content_parts when
-// withParts is set. It returns nil content if res carries neither.
-func llmResponseContent(res *model.LLMResponse, maxLen int, withParts, redact bool) (content map[string]any, parts []map[string]any, contentTruncated, partsTruncated bool) {
-	content = map[string]any{}
+// parts is not nil. It returns nil content if res carries neither.
+func buildLLMResponseContent(res *model.LLMResponse, maxLen int, redact, contentDenied bool, parts *partsCollector) (content map[string]any, contentTruncated bool, builder *contentSummaryBuilder) {
+	b := &contentSummaryBuilder{
+		isLLMResponse: true,
+		contentDenied: contentDenied,
+		maxLen:        maxLen,
+		redact:        redact,
+	}
 	if res.Content != nil {
-		content["response"], contentTruncated = formatResponseContent(res.Content, maxLen, redact)
-		if withParts {
-			parts, partsTruncated = formatContentParts(res.Content, maxLen, redact)
+		b.messages = []*messageSummary{newResponseMessageSummary(res.Content, 0, maxLen, redact)}
+		if parts != nil {
+			parts.addContent(res.Content, 0)
+			for _, u := range parts.pending {
+				if u.isText {
+					b.omitTextFromSummary(u.contentOrd, u.partIdx)
+				}
+			}
 		}
 	}
 	if u := res.UsageMetadata; u != nil {
@@ -840,12 +1107,13 @@ func llmResponseContent(res *model.LLMResponse, maxLen int, withParts, redact bo
 		if u.CachedContentTokenCount > 0 {
 			usage["cached"] = u.CachedContentTokenCount
 		}
-		content["usage"] = usage
+		b.usage = usage
 	}
+	content, contentTruncated = b.buildContent()
 	if len(content) == 0 {
-		return nil, parts, false, partsTruncated
+		return nil, false, nil
 	}
-	return content, parts, contentTruncated, partsTruncated
+	return content, contentTruncated, b
 }
 
 func llmResponseAttributes(res *model.LLMResponse) map[string]any {
@@ -883,7 +1151,97 @@ func llmResponseAttributes(res *model.LLMResponse) map[string]any {
 	if res.CitationMetadata != nil {
 		attrs["citation_metadata"] = res.CitationMetadata
 	}
+	attrs["cache_type"] = cacheType(res.UsageMetadata)
 	return attrs
+}
+
+// cacheType classifies the cached tokens of a response as "none" without
+// cached tokens and "implicit" when cached tokens are present, because ADK Go
+// responses carry no explicit context-cache metadata.
+func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
+	if u == nil || u.CachedContentTokenCount <= 0 {
+		return "none"
+	}
+	return "implicit"
+}
+
+// agentStartingData returns the AGENT_STARTING content and attributes of
+// agent a: the instruction of an LLM agent as content, and its description,
+// model, sub-agent names and, when an instruction provider builds the
+// instruction, instruction_source. When InstructionProvider is set on
+// llmagent.Config, attributes["instruction_source"] = "provider" is recorded
+// and content is nil; static Instruction is returned as content. adk-python
+// writes only the instruction for AGENT_STARTING; the attributes are Go
+// additions. An agent that inherits its model from an ancestor has no model
+// attribute, because ADK Go exposes no parent link on agent.Agent.
+func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
+	attrs = map[string]any{}
+	if a == nil {
+		return nil, attrs
+	}
+	putNonEmpty(attrs, "agent_description", orZero(a.Description))
+	var subAgents []string
+	for _, sub := range orZero(a.SubAgents) {
+		if sub != nil {
+			if name := orZero(sub.Name); name != "" {
+				subAgents = append(subAgents, name)
+			}
+		}
+	}
+	if len(subAgents) > 0 {
+		attrs["sub_agents"] = subAgents
+	}
+	cfg, ok := orZero(func() any { return agentConfig(a) }).(llmagent.Config)
+	if !ok {
+		return nil, attrs
+	}
+	if cfg.Model != nil {
+		putNonEmpty(attrs, "model", orZero(cfg.Model.Name))
+	}
+	if cfg.InstructionProvider != nil {
+		attrs["instruction_source"] = "provider"
+		return nil, attrs
+	}
+	if cfg.Instruction != "" {
+		content = cfg.Instruction
+	}
+	return content, attrs
+}
+
+// agentConfig returns the configuration that ADK keeps in the base agent of
+// a, such as the llmagent.Config of an LLM agent, or nil. ADK exposes no
+// accessor for it, so it is read with reflection from the exported Config
+// field of the base agent's embedded state. An agent that embeds its base
+// agent in an exported agent.Agent field, as LLM agents do, is unwrapped
+// when its own Config is zero. Agents without a readable Config field yield nil.
+func agentConfig(a agent.Agent) any {
+	// One unwrapping reaches the base agent of the ADK agents; the bound
+	// stops agents that wrap themselves.
+	for range 4 {
+		v := reflect.ValueOf(a)
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return nil
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return nil
+		}
+		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
+			return f.Interface()
+		}
+		inner := v.FieldByName("Agent")
+		if !inner.IsValid() || !inner.CanInterface() {
+			return nil
+		}
+		next, ok := inner.Interface().(agent.Agent)
+		if !ok {
+			return nil
+		}
+		a = next
+	}
+	return nil
 }
 
 // identity holds the invocation fields of a row.
@@ -894,6 +1252,7 @@ type identity struct {
 	userID       string
 	appName      string
 	branch       string
+	path         string
 	state        session.ReadonlyState
 }
 
@@ -911,12 +1270,14 @@ func identityOf(ctx context.Context) identity {
 			userID:       orZero(c.UserID),
 			appName:      orZero(c.AppName),
 			branch:       orZero(c.Branch),
+			path:         orZero(func() string { return contextPath(ctx) }),
 			state:        orZero(c.ReadonlyState),
 		}
 	case agent.InvocationContext:
 		id := identity{
 			invocationID: orZero(c.InvocationID),
 			branch:       orZero(c.Branch),
+			path:         orZero(func() string { return contextPath(ctx) }),
 		}
 		if a := orZero(c.Agent); a != nil {
 			id.agentName = orZero(a.Name)
@@ -933,14 +1294,100 @@ func identityOf(ctx context.Context) identity {
 	}
 }
 
+type visitedContextStruct struct {
+	ptr uintptr
+	typ reflect.Type
+}
+
+// contextPath returns the execution node path carried by ctx, or "".
+// ADK's callbackContextWrapper.Path logs an error and returns "", and
+// NewCallbackContext wraps the inner InvocationContext without copying its
+// path onto the outer commonContext, so contextPath inspects the wrapped
+// context chain directly before falling back to Path() on non-wrapper types.
+func contextPath(ctx context.Context) (path string) {
+	defer func() {
+		if r := recover(); r != nil {
+			path = ""
+		}
+	}()
+	queue := []reflect.Value{reflect.ValueOf(ctx)}
+	seen := map[visitedContextStruct]bool{}
+	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
+		v := queue[0]
+		queue = queue[1:]
+		var ptr uintptr
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				v = reflect.Value{}
+				break
+			}
+			if v.Kind() == reflect.Pointer {
+				ptr = v.Pointer()
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			continue
+		}
+		if ptr != 0 {
+			key := visitedContextStruct{ptr: ptr, typ: v.Type()}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+		}
+		if f := v.FieldByName("path"); f.IsValid() && f.Kind() == reflect.String {
+			if s := f.String(); s != "" {
+				return s
+			}
+		}
+		if f := v.FieldByName("params"); f.IsValid() {
+			for f.Kind() == reflect.Pointer || f.Kind() == reflect.Interface {
+				if f.IsNil() {
+					f = reflect.Value{}
+					break
+				}
+				f = f.Elem()
+			}
+			if f.Kind() == reflect.Struct {
+				if p := f.FieldByName("Path"); p.IsValid() && p.Kind() == reflect.String {
+					if s := p.String(); s != "" {
+						return s
+					}
+				}
+			}
+		}
+		for _, name := range []string{"context", "Context", "ctx", "invocationContext"} {
+			if f := v.FieldByName(name); f.IsValid() {
+				queue = append(queue, f)
+			}
+		}
+	}
+	type pathCarrier interface {
+		Path() string
+	}
+	if p, ok := ctx.(pathCarrier); ok && !strings.HasSuffix(reflect.TypeOf(ctx).String(), "callbackContextWrapper") {
+		return orZero(p.Path)
+	}
+	return ""
+}
+
 // orZero returns f(), or the zero value of T if f panics.
 func orZero[T any](f func() T) (v T) {
 	defer func() { _ = recover() }()
 	return f()
 }
 
-func (p *analyticsPlugin) buildRow(ctx context.Context, eventType string, d *eventData) map[string]any {
-	id := identityOf(ctx)
+// runnerAgentOf returns the agent of the context of an invocation callback,
+// which is the agent that the runner runs, or nil.
+func runnerAgentOf(ctx agent.InvocationContext) agent.Agent {
+	if ctx == nil {
+		return nil
+	}
+	return orZero(ctx.Agent)
+}
+
+func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType string, d *eventData) map[string]any {
 	eventID := newEventID()
 	row := map[string]any{
 		timestampField:  time.Now(),
@@ -949,6 +1396,12 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, eventType string, d *eve
 		"invocation_id": id.invocationID,
 		"user_id":       id.userID,
 	}
+	var built bool
+	defer func() {
+		if !built && p.processor != nil {
+			p.processor.releaseRowUploads(row)
+		}
+	}()
 	agentName := id.agentName
 	if agentName == "" && d.sourceEvent != nil {
 		agentName = d.sourceEvent.Author
@@ -960,17 +1413,25 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, eventType string, d *eve
 		row["session_id"] = id.sessionID
 	}
 
-	// Add trace info dynamically resolving the context span
-	span := trace.SpanContextFromContext(ctx)
-	if span.IsValid() {
-		row["trace_id"] = span.TraceID().String()
-		row["span_id"] = span.SpanID().String()
+	putNonEmpty(row, "trace_id", d.span.traceID)
+	putNonEmpty(row, "span_id", d.span.spanID)
+	putNonEmpty(row, "parent_span_id", d.span.parentSpanID)
+	if d.span.latency != nil && !p.denied(columnLatencyMS) {
+		// The batch processor writes JSON columns from their JSON text, so
+		// the latency object is marshaled here, exactly once.
+		if b, err := json.Marshal(d.span.latency); err == nil {
+			row[columnLatencyMS] = string(b)
+		}
 	}
+	// The ambient OpenTelemetry span only feeds attributes.otel.
+	span := trace.SpanContextFromContext(ctx)
 
 	truncated := p.addContent(row, eventType, d)
+	attrsTruncated := false
 	if !p.denied(columnAttributes) {
 		attrs, t := p.jsonColumn(p.attributes(eventID, id, agentName, span, d))
 		row[columnAttributes] = attrs
+		attrsTruncated = t
 		truncated = truncated || t
 	}
 
@@ -979,6 +1440,7 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, eventType string, d *eve
 		status = "ERROR"
 	}
 	row["status"] = status
+	errMsgTruncated := false
 	if d.errMsg != "" {
 		errMsg := d.errMsg
 		if p.config.redactSensitiveKeys() {
@@ -986,9 +1448,14 @@ func (p *analyticsPlugin) buildRow(ctx context.Context, eventType string, d *eve
 		}
 		msg, t := truncateString(errMsg, p.config.maxContentLength())
 		row["error_message"] = msg
+		errMsgTruncated = t
 		truncated = truncated || t
 	}
+	if builder, ok := row[summaryBuilderKey].(*contentSummaryBuilder); ok {
+		builder.otherTruncated = builder.otherTruncated || attrsTruncated || errMsgTruncated
+	}
 	row["is_truncated"] = truncated
+	built = true
 	return row
 }
 
@@ -1001,6 +1468,14 @@ func newEventID() string {
 
 // addContent writes the content and content_parts columns of row and
 // reports whether anything written was truncated.
+//
+// Everything that goes into row is detached from the caller's messages. The
+// row is handed to the batch processor, which writes it on another goroutine
+// while the caller may already be changing the messages. Payloads that are to
+// be offloaded travel with the row as copies under rawPartsKey. Synthetic
+// events such as AGENT_RESPONSE that pre-populate d.parts in events.go when
+// no ContentFormatter is set copy those pre-formatted entries directly and
+// stay inline up to MaxContentLen rather than re-entering parts.addContent.
 func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *eventData) bool {
 	contentDenied := p.denied(columnContent)
 	partsDenied := p.denied(columnContentParts)
@@ -1030,30 +1505,56 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 
 	maxLen := p.config.maxContentLength()
 	redact := p.config.redactSensitiveKeys()
-	withParts := !partsDenied && p.config.logMultiModalContent()
+	var parts *partsCollector
+	var partsCommitted bool
+	if !partsDenied && p.config.logMultiModalContent() {
+		parts = p.newPartsCollector(maxLen)
+		defer func() {
+			if !partsCommitted && p.processor != nil {
+				var reserved int64
+				for _, u := range parts.pending {
+					reserved += u.reserved
+				}
+				p.processor.releaseUploadBytes(reserved)
+			}
+		}()
+	}
 	content := payload
 	contentTruncated := d.contentTruncated
-	var parts []map[string]any
-	partsTruncated := false
 	preFormatted := false
+	var builder *contentSummaryBuilder
 	switch v := payload.(type) {
 	case *genai.Content:
-		summary, t := contentSummary(v, maxLen, redact)
-		content, contentTruncated = map[string]any{"text_summary": summary}, t
-		preFormatted = true
-		if withParts {
-			parts, partsTruncated = formatContentParts(v, maxLen, redact)
+		if parts != nil {
+			parts.addContent(v, 0)
 		}
+		builder = &contentSummaryBuilder{
+			contentDenied: contentDenied,
+			maxLen:        maxLen,
+			redact:        redact,
+			messages:      []*messageSummary{newMessageSummary(v, 0, maxLen, redact)},
+		}
+		if parts != nil {
+			for _, u := range parts.pending {
+				if u.isText {
+					builder.omitTextFromSummary(u.contentOrd, u.partIdx)
+				}
+			}
+		}
+		content, contentTruncated = builder.buildContent()
+		preFormatted = true
 	case *model.LLMRequest:
-		var t bool
-		content, parts, t, partsTruncated = llmRequestContent(v, maxLen, withParts, redact)
-		contentTruncated = t
+		content, contentTruncated, builder = buildLLMRequestContent(v, maxLen, redact, contentDenied, parts)
 		preFormatted = true
 	case *model.LLMResponse:
-		var t bool
-		content, parts, t, partsTruncated = llmResponseContent(v, maxLen, withParts, redact)
-		contentTruncated = t
+		content, contentTruncated, builder = buildLLMResponseContent(v, maxLen, redact, contentDenied, parts)
 		preFormatted = true
+	default:
+		if parts != nil && len(d.parts) > 0 && p.config.ContentFormatter == nil {
+			parts.parts = append(parts.parts, d.parts...)
+			parts.truncated = parts.truncated || d.partsTruncated
+			parts.nonUploadTruncated = parts.nonUploadTruncated || d.partsTruncated
+		}
 	}
 
 	truncated := false
@@ -1073,11 +1574,37 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 			truncated = t || contentTruncated
 		}
 	}
-	if len(parts) > 0 {
-		row[columnContentParts] = parts
-		truncated = truncated || partsTruncated
+	if parts != nil && len(parts.parts) > 0 {
+		row[columnContentParts] = parts.parts
+		truncated = truncated || parts.truncated
+		if len(parts.pending) > 0 {
+			row[rawPartsKey] = parts.pending
+			partsCommitted = true
+			if builder != nil && parts.hasPendingText() {
+				builder.otherTruncated = parts.nonUploadTruncated
+				row[summaryBuilderKey] = builder
+			}
+		}
 	}
 	return truncated
+}
+
+// newPartsCollector returns the collector of the content_parts of one row.
+// Offloading to Cloud Storage is on if the plugin has an offloader.
+func (p *analyticsPlugin) newPartsCollector(maxLen int) *partsCollector {
+	opts := partsOptions{
+		maxLen:       maxLen,
+		redact:       p.config.redactSensitiveKeys(),
+		connectionID: p.config.ConnectionID,
+	}
+	if p.config.GCSOffloader != nil {
+		opts.offload = true
+		opts.inlineLimit = p.config.MaxInlineTextSize
+		if p.processor != nil {
+			opts.reserveBytes = p.processor.tryReserveUploadBytes
+		}
+	}
+	return &partsCollector{opts: opts}
 }
 
 // isNil reports whether v is nil or holds a nil pointer, map, slice or
@@ -1110,6 +1637,7 @@ func (p *analyticsPlugin) attributes(eventID string, id identity, agentName stri
 	attrs := make(map[string]any, len(d.attributes)+6)
 	maps.Copy(attrs, d.attributes)
 	attrs["adk"] = p.adkEnvelope(eventID, id, agentName, d)
+	putNonEmpty(attrs, "root_agent_name", d.span.rootAgentName)
 	if len(p.config.CustomTags) > 0 {
 		attrs["custom_tags"] = p.config.CustomTags
 	}
@@ -1151,6 +1679,11 @@ func (p *analyticsPlugin) adkEnvelope(eventID string, id identity, agentName str
 	putNonEmpty(adk, "author", cmp.Or(d.author, agentName))
 	if ev := d.sourceEvent; ev != nil {
 		addSourceEvent(adk, ev)
+	}
+	for k, v := range d.adkExtras {
+		if _, ok := adk[k]; !ok {
+			adk[k] = v
+		}
 	}
 	return adk
 }

@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -45,16 +46,38 @@ type BatchProcessor struct {
 	arrowSchema *arrow.Schema
 	allocator   memory.Allocator
 
-	ctx       context.Context
-	cancel    context.CancelFunc
-	stop      chan struct{}
+	// uploadCtx bounds background uploads; Close cancels it before waiting on
+	// flushMu so an in-flight upload falls back to inline instead of blocking
+	// shutdown. writeCtx bounds BigQuery appends and stays open until Close
+	// finishes flushing.
+	uploadCtx     context.Context
+	cancelUploads context.CancelFunc
+	writeCtx      context.Context
+	cancelWrite   context.CancelFunc
+
+	stopCh    chan struct{}
+	closeOnce sync.Once
 	done      chan struct{}
 	started   atomic.Bool // Track if Start() has been called.
 	closed    atomic.Bool
-	closeOnce sync.Once
+
+	// uploadTimeout overrides Config.GCSUploadTimeout in tests.
+	uploadTimeout time.Duration
+	// uploadCooldownUntil holds a UnixNano deadline while uploads are paused
+	// after a batch-level GCSUploadTimeout expiration.
+	uploadCooldownUntil atomic.Int64
+
+	// pendingUploadBytes tracks total bytes currently held in memory by
+	// queued and in-flight pending uploads; maxPendingUploadBytes overrides
+	// Config.GCSMaxPendingUploadBytes in tests.
+	pendingUploadBytes    atomic.Int64
+	maxPendingUploadBytes int64
+	uploadBudgetWarned    atomic.Bool
 }
 
-// NewBatchProcessor creates a new BatchProcessor instance.
+// NewBatchProcessor creates a new BatchProcessor instance. If config.GCSOffloader
+// is set, the payloads queued for upload with the rows are uploaded through it
+// before the rows are written.
 //
 // Only the values carried by ctx are used: its cancellation and deadline are
 // ignored, so canceling ctx neither stops nor drains the processor. Only
@@ -71,20 +94,23 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		return nil, fmt.Errorf("failed to serialize arrow schema: %w", err)
 	}
 	baseCtx := context.WithoutCancel(ctx)
-	ctx, cancel := context.WithCancel(baseCtx)
+	uploadCtx, cancelUploads := context.WithCancel(baseCtx)
+	writeCtx, cancelWrite := context.WithCancel(baseCtx)
 
 	return &BatchProcessor{
-		writeClient:  writeClient,
-		streamWriter: newStreamWriter(ctx, writeClient, streamName, schemaBytes, config),
-		streamName:   streamName,
-		config:       config,
-		queue:        make(chan map[string]any, config.QueueMaxSize),
-		arrowSchema:  arrowSchema,
-		allocator:    memory.NewGoAllocator(), // Use Go memory allocator
-		ctx:          ctx,
-		cancel:       cancel,
-		stop:         make(chan struct{}),
-		done:         make(chan struct{}),
+		writeClient:   writeClient,
+		streamWriter:  newStreamWriter(ctx, writeClient, streamName, schemaBytes, config),
+		streamName:    streamName,
+		config:        config,
+		queue:         make(chan map[string]any, config.QueueMaxSize),
+		arrowSchema:   arrowSchema,
+		allocator:     memory.NewGoAllocator(), // Use Go memory allocator
+		uploadCtx:     uploadCtx,
+		cancelUploads: cancelUploads,
+		writeCtx:      writeCtx,
+		cancelWrite:   cancelWrite,
+		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
 	}, nil
 }
 
@@ -100,7 +126,7 @@ func (b *BatchProcessor) Start() {
 
 			for {
 				select {
-				case <-b.stop:
+				case <-b.stopCh:
 					return
 				case <-ticker.C:
 					b.flush()
@@ -108,6 +134,59 @@ func (b *BatchProcessor) Start() {
 			}
 		}()
 	}
+}
+
+func (b *BatchProcessor) shutdownTimeout() time.Duration {
+	if b.config.ShutdownTimeout > 0 {
+		return b.config.ShutdownTimeout
+	}
+	return 10 * time.Second
+}
+
+// tryReserveUploadBytes reserves n bytes in pendingUploadBytes if within the
+// pending upload byte cap.
+func (b *BatchProcessor) tryReserveUploadBytes(n int) bool {
+	if n <= 0 {
+		return true
+	}
+	limit := cmp.Or(b.maxPendingUploadBytes, b.config.GCSMaxPendingUploadBytes, int64(defaultMaxPendingUploadBytes))
+	for {
+		cur := b.pendingUploadBytes.Load()
+		if cur+int64(n) > limit {
+			if b.uploadBudgetWarned.CompareAndSwap(false, true) {
+				b.config.logf("agentanalytics: pending GCS upload byte budget (%d bytes) exceeded; keeping payload inline", limit)
+			}
+			return false
+		}
+		if b.pendingUploadBytes.CompareAndSwap(cur, cur+int64(n)) {
+			b.uploadBudgetWarned.Store(false)
+			return true
+		}
+	}
+}
+
+func (b *BatchProcessor) releaseUploadBytes(n int64) {
+	if n <= 0 {
+		return
+	}
+	if b.pendingUploadBytes.Add(-n) < 0 {
+		b.pendingUploadBytes.Store(0)
+	}
+	b.uploadBudgetWarned.Store(false)
+}
+
+func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
+	delete(row, summaryBuilderKey)
+	pending, ok := row[rawPartsKey].([]pendingUpload)
+	if !ok {
+		return
+	}
+	delete(row, rawPartsKey)
+	var total int64
+	for _, u := range pending {
+		total += u.reserved
+	}
+	b.releaseUploadBytes(total)
 }
 
 // Append adds a row to the processor queue asynchronously. If the queue is
@@ -128,16 +207,19 @@ func (b *BatchProcessor) Append(row map[string]any) {
 // Close cannot mark the processor closed mid-send. It reports whether the row
 // was dropped because the queue was full and whether the queue has just
 // reached BatchSize rows. Rows offered after Close are discarded silently.
+// A row that is dropped or discarded has its pending uploads released.
 func (b *BatchProcessor) enqueue(row map[string]any) (dropped, shouldFlush bool) {
 	b.appendMu.RLock()
 	defer b.appendMu.RUnlock()
 	if b.closed.Load() {
+		b.releaseRowUploads(row)
 		return false, false
 	}
 	select {
 	case b.queue <- row:
 		return false, len(b.queue) == b.config.BatchSize
 	default:
+		b.releaseRowUploads(row)
 		return true, false
 	}
 }
@@ -169,11 +251,11 @@ Loop:
 }
 
 // writeAndLogBatch writes the batch and logs any errors.
-func (b *BatchProcessor) writeAndLogBatch(ctx context.Context, batch []map[string]any) {
+func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
-	if err := b.writeBatch(ctx, batch); err != nil && b.config.Logger != nil {
+	if err := b.writeBatchWithContexts(uploadCtx, writeCtx, batch); err != nil && b.config.Logger != nil {
 		b.config.Logger.Printf("ERROR: Failed to write batch to BigQuery: %v", err)
 	}
 }
@@ -182,9 +264,7 @@ func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, b.config.ShutdownTimeout)
-	defer cancel()
-	b.writeAndLogBatch(ctx, batch)
+	b.writeAndLogBatch(b.uploadCtx, context.WithoutCancel(b.writeCtx), batch)
 }
 
 // flush drains the current queue and appends it. Uses TryLock to avoid blocking.
@@ -209,27 +289,74 @@ func (b *BatchProcessor) flush() {
 	}
 }
 
-// drainRemaining flushes all remaining queued batches under ShutdownTimeout.
-func (b *BatchProcessor) drainRemaining() {
-	b.flushMu.Lock()
-	defer b.flushMu.Unlock()
-	defer b.streamWriter.close()
-	if len(b.queue) == 0 {
+// flushRunEnd drains and writes queued events synchronously under a single
+// ShutdownTimeout budget, skipping if a background flush is already running.
+func (b *BatchProcessor) flushRunEnd() {
+	if !b.flushMu.TryLock() {
 		return
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), b.config.ShutdownTimeout)
+	defer b.flushMu.Unlock()
+	if b.closed.Load() {
+		return
+	}
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(b.writeCtx), b.shutdownTimeout())
 	defer cancel()
+	uploadCtx := b.uploadCtx
+	if deadline, ok := flushCtx.Deadline(); ok {
+		var cancelUploads context.CancelFunc
+		uploadCtx, cancelUploads = context.WithDeadline(b.uploadCtx, deadline)
+		defer cancelUploads()
+	}
+
+	for !b.closed.Load() && len(b.queue) > 0 && flushCtx.Err() == nil {
+		batch := b.drainQueue()
+		if len(batch) == 0 {
+			break
+		}
+		b.writeAndLogBatch(uploadCtx, flushCtx, batch)
+	}
+}
+
+// flushAndWaitForInflightBatch waits for any in-flight background flush to
+// finish persisting its already-drained batch, then drains and writes all
+// remaining queued batches under shutdownCtx.
+func (b *BatchProcessor) flushAndWaitForInflightBatch(shutdownCtx context.Context) {
+	b.flushMu.Lock()
+	defer b.flushMu.Unlock()
+
 	for len(b.queue) > 0 {
 		batch := b.drainQueue()
 		if len(batch) == 0 {
 			break
 		}
-		b.writeAndLogBatch(shutdownCtx, batch)
+		if shutdownCtx.Err() != nil {
+			for _, row := range batch {
+				b.releaseRowUploads(row)
+			}
+			continue
+		}
+		b.writeAndLogBatch(shutdownCtx, shutdownCtx, batch)
 	}
 }
 
 // writeBatch allocates a new Apache Arrow RecordBuilder from the batch and commits the writes to BigQuery.
+// Payloads queued for offloading are uploaded to Cloud Storage first, so that
+// the rows are final by the time they are serialized.
 func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any) error {
+	return b.writeBatchWithContexts(ctx, ctx, batch)
+}
+
+func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Context, batch []map[string]any) error {
+	b.resolveUploads(uploadCtx, batch)
+	if _, ok := writeCtx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		writeCtx, cancel = context.WithTimeout(writeCtx, b.shutdownTimeout())
+		defer cancel()
+	}
+	if err := writeCtx.Err(); err != nil {
+		return err
+	}
+
 	builder := array.NewRecordBuilder(b.allocator, b.arrowSchema)
 	defer builder.Release()
 
@@ -384,7 +511,7 @@ func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any)
 	record := builder.NewRecordBatch()
 	defer record.Release()
 
-	res, err := b.streamWriter.append(ctx, record)
+	res, err := b.streamWriter.append(writeCtx, record)
 	if err != nil {
 		return fmt.Errorf("streamWriter append error: %w", err)
 	}
@@ -458,8 +585,9 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 
 	var lastErr error
 	delay := s.config.RetryConfig.InitialDelay
+	maxRetries := s.config.RetryConfig.MaxRetries
 
-	for attempt := 0; attempt <= s.config.RetryConfig.MaxRetries; attempt++ {
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -594,20 +722,29 @@ func serializeRecord(record arrow.RecordBatch, logger Logger) []byte {
 	return buf.Bytes()
 }
 
+func (b *BatchProcessor) stopAcceptingRows() {
+	b.appendMu.Lock()
+	b.closed.Store(true)
+	close(b.stopCh)
+	b.appendMu.Unlock()
+	b.cancelUploads()
+}
+
+func (b *BatchProcessor) cancelWriteContext() {
+	b.cancelWrite()
+}
+
 // Close gracefully shuts down the processing loop, flushes, and stops.
 func (b *BatchProcessor) Close() {
 	b.closeOnce.Do(func() {
-		b.appendMu.Lock()
-		b.closed.Store(true)
-		close(b.stop)
-		b.appendMu.Unlock()
-
-		// Only wait on the done channel if the Start() goroutine was actually launched.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(b.writeCtx), b.shutdownTimeout())
+		defer cancel()
+		b.stopAcceptingRows()
 		if b.started.Load() {
 			<-b.done
 		}
-		b.drainRemaining()
+		b.flushAndWaitForInflightBatch(shutdownCtx)
 		b.streamWriter.close()
-		b.cancel()
+		b.cancelWriteContext()
 	})
 }
