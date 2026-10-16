@@ -16,6 +16,8 @@ package mcptoolset
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -473,7 +475,11 @@ func TestMCPToolRunContent(t *testing.T) {
 					}},
 				},
 			},
-			want: map[string]any{"output": map[string]any{"sha": "abc123"}},
+			want: map[string]any{
+				"output": map[string]any{"sha": "abc123"},
+				"content": "downloaded\n[MCP embedded resource: uri=\"repo://owner/project/file.txt\", " +
+					"mimeType=\"text/plain\"]\nfile contents",
+			},
 		},
 		{
 			name: "structured output with text only remains compatible",
@@ -714,5 +720,28 @@ func TestHasMIMECharsetParameter(t *testing.T) {
 				t.Errorf("hasMIMECharsetParameter(%q) = %v, want %v", test.mimeType, got, test.want)
 			}
 		})
+	}
+}
+
+func TestMCPToolRunStructuredContentKeepsContentBlocks(t *testing.T) {
+	tool := &mcpTool{
+		name: "test_tool",
+		mcpClient: &fixedResultMCPClient{result: &mcp.CallToolResult{
+			StructuredContent: map[string]any{"status": "ok"},
+			Content: []mcp.Content{
+				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+					URI:      "repo://owner/project/main/file.go",
+					MIMEType: "text/plain",
+					Text:     "package example\n",
+				}},
+			},
+		}},
+	}
+	got, err := tool.Run(&agent.ContextMock{}, map[string]any{})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if s := fmt.Sprint(got); !strings.Contains(s, "package example") {
+		t.Errorf("Run() result dropped the embedded resource content blocks when StructuredContent is set (got %T)", got)
 	}
 }
