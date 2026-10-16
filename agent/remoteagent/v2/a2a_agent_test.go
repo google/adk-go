@@ -1230,7 +1230,7 @@ func TestRemoteAgent_ResolvesAgentCard(t *testing.T) {
 	}
 }
 
-func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
+func TestRemoteAgent_ErrorIfNoCompatibleTransport(t *testing.T) {
 	remoteEvents := []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("will not be invoked!"))}
 	executor := newA2AEventReplay(t, remoteEvents)
 	server := startA2AServer(executor)
@@ -1255,19 +1255,15 @@ func TestRemoteAgent_ErrorEventIfNoCompatibleTransport(t *testing.T) {
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 	gotEvents, err := runAndCollect(ictx, remoteAgent)
-	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no compatible transports found") {
+		t.Fatalf("agent.Run() error = %v, want to contain %q", err, "no compatible transports found")
 	}
-
-	if len(gotEvents) != 1 {
-		t.Fatalf("len(events) = %d, want 1", len(gotEvents))
-	}
-	if !strings.Contains(gotEvents[0].ErrorMessage, "no compatible transports found") {
-		t.Fatalf("event.ErrorMessage = %s, want to contain %q", gotEvents[0].ErrorMessage, "no compatible transports found")
+	if len(gotEvents) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(gotEvents))
 	}
 }
 
-func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
+func TestRemoteAgent_ErrorOnServerError(t *testing.T) {
 	executorErr := fmt.Errorf("mockExecutor failed")
 	executor := &mockA2AExecutor{
 		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -1280,15 +1276,32 @@ func TestRemoteAgent_ErrorEventOnServerError(t *testing.T) {
 
 	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
 	gotEvents, err := runAndCollect(ictx, remoteAgent)
+	if err == nil {
+		t.Fatal("agent.Run() error = nil, want non-nil")
+	}
+	if len(gotEvents) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(gotEvents))
+	}
+}
+
+func TestRemoteAgent_ErrorIfAgentCardResolutionFails(t *testing.T) {
+	remoteAgent, err := NewA2A(A2AConfig{
+		Name: "a2a",
+		AgentCardProvider: func(ctx context.Context) (*a2a.AgentCard, error) {
+			return nil, fmt.Errorf("connection refused")
+		},
+	})
 	if err != nil {
-		t.Fatalf("agent.Run() error = %v", err)
+		t.Fatalf("remoteagent.NewA2A() error = %v", err)
 	}
 
-	if len(gotEvents) != 1 {
-		t.Fatalf("len(events) = %d, want 1", len(gotEvents))
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	gotEvents, err := runAndCollect(ictx, remoteAgent)
+	if err == nil || !strings.Contains(err.Error(), "agent card resolution failed: connection refused") {
+		t.Fatalf("agent.Run() error = %v, want agent card resolution failure", err)
 	}
-	if gotEvents[0].ErrorMessage == "" {
-		t.Fatal("event.ErrorMessage empty, want non-empty")
+	if len(gotEvents) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(gotEvents))
 	}
 }
 
