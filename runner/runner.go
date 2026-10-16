@@ -186,9 +186,10 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,
-		// Safety settings and output limits the application configured govern
-		// the summarization call too, rather than it silently falling back to
+		// The settings the summarizer keeps, such as safety settings, govern the
+		// summarization call too, rather than it silently falling back to
 		// provider defaults for the one call that sees the whole transcript.
+		// The summarizer ignores the rest of the config, output limits included.
 		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
 		// A bound on the one call the application did not ask for. Compaction
 		// runs inside the run loop, and the post-invocation pass runs from a

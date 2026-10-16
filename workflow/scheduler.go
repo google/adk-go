@@ -410,12 +410,10 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 // move the node to a different branch.
 func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string, delay time.Duration) {
 	timer := time.AfterFunc(delay, func() {
-		go func() {
-			select {
-			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
-			case <-s.parentCtx.Done():
-			}
-		}()
+		select {
+		case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
+		case <-s.parentCtx.Done():
+		}
 	})
 	s.retryTimers[n.Name()] = timer
 }
