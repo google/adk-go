@@ -17,10 +17,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
 	"maps"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -634,6 +636,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -715,7 +718,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
-				if !yield(event, err) {
+				// The model-call budget is spent for the whole invocation, so
+				// nothing that runs after this can reach a model. Ending here
+				// stops a root agent that carries on after a sub-agent error
+				// from turning the rest of the run into a stream of limit
+				// errors, as adk-python does.
+				if !yield(event, err) || errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
 					return
 				}
 				continue
@@ -825,6 +833,15 @@ type runnerLiveSession struct {
 }
 
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
+	if req.Content != nil && slices.Contains(req.Content.Parts, nil) {
+		// A nil part carries no content, so it is dropped; adk-python rejects
+		// the request instead.
+		content := *req.Content
+		content.Parts = slices.DeleteFunc(slices.Clone(content.Parts), func(p *genai.Part) bool {
+			return p == nil
+		})
+		req.Content = &content
+	}
 	err := s.sess.Send(req)
 	if err != nil {
 		return err
