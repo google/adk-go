@@ -262,12 +262,25 @@ func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event,
 		semconv.GenAIToolNameKey.String(mergeToolName),
 		semconv.GenAIToolDescriptionKey.String(mergeToolName),
 		gcpVertexAgentToolCallArgsName.String("N/A"),
-		gcpVertexAgentToolResponseName.String(safeSerialize(fnResponseEvent)),
+		gcpVertexAgentToolResponseName.String(safeSerialize(withoutConsentRequests(fnResponseEvent))),
 	}
 	if fnResponseEvent != nil {
 		attributes = append(attributes, gcpVertexAgentEventID.String(fnResponseEvent.ID))
 	}
 	span.SetAttributes(attributes...)
+}
+
+// withoutConsentRequests returns ev with Actions.RequestedCredentials cleared,
+// copying only when there is something to clear. A pending consent request
+// carries the consent URL and nonce, which name the acting user and bind the
+// credential, so they must not reach a span. ev itself is left untouched.
+func withoutConsentRequests(ev *session.Event) *session.Event {
+	if ev == nil || len(ev.Actions.RequestedCredentials) == 0 {
+		return ev
+	}
+	redacted := *ev
+	redacted.Actions.RequestedCredentials = nil
+	return &redacted
 }
 
 func safeSerialize(obj any) string {
