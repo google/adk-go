@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"time"
 	"unicode/utf8"
 
@@ -470,6 +471,11 @@ func decodeRequestBody(req *http.Request) (models.RunAgentRequest, error) {
 	if err := d.Decode(&runAgentRequest); err != nil {
 		return runAgentRequest, newStatusError(fmt.Errorf("failed to decode request: %w", err), http.StatusBadRequest)
 	}
+	// A null part carries no content, so it is dropped; adk-python rejects the
+	// request instead.
+	runAgentRequest.NewMessage.Parts = slices.DeleteFunc(runAgentRequest.NewMessage.Parts, func(p *genai.Part) bool {
+		return p == nil
+	})
 	return runAgentRequest, nil
 }
 
