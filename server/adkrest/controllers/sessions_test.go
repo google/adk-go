@@ -220,6 +220,26 @@ func TestCreateSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			name:           "session id from request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "bodySession",
+				State:     map[string]any{"foo": "bar"},
+			},
+			wantSession: models.Session{
+				ID:      "bodySession",
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{"foo": "bar"},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:           "user id is missing",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID: fakes.SessionKey{

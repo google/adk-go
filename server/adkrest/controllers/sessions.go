@@ -84,10 +84,14 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 }
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {
+	id := sessionID.ID
+	if id == "" {
+		id = createSessionRequest.SessionID
+	}
 	session, err := c.service.Create(ctx, &session.CreateRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
-		SessionID: sessionID.ID,
+		SessionID: id,
 		State:     createSessionRequest.State,
 	})
 	if err != nil {
