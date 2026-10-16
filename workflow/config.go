@@ -63,7 +63,10 @@ type NodeConfig struct {
 	// &true re-runs the interrupted node from scratch on resume
 	// (re-entry mode), &false routes the resume payload to the
 	// node's successor as input (handoff mode), and nil defers to
-	// the engine. The engine currently treats nil as handoff.
+	// the engine. The engine treats nil as handoff for ordinary
+	// nodes. AgentNode defaults nil to true only for LlmAgent and
+	// task-mode remote A2A agents, whose runtimes can finish the call
+	// that interrupted them; other wrapped agents keep handoff.
 	RerunOnResume *bool
 
 	// WaitForOutput, when true, parks the parent (ErrNodeInterrupted) to

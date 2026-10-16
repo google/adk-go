@@ -15,13 +15,13 @@
 package workflow
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -34,12 +34,13 @@ type nodeScanState struct {
 	seen       map[string]struct{}
 	// resolved maps an interrupt ID to the (last) user response.
 	resolved map[string]any
-	// resolvedCount maps an interrupt ID to how many user
-	// FunctionResponse events in history resolved it. 1 means the
-	// response arrived this turn for the first time; >1 means a
-	// duplicate resume replayed an already-consumed response. Lets
-	// Resume tell a genuine first resume from an idempotent no-op.
-	resolvedCount map[string]int
+	// settled marks responses the node has already consumed. A re-entry
+	// response is settled by a successful resume checkpoint; a handoff response
+	// is settled by a non-partial event from one of its direct successors or by
+	// a checkpoint for a terminal asker with no successors. A resume that failed
+	// before reaching either outcome leaves the response unsettled and therefore
+	// retryable with the same payload.
+	settled map[string]bool
 	// schemas maps an interrupt ID to its declared response schema,
 	// re-extracted from the pause FunctionCall args.
 	schemas map[string]*jsonschema.Schema
@@ -86,12 +87,13 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 
 	// Stage 1: scan history into a per-node view of the pause
 	// (interrupts raised, responses that resolved them, schemas).
-	scans := scanHistory(events, nodesByName, invocationID)
+	scans := w.scanHistory(events, nodesByName, invocationID)
 
 	// Stage 2: gather the inputs inferNodeState needs to rebuild a
 	// re-entry node's input: every node's cached output, the set of
 	// nodes that ran, and the workflow's seed input.
 	nodeOutputs, completed := collectNodeOutputs(events, nodesByName, invocationID)
+	addHandoffResumeOutputs(scans, nodesByName, nodeOutputs)
 	workflowInput := firstUserInput(events, invocationID)
 
 	// Stage 3: turn each interrupted node's scan into a NodeState.
@@ -121,13 +123,17 @@ func (w *Workflow) ReconstructRunState(sess session.Session, invocationID string
 // each interrupt's declared response schema. Only nodes with
 // interrupt history are returned. invocationID, when non-empty,
 // restricts the scan to that invocation's events.
-func scanHistory(events session.Events, nodesByName map[string]Node, invocationID string) map[string]*nodeScanState {
+func (w *Workflow) scanHistory(events session.Events, nodesByName map[string]Node, invocationID string) map[string]*nodeScanState {
 	scans := map[string]*nodeScanState{}
 	interruptOwner := map[string]string{} // interrupt ID -> node name
 	scanFor := func(name string) *nodeScanState {
 		s := scans[name]
 		if s == nil {
-			s = &nodeScanState{resolved: map[string]any{}, resolvedCount: map[string]int{}, schemas: map[string]*jsonschema.Schema{}}
+			s = &nodeScanState{
+				resolved: map[string]any{},
+				settled:  map[string]bool{},
+				schemas:  map[string]*jsonschema.Schema{},
+			}
 			scans[name] = s
 		}
 		return s
@@ -158,8 +164,7 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 					continue
 				}
 				sf := scanFor(owner)
-				sf.resolved[fr.ID] = unwrapResponse(fr.Response)
-				sf.resolvedCount[fr.ID]++
+				sf.resolved[fr.ID] = utils.UnwrapResponse(fr.Response)
 			}
 			continue
 		}
@@ -172,6 +177,34 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 			continue
 		}
 		s := scanFor(owner)
+		// A re-entry response is consumed only after the resumed activation
+		// completes successfully. The scheduler persists that outcome as a
+		// checkpoint event, so a progress event followed by an error does not
+		// consume the response.
+		if ev.NodeInfo != nil && len(ev.NodeInfo.ResumeConsumedIDs) > 0 {
+			for _, id := range ev.NodeInfo.ResumeConsumedIDs {
+				if id != "" {
+					s.settled[id] = true
+				}
+			}
+			continue
+		}
+		// A handoff node owns no later event. Its response belongs to that node
+		// and its direct successors, so a non-partial event from a successor
+		// consumes only that predecessor's reply -- not another branch's.
+		if !ev.LLMResponse.Partial {
+			if ownerNode := nodesByName[owner]; ownerNode != nil {
+				for _, edge := range w.graph.predecessorsOf(ownerNode) {
+					pred := edge.From
+					if pred == nil || rerunsOnResume(pred) {
+						continue
+					}
+					if ps := scans[pred.Name()]; ps != nil {
+						settleResolved(ps)
+					}
+				}
+			}
+		}
 		if ev.Output != nil {
 			s.branch = ev.Branch
 		}
@@ -190,6 +223,18 @@ func scanHistory(events session.Events, nodesByName map[string]Node, invocationI
 		}
 	}
 	return scans
+}
+
+// settleResolved marks every response currently observed for this node as
+// consumed. Later duplicate user replies keep the bit set; an unresolved or
+// not-yet-successful response keeps it clear.
+func settleResolved(scan *nodeScanState) {
+	if scan == nil {
+		return
+	}
+	for id := range scan.resolved {
+		scan.settled[id] = true
+	}
 }
 
 // collectNodeOutputs walks history once and returns each graph node's
@@ -240,6 +285,33 @@ func collectNodeOutputs(events session.Events, nodesByName map[string]Node, invo
 		}
 	}
 	return outputs, completed
+}
+
+// addHandoffResumeOutputs reconstructs the output a handoff asker produced from
+// the user response itself. That response is deliberately not emitted as a node
+// event, so without this a successor resumed after the handoff sees a nil input.
+func addHandoffResumeOutputs(scans map[string]*nodeScanState, nodesByName map[string]Node, outputs map[string]any) {
+	for name, scan := range scans {
+		node := nodesByName[name]
+		if node == nil || rerunsOnResume(node) || len(scan.resolved) == 0 {
+			continue
+		}
+		responses := make(map[string]any, len(scan.resolved))
+		for id, resp := range scan.resolved {
+			if !scan.settled[id] {
+				responses = nil
+				break
+			}
+			responses[id] = resp
+		}
+		if len(responses) == 0 {
+			continue
+		}
+		if _, ok := outputs[name]; ok {
+			continue
+		}
+		outputs[name] = resumeOutput(responses)
+	}
 }
 
 // buildRunState maps each interrupted node's scan to a NodeState via
@@ -327,6 +399,12 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 	}
 
 	ns := &NodeState{Branch: scan.branch, interruptSchemas: scan.schemas}
+	for id := range resumed {
+		if !scan.settled[id] {
+			ns.hasUnconsumedResponse = true
+			break
+		}
+	}
 
 	switch {
 	case len(unresolved) > 0 && reenter && len(resumed) > 0:
@@ -356,15 +434,6 @@ func (w *Workflow) inferNodeState(node Node, scan *nodeScanState, nodeOutputs ma
 		ns.Status = NodeCompleted
 		ns.Output = resumeOutput(resumed)
 		ns.ResumedInputs = resumed
-		// A response seen for the first time this turn (count == 1)
-		// marks a genuine first resume; a duplicate turn replays an
-		// already-counted response (>= 2) and must stay a no-op.
-		for id := range resumed {
-			if scan.resolvedCount[id] == 1 {
-				ns.answeredThisTurn = true
-				break
-			}
-		}
 	}
 	return ns, nil
 }
@@ -499,31 +568,4 @@ func schemaFromEvent(ev *session.Event, id string) *jsonschema.Schema {
 		}
 	}
 	return nil
-}
-
-// unwrapResponse extracts the original value from a FunctionResponse
-// payload. A sole single-key wrapper — {"result": v} (adk-python),
-// {"response": v} or {"payload": v} (adk-go) — is unwrapped, with
-// string values JSON-parsed when possible; anything else passes
-// through. Mirrors adk-python _unwrap_response, extended with the
-// adk-go keys for cross-runtime sessions.
-func unwrapResponse(data map[string]any) any {
-	if len(data) != 1 {
-		return data
-	}
-	for _, key := range []string{"result", "response", "payload"} {
-		v, ok := data[key]
-		if !ok {
-			continue
-		}
-		if s, isStr := v.(string); isStr {
-			var parsed any
-			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
-				return parsed
-			}
-			return s
-		}
-		return v
-	}
-	return data
 }

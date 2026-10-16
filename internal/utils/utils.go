@@ -16,6 +16,7 @@ package utils
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"google.golang.org/genai"
@@ -101,6 +102,37 @@ func FunctionResponses(c *genai.Content) (ret []*genai.FunctionResponse) {
 		}
 	}
 	return ret
+}
+
+// UnwrapResponse extracts the value carried by a FunctionResponse payload.
+//
+// A sole single-key wrapper — {"result": v} (adk-python and the web
+// frontend), {"response": v}, or {"payload": v} — is unwrapped, with string
+// values JSON-parsed when possible. Any other map, including a multi-key tool
+// confirmation such as {"confirmed": true, "payload": v}, is returned whole so
+// callers do not silently drop the decision flag.
+func UnwrapResponse(data map[string]any) any {
+	if data == nil {
+		return nil
+	}
+	if len(data) != 1 {
+		return data
+	}
+	for _, key := range []string{"result", "response", "payload"} {
+		v, ok := data[key]
+		if !ok {
+			continue
+		}
+		if s, isStr := v.(string); isStr {
+			var parsed any
+			if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+				return parsed
+			}
+			return s
+		}
+		return v
+	}
+	return data
 }
 
 // TextParts extracts all Text parts from the content.

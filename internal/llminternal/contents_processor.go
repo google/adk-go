@@ -755,6 +755,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
+	resuming := len(utils.FunctionResponses(userContent)) > 0
 	// Find the latest event that starts the current turn and process from there
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -769,6 +770,14 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		// invisible to the agent, so skip it as a pivot (matching
 		// adk-python's _should_include_event_in_context gate here).
 		if event.IsolationScope != isolationScope {
+			continue
+		}
+		if resuming && shouldExcludeEvent(event) {
+			continue
+		}
+		// Function responses and their surrounding tool bookkeeping continue
+		// an exchange; none of them starts a new turn.
+		if resuming && len(utils.FunctionResponses(utils.Content(event))) > 0 {
 			continue
 		}
 		// An event discarded by foreign conversion cannot start a visible
