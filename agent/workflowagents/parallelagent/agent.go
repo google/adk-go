@@ -79,7 +79,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
+	subAgentNames := make(map[string]bool, len(ctx.Agent().SubAgents()))
 	for _, sa := range ctx.Agent().SubAgents() {
+		subAgentNames[sa.Name()] = true
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
@@ -129,6 +131,14 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 
 		for res := range resultsChan {
 			shouldContinue := yield(res.event, res.err)
+
+			// An escalation from a direct sub-agent ends this agent, as in
+			// adk-python (_asks_this_agent_to_exit). Escalations from deeper agents
+			// are re-yielded by their own parent workflow and are not for this one.
+			// The deferred cleanup cancels the remaining branches.
+			if shouldContinue && res.event != nil && res.event.Actions.Escalate && subAgentNames[res.event.Author] {
+				break
+			}
 
 			// Signal sub-agent that event processing (including session append) is complete
 			if res.ackChan != nil {
