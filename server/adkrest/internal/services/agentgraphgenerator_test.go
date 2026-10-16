@@ -15,10 +15,16 @@
 package services
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"iter"
+	"log"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/awalterschulze/gographviz"
 	"github.com/google/go-cmp/cmp"
@@ -907,19 +913,432 @@ func TestAgentGraphWithToolsetAndSubAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	graphStr, err := GetAgentGraph(context.Background(), root, nil)
+	dot, err := GetAgentGraph(context.Background(), root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := parseGraph(t, dot)
+	for _, to := range []string{"direct_tool", "toolset_tool", "helper"} {
+		if lookupEdge(t, g, "root", to) == nil {
+			t.Errorf("missing edge root -> %s\n%s", to, dot)
+		}
+	}
+}
+
+// failingToolset fails to list its tools the way a toolset does outside an
+// invocation, for example an MCP server that is down or per-user auth with no
+// user. It returns a tool alongside the error, which must not be drawn: a
+// result that comes with an error is not used.
+type failingToolset struct{}
+
+func (failingToolset) Name() string { return "failing" }
+
+func (failingToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	return []tool.Tool{&mockTool{name: "partial_tool"}}, errors.New("cannot list tools")
+}
+
+// panickingToolset panics the way a toolset does when it reads a part of the
+// context that only a run has, such as the session.
+type panickingToolset struct{}
+
+func (panickingToolset) Name() string { return "panicking" }
+
+func (panickingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	panic("no session outside a run")
+}
+
+// TestAgentGraphSkipsToolsetsThatCannotListTools pins that a toolset that
+// fails or panics is left out and the rest of the graph, including toolsets
+// after it, still renders. adk-python logs and skips such a toolset too.
+func TestAgentGraphSkipsToolsetsThatCannotListTools(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		toolset tool.Toolset
+	}{
+		{"error", failingToolset{}},
+		{"panic", panickingToolset{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			helper := newTestAgent(t, "helper", "", agentinternal.TypeLLMAgent, nil, nil)
+			root, err := llmagent.New(llmagent.Config{
+				Name:      "root",
+				Model:     &dummyLLM{},
+				Tools:     []tool.Tool{newTestTool("direct_tool")},
+				Toolsets:  []tool.Toolset{tt.toolset, staticToolset{}},
+				SubAgents: []agent.Agent{helper},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			dot, err := GetAgentGraph(context.Background(), root, nil)
+			if err != nil {
+				t.Fatalf("GetAgentGraph: %v", err)
+			}
+			g := parseGraph(t, dot)
+			for _, to := range []string{"direct_tool", "toolset_tool", "helper"} {
+				if lookupEdge(t, g, "root", to) == nil {
+					t.Errorf("missing edge root -> %s\n%s", to, dot)
+				}
+			}
+			if g.IsNode("partial_tool") {
+				t.Errorf("drew a tool from a toolset that returned an error\n%s", dot)
+			}
+		})
+	}
+}
+
+// TestAgentGraphToolsetSeesItsAgent pins that toolset resolution is given the
+// agent, so a filter that picks tools per agent works in the graph as it does
+// in a run, instead of panicking and dropping the toolset.
+func TestAgentGraphToolsetSeesItsAgent(t *testing.T) {
+	onlyRoot := tool.FilterToolset(staticToolset{}, func(ctx agent.ReadonlyContext, _ tool.Tool) bool {
+		return ctx.AgentName() == "root"
+	})
+	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: &dummyLLM{}, Toolsets: []tool.Toolset{onlyRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     &dummyLLM{},
+		Toolsets:  []tool.Toolset{onlyRoot},
+		SubAgents: []agent.Agent{helper},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Verify expected sub-agent and toolset tools are in graph
-	if !strings.Contains(graphStr, "root->direct_tool") {
-		t.Errorf("Expected graph to contain edge root->direct_tool")
+	dot, err := GetAgentGraph(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
 	}
-	if !strings.Contains(graphStr, "root->toolset_tool") {
-		t.Errorf("Expected graph to contain edge root->toolset_tool")
+	g := parseGraph(t, dot)
+	if lookupEdge(t, g, "root", "toolset_tool") == nil {
+		t.Errorf("missing edge root -> toolset_tool\n%s", dot)
 	}
-	if !strings.Contains(graphStr, "root->helper") {
-		t.Errorf("Expected graph to contain edge root->helper")
+	if lookupEdge(t, g, "helper", "toolset_tool") != nil {
+		t.Errorf("edge helper -> toolset_tool drawn, but the filter keeps the tool for root only\n%s", dot)
+	}
+}
+
+// captureDefaultLog sends slog's default logger to a JSON buffer for the rest
+// of the test.
+func captureDefaultLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() {
+		// SetDefault also redirects the log package; put both back.
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+	return &buf
+}
+
+// TestAgentGraphLogsSkippedToolsets pins that a skipped toolset leaves a trace,
+// so a developer can see why its tools are missing, and that the trace names
+// types only: an error or panic value can carry a server URL or credentials.
+func TestAgentGraphLogsSkippedToolsets(t *testing.T) {
+	logs := captureDefaultLog(t)
+	root, err := llmagent.New(llmagent.Config{
+		Name:     "root",
+		Model:    &dummyLLM{},
+		Toolsets: []tool.Toolset{failingToolset{}, panickingToolset{}, nil, staticToolset{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dot, err := GetAgentGraph(context.Background(), root, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	if lookupEdge(t, parseGraph(t, dot), "root", "toolset_tool") == nil {
+		t.Errorf("missing edge root -> toolset_tool\n%s", dot)
+	}
+
+	var got []map[string]any
+	dec := json.NewDecoder(logs)
+	for dec.More() {
+		var rec map[string]any
+		if err := dec.Decode(&rec); err != nil {
+			t.Fatalf("decode log record: %v", err)
+		}
+		delete(rec, "time")
+		got = append(got, rec)
+	}
+	const msg = "agent graph: skipping a toolset that could not list its tools"
+	want := []map[string]any{
+		{"level": "WARN", "msg": msg, "agent": "root", "toolset": "failing", "toolset_type": "services.failingToolset", "kind": "error", "error_type": "*errors.errorString"},
+		{"level": "WARN", "msg": msg, "agent": "root", "toolset": "panicking", "toolset_type": "services.panickingToolset", "kind": "panic", "error_type": "string"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("log records mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// blockingToolset never lists its tools on its own, like an MCP server that
+// accepts the connection and never answers. It gives up when its context does.
+type blockingToolset struct{}
+
+func (blockingToolset) Name() string { return "blocking" }
+
+func (blockingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestAgentGraphBoundsToolsetResolution pins that an unresponsive toolset
+// costs the graph at most the resolution budget. Without one the graph waits
+// on it forever, where it used to render without the toolset's tools.
+func TestAgentGraphBoundsToolsetResolution(t *testing.T) {
+	prev := toolsetResolveBudget
+	toolsetResolveBudget = 50 * time.Millisecond
+	t.Cleanup(func() { toolsetResolveBudget = prev })
+
+	helper := newTestAgent(t, "helper", "", agentinternal.TypeLLMAgent, nil, nil)
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     &dummyLLM{},
+		Tools:     []tool.Tool{newTestTool("direct_tool")},
+		Toolsets:  []tool.Toolset{blockingToolset{}, staticToolset{}},
+		SubAgents: []agent.Agent{helper},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		dot string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		dot, err := GetAgentGraph(context.Background(), root, nil)
+		done <- result{dot, err}
+	}()
+	var res result
+	select {
+	case res = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetAgentGraph still waiting on an unresponsive toolset after 10s")
+	}
+	if res.err != nil {
+		t.Fatalf("GetAgentGraph: %v", res.err)
+	}
+	g := parseGraph(t, res.dot)
+	for _, to := range []string{"direct_tool", "toolset_tool", "helper"} {
+		if lookupEdge(t, g, "root", to) == nil {
+			t.Errorf("missing edge root -> %s\n%s", to, res.dot)
+		}
+	}
+}
+
+// TestAgentGraphLLMAgentWithWorkflowSubAgent pins the edge from an llmagent
+// into a workflow sub-agent. The workflow is drawn as a cluster, not a node,
+// so the edge goes to its first member with lhead set, as adk-python does.
+func TestAgentGraphLLMAgentWithWorkflowSubAgent(t *testing.T) {
+	for _, agentType := range []agentinternal.Type{
+		agentinternal.TypeSequentialAgent,
+		agentinternal.TypeLoopAgent,
+		agentinternal.TypeParallelAgent,
+	} {
+		t.Run(string(agentType), func(t *testing.T) {
+			pipeline := newTestAgent(t, "pipeline", "", agentType, []agent.Agent{
+				newTestAgent(t, "a", "", agentinternal.TypeLLMAgent, nil, nil),
+				newTestAgent(t, "b", "", agentinternal.TypeLLMAgent, nil, nil),
+			}, nil)
+			root := newTestAgent(t, "root", "", agentinternal.TypeLLMAgent, []agent.Agent{pipeline}, nil)
+
+			dot, err := GetAgentGraph(context.Background(), root, nil)
+			if err != nil {
+				t.Fatalf("GetAgentGraph: %v", err)
+			}
+			g := parseGraph(t, dot)
+			if g.IsNode("pipeline") || g.IsNode("cluster_pipeline") {
+				t.Fatalf("workflow agent was drawn as a node\n%s", dot)
+			}
+			for _, name := range []string{"a", "b"} {
+				if parents := g.Relations.ChildToParents[name]; !parents["cluster_pipeline"] {
+					t.Errorf("node %s parents = %v, want cluster_pipeline\n%s", name, parents, dot)
+				}
+			}
+			edge := lookupEdge(t, g, "root", "a")
+			if edge == nil || edge.Attrs["lhead"] != "cluster_pipeline" {
+				t.Fatalf("edge = %v, want root -> a with lhead cluster_pipeline\n%s", edge, dot)
+			}
+			if g.Attrs["compound"] != "true" {
+				t.Errorf("compound = %q, want true so Graphviz clips the edge at the cluster\n%s", g.Attrs["compound"], dot)
+			}
+		})
+	}
+}
+
+// TestAgentGraphLLMAgentInsideWorkflow pins the edges of an llmagent nested in
+// a workflow agent. Inside a cluster, graph is only the cluster's name holder,
+// so an edge drawn there is never serialized.
+func TestAgentGraphLLMAgentInsideWorkflow(t *testing.T) {
+	helper := newTestAgent(t, "helper", "", agentinternal.TypeLLMAgent, nil, nil)
+	worker, err := llmagent.New(llmagent.Config{
+		Name:      "worker",
+		Model:     &dummyLLM{},
+		Tools:     []tool.Tool{newTestTool("direct_tool")},
+		Toolsets:  []tool.Toolset{staticToolset{}},
+		SubAgents: []agent.Agent{helper},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := newTestAgent(t, "last", "", agentinternal.TypeLLMAgent, nil, nil)
+	pipeline := newTestAgent(t, "pipeline", "", agentinternal.TypeSequentialAgent, []agent.Agent{worker, last}, nil)
+
+	dot, err := GetAgentGraph(context.Background(), pipeline, nil)
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+	for _, to := range []string{"direct_tool", "toolset_tool", "helper", "last"} {
+		if lookupEdge(t, g, "worker", to) == nil {
+			t.Errorf("missing edge worker -> %s\n%s", to, dot)
+		}
+	}
+	for _, name := range []string{"worker", "direct_tool", "toolset_tool", "helper", "last"} {
+		if parents := g.Relations.ChildToParents[name]; !g.IsNode(name) || !parents["cluster_pipeline"] {
+			t.Errorf("node %s parents = %v, want cluster_pipeline\n%s", name, parents, dot)
+		}
+	}
+}
+
+func TestDotID(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want string
+	}{
+		// Plain identifiers stay bare, so graphs that rendered before are unchanged.
+		{"root", "root"},
+		{"_tool_2", "_tool_2"},
+		{"SubAgent1", "SubAgent1"},
+		{"nodes", "nodes"},
+		// Everything else is quoted.
+		{"", `""`},
+		{"resolve-library-id", `"resolve-library-id"`},
+		{"1st", `"1st"`},
+		{"a.b", `"a.b"`},
+		{"ns:tool", `"ns:tool"`},
+		{"two words", `"two words"`},
+		{"naïve", `"naïve"`},
+		{"node", `"node"`},
+		{"EDGE", `"EDGE"`},
+		{"Subgraph", `"Subgraph"`},
+		{`say"hi`, `"say\"hi"`},
+		{`trailing\`, `"trailing\\"`},
+		{`x\"y`, `"x\\\"y"`},
+	} {
+		if got := dotID(tt.name); got != tt.want {
+			t.Errorf("dotID(%q) = %s, want %s", tt.name, got, tt.want)
+		}
+	}
+}
+
+// namedToolset returns tools with the given names, the way an MCP server
+// does: the server picks the names, and nothing limits them to DOT identifiers.
+type namedToolset struct {
+	name  string
+	tools []string
+}
+
+func (s namedToolset) Name() string { return s.name }
+
+func (s namedToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	var tools []tool.Tool
+	for _, name := range s.tools {
+		tools = append(tools, &mockTool{name: name})
+	}
+	return tools, nil
+}
+
+// TestAgentGraphQuotesNamesThatAreNotDOTIdentifiers pins that every ID the
+// generator emits parses, whatever an agent or tool is called. Graphviz rejects
+// a bare resolve-library-id, and reads a bare node as the node-defaults
+// statement and ns:tool as a node with a port, so these must all be quoted.
+func TestAgentGraphQuotesNamesThatAreNotDOTIdentifiers(t *testing.T) {
+	toolsetTools := []string{
+		"resolve-library-id", // Context7's MCP server
+		`say"hi`,
+		`trailing\`,
+		"1st",
+		"a.b",
+		"ns:tool",
+		"node",
+		"Graph",
+		"naïve",
+	}
+	steps := newTestAgent(t, "my-pipeline", "", agentinternal.TypeSequentialAgent, []agent.Agent{
+		newTestAgent(t, "step-one", "", agentinternal.TypeLLMAgent, nil, nil),
+		newTestAgent(t, "step_two", "", agentinternal.TypeLLMAgent, nil, nil),
+	}, nil)
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root-agent",
+		Model:     &dummyLLM{},
+		Tools:     []tool.Tool{&mockTool{name: "direct-tool"}},
+		Toolsets:  []tool.Toolset{namedToolset{name: "mcp", tools: toolsetTools}},
+		SubAgents: []agent.Agent{steps},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dot, err := GetAgentGraph(context.Background(), root, [][]string{{"resolve-library-id", "root-agent"}})
+	if err != nil {
+		t.Fatalf("GetAgentGraph: %v", err)
+	}
+	g := parseGraph(t, dot)
+
+	// Quoted IDs keep their quotes and escapes after parsing.
+	wantTools := []string{
+		`"direct-tool"`,
+		`"resolve-library-id"`,
+		`"say\"hi"`,
+		`"trailing\\"`,
+		`"1st"`,
+		`"a.b"`,
+		`"ns:tool"`,
+		`"node"`,
+		`"Graph"`,
+		`"naïve"`,
+	}
+	for _, id := range wantTools {
+		if !g.IsNode(id) {
+			t.Errorf("missing tool node %s\n%s", id, dot)
+		}
+		if lookupEdge(t, g, `"root-agent"`, id) == nil {
+			t.Errorf("missing edge root-agent -> %s\n%s", id, dot)
+		}
+	}
+	if label := g.Nodes.Lookup[`"say\"hi"`]; label == nil || label.Attrs["label"] != `"🔧 say\"hi"` {
+		t.Errorf("say\"hi node = %v, want its name in the label\n%s", label, dot)
+	}
+	if !g.IsSubGraph(`"cluster_my-pipeline"`) {
+		t.Fatalf("missing cluster for my-pipeline\n%s", dot)
+	}
+	for _, id := range []string{`"step-one"`, "step_two"} {
+		if parents := g.Relations.ChildToParents[id]; !parents[`"cluster_my-pipeline"`] {
+			t.Errorf("node %s parents = %v, want cluster_my-pipeline\n%s", id, parents, dot)
+		}
+	}
+	into := lookupEdge(t, g, `"root-agent"`, `"step-one"`)
+	if into == nil || into.Attrs["lhead"] != `"cluster_my-pipeline"` {
+		t.Errorf("edge into the pipeline = %v, want root-agent -> step-one with lhead cluster_my-pipeline\n%s", into, dot)
+	}
+	if lookupEdge(t, g, `"step-one"`, "step_two") == nil {
+		t.Errorf("missing edge step-one -> step_two\n%s", dot)
+	}
+	// Highlighting matches the raw names an event carries, not the quoted IDs.
+	hl := lookupEdge(t, g, `"root-agent"`, `"resolve-library-id"`)
+	if hl == nil || hl.Attrs["color"] != LightGreen || hl.Attrs["dir"] != "back" {
+		t.Errorf("highlighted edge = %v, want color %s and dir back\n%s", hl, LightGreen, dot)
 	}
 }
