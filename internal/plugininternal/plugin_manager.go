@@ -119,6 +119,15 @@ func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) {
 	}
 }
 
+// RunOnRunErrorCallback notifies every plugin of a runner error.
+func (pm *PluginManager) RunOnRunErrorCallback(cctx agent.InvocationContext, err error) {
+	for _, plugin := range pm.plugins {
+		if callback := plugin.OnRunErrorCallback(); callback != nil {
+			callback(cctx, err)
+		}
+	}
+}
+
 // RunOnEventCallback runs the OnEventCallback for all plugins.
 func (pm *PluginManager) RunOnEventCallback(cctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
 	for _, plugin := range pm.plugins {
