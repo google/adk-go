@@ -17,9 +17,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
+	"maps"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -286,7 +289,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	if compactionctx.FromContext(ctx).AlreadyCompacted() {
 		return nil
 	}
-	// Compaction is an optimisation, so a cancelled or expired run should not
+	// Compaction is an optimisation, so a canceled or expired run should not
 	// spend a model call on it, nor write a summary the caller never waited
 	// for.
 	if ctx.Err() != nil {
@@ -332,7 +335,7 @@ func (r *Runner) compactAfterInvocation(ctx context.Context, storedSession sessi
 	// is named by nothing, so prompt assembly drops it. This does not need a
 	// hostile plugin or even a concurrent invocation to reach: an event carries
 	// the timestamp it was created at rather than the one it was stored at, so
-	// parallel tool responses and sub-agent events funnelled through a channel
+	// parallel tool responses and sub-agent events funneled through a channel
 	// are routinely created before the range ends and appended after it.
 	// The identities present when the window was chosen, captured once. The
 	// race guard compares against the snapshot session; the repair after the
@@ -633,6 +636,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -706,25 +710,20 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// This does NOT emit any event.
 			defer pluginManager.RunAfterRunCallback(ctx)
 
-			earlyExitResult, err := pluginManager.RunBeforeRunCallback(ctx)
-			if earlyExitResult != nil || err != nil {
-				earlyExitEvent := session.NewEvent(ctx, ctx.InvocationID())
-				earlyExitEvent.Author = "user"
-				earlyExitEvent.LLMResponse = model.LLMResponse{
-					Content: msg,
-				}
-				if err := r.sessionService.AppendEvent(ctx, storedSession, earlyExitEvent); err != nil {
-					yield(nil, fmt.Errorf("failed to add event to session: %w", err))
-					return
-				}
-				yield(earlyExitEvent, err)
+			if event, err := r.runBeforeRunCallback(ctx); event != nil || err != nil {
+				yield(event, err)
 				return
 			}
 		}
 
 		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
-				if !yield(event, err) {
+				// The model-call budget is spent for the whole invocation, so
+				// nothing that runs after this can reach a model. Ending here
+				// stops a root agent that carries on after a sub-agent error
+				// from turning the rest of the run into a stream of limit
+				// errors, as adk-python does.
+				if !yield(event, err) || errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
 					return
 				}
 				continue
@@ -787,6 +786,40 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	}
 }
 
+// runBeforeRunCallback processes and persists a plugin's replacement reply.
+// A nil event and nil error mean agent execution should continue.
+func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Event, error) {
+	content, err := r.pluginManager.RunBeforeRunCallback(ctx)
+	if err != nil || content == nil {
+		return nil, err
+	}
+
+	event := session.NewEvent(ctx, ctx.InvocationID())
+	// Match RunLive's attribution so later turns can resolve the agent from history.
+	event.Author = ctx.Agent().Name()
+	event.Content = content
+
+	record := event.Actions.Compaction
+	modifiedEvent, err := r.pluginManager.RunOnEventCallback(ctx, event)
+	if err != nil {
+		return nil, err
+	}
+	// Stamp after OnEvent so a replacement keeps its BeforeRun origin, without
+	// changing plugin-owned metadata.
+	event = fromPlugin(event, modifiedEvent, record)
+	reply := *event
+	reply.CustomMetadata = make(map[string]any, len(event.CustomMetadata)+1)
+	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
+	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
+	event = &reply
+	if !event.Partial {
+		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
+			return nil, fmt.Errorf("failed to add event to session: %w", err)
+		}
+	}
+	return event, nil
+}
+
 type liveAgent interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
@@ -800,6 +833,15 @@ type runnerLiveSession struct {
 }
 
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
+	if req.Content != nil && slices.Contains(req.Content.Parts, nil) {
+		// A nil part carries no content, so it is dropped; adk-python rejects
+		// the request instead.
+		content := *req.Content
+		content.Parts = slices.DeleteFunc(slices.Clone(content.Parts), func(p *genai.Part) bool {
+			return p == nil
+		})
+		req.Content = &content
+	}
 	err := s.sess.Send(req)
 	if err != nil {
 		return err

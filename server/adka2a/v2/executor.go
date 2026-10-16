@@ -267,7 +267,7 @@ func (e *Executor) Cleanup(ctx context.Context, execCtx *a2asrv.ExecutorContext,
 
 	remoteSubagents := findRemoteSubagents(cfg.Agent)
 
-	// If task was in input-required and got successfully cancelled - run the cleanup logic
+	// If task was in input-required and got successfully canceled - run the cleanup logic
 	if execCtx.StoredTask != nil && execCtx.StoredTask.Status.State == a2a.TaskStateInputRequired {
 		if task, ok := result.(*a2a.Task); ok && task.Status.State == a2a.TaskStateCanceled && execCtx.Message == nil {
 			if err := e.cancelChildInputRequiredTasks(ctx, execCtx, execCtx.StoredTask.Status, cfg, remoteSubagents); err != nil {

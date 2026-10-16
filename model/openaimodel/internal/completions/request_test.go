@@ -17,6 +17,7 @@ package completions
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -399,7 +400,7 @@ func TestBuildParams_CallOutsideModelTurnRejected(t *testing.T) {
 }
 
 // TestApplyGenerationConfig_EndpointOnlyFields covers the three settings
-// Chat Completions honours that the Responses path rejects outright.
+// Chat Completions honors that the Responses path rejects outright.
 func TestApplyGenerationConfig_EndpointOnlyFields(t *testing.T) {
 	seed := int32(42)
 	freq := float32(0.5)
@@ -462,6 +463,23 @@ func TestApplyGenerationConfig_TranslatedFields(t *testing.T) {
 	}
 	if wire["service_tier"] != "flex" {
 		t.Errorf("service_tier = %v, want flex", wire["service_tier"])
+	}
+}
+
+// AutomaticContinuation has no effect on Chat Completions, which never pauses
+// a generation with CONTINUATION, so a config shared with a Gemini model that
+// sets it must be accepted.
+func TestApplyGenerationConfig_AcceptsAutomaticContinuation(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprint(on), func(t *testing.T) {
+			_, err := buildParams("m", &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config:   &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)},
+			})
+			if err != nil {
+				t.Errorf("buildParams() error = %v, want nil", err)
+			}
+		})
 	}
 }
 

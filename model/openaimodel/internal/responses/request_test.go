@@ -111,7 +111,7 @@ func TestBuildParams_MultiTurnAssistantUsesOutputText(t *testing.T) {
 	if got, want := out.Content[0].OfOutputText.Text, "hello there"; got != want {
 		t.Errorf("assistant text = %q, want %q", got, want)
 	}
-	// Verify the wire format OpenAI actually receives. Asserting the marshalled
+	// Verify the wire format OpenAI actually receives. Asserting the marshaled
 	// JSON rather than the structs is what makes these checks meaningful: Type
 	// elides its zero value to "output_text", ID is dropped when empty, and
 	// Status is `omitzero`, so none of the three is observable on the struct.
@@ -297,7 +297,7 @@ func TestBuildParams_JSONSchemaPropertylessObjectOnTheWire(t *testing.T) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatalf("json.Unmarshal() err = %v", err)
 	}
-	// Failures report the schema alone, never the marshalled request, which
+	// Failures report the schema alone, never the marshaled request, which
 	// carries the prompt.
 	sent := payload.Text.Format.Schema
 	props, _ := sent["properties"].(map[string]any)
@@ -1293,6 +1293,19 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
+// AutomaticContinuation has no effect on these APIs, which never pause a
+// generation with CONTINUATION, so a config shared with a Gemini model that
+// sets it must be accepted.
+func TestApplyGenerationConfigAcceptsAutomaticContinuation(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprint(on), func(t *testing.T) {
+			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)}); err != nil {
+				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
 // ThinkingConfig is honored rather than rejected, mapping onto effort-based
 // reasoning. Summary rides on IncludeThoughts alone: it requires a verified
 // OpenAI organization, so sending it unasked would fail every reasoning call an
@@ -1861,6 +1874,12 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		"SafetySettings":   true,
 		"ResponseMIMEType": true,
 	}
+	// Fields that have no effect on these APIs, so accepting them drops
+	// nothing: AutomaticContinuation resumes a generation paused with
+	// CONTINUATION, which the OpenAI APIs never do.
+	noEffect := map[string]bool{
+		"AutomaticContinuation": true,
+	}
 	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
 	for _, field := range shared.UnsupportedConfigFields {
 		rejected[field.Name] = true
@@ -1872,7 +1891,7 @@ func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
 		if cfgType.Field(i).PkgPath != "" {
 			continue // unexported, not settable by callers
 		}
-		if !translated[name] && !namedError[name] && !rejected[name] {
+		if !translated[name] && !namedError[name] && !noEffect[name] && !rejected[name] {
 			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
 		}
 	}
@@ -2610,7 +2629,7 @@ func redact(v string) string {
 // The timeout is applied inside the returned closure, so it must derive from
 // the context the caller passed rather than overwrite it: assigning to the
 // captured variable would leave the second range starting from the deadline the
-// first one had already cancelled, failing instantly and for a reason the
+// first one had already canceled, failing instantly and for a reason the
 // caller could not see.
 func TestGenerateContentIsReRangeableWithATimeout(t *testing.T) {
 	for _, stream := range []bool{false, true} {

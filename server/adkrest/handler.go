@@ -116,7 +116,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			// upgrader would then apply gorilla's default check on top and
 			// refuse an origin we just allowed. Giving it ours settles both
 			// with one rule.
-			CheckOrigin: policy.CheckOrigin,
+			CheckOrigin:          policy.CheckOrigin,
+			MaxLiveMessageBytes:  cfg.MaxLiveMessageBytes,
+			LiveKeepaliveTimeout: cfg.LiveKeepaliveTimeout,
+			MaxLiveSessions:      cfg.MaxLiveSessions,
 		})),
 		routers.NewAppsAPIRouter(controllers.NewAppsAPIController(cfg.AgentLoader)),
 		routers.NewArtifactsAPIRouter(artifactsController),
@@ -266,6 +269,29 @@ type ServerConfig struct {
 	// MaxPayloadSize limits request body size in bytes. If <= 0,
 	// DefaultMaxPayloadSize is used.
 	MaxPayloadSize int64
+
+	// MaxLiveMessageBytes caps one client message on a /run_live connection. A
+	// larger message closes the connection with close code 1009. See
+	// [controllers.RuntimeAPIControllerConfig.MaxLiveMessageBytes].
+	//
+	// optional; zero means 16 MiB, negative means no cap
+	MaxLiveMessageBytes int64
+
+	// LiveKeepaliveTimeout drops a /run_live peer that has stopped responding:
+	// one that for this long neither answers a ping nor sends a message, or
+	// that takes longer than this to accept one event. A quiet client that
+	// still answers pings stays connected. See
+	// [controllers.RuntimeAPIControllerConfig.LiveKeepaliveTimeout].
+	//
+	// optional; zero means 40s, negative turns the keepalive off
+	LiveKeepaliveTimeout time.Duration
+
+	// MaxLiveSessions caps how many /run_live connections this server carries
+	// at once. Past the cap the handshake is refused with 503. See
+	// [controllers.RuntimeAPIControllerConfig.MaxLiveSessions].
+	//
+	// optional; zero or negative means no cap
+	MaxLiveSessions int
 }
 
 // DebugAPIConfig contains parameters for the debug API.

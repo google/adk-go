@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -180,7 +181,7 @@ func TestEndInvocation_EndsBeforeMainCall(t *testing.T) {
 		}
 	}
 
-	// Even though beforeAgentCallback returns nil, it stil doesn't call llm because
+	// Even though beforeAgentCallback returns nil, it still doesn't call llm because
 	// endInvocation is true.
 	if custom.callCounter != 0 {
 		t.Errorf("unexpected want_llm_calls, got: %v, want: %v", custom.callCounter, 0)
@@ -347,6 +348,69 @@ func TestFindAgent(t *testing.T) {
 			got := root.FindAgent(tt.agentName)
 			if got != tt.want {
 				t.Errorf("FindAgent(%q) = %v, want %v", tt.agentName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunWithoutRunFunc(t *testing.T) {
+	tests := []struct {
+		name string
+		// beforeContent, when set, is returned by a before-agent callback.
+		beforeContent *genai.Content
+		wantErr       bool
+		wantEvents    int
+	}{
+		{name: "reports an error instead of panicking", wantErr: true},
+		{name: "before-agent content still short-circuits", beforeContent: genai.NewContentFromText("cached", genai.RoleModel), wantEvents: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			afterCalls := 0
+			testAgent, err := New(Config{
+				Name: "no_run",
+				BeforeAgentCallbacks: []BeforeAgentCallback{
+					func(Context) (*genai.Content, error) { return tc.beforeContent, nil },
+				},
+				AfterAgentCallbacks: []AfterAgentCallback{
+					func(Context) (*genai.Content, error) {
+						afterCalls++
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			ctx := &invocationContext{
+				Context: t.Context(),
+				agent:   testAgent,
+				session: &mockSession{sessionID: "test-session"},
+			}
+
+			var errs []error
+			events := 0
+			for event, err := range testAgent.Run(ctx) {
+				if err != nil {
+					errs = append(errs, err)
+				}
+				if event != nil {
+					events++
+				}
+			}
+
+			if tc.wantErr {
+				if len(errs) != 1 || !strings.Contains(errs[0].Error(), `"no_run"`) {
+					t.Errorf("Run() errors = %v, want one error naming the agent", errs)
+				}
+			} else if len(errs) != 0 {
+				t.Errorf("Run() errors = %v, want none", errs)
+			}
+			if events != tc.wantEvents {
+				t.Errorf("Run() yielded %d events, want %d", events, tc.wantEvents)
+			}
+			if afterCalls != 0 {
+				t.Errorf("after-agent callbacks ran %d times, want 0", afterCalls)
 			}
 		})
 	}
