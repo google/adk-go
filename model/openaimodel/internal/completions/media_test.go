@@ -183,6 +183,14 @@ func TestBuildParams_MediaRefused(t *testing.T) {
 			}},
 			wantMsg: "media on a function response part is not supported: image/png",
 		},
+		{
+			name: "function call beside media in a user turn",
+			req: &model.LLMRequest{Contents: []*genai.Content{
+				{Role: "user", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "f"}}, png}},
+				{Role: "user", Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "c1", Name: "f", Response: map[string]any{"ok": true}}}}},
+			}},
+			wantMsg: "function call in a user turn",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := buildParams("m", tt.req)

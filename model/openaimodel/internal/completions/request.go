@@ -181,17 +181,17 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 			return nil, errors.New("openai: unsupported content part: carries nothing to send")
 		}
 	}
+	if len(calls) > 0 && role != roleAssistant {
+		// Only an assistant message carries tool calls, and dropping them would
+		// leave their results answering calls the request never made.
+		return nil, fmt.Errorf("openai: function call in a %s turn: only model turns can carry calls", role)
+	}
 	if hasMedia {
 		userMsg, err := newMediaMessage(role, pieces)
 		if err != nil {
 			return nil, err
 		}
 		return append(messages, *userMsg), nil
-	}
-	if len(calls) > 0 && role != roleAssistant {
-		// Only an assistant message carries tool calls, and dropping them would
-		// leave their results answering calls the request never made.
-		return nil, fmt.Errorf("openai: function call in a %s turn: only model turns can carry calls", role)
 	}
 
 	text := joinText(texts)
