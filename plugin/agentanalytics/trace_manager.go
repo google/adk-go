@@ -72,11 +72,11 @@ type spanRecord struct {
 	branch string
 	start  time.Time
 	// firstToken is the arrival time of the first streamed chunk of a
-	// model call.
+	// model call that carries generated content.
 	firstToken time.Time
 	// hasResponse reports whether the agent activation has produced a model
-	// response or a content event, itself or through an activation that ran
-	// under it.
+	// response or an event with content or output, itself or through an
+	// activation that ran under it.
 	hasResponse bool
 }
 
@@ -789,14 +789,14 @@ type unclosedAgentSpan struct {
 }
 
 // completeResponse records that the author of a final, non-partial session
-// event with content responded. The author's activation is looked up from
-// the event's author, branch and node path in id, as in eventSpan, because
-// the event callback gets the agent that the runner runs rather than the
-// author. The model calls still open under the activation end without a row:
-// ADK runs no AfterModelCallback for a call that a BeforeModelCallback
-// answered, so its response event is all that ends it. The activation and the
-// open activations that it runs under are marked as responded. An event whose
-// author has no open agent span changes nothing.
+// event with content or an output responded. The author's activation is
+// looked up from the event's author, branch and node path in id, as in
+// eventSpan, because the event callback gets the agent that the runner runs
+// rather than the author. The model calls still open under the activation end
+// without a row: ADK runs no AfterModelCallback for a call that a
+// BeforeModelCallback answered, so its response event is all that ends it.
+// The activation and the open activations that it runs under are marked as
+// responded. An event whose author has no open agent span changes nothing.
 func (tm *traceManager) completeResponse(ctx context.Context, id identity, author, branch string) {
 	inv := tm.invocation(ctx, id)
 	inv.mu.Lock()
@@ -861,9 +861,9 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //     BeforeModelCallback or BeforeToolCallback error stops the agent
 //     without any error callback.
 //   - Otherwise, the most recent open agent span whose activation produced
-//     no response, neither a model response nor a content event of its own
-//     or of an activation that ran under it, for example because its Run
-//     returned an error first.
+//     no response, neither a model response nor an event with content or
+//     output of its own or of an activation that ran under it, for example
+//     because its Run returned an error first.
 //
 // The last two are reported with a synthetic error, and only if ctx was not
 // ended: an agent that a BeforeAgentCallback answered ends its node, so no
@@ -1055,8 +1055,9 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	return inv.rowSpan(rec, nil)
 }
 
-// recordFirstToken records the arrival of a streamed chunk of the running
-// model call of an agent. Only the first chunk is recorded.
+// recordFirstToken records the arrival of a streamed chunk of generated
+// content of the running model call of an agent. Only the first chunk is
+// recorded; the caller decides which chunks carry generated content.
 func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()

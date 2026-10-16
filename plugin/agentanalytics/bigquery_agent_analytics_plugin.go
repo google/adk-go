@@ -63,7 +63,8 @@ const (
 	EventLLMRequest          = "LLM_REQUEST"
 	// EventLLMResponse is written once per model call, on the final
 	// non-partial response. Streamed chunks with Partial set only feed
-	// latency_ms.time_to_first_token_ms on that final row.
+	// latency_ms.time_to_first_token_ms on that final row, and only the
+	// first chunk with generated content does.
 	EventLLMResponse               = "LLM_RESPONSE"
 	EventLLMError                  = "LLM_ERROR"
 	EventToolStarting              = "TOOL_STARTING"
@@ -579,11 +580,12 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 
 // onEvent writes the row of a session event. The event callback gets the
 // agent that the runner runs, so the event is placed by its author, branch
-// and node path. A non-partial event with content also records that its
-// author responded: ADK runs no AfterModelCallback for a model call that a
-// BeforeModelCallback answered, so the event is what ends such a call.
-// Streamed partial events end nothing: AfterModelCallback ends the model call
-// with the final response, which carries the call's latency.
+// and node path. A non-partial event with content or a typed output also
+// records that its author responded: ADK runs no AfterModelCallback for a
+// model call that a BeforeModelCallback answered, so the event is what ends
+// such a call, and a custom agent or workflow node may respond with an output
+// alone. Streamed partial events end nothing: AfterModelCallback ends the
+// model call with the final response, which carries the call's latency.
 func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event) (*session.Event, error) {
 	defer p.recoverCallback(legacyEventType)
 	if ev != nil {
@@ -592,7 +594,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
-		if !ev.Partial && ev.Content != nil {
+		if !ev.Partial && (ev.Content != nil || ev.Output != nil) {
 			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch)
 		}
 		p.logEvent(ctx, id, legacyEventType, func() rowSpan {
@@ -644,10 +646,13 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 	defer p.recoverCallback(EventLLMResponse)
 	id := identityOf(ctx)
 	if res != nil && res.Partial {
-		// A streamed chunk only times the first token. adk-python writes a
-		// row for every chunk; the final response alone is written here so
-		// that token usage is counted once.
-		p.traces.recordFirstToken(ctx, id)
+		// A streamed chunk only times the first token, and only if it carries
+		// generated content: a leading chunk of usage or role metadata is not
+		// the first token. adk-python writes a row for every chunk; the final
+		// response alone is written here so that token usage is counted once.
+		if hasGeneratedContent(res) {
+			p.traces.recordFirstToken(ctx, id)
+		}
 		return nil, nil
 	}
 	key := llmKey(id)
@@ -676,6 +681,29 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 		}
 	})
 	return nil, nil
+}
+
+// hasGeneratedContent reports whether res carries content that the model
+// generated: a part with text, inline or file data, a function call or
+// response, or executable code or its result, the kinds of content that the
+// content formatter writes. A chunk of a streamed response that carries only
+// metadata, such as token usage or the role of its content, or whose content
+// has no part with any of these, is not generated content.
+func hasGeneratedContent(res *model.LLMResponse) bool {
+	if res == nil || res.Content == nil || len(res.Content.Parts) == 0 {
+		return false
+	}
+	for _, part := range res.Content.Parts {
+		if part == nil {
+			continue
+		}
+		if part.Text != "" || part.InlineData != nil || part.FunctionCall != nil ||
+			part.FunctionResponse != nil || part.FileData != nil ||
+			part.ExecutableCode != nil || part.CodeExecutionResult != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *analyticsPlugin) onModelError(ctx agent.Context, req *model.LLMRequest, err error) (*model.LLMResponse, error) {

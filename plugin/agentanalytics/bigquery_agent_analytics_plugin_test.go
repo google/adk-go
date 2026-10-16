@@ -415,6 +415,44 @@ func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
 	}
 }
 
+// TestHasGeneratedContent verifies which streamed chunks count as the first
+// token of a model call: only those with a part that holds generated content.
+// The chunks that carry only metadata, such as token usage or the role of the
+// content, do not.
+func TestHasGeneratedContent(t *testing.T) {
+	content := func(parts ...*genai.Part) *model.LLMResponse {
+		return &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model", Parts: parts}}
+	}
+	tests := []struct {
+		name string
+		res  *model.LLMResponse
+		want bool
+	}{
+		{name: "nil response", res: nil, want: false},
+		{name: "usage only", res: &model.LLMResponse{Partial: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}}, want: false},
+		{name: "no content", res: &model.LLMResponse{Partial: true}, want: false},
+		{name: "role only", res: &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model"}}, want: false},
+		{name: "empty parts", res: content(), want: false},
+		{name: "nil part", res: content(nil), want: false},
+		{name: "empty part", res: content(&genai.Part{}), want: false},
+		{name: "text", res: content(&genai.Part{Text: "Hel"}), want: true},
+		{name: "inline data", res: content(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}), want: true},
+		{name: "file data", res: content(&genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/object", MIMEType: "image/png"}}), want: true},
+		{name: "function call", res: content(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup"}}), want: true},
+		{name: "function response", res: content(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "lookup"}}), want: true},
+		{name: "executable code", res: content(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}), want: true},
+		{name: "code execution result", res: content(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}}), want: true},
+		{name: "text after empty parts", res: content(nil, &genai.Part{}, &genai.Part{Text: "Hel"}), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasGeneratedContent(tt.res); got != tt.want {
+				t.Errorf("hasGeneratedContent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLogEvent_ExtractsTraceInfo(t *testing.T) {
 	p, requestsChan, mCtx := setupTestPlugin(t)
 

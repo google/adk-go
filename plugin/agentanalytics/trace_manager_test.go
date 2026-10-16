@@ -380,6 +380,133 @@ func TestTraceManager_StreamingTTFTAndSingleMarshaledLatency(t *testing.T) {
 	checkJSON(t, "content", jsonObjectColumn(t, response, "content"), `{"response":"text: 'Hello'"}`)
 }
 
+// clockedPlugin is an analyticsPlugin whose trace manager reads a clock that
+// the test sets, so that latencies are exact. Its batch processor never
+// starts: the rows of the plugin's callbacks wait in the processor's queue
+// until takeRows takes them.
+type clockedPlugin struct {
+	*analyticsPlugin
+	now time.Time
+}
+
+func newClockedPlugin(t *testing.T) *clockedPlugin {
+	t.Helper()
+	config := applyDefaults(DefaultConfig())
+	processor, err := NewBatchProcessor(t.Context(), nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		// Close writes the rows that are left, which needs a write client.
+		processor.drainQueue()
+		processor.Close()
+	})
+	c := &clockedPlugin{now: time.Unix(1000, 0)}
+	traces := newTraceManager()
+	traces.now = func() time.Time { return c.now }
+	c.analyticsPlugin = &analyticsPlugin{config: config, processor: processor, traces: traces}
+	return c
+}
+
+// takeRows returns the rows that the callbacks queued since the last call.
+func (c *clockedPlugin) takeRows() []map[string]any {
+	return c.processor.drainQueue()
+}
+
+// firstTokenTimed reports whether the running model call of ctx's agent has a
+// time to first token.
+func (c *clockedPlugin) firstTokenTimed(t *testing.T, ctx *mockInvocationContext) bool {
+	t.Helper()
+	id := identityOf(ctx)
+	inv := c.traces.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	rec := inv.llmSpans[llmKey(id)]
+	if rec == nil {
+		t.Fatal("no model call is running")
+	}
+	return !rec.firstToken.IsZero()
+}
+
+// TestAfterModel_FirstTokenIsFirstGeneratedContent streams a model response
+// whose first chunk, 10 ms into the call, carries only metadata. That chunk
+// says nothing about when the model began to answer, so the time to first
+// token is that of the first chunk with generated content, at 800 ms, and not
+// that of the metadata.
+func TestAfterModel_FirstTokenIsFirstGeneratedContent(t *testing.T) {
+	usage := &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}
+	tests := []struct {
+		name string
+		// leading is the chunk that arrives before any generated content.
+		leading *model.LLMResponse
+	}{
+		{"usage only", &model.LLMResponse{Partial: true, UsageMetadata: usage}},
+		{"role only", &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model"}}},
+		{"empty parts", &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model", Parts: []*genai.Part{}}}},
+		{"empty part", &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model", Parts: []*genai.Part{{}}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newClockedPlugin(t)
+			mCtx := &mockInvocationContext{ctx: t.Context(), agentName: "agent", invocationID: "inv-first-token"}
+			start := p.now
+			at := func(offset time.Duration) { p.now = start.Add(offset) }
+
+			var errs callbackErrors
+			errs.add(p.beforeModel(mCtx, &model.LLMRequest{Model: "gemini-test"}))
+			at(10 * time.Millisecond)
+			errs.add(p.afterModel(mCtx, tt.leading, nil))
+			errs.check(t)
+			if p.firstTokenTimed(t, mCtx) {
+				t.Fatal("a chunk without generated content timed the first token")
+			}
+
+			at(800 * time.Millisecond)
+			errs.add(p.afterModel(mCtx, &model.LLMResponse{Partial: true, Content: textContent("model", "Hel")}, nil))
+			errs.check(t)
+			if !p.firstTokenTimed(t, mCtx) {
+				t.Fatal("the first chunk with generated content did not time the first token")
+			}
+
+			at(900 * time.Millisecond)
+			errs.add(p.afterModel(mCtx, &model.LLMResponse{Partial: true, Content: textContent("model", "lo")}, nil))
+			at(1000 * time.Millisecond)
+			errs.add(p.afterModel(mCtx, &model.LLMResponse{Content: textContent("model", "Hello"), TurnComplete: true}, nil))
+			errs.check(t)
+
+			response := onlyRowOfType(t, p.takeRows(), EventLLMResponse)
+			want := map[string]int64{"time_to_first_token_ms": 800, "total_ms": 1000}
+			if diff := cmp.Diff(want, mustLatency(t, response)); diff != "" {
+				t.Errorf("LLM_RESPONSE latency_ms mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestAfterModel_MetadataOnlyChunksLeaveFirstTokenToFinalResponse streams a
+// model response whose chunks all carry only metadata. No chunk times the
+// first token, so the call gets a time to first token equal to its total
+// latency, as a call that is not streamed does.
+func TestAfterModel_MetadataOnlyChunksLeaveFirstTokenToFinalResponse(t *testing.T) {
+	p := newClockedPlugin(t)
+	mCtx := &mockInvocationContext{ctx: t.Context(), agentName: "agent", invocationID: "inv-metadata-only"}
+	start := p.now
+
+	var errs callbackErrors
+	errs.add(p.beforeModel(mCtx, &model.LLMRequest{Model: "gemini-test"}))
+	p.now = start.Add(10 * time.Millisecond)
+	errs.add(p.afterModel(mCtx, &model.LLMResponse{Partial: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}}, nil))
+	p.now = start.Add(1000 * time.Millisecond)
+	errs.add(p.afterModel(mCtx, &model.LLMResponse{Content: textContent("model", "Hello"), TurnComplete: true}, nil))
+	errs.check(t)
+
+	response := onlyRowOfType(t, p.takeRows(), EventLLMResponse)
+	want := map[string]int64{"time_to_first_token_ms": 1000, "total_ms": 1000}
+	if diff := cmp.Diff(want, mustLatency(t, response)); diff != "" {
+		t.Errorf("LLM_RESPONSE latency_ms mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestTraceManager_UnknownToolErrorKeepsAgentSpan replays the call of a tool
 // that does not exist, for which ADK runs only OnToolErrorCallback. The
 // TOOL_ERROR row gets a span of its own under the agent, and the agent's
@@ -3314,6 +3441,102 @@ func TestRunner_CachedBeforeModelCallbackResponse_EmitsInvocationCompletedOK(t *
 	}
 }
 
+// TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK verifies that
+// a custom agent whose event carries a typed Output and no Content responded.
+// The caller stops reading once it has the event, so ADK runs no
+// AfterAgentCallback and the agent's span is still open when the invocation
+// terminates; finalization must not report the agent as failed.
+func TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	customBot, err := agent.New(agent.Config{
+		Name: "custom_bot",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				event.Output = map[string]any{"answer": 42}
+				yield(event, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	r := newTestRunner(t, customBot, p)
+
+	for event, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+		if event != nil && event.Output != nil {
+			break
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR after the output event was consumed, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	invRow := onlyRowOfType(t, rows, EventInvocationCompleted)
+	if invRow["status"] != "OK" {
+		t.Errorf("INVOCATION_COMPLETED status = %v, want OK", invRow["status"])
+	}
+	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
+		t.Errorf("got %d AGENT_ERROR rows, want 0", n)
+	}
+}
+
+// TestOnEvent_FinalContentOrOutputMarksAuthorResponded verifies which session
+// events show that their author responded, so that its agent span, left open
+// when the invocation terminates, is not reported as failed: a final event
+// with Content or with a typed Output, as the events of a custom agent or of a
+// workflow node carry. A streamed partial event, and an event with neither,
+// do not.
+func TestOnEvent_FinalContentOrOutputMarksAuthorResponded(t *testing.T) {
+	tests := []struct {
+		name          string
+		event         session.Event
+		wantResponded bool
+	}{
+		{name: "content", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}}, wantResponded: true},
+		{name: "output", event: session.Event{Output: "result"}, wantResponded: true},
+		{name: "content and output", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}, Output: "result"}, wantResponded: true},
+		{name: "partial content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, Content: textContent("model", "h")}}, wantResponded: false},
+		{name: "partial output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}, Output: "result"}, wantResponded: false},
+		{name: "neither content nor output", event: session.Event{}, wantResponded: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			event := tt.event
+			event.Author = mCtx.agentName
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.OnEventCallback()(mCtx, &event))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if tt.wantResponded {
+				if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+					t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED: the author responded; event types: %v", eventTypes(rows))
+				}
+				onlyRowOfType(t, rows, EventInvocationCompleted)
+				if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
+					t.Errorf("got %d AGENT_ERROR rows, want 0", n)
+				}
+				return
+			}
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got INVOCATION_COMPLETED, want INVOCATION_ERROR: the author did not respond; event types: %v", eventTypes(rows))
+			}
+			onlyRowOfType(t, rows, EventInvocationError)
+			if got, want := agentErrorCounts(rows), map[string]int{mCtx.agentName: 1}; !maps.Equal(got, want) {
+				t.Errorf("AGENT_ERROR rows per agent = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // TestRunner_CustomRunError verifies that when an agent's custom Run returns an error,
 // the error reaches the caller and finalization writes AGENT_ERROR and INVOCATION_ERROR.
 func TestRunner_CustomRunError(t *testing.T) {
@@ -3567,10 +3790,13 @@ func TestTraceManager_FindAgent_DoesNotMatchDifferentNodePath(t *testing.T) {
 // streamingLLM is a model.LLM that, when ADK asks it to stream, yields its
 // chunks as partial responses. It pauses before each chunk and before its
 // last response, which aggregates the chunks or, if err is set, is err.
+// leading holds partial responses, such as one that only reports token usage,
+// that it yields as soon as the stream opens, before the first pause.
 type streamingLLM struct {
-	chunks []string
-	pause  time.Duration
-	err    error
+	leading []*model.LLMResponse
+	chunks  []string
+	pause   time.Duration
+	err     error
 }
 
 func (m *streamingLLM) Name() string { return "streaming-model" }
@@ -3578,6 +3804,11 @@ func (m *streamingLLM) Name() string { return "streaming-model" }
 func (m *streamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		var text strings.Builder
+		for _, res := range m.leading {
+			if stream && !yield(res, nil) {
+				return
+			}
+		}
 		for _, chunk := range m.chunks {
 			time.Sleep(m.pause)
 			text.WriteString(chunk)
@@ -3599,7 +3830,8 @@ func (m *streamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, s
 // to OnEventCallback as a partial event before the stream ends. The chunks
 // must not end the model call: the row that ends it, LLM_RESPONSE or
 // LLM_ERROR, stays on the span of LLM_REQUEST with the call's total latency
-// and time to first token.
+// and time to first token. A leading chunk that only reports token usage does
+// not time the first token.
 func TestRunner_SSEStreaming_ModelCallEndKeepsRequestSpanAndLatency(t *testing.T) {
 	const gap = 20 * time.Millisecond
 	modelErr := errors.New("stream broken 503")
@@ -3614,6 +3846,17 @@ func TestRunner_SSEStreaming_ModelCallEndKeepsRequestSpanAndLatency(t *testing.T
 		{
 			name:            "final response",
 			llm:             &streamingLLM{chunks: []string{"Hel", "lo"}, pause: gap},
+			wantEnd:         EventLLMResponse,
+			wantInvocation:  EventInvocationCompleted,
+			wantAgentErrors: map[string]int{},
+		},
+		{
+			name: "final response after a leading usage-only chunk",
+			llm: &streamingLLM{
+				leading: []*model.LLMResponse{{Partial: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}}},
+				chunks:  []string{"Hel", "lo"},
+				pause:   gap,
+			},
 			wantEnd:         EventLLMResponse,
 			wantInvocation:  EventInvocationCompleted,
 			wantAgentErrors: map[string]int{},
@@ -3672,7 +3915,7 @@ func TestRunner_SSEStreaming_ModelCallEndKeepsRequestSpanAndLatency(t *testing.T
 			}
 			ttft, total := latency["time_to_first_token_ms"], latency["total_ms"]
 			if wantMin := gap.Milliseconds(); ttft < wantMin || total-ttft < wantMin {
-				t.Errorf("%s latency_ms = %v, want time_to_first_token_ms >= %d (the first chunk) and total_ms >= time_to_first_token_ms + %d (the end of the stream)", tc.wantEnd, latency, wantMin, wantMin)
+				t.Errorf("%s latency_ms = %v, want time_to_first_token_ms >= %d (the first chunk with generated content) and total_ms >= time_to_first_token_ms + %d (the end of the stream)", tc.wantEnd, latency, wantMin, wantMin)
 			}
 		})
 	}
