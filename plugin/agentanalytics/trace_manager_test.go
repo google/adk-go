@@ -4140,11 +4140,11 @@ func TestTraceManager_CancellationAttributesEveryOpenSpan(t *testing.T) {
 
 // requireInvocationCompletedOK fails the test unless rows end the invocation
 // with INVOCATION_COMPLETED, status OK, and hold neither an INVOCATION_ERROR
-// nor an AGENT_ERROR row: the run succeeded.
+// nor an AGENT_ERROR row: the run is reported as completed.
 func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
 	t.Helper()
 	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
-		t.Fatalf("got INVOCATION_ERROR for a run that succeeded, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+		t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
 	}
 	invRow := onlyRowOfType(t, rows, EventInvocationCompleted)
 	if invRow["status"] != "OK" {
@@ -4763,4 +4763,666 @@ func TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK(t 
 		t.Errorf("got %d %s rows, want 1: the analytics plugin sees the event first", n, legacyEventType)
 	}
 	requireInvocationCompletedOK(t, rows)
+}
+
+// runSubAgentFailure runs a custom parent agent that runs a custom sub-agent
+// itself, as a sequential agent does. The sub-agent writes an event that only
+// changes the state and then fails with childErr, which the parent returns and
+// no callback observes. When parentResponds is set, the parent writes an event
+// with content after each event of the sub-agent, so it responds while the
+// sub-agent's span is open. It returns the rows of the invocation and the first
+// error that the runner gave its caller.
+func runSubAgentFailure(t *testing.T, childErr error, parentResponds bool) ([]map[string]any, error) {
+	t.Helper()
+	p, requests, _ := setupTestPlugin(t)
+	child, err := agent.New(agent.Config{
+		Name: "child",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Actions.StateDelta = map[string]any{"step": 1}
+				if yield(ev, nil) {
+					yield(nil, childErr)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child): %v", err)
+	}
+	parent, err := agent.New(agent.Config{
+		Name:      "parent",
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for ev, err := range child.Run(ctx) {
+					if err != nil {
+						yield(nil, err)
+						return
+					}
+					if !yield(ev, nil) {
+						return
+					}
+					if parentResponds {
+						progress := session.NewEvent(ctx, ctx.InvocationID())
+						progress.Content = textContent("model", "working on it")
+						if !yield(progress, nil) {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(parent): %v", err)
+	}
+	r := newTestRunner(t, parent, p)
+
+	var gotErr error
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			gotErr = err
+			break
+		}
+	}
+	return collectRows(t, requests, untilInvocationEnd), gotErr
+}
+
+// TestRunner_SubAgentFailsAfterParentProducedContent_EmitsInvocationCompletedOK
+// pins a documented limit of the failure detection. A custom parent writes an
+// event with content while its sub-agent runs, and the sub-agent then fails
+// without any callback observing the error: the runner returns the error to
+// its caller. The parent's event settles the activations that still run under
+// it, the sub-agent's among them, because the callbacks cannot tell the
+// sub-agent apart from one that a callback answered and whose events the
+// parent swallowed, as in
+// TestRunner_CustomParentSwallowsShortCircuitedChild_EmitsInvocationCompletedOK.
+// So the invocation ends with INVOCATION_COMPLETED and no AGENT_ERROR row.
+// popUnclosedAgentSpans and afterRun document this: a change that reports
+// this failure has to update them and this test together.
+func TestRunner_SubAgentFailsAfterParentProducedContent_EmitsInvocationCompletedOK(t *testing.T) {
+	childErr := errors.New("child failure")
+	rows, gotErr := runSubAgentFailure(t, childErr, true)
+	if !errors.Is(gotErr, childErr) {
+		t.Fatalf("r.Run error = %v, want %v", gotErr, childErr)
+	}
+	if n := len(rowsOfType(rows, EventAgentStarting)); n != 2 {
+		t.Errorf("got %d AGENT_STARTING rows, want 2 (parent and child)", n)
+	}
+	requireInvocationCompletedOK(t, rows)
+}
+
+// TestRunner_SubAgentFailsWithoutParentContent_EmitsInvocationError is the
+// counterpart of the test above: when the parent writes no event with content
+// while the sub-agent runs, nothing settles the sub-agent's activation, so its
+// failure is reported with an AGENT_ERROR row for the sub-agent and one for the
+// parent that runs it, and the invocation ends with INVOCATION_ERROR.
+func TestRunner_SubAgentFailsWithoutParentContent_EmitsInvocationError(t *testing.T) {
+	childErr := errors.New("child failure")
+	rows, gotErr := runSubAgentFailure(t, childErr, false)
+	if !errors.Is(gotErr, childErr) {
+		t.Fatalf("r.Run error = %v, want %v", gotErr, childErr)
+	}
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED after the sub-agent failure, want INVOCATION_ERROR; event types: %v", eventTypes(rows))
+	}
+	if diff := cmp.Diff(map[string]int{"child": 1, "parent": 1}, agentErrorCounts(rows)); diff != "" {
+		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
+	}
+	onlyRowOfType(t, rows, EventInvocationError)
+}
+
+// TestTraceManager_FunctionResponseRetiresOnlyItsToolCall ends the tool calls
+// that the function responses of a final event answer, and no others. An
+// earlier plugin's AfterToolCallback that returns a result stops the chain
+// before this plugin's, so the response event is all that ends the call. A call
+// that has not responded keeps failing the invocation, and so does a call of
+// another activation, even one that has the same function call ID.
+func TestTraceManager_FunctionResponseRetiresOnlyItsToolCall(t *testing.T) {
+	type toolCall struct{ id, name string }
+	tests := []struct {
+		name string
+		// rootCalls and workerCalls are the tool calls that are open under the
+		// root agent and under its sub-agent. responses is what
+		// functionResponseCalls returns for the final event of the root agent.
+		rootCalls, workerCalls []toolCall
+		responses              []string
+		wantOpen               int
+	}{
+		{
+			name:      "response for every call",
+			rootCalls: []toolCall{{"call-1", "lookup"}, {"call-2", "search"}},
+			responses: []string{"call-1", "call-2"},
+		},
+		{
+			name:      "response for one of two calls",
+			rootCalls: []toolCall{{"call-1", "lookup"}, {"call-2", "search"}},
+			responses: []string{"call-1"},
+			wantOpen:  1,
+		},
+		{
+			name:      "no function response",
+			rootCalls: []toolCall{{"call-1", "lookup"}},
+			wantOpen:  1,
+		},
+		{
+			name:      "call without an ID is matched by tool name",
+			rootCalls: []toolCall{{"", "lookup"}},
+			responses: []string{"lookup"},
+		},
+		{
+			name:        "call of another activation with the same ID",
+			rootCalls:   []toolCall{{"call-1", "lookup"}},
+			workerCalls: []toolCall{{"call-1", "lookup"}},
+			responses:   []string{"call-1"},
+			wantOpen:    1,
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			invocationID := fmt.Sprintf("inv-function-response-%d", i)
+			rootID := identity{invocationID: invocationID, agentName: "root", path: "root"}
+			workerID := identity{invocationID: invocationID, agentName: "worker", path: "root/worker"}
+			tm.pushAgentSpan(ctx, rootID)
+			tm.pushAgentSpan(ctx, workerID)
+			for _, c := range tc.rootCalls {
+				tm.pushToolSpan(ctx, rootID, toolKey(rootID, c.id, c.name))
+			}
+			for _, c := range tc.workerCalls {
+				tm.pushToolSpan(ctx, workerID, toolKey(workerID, c.id, c.name))
+			}
+
+			tm.completeResponse(ctx, rootID, "root", "", tc.responses)
+
+			if got := openSpans(t, tm, invocationID).tools; got != tc.wantOpen {
+				t.Errorf("open tool calls = %d, want %d", got, tc.wantOpen)
+			}
+			tm.mu.Lock()
+			inv := tm.invocations[invocationID]
+			tm.mu.Unlock()
+			if got, want := inv.hasOpenCalls(), tc.wantOpen > 0; got != want {
+				t.Errorf("hasOpenCalls() = %v, want %v: the count that protects an invocation from eviction follows the open calls", got, want)
+			}
+			_, termErr := tm.popUnclosedAgentSpans(ctx, rootID)
+			if got, want := termErr != nil, tc.wantOpen > 0; got != want {
+				t.Errorf("popUnclosedAgentSpans error = %v, want a failure: %v", termErr, want)
+			}
+		})
+	}
+}
+
+// TestTraceManager_FinalEventMarksActivationsAsResponded places the final event
+// of an agent. The event settles the activations that it shows have responded,
+// so that the invocation does not fail for them when ADK ends it without
+// running their AfterAgentCallback: the activation of the author, the
+// activations that it runs under and the ones that run under it or, if the
+// author has no open span, the activation that it would run under. An event of
+// the user or without an author settles nothing, and an event of one sibling
+// does not settle another.
+func TestTraceManager_FinalEventMarksActivationsAsResponded(t *testing.T) {
+	root := identity{agentName: "root", path: "root"}
+	sub := identity{agentName: "sub", path: "root/sub"}
+	a := identity{agentName: "a", path: "root/a"}
+	b := identity{agentName: "b", path: "root/b"}
+	tests := []struct {
+		name string
+		// running holds the open activations in the order they started.
+		running []identity
+		// author and path are the author and the node path of the event.
+		author, path string
+		// wantBlamed is the activation that popUnclosedAgentSpans reports
+		// as failed, if any.
+		wantBlamed string
+	}{
+		{
+			name:    "event of an agent settles a sub-agent that runs under it",
+			running: []identity{root, sub},
+			author:  "root",
+			path:    "root",
+		},
+		{
+			name:    "event of a sub-agent settles the agent that it runs under",
+			running: []identity{root, sub},
+			author:  "sub",
+			path:    "root/sub",
+		},
+		{
+			name:    "event of an agent without an open span settles the activation that it would run under",
+			running: []identity{root},
+			author:  "late",
+			path:    "root/late",
+		},
+		{
+			name:       "event of a sibling leaves the other sibling unsettled",
+			running:    []identity{root, a, b},
+			author:     "a",
+			path:       "root/a",
+			wantBlamed: "b",
+		},
+		{
+			name:       "event of the user settles nothing",
+			running:    []identity{root},
+			author:     userAuthor,
+			path:       "root",
+			wantBlamed: "root",
+		},
+		{
+			name:       "event without an author settles nothing",
+			running:    []identity{root},
+			path:       "root",
+			wantBlamed: "root",
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			invocationID := fmt.Sprintf("inv-final-event-%d", i)
+			for _, id := range tc.running {
+				id.invocationID = invocationID
+				tm.pushAgentSpan(ctx, id)
+			}
+
+			// The event callback gets the agent that the runner runs, and the
+			// event brings its own node path.
+			eventID := identity{invocationID: invocationID, agentName: "root", path: tc.path}
+			tm.completeResponse(ctx, eventID, tc.author, "", nil)
+
+			rootID := identity{invocationID: invocationID, agentName: "root", path: "root"}
+			unclosed, termErr := tm.popUnclosedAgentSpans(ctx, rootID)
+			var gotBlamed string
+			if len(unclosed) > 0 {
+				gotBlamed = unclosed[0].agentName
+			}
+			if gotBlamed != tc.wantBlamed {
+				t.Errorf("popUnclosedAgentSpans blames %q, want %q", gotBlamed, tc.wantBlamed)
+			}
+			if got, want := termErr != nil, tc.wantBlamed != ""; got != want {
+				t.Errorf("popUnclosedAgentSpans error = %v, want a failure: %v", termErr, want)
+			}
+		})
+	}
+}
+
+// TestTraceManager_FinalEventClearsTheErrorsOfItsActivation records model
+// errors, then places the final event of an agent. A response from the
+// activation that failed shows that it recovered, as when a plugin recovers
+// from the error and an earlier plugin's AfterModelCallback answers the call,
+// which hides the response from this plugin's AfterModelCallback. The errors of
+// other activations stay, including those of activations that run under the
+// author: the event does not show that the author handled them.
+func TestTraceManager_FinalEventClearsTheErrorsOfItsActivation(t *testing.T) {
+	root := identity{agentName: "root", path: "root"}
+	a := identity{agentName: "a", path: "root/a"}
+	b := identity{agentName: "b", path: "root/b"}
+	worker := identity{agentName: "worker", path: "root/a/worker"}
+	tests := []struct {
+		name string
+		// running holds the open activations in the order they started, and
+		// failing the ones whose model call failed.
+		running, failing []identity
+		// author is the author of the final event.
+		author identity
+		// wantFailed lists the activations that popUnclosedAgentSpans reports
+		// as failed, most recent first, and wantErr is its error.
+		wantFailed []string
+		wantErr    string
+	}{
+		{
+			name:    "error of the activation that responded",
+			running: []identity{root, a},
+			failing: []identity{a},
+			author:  a,
+		},
+		{
+			name:       "error of a sibling activation",
+			running:    []identity{root, a, b},
+			failing:    []identity{a, b},
+			author:     a,
+			wantFailed: []string{"b", "root"},
+			wantErr:    "model failure of b",
+		},
+		{
+			name:       "error of an activation that runs under the author",
+			running:    []identity{root, a, worker},
+			failing:    []identity{worker},
+			author:     a,
+			wantFailed: []string{"worker", "a", "root"},
+			wantErr:    "model failure of worker",
+		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			invocationID := fmt.Sprintf("inv-final-event-errors-%d", i)
+			in := func(id identity) identity {
+				id.invocationID = invocationID
+				return id
+			}
+			for _, id := range tc.running {
+				tm.pushAgentSpan(ctx, in(id))
+			}
+			for _, id := range tc.failing {
+				tm.recordError(ctx, in(id), llmKey(in(id)), fmt.Errorf("model failure of %s", id.agentName))
+			}
+
+			tm.completeResponse(ctx, in(tc.author), tc.author.agentName, "", nil)
+
+			unclosed, termErr := tm.popUnclosedAgentSpans(ctx, in(root))
+			var gotFailed []string
+			for _, u := range unclosed {
+				gotFailed = append(gotFailed, u.agentName)
+			}
+			if diff := cmp.Diff(tc.wantFailed, gotFailed); diff != "" {
+				t.Errorf("popUnclosedAgentSpans activations mismatch (-want +got):\n%s", diff)
+			}
+			var gotErr string
+			if termErr != nil {
+				gotErr = termErr.Error()
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("popUnclosedAgentSpans error = %q, want %q", gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+// deltaContext is a context that derives an invocation context with
+// WithICDelta, as the callback contexts of ADK do.
+type deltaContext struct {
+	context.Context
+	derive func() agent.InvocationContext
+}
+
+func (c deltaContext) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c.derive()
+}
+
+// runningInvocation is an invocation context that knows only the agent that
+// runs.
+type runningInvocation struct {
+	agent.InvocationContext
+	running agent.Agent
+}
+
+func (c runningInvocation) Agent() agent.Agent { return c.running }
+
+// contextRunning returns a callback context of the running agent a.
+func contextRunning(a agent.Agent) context.Context {
+	return deltaContext{
+		Context: context.Background(),
+		derive:  func() agent.InvocationContext { return runningInvocation{running: a} },
+	}
+}
+
+// brokenAgent is an agent whose sub-agents cannot be read.
+type brokenAgent struct{ agent.Agent }
+
+func (brokenAgent) Name() string { return "broken" }
+
+func (brokenAgent) SubAgents() []agent.Agent { panic("SubAgents failed") }
+
+// newTestAgent returns a custom agent that runs nothing and has subAgents.
+func newTestAgent(t *testing.T, name string, subAgents ...agent.Agent) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{
+		Name:      name,
+		SubAgents: subAgents,
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(%q) error: %v", name, err)
+	}
+	return a
+}
+
+// TestRunningAgentChildren reads the sub-agents of the agent that a callback
+// context runs. Anything but the agent that was asked for has no children.
+func TestRunningAgentChildren(t *testing.T) {
+	a, b := newTestAgent(t, "a"), newTestAgent(t, "b")
+	sequence := newTestAgent(t, "sequence", a, b)
+	helper, err := llmagent.New(llmagent.Config{Name: "helper"})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper) error: %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{Name: "coordinator", SubAgents: []agent.Agent{helper}})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator) error: %v", err)
+	}
+	derives := func(derive func() agent.InvocationContext) context.Context {
+		return deltaContext{Context: context.Background(), derive: derive}
+	}
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		agentName string
+		want      agentChildren
+	}{
+		{
+			name:      "workflow agent",
+			ctx:       contextRunning(sequence),
+			agentName: "sequence",
+			want:      agentChildren{parent: "sequence", nonLLM: true, names: []string{"a", "b"}},
+		},
+		{
+			name:      "LLM agent",
+			ctx:       contextRunning(coordinator),
+			agentName: "coordinator",
+			want:      agentChildren{parent: "coordinator", names: []string{"helper"}},
+		},
+		{
+			name:      "agent without sub-agents",
+			ctx:       contextRunning(a),
+			agentName: "a",
+			want:      agentChildren{parent: "a", nonLLM: true},
+		},
+		{name: "another agent runs", ctx: contextRunning(sequence), agentName: "other"},
+		{name: "no agent runs", ctx: contextRunning(nil), agentName: "sequence"},
+		{name: "no name", ctx: contextRunning(sequence)},
+		{name: "sub-agents cannot be read", ctx: contextRunning(brokenAgent{}), agentName: "broken"},
+		{
+			name:      "context derives nothing",
+			ctx:       derives(func() agent.InvocationContext { return nil }),
+			agentName: "sequence",
+		},
+		{
+			name:      "derivation panics",
+			ctx:       derives(func() agent.InvocationContext { panic("WithICDelta failed") }),
+			agentName: "sequence",
+		},
+		{name: "context without invocation context", ctx: context.Background(), agentName: "sequence"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runningAgentChildren(tc.ctx, tc.agentName)
+			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(agentChildren{})); diff != "" {
+				t.Errorf("runningAgentChildren mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestInvocationTrace_RecordChildrenReplacesTheParent records the sub-agents of
+// a workflow agent and then those of an LLM agent that has a sub-agent of the
+// same name. The later tree replaces the parent, and the workflow agent no
+// longer keeps the sub-agent apart from its siblings.
+func TestInvocationTrace_RecordChildrenReplacesTheParent(t *testing.T) {
+	inv := newInvocationTrace(context.Background(), "", time.Now())
+	inv.recordChildren(agentChildren{parent: "sequence", nonLLM: true, names: []string{"worker", "other"}})
+	if got := inv.parentAgent["worker"]; got != "sequence" {
+		t.Errorf("parent of worker = %q, want %q", got, "sequence")
+	}
+	if got := inv.sequentialParent["worker"]; got != "sequence" {
+		t.Errorf("workflow parent of worker = %q, want %q", got, "sequence")
+	}
+
+	inv.recordChildren(agentChildren{parent: "coordinator", names: []string{"worker"}})
+	if got := inv.parentAgent["worker"]; got != "coordinator" {
+		t.Errorf("parent of worker = %q, want %q", got, "coordinator")
+	}
+	if got, ok := inv.sequentialParent["worker"]; ok {
+		t.Errorf("workflow parent of worker = %q, want none: its parent is an LLM agent", got)
+	}
+	if got := inv.sequentialParent["other"]; got != "sequence" {
+		t.Errorf("workflow parent of other = %q, want %q: the second tree does not name it", got, "sequence")
+	}
+}
+
+// TestTraceManager_SubAgentsOfRunningAgentStayApartOutsideTheRunnerTree starts
+// a workflow agent whose sub-agents are not in the agent tree that the runner
+// runs, as when the agent runs as a graph node. Starting the agent records its
+// sub-agents, so the second one is parented to the workflow agent rather than
+// to the first, whose span is still open because a callback answered for it.
+func TestTraceManager_SubAgentsOfRunningAgentStayApartOutsideTheRunnerTree(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invocationID = "inv-running-agent-children"
+	id := func(name string) identity {
+		return identity{invocationID: invocationID, agentName: name, path: "graph"}
+	}
+	shortcut, next := newTestAgent(t, "shortcut"), newTestAgent(t, "next")
+	sequence := newTestAgent(t, "sequence", shortcut, next)
+
+	sequenceSpan := tm.pushAgentSpan(contextRunning(sequence), id("sequence"))
+	shortcutSpan := tm.pushAgentSpan(ctx, id("shortcut"))
+	nextSpan := tm.pushAgentSpan(ctx, id("next"))
+
+	if shortcutSpan.parentSpanID != sequenceSpan.spanID {
+		t.Errorf("shortcut: parent span %q, want the sequence %q", shortcutSpan.parentSpanID, sequenceSpan.spanID)
+	}
+	if nextSpan.parentSpanID != sequenceSpan.spanID {
+		t.Errorf("next: parent span %q, want the sequence %q rather than its sibling %q", nextSpan.parentSpanID, sequenceSpan.spanID, shortcutSpan.spanID)
+	}
+}
+
+// TestFunctionResponseCalls lists the function call ID, or else the tool name,
+// of each function response of a piece of content.
+func TestFunctionResponseCalls(t *testing.T) {
+	tests := []struct {
+		name    string
+		content *genai.Content
+		want    []string
+	}{
+		{name: "no content"},
+		{name: "text only", content: textContent("model", "hi")},
+		{
+			name: "responses among other parts",
+			content: &genai.Content{Parts: []*genai.Part{
+				nil,
+				{Text: "hi"},
+				{FunctionCall: &genai.FunctionCall{ID: "call-0", Name: "lookup"}},
+				{FunctionResponse: &genai.FunctionResponse{}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "lookup"}},
+				{FunctionResponse: &genai.FunctionResponse{Name: "search"}},
+			}},
+			want: []string{"call-1", "search"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if diff := cmp.Diff(tc.want, functionResponseCalls(tc.content)); diff != "" {
+				t.Errorf("functionResponseCalls mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestFunctionResponseCallsMatchToolKeys pairs the function response of an
+// event with the tool call that it answers: what functionResponseCalls returns
+// is what toolKeyCall finds at the end of the key that the tool callbacks
+// build for the call.
+func TestFunctionResponseCallsMatchToolKeys(t *testing.T) {
+	id := identity{agentName: "bot", branch: "root.bot", path: "root/bot"}
+	tests := []struct {
+		name string
+		resp *genai.FunctionResponse
+		want string
+	}{
+		{name: "function call ID", resp: &genai.FunctionResponse{ID: "call-1", Name: "lookup"}, want: "call-1"},
+		{name: "tool name without a function call ID", resp: &genai.FunctionResponse{Name: "lookup"}, want: "lookup"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			content := &genai.Content{Parts: []*genai.Part{{FunctionResponse: tc.resp}}}
+			got := functionResponseCalls(content)
+			if diff := cmp.Diff([]string{tc.want}, got); diff != "" {
+				t.Fatalf("functionResponseCalls mismatch (-want +got):\n%s", diff)
+			}
+			if key := toolKeyCall(toolKey(id, tc.resp.ID, tc.resp.Name)); key != got[0] {
+				t.Errorf("toolKeyCall(toolKey(...)) = %q, want %q: a response must name the key of its call", key, got[0])
+			}
+		})
+	}
+}
+
+// TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation shares one
+// traceManager between a runner of the tree root -> worker -> helper and a later
+// runner of an agent of that tree, as a plugin that several runners share does.
+// The parent map that a runner attaches to the callback context describes the
+// tree of that runner, so it is authoritative even when it is empty: nothing
+// that the earlier runner's tree says about the ancestors of the agent is
+// recorded for the invocation. Without a parent map, the earlier tree is all
+// that is known, and it gives the invocation its root agent.
+func TestTraceManager_EarlierRunnerAncestryStaysOutOfTheInvocation(t *testing.T) {
+	helper := newTestAgent(t, "helper")
+	worker := newTestAgent(t, "worker", helper)
+	root := newTestAgent(t, "root", worker)
+
+	type parentsKey struct{}
+	tests := []struct {
+		name    string
+		runner  agent.Agent
+		parents map[string]agent.Agent // nil: the context carries no parent map
+		// wantRoot is the root agent of the invocation, and wantParents the
+		// parent of each agent that the invocation records.
+		wantRoot    string
+		wantParents map[string]string
+	}{
+		{
+			name:        "parent map of the runner",
+			runner:      worker,
+			parents:     map[string]agent.Agent{"helper": worker},
+			wantRoot:    "worker",
+			wantParents: map[string]string{"helper": "worker"},
+		},
+		{
+			name:     "empty parent map",
+			runner:   helper,
+			parents:  map[string]agent.Agent{},
+			wantRoot: "helper",
+		},
+		{
+			name:        "no parent map",
+			runner:      worker,
+			wantRoot:    "root",
+			wantParents: map[string]string{"worker": "root", "helper": "worker"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			// The earlier runner runs root.
+			tm.rememberAgentTree(root)
+			ctx := context.Background()
+			if tc.parents != nil {
+				ctx = context.WithValue(ctx, parentsKey{}, tc.parents)
+			}
+			id := identity{invocationID: "inv-earlier-runner", agentName: tc.runner.Name()}
+			if got := tm.invocationSpan(ctx, id, tc.runner).rootAgentName; got != tc.wantRoot {
+				t.Errorf("root agent = %q, want %q", got, tc.wantRoot)
+			}
+			inv := tm.invocation(ctx, id)
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			if !maps.Equal(inv.parentAgent, tc.wantParents) {
+				t.Errorf("recorded parents = %v, want %v", inv.parentAgent, tc.wantParents)
+			}
+		})
+	}
 }

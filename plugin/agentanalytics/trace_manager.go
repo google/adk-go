@@ -76,10 +76,10 @@ type spanRecord struct {
 	firstToken time.Time
 	// hasResponse reports whether the agent activation has produced a model
 	// response or an event with content or output, itself or through an
-	// activation that ran under it. The final event of an activation also
-	// settles the activations that still run under it, and an event of an
-	// author that has no open span settles the activation that it would
-	// have run under.
+	// activation that ran under it. Such an event of an activation also
+	// settles the activations that still run under it, even if one of them
+	// fails later, and an event of an author that has no open span settles
+	// the activation that it would have run under.
 	hasResponse bool
 }
 
@@ -904,7 +904,9 @@ type unclosedAgentSpan struct {
 //     as responded, and so are the open activations that still run under it,
 //     such as a sub-agent that a callback answered inside a custom agent that
 //     runs it itself: its event never reaches the runner and no
-//     AfterAgentCallback ends its span.
+//     AfterAgentCallback ends its span. A sub-agent that fails later without
+//     any callback is settled as well, so its failure is not reported:
+//     popUnclosedAgentSpans documents this trade-off.
 //
 // If the author has no open agent span, for example because a callback of an
 // earlier plugin answered for it before this plugin saw it start, the response
@@ -1025,6 +1027,12 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //   - A model error of an activation that ADK still ends normally, running
 //     its AfterAgentCallback, because the caller kept reading after the
 //     error.
+//   - A sub-agent that fails without any callback after an agent that it
+//     runs under produced content, such as a custom agent that writes an
+//     event while its sub-agent runs. The event settles the activations that
+//     still run under the agent, so the callbacks cannot tell the failed
+//     sub-agent apart from one whose caller stopped reading once it had the
+//     response.
 //
 // Only the failing activations, each with its own error, and the open
 // activations they ran under are returned; a sibling span left open by a

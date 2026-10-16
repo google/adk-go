@@ -550,9 +550,11 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 // agent spans whose activation produced no response. A run that fails after
 // producing a response, such as a custom agent that writes an event and then
 // returns an error, or an AfterAgentCallback that returns an error, ends with
-// INVOCATION_COMPLETED: no plugin callback tells it apart from a successful
-// run whose caller stopped reading once it had the response.
-// popUnclosedAgentSpans documents the rules.
+// INVOCATION_COMPLETED, and so does a run in which a sub-agent fails without
+// any callback after an agent that it runs under produced content: no plugin
+// callback tells either apart from a successful run whose caller stopped
+// reading once it had the response. popUnclosedAgentSpans documents the
+// rules.
 //
 // The rules rely on this plugin seeing the callbacks of the run. ADK stops
 // each callback chain at the first plugin that returns a non-nil result or an
