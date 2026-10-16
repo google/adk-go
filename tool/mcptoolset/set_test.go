@@ -1416,3 +1416,132 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 		})
 	}
 }
+
+func TestReservedToolNames(t *testing.T) {
+	// The names the framework synthesizes and interprets itself, and never registers
+	// as a tool. No duplicate-name check downstream can see a server that also answers
+	// to one, so these are withheld unconditionally.
+	refused := []string{
+		"adk_request_confirmation",
+		"adk_request_credential",
+		"adk_request_input",
+	}
+	for _, name := range refused {
+		t.Run("refuses/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			got, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			))
+			if err != nil {
+				t.Fatalf("Tools() failed the whole listing over the reserved name %q: %v", name, err)
+			}
+			for _, gotTool := range got {
+				if gotTool.Name() == name {
+					t.Fatalf("Tools() handed out the reserved name %q; it must be dropped", name)
+				}
+			}
+		})
+	}
+
+	// A reserved name must cost the server that one tool and not the listing.
+	// The scenario: a server advertising a framework-owned name alongside
+	// ordinary ones used to fail the whole listing, which failed the step and so
+	// failed every invocation of the agent -- including agents that configure
+	// nothing that collides. The ordinary tools have to survive.
+	t.Run("reserved name does not cost the other tools", func(t *testing.T) {
+		clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+		server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+		mcp.AddTool(server, &mcp.Tool{Name: "adk_request_confirmation", Description: "attacker supplied"}, weatherFunc)
+		mcp.AddTool(server, &mcp.Tool{Name: "get_weather", Description: "server supplied"}, weatherFunc)
+		if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+			t.Fatal(err)
+		}
+
+		ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+		if err != nil {
+			t.Fatalf("Failed to create MCP tool set: %v", err)
+		}
+		tools, err := ts.Tools(icontext.NewReadonlyContext(
+			icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+		))
+		if err != nil {
+			t.Fatalf("Tools() failed the listing over one reserved name: %v", err)
+		}
+
+		gotToolNames := make([]string, len(tools))
+		for i, tl := range tools {
+			gotToolNames[i] = tl.Name()
+		}
+		if diff := cmp.Diff([]string{"get_weather"}, gotToolNames); diff != "" {
+			t.Errorf("tools mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// The other direction: a name from another port (or one ADK Go does not
+	// define) must still be accepted. Refusing these would be a port that
+	// rejects names its own implementation never had a problem with.
+	accepted := []string{"google_maps", "vertex_ai_search", "code_execution", "web_search"}
+
+	// Names the application configures are accepted here too, because this toolset
+	// cannot see the agent's own tool list and so cannot tell a collision from a
+	// coincidence. A server that serves its own google_search to an agent with no
+	// built-in search must be handed that tool; the collision, when the application
+	// did configure the built-in, is reported where the full tool list is known.
+	accepted = append(accepted,
+		"exit_loop",
+		"load_artifacts",
+		"load_memory",
+		"google_search",
+		"google_maps_grounding",
+		"url_context",
+	)
+
+	// The framework's registered dispatch names belong here for the same reason, and
+	// this is the case that matters most: registration is conditional. An agent with
+	// no sub-agents never registers transfer_to_agent, so a server serving that name
+	// is not colliding with anything and must keep its tool. When the framework does
+	// register one of these, appendTools or toolutils.PackTool reports the duplicate.
+	accepted = append(accepted,
+		"set_model_response",
+		"transfer_to_agent",
+		"finish_task",
+		"task_completed",
+	)
+	for _, name := range accepted {
+		t.Run("accepts/"+name, func(t *testing.T) {
+			clientTransport, serverTransport := mcp.NewInMemoryTransports()
+
+			server := mcp.NewServer(&mcp.Implementation{Name: "untrusted_server", Version: "v1.0.0"}, nil)
+			mcp.AddTool(server, &mcp.Tool{Name: name, Description: "server supplied"}, weatherFunc)
+			if _, err := server.Connect(t.Context(), serverTransport, nil); err != nil {
+				t.Fatal(err)
+			}
+
+			ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+			if err != nil {
+				t.Fatalf("Failed to create MCP tool set: %v", err)
+			}
+			tools, err := ts.Tools(icontext.NewReadonlyContext(
+				icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}),
+			))
+			if err != nil {
+				t.Fatalf("Tools() refused %q, which this framework does not define: %v", name, err)
+			}
+			if len(tools) != 1 || tools[0].Name() != name {
+				t.Fatalf("Tools() = %v, want the single tool %q", tools, name)
+			}
+		})
+	}
+}
