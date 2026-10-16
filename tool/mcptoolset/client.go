@@ -25,6 +25,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sync/semaphore"
 
+	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/version"
 )
 
@@ -62,14 +63,19 @@ var refreshableErrors = []error{
 // newConnectionRefresher creates a new connectionRefresher with the given client and transport.
 // If client is nil, a default MCP client will be created.
 func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connectionRefresher {
-	if client == nil {
-		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
-	}
 	return &connectionRefresher{
-		client:    client,
+		client:    orDefaultClient(client),
 		transport: transport,
 		mu:        semaphore.NewWeighted(1),
 	}
+}
+
+// orDefaultClient returns client, or a default MCP client if it is nil.
+func orDefaultClient(client *mcp.Client) *mcp.Client {
+	if client == nil {
+		return mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
+	}
+	return client
 }
 
 func (c *connectionRefresher) Close() error {
@@ -225,3 +231,99 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 }
 
 var _ MCPClient = (*connectionRefresher)(nil)
+
+// userKey identifies the acting user an MCP session belongs to.
+type userKey struct {
+	appName string
+	userID  string
+}
+
+// perUserClients gives each acting user an MCP session of its own, keyed by
+// the app and user from [agent.IdentityFromContext].
+//
+// It is used when Config.Auth is set. The credential then differs per user,
+// and an MCP server that binds a session to the user who created it (as the
+// MCP spec recommends, and as go-sdk servers do whenever their token verifier
+// reports a UserID) rejects requests on another user's session. A single
+// shared session would work only for whichever user opened it, and a rejected
+// request from another user would also close it for that user.
+//
+// A context without an identity, or with an empty UserID, shares one session,
+// which is what every caller got before.
+//
+// Sessions are kept until Close, one per user that has called the toolset.
+type perUserClients struct {
+	client    *mcp.Client
+	transport mcp.Transport
+
+	mu       sync.Mutex
+	closed   bool
+	sessions map[userKey]*connectionRefresher
+}
+
+func newPerUserClients(client *mcp.Client, transport mcp.Transport) *perUserClients {
+	return &perUserClients{
+		client:    orDefaultClient(client),
+		transport: transport,
+		sessions:  make(map[userKey]*connectionRefresher),
+	}
+}
+
+// forUser returns the connection of the user acting in ctx, creating it on
+// first use. The connection itself connects lazily.
+func (p *perUserClients) forUser(ctx context.Context) (*connectionRefresher, error) {
+	var key userKey
+	if id, ok := agent.IdentityFromContext(ctx); ok && id.UserID != "" {
+		key = userKey{appName: id.AppName, userID: id.UserID}
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, mcp.ErrConnectionClosed
+	}
+	c, ok := p.sessions[key]
+	if !ok {
+		c = newConnectionRefresher(p.client, p.transport)
+		p.sessions[key] = c
+	}
+	return c, nil
+}
+
+// CallTool calls a tool on the acting user's MCP session.
+func (p *perUserClients) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	c, err := p.forUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.CallTool(ctx, params)
+}
+
+// ListTools lists tools on the acting user's MCP session.
+func (p *perUserClients) ListTools(ctx context.Context) ([]*mcp.Tool, error) {
+	c, err := p.forUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.ListTools(ctx)
+}
+
+// Close closes every user's session. Later calls fail with
+// [mcp.ErrConnectionClosed].
+func (p *perUserClients) Close() error {
+	p.mu.Lock()
+	p.closed = true
+	sessions := p.sessions
+	p.sessions = nil
+	p.mu.Unlock()
+
+	var errs []error
+	for _, c := range sessions {
+		if err := c.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+var _ MCPClient = (*perUserClients)(nil)
