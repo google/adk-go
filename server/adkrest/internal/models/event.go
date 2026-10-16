@@ -16,6 +16,7 @@ package models
 
 import (
 	"encoding/json"
+	"math"
 	"time"
 
 	"google.golang.org/genai"
@@ -39,7 +40,7 @@ type EventActions struct {
 // Event represents a single event in a session.
 type Event struct {
 	ID                  string                                      `json:"id"`
-	Timestamp           int64                                       `json:"timestamp"`
+	Timestamp           float64                                     `json:"timestamp"`
 	InvocationID        string                                      `json:"invocationId"`
 	Branch              string                                      `json:"branch,omitempty"`
 	Author              string                                      `json:"author"`
@@ -69,7 +70,7 @@ type Event struct {
 func ToSessionEvent(event Event) *session.Event {
 	var ts time.Time
 	if event.Timestamp != 0 {
-		ts = time.Unix(event.Timestamp, 0).UTC()
+		ts = time.UnixMicro(int64(math.Round(event.Timestamp * 1e6))).UTC()
 	}
 	return &session.Event{
 		ID:                 event.ID,
@@ -118,9 +119,9 @@ func ToSessionEvent(event Event) *session.Event {
 
 // FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
-	var ts int64
+	var ts float64
 	if !event.Timestamp.IsZero() {
-		ts = event.Timestamp.Unix()
+		ts = float64(event.Timestamp.UnixMicro()) / 1e6
 	}
 	return Event{
 		ID:                  event.ID,

@@ -32,7 +32,7 @@ import (
 func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	ev := session.Event{
 		ID:             "e1",
-		Timestamp:      time.Unix(1733040000, 0).UTC(),
+		Timestamp:      time.UnixMicro(1733040000123456).UTC(),
 		Author:         "agent",
 		IsolationScope: "scope-1",
 		Routes:         []string{"next-node", "fallback"},
@@ -47,8 +47,8 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 
 	restEvent := models.FromSessionEvent(ev)
-	if restEvent.Timestamp != 1733040000 {
-		t.Errorf("FromSessionEvent().Timestamp = %d, want 1733040000", restEvent.Timestamp)
+	if restEvent.Timestamp != 1733040000.123456 {
+		t.Errorf("FromSessionEvent().Timestamp = %f, want 1733040000.123456", restEvent.Timestamp)
 	}
 	rawJSON, err := json.Marshal(restEvent)
 	if err != nil {
@@ -58,11 +58,15 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	if err := json.Unmarshal(rawJSON, &wire); err != nil {
 		t.Fatalf("json.Unmarshal(rawJSON) failed: %v", err)
 	}
-	if gotTS, ok := wire["timestamp"].(float64); !ok || int64(gotTS) != 1733040000 {
-		t.Errorf("wire[\"timestamp\"] = %v, want 1733040000", wire["timestamp"])
+	if gotTS, ok := wire["timestamp"].(float64); !ok || gotTS != 1733040000.123456 {
+		t.Errorf("wire[\"timestamp\"] = %v, want 1733040000.123456", wire["timestamp"])
+	}
+	var decodedRestEvent models.Event
+	if err := json.Unmarshal(rawJSON, &decodedRestEvent); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON, &decodedRestEvent) failed: %v", err)
 	}
 
-	back := models.ToSessionEvent(restEvent)
+	back := models.ToSessionEvent(decodedRestEvent)
 
 	if !back.Timestamp.Equal(ev.Timestamp) {
 		t.Errorf("Timestamp = %v, want %v", back.Timestamp, ev.Timestamp)
