@@ -28,6 +28,7 @@ import (
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -249,6 +250,51 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 	if usr.UpdateTime.IsZero() {
 		t.Errorf("user_states.update_time is zero after AppendEvent; want it populated")
+	}
+}
+
+// The test database is SQLite without PRAGMA foreign_keys, so the ON DELETE
+// CASCADE on events is not enforced and only an explicit delete removes them.
+func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	deleted, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "deleted"})
+	if err != nil {
+		t.Fatalf("Create(deleted): %v", err)
+	}
+	kept, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "kept"})
+	if err != nil {
+		t.Fatalf("Create(kept): %v", err)
+	}
+	for _, sess := range []session.Session{deleted.Session, kept.Session} {
+		event := &session.Event{
+			ID:          "e-" + sess.ID(),
+			Author:      "tool",
+			Timestamp:   time.Now(),
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("tool output", genai.RoleUser)},
+		}
+		if err := s.AppendEvent(ctx, sess, event); err != nil {
+			t.Fatalf("AppendEvent(%s): %v", sess.ID(), err)
+		}
+	}
+
+	if err := s.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "deleted"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	var left int64
+	if err := s.db.Model(&storageEvent{}).Where("session_id = ?", "deleted").Count(&left).Error; err != nil {
+		t.Fatalf("count events of deleted session: %v", err)
+	}
+	if left != 0 {
+		t.Errorf("events left for deleted session = %d, want 0", left)
+	}
+	var other int64
+	if err := s.db.Model(&storageEvent{}).Where("session_id = ?", "kept").Count(&other).Error; err != nil {
+		t.Fatalf("count events of kept session: %v", err)
+	}
+	if other != 1 {
+		t.Errorf("events left for kept session = %d, want 1", other)
 	}
 }
 
