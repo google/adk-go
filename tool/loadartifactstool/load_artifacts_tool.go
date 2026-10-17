@@ -20,7 +20,10 @@ package loadartifactstool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"strings"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -201,14 +204,31 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 	}
 
 	results := make([]*genai.Content, len(artifactNames))
+	// notes[i] explains why artifactNames[i] was not loaded. Per index rather
+	// than an appended list so the goroutines never share a variable.
+	notes := make([]string, len(artifactNames))
 	group, childCtx := errgroup.WithContext(ctx)
 	artifactsService := ctx.Artifacts()
 
 	for i, artifactName := range artifactNames {
 		group.Go(func() error {
+			// The load runs here, on the request that follows the tool call, so
+			// returning a recoverable failure from ProcessRequest ends the turn
+			// before the model is asked again, and the model never learns what
+			// went wrong. A name the model got wrong is something it can fix, so
+			// those are reported back to it as content. Anything it cannot fix --
+			// a storage failure, a cancelled context -- is still returned.
+			if !isValidArtifactName(artifactName) {
+				notes[i] = fmt.Sprintf("%q is not a valid artifact name: artifact names are plain file names and cannot contain path separators", artifactName)
+				return nil
+			}
 			// Although not used, we need to pass childCtx for early return in case of an error.
 			content, err := t.loadIndividualArtifact(childCtx, artifactsService, artifactName)
 			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					notes[i] = fmt.Sprintf("%q was not found", artifactName)
+					return nil
+				}
 				return err
 			}
 			results[i] = content
@@ -220,8 +240,33 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 		return err
 	}
 
-	req.Contents = append(req.Contents, results...)
+	for _, content := range results {
+		if content != nil {
+			req.Contents = append(req.Contents, content)
+		}
+	}
+	var failed []string
+	for _, note := range notes {
+		if note != "" {
+			failed = append(failed, note)
+		}
+	}
+	if len(failed) > 0 {
+		// Tell the model which artifacts it did not get and why, so it can
+		// correct the call or answer without them instead of the turn ending.
+		req.Contents = append(req.Contents, &genai.Content{
+			Role:  genai.RoleUser,
+			Parts: []*genai.Part{genai.NewPartFromText(strings.Join(failed, "\n"))},
+		})
+	}
 	return nil
+}
+
+// isValidArtifactName reports whether name can be an artifact file name. The
+// artifact service rejects names containing path separators; checking that here
+// lets the failure be reported to the model instead of ending the turn.
+func isValidArtifactName(name string) bool {
+	return !strings.Contains(name, "/") && !strings.Contains(name, "\\")
 }
 
 func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
