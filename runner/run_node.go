@@ -144,6 +144,7 @@ func (r *Runner) runNode(
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
 	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
+	yield = r.observeRunErrors(ictx, yield)
 	if err != nil {
 		yield(nil, err)
 		return

@@ -700,6 +700,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		yield = r.observeRunErrors(ctx, yield)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -784,6 +785,18 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
+	}
+}
+
+// observeRunErrors notifies plugins before yielding each error to the caller.
+// Go's existing runner can continue after an error and still calls AfterRunCallback.
+// Preserve that behavior here, so a plugin can log or clean up after an error even if the caller ignores it and keeps going.
+func (r *Runner) observeRunErrors(ctx agent.InvocationContext, yield func(*session.Event, error) bool) func(*session.Event, error) bool {
+	return func(event *session.Event, err error) bool {
+		if err != nil {
+			r.pluginManager.RunOnRunErrorCallback(ctx, err)
+		}
+		return yield(event, err)
 	}
 }
 
@@ -890,7 +903,7 @@ func (s *closedLiveSession) Close() error {
 
 // RunLive starts a live, bidirectional agent session, returning the session
 // and a stream of events from the agents.
-func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (liveSession agent.LiveSession, events iter.Seq2[*session.Event, error], err error) {
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -951,6 +964,12 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		UserContent: nil,
 	})
 
+	defer func() {
+		if err != nil {
+			r.pluginManager.RunOnRunErrorCallback(iCtx, err)
+		}
+	}()
+
 	if r.pluginManager != nil {
 		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
 		if err != nil {
@@ -979,6 +998,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		yield = r.observeRunErrors(iCtx, yield)
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
