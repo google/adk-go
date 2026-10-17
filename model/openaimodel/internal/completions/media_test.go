@@ -117,6 +117,81 @@ func TestBuildParams_MediaOnTheWire(t *testing.T) {
 	}
 }
 
+func TestBuildParams_ToolResponseBeforeMedia(t *testing.T) {
+	response := &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: "c1", Name: "f", Response: map[string]any{"ok": true},
+	}}
+	image := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}
+	for _, tt := range []struct {
+		name  string
+		parts []*genai.Part
+	}{
+		{name: "response part first", parts: []*genai.Part{response, image}},
+		{name: "media part first", parts: []*genai.Part{image, response}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: []*genai.Content{
+				{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "f"}}}},
+				{Role: "user", Parts: tt.parts},
+			}}
+			msgs := wireMessages(t, requestWire(t, req))
+			if len(msgs) != 3 {
+				t.Fatalf("got %d messages, want 3", len(msgs))
+			}
+			// All tool calls must be answered before another user message.
+			for i, role := range []string{"assistant", "tool", "user"} {
+				if msgs[i]["role"] != role {
+					t.Fatalf("message %d: expected role %s", i, role)
+				}
+			}
+			if msgs[1]["tool_call_id"] != "c1" {
+				t.Error("tool response lost its call association")
+			}
+			if msgs[1]["content"] != `{"ok":true}` {
+				t.Error("tool response content changed")
+			}
+			content, ok := msgs[2]["content"].([]any)
+			if !ok || len(content) != 1 {
+				t.Fatal("expected one media content part")
+			}
+			part, ok := content[0].(map[string]any)
+			if !ok || part["type"] != "image_url" {
+				t.Fatal("expected an image content part")
+			}
+			imageURL, ok := part["image_url"].(map[string]any)
+			if !ok || imageURL["url"] != "data:image/png;base64,AQ==" {
+				t.Error("image content changed")
+			}
+		})
+	}
+}
+
+func TestBuildParams_FunctionCallBeforeMediaRoleError(t *testing.T) {
+	call := &genai.FunctionCall{ID: "c1", Name: "f"}
+	image := &genai.Blob{MIMEType: "image/png", Data: []byte{1}}
+	for _, role := range []string{"system", "developer"} {
+		for _, tt := range []struct {
+			name  string
+			parts []*genai.Part
+		}{
+			{name: "call part first", parts: []*genai.Part{{FunctionCall: call}, {InlineData: image}}},
+			{name: "media part first", parts: []*genai.Part{{InlineData: image}, {FunctionCall: call}}},
+			{name: "same part", parts: []*genai.Part{{FunctionCall: call, InlineData: image}}},
+		} {
+			t.Run(role+"/"+tt.name, func(t *testing.T) {
+				req := &model.LLMRequest{Contents: []*genai.Content{{Role: role, Parts: tt.parts}}}
+				_, err := buildParams("m", req)
+				if err == nil {
+					t.Fatal("expected function call refusal")
+				}
+				if !strings.Contains(err.Error(), "function call in a "+role+" turn") {
+					t.Errorf("expected function call refusal for %s before media role refusal", role)
+				}
+			})
+		}
+	}
+}
+
 func TestBuildParams_MediaRefused(t *testing.T) {
 	const secretURL = "https://example.com/doc.pdf?X-Amz-Signature=SECRET"
 	png := &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}
