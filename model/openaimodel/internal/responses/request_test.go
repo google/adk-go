@@ -858,6 +858,7 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 func TestBuildParams_Media(t *testing.T) {
 	tests := []struct {
 		name        string
+		role        string
 		part        *genai.Part
 		want        []string
 		wantErr     error
@@ -969,12 +970,31 @@ func TestBuildParams_Media(t *testing.T) {
 			},
 			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
 		},
+		{
+			// System and developer messages take input_text only. The
+			// Completions path already refuses media in those roles; sending
+			// input_image here would be a 400 from the API instead.
+			name:        "image_in_a_system_message_is_refused",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: image/png",
+		},
+		{
+			name:        "image_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a developer message is not supported: image/png",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			role := tt.role
+			if role == "" {
+				role = string(genai.RoleUser)
+			}
 			params, err := buildParams("fallback", &model.LLMRequest{
-				Contents: []*genai.Content{userContent(tt.part)},
+				Contents: []*genai.Content{{Role: role, Parts: []*genai.Part{tt.part}}},
 			})
 			if tt.wantErr != nil || tt.wantErrText != "" {
 				if err == nil {
