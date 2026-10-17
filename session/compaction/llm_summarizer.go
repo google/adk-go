@@ -140,15 +140,21 @@ type LLMSummarizerConfig struct {
 	// for it, and compaction is an optimisation: giving up on it is cheap.
 	Timeout time.Duration
 
-	// GenerateContentConfig is applied to the summarization call.
+	// GenerateContentConfig supplies settings for the summarization call.
 	//
-	// The runner passes the root agent's config here, so safety settings and
-	// output limits an application deliberately configured also govern the one
-	// call that processes the whole conversation transcript. Without it that
-	// call silently falls back to provider defaults.
+	// Only SafetySettings, Temperature, TopP, TopK, Seed, HTTPOptions and
+	// Labels carry over. Every other field is ignored, including
+	// MaxOutputTokens, StopSequences, CandidateCount, SystemInstruction, Tools,
+	// ResponseMIMEType, ResponseSchema, ResponseModalities, CachedContent and
+	// ThinkingConfig. Those settings are meant for the agent's own replies, not
+	// for a call that must return a prose summary of a whole window. An output
+	// limit sized for one reply, for example, stops the summary before it
+	// finishes, and the summarizer then reports an error.
 	//
-	// SystemInstruction and Tools are cleared: the summarizer has its own
-	// instruction and must not be offered tools to call.
+	// The runner passes the root agent's config here, so the fields above that
+	// an application configured, such as its safety settings, also govern the
+	// one call that processes the whole conversation transcript. Without it that
+	// call falls back to provider defaults.
 	GenerateContentConfig *genai.GenerateContentConfig
 }
 
@@ -432,33 +438,6 @@ func escapeLines(text string) string {
 	return r.Replace(text)
 }
 
-// summarizerGenConfig adapts an application's generation config for the
-// summarization call.
-//
-// Only settings that mean the same thing for a summarization are carried over,
-// named one by one. A deny-list was the wrong shape here: everything not
-// thought of rode along, so an application asking for JSON out, or for a fixed
-// response schema, or for images, silently applied all of it to a call whose
-// entire job is to return prose. A cached-content handle from the agent's own
-// call came through as well, which is a different conversation entirely.
-//
-// Safety settings carry over because an application that tightened them meant
-// them to apply to every call the framework makes on its behalf. Temperature
-// and the sampling controls carry over as the closest thing to "how this
-// application likes its model to behave".
-//
-// Three that sound like they should and do not:
-//
-//   - MaxOutputTokens is sized for the agent's own replies. A summary of a
-//     whole window is longer than a reply, so an ordinary app-level cap fails
-//     the summarization outright and compaction never runs.
-//   - StopSequences are chosen for the agent's output format. A hit reports
-//     finish reason STOP, which is indistinguishable from finishing, so a
-//     summary cut off at the first occurrence of the token is stored and the
-//     covered turns are then dropped in favor of it.
-//   - CandidateCount bills one generation per candidate and only the first is
-//     read, so an app asking for four pays four times for one summary.
-//
 // cloneGenConfig returns a copy safe to hand to one model call.
 //
 // The config is built once when the summarizer is constructed, and the model
@@ -486,6 +465,32 @@ func cloneGenConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConf
 	return &out
 }
 
+// summarizerGenConfig adapts an application's generation config for the
+// summarization call.
+//
+// Only settings that mean the same thing for a summarization are carried over,
+// named one by one. A deny-list was the wrong shape here: everything not
+// thought of rode along, so an application asking for JSON out, or for a fixed
+// response schema, or for images, silently applied all of it to a call whose
+// entire job is to return prose. A cached-content handle from the agent's own
+// call came through as well, which is a different conversation entirely.
+//
+// Safety settings carry over because an application that tightened them meant
+// them to apply to every call the framework makes on its behalf. Temperature
+// and the sampling controls carry over as the closest thing to "how this
+// application likes its model to behave".
+//
+// Three that sound like they should and do not:
+//
+//   - MaxOutputTokens is sized for the agent's own replies. A summary of a
+//     whole window is longer than a reply, so an ordinary app-level cap fails
+//     the summarization outright and compaction never runs.
+//   - StopSequences are chosen for the agent's output format. A hit reports
+//     finish reason STOP, which is indistinguishable from finishing, so a
+//     summary cut off at the first occurrence of the token is stored and the
+//     covered turns are then dropped in favor of it.
+//   - CandidateCount bills one generation per candidate and only the first is
+//     read, so an app asking for four pays four times for one summary.
 func summarizerGenConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
 	if cfg == nil {
 		return nil
