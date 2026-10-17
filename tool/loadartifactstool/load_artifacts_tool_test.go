@@ -553,9 +553,9 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 	}
 }
 
-// TestLoadArtifactsTool_ProcessRequest_CancelledContextIsReturned pins that a
-// cancelled context is not mistaken for a name the model could fix.
-func TestLoadArtifactsTool_ProcessRequest_CancelledContextIsReturned(t *testing.T) {
+// TestLoadArtifactsTool_ProcessRequest_CanceledContextIsReturned pins that a
+// canceled context is not mistaken for a name the model could fix.
+func TestLoadArtifactsTool_ProcessRequest_CanceledContextIsReturned(t *testing.T) {
 	loadArtifactsTool := loadartifactstool.New()
 	tc := createToolContextWithService(t, &faultyLoadService{
 		Service: artifact.InMemoryService(),
@@ -578,7 +578,7 @@ func TestLoadArtifactsTool_ProcessRequest_CancelledContextIsReturned(t *testing.
 	requestProcessor := loadArtifactsTool.(toolinternal.RequestProcessor)
 	err := requestProcessor.ProcessRequest(tc, llmRequest)
 	if err == nil {
-		t.Fatal("ProcessRequest should return a cancelled-context error, but got nil")
+		t.Fatal("ProcessRequest should return a canceled-context error, but got nil")
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("errors.Is(err, context.Canceled) = false, got: %v", err)
@@ -586,7 +586,7 @@ func TestLoadArtifactsTool_ProcessRequest_CancelledContextIsReturned(t *testing.
 }
 
 // TestLoadArtifactsTool_ProcessRequest_ReportsNamesTheModelCanFix covers the
-// behaviour change: a wrong or missing artifact name reaches the model as
+// behavior change: a wrong or missing artifact name reaches the model as
 // content, the run continues, and artifacts that did load are still delivered.
 func TestLoadArtifactsTool_ProcessRequest_ReportsNamesTheModelCanFix(t *testing.T) {
 	tests := []struct {

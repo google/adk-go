@@ -217,7 +217,7 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 			// before the model is asked again, and the model never learns what
 			// went wrong. A name the model got wrong is something it can fix, so
 			// those are reported back to it as content. Anything it cannot fix --
-			// a storage failure, a cancelled context -- is still returned.
+			// a storage failure, a canceled context -- is still returned.
 			if !isValidArtifactName(artifactName) {
 				notes[i] = fmt.Sprintf("%q is not a valid artifact name: artifact names are plain file names and cannot contain path separators", artifactName)
 				return nil
