@@ -434,15 +434,22 @@ func floatValue(v reflect.Value) any {
 }
 
 // stringValue redacts sensitive keys inside JSON-encoded strings and scrubs
-// credential patterns when redact is set, then truncates the result to
+// credential patterns when redact is set, replacing a JSON object or array
+// that would still hold a credential in a decoded string (see
+// decodedCredentialSurvives) as a whole, then truncates the result to
 // maxLength runes.
 func (s *sanitizer) stringValue(str string, depth int) (string, bool) {
 	var contentLost bool
 	if s.redact {
+		in := str
 		str, _, contentLost = redactJSONTextWithBudget(str, depth, s.budget)
 		scrubbed := scrubErrorText(str)
 		if scrubbed != str {
 			str = scrubbed
+			contentLost = true
+		}
+		if decodedCredentialSurvives(in, str) {
+			str = redactedSensitiveTextPlaceholder
 			contentLost = true
 		}
 	}
