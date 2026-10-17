@@ -321,6 +321,60 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 2,
 		},
 		{
+			// ClosePolicyViolation (1008) is resumable.
+			name: "policy violation (1008) close error is resumable and reconnects",
+			serveConn: func(connNum int, conn *websocket.Conn) {
+				if connNum == 1 {
+					deadline := time.Now().Add(time.Second)
+					_ = conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "policy violation"), deadline)
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+					return
+				}
+				blockUntilClientCloses(conn)
+			},
+			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
+				sawTurn := false
+				for ev, err := range seq {
+					if err != nil {
+						continue
+					}
+					if ev != nil && ev.LLMResponse.Content != nil {
+						sawTurn = true
+						cancel()
+					}
+				}
+				if !sawTurn {
+					t.Error("never received the post-reconnect model turn")
+				}
+			},
+			wantConns: 2,
+		},
+		{
+			// An error whose message contains 1008 only in a port or address (e.g. port 41008 timeout)
+			// is not a ClosePolicyViolation and must terminate without reconnecting.
+			name: "non-resumable error with 1008 port does not reconnect",
+			serveConn: func(connNum int, conn *websocket.Conn) {
+				deadline := time.Now().Add(time.Second)
+				_ = conn.WriteControl(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseProtocolError, "read tcp 127.0.0.1:41008->127.0.0.1:42207: i/o timeout"), deadline)
+			},
+			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
+				sawErr := false
+				for _, err := range seq {
+					if err != nil && strings.Contains(err.Error(), "41008") {
+						sawErr = true
+					}
+				}
+				if !sawErr {
+					t.Error("expected error to surface through the iterator")
+				}
+			},
+			wantConns: 1,
+		},
+		{
 			// A close frame with a non-resumable code must surface as an error
 			// to the caller and terminate the flow after a single connection.
 			//

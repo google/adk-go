@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -325,11 +326,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			if err == io.EOF {
 				return true
 			}
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) && closeErr.Code == websocket.ClosePolicyViolation {
+				return true
+			}
 			errStr := err.Error()
 			return strings.Contains(errStr, "broken pipe") ||
 				strings.Contains(errStr, "connection reset") ||
 				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "1008") ||
+				strings.Contains(errStr, "close 1008") ||
 				strings.Contains(errStr, "GoAway")
 		}
 
