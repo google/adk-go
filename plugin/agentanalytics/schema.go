@@ -38,8 +38,8 @@ func EventsSchema() bq.Schema {
 		{Name: "invocation_id", Type: bq.StringFieldType, Required: false, Description: "A unique identifier for a single turn or execution within a session. Groups related events like LLM request and response."},
 		{Name: "user_id", Type: bq.StringFieldType, Required: false, Description: "The identifier of the end-user participating in the session, if available."},
 		{Name: "trace_id", Type: bq.StringFieldType, Required: false, Description: "OpenTelemetry trace ID for distributed tracing across services."},
-		{Name: "span_id", Type: bq.StringFieldType, Required: false, Description: "OpenTelemetry span ID of the ambient span when the event was logged. Plugin-internal execution-tree span ids are not written yet, and parent_span_id is currently unset. For span-level Cloud Trace correlation use attributes.otel.span_id (best-effort)."},
-		{Name: "parent_span_id", Type: bq.StringFieldType, Required: false, Description: "Parent execution-tree span ID, currently unset. Plugin-internal execution-tree span ids are not written yet."},
+		{Name: "span_id", Type: bq.StringFieldType, Required: false, Description: "Unique identifier for this specific operation or span within the trace (invocation, agent run, model call, or tool call). When EnableOTelCorrelation is set, raw ambient OpenTelemetry span IDs are also written to attributes.otel.span_id."},
+		{Name: "parent_span_id", Type: bq.StringFieldType, Required: false, Description: "Identifier of the parent span in the execution tree, establishing causality and hierarchy across invocations, agent runs, model calls, and tool calls."},
 		{Name: "content", Type: bq.JSONFieldType, Required: false, Description: "The primary payload of the event, stored as a JSON string. The structure depends on the event_type (e.g., prompt text for LLM_REQUEST, tool output for TOOL_RESPONSE)."},
 		{
 			Name:        "content_parts",
