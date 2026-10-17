@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -6351,4 +6352,57 @@ func TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan(t *testing.T) {
 			t.Errorf("post-eviction endInvocation traceID = %q, want adopted trace_id %q", endSpan.traceID, traceHex)
 		}
 	})
+}
+
+// transferModel answers its calls in order: transfer to `to` for each name in
+// script, then text.
+type transferModel struct {
+	calls  atomic.Int32
+	script []string
+}
+
+func (m *transferModel) Name() string { return "transfer-model" }
+
+func (m *transferModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	i := int(m.calls.Add(1)) - 1
+	part := genai.NewPartFromText("done")
+	if i < len(m.script) {
+		part = genai.NewPartFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": m.script[i]})
+	}
+	resp := &model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{part}}, TurnComplete: true}
+	return func(yield func(*model.LLMResponse, error) bool) { yield(resp, nil) }
+}
+
+func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: &transferModel{script: []string{"planner"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner, err := llmagent.New(llmagent.Config{Name: "planner", Model: &transferModel{script: []string{"helper"}}, SubAgents: []agent.Agent{helper}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	started := map[any]any{}
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		started[row["span_id"]] = row["agent"]
+	}
+	for _, row := range rowsOfType(rows, EventAgentCompleted) {
+		if _, ok := started[row["span_id"]]; !ok {
+			t.Errorf("AGENT_COMPLETED of %v has span_id %v, which no AGENT_STARTING row has", row["agent"], row["span_id"])
+		}
+		if row["latency_ms"] == nil {
+			t.Errorf("AGENT_COMPLETED of %v has no latency_ms", row["agent"])
+		}
+		delete(started, row["span_id"])
+	}
+	if len(started) > 0 {
+		t.Errorf("AGENT_STARTING spans never closed: %v", started)
+	}
 }

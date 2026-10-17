@@ -85,7 +85,22 @@ type spanRecord struct {
 	// event's own branch and node path, even if one of them fails later, and
 	// an event of an author that has no open span settles the activation
 	// that it would have run under.
+	//
+	// hasResponse alone does not retire an earlier activation on
+	// re-entry (see pushAgentSpan): a transfer-back chain sets it on the
+	// parent while the parent is still running, so retiring on hasResponse
+	// would end a live span. Instead, taskDelegated marks that a child
+	// task-mode sub-agent completed via finish_task, which is the only case
+	// where re-entry retirement is safe.
 	hasResponse bool
+	// taskDelegated is set on the parent agent activation when a child
+	// task-mode sub-agent completes via a finish_task function response
+	// (see popTaskAgentSpan). It distinguishes the task-mode delegation
+	// case — where ADK skips the parent's AfterAgentCallback and the
+	// parent's prior activation must be retired on re-entry — from an
+	// ordinary transfer-back chain, where the parent is still running and
+	// must not be retired.
+	taskDelegated bool
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -981,10 +996,11 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 // agent are recorded on its activation span before they start, so that agents
 // that run under a workflow agent outside the runner's agent tree, such as a
 // graph node, are parented like those of the tree without overwriting sibling
-// graph nodes. When the same agent re-enters Run on the same branch and node
-// path after its prior activation already produced a response without running
-// AfterAgentCallback (as when a chat coordinator resumes after delegating to a
-// task-mode sub-agent), the prior responded activation is retired first.
+// graph nodes. If an agent activation of the same (name, branch, path) is
+// re-entered after delegating to a task-mode sub-agent that completed via
+// finish_task without running AfterAgentCallback for the delegating
+// activation, the delegating activation is retired first so the continuation
+// turn becomes a direct sibling under the parent span.
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -998,7 +1014,13 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan 
 	inv.noteRootAgentLocked(id, rootIn, true)
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
-		if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.hasResponse {
+		// Retire the prior activation only when it delegated to a completed
+		// task-mode sub-agent (taskDelegated). An ordinary transfer-back
+		// chain (planner → helper → planner) leaves the first planner with
+		// hasResponse == true (its transfer call counted as a response)
+		// while it is still running, so retiring on hasResponse would pop
+		// the planner and its descendants prematurely.
+		if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.taskDelegated {
 			inv.retireAgentLocked(i)
 			break
 		}
@@ -1059,6 +1081,38 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 		return inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
 	}
 	rec := inv.agentStack[i]
+	inv.retireAgentLocked(i)
+	return inv.rowSpan(rec, latencyOf(rec, now), ambient)
+}
+
+// popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
+// a finish_task function response (which ADK does without running
+// AfterAgentCallback), and marks its parent agent activation as having
+// delegated to a completed task. The mark lets pushAgentSpan retire the
+// parent's prior activation safely on re-entry, without retiring a parent
+// that is still running in an ordinary transfer-back chain.
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity) rowSpan {
+	inv := tm.invocation(ctx, id)
+	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.noteRootAgentLocked(id, rootIn, true)
+	i := inv.findAgent(id.path, id.agentName, id.branch)
+	if i < 0 {
+		return inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
+	}
+	rec := inv.agentStack[i]
+	// Mark the parent activation that delegated to this task sub-agent so
+	// that pushAgentSpan can retire it on re-entry. The parent is the agent
+	// span whose spanID equals rec.parentSpanID and whose kind is spanKindAgent.
+	for j := range inv.agentStack {
+		if inv.agentStack[j].spanID == rec.parentSpanID && inv.agentStack[j].kind == spanKindAgent {
+			inv.agentStack[j].taskDelegated = true
+			break
+		}
+	}
 	inv.retireAgentLocked(i)
 	return inv.rowSpan(rec, latencyOf(rec, now), ambient)
 }

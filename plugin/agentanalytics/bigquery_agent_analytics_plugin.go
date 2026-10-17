@@ -660,7 +660,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			taskID.agentName = ev.Author
 			taskID.branch = ev.Branch
 			p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan {
-				return p.traces.popAgentSpan(ctx, taskID)
+				return p.traces.popTaskAgentSpan(ctx, taskID)
 			}, nil)
 		}
 	}
