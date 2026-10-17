@@ -548,22 +548,6 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		// An invocation that ended in an error is not a finished turn and must
-		// not be summarized: the window would hold a question with no answer,
-		// and that summary is stored permanently and degrades every later
-		// prompt. Observing it here, rather than at each error site, means no
-		// path can forget to.
-		invocationFailed := false
-		var invocationCtx agent.InvocationContext
-		emit := yield
-		yield = func(ev *session.Event, err error) bool {
-			if err != nil {
-				invocationFailed = true
-				r.notifyRunError(invocationCtx, err)
-			}
-			return emit(ev, err)
-		}
-
 		options := runOptions{}
 		for _, opt := range opts {
 			opt(&options)
@@ -649,6 +633,22 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+
+		// An invocation that ended in an error is not a finished turn and must
+		// not be summarized: the window would hold a question with no answer,
+		// and that summary is stored permanently and degrades every later
+		// prompt. Observing it here, rather than at each error site, means no
+		// path can forget to.
+		invocationFailed := false
+		var invocationCtx agent.InvocationContext
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil {
+				invocationFailed = true
+				r.notifyRunError(invocationCtx, err)
+			}
+			return emit(ev, err)
+		}
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
@@ -993,7 +993,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		emit := yield
 		yield = func(ev *session.Event, err error) bool {
-			r.notifyRunError(iCtx, err)
+			if err != nil {
+				r.notifyRunError(iCtx, err)
+			}
 			return emit(ev, err)
 		}
 		if r.pluginManager != nil {
