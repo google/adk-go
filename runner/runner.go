@@ -17,6 +17,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
@@ -185,9 +186,10 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,
-		// Safety settings and output limits the application configured govern
-		// the summarization call too, rather than it silently falling back to
+		// The settings the summarizer keeps, such as safety settings, govern the
+		// summarization call too, rather than it silently falling back to
 		// provider defaults for the one call that sees the whole transcript.
+		// The summarizer ignores the rest of the config, output limits included.
 		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
 		// A bound on the one call the application did not ask for. Compaction
 		// runs inside the run loop, and the post-invocation pass runs from a
@@ -635,6 +637,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -716,7 +719,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
-				if !yield(event, err) {
+				// The model-call budget is spent for the whole invocation, so
+				// nothing that runs after this can reach a model. Ending here
+				// stops a root agent that carries on after a sub-agent error
+				// from turning the rest of the run into a stream of limit
+				// errors, as adk-python does.
+				if !yield(event, err) || errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
 					return
 				}
 				continue
