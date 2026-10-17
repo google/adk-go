@@ -47,6 +47,18 @@ func TestContentsRequestProcessor_ForeignThoughts(t *testing.T) {
 			parts: []*genai.Part{{Text: "private reasoning", Thought: true}},
 		},
 		{
+			name: "empty foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{}},
+		},
+		{
+			name: "signature-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{ThoughtSignature: []byte{1, 2}}},
+		},
+		{
+			name: "metadata-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{PartMetadata: map[string]any{"source": "test"}}},
+		},
+		{
 			name: "mixed foreign event retains public parts", author: "otherAgent",
 			parts: []*genai.Part{
 				{Text: "private reasoning", Thought: true},
@@ -162,6 +174,18 @@ func TestContentsRequestProcessor_ForeignThoughtCurrentTurn(t *testing.T) {
 		{
 			name: "foreign empty thought does not start a turn", author: "otherAgent",
 			parts: []*genai.Part{{Thought: true}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign empty part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign signature-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{ThoughtSignature: []byte{1, 2}}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign metadata-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{PartMetadata: map[string]any{"source": "test"}}}, keepCurrentUser: true,
 		},
 		{
 			name: "multiple foreign thought parts do not start a turn", author: "otherAgent",
