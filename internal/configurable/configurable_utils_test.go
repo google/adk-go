@@ -275,7 +275,7 @@ func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 	}
 }
 
-// TestResolveConfigReferenceRefusesLinksThatStayInside pins the one behaviour
+// TestResolveConfigReferenceRefusesLinksThatStayInside pins the one behavior
 // this check deliberately chose: a link is refused for being a link, not for
 // where it points, so a link wholly inside the config directory is refused too.
 //
@@ -286,7 +286,7 @@ func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 // and passes containment.
 //
 // The projected-volume case is the cost of that choice, and it is the reason
-// this is a trade rather than a free win: the kubelet materialises a Kubernetes
+// this is a trade rather than a free win: the kubelet materializes a Kubernetes
 // ConfigMap as a `..data` symlink to a timestamped directory plus one symlink
 // per key, so every reference in such a mount is refused. Bazel runfiles
 // forests and Nix store paths have the same shape.
