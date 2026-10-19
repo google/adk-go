@@ -283,19 +283,20 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name:    "inline data alone",
-			part:    &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
-			wantErr: "unsupported content part: InlineData",
+			name: "media resolution beside inline data",
+			part: &genai.Part{
+				InlineData:      &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				MediaResolution: &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionHigh},
+			},
+			wantErr: "unsupported content part: MediaResolution",
 		},
 		{
-			name:    "inline data beside text",
-			part:    &genai.Part{Text: "what is this?", InlineData: &genai.Blob{MIMEType: "image/png"}},
-			wantErr: "unsupported content part: InlineData",
-		},
-		{
-			name:    "file data beside a thought",
-			part:    &genai.Part{Thought: true, FileData: &genai.FileData{FileURI: "gs://b/o"}},
-			wantErr: "unsupported content part: FileData",
+			name: "video metadata beside file data",
+			part: &genai.Part{
+				FileData:      &genai.FileData{MIMEType: "video/mp4", FileURI: "https://example.com/v.mp4"},
+				VideoMetadata: &genai.VideoMetadata{},
+			},
+			wantErr: "unsupported content part: VideoMetadata",
 		},
 		{
 			name:    "empty part",
