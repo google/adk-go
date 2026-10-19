@@ -20,6 +20,8 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+
+	"google.golang.org/adk/v2/server/authn"
 )
 
 // DevPrefix is the path prefix ADK v2 clients use for developer-only
@@ -38,6 +40,13 @@ type Route struct {
 	Methods     []string
 	Pattern     string
 	HandlerFunc http.HandlerFunc
+
+	// Public exempts the route from authentication. It is false by default, so
+	// a route requires authentication whenever the server is configured with an
+	// [authn.Authenticator] unless it opts out here. Failing closed means a new
+	// route cannot accidentally ship unauthenticated; only endpoints that are
+	// safe without a caller identity (health, version) set it.
+	Public bool
 }
 
 // Routes is a list of defined api endpoints
@@ -50,10 +59,17 @@ type Router interface {
 
 // SetupSubRouters adds routes from subrouter to the main router.
 //
+// When authenticator is non-nil, every route that is not marked
+// [Route.Public] is wrapped with [authn.Middleware], so it answers 401 unless
+// the request carries valid credentials and otherwise carries the resolved
+// caller's identity on the request context. A nil authenticator leaves every route
+// unauthenticated, preserving the behavior of a server with no authenticator
+// configured.
+//
 // It also takes over the router's two fallbacks and its trailing-slash
 // handling, because both need to know the routes registered here. See
 // [newFallbackHandler].
-func SetupSubRouters(router *mux.Router, subrouters ...Router) {
+func SetupSubRouters(router *mux.Router, authenticator authn.Authenticator, subrouters ...Router) {
 	// StrictSlash answers a trailing-slash URL with a redirect to the same
 	// path without one. A client re-issues a redirected POST as a GET, so
 	// POST /apps/x/users/y/sessions/ came back as a session list from the GET
@@ -67,9 +83,16 @@ func SetupSubRouters(router *mux.Router, subrouters ...Router) {
 	// way to read the previous value back, so it cannot be restored. Routes
 	// registered on that router before this call keep whatever it was.
 	router.StrictSlash(false)
+	var authMiddleware func(http.Handler) http.Handler
+	if authenticator != nil {
+		authMiddleware = authn.Middleware(authenticator)
+	}
 	for _, api := range subrouters {
 		for _, route := range api.Routes() {
 			var handler http.Handler = route.HandlerFunc
+			if authMiddleware != nil && !route.Public {
+				handler = authMiddleware(handler)
+			}
 
 			router.
 				Methods(withHead(route.Methods)...).

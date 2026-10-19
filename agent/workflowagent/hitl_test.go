@@ -76,7 +76,7 @@ func TestWorkflowAgent_Resume_RestoresStateFromSession(t *testing.T) {
 	var handlerCalled atomic.Bool
 
 	// makeNodes returns fresh node instances per agent so the test
-	// proves resume goes through session.State, not through any
+	// proves resume works from session event history, not through any
 	// shared in-memory references between a1 and a2.
 	makeNodes := func() (workflow.Node, workflow.Node) {
 		return newAskerNode("human_approval", "approve?", nil),
@@ -115,9 +115,11 @@ func TestWorkflowAgent_Resume_Idempotent(t *testing.T) {
 	runFreshTurn(t, sess, a, "x")
 	// First resume: matches the waiting node, runs the handler.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), nil)
-	// Second resume with the same payload: PendingRequest was
-	// consumed by the first call, so no waiting node matches and
-	// Resume yields ErrNothingToResume rather than re-running.
+	// Second resume with the same payload: nothing from the first
+	// call carries over, because RunState is rebuilt from event
+	// history on every turn. The response it replays has already been
+	// consumed, so no waiting node matches and Resume yields
+	// ErrNothingToResume rather than re-running.
 	drainAgent(t, sess, a.Run(newMockCtx(sess, a, resumeMessage("approve", "yes"))), workflow.ErrNothingToResume)
 
 	if got := handlerRuns.Load(); got != 1 {
@@ -364,7 +366,7 @@ func (s *fakeSession) Events() session.Events {
 	return fakeEvents(append([]*session.Event(nil), s.events...))
 }
 
-// appendEvent records an event in history (the test analogue of
+// appendEvent records an event in history (the test analog of
 // session.Service.AppendEvent) and applies any StateDelta.
 func (s *fakeSession) appendEvent(ev *session.Event) {
 	if ev == nil {
@@ -514,7 +516,7 @@ func newMockCtx(sess session.Session, agt agent.Agent, msg *genai.Content) *Mock
 }
 
 // drainAgent consumes the agent's iter.Seq2, collecting events and
-// appending each to sess. The append step is the test analogue of
+// appending each to sess. The append step is the test analog of
 // the runner's AppendEvent: it builds the session history that the
 // next turn's ReconstructRunState reads. Fails the test if the
 // iterator yields a non-nil error the test did not opt into.

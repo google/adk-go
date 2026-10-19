@@ -33,15 +33,54 @@ type CredentialProvider interface {
 	// and deadlines.
 	//
 	// A provider that needs the acting user's identity (for example the GCP
-	// provider, which keys on the user) recovers the ADK context from ctx via a
-	// shared helper introduced together with the first provider that needs it —
-	// so identity rides on the one ADK context rather than an auth-specific key.
+	// provider, which keys on the user) recovers it from ctx via
+	// IdentityFromContext in the agent package — so identity rides on the one
+	// ADK context rather than an auth-specific key.
 	//
 	// When interactive (3-legged) consent is required and cannot be completed
-	// non-interactively, Credential returns a *ConsentRequiredError carrying the
-	// authorization URI; the tool layer turns that into a human-in-the-loop
+	// non-interactively, Credential returns an error wrapping a
+	// *ConsentRequiredError that carries the authorization URI — find it with
+	// errors.As, since a provider may wrap it. The tool layer turns that into a
+	// human-in-the-loop
 	// consent round-trip. Non-interactive providers never return it.
 	Credential(ctx context.Context) (Credential, error)
+}
+
+// RefreshingProvider is an optional [CredentialProvider] capability. After a
+// credential is rejected downstream (HTTP 401/403) — and the request body can be
+// replayed — [Transport] calls Refresh to obtain a fresh credential and retries
+// the request once. Providers without a cache, or that self-refresh (e.g. an
+// oauth2.TokenSource), need not implement it.
+//
+// adk-python's equivalent seam is BaseCredentialRefresher, whose refresh() also
+// takes the credential rather than re-deriving it
+// (auth/refresher/base_credential_refresher.py). The retry itself has no
+// adk-python counterpart.
+type RefreshingProvider interface {
+	CredentialProvider
+
+	// Refresh resolves a replacement for rejected. It must not return rejected,
+	// and must not leave rejected where a later call will find it.
+	//
+	// Minting is not required. An implementation that finds another request has
+	// already replaced the credential should return what that request fetched,
+	// and one that is rate-limiting itself should return an error rather than
+	// mint again — a forced refresh typically invalidates a live token, so a
+	// downstream returning 401 to everything must not set the rate at which that
+	// happens.
+	//
+	// rejected is the credential [Transport] applied to the request the
+	// downstream turned down — passed in rather than looked up, because between
+	// the rejection and this call another request may already have replaced the
+	// cached value, and force-refreshing a credential that is working destroys a
+	// good token. It is never nil.
+	//
+	// Returning an error leaves [Transport] to surface the downstream's original
+	// rejection, so a provider that cannot refresh should say so rather than
+	// return the credential it was given. The exception is
+	// [ConsentRequiredError], which Transport propagates: it is the one refusal
+	// the caller can act on.
+	Refresh(ctx context.Context, rejected Credential) (Credential, error)
 }
 
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].
@@ -68,7 +107,9 @@ type ConsentRequiredError struct {
 	// Nonce is an opaque value echoed back to correlate the consent response.
 	// Sensitive on the same terms as AuthURI, which embeds it.
 	Nonce string
-	// Key is the credential-store key to resume the flow under.
+	// Key is an opaque, caller-defined identifier for the credential this flow
+	// will produce, for a consumer that has to resume the flow later. It is not a
+	// [CredentialKey], which identifies a [CredentialStore] entry.
 	Key string
 }
 
@@ -163,8 +204,12 @@ func ServiceAccount(cfg ServiceAccountConfig) CredentialProvider {
 			return ts, nil
 		}
 		if len(cfg.JSONKey) > 0 {
-			// Stricter than adk-python (scopes optional there): an explicit-key
-			// access token is scope-bound, so no scopes = unusable — fail fast.
+			// An explicit-key access token is scope-bound, so no scopes = unusable.
+			// This runs on the first Credential call, not in ServiceAccount, which
+			// returns no error and so cannot fail at construction. adk-python
+			// rejects the same case at the same point, when it first exchanges the
+			// key (service_account_exchanger.py), and defaults scopes only for
+			// default credentials, as adcTokenSource does below.
 			if len(cfg.Scopes) == 0 {
 				return nil, fmt.Errorf("auth: scopes are required for a service-account access token")
 			}

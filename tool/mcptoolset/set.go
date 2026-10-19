@@ -17,6 +17,7 @@ package mcptoolset
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -26,28 +27,58 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// MetadataProvider supplies request-scoped metadata for MCP tool calls. The
+// returned map is sent in the `_meta` field of mcp.CallToolParams, letting an
+// agent forward values such as tracing IDs or tenant identifiers from the
+// incoming request to the MCP server.
+//
+// It is called before each tool call is sent; when a tool requires confirmation,
+// it runs only for the confirmed call, with the context of the request carrying
+// the confirmation. It may be called concurrently. The returned map, and
+// anything reachable from it, must not be modified after the provider returns.
+// Returning a nil map contributes no metadata, while returning an error or a
+// reserved MCP key ("progressToken" or any "io.modelcontextprotocol/*" key)
+// fails the tool call.
+type MetadataProvider func(ctx agent.Context) (map[string]any, error)
+
 // New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
 // It uses https://github.com/modelcontextprotocol/go-sdk for MCP communication.
 // MCP session is created lazily on the first request to LLM.
+// New returns an error if neither Transport nor Endpoint is provided.
+//
+// The returned toolset implements [io.Closer]. Callers must close it when it
+// is no longer in use. Close waits for ongoing connection setup and MCP
+// operations to finish, and is safe to call concurrently or more than once.
+// Further MCP operations fail with [mcp.ErrConnectionClosed]; closing does not
+// affect other sessions created with Config.Client.
+// When using [tool.FilterToolset], retain the original toolset to close it.
 //
 // Usage: create MCP ToolSet with mcptoolset.New() and provide it to the
 // LLMAgent in the llmagent.Config.
 //
 // Example:
 //
-//	llmagent.New(llmagent.Config{
+//	mcpTools, err := mcptoolset.New(mcptoolset.Config{
+//		Transport: &mcp.CommandTransport{Command: exec.Command("myserver")},
+//	})
+//	if err != nil {
+//		return err
+//	}
+//	defer mcpTools.(io.Closer).Close()
+//
+//	a, err := llmagent.New(llmagent.Config{
 //		Name:        "agent_name",
 //		Model:       model,
 //		Description: "...",
 //		Instruction: "...",
-//		Toolsets: []tool.Set{
-//			mcptoolset.New(mcptoolset.Config{
-//				Transport: &mcp.CommandTransport{Command: exec.Command("myserver")}
-//			}),
-//		},
+//		Toolsets:    []tool.Toolset{mcpTools},
 //	})
+//	if err != nil {
+//		return err
+//	}
+//	_ = a // Use a with a runner before returning, while mcpTools is still open.
 func New(cfg Config) (tool.Toolset, error) {
 	transport, err := buildTransport(cfg)
 	if err != nil {
@@ -58,40 +89,63 @@ func New(cfg Config) (tool.Toolset, error) {
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
+		metadataProvider:            cfg.MetadataProvider,
 	}, nil
 }
 
 // buildTransport resolves the MCP transport from cfg. When Transport is nil and
-// Endpoint is set, it builds a streamable HTTP transport to that URL. When
-// Config.Auth is set, it wraps the transport's HTTP client with a per-request
-// auth RoundTripper, which requires a streamable HTTP transport.
+// Endpoint is set, it builds a streamable HTTP transport to that URL. A
+// streamable HTTP or SSE transport is copied, and the copy's HTTP client sends
+// the ADK tracking headers. When Config.Auth is set, the client also applies a
+// per-request auth RoundTripper, which requires a streamable HTTP transport.
 func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
 		transport = &mcp.StreamableClientTransport{Endpoint: cfg.Endpoint}
 	}
-	if cfg.Auth == nil {
-		return transport, nil
+	if transport == nil {
+		return nil, fmt.Errorf("mcptoolset: set Config.Transport or Config.Endpoint")
 	}
-	st, ok := transport.(*mcp.StreamableClientTransport)
-	if !ok {
+	if _, ok := transport.(*mcp.StreamableClientTransport); cfg.Auth != nil && !ok {
 		return nil, fmt.Errorf("mcptoolset: Config.Auth requires a streamable HTTP transport; "+
 			"set Config.Endpoint or pass a *mcp.StreamableClientTransport (got %T)", transport)
 	}
-	stCopy := *st
-	stCopy.HTTPClient = authHTTPClient(st.HTTPClient, cfg.Auth)
-	return &stCopy, nil
+	switch t := transport.(type) {
+	case *mcp.StreamableClientTransport:
+		if t == nil {
+			return nil, fmt.Errorf("mcptoolset: Config.Transport is a nil %T", t)
+		}
+		stCopy := *t
+		stCopy.HTTPClient = httpClient(t.HTTPClient, cfg.Auth)
+		return &stCopy, nil
+	case *mcp.SSEClientTransport:
+		if t == nil {
+			return nil, fmt.Errorf("mcptoolset: Config.Transport is a nil %T", t)
+		}
+		sseCopy := *t
+		sseCopy.HTTPClient = httpClient(t.HTTPClient, nil)
+		return &sseCopy, nil
+	}
+	return transport, nil
 }
 
-// authHTTPClient returns a shallow copy of base whose Transport applies provider
-// to every request. base may be nil.
-func authHTTPClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
-	c := &http.Client{}
-	if base != nil {
-		*c = *base
+// httpClient returns a shallow copy of base whose Transport adds the ADK
+// tracking headers and, when provider is non-nil, applies provider to every
+// request. A nil base stands for http.DefaultClient, as it does in the SDK,
+// except with a provider (see Config.Auth).
+func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
+	var c http.Client
+	switch {
+	case base != nil:
+		c = *base
+	case provider == nil:
+		c = *http.DefaultClient
 	}
-	c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
-	return c
+	c.Transport = &trackingTransport{base: c.Transport}
+	if provider != nil {
+		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+	}
+	return &c
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -99,6 +153,18 @@ type Config struct {
 	// Client is an optional custom MCP client to use. If nil, a default client will be created.
 	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
+	//
+	// A *mcp.StreamableClientTransport or *mcp.SSEClientTransport is copied
+	// together with its HTTPClient when New is called, so later changes to
+	// either have no effect. A nil HTTPClient stands for http.DefaultClient,
+	// except with Auth (see there). The copied client puts the ADK client
+	// labels ("google-adk/<version> gl-go/<version>") at the front of the
+	// User-Agent and X-Goog-Api-Client headers of every request. The
+	// HTTPClient's own Transport runs after that. A User-Agent it
+	// sets with Header.Set replaces the labels, and one it adds with
+	// Header.Add is not sent, because net/http sends only the first value.
+	// Other transport types, including a wrapper such as *mcp.LoggingTransport,
+	// are used as given.
 	Transport mcp.Transport
 
 	// Endpoint, when set and Transport is nil, builds a streamable HTTP
@@ -111,6 +177,12 @@ type Config struct {
 	// HTTP transport: set Endpoint, or pass a *mcp.StreamableClientTransport.
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
+	//
+	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
+	// than a copy of http.DefaultClient, so the credential never reaches
+	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
+	// user's requests are not kept in its Jar. Requests are sent by
+	// http.DefaultTransport.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
@@ -139,14 +211,25 @@ type Config struct {
 	// func(name string, toolInput any) bool
 	// Returning true means confirmation is required.
 	RequireConfirmationProvider tool.ConfirmationProvider
+
+	// MetadataProvider, when set, is called before each tool call is sent to
+	// build the request's `_meta` entries.
+	MetadataProvider MetadataProvider
 }
 
 type set struct {
-	mcpClient                   MCPClient
+	mcpClient                   *connectionRefresher
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
+	metadataProvider            MetadataProvider
 }
+
+func (s *set) Close() error {
+	return s.mcpClient.Close()
+}
+
+var _ io.Closer = (*set)(nil)
 
 func (*set) Name() string {
 	return "mcp_tool_set"
@@ -169,7 +252,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

@@ -123,17 +123,23 @@ type TraceGenerateContentResultParams struct {
 // TraceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func TraceGenerateContentResult(span trace.Span, params TraceGenerateContentResultParams) {
 	recordErrorAndStatus(span, params.Error)
+	// Record a finish reason when the call produced a response or an error; a
+	// nil response and nil error means there is no result to describe.
+	if params.Response != nil || params.Error != nil {
+		span.SetAttributes(semconv.GenAIResponseFinishReasons(schemaFinishReason(params.Response, params.Error)))
+	}
 	if params.Response == nil {
 		return
 	}
-	span.SetAttributes(
-		gcpVertexAgentEventID.String(params.EventID),
-		semconv.GenAIResponseFinishReasons(string(params.Response.FinishReason)),
-	)
-	span.SetAttributes(responseContentAttributes(params.Response)...)
+	span.SetAttributes(gcpVertexAgentEventID.String(params.EventID))
+	span.SetAttributes(responseContentAttributes(params.Response, params.Error)...)
 	if params.Response.UsageMetadata != nil {
 		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount)),
+			// Tool-use prompt tokens are reported separately from PromptTokenCount and
+			// are billed as input, so they belong in gen_ai.usage.input_tokens. This
+			// matches the semantic-conventions reference implementation for google-genai:
+			// https://github.com/open-telemetry/semantic-conventions-genai/blob/main/reference/scenarios/google-genai/scenario.py
+			semconv.GenAIUsageInputTokens(int(params.Response.UsageMetadata.PromptTokenCount+params.Response.UsageMetadata.ToolUsePromptTokenCount)),
 			// According to OpenTelemetry Semantic Conventions:
 			// https://github.com/open-telemetry/semantic-conventions/blob/v1.41.0/docs/registry/attributes/gen-ai.md
 			// gen_ai.usage.reasoning.output_tokens (ThoughtsTokenCount) SHOULD be included in gen_ai.usage.output_tokens.

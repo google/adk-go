@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -58,7 +59,11 @@ func (s *localSession) State() session.State {
 }
 
 func (s *localSession) Events() session.Events {
-	return events(s.events)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Return a snapshot so callers can iterate without holding the session lock.
+	return events(slices.Clone(s.events))
 }
 
 func (s *localSession) LastUpdateTime() time.Time {

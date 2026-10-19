@@ -38,6 +38,9 @@ func (r *VersionAPIRouter) Routes() Routes {
 			Methods:     []string{http.MethodGet},
 			Pattern:     "/version",
 			HandlerFunc: r.versionController.VersionHandler,
+			// The build version carries no user data and monitoring reads it
+			// without credentials, like /health.
+			Public: true,
 		},
 	}
 }

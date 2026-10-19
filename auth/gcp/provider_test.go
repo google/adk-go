@@ -1,0 +1,2414 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package gcp_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+	"unicode/utf8"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/auth"
+	"google.golang.org/adk/v2/auth/gcp"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/session"
+)
+
+const testResource = "projects/p/locations/l/authProviders/ap"
+
+// TestProviderCredential drives two users through one shared provider: the
+// provider is long-lived, so serving one user's credential to another is the
+// failure that matters. It also pins scopes and continueUri on the wire.
+func TestProviderCredential(t *testing.T) {
+	var gotUsers []string
+	var gotScopes []string
+	var gotContinueURI string
+	// Guarded because these are written on the handler's goroutine and read on the
+	// test's. A completed round trip is not a happens-before edge under the memory
+	// model, and -race finding nothing over hundreds of runs says the window did
+	// not open, not that there is none.
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UserID      string   `json:"userId"`
+			Scopes      []string `json:"scopes"`
+			ContinueURI string   `json:"continueUri"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		gotUsers = append(gotUsers, body.UserID)
+		gotScopes, gotContinueURI = body.Scopes, body.ContinueURI
+		mu.Unlock()
+		// Echo the caller back, so a credential served to the wrong user shows up.
+		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer"}}`)
+	}))
+	defer srv.Close()
+
+	scopes := []string{"s1", "s2"}
+	p := newProvider(t, srv, gcp.ProviderScheme{
+		Name:        testResource,
+		Scopes:      scopes,
+		ContinueURI: "https://example.test/continue",
+	})
+	scopes[0] = "mutated" // the provider must have cloned this
+
+	for _, user := range []string{"alice", "bob"} {
+		cred, err := p.Credential(adkContext(t, user))
+		if err != nil {
+			t.Fatalf("Credential(%q) error = %v", user, err)
+		}
+		if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok-"+user {
+			t.Errorf("credential for %q = %+v, want bearer %q", user, cred, "tok-"+user)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(gotUsers, []string{"alice", "bob"}) {
+		t.Errorf("service saw users %q, want [alice bob]", gotUsers)
+	}
+	if !slices.Equal(gotScopes, []string{"s1", "s2"}) {
+		t.Errorf("body scopes = %q, want [s1 s2] (caller's later mutation must not leak)", gotScopes)
+	}
+	if gotContinueURI != "https://example.test/continue" {
+		t.Errorf("body continueUri = %q, want the scheme's", gotContinueURI)
+	}
+}
+
+// TestProviderCredentialConcurrent drives two users through one shared provider
+// at the same time. The sequential case above pins the wire contract. This one
+// pins that concurrency cannot cross the streams.
+func TestProviderCredentialConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UserID string `json:"userId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		// With an expiry, so these goroutines drive the cache write and the cache
+		// read, not only the retrieval. Without one the provider declines to cache
+		// and store.Set is never reached under concurrency at all.
+		_, _ = io.WriteString(w, `{"success":{"token":"tok-`+body.UserID+`","header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`)
+	}))
+	defer srv.Close()
+
+	// Several scopes, so the clone-before-sort in the slot derivation is exercised
+	// concurrently: sorting p.scheme.Scopes in place instead would write a shared
+	// backing array from every one of these goroutines, and a nil Scopes makes
+	// that mutant a no-op.
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource, Scopes: []string{"b", "a", "c"}})
+	users := []string{"alice", "bob", "carol", "dave"}
+	ctxs := make([]context.Context, len(users))
+	for i, u := range users {
+		ctxs[i] = adkContext(t, u)
+	}
+
+	var wg sync.WaitGroup
+	got := make([]auth.Credential, len(users)*8)
+	errs := make([]error, len(users)*8)
+	for i := range got {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], errs[i] = p.Credential(ctxs[i%len(users)])
+		}()
+	}
+	wg.Wait()
+
+	for i, cred := range got {
+		want := "tok-" + users[i%len(users)]
+		if errs[i] != nil {
+			t.Fatalf("Credential(%s) error = %v", users[i%len(users)], errs[i])
+		}
+		if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != want {
+			t.Errorf("credential %d = %+v, want bearer %q", i, cred, want)
+		}
+	}
+}
+
+// TestProviderErrorAttribution pins that a failed retrieval says which resource
+// failed — several providers can be wired into one process — and names no
+// caller-supplied id, since this text is fed to the model and persisted in the
+// session. Sentinels must stay matchable through the wrap.
+func TestProviderErrorAttribution(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `denied`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	ctx := adkContext(t, "alice@example.test")
+	id, _ := agent.IdentityFromContext(ctx)
+	_, err := p.Credential(ctx)
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if !strings.Contains(err.Error(), testResource) {
+		t.Errorf("Credential() error = %v, want it to name the resource", err)
+	}
+	for _, unwanted := range []string{"alice@example.test", id.SessionID} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("Credential() error = %v, want the caller-supplied %q kept out of it", err, unwanted)
+		}
+	}
+	var apiErr *gcp.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusForbidden {
+		t.Errorf("Credential() error = %v, want a wrapped *gcp.APIError with status 403", err)
+	}
+}
+
+// TestServiceEchoIsRedacted covers the leak the attribution test cannot see.
+//
+// That test drives a body of "denied", so it passes whether or not anything
+// scrubs. A credentials service that rejects a request commonly quotes back what
+// it rejected, and up to a kilobyte of that response is carried on APIError and
+// reaches the model and the session store along with the tool's error.
+func TestServiceEchoIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid userId: `+user+`"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if strings.Contains(err.Error(), user) {
+		t.Errorf("Credential() error = %v, want the acting user redacted out of the "+
+			"service's echoed body", err)
+	}
+	// Redacted, not swallowed: the operator still needs the failure.
+	var apiErr *gcp.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("Credential() error = %v, want a wrapped *gcp.APIError with status 400", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "invalid userid") {
+		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+	// The field, not only the rendered message. Body is exported, so a caller
+	// that matches the error and logs the body itself takes a different path out
+	// of here, and cleaning only Error() would leave that one open.
+	if strings.Contains(apiErr.Body, user) {
+		t.Errorf("APIError.Body = %q, want the acting user redacted from the field too", apiErr.Body)
+	}
+}
+
+// TestConnectorOperationErrorIsRedacted covers the arm the test above cannot.
+//
+// A connector reports a terminal failure inside a 200 response, so it never
+// becomes an *APIError, and a redaction keyed on that type missed it entirely.
+// The two arms carry service-controlled text by different routes and both have
+// to be scrubbed.
+func TestConnectorOperationErrorIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"done":true,"error":{"code":3,"message":"invalid userId: `+user+`"}}`)
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:        srv.Client(),
+		ConnectorEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	const connector = "projects/p/locations/l/connectors/c"
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: connector},
+		Client: client,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	_, err = p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the operation failure")
+	}
+	if strings.Contains(err.Error(), user) {
+		t.Errorf("Credential() error = %v, want the acting user redacted", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "invalid userid") {
+		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+}
+
+// TestALongEchoStillRedacts pins the order of the two operations.
+//
+// The cap used to run first, which cut an identifier in half whenever it
+// straddled the boundary, and the surviving prefix then matched nothing — so a
+// long enough response smuggled out the leading bytes of the acting user.
+func TestALongEchoStillRedacts(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		// Padding sized so the identifier lands across the 1 KiB cap.
+		_, _ = io.WriteString(w, strings.Repeat("x", 1015)+user)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	// Neither the whole identifier nor the prefix the cap would have left behind.
+	for _, unwanted := range []string{user, user[:8]} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("Credential() error = %v, want %q gone: redaction must run before the cap",
+				err, unwanted)
+		}
+	}
+}
+
+// TestAnEscapedEchoIsRedacted pins the encoding half.
+//
+// A JSON body escapes at the service's discretion, so an echoed identifier can
+// arrive as \u0040 for the @ and walk past a literal substring scrub. Redaction
+// is best-effort against arbitrary encodings, and this is the one that actually
+// occurs.
+func TestAnEscapedEchoIsRedacted(t *testing.T) {
+	const user = "alice@example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid userId: alice\u0040example.test"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, user))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if strings.Contains(err.Error(), "example.test") {
+		t.Errorf("Credential() error = %v, want the escaped identifier redacted too", err)
+	}
+}
+
+// TestSentinelsCarryTheResource pins the arms that previously carried no
+// resource at all.
+//
+// The 403 case above cannot cover this: an APIError already named the resource,
+// so it passes whether or not the wrap runs. The sentinels did not, and
+// restoring the old behavior for them broke nothing — errors.Is holds either
+// way, and that is all any existing assertion checks. So the resource is
+// asserted here alongside the match, on the arms where it is new, and asserted
+// to appear once, since the provider used to attribute on top of the client.
+func TestSentinelsCarryTheResource(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want error
+	}{
+		{"consent rejected", `{"consentRejected":{}}`, gcp.ErrConsentRejected},
+		{"poll timeout", `{"pending":{}}`, gcp.ErrPollTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			// A short poll timeout: the pending arm otherwise waits out the real
+			// one, and this test is about the error's text, not about the wait.
+			client, err := gcp.NewClient(t.Context(), &gcp.Config{
+				HTTPClient:            srv.Client(),
+				AgentIdentityEndpoint: srv.URL,
+				PollTimeout:           20 * time.Millisecond,
+			})
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+				Scheme: gcp.ProviderScheme{Name: testResource},
+				Client: client,
+			})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			_, err = p.Credential(adkContext(t, "alice@example.test"))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Credential() error = %v, want errors.Is %v", err, tc.want)
+			}
+			if n := strings.Count(err.Error(), testResource); n != 1 {
+				t.Errorf("Credential() error = %v names the resource %d times, want exactly 1: "+
+					"one client serves several resources, and this sentinel used to name none",
+					err, n)
+			}
+		})
+	}
+}
+
+// TestProviderNoActingUser covers both identity failures: the guard must reject
+// before any service call, the two cases must stay distinguishable, and neither
+// message may carry a caller-supplied id — this text reaches the model and is
+// persisted in the session.
+func TestProviderNoActingUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     func(t *testing.T) context.Context
+		wantMsg string
+		// leaks are the caller-supplied ids the context actually carries, so the
+		// check below can fail. A plain context carries none, and asserting their
+		// absence there passes whatever the message says.
+		leaks []string
+	}{
+		{
+			name:    "not an ADK context",
+			ctx:     func(t *testing.T) context.Context { return t.Context() },
+			wantMsg: "no ADK invocation identity",
+		},
+		{
+			name:    "invocation without a user",
+			ctx:     userlessADKContext,
+			wantMsg: "carries no user",
+			leaks:   []string{"app-zqx7", "sid-zqx7"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Fails the test if reached: no identity means no service call.
+			srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("credentials service must not be called without an ADK identity")
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+			_, err := p.Credential(tt.ctx(t))
+			if !errors.Is(err, gcp.ErrNoActingUser) {
+				t.Fatalf("Credential() error = %v, want gcp.ErrNoActingUser", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("Credential() error = %v, want it to mention %q", err, tt.wantMsg)
+			}
+			for _, unwanted := range tt.leaks {
+				if strings.Contains(err.Error(), unwanted) {
+					t.Errorf("Credential() error = %v, want the caller-supplied %q kept out of it", err, unwanted)
+				}
+			}
+		})
+	}
+}
+
+func TestNewProviderValidatesScheme(t *testing.T) {
+	// Everything here is a wiring mistake, and each must fail at construction
+	// rather than on every request from inside an http.RoundTripper.
+	bad := []struct {
+		name string
+		cfg  gcp.ProviderConfig
+	}{
+		{"empty name", gcp.ProviderConfig{}},
+		// The next three are rejected by validateResource, which runs first and
+		// refuses an empty or relative path segment. They still do not pin it: the
+		// two collection patterns anchor the whole name and allow no slash inside a
+		// segment, so they reject all three as well, and deleting validateResource
+		// leaves them answering. Worth a row each as the shapes a caller mistypes.
+		{"extra segments where the provider id belongs", cfgFor("projects/p/locations/l/authProviders/../../secret")},
+		{"empty path segment", cfgFor("projects/p/locations/l/authProviders//ap")},
+		{"trailing slash routes differently after normalization", cfgFor("projects/p/locations/l/connectors/c/")},
+		// This row does pin it. A whole ".." where the provider id belongs is one
+		// segment with no slash in it, so authProviderResourceRE accepts the name
+		// and validateResource is the only thing that rejects it: drop its empty
+		// and relative segment check and this row alone turns red.
+		{"relative segment as the whole provider id", cfgFor("projects/p/locations/l/authProviders/..")},
+		{"not a resource name at all", cfgFor("Bearer")},
+		{"unknown collection", cfgFor("projects/p/locations/l/authProvidrs/ap")},
+		{"truncated", cfgFor("projects/p")},
+		// These three are the collection patterns' blind spot and the only rows
+		// that pin the character validation: each matches
+		// projects/*/locations/*/authProviders/* exactly, so dropping that check
+		// lets all three through to be interpolated into a request URL. The query
+		// one is the reason the check exists.
+		{"query injected into the provider id", cfgFor("projects/p/locations/l/authProviders/ap?alt=json")},
+		{"percent-escape in the provider id", cfgFor("projects/p/locations/l/authProviders/a%2Fb")},
+		{"space in the provider id", cfgFor("projects/p/locations/l/authProviders/a b")},
+		{"unconstructed client", gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: testResource}, Client: &gcp.Client{}}},
+	}
+	for _, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := gcp.NewProvider(t.Context(), tt.cfg); err == nil {
+				t.Fatal("NewProvider() = nil error, want the config rejected")
+			}
+		})
+	}
+
+	good := []string{
+		testResource,
+		"projects/p/locations/l/connectors/c",
+		// Domain-scoped project ids carry a colon.
+		"projects/example.com:my-project/locations/l/authProviders/ap",
+	}
+	for _, name := range good {
+		t.Run("accepts "+name, func(t *testing.T) {
+			if _, err := gcp.NewProvider(t.Context(), cfgFor(name)); err != nil {
+				t.Fatalf("NewProvider(%q) error = %v", name, err)
+			}
+		})
+	}
+}
+
+// TestProviderErrorsStayClassifiableThroughCredential pins that the error types
+// a caller behind an http.RoundTripper classifies on reach it through the
+// provider.
+//
+// Credential returns the retrieval error as it stands, and this does not pin
+// that — a %w wrap added there keeps every arm green. What it pins is that the
+// error stays classifiable: the tool layer decides whether to raise a
+// human-in-the-loop consent round-trip by finding *auth.ConsentRequiredError,
+// and retry logic keys on the sentinels, so a wrap with %v rather than %w would
+// break both. Each arm goes through the exported Credential rather than through
+// the client, because the client's own tests cannot see what this layer does to
+// the error.
+func TestProviderErrorsStayClassifiableThroughCredential(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		status int
+		body   string
+		// check reports whether the error is still classifiable as the arm expects.
+		check func(error) bool
+		want  string
+	}{
+		{
+			name:   "consent required",
+			status: http.StatusOK,
+			body:   `{"uriConsentRequired":{"authorizationUri":"https://consent.example/auth","consentNonce":"n"}}`,
+			check: func(err error) bool {
+				var consent *auth.ConsentRequiredError
+				return errors.As(err, &consent) && consent.AuthURI == "https://consent.example/auth"
+			},
+			want: "*auth.ConsentRequiredError with its AuthURI intact",
+		},
+		{
+			name:   "undecodable response",
+			status: http.StatusOK,
+			body:   `{"success": NOT JSON`,
+			check:  func(err error) bool { return errors.Is(err, gcp.ErrMalformedResponse) },
+			want:   "gcp.ErrMalformedResponse",
+		},
+		{
+			name:   "permission denied",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"message":"denied"}}`,
+			check: func(err error) bool {
+				var apiErr *gcp.APIError
+				return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusForbidden
+			},
+			want: "*gcp.APIError carrying the status",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+			_, err := p.Credential(adkContext(t, "alice@example.test"))
+			if err == nil {
+				t.Fatal("Credential() = nil error, want the service failure surfaced")
+			}
+			if !tt.check(err) {
+				t.Errorf("Credential() error = %v, want it still classifiable as %s", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCredentialSurfacesAnUnavailableClient pins that a failure to build the
+// default client reaches the caller as ErrClientUnavailable through the
+// exported Credential, and not only through the unexported resolveClient the
+// internal tests drive.
+//
+// The lazy path is the one a caller gets by leaving ProviderConfig.Client nil,
+// so its only error branch on the exported surface is worth an assertion. The
+// resource is deliberately absent from the message: a client-init failure is
+// about this process's own credentials, and every provider in the process
+// fails it identically.
+func TestCredentialSurfacesAnUnavailableClient(t *testing.T) {
+	// A wiring context that is already canceled does not stop the build — that
+	// is the documented contract — so the failure is forced by pointing
+	// Application Default Credentials at a path that does not exist. The file is
+	// never created, so discovery fails on the open rather than on the contents.
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", filepath.Join(t.TempDir(), "absent.json"))
+
+	p, err := gcp.NewProvider(t.Context(), cfgFor(testResource))
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	_, err = p.Credential(adkContext(t, "alice@example.test"))
+	if !errors.Is(err, gcp.ErrClientUnavailable) {
+		t.Fatalf("Credential() error = %v, want ErrClientUnavailable", err)
+	}
+	if strings.Contains(err.Error(), testResource) {
+		t.Errorf("Credential() error = %q, want the resource left out of a client-init failure", err)
+	}
+}
+
+func cfgFor(name string) gcp.ProviderConfig {
+	return gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: name}}
+}
+
+// newProvider builds a provider whose client targets srv.
+func newProvider(t *testing.T, srv *httptest.Server, scheme gcp.ProviderScheme) auth.CredentialProvider {
+	t.Helper()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{
+		HTTPClient:            srv.Client(),
+		AgentIdentityEndpoint: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	return p
+}
+
+func TestProviderRefreshForcesNewToken(t *testing.T) {
+	// Both credential services mint a fresh token when asked to force a refresh:
+	// Agent Identity is sent the rejected token as forceRefreshToken, the
+	// connector the boolean forceRefresh. Refresh must ask on both routes, from the
+	// credential it is given; the connector's Operation-wrapped response and Agent
+	// Identity's inline response only differ in the envelope.
+	tests := []struct {
+		name     string
+		resource string
+		endpoint func(cfg *gcp.Config, url string)
+		// success builds the service-specific success envelope carrying tok.
+		success func(tok string) string
+		// forced reports whether a request body asked for a forced refresh. The
+		// two services spell that differently, which is the point of the split.
+		forced func(body forceRefreshFields) bool
+	}{
+		{
+			name:     "agent identity",
+			resource: "projects/p/locations/l/authProviders/ap",
+			endpoint: func(cfg *gcp.Config, url string) { cfg.AgentIdentityEndpoint = url },
+			success: func(tok string) string {
+				return fmt.Sprintf(`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
+			},
+			forced: func(b forceRefreshFields) bool { return b.ForceRefreshToken != "" },
+		},
+		{
+			name:     "iam connector",
+			resource: "projects/p/locations/l/connectors/c",
+			endpoint: func(cfg *gcp.Config, url string) { cfg.ConnectorEndpoint = url },
+			success: func(tok string) string {
+				return fmt.Sprintf(`{"done":true,"response":{"token":%q,"header":"Authorization: Bearer","expireTime":"2999-01-01T00:00:00Z"}}`, tok)
+			},
+			forced: func(b forceRefreshFields) bool { return b.ForceRefresh },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var lastBody forceRefreshFields
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body forceRefreshFields
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				mu.Lock()
+				lastBody = body
+				mu.Unlock()
+				tok := "tok1"
+				if tc.forced(body) {
+					tok = "tok2" // a forced refresh mints a new token
+				}
+				// Include an expiry so the credential is cached, as a real one would
+				// be. The hint Refresh sends comes from the credential it is handed.
+				_, _ = io.WriteString(w, tc.success(tok))
+			}))
+			defer srv.Close()
+
+			cfg := &gcp.Config{HTTPClient: srv.Client()}
+			tc.endpoint(cfg, srv.URL)
+			client, err := gcp.NewClient(t.Context(), cfg)
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: gcp.ProviderScheme{Name: tc.resource}, Client: client})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			rp, ok := p.(auth.RefreshingProvider)
+			if !ok {
+				t.Fatal("gcp provider does not implement auth.RefreshingProvider")
+			}
+
+			ctx := adkContext(t, "user-1")
+
+			// Prime the cache with the initial token.
+			first, err := p.Credential(ctx)
+			if err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			if bc, ok := first.(auth.BearerCredential); !ok || bc.Token != "tok1" {
+				t.Fatalf("initial credential = %+v, want tok1", first)
+			}
+
+			// Refresh sends the rejected token back and returns a new one.
+			cred, err := rp.Refresh(ctx, first)
+			if err != nil {
+				t.Fatalf("Refresh() error = %v", err)
+			}
+			mu.Lock()
+			got := lastBody
+			mu.Unlock()
+			if !tc.forced(got) {
+				t.Errorf("request body %+v did not ask for a forced refresh", got)
+			}
+			// Agent Identity is told which token to replace; the connector is not
+			// given the field, so it must not be sent one.
+			wantToken := ""
+			if strings.Contains(tc.resource, "/authProviders/") {
+				wantToken = "tok1"
+			}
+			if got.ForceRefreshToken != wantToken {
+				t.Errorf("forceRefreshToken = %q, want %q", got.ForceRefreshToken, wantToken)
+			}
+			if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+				t.Errorf("refreshed credential = %+v, want tok2", cred)
+			}
+
+			// The refreshed credential replaces the cached one.
+			if cred, err := p.Credential(ctx); err != nil {
+				t.Fatalf("Credential() after refresh error = %v", err)
+			} else if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != "tok2" {
+				t.Errorf("cached credential after refresh = %+v, want tok2", cred)
+			}
+		})
+	}
+}
+
+// adkContext returns an ADK invocation context (recoverable via
+// agent.IdentityFromContext) for the given user, under the app name "app".
+func adkContext(t *testing.T, userID string) context.Context {
+	t.Helper()
+	return adkContextIn(t, "app", userID)
+}
+
+// adkContextIn is adkContext with the app name spelled out, for the tests that
+// vary it.
+func adkContextIn(t *testing.T, appName, userID string) context.Context {
+	t.Helper()
+	svc := session.InMemoryService()
+	resp, err := svc.Create(t.Context(), &session.CreateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("session Create() error = %v", err)
+	}
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: resp.Session})
+}
+
+// userlessADKContext returns an invocation whose session carries no user — the
+// shape session.InMemoryService refuses to create, but that a custom session
+// service can produce.
+func userlessADKContext(t *testing.T) context.Context {
+	t.Helper()
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Session: userlessSession{}})
+}
+
+// userlessSession embeds a nil session.Session for the accessors the identity
+// path never reaches.
+type userlessSession struct{ session.Session }
+
+// Distinctive values rather than "sid" and "app": the leak check below is a
+// substring match, and short common words fire on ordinary prose like "apply" or
+// "happened" rather than on a leak.
+func (userlessSession) ID() string      { return "sid-zqx7" }
+func (userlessSession) AppName() string { return "app-zqx7" }
+func (userlessSession) UserID() string  { return "" }
+
+// TestServiceEchoIsRedactedAcrossCase covers the same leak when the service and
+// the session disagree about case.
+//
+// An embedding server that takes session.UserID from an OIDC email claim keeps
+// whatever case the provider sent, and Google-side services lowercase addresses
+// before echoing them. A literal substring scrub misses that, and a case
+// difference is not one of the encodings the best-effort caveat disclaims.
+func TestServiceEchoIsRedactedAcrossCase(t *testing.T) {
+	const acting = "Alice@Example.test"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid userId: alice@example.test"}}`)
+	}))
+	defer srv.Close()
+
+	p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource})
+	_, err := p.Credential(adkContext(t, acting))
+	if err == nil {
+		t.Fatal("Credential() = nil error, want the service failure")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), strings.ToLower(acting)) {
+		t.Errorf("Credential() error = %v, want the acting user redacted whatever case "+
+			"the service echoed it in", err)
+	}
+	var apiErr *gcp.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Credential() error = %v, want a wrapped *gcp.APIError", err)
+	}
+	if strings.Contains(strings.ToLower(apiErr.Body), strings.ToLower(acting)) {
+		t.Errorf("APIError.Body = %q, want the acting user redacted from the field too", apiErr.Body)
+	}
+	// Keyed on the secret, not a blanket drop: the operator still needs the
+	// failure. Compared case-insensitively because redact lowercases the text it
+	// scrubs, which is the price of not mapping offsets between two spellings.
+	if !strings.Contains(strings.ToLower(err.Error()), "invalid userid") {
+		t.Errorf("Credential() error = %v, want the service's message kept apart from the id", err)
+	}
+}
+
+// TestRedactionCoversTheWholeSecretSurface covers four inputs the other
+// redaction tests miss, each of which let a secret through or mangled the error
+// on a path the scrub was supposed to cover.
+func TestRedactionCoversTheWholeSecretSurface(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		user        string
+		continueURI string
+		body        string // echoed back by the service on a 400
+		unwanted    string // must not survive; compared case-insensitively
+		wantIntact  string // service wording that must survive; "" to skip
+	}{{
+		// An ASCII-only fold does not reach an accented capital, so the whole
+		// address survives, not just the accented byte.
+		name:       "a non-ASCII acting user echoed in lower case",
+		user:       "Émile@example.test",
+		body:       `{"error":{"message":"invalid userId: émile@example.test"}}`,
+		unwanted:   "émile@example.test",
+		wantIntact: "invalid userId: ",
+	}, {
+		// ContinueURI is threaded into every scrub site, and no test drove it
+		// through an error: deleting it from all four call sites kept the suite
+		// green.
+		name:        "the continue URI echoed back",
+		user:        "alice@example.test",
+		continueURI: "https://app.example.test/finish?login_hint=alice%40example.test",
+		body:        `{"error":{"message":"bad continueUri: https://app.example.test/finish?login_hint=alice%40example.test"}}`,
+		unwanted:    "https://app.example.test/finish",
+		wantIntact:  "bad continueUri: ",
+	}, {
+		// Go folds U+0130 to a plain "i", one byte shorter than the capital, so a
+		// secret spelled with it changes length when lowered.
+		name:       "an acting user whose lowercase is a different length",
+		user:       "\u0130van@example.test",
+		body:       `{"error":{"message":"invalid userId: ivan@example.test"}}`,
+		unwanted:   "ivan@example.test",
+		wantIntact: "invalid userId: ",
+	}, {
+		// The length-changing rune in the BODY rather than the secret. It shifts
+		// every offset after it, so splicing lowered-copy offsets into the original
+		// would cut in the wrong place. Redacting the lowered copy is the way out,
+		// which is why the surviving wording is compared case-insensitively.
+		name:       "a length-changing rune ahead of the echo",
+		user:       "alice@example.test",
+		body:       `{"error":{"message":"\u0130 invalid userId: alice@example.test"}}`,
+		unwanted:   "alice@example.test",
+		wantIntact: "invalid userId: ",
+	}, {
+		// Lowercasing shrinks some runes and grows others: Go folds U+0130 to a
+		// one-byte "i" and U+023A to a three-byte U+2C65. A body carrying equal
+		// numbers of each has the SAME total length lowered as unlowered, while
+		// every offset after the first one has moved. A guard comparing totals
+		// sees nothing wrong and the splice then cuts in the wrong place, which
+		// leaves the acting user in the error verbatim.
+		name:       "a body whose shrinking and growing runes balance out",
+		user:       "alice",
+		body:       "\u0130\u0130\u0130\u0130\u0130alice\u023a\u023a\u023a\u023a\u023a",
+		unwanted:   "alice",
+		wantIntact: "",
+	}, {
+		// A non-BMP identifier arrives as a surrogate PAIR, two \uXXXX escapes.
+		// Decoding each half alone yields U+FFFD twice, so the identifier was in
+		// neither the decoded copy nor the original and survived whole.
+		name:       "an acting user outside the BMP, echoed as a surrogate pair",
+		user:       "alice\U0001F600",
+		body:       `{"error":{"message":"invalid userId: alice\ud83d\ude00"}}`,
+		unwanted:   `\ud83d`,
+		wantIntact: "invalid userId: ",
+	}, {
+		// RFC 8259 permits \/ and several encoders emit it by default, which is
+		// enough to hide every slash in an echoed continue URI.
+		name:        "a continue URI echoed with escaped slashes",
+		user:        "alice@example.test",
+		continueURI: "https://app.example.test/oauth/callback",
+		body:        `{"error":{"message":"bad continueUri: https:\/\/app.example.test\/oauth\/callback"}}`,
+		unwanted:    "app.example.test",
+		wantIntact:  "bad continueUri: ",
+	}, {
+		// A backslash in the identifier is echoed doubled. A decoder that does not
+		// consume the pair as one unit emits a single backslash and then reads the
+		// second as an escape opener, so the decoded copy matches no secret and the
+		// echo is returned exactly as the service sent it. What survives is the
+		// escaped spelling, which is why that is what this forbids.
+		name:       "an acting user whose identifier contains a backslash",
+		user:       `DOMAIN\alice`,
+		body:       `{"error":{"message":"invalid userId: DOMAIN\\alice"}}`,
+		unwanted:   `DOMAIN\\alice`,
+		wantIntact: "invalid userId: ",
+	}, {
+		// Neither candidate output can be shown clean, so the body is withheld
+		// whole. The identifier matches the raw body and not the decoded copy,
+		// the continue URI the reverse, so scrubbing either one leaves the other
+		// readable. What this forbids is the identifier's DECODED spelling, since
+		// that is the form that used to survive — the escaped one never reached
+		// the output, so naming it would assert nothing.
+		name:        "one identifier the decode reveals, one it destroys",
+		user:        `alice\/bob`,
+		continueURI: "https://app.example.test/finish",
+		body:        `{"error":{"message":"bad user alice\/bob, bad continueUri https:\/\/app.example.test\/finish"}}`,
+		unwanted:    "alice/bob",
+		wantIntact:  "withheld",
+	}, {
+		// A one-character user matches inside the "[redacted]" marker itself, so a
+		// second scrub over already-scrubbed text nests markers and destroys the
+		// message. No wording survives this one — every "e" in it is the secret —
+		// so only the cap and the UTF-8 check apply.
+		name:     "a one-character acting user",
+		user:     "e",
+		body:     `{"error":{"message":"` + strings.Repeat("e", 800) + `"}}`,
+		unwanted: "",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			p := newProvider(t, srv, gcp.ProviderScheme{Name: testResource, ContinueURI: tc.continueURI})
+			_, err := p.Credential(adkContext(t, tc.user))
+			if err == nil {
+				t.Fatal("Credential() = nil error, want the service failure")
+			}
+			var apiErr *gcp.APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("Credential() error = %v, want a wrapped *gcp.APIError", err)
+			}
+			if tc.unwanted != "" && strings.Contains(strings.ToLower(apiErr.Body), strings.ToLower(tc.unwanted)) {
+				t.Errorf("APIError.Body = %q, want %q redacted out of it", apiErr.Body, tc.unwanted)
+			}
+			// Redacted, not mangled. An off-by-one splice removes the right number
+			// of bytes from the wrong offset, so the secret stops appearing while
+			// the text around it is corrupted — the check above cannot tell those
+			// apart and these two can.
+			if !utf8.ValidString(apiErr.Body) {
+				t.Errorf("APIError.Body = %q is not valid UTF-8, so a splice cut mid-rune", apiErr.Body)
+			}
+			if tc.wantIntact != "" && !strings.Contains(strings.ToLower(apiErr.Body), strings.ToLower(tc.wantIntact)) {
+				t.Errorf("APIError.Body = %q lost %q, the wording around the redaction", apiErr.Body, tc.wantIntact)
+			}
+			if strings.Contains(apiErr.Body, "[r[redacted]") {
+				t.Errorf("APIError.Body = %q has a marker nested inside a marker", apiErr.Body)
+			}
+			// maxErrorBody, which this external test package cannot name. Doubled
+			// to leave room for the marker and the ellipsis.
+			const cap = 1024
+			if len(apiErr.Body) > 2*cap {
+				t.Errorf("APIError.Body is %d bytes, want it capped near %d", len(apiErr.Body), cap)
+			}
+		})
+	}
+}
+
+// echoServer answers every retrieval with a token naming what the request asked
+// for, so a credential served from the wrong cache entry is visible in the token
+// rather than only in a call count. It records each request.
+type echoServer struct {
+	*httptest.Server
+	mu       sync.Mutex
+	requests []echoRequest
+}
+
+type echoRequest struct {
+	path        string // carries the resource name, which is not in the body
+	userID      string
+	scopes      []string
+	continueURI string
+	caller      string // X-Caller-Identity, set by the identity transports below
+}
+
+// newEchoServer starts an echoServer whose tokens expire at expireTime (RFC
+// 3339; empty for a response that reports no expiry).
+func newEchoServer(t *testing.T, expireTime string) *echoServer {
+	t.Helper()
+	e := &echoServer{}
+	e.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			UserID      string   `json:"userId"`
+			Scopes      []string `json:"scopes"`
+			ContinueURI string   `json:"continueUri"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		req := echoRequest{
+			path:        r.URL.Path,
+			userID:      body.UserID,
+			scopes:      body.Scopes,
+			continueURI: body.ContinueURI,
+			caller:      r.Header.Get("X-Caller-Identity"),
+		}
+		e.mu.Lock()
+		e.requests = append(e.requests, req)
+		e.mu.Unlock()
+
+		resp := map[string]any{"token": req.token(), "header": "Authorization: Bearer"}
+		if expireTime != "" {
+			resp["expireTime"] = expireTime
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": resp})
+	}))
+	t.Cleanup(e.Close)
+	return e
+}
+
+// token is the token this request is answered with: everything the service was
+// told, so any two requests that should not share a cache entry get different
+// tokens.
+//
+// Length-prefixed for the same reason the cache slot is. Joining on a delimiter
+// made the token for {scopes:["x"], continueURI:"y|z"} byte-identical to the one
+// for {scopes:["x|y"], continueURI:"z"} — so the two cases written to catch
+// exactly that collision in the cache key could not see it in the token, and
+// rested on the call count alone.
+func (r echoRequest) token() string {
+	fields := []string{"tok", r.path, r.caller, r.userID, strconv.Itoa(len(r.scopes))}
+	fields = append(fields, r.scopes...)
+	fields = append(fields, r.continueURI)
+	var b strings.Builder
+	for _, f := range fields {
+		b.WriteString(strconv.Itoa(len(f)))
+		b.WriteByte(':')
+		b.WriteString(f)
+	}
+	return b.String()
+}
+
+func (e *echoServer) calls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.requests)
+}
+
+// identityTransport stamps a caller identity on every request, standing in for
+// the distinct service-account credentials a caller-supplied HTTPClient carries.
+type identityTransport struct {
+	base http.RoundTripper
+	who  string
+}
+
+func (t identityTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("X-Caller-Identity", t.who)
+	return t.base.RoundTrip(r)
+}
+
+// newSharingProvider builds a provider against e that shares store with every
+// other provider built the same way. who names the caller identity its client
+// authenticates as; two providers given the same who share one *Client.
+func newSharingProvider(t *testing.T, e *echoServer, store auth.CredentialStore, clients map[string]*gcp.Client, who string, scheme gcp.ProviderScheme) auth.CredentialProvider {
+	t.Helper()
+	client, ok := clients[who]
+	if !ok {
+		var err error
+		client, err = gcp.NewClient(t.Context(), &gcp.Config{
+			HTTPClient:            &http.Client{Transport: identityTransport{base: e.Client().Transport, who: who}},
+			AgentIdentityEndpoint: e.URL,
+		})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		clients[who] = client
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	return p
+}
+
+func TestProviderCachesCredential(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+
+	// Default (in-memory) store; two resolves for the same app+user+resource.
+	p := newProvider(t, e.Server, gcp.ProviderScheme{Name: testResource})
+	var got []string
+	for i := range 2 {
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
+			t.Fatalf("call %d: Credential() error = %v", i, err)
+		}
+		got = append(got, bearerToken(t, cred))
+	}
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (second resolve should hit the cache)", n)
+	}
+	e.requireServed(t, got...)
+}
+
+// bearerToken returns the token cred carries, failing t if it is not a bearer
+// credential.
+func bearerToken(t *testing.T, cred auth.Credential) string {
+	t.Helper()
+	bc, ok := cred.(auth.BearerCredential)
+	if !ok {
+		t.Fatalf("credential = %T, want auth.BearerCredential", cred)
+	}
+	return bc.Token
+}
+
+// requireServed fails t unless every token in got is the one e minted for its
+// only request. A cache hit is then pinned to what the miss fetched, not merely
+// to having avoided the service.
+func (e *echoServer) requireServed(t *testing.T, got ...string) {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.requests) != 1 {
+		t.Fatalf("service requests = %d, want 1", len(e.requests))
+	}
+	want := e.requests[0].token()
+	for i, tok := range got {
+		if tok != want {
+			t.Errorf("resolve %d served %q, want the token the service minted, %q", i, tok, want)
+		}
+	}
+}
+
+// TestProviderCacheDimensions is the guard on the cache's headline property: a
+// credential must never be served to a request that would not have been minted
+// the same one. Each case runs two resolves that differ in exactly one thing,
+// through one shared store, and requires that both reach the service and each
+// gets its own token. Collapsing any single dimension of the cache key leaves
+// every other test in the package green.
+func TestProviderCacheDimensions(t *testing.T) {
+	const res2 = "projects/p/locations/l/authProviders/other"
+	// resolve names one call: which caller identity mints, for which end user,
+	// under which app, for which scheme.
+	type resolve struct {
+		who, app, user string
+		scheme         gcp.ProviderScheme
+	}
+	base := resolve{who: "sa-alpha", app: "app", user: "user-1", scheme: gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}}
+	with := func(f func(*resolve)) resolve {
+		r := base
+		r.scheme.Scopes = slices.Clone(base.scheme.Scopes)
+		f(&r)
+		return r
+	}
+
+	tests := []struct {
+		name          string
+		first, second resolve
+	}{
+		{name: "end user", second: with(func(r *resolve) { r.user = "user-2" })},
+		{name: "app", second: with(func(r *resolve) { r.app = "other-app" })},
+		{name: "caller identity", second: with(func(r *resolve) { r.who = "sa-beta" })},
+		{name: "resource", second: with(func(r *resolve) { r.scheme.Name = res2 })},
+		{name: "scopes", second: with(func(r *resolve) { r.scheme.Scopes = []string{"drive.readonly"} })},
+		{name: "continue URI", second: with(func(r *resolve) { r.scheme.ContinueURI = "https://example.com/finish" })},
+		// The two pairs below are what an encoding that joins the components on a
+		// delimiter collides, since neither "," nor "|" is escaped or barred from a
+		// scope or a URI: both members slot alike under
+		// name + "|" + join(scopes, ",") + "|" + continueURI.
+		{
+			name:   "one scope holding the scope separator",
+			first:  with(func(r *resolve) { r.scheme.Scopes = []string{"a,b"} }),
+			second: with(func(r *resolve) { r.scheme.Scopes = []string{"a", "b"} }),
+		},
+		{
+			name:   "field separator shifted between scope and continue URI",
+			first:  with(func(r *resolve) { r.scheme.Scopes, r.scheme.ContinueURI = []string{"x"}, "y|z" }),
+			second: with(func(r *resolve) { r.scheme.Scopes, r.scheme.ContinueURI = []string{"x|y"}, "z" }),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			first := tc.first
+			if first.who == "" {
+				first = base
+			}
+			// The pair is symmetric, so also run it reversed: broad-then-narrow hands
+			// out more authority than was asked for, narrow-then-broad only produces a
+			// confusing failure, and one pass checks only one of the two orders.
+			for _, order := range [][2]resolve{{first, tc.second}, {tc.second, first}} {
+				e := newEchoServer(t, "2999-01-01T00:00:00Z")
+				store := auth.NewInMemoryCredentialStore()
+				clients := map[string]*gcp.Client{}
+				for _, r := range order {
+					p := newSharingProvider(t, e, store, clients, r.who, r.scheme)
+					cred, err := p.Credential(adkContextIn(t, r.app, r.user))
+					if err != nil {
+						t.Fatalf("Credential() error = %v", err)
+					}
+					want := echoRequest{
+						path:        "/v1/" + r.scheme.Name + "/credentials:retrieve",
+						userID:      r.user,
+						scopes:      r.scheme.Scopes,
+						continueURI: r.scheme.ContinueURI,
+						caller:      r.who,
+					}.token()
+					if bc, ok := cred.(auth.BearerCredential); !ok || bc.Token != want {
+						t.Errorf("%+v was served %+v, want bearer %q", r, cred, want)
+					}
+				}
+				if got := e.calls(); got != 2 {
+					t.Errorf("service calls = %d, want 2 (the second resolve must not reuse the first entry)", got)
+				}
+			}
+		})
+	}
+}
+
+// The same resolve twice through a shared store is one call, so the isolation
+// above is not just the cache never hitting at all.
+func TestProviderCacheHitsAcrossProviders(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	clients := map[string]*gcp.Client{}
+	scheme := gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}
+	var got []string
+	for range 2 {
+		p := newSharingProvider(t, e, store, clients, "sa-alpha", scheme)
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+		got = append(got, bearerToken(t, cred))
+	}
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (a second provider with the same client and scheme should hit the entry)", n)
+	}
+	e.requireServed(t, got...)
+}
+
+// Scope order is the caller's, not a cache dimension.
+func TestProviderCacheIgnoresScopeOrder(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	clients := map[string]*gcp.Client{}
+	var got []string
+	for _, scopes := range [][]string{{"a", "b"}, {"b", "a"}} {
+		p := newSharingProvider(t, e, store, clients, "sa-alpha", gcp.ProviderScheme{Name: testResource, Scopes: scopes})
+		cred, err := p.Credential(adkContext(t, "user-1"))
+		if err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+		got = append(got, bearerToken(t, cred))
+	}
+	if n := e.calls(); n != 1 {
+		t.Fatalf("service calls = %d, want 1 (reordered scopes are the same credential)", n)
+	}
+	e.requireServed(t, got...)
+}
+
+// recordingStore reports every call and what it was handed, and can fail either
+// direction.
+type recordingStore struct {
+	inner  auth.CredentialStore
+	getErr error
+	setErr error
+
+	// CredentialStore is documented safe for concurrent use, so the double is too
+	// — otherwise the first test to drive one from two goroutines reports a race
+	// in the harness rather than a finding about the code.
+	mu      sync.Mutex
+	sets    int
+	gets    int
+	nilOnce bool // return a hit carrying no credential on the first Get
+	// hitWithErr reports whatever the inner store holds, hit included, alongside
+	// an error — the shape CredentialStore.Get forbids.
+	hitWithErr bool
+
+	lastKey     auth.CredentialKey
+	lastExpires time.Time
+	// setCancellable records whether the last Set could have been canceled.
+	setCancellable bool
+}
+
+func (s *recordingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gets++
+	if s.getErr != nil {
+		return nil, false, s.getErr
+	}
+	if s.nilOnce {
+		s.nilOnce = false
+		return nil, true, nil
+	}
+	if s.hitWithErr {
+		cred, ok, _ := s.inner.Get(ctx, key)
+		return cred, ok, errors.New("backend degraded")
+	}
+	return s.inner.Get(ctx, key)
+}
+
+func (s *recordingStore) Set(ctx context.Context, key auth.CredentialKey, cred auth.Credential, expiresAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sets++
+	s.lastKey, s.lastExpires = key, expiresAt
+	s.setCancellable = ctx.Done() != nil
+	if s.setErr != nil {
+		return s.setErr
+	}
+	return s.inner.Set(ctx, key, cred, expiresAt)
+}
+
+// failHits makes every later Get report its result alongside an error.
+func (s *recordingStore) failHits() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hitWithErr = true
+}
+
+func (s *recordingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
+	return s.inner.Delete(ctx, key)
+}
+
+// newStoreProvider builds a provider against e backed by a recordingStore.
+func newStoreProvider(t *testing.T, e *echoServer, store auth.CredentialStore) auth.CredentialProvider {
+	t.Helper()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	return p
+}
+
+// TestProviderStoreDegradesRatherThanFails pins that a store which misbehaves
+// costs a round trip and nothing else. Each case breaks the store a different
+// way and requires a usable credential back.
+func TestProviderStoreDegradesRatherThanFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		breakIt func(*recordingStore)
+	}{
+		{"the read fails", func(s *recordingStore) { s.getErr = errors.New("backend unreachable") }},
+		{"the write fails", func(s *recordingStore) { s.setErr = errors.New("disk on fire") }},
+		{"a hit carries no credential", func(s *recordingStore) { s.nilOnce = true }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEchoServer(t, "2999-01-01T00:00:00Z")
+			store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+			tc.breakIt(store)
+			p := newStoreProvider(t, e, store)
+
+			cred, err := p.Credential(adkContext(t, "user-1"))
+			if err != nil {
+				t.Fatalf("Credential() error = %v; a broken store must not fail auth", err)
+			}
+			if cred == nil {
+				t.Fatal("Credential() = nil credential")
+			}
+			if store.gets != 1 {
+				t.Errorf("store gets = %d, want 1 (the configured store must be consulted)", store.gets)
+			}
+		})
+	}
+}
+
+// A hit reported alongside an error is discarded and refetched, which is what
+// CredentialStore.Get tells callers to expect. The store is warmed first, so the
+// refetch is observable only if the credential really was dropped.
+func TestProviderDiscardsAHitReportedWithAnError(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+	p := newStoreProvider(t, e, store)
+
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("warming Credential() error = %v", err)
+	}
+	store.failHits()
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v; a degraded store must not fail auth", err)
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (a hit carrying an error must be refetched)", got)
+	}
+}
+
+// With Store unset, each provider gets a store of its own. Two providers that
+// share a Client and a scheme would share an entry through any common store, so
+// only a private one makes both reach the service.
+func TestProviderDefaultStoreIsPrivate(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	scheme := gcp.ProviderScheme{Name: testResource}
+	for range 2 {
+		p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client})
+		if err != nil {
+			t.Fatalf("NewProvider() error = %v", err)
+		}
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (providers without a Store must not share one)", got)
+	}
+}
+
+// The configured store is written to, under a key whose app and user land in
+// their own fields.
+func TestProviderStoreWritesTheKeyItRead(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+	p := newStoreProvider(t, e, store)
+
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if store.gets != 1 || store.sets != 1 {
+		t.Errorf("store gets/sets = %d/%d, want 1/1 (the configured store must be used)", store.gets, store.sets)
+	}
+	// The app and the user must land in their own fields, not merely in some
+	// distinct pair: a store that buckets by app and then by user — the shape
+	// auth.CredentialStore is documented for — files them separately, so swapping
+	// the two would file alice's credential under an app named "alice".
+	if store.lastKey.AppName != "app" || store.lastKey.UserID != "user-1" {
+		t.Errorf("store key = %+v, want AppName \"app\" and UserID \"user-1\"", store.lastKey)
+	}
+	if store.lastKey.Key == "" {
+		t.Error("store key has an empty slot")
+	}
+	// The write runs on the request path, so it must stay bounded by the request.
+	if !store.setCancellable {
+		t.Error("Set() got a context the request cannot cancel, want the request's own")
+	}
+}
+
+// The key the provider writes under is the one Client.CacheKey names, so a
+// caller told to invalidate a credential with it can actually reach the entry.
+func TestClientCacheKeyMatchesWhatTheProviderWrote(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	scheme := gcp.ProviderScheme{Name: testResource, Scopes: []string{"drive"}}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	// A session other than the one that resolved: the entry is per user, not per
+	// session.
+	key := client.CacheKey(scheme, agent.Identity{AppName: "app", UserID: "user-1", SessionID: "another-session"})
+	if _, ok, _ := store.Get(t.Context(), key); !ok {
+		t.Fatal("Client.CacheKey() names no cached entry, so a caller cannot invalidate one")
+	}
+	if err := store.Delete(t.Context(), key); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+		t.Fatalf("Credential() after Delete error = %v", err)
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (Delete must actually invalidate)", got)
+	}
+}
+
+// Two Clients are two cache dimensions even when built from one config: this
+// package cannot see what identity a Client authenticates as, so it never
+// assumes two of them agree.
+func TestProviderCacheSeparatesClientInstances(t *testing.T) {
+	e := newEchoServer(t, "2999-01-01T00:00:00Z")
+	store := auth.NewInMemoryCredentialStore()
+	scheme := gcp.ProviderScheme{Name: testResource}
+	for range 2 {
+		client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: e.Client(), AgentIdentityEndpoint: e.URL})
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+		p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{Scheme: scheme, Client: client, Store: store})
+		if err != nil {
+			t.Fatalf("NewProvider() error = %v", err)
+		}
+		if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+			t.Fatalf("Credential() error = %v", err)
+		}
+	}
+	if got := e.calls(); got != 2 {
+		t.Errorf("service calls = %d, want 2 (a second Client must not read the first one's entries)", got)
+	}
+}
+
+// TestProviderCachedExpiry pins what lifetime the provider is willing to cache
+// for. The store is asked what it was handed rather than inferring from a call
+// count, so each case fails loudly if the provider stops calling Set at all.
+//
+// Expiries are relative to the wall clock, because that is the clock the whole
+// path now uses: a credential dies when the issuer says it does, not when a
+// simulated clock says so.
+func TestProviderCachedExpiry(t *testing.T) {
+	const noCache = time.Duration(0)
+	tests := []struct {
+		name string
+		// left is how much life the service reports, from now. The zero value
+		// means the service reports no expiry at all.
+		left string
+		// want is the lifetime the store should be handed, or noCache. When clamped
+		// is set it is measured from the provider's clock; otherwise the service's
+		// own expiry must be passed through untouched.
+		want    time.Duration
+		clamped bool
+	}{
+		{name: "honored as reported", left: "5m", want: 5 * time.Minute},
+		// A short-lived credential is still worth caching. With the boundary cases
+		// below this pins auth.ExpirySkew under a minute: widen it and this stops
+		// being cached at all.
+		{name: "a minute of life left", left: "1m", want: time.Minute},
+		// Twice the margin, so widening the floor to any multiple of it stops
+		// caching this. The floor is what keeps a guaranteed-dead entry out; it is
+		// not a license to refuse short-lived credentials.
+		{name: "twice the store's margin", left: "20s", want: 20 * time.Second},
+		{name: "clamped to the cap", left: "8760h", want: maxCachedLifetimeForTest, clamped: true},
+		// At or inside the margin the store applies, the entry would be written and
+		// then refused on the very next read: a guaranteed-dead write.
+		{name: "less left than the store's margin", left: "5s", want: noCache},
+		{name: "exactly the store's margin", left: "10s", want: noCache},
+		{name: "already past", left: "-1h", want: noCache},
+		{name: "absent", left: "", want: noCache},
+		{name: "unparseable", left: "garbage", want: noCache},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			issued := time.Now()
+			expireTime := tc.left
+			if d, err := time.ParseDuration(tc.left); err == nil {
+				expireTime = issued.Add(d).Format(time.RFC3339Nano)
+			}
+			e := newEchoServer(t, expireTime)
+			store := &recordingStore{inner: auth.NewInMemoryCredentialStore()}
+			p := newStoreProvider(t, e, store)
+
+			before := time.Now()
+			if _, err := p.Credential(adkContext(t, "user-1")); err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			after := time.Now()
+
+			if tc.want == noCache {
+				if store.sets != 0 {
+					t.Errorf("store Set called with expiry %s, want no cache write for expireTime %q", store.lastExpires, expireTime)
+				}
+				return
+			}
+			if store.sets != 1 {
+				t.Fatalf("store Set calls = %d, want 1", store.sets)
+			}
+			if !tc.clamped {
+				// Passed through untouched, so this is exact.
+				want, err := time.Parse(time.RFC3339Nano, expireTime)
+				if err != nil {
+					t.Fatalf("parse %q: %v", expireTime, err)
+				}
+				if !store.lastExpires.Equal(want) {
+					t.Errorf("cached until %s, want the service's own %s", store.lastExpires, want)
+				}
+				return
+			}
+			// Clamped to the cap measured from the provider's own clock read, which
+			// happens somewhere between these two. The window is the test's
+			// scheduling jitter, not a tolerance on the arithmetic.
+			lo, hi := before.Add(tc.want), after.Add(tc.want)
+			if store.lastExpires.Before(lo) || store.lastExpires.After(hi) {
+				t.Errorf("cached until %s, want %s from now (between %s and %s)", store.lastExpires, tc.want, lo, hi)
+			}
+		})
+	}
+}
+
+// maxCachedLifetimeForTest mirrors the provider's cap. Duplicated rather than
+// exported: the cap is a policy the test should notice changing.
+const maxCachedLifetimeForTest = time.Hour
+
+// refreshFixture wires a provider whose service answers every retrieval with a
+// token naming the forceRefreshToken it was sent, so a refresh that lost the
+// hint is visible in the credential rather than only in a call count.
+func refreshFixture(t *testing.T, header string) (auth.RefreshingProvider, auth.CredentialStore, *gcp.Client, func() (int, string)) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls int
+	var lastHint string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		calls++
+		n := calls
+		lastHint = body.ForceRefreshToken
+		mu.Unlock()
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":%q,"expireTime":%q}}`,
+			n, header, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp, ok := p.(auth.RefreshingProvider)
+	if !ok {
+		t.Fatal("the gcp provider does not implement auth.RefreshingProvider")
+	}
+	return rp, store, client, func() (int, string) { mu.Lock(); defer mu.Unlock(); return calls, lastHint }
+}
+
+// A non-bearer credential is wrapped for the extra X-Goog-Api-Key header, so
+// reading its concrete type without unwrapping finds nothing — and the refresh
+// then loses the hint and is handed back the credential that was just rejected.
+func TestProviderRefreshReadsThroughAWrappedCredential(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "X-Goog-Api-Key")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := first.(auth.BearerCredential); ok {
+		t.Fatal("the fixture produced a bearer credential; this case is about the wrapped one")
+	}
+	if _, err := rp.Refresh(ctx, first); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	calls, hint := seen()
+	if calls != 2 {
+		t.Fatalf("service calls = %d, want 2", calls)
+	}
+	// The hint is the whole point: without it the service is entitled to return
+	// the very credential the downstream just rejected.
+	if hint != "tok1" {
+		t.Errorf("forceRefreshToken = %q, want %q — the token inside the wrapper", hint, "tok1")
+	}
+}
+
+// A downstream that rejects everything must not set the rate at which this
+// process re-mints, and thereby invalidates, an end user's credential.
+func TestProviderRefreshIsRateLimited(t *testing.T) {
+	rp, store, client, seen := refreshFixture(t, "Authorization: Bearer")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Fatalf("service calls = %d, want 2 (the cold resolve and one refresh)", calls)
+	}
+
+	// A second forced refresh of the same credential inside the cooldown is
+	// refused rather than served.
+	if _, err := rp.Refresh(ctx, fresh); err == nil {
+		t.Error("Refresh() twice inside the cooldown = nil error, want it refused")
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Errorf("service calls = %d, want 2 (the refused refresh must not reach the service)", calls)
+	}
+	// Refused or not, the rejected credential is gone: it is known bad.
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached after a refused refresh")
+	}
+}
+
+// Another request may have refreshed already. Force-refreshing then destroys a
+// token that is working, so a cached credential that is not the rejected one is
+// served instead.
+func TestProviderRefreshServesACredentialSomebodyElseAlreadyFetched(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Fatalf("service calls = %d, want 2", calls)
+	}
+
+	// A straggler still holding the first credential asks again. The cache holds
+	// the fresh one, which nothing has rejected.
+	got, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() for a straggler error = %v", err)
+	}
+	if got != fresh {
+		t.Errorf("straggler was served %+v, want the credential already fetched, %+v", got, fresh)
+	}
+	if calls, _ := seen(); calls != 2 {
+		t.Errorf("service calls = %d, want 2 (the straggler must not mint again)", calls)
+	}
+}
+
+// A refresh whose replacement cannot be cached, and a refresh that fails, must
+// both leave the rejected credential gone. Leaving it in place means the very
+// next request is served the credential the downstream just refused, for the
+// rest of its cached life.
+func TestProviderRefreshEvictsWhatItCannotReplace(t *testing.T) {
+	tests := []struct {
+		name string
+		// refresh is what the service does on the second call.
+		refresh func(w http.ResponseWriter)
+		wantErr bool
+	}{
+		{
+			name: "the replacement has no usable lifetime",
+			refresh: func(w http.ResponseWriter) {
+				_, _ = io.WriteString(w, `{"success":{"token":"tok2","header":"Authorization: Bearer"}}`)
+			},
+		},
+		{
+			name:    "the refresh fails",
+			refresh: func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) },
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				calls++
+				n := calls
+				mu.Unlock()
+				if n == 1 {
+					_, _ = io.WriteString(w, fmt.Sprintf(
+						`{"success":{"token":"tok1","header":"Authorization: Bearer","expireTime":%q}}`,
+						time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+					return
+				}
+				tc.refresh(w)
+			}))
+			defer srv.Close()
+
+			client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+			if err != nil {
+				t.Fatalf("NewClient() error = %v", err)
+			}
+			store := auth.NewInMemoryCredentialStore()
+			p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+				Scheme: gcp.ProviderScheme{Name: testResource},
+				Client: client,
+				Store:  store,
+			})
+			if err != nil {
+				t.Fatalf("NewProvider() error = %v", err)
+			}
+			ctx := adkContext(t, "user-1")
+			first, err := p.Credential(ctx)
+			if err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+			if _, ok, _ := store.Get(ctx, key); !ok {
+				t.Fatal("the first credential was not cached, so this case proves nothing")
+			}
+
+			_, err = p.(auth.RefreshingProvider).Refresh(ctx, first)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("Refresh() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if _, ok, _ := store.Get(ctx, key); ok {
+				t.Error("the rejected credential is still cached, so the next request is served it again")
+			}
+		})
+	}
+}
+
+// forceRefreshFields is both services' force-refresh spellings in one struct, so
+// a test can assert that each route sends its own and not the other's.
+type forceRefreshFields struct {
+	ForceRefreshToken string `json:"forceRefreshToken"`
+	ForceRefresh      bool   `json:"forceRefresh"`
+}
+
+// A service that hands back the credential it already had has not refreshed
+// anything. Retrying with it is a second guaranteed failure, so Refresh reports
+// instead and lets the downstream's own answer stand — and the known-bad
+// credential does not survive in the cache either.
+func TestProviderRefreshRejectsTheSameCredentialComingBack(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		// The same token every time, whatever the request asked for.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok1","header":"Authorization: Bearer","expireTime":%q}}`,
+			time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := auth.NewInMemoryCredentialStore()
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	ctx := adkContext(t, "user-1")
+	first, err := p.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	got, err := p.(auth.RefreshingProvider).Refresh(ctx, first)
+	if err == nil {
+		t.Fatalf("Refresh() = %+v, nil error; want it refused when the service returns the rejected credential", got)
+	}
+	if got != nil {
+		t.Errorf("Refresh() returned %+v alongside the error, want nil", got)
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached, so the next request is served it again")
+	}
+}
+
+// The cooldown protects a credential at the service, which is identified by the
+// end user and the scheme — not by the app name, which the service never sees.
+// Counting app names would multiply the bound by however many a deployment wires
+// up.
+func TestProviderRefreshCooldownIgnoresTheAppName(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+
+	first, err := rp.Credential(adkContextIn(t, "app-one", "user-1"))
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, err := rp.Refresh(adkContextIn(t, "app-one", "user-1"), first); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	callsAfterFirst, _ := seen()
+
+	// A second app, same end user and scheme: one credential at the service, so
+	// one forced refresh.
+	second, err := rp.Credential(adkContextIn(t, "app-two", "user-1"))
+	if err != nil {
+		t.Fatalf("Credential() for the second app error = %v", err)
+	}
+	if _, err := rp.Refresh(adkContextIn(t, "app-two", "user-1"), second); err == nil {
+		t.Error("Refresh() under a second app name = nil error, want the cooldown to hold")
+	}
+	calls, _ := seen()
+	if calls != callsAfterFirst+1 {
+		t.Errorf("service calls = %d, want %d (only the second app's cold resolve, not another forced refresh)", calls, callsAfterFirst+1)
+	}
+}
+
+// swappingStore lets a test place a credential change between two of the
+// provider's reads, which is what the eviction guard exists for and what a
+// sequential test cannot otherwise produce.
+type swappingStore struct {
+	inner   auth.CredentialStore
+	armed   int             // Gets still to answer with pinned before swapping
+	pinned  auth.Credential // what the provider sees first
+	swapped auth.Credential // what it sees after, as if somebody else had written
+	deletes int
+}
+
+func (s *swappingStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	switch {
+	case s.armed > 0:
+		s.armed--
+		return s.pinned, true, nil
+	case s.swapped != nil:
+		return s.swapped, true, nil
+	}
+	return s.inner.Get(ctx, key)
+}
+
+func (s *swappingStore) Set(ctx context.Context, key auth.CredentialKey, cred auth.Credential, expiresAt time.Time) error {
+	return s.inner.Set(ctx, key, cred, expiresAt)
+}
+
+func (s *swappingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
+	s.deletes++
+	return s.inner.Delete(ctx, key)
+}
+
+// Eviction is the last thing Refresh does on every failing path, and by then its
+// view of the entry is stale: another request may have replaced it since. That
+// replacement has not been rejected, so deleting it would throw away a working
+// credential — and leave every straggler still holding the old one with nothing
+// to be served.
+func TestProviderRefreshDoesNotEvictACredentialSomebodyElseReplaced(t *testing.T) {
+	var mu sync.Mutex
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		// A new token each time, so the same-token guard never trips here.
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":"Authorization: Bearer","expireTime":%q}}`,
+			n, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer srv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	store := &swappingStore{inner: auth.NewInMemoryCredentialStore()}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	rp := p.(auth.RefreshingProvider)
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := p.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	// Burn the cooldown, so the Refresh below takes the throttled path — the
+	// shortest route to the eviction.
+	if _, err := rp.Refresh(ctx, rejected); err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+
+	// One read answers with the rejected credential, so Refresh proceeds past its
+	// straggler check; every read after that answers with a replacement, as if
+	// another request had landed in between.
+	store.pinned = rejected
+	store.swapped = auth.BearerCredential{Token: "replaced-by-somebody-else"}
+	store.armed = 1
+	before := store.deletes
+
+	if _, err := rp.Refresh(ctx, rejected); err == nil {
+		t.Fatal("Refresh() inside the cooldown = nil error, want it refused")
+	}
+	if store.deletes != before {
+		t.Error("Refresh deleted an entry another request had already replaced")
+	}
+}
+
+// The cooldown must separate end users. It is the only dimension of the refresh
+// slot that varies within one provider — the scheme is fixed at construction —
+// so without this, collapsing the slot to a constant passes every other test in
+// the package, and one user's 401-storming downstream would block every other
+// user's refresh for the length of the cooldown.
+func TestProviderRefreshCooldownSeparatesUsers(t *testing.T) {
+	rp, _, _, seen := refreshFixture(t, "Authorization: Bearer")
+
+	refresh := func(user string) error {
+		t.Helper()
+		ctx := adkContext(t, user)
+		cred, err := rp.Credential(ctx)
+		if err != nil {
+			t.Fatalf("Credential(%q) error = %v", user, err)
+		}
+		_, err = rp.Refresh(ctx, cred)
+		return err
+	}
+	if err := refresh("user-1"); err != nil {
+		t.Fatalf("Refresh() for the first user error = %v", err)
+	}
+	if err := refresh("user-2"); err != nil {
+		t.Errorf("Refresh() for a second user error = %v; the first user's cooldown must not bind them", err)
+	}
+	// Two cold resolves and two forced refreshes.
+	if calls, _ := seen(); calls != 4 {
+		t.Errorf("service calls = %d, want 4", calls)
+	}
+}
+
+// replacingServer answers like Agent Identity: it keeps returning the token it
+// already issued, and mints a replacement only when sent that token as the
+// force-refresh hint. hold, when set, blocks each forced retrieval until closed.
+func replacingServer(t *testing.T, hold <-chan struct{}) (*httptest.Server, func() (calls, forced int)) {
+	t.Helper()
+	var mu sync.Mutex
+	var calls, forced int
+	current := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		calls++
+		isForced := body.ForceRefreshToken != "" && body.ForceRefreshToken == fmt.Sprintf("tok%d", current)
+		if isForced {
+			forced++
+			current++
+		}
+		tok := fmt.Sprintf("tok%d", current)
+		mu.Unlock()
+		if isForced && hold != nil {
+			<-hold
+		}
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":%q,"header":"Authorization: Bearer","expireTime":%q}}`,
+			tok, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() (int, int) { mu.Lock(); defer mu.Unlock(); return calls, forced }
+}
+
+func replacingProvider(t *testing.T, srv *httptest.Server, store auth.CredentialStore) (auth.RefreshingProvider, *gcp.Client) {
+	t.Helper()
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: srv.Client(), AgentIdentityEndpoint: srv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  store,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+	return p.(auth.RefreshingProvider), client
+}
+
+// pointerStore hands back what it stored as a pointer. CredentialStore does not
+// constrain the concrete type Get returns.
+type pointerStore struct{ auth.CredentialStore }
+
+func (s pointerStore) Get(ctx context.Context, key auth.CredentialKey) (auth.Credential, bool, error) {
+	cred, ok, err := s.CredentialStore.Get(ctx, key)
+	if b, isBearer := cred.(auth.BearerCredential); isBearer {
+		return &b, ok, err
+	}
+	return cred, ok, err
+}
+
+// A rejected credential whose token cannot be read leaves Refresh no hint to
+// send and nothing to tell the cached credential from the rejected one, so an
+// unforced retrieval hands back exactly what was refused. Refresh must refuse
+// instead, and drop the entry rather than serve it again.
+func TestProviderRefreshFailsClosedOnAnUnreadableToken(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	store := pointerStore{auth.NewInMemoryCredentialStore()}
+	rp, client := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	if _, err := rp.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(*auth.BearerCredential); !ok {
+		t.Fatalf("Credential() = %T, want the store's *auth.BearerCredential", rejected)
+	}
+
+	if got, err := rp.Refresh(ctx, rejected); err == nil {
+		t.Errorf("Refresh() = %+v, nil error; want a refusal", got)
+	}
+	if calls, _ := seen(); calls != 1 {
+		t.Errorf("service calls = %d, want 1: an unforced retrieval cannot replace the rejected credential", calls)
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached")
+	}
+}
+
+// A cold miss hands the caller the fetched credential, which is readable, while
+// the store reads back a type this package cannot read. An unreadable cached
+// entry cannot be shown to differ from the rejected one, so it must not be served
+// as a replacement: Refresh forces instead.
+func TestProviderRefreshDoesNotServeAnUnreadableCachedEntry(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	rp, _ := replacingProvider(t, srv, pointerStore{auth.NewInMemoryCredentialStore()})
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(auth.BearerCredential); !ok {
+		t.Fatalf("Credential() on a cold miss = %T, want the fetched auth.BearerCredential", rejected)
+	}
+
+	got, err := rp.Refresh(ctx, rejected)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if b, ok := got.(auth.BearerCredential); !ok || b.Token != "tok2" {
+		t.Errorf("Refresh() = %+v, want the replacement tok2", got)
+	}
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forced)
+	}
+}
+
+// The same reading at eviction: an unreadable cached entry counts as possibly the
+// rejected one, so the throttled path drops it.
+func TestProviderRefreshEvictsAnUnreadableCachedEntry(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := pointerStore{auth.NewInMemoryCredentialStore()}
+	rp, client := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	first, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	// Burns the cooldown and caches tok2, which the store reads back as a pointer.
+	fresh, err := rp.Refresh(ctx, first)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if _, err := rp.Refresh(ctx, fresh); err == nil {
+		t.Fatal("Refresh() inside the cooldown = nil error, want it refused")
+	}
+	key := client.CacheKey(gcp.ProviderScheme{Name: testResource}, agent.Identity{AppName: "app", UserID: "user-1"})
+	if _, ok, _ := store.Get(ctx, key); ok {
+		t.Error("the rejected credential is still cached after a refused refresh")
+	}
+}
+
+// A Refresh whose context is already done sends nothing to the service, so it
+// must not spend the cooldown: the next rejection still gets its forced refresh.
+func TestProviderRefreshOnADoneContextKeepsTheCooldown(t *testing.T) {
+	srv, seen := replacingServer(t, nil)
+	rp, _ := replacingProvider(t, srv, auth.NewInMemoryCredentialStore())
+	live := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(live)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	done, cancel := context.WithCancel(live)
+	cancel()
+	if _, err := rp.Refresh(done, rejected); err == nil {
+		t.Fatal("Refresh() on a canceled context = nil error, want an error")
+	}
+
+	rejected, err = rp.Credential(live)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, err := rp.Refresh(live, rejected); err != nil {
+		t.Errorf("Refresh() after a canceled one error = %v; the canceled one must not have taken the cooldown", err)
+	}
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced refreshes = %d, want 1", forced)
+	}
+}
+
+// A burst of requests rejected together must reach the service with one forced
+// refresh, not one per request. The winner is held at the service until every
+// other Refresh has returned, so all of them run before the replacement is
+// cached — which is the state that would otherwise let a second one through.
+// It is also the only test that calls allowRefresh from more than one
+// goroutine, which is what lets -race see its lock.
+func TestProviderRefreshConcurrentForcesOnce(t *testing.T) {
+	const n = 8
+	hold := make(chan struct{})
+	srv, seen := replacingServer(t, hold)
+	rp, _ := replacingProvider(t, srv, auth.NewInMemoryCredentialStore())
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	type result struct {
+		cred auth.Credential
+		err  error
+	}
+	results := make(chan result, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cred, err := rp.Refresh(ctx, rejected)
+			results <- result{cred, err}
+		}()
+	}
+	var got []result
+	timeout := time.After(5 * time.Second)
+	for len(got) < n-1 {
+		select {
+		case r := <-results:
+			got = append(got, r)
+		case <-timeout:
+			close(hold)
+			wg.Wait()
+			t.Fatalf("%d of %d refreshes returned while one was held at the service, so more than one reached it", len(got), n-1)
+		}
+	}
+	close(hold)
+	wg.Wait()
+	got = append(got, <-results)
+
+	if _, forced := seen(); forced != 1 {
+		t.Errorf("forced retrievals = %d, want 1", forced)
+	}
+	var replaced int
+	for _, r := range got {
+		if r.err != nil {
+			continue
+		}
+		if r.cred != (auth.BearerCredential{Token: "tok2"}) {
+			t.Errorf("Refresh() = %+v, want the replacement tok2 or an error", r.cred)
+		}
+		replaced++
+	}
+	if replaced != 1 {
+		t.Errorf("%d refreshes returned the replacement, want exactly the one that fetched it", replaced)
+	}
+	// The losers' evictions ran before the replacement was written, so it stands.
+	before, _ := seen()
+	if cred, err := rp.Credential(ctx); err != nil || cred != (auth.BearerCredential{Token: "tok2"}) {
+		t.Errorf("Credential() = %+v, %v; want the cached replacement tok2", cred, err)
+	}
+	if after, _ := seen(); after != before {
+		t.Errorf("service calls went %d -> %d; the replacement should have been served from the cache", before, after)
+	}
+}
+
+// The end-to-end path nothing else drives: a downstream 401 reaching a real
+// provider through a real Transport, the rejected credential surviving the trip
+// in a form the provider can read a token out of, and the retry going out with
+// the replacement. Both halves are covered elsewhere against a stub of the
+// other, which is exactly the seam two earlier defects lived on.
+func TestTransportRefreshesThroughTheRealProvider(t *testing.T) {
+	var mu sync.Mutex
+	var hints []string
+	credSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ForceRefreshToken string `json:"forceRefreshToken"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		hints = append(hints, body.ForceRefreshToken)
+		n := len(hints)
+		mu.Unlock()
+		_, _ = io.WriteString(w, fmt.Sprintf(
+			`{"success":{"token":"tok%d","header":"Authorization: Bearer","expireTime":%q}}`,
+			n, time.Now().Add(time.Hour).Format(time.RFC3339Nano)))
+	}))
+	defer credSrv.Close()
+
+	client, err := gcp.NewClient(t.Context(), &gcp.Config{HTTPClient: credSrv.Client(), AgentIdentityEndpoint: credSrv.URL})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	p, err := gcp.NewProvider(t.Context(), gcp.ProviderConfig{
+		Scheme: gcp.ProviderScheme{Name: testResource},
+		Client: client,
+		Store:  auth.NewInMemoryCredentialStore(),
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error = %v", err)
+	}
+
+	// The downstream refuses the first credential and accepts the second.
+	var seenAuth []string
+	downstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		n := len(seenAuth)
+		mu.Unlock()
+		if n == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, "no")
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer downstream.Close()
+
+	hc := &http.Client{Transport: &auth.Transport{Provider: p, Base: downstream.Client().Transport}}
+	req, err := http.NewRequestWithContext(adkContext(t, "user-1"), http.MethodGet, downstream.URL, nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200 after the refresh and retry", resp.StatusCode)
+	}
+	mu.Lock()
+	gotAuth, gotHints := slices.Clone(seenAuth), slices.Clone(hints)
+	mu.Unlock()
+	if want := []string{"Bearer tok1", "Bearer tok2"}; !slices.Equal(gotAuth, want) {
+		t.Errorf("downstream saw %q, want %q", gotAuth, want)
+	}
+	// The second retrieval must carry the rejected token, which is the whole
+	// point of passing it through Transport rather than re-reading the cache.
+	if want := []string{"", "tok1"}; !slices.Equal(gotHints, want) {
+		t.Errorf("credential service saw forceRefreshToken %q, want %q", gotHints, want)
+	}
+}
+
+// ctxRecordingStore records whether the context each call was given had already
+// been canceled.
+type ctxRecordingStore struct {
+	auth.CredentialStore
+	mu             sync.Mutex
+	deleteCanceled bool
+	deletes        int
+}
+
+func (s *ctxRecordingStore) Delete(ctx context.Context, key auth.CredentialKey) error {
+	s.mu.Lock()
+	s.deletes++
+	s.deleteCanceled = s.deleteCanceled || ctx.Err() != nil
+	s.mu.Unlock()
+	return s.CredentialStore.Delete(ctx, key)
+}
+
+func (s *ctxRecordingStore) seen() (deletes int, canceled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deletes, s.deleteCanceled
+}
+
+// Eviction runs on the paths where the fetch failed, and a caller's canceled
+// context is one reason it does. A store that honors cancellation would then
+// refuse the delete and keep serving a credential known to be refused, so the
+// eviction must not inherit the cancellation.
+func TestProviderRefreshEvictsOnADetachedContext(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := &ctxRecordingStore{CredentialStore: auth.NewInMemoryCredentialStore()}
+	rp, _ := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := rp.Refresh(canceled, rejected); err == nil {
+		t.Fatal("Refresh() on a canceled context = nil error, want the fetch failure")
+	}
+	deletes, onCanceledCtx := store.seen()
+	if deletes == 0 {
+		t.Fatal("the rejected credential was not evicted")
+	}
+	if onCanceledCtx {
+		t.Error("the eviction was made on the caller's canceled context")
+	}
+}
+
+// The refusal to refresh a credential whose token cannot be read drops the entry
+// itself, so it needs the detached context for the same reason.
+func TestProviderRefreshDropsAnUnreadableTokenOnADetachedContext(t *testing.T) {
+	srv, _ := replacingServer(t, nil)
+	store := &ctxRecordingStore{CredentialStore: pointerStore{auth.NewInMemoryCredentialStore()}}
+	rp, _ := replacingProvider(t, srv, store)
+	ctx := adkContext(t, "user-1")
+
+	// The first call caches what the service returned; the second reads it back
+	// through the store, which is where the unreadable type comes from.
+	if _, err := rp.Credential(ctx); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	rejected, err := rp.Credential(ctx)
+	if err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+	if _, ok := rejected.(*auth.BearerCredential); !ok {
+		t.Fatalf("Credential() = %T, want the store's *auth.BearerCredential", rejected)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+
+	if _, err := rp.Refresh(canceled, rejected); err == nil {
+		t.Fatal("Refresh() with an unreadable token = nil error, want a refusal")
+	}
+	deletes, onCanceledCtx := store.seen()
+	if deletes == 0 {
+		t.Fatal("the rejected credential was not dropped")
+	}
+	if onCanceledCtx {
+		t.Error("the drop was made on the caller's canceled context")
+	}
+}

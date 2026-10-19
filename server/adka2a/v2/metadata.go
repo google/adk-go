@@ -22,6 +22,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 
 	"google.golang.org/adk/v2/internal/converters"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -158,6 +159,8 @@ func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 			event.CustomMetadata = make(map[string]any)
 		}
 		maps.Copy(event.CustomMetadata, um)
+		// BeforeRun origin is local to the runner that created the event.
+		delete(event.CustomMetadata, plugininternal.BeforeRunReplyKey)
 	}
 
 	if ec, ok := meta[metadataErrorCodeKey].(string); ok {
