@@ -276,7 +276,7 @@ func (inv *invocationTrace) setRootAgentLocked(name string) {
 }
 
 // restoreEvicted restores the root span identity and trace metadata saved when
-// inv was previously evicted. Called before inv is published in tm.invocations.
+// inv was previously evicted or completed, before it is returned to a callback.
 func (inv *invocationTrace) restoreEvicted(ev evictedTrace) {
 	inv.evicted = true
 	if ev.traceID != "" {
@@ -740,14 +740,18 @@ type traceManager struct {
 	now        func() time.Time
 }
 
-// evictedTrace is what is kept of an evicted invocation, so that its later rows
-// keep its invocation span and root agent.
+// evictedTrace retains the identity of an evicted or completed invocation, so
+// that later callbacks keep its invocation span after active tracking ends.
 type evictedTrace struct {
 	traceID       string
 	spanID        string
 	parentSpanID  string
 	rootAgentName string
 	lastActive    int64
+	completed     bool
+	// late is created lazily for callbacks after completion, so the original
+	// invocation's span state can be released.
+	late *invocationTrace
 }
 
 func newTraceManager() *traceManager {
@@ -825,8 +829,15 @@ func (tm *traceManager) rememberAgentTree(runner agent.Agent) agent.Agent {
 
 // invocation returns the trace of the invocation id belongs to, creating it
 // on the invocation's first callback. Callbacks without an invocation ID
-// get a trace that is not tracked, so that their rows still have IDs.
+// get a trace that is not tracked, so that their rows still have IDs. Completed
+// invocations are restored without restarting active tracking.
 func (tm *traceManager) invocation(ctx context.Context, id identity) *invocationTrace {
+	return tm.lookupInvocation(ctx, id, false)
+}
+
+// lookupInvocation starts a fresh run only when start is true. Other callbacks
+// after AfterRun use the completed identity without restarting active tracking.
+func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start bool) *invocationTrace {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
@@ -839,6 +850,19 @@ func (tm *traceManager) invocation(ctx context.Context, id identity) *invocation
 	inv, ok := tm.invocations[id.invocationID]
 	if !ok {
 		ev, wasEvicted := tm.evicted[id.invocationID]
+		if ev.completed {
+			if !start {
+				if ev.late == nil {
+					ev.late = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+					ev.late.restoreEvicted(ev)
+					tm.evicted[id.invocationID] = ev
+				}
+				tm.mu.Unlock()
+				return ev.late
+			}
+			delete(tm.evicted, id.invocationID)
+			wasEvicted = false
+		}
 		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 		if wasEvicted {
 			inv.restoreEvicted(ev)
@@ -939,7 +963,7 @@ func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, in
 // agent that the runner runs, runner, which is used to record the root
 // agent.
 func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner agent.Agent) rowSpan {
-	inv := tm.invocation(ctx, id)
+	inv := tm.lookupInvocation(ctx, id, true)
 	rememberedRoot := tm.rememberAgentTree(runner)
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, runner, rememberedRoot)
@@ -952,43 +976,54 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 
 // endInvocation stops tracking the invocation and returns the place of its
 // INVOCATION_COMPLETED row, with the invocation latency if the invocation
-// was tracked from its start without being evicted mid-run.
+// was tracked from its start without being evicted mid-run. Its identity stays
+// in the bounded eviction cache for late callbacks. A new run with the same ID
+// discards that completed state; ordinary cache pruning can remove it earlier.
 func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan {
+	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	ambient := ""
 	if sc.IsValid() {
 		ambient = sc.TraceID().String()
 	}
 	var inv *invocationTrace
-	var ev evictedTrace
-	var wasEvicted bool
 	if id.invocationID != "" {
 		tm.mu.Lock()
 		inv = tm.invocations[id.invocationID]
-		ev, wasEvicted = tm.evicted[id.invocationID]
-		delete(tm.invocations, id.invocationID)
-		delete(tm.evicted, id.invocationID)
+		if inv == nil {
+			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+			if ev, ok := tm.evicted[id.invocationID]; ok {
+				inv.restoreEvicted(ev)
+			}
+		}
 		tm.mu.Unlock()
 	}
 	if inv == nil {
-		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), tm.now())
-		if wasEvicted {
-			inv.restoreEvicted(ev)
-		}
-		rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-		inv.noteRootAgentLocked(id, rootIn, false)
-		return inv.rowSpan(inv.agentStack[0], nil, ambient)
+		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 	}
-	now := tm.now()
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
-	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, false)
 	var latency map[string]any
 	if inv.started && !inv.evicted {
 		latency = latencyOf(inv.agentStack[0], now)
 	}
-	return inv.rowSpan(inv.agentStack[0], latency, ambient)
+	row := inv.rowSpan(inv.agentStack[0], latency, ambient)
+	inv.mu.Unlock()
+	if id.invocationID != "" {
+		tm.mu.Lock()
+		// Publish the final identity, including any trace adopted by rowSpan,
+		// before removing active state. Late Live callbacks may start and end
+		// an operation, so their state is shared separately from the finished run.
+		tm.markEvictedLocked(now, id.invocationID, inv)
+		ev := tm.evicted[id.invocationID]
+		ev.completed = true
+		ev.lastActive = now.UnixNano()
+		tm.evicted[id.invocationID] = ev
+		delete(tm.invocations, id.invocationID)
+		tm.mu.Unlock()
+	}
+	return row
 }
 
 // pushAgentSpan starts the span of an agent run and returns the place of
