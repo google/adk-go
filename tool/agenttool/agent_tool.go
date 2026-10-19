@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -180,9 +181,22 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("failed to create session for sub-agent %s: %w", t.agent.Name(), err)
 	}
 
+	// Forward the caller's model-call budget, as adk-python forwards its run
+	// config, so that MaxLLMCalls: -1 is not capped at the default inside the
+	// nested run and a small limit bounds the nested run too. The value is the
+	// already resolved one: tool contexts have no public run config, so it is
+	// read from the internal one. When there is none, because the calling agent
+	// was run directly rather than through a runner, zero gives the nested run
+	// the default.
+	var maxLLMCalls int
+	if rc := runconfig.FromContext(toolCtx); rc != nil {
+		maxLLMCalls = rc.MaxLLMCalls
+	}
+
 	// TODO(dpasiukevich): verify agent loop termination.
 	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
+		MaxLLMCalls:   maxLLMCalls,
 	})
 
 	var lastEvent *session.Event
@@ -205,8 +219,20 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
 	for _, part := range lastContent.Parts {
-		if part != nil && part.Text != "" && !part.Thought {
-			textParts = append(textParts, part.Text)
+		if part == nil || part.Thought {
+			continue
+		}
+		var text string
+		switch {
+		case part.Text != "":
+			text = part.Text
+		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
+			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
+		case part.ExecutableCode != nil:
+			text = part.ExecutableCode.Code
+		}
+		if text != "" {
+			textParts = append(textParts, text)
 		}
 	}
 	outputText := strings.Join(textParts, "\n")

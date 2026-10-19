@@ -353,13 +353,30 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
@@ -819,7 +836,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta, artifactDelta)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -995,6 +1012,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 		useStream := false
 		if rc := ctx.RunConfig(); rc != nil {
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
+		}
+
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
 		}
 
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
@@ -1177,7 +1202,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any, artifactDelta map[string]int64) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -1189,6 +1214,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp.LLMResponse
 	ev.Actions.StateDelta = stateDelta
+	ev.Actions.ArtifactDelta = artifactDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)

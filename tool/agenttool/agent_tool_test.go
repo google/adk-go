@@ -15,6 +15,7 @@
 package agenttool_test
 
 import (
+	"iter"
 	"log"
 	"testing"
 
@@ -235,6 +236,87 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	want := map[string]any{"result": "First text part is returned This should not be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestAgentTool_Run_CodeParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  map[string]any
+	}{
+		{
+			name: "code execution output",
+			parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "\n 42 \n\n"}},
+			},
+			want: map[string]any{"result": "\n 42 "},
+		},
+		{
+			name: "executable code",
+			parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(42)\n"}},
+			},
+			want: map[string]any{"result": "print(42)\n"},
+		},
+		{
+			name: "mixed content",
+			parts: []*genai.Part{
+				{Text: "Calculating."},
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(42)"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "42\n"}},
+				{Text: "Done."},
+			},
+			want: map[string]any{"result": "Calculating.\nprint(42)\n42\nDone."},
+		},
+		{
+			name: "empty and thought parts",
+			parts: []*genai.Part{
+				nil,
+				{},
+				{CodeExecutionResult: &genai.CodeExecutionResult{}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "\n\n"}},
+				{ExecutableCode: &genai.ExecutableCode{}},
+				{Thought: true, CodeExecutionResult: &genai.CodeExecutionResult{Output: "hidden"}},
+				{Thought: true, ExecutableCode: &genai.ExecutableCode{Code: "hidden"}},
+			},
+			want: map[string]any{},
+		},
+		{
+			name: "text and code precedence",
+			parts: []*genai.Part{
+				{Text: "text", CodeExecutionResult: &genai.CodeExecutionResult{Output: "unused"}, ExecutableCode: &genai.ExecutableCode{Code: "unused"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "output"}, ExecutableCode: &genai.ExecutableCode{Code: "unused"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{}, ExecutableCode: &genai.ExecutableCode{Code: "code"}},
+			},
+			want: map[string]any{"result": "text\noutput\ncode"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			child, err := agent.New(agent.Config{
+				Name: "calculator",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						event := session.NewEvent(ctx, ctx.InvocationID())
+						event.Author = "calculator"
+						event.Content = &genai.Content{Role: genai.RoleModel, Parts: tt.parts}
+						yield(event, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
+			got, err := wrapped.Run(createToolContext(t, child), map[string]any{"request": "calculate"})
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if !cmp.Equal(got, tt.want) {
+				t.Error("Run returned an unexpected tool result")
+			}
+		})
 	}
 }
 
