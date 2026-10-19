@@ -20,7 +20,9 @@ package loadartifactstool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"slices"
 	"time"
@@ -198,7 +200,7 @@ func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to list artifacts: %w", err)
+		return fmt.Errorf("failed to list artifacts: %w", redact(err))
 	}
 	if len(resp.FileNames) == 0 {
 		return nil
@@ -353,7 +355,7 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	if version > 0 {
 		resp, err := artifactsService.LoadVersion(ctx, artifactName, version)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load artifact (version %d): %w", version, err)
+			return nil, fmt.Errorf("failed to load artifact (version %d): %w", version, redact(err))
 		}
 		return &genai.Content{
 			Parts: []*genai.Part{
@@ -365,7 +367,7 @@ func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsSer
 	}
 	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
+		return nil, fmt.Errorf("failed to load artifact: %w", redact(err))
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
@@ -385,7 +387,7 @@ type artifactVersionSummary struct {
 func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
 	versionsResp, err := artifactinternal.Versions(ctx, artifactsService, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list artifact versions: %w", err)
+		return nil, fmt.Errorf("failed to list artifact versions: %w", redact(err))
 	}
 	versions := slices.Clone(versionsResp.Versions)
 	slices.Sort(versions)
@@ -394,7 +396,7 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 	for _, v := range versions {
 		metaResp, err := artifactinternal.GetArtifactVersion(ctx, artifactsService, artifactName, int(v))
 		if err != nil {
-			return nil, fmt.Errorf("failed to get version %d metadata for artifact: %w", v, err)
+			return nil, fmt.Errorf("failed to get version %d metadata for artifact: %w", v, redact(err))
 		}
 		summary := artifactVersionSummary{Version: v}
 		if av := metaResp.ArtifactVersion; av != nil {
@@ -418,6 +420,35 @@ func (t *artifactsTool) listArtifactVersions(ctx context.Context, artifactsServi
 		},
 		Role: genai.RoleUser,
 	}, nil
+}
+
+// redactedError reports msg while keeping cause reachable through errors.Is and
+// errors.As. Wrapping with %w would put the cause's own text in the message,
+// which is the thing being redacted.
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.cause }
+
+// redact wraps err, an error from the artifact service, in an error whose text
+// is that of the standard sentinel err wraps or, failing that, the type of the
+// innermost error in its chain. errors.Is and errors.As still reach err.
+// Services write the object path or the request URL into their errors, and both
+// carry the model-supplied artifact name and the user and session IDs.
+func redact(err error) error {
+	for _, sentinel := range []error{fs.ErrNotExist, errors.ErrUnsupported, context.Canceled, context.DeadlineExceeded} {
+		if errors.Is(err, sentinel) {
+			return &redactedError{msg: sentinel.Error(), cause: err}
+		}
+	}
+	inner := err
+	for errors.Unwrap(inner) != nil {
+		inner = errors.Unwrap(inner)
+	}
+	return &redactedError{msg: fmt.Sprintf("artifact service error of type %T", inner), cause: err}
 }
 
 func parseStringSliceArg(m map[string]any, key string) ([]string, error) {

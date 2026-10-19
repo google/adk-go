@@ -18,7 +18,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
+	"net"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -864,4 +867,212 @@ type failingGetVersionService struct {
 
 func (f failingGetVersionService) GetArtifactVersion(context.Context, *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
 	return nil, fs.ErrNotExist
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ServiceErrorsOmitIdentifiers(t *testing.T) {
+	const (
+		userID    = "user-7f3a"
+		sessionID = "session-91c2"
+		fileName  = "patient-jane-doe.pdf"
+	)
+	base := artifact.InMemoryService()
+	if _, err := base.Save(t.Context(), &artifact.SaveRequest{
+		AppName: "app", UserID: userID, SessionID: sessionID, FileName: fileName, Part: genai.NewPartFromText("v1"),
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	dnsErr := &net.DNSError{Err: "no such host", Name: "storage.example", IsNotFound: true}
+
+	tests := []struct {
+		name    string
+		failing string
+		cause   error
+		// response is the load_artifacts function response in the request; nil
+		// sends none, so only the artifact listing runs.
+		response map[string]any
+		wantErr  string
+	}{
+		{
+			name:    "listing artifacts",
+			failing: "List",
+			cause:   context.Canceled,
+			wantErr: "failed to list artifacts: context canceled",
+		},
+		{
+			name:     "artifact_versions with a version",
+			failing:  "Load",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(7)}}},
+			wantErr:  "failed to load artifact (version 7): file does not exist",
+		},
+		{
+			name:     "in-process artifact_versions with a version",
+			failing:  "Load",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_versions": []map[string]any{{"name": fileName, "version": 7}}},
+			wantErr:  "failed to load artifact (version 7): file does not exist",
+		},
+		{
+			name:     "artifact_names with top-level version",
+			failing:  "Load",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_names": []any{fileName}, "version": float64(7)},
+			wantErr:  "failed to load artifact (version 7): file does not exist",
+		},
+		{
+			name:     "artifact_versions without a version",
+			failing:  "Load",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName}}},
+			wantErr:  "failed to load artifact: file does not exist",
+		},
+		{
+			name:     "artifact_versions with version 0",
+			failing:  "Load",
+			cause:    context.DeadlineExceeded,
+			response: map[string]any{"artifact_versions": []any{map[string]any{"name": fileName, "version": float64(0)}}},
+			wantErr:  "failed to load artifact: context deadline exceeded",
+		},
+		{
+			name:     "artifact_names",
+			failing:  "Load",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_names": []any{fileName}},
+			wantErr:  "failed to load artifact: file does not exist",
+		},
+		{
+			name:     "list_versions listing revisions",
+			failing:  "Versions",
+			cause:    dnsErr,
+			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
+			wantErr:  "failed to list artifact versions: artifact service error of type *net.DNSError",
+		},
+		{
+			name:     "list_versions reading revision metadata",
+			failing:  "GetArtifactVersion",
+			cause:    fs.ErrNotExist,
+			response: map[string]any{"artifact_names": []any{fileName}, "list_versions": true},
+			wantErr:  "failed to get version 1 metadata for artifact: file does not exist",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Artifacts: &artifactinternal.Artifacts{
+					Service:   identifyingErrorService{Service: base, failing: tt.failing, cause: tt.cause},
+					AppName:   "app",
+					UserID:    userID,
+					SessionID: sessionID,
+				},
+			})
+			tc := agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)
+			req := &model.LLMRequest{}
+			if tt.response != nil {
+				req.Contents = []*genai.Content{{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", tt.response)},
+				}}
+			}
+
+			err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
+			if err == nil {
+				t.Fatal("ProcessRequest succeeded, want an error")
+			}
+			for _, id := range []string{fileName, userID, sessionID, "storage.example"} {
+				if strings.Contains(err.Error(), id) {
+					t.Errorf("ProcessRequest error carries %q", id)
+				}
+			}
+			if got := err.Error(); got != tt.wantErr {
+				t.Errorf("ProcessRequest error = %q, want %q", got, tt.wantErr)
+			}
+			if !errors.Is(err, tt.cause) {
+				t.Errorf("errors.Is(err, %v) = false, want true", tt.cause)
+			}
+			var urlErr *url.Error
+			if !errors.As(err, &urlErr) {
+				t.Error("errors.As(err, *url.Error) = false, want true")
+			}
+		})
+	}
+}
+
+func TestLoadArtifactsTool_ProcessRequest_ListVersionsUnsupported(t *testing.T) {
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Artifacts: unversionedArtifacts{&artifactinternal.Artifacts{
+			Service:   artifact.InMemoryService(),
+			AppName:   "app",
+			UserID:    "user",
+			SessionID: "session",
+		}},
+	})
+	tc := agent.NewToolContext(ic, "call-1", &session.EventActions{}, nil)
+	req := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+			"artifact_names": []any{"design.md"},
+			"list_versions":  true,
+		})},
+	}}}
+
+	err := loadartifactstool.New().(toolinternal.RequestProcessor).ProcessRequest(tc, req)
+	if got, want := fmt.Sprint(err), "failed to list artifact versions: unsupported operation"; got != want {
+		t.Errorf("ProcessRequest error = %q, want %q", got, want)
+	}
+	if !errors.Is(err, errors.ErrUnsupported) {
+		t.Errorf("errors.Is(err, errors.ErrUnsupported) = false, want true, got: %v", err)
+	}
+}
+
+// identifyingErrorService fails the operation named by failing with an error
+// that, like the GCS service's, names the object path and a request URL built
+// from the request's user, session and file name, and wraps cause. Every other
+// operation goes to the embedded service.
+type identifyingErrorService struct {
+	artifact.Service
+	failing string
+	cause   error
+}
+
+func (s identifyingErrorService) err(userID, sessionID, fileName string) error {
+	object := "app/" + userID + "/" + sessionID + "/" + fileName
+	return fmt.Errorf("artifact '%s': %w", object, &url.Error{
+		Op:  "Get",
+		URL: "https://storage.example/b/bucket/o?prefix=" + url.QueryEscape(object),
+		Err: s.cause,
+	})
+}
+
+func (s identifyingErrorService) List(ctx context.Context, req *artifact.ListRequest) (*artifact.ListResponse, error) {
+	if s.failing == "List" {
+		return nil, s.err(req.UserID, req.SessionID, "")
+	}
+	return s.Service.List(ctx, req)
+}
+
+func (s identifyingErrorService) Load(ctx context.Context, req *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	if s.failing == "Load" {
+		return nil, s.err(req.UserID, req.SessionID, req.FileName)
+	}
+	return s.Service.Load(ctx, req)
+}
+
+func (s identifyingErrorService) Versions(ctx context.Context, req *artifact.VersionsRequest) (*artifact.VersionsResponse, error) {
+	if s.failing == "Versions" {
+		return nil, s.err(req.UserID, req.SessionID, req.FileName)
+	}
+	return s.Service.Versions(ctx, req)
+}
+
+func (s identifyingErrorService) GetArtifactVersion(ctx context.Context, req *artifact.GetArtifactVersionRequest) (*artifact.GetArtifactVersionResponse, error) {
+	if s.failing == "GetArtifactVersion" {
+		return nil, s.err(req.UserID, req.SessionID, req.FileName)
+	}
+	return s.Service.GetArtifactVersion(ctx, req)
+}
+
+// unversionedArtifacts exposes only the agent.Artifacts methods, so neither
+// version listing nor a backing service is reachable through it.
+type unversionedArtifacts struct {
+	agent.Artifacts
 }

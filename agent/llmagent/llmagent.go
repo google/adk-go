@@ -355,12 +355,16 @@ type Config struct {
 	//
 	// When set, the reply text is written to the invocation's artifact service,
 	// the saved version is recorded in EventActions.ArtifactDelta, and the
-	// event's non-thought text parts are replaced with a short reference so the
-	// body is not persisted in the session or replayed on later turns. Saving
-	// requires an artifact service on the runner; the run fails if none is
-	// configured. Live runs (RunLive) and models that require the
-	// set_model_response tool workaround for OutputSchema with tools are not
-	// supported when OutputArtifact is set and return an error.
+	// event's non-thought text parts are replaced with a short reference, so the
+	// body is neither persisted in the session's events nor replayed from them
+	// on later turns. When OutputKey is also set, session state still receives
+	// the full reply under that key, or the parsed value when OutputSchema is
+	// set, so the body is persisted there and an instruction placeholder for
+	// the key carries it into later turns. Saving requires an artifact service
+	// on the runner; the run fails if none is configured. Live runs (RunLive)
+	// and models that require the set_model_response tool workaround for
+	// OutputSchema with tools are not supported when OutputArtifact is set and
+	// return an error.
 	OutputArtifact string
 
 	// Mode is the delegation mode for this agent.
