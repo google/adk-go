@@ -6373,36 +6373,147 @@ func (m *transferModel) GenerateContent(context.Context, *model.LLMRequest, bool
 	return func(yield func(*model.LLMResponse, error) bool) { yield(resp, nil) }
 }
 
-func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: &transferModel{script: []string{"planner"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	planner, err := llmagent.New(llmagent.Config{Name: "planner", Model: &transferModel{script: []string{"helper"}}, SubAgents: []agent.Agent{helper}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, err := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	rows := collectRows(t, requests, untilInvocationEnd)
-	started := map[any]any{}
+func assertAgentSpansClosed(t *testing.T, rows []map[string]any) {
+	t.Helper()
+	starts := map[any]map[string]any{}
+	ends := map[any]bool{}
 	for _, row := range rowsOfType(rows, EventAgentStarting) {
-		started[row["span_id"]] = row["agent"]
+		id := row["span_id"]
+		if _, exists := starts[id]; exists {
+			t.Error("agent span started twice")
+		}
+		starts[id] = row
+	}
+	if len(starts) == 0 {
+		t.Fatal("no agent spans started")
 	}
 	for _, row := range rowsOfType(rows, EventAgentCompleted) {
-		if _, ok := started[row["span_id"]]; !ok {
-			t.Errorf("AGENT_COMPLETED of %v has span_id %v, which no AGENT_STARTING row has", row["agent"], row["span_id"])
+		id := row["span_id"]
+		opened, ok := starts[id]
+		if !ok {
+			t.Errorf("AGENT_COMPLETED of %v closes no started span", row["agent"])
+			continue
+		}
+		if ends[id] {
+			t.Error("agent span completed twice")
+		}
+		ends[id] = true
+		if row["agent"] != opened["agent"] || row["parent_span_id"] != opened["parent_span_id"] {
+			t.Error("agent completion changed its owner or parent")
 		}
 		if row["latency_ms"] == nil {
 			t.Errorf("AGENT_COMPLETED of %v has no latency_ms", row["agent"])
 		}
-		delete(started, row["span_id"])
 	}
-	if len(started) > 0 {
-		t.Errorf("AGENT_STARTING spans never closed: %v", started)
+	if len(ends) != len(starts) {
+		t.Errorf("closed %d of %d agent spans", len(ends), len(starts))
 	}
+}
+
+func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  []string
+		second []string
+	}{
+		{name: "parent", first: []string{"planner"}},
+		{name: "peer", first: []string{"second"}, second: []string{"first"}},
+		{name: "double bounce", first: []string{"second", "second"}, second: []string{"first", "first"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			first, err := llmagent.New(llmagent.Config{Name: "first", Model: &transferModel{script: tc.first}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := llmagent.New(llmagent.Config{Name: "second", Model: &transferModel{script: tc.second}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			planner, err := llmagent.New(llmagent.Config{
+				Name: "planner", Model: &transferModel{script: []string{"first"}}, SubAgents: []agent.Agent{first, second},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			assertAgentSpansClosed(t, rows)
+		})
+	}
+}
+
+func TestRunner_ResumedTaskThenTransferBack_ClosesEverySpan(t *testing.T) {
+	call := func(name string, args map[string]any) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-" + name, Name: name, Args: args}}}}}
+	}
+	text := func(s string) *model.LLMResponse {
+		return &model.LLMResponse{Content: textContent("model", s), TurnComplete: true}
+	}
+	newAgent := func(c llmagent.Config) agent.Agent {
+		a, err := llmagent.New(c)
+		if err != nil {
+			t.Fatalf("llmagent.New(%s): %v", c.Name, err)
+		}
+		return a
+	}
+
+	p, requests, _ := setupTestPlugin(t)
+	taskModel := &scriptedLLM{responses: []*model.LLMResponse{text("Which color?"), call("finish_task", map[string]any{"result": "blue"})}}
+	helperTask := newAgent(llmagent.Config{
+		Name: "helper_task", Description: "asks, then finishes", Mode: llmagent.ModeTask, Model: taskModel,
+	})
+	helperModel := &scriptedLLM{responses: []*model.LLMResponse{
+		call("helper_task", map[string]any{"request": "pick a color"}),
+		call("transfer_to_agent", map[string]any{"agent_name": "coord"}),
+	}}
+	helper := newAgent(llmagent.Config{
+		Name: "helper", Description: "delegates", SubAgents: []agent.Agent{helperTask}, Model: helperModel,
+	})
+	// Having a task child makes the runner restart at coord on turn 2.
+	coordTask := newAgent(llmagent.Config{Name: "coord_task", Description: "unused", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+	coord := newAgent(llmagent.Config{
+		Name: "coord", SubAgents: []agent.Agent{coordTask, helper},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("waiting for the user"),
+			call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("all done"),
+		}},
+	})
+	r := newTestRunner(t, coord, p)
+	var resumedInvocation string
+	for _, msg := range []string{"start", "blue"} {
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", msg), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("r.Run: %v", err)
+			}
+			if ev != nil {
+				resumedInvocation = ev.InvocationID
+			}
+		}
+	}
+	for name, m := range map[string]*scriptedLLM{"task": taskModel, "helper": helperModel} {
+		if len(m.responses) != 0 {
+			t.Fatalf("%s has %d unconsumed model responses", name, len(m.responses))
+		}
+	}
+	if resumedInvocation == "" {
+		t.Fatal("resumed run returned no invocation ID")
+	}
+	rows := collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rowsOfType(rows, EventInvocationCompleted))+len(rowsOfType(rows, EventInvocationError)) >= 2
+	})
+	var resumedRows []map[string]any
+	for _, row := range rows {
+		if row["invocation_id"] == resumedInvocation {
+			resumedRows = append(resumedRows, row)
+		}
+	}
+	if len(rowsOfType(resumedRows, EventInvocationCompleted)) != 1 || len(rowsOfType(resumedRows, EventInvocationError)) != 0 {
+		t.Fatal("resumed invocation did not complete successfully")
+	}
+	assertAgentSpansClosed(t, resumedRows)
 }
