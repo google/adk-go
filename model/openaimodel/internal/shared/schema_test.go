@@ -132,6 +132,18 @@ func TestResponseFormatName(t *testing.T) {
 			want:   "Custom-Title_2",
 		},
 		{
+			// Only characters the pattern rejects are dropped, so a title the
+			// caller chose to start with an underscore keeps it.
+			name:   "a legal leading separator is kept",
+			schema: &genai.Schema{Title: "_x"},
+			want:   "_x",
+		},
+		{
+			name:   "non-ascii between legal characters becomes one underscore",
+			schema: &genai.Schema{Title: "Résumé Parser"},
+			want:   "R_sum_Parser",
+		},
+		{
 			name:   "spaces become underscores",
 			schema: &genai.Schema{Title: "Weather Report"},
 			want:   "Weather_Report",
@@ -171,8 +183,11 @@ func TestResponseFormatName(t *testing.T) {
 	}
 }
 
-// A title made of multi-byte runes must not be truncated mid-rune into a name
-// the pattern rejects, whatever the caller writes.
+// Whatever the caller writes — non-ASCII, control characters, invalid UTF-8,
+// a title made only of separators — the derived name matches the pattern. The
+// table above pins what each rule produces; this pins that no input escapes
+// them, which is what widening the legal set to, say, unicode.IsLetter would
+// break.
 func TestResponseFormatNameAlwaysMatchesTheOpenAIPattern(t *testing.T) {
 	titles := []string{
 		"",
@@ -184,6 +199,9 @@ func TestResponseFormatNameAlwaysMatchesTheOpenAIPattern(t *testing.T) {
 		strings.Repeat("天", 64) + "a",
 		"\x00\n\t",
 		strings.Repeat("-", 200),
+		"\xff\xfe invalid utf-8",
+		// A cut that lands right after an inserted separator.
+		strings.Repeat("abc ", 20),
 	}
 	for _, title := range titles {
 		got := ResponseFormatName(&genai.Schema{Title: title})
