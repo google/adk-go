@@ -15,6 +15,8 @@
 package shared
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -99,5 +101,94 @@ func TestNormalizeSchema(t *testing.T) {
 				t.Fatalf("NormalizeSchema() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// openAIFormatName is the pattern OpenAI documents on the name field of both
+// endpoints' structured-output format, quoted from the pinned openai-go:
+// "Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum
+// length of 64."
+var openAIFormatName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+func TestResponseFormatName(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema *genai.Schema
+		want   string
+	}{
+		{
+			name:   "nil schema",
+			schema: nil,
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "no title",
+			schema: &genai.Schema{Type: genai.TypeObject},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "title already a legal name",
+			schema: &genai.Schema{Title: "Custom-Title_2"},
+			want:   "Custom-Title_2",
+		},
+		{
+			name:   "spaces become underscores",
+			schema: &genai.Schema{Title: "Weather Report"},
+			want:   "Weather_Report",
+		},
+		{
+			name:   "a run of illegal characters collapses to one underscore",
+			schema: &genai.Schema{Title: "Weather  Report (v2)"},
+			want:   "Weather_Report_v2",
+		},
+		{
+			name:   "leading and trailing illegal characters are dropped",
+			schema: &genai.Schema{Title: " .Weather. "},
+			want:   "Weather",
+		},
+		{
+			name:   "a title longer than 64 characters is truncated",
+			schema: &genai.Schema{Title: strings.Repeat("Extraction", 8)},
+			want:   strings.Repeat("Extraction", 8)[:64],
+		},
+		{
+			name:   "a title with no legal character falls back to the default",
+			schema: &genai.Schema{Title: "天気予報"},
+			want:   DefaultResponseFormatName,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ResponseFormatName(tc.schema)
+			if got != tc.want {
+				t.Errorf("ResponseFormatName() = %q, want %q", got, tc.want)
+			}
+			if !openAIFormatName.MatchString(got) {
+				t.Errorf("ResponseFormatName() = %q, want it to match %s", got, openAIFormatName)
+			}
+		})
+	}
+}
+
+// A title made of multi-byte runes must not be truncated mid-rune into a name
+// the pattern rejects, whatever the caller writes.
+func TestResponseFormatNameAlwaysMatchesTheOpenAIPattern(t *testing.T) {
+	titles := []string{
+		"",
+		" ",
+		"_",
+		"-",
+		strings.Repeat("é", 100),
+		strings.Repeat("a é", 100),
+		strings.Repeat("天", 64) + "a",
+		"\x00\n\t",
+		strings.Repeat("-", 200),
+	}
+	for _, title := range titles {
+		got := ResponseFormatName(&genai.Schema{Title: title})
+		if !openAIFormatName.MatchString(got) {
+			t.Errorf("ResponseFormatName(%q) = %q, want it to match %s", title, got, openAIFormatName)
+		}
 	}
 }

@@ -2296,6 +2296,27 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 				},
 			},
 		},
+		{
+			// OpenAI accepts only ^[a-zA-Z0-9_-]+$ in the name while genai puts
+			// no constraint on Title, so the name is derived from the title and
+			// the body keeps the title the caller wrote.
+			name: "response schema title that is not a legal format name",
+			cfg: &genai.GenerateContentConfig{
+				ResponseSchema: &genai.Schema{Title: "Weather Report", Type: genai.TypeObject},
+			},
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   "Weather_Report",
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"title":                "Weather Report",
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
 
 		{
 			name: "with json schema",

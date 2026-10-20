@@ -24,6 +24,57 @@ import (
 	"google.golang.org/genai"
 )
 
+const (
+	// DefaultResponseFormatName is the structured-output format name both
+	// endpoints send when the caller's schema offers no usable title.
+	DefaultResponseFormatName = "adk_response"
+
+	// maxResponseFormatNameLen is the longest format name OpenAI accepts.
+	maxResponseFormatNameLen = 64
+)
+
+// ResponseFormatName derives the structured-output format name from a schema's
+// title. OpenAI accepts only ^[a-zA-Z0-9_-]+$ up to 64 characters there, while
+// genai puts no constraint on Title, so each run of other characters collapses
+// to one underscore and an over-long result is truncated; a title that leaves
+// nothing behind falls back to DefaultResponseFormatName. The untouched title
+// still reaches the model in the schema body, which the API does not restrict.
+//
+// adk-python's LiteLLM path copies the title straight into the name
+// (models/lite_llm.py, _to_litellm_response_format), so this is the defect
+// avoided rather than a divergence to justify.
+func ResponseFormatName(schema *genai.Schema) string {
+	if schema == nil {
+		return DefaultResponseFormatName
+	}
+	var b strings.Builder
+	separate := false
+	for _, r := range schema.Title {
+		if !isResponseFormatNameRune(r) {
+			separate = true
+			continue
+		}
+		if separate && b.Len() > 0 {
+			b.WriteByte('_')
+		}
+		separate = false
+		b.WriteRune(r)
+	}
+	// Every rune written above is ASCII, so truncating by byte cannot split one.
+	name := b.String()
+	if len(name) > maxResponseFormatNameLen {
+		name = name[:maxResponseFormatNameLen]
+	}
+	if name == "" {
+		return DefaultResponseFormatName
+	}
+	return name
+}
+
+func isResponseFormatNameRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-'
+}
+
 // NormalizeSchema round-trips a JSON schema of any Go shape into a map,
 // keeping its numbers as written.
 func NormalizeSchema(schema any) (map[string]any, error) {
