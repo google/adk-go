@@ -16,6 +16,7 @@ package telemetry
 
 import (
 	"context"
+	"iter"
 	"strings"
 	"testing"
 
@@ -291,7 +292,7 @@ func TestLogRequest(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
 			ApplyEnv()
 
-			LogRequest(ctx, tc.req, tc.backend)
+			logRequest(ctx, tc.req, tc.backend)
 
 			if len(exporter.records) != len(tc.wantEvents) {
 				var records strings.Builder
@@ -506,7 +507,7 @@ func TestLogResponse(t *testing.T) {
 			exporter := setup(t, tc.captureMessageContent)
 			ApplyEnv()
 
-			LogResponse(t.Context(), tc.resp, tc.backend)
+			logResponse(t.Context(), tc.resp, tc.backend)
 
 			if len(exporter.records) != 1 {
 				var records strings.Builder
@@ -563,8 +564,8 @@ func TestSpanIDPropagation(t *testing.T) {
 		},
 	}
 
-	LogRequest(ctx, req, genai.BackendVertexAI)
-	LogResponse(ctx, &model.LLMResponse{}, genai.BackendVertexAI)
+	logRequest(ctx, req, genai.BackendVertexAI)
+	logResponse(ctx, &model.LLMResponse{}, genai.BackendVertexAI)
 
 	if len(exporter.records) != 3 {
 		t.Fatalf("expected 3 records, got %d", len(exporter.records))
@@ -578,22 +579,19 @@ func TestSpanIDPropagation(t *testing.T) {
 	}
 }
 
+// setup installs an in-memory logger under the legacy schema.
 func setup(t *testing.T, capture bool) *inMemoryExporter {
 	exporter := &inMemoryExporter{}
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)),
 	)
-	originalLogger := otelLogger
-	otelLogger = provider.Logger("test")
-	t.Cleanup(func() {
-		otelLogger = originalLogger
-	})
+	OverrideLoggerForTesting(t, provider)
 
+	capturing := ""
 	if capture {
-		t.Setenv(captureMessageContentEnvVar, "true")
-	} else {
-		t.Setenv(captureMessageContentEnvVar, "")
+		capturing = "true"
 	}
+	setEnvForTesting(t, map[string]string{captureMessageContentEnvVar: capturing, adkTelemetrySchemaVersionOptIn: otelSemconv136})
 
 	return exporter
 }
@@ -660,4 +658,87 @@ func toGoKeyValues(kvs []attribute.KeyValue) []goKeyValue {
 		values = append(values, goKeyValue{Key: string(kv.Key), Value: toGoValue(kv.Value)})
 	}
 	return values
+}
+
+// Not covered by goldens, whose mock model has no backend.
+func TestGenerateContentProviderName(t *testing.T) {
+	for _, tc := range []struct {
+		schema     string
+		backend    genai.Backend
+		want       any
+		wantEvents int
+	}{
+		{"otel_semconv_1_44", genai.BackendVertexAI, "gcp.vertex_ai", 1},
+		{"otel_semconv_1_44", genai.BackendGeminiAPI, "gcp.gemini", 1},
+		{"otel_semconv_1_44", genai.BackendUnspecified, nil, 1},
+		{"otel_semconv_1_36", genai.BackendVertexAI, nil, 0},
+	} {
+		t.Run(tc.schema+"/"+tc.backend.String(), func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			spans := setupTestTracer(t)
+			logs := &inMemoryExporter{}
+			OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
+			call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) { yield(&model.LLMResponse{}, nil) }
+			}
+			params := GenerateContentParams{ModelName: "m", Request: &model.LLMRequest{}, Backend: tc.backend}
+			for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
+			}
+
+			if len(spans.GetSpans()) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans.GetSpans()))
+			}
+			var gotSpan any
+			for _, kv := range spans.GetSpans()[0].Attributes {
+				if kv.Key == genAIProviderName {
+					gotSpan = kv.Value.AsString()
+				}
+			}
+			if gotSpan != tc.want {
+				t.Errorf("span gen_ai.provider.name = %v, want %v", gotSpan, tc.want)
+			}
+			events := 0
+			for _, r := range logs.records {
+				if r.EventName() != inferenceOperationDetailsEventName {
+					continue
+				}
+				events++
+				var gotEvent any
+				r.WalkAttributes(func(kv attribute.KeyValue) bool {
+					if kv.Key == genAIProviderName {
+						gotEvent = kv.Value.AsString()
+					}
+					return true
+				})
+				if gotEvent != tc.want {
+					t.Errorf("event gen_ai.provider.name = %v, want %v", gotEvent, tc.want)
+				}
+			}
+			if events != tc.wantEvents {
+				t.Errorf("got %d %s events, want %d", events, inferenceOperationDetailsEventName, tc.wantEvents)
+			}
+		})
+	}
+}
+
+func TestUseLegacySchema(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"otel_semconv_1_36", true},
+		{"OTel_Semconv_1_36", true},
+		{" 1\n", true},
+		{"otel_semconv_1_44", false},
+		{"2", false},
+		{"", false},
+		{"true", false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			t.Setenv(adkTelemetrySchemaVersionOptIn, tc.value)
+			if got := useLegacySchema(); got != tc.want {
+				t.Errorf("useLegacySchema() = %t, want %t", got, tc.want)
+			}
+		})
+	}
 }
