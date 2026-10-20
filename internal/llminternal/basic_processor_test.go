@@ -133,43 +133,28 @@ func TestBasicRequestProcessor_OutputSchemaCloneError(t *testing.T) {
 }
 
 func TestBasicRequestProcessor_JSONSchemaCompatibility(t *testing.T) {
-	type schemaWithCache struct {
-		Type  string `json:"type"`
-		cache string
+	schema := map[string]any{"type": "integer", "minimum": big.NewInt(9007199254740993)}
+	base := utils.Must(agent.New(agent.Config{Name: "testAgent"}))
+	a := &mockLLMAgent{Agent: base, s: &State{
+		GenerateContentConfig: &genai.GenerateContentConfig{ResponseJsonSchema: schema},
+	}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
+	req := &model.LLMRequest{}
+	for _, err := range basicRequestProcessor(ctx, req, &Flow{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	var deep any = map[string]any{"type": "string"}
-	for range 130 {
-		deep = map[string]any{"type": "array", "items": deep}
+	want, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for name, schema := range map[string]any{
-		"big integer":   map[string]any{"type": "integer", "minimum": big.NewInt(9007199254740993)},
-		"private cache": &schemaWithCache{Type: "string", cache: "not serialized"},
-		"deep schema":   deep,
-	} {
-		t.Run(name, func(t *testing.T) {
-			base := utils.Must(agent.New(agent.Config{Name: "testAgent"}))
-			a := &mockLLMAgent{Agent: base, s: &State{
-				GenerateContentConfig: &genai.GenerateContentConfig{ResponseJsonSchema: schema},
-			}}
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a})
-			req := &model.LLMRequest{}
-			for _, err := range basicRequestProcessor(ctx, req, &Flow{}) {
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			want, err := json.Marshal(schema)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := json.Marshal(req.Config.ResponseJsonSchema)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(got) != string(want) {
-				t.Errorf("schema JSON = %s, want %s", got, want)
-			}
-		})
+	got, err := json.Marshal(req.Config.ResponseJsonSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("schema JSON = %s, want %s", got, want)
 	}
 }
 

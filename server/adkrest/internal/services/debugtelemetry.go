@@ -153,11 +153,12 @@ type DebugSpan struct {
 // always marshals and always carries the shape the ADK web UI expects for the
 // event name.
 type DebugLog struct {
-	Body              any    `json:"body"`
-	ObservedTimestamp string `json:"observed_timestamp"`
-	TraceID           string `json:"trace_id"`
-	SpanID            string `json:"span_id"`
-	EventName         string `json:"event_name"`
+	Body              any            `json:"body"`
+	Attributes        map[string]any `json:"attributes,omitempty"`
+	ObservedTimestamp string         `json:"observed_timestamp"`
+	TraceID           string         `json:"trace_id"`
+	SpanID            string         `json:"span_id"`
+	EventName         string         `json:"event_name"`
 }
 
 // normalizeLogBody returns a log body the ADK web UI can validate, staying as
@@ -243,6 +244,71 @@ func textParts(v any) []any {
 		text = fmt.Sprint(v)
 	}
 	return []any{map[string]any{textKey: text}}
+}
+
+const (
+	inferenceDetailsEventName = "gen_ai.client.inference.operation.details"
+	inputMessagesKey          = "gen_ai.input.messages"
+	outputMessagesKey         = "gen_ai.output.messages"
+	systemInstructionsKey     = "gen_ai.system_instructions"
+)
+
+// normalizeLogAttributes rewrites message parts the ADK web UI cannot render, which blank its Traces panel.
+func normalizeLogAttributes(eventName string, attrs map[string]any) map[string]any {
+	if eventName == inferenceDetailsEventName {
+		for _, key := range []string{inputMessagesKey, outputMessagesKey} {
+			msgs, _ := attrs[key].([]any)
+			for _, m := range msgs {
+				if msg, ok := m.(map[string]any); ok {
+					msg[partsKey] = uiParts(msg[partsKey])
+				}
+			}
+		}
+		if parts, ok := attrs[systemInstructionsKey]; ok {
+			attrs[systemInstructionsKey] = uiParts(parts)
+		}
+	}
+	if _, err := json.Marshal(attrs); err != nil {
+		return nil
+	}
+	return attrs
+}
+
+func uiParts(v any) any {
+	parts, ok := v.([]any)
+	if !ok {
+		return v
+	}
+	for i, p := range parts {
+		if part, ok := p.(map[string]any); ok {
+			parts[i] = uiPart(part)
+		}
+	}
+	return parts
+}
+
+func uiPart(p map[string]any) map[string]any {
+	mimeType, _ := p["mime_type"].(string)
+	switch p["type"] {
+	case "reasoning":
+		return map[string]any{"type": "text", "content": p["content"]}
+	case "blob":
+		return map[string]any{"type": "blob", "mime_type": mimeType, "data": p["content"]}
+	case "uri":
+		return map[string]any{"type": "file_data", "mime_type": mimeType, "uri": p["uri"]}
+	case "tool_call":
+		p["arguments"] = uiObject(p["arguments"])
+	case "tool_call_response":
+		p["response"] = uiObject(p["response"])
+	}
+	return p
+}
+
+func uiObject(v any) any {
+	if _, ok := v.(map[string]any); ok || v == nil {
+		return v
+	}
+	return map[string]any{"value": v}
 }
 
 // spanRecord stores a span and its associated logs.
@@ -406,8 +472,17 @@ func (s *spanStore) Export(ctx context.Context, logRecords []sdklog.Record) erro
 			record = &spanRecord{}
 			s.recordsBySpanID[spanID] = record
 		}
+		var attrs map[string]any
+		log.WalkAttributes(func(kv attribute.KeyValue) bool {
+			if attrs == nil {
+				attrs = make(map[string]any, log.AttributesLen())
+			}
+			attrs[string(kv.Key)] = telemetry.FromLogValue(kv.Value)
+			return true
+		})
 		record.Logs = append(record.Logs, DebugLog{
 			Body:              normalizeLogBody(log.EventName(), telemetry.FromLogValue(log.Body())),
+			Attributes:        normalizeLogAttributes(log.EventName(), attrs),
 			ObservedTimestamp: log.ObservedTimestamp().Format(time.RFC3339Nano),
 			TraceID:           log.TraceID().String(),
 			SpanID:            log.SpanID().String(),
