@@ -34,7 +34,7 @@ func runTests(t *testing.T, base string, cases []normalizeCase) {
 	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, gotRel, err := SafeSubpath(base, tc.rel, true, false)
+			got, gotRel, err := SafeSubpath(base, tc.rel)
 
 			if tc.wantErr {
 				if err == nil {
@@ -150,6 +150,12 @@ func TestSafeSubpath_Windows(t *testing.T) {
 		{name: "reserved_name_con", rel: "CON", wantErr: true},
 		{name: "reserved_name_nul", rel: "NUL", wantErr: true},
 		{name: "reserved_name_com1", rel: "COM1", wantErr: true},
+		// the reserved names are matched case-insensitively, with or without an extension
+		{name: "reserved_name_con_lower", rel: "con", wantErr: true},
+		{name: "reserved_name_conin_lower", rel: "conin$", wantErr: true},
+		{name: "reserved_name_nul_ext", rel: "nul.yaml", wantErr: true},
+		{name: "reserved_name_com1_mixed_ext", rel: "Com1.yaml", wantErr: true},
+		{name: "reserved_name_in_subdir", rel: "sub/aux.yaml", wantErr: true},
 		{name: "ads_on_inside_file", rel: "file.txt:hidden", wantErr: true},
 		{name: "control_char", rel: "bad\x01name.txt", wantErr: true},
 

@@ -115,7 +115,7 @@ func init() {
 			return nil, fmt.Errorf("parentPath not found in context")
 		}
 		if configPath, ok := a["config_path"].(string); ok {
-			ag, err := ResolveAgentReference(ctx, parentPath, configPath, false)
+			ag, err := ResolveAgentReference(ctx, parentPath, configPath)
 			if err != nil {
 				return nil, err
 			}
@@ -374,8 +374,8 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-func resolveConfigReference(parentPath, refPath string, acceptSymlinks, evalPath bool) (string, error) {
-	abs, _, err := utils.SafeSubpath(parentPath, refPath, acceptSymlinks, evalPath)
+func resolveConfigReference(parentPath, refPath string) (string, error) {
+	abs, _, err := utils.SafeSubpath(parentPath, refPath)
 	if err != nil {
 		return "", err
 	}
@@ -383,8 +383,8 @@ func resolveConfigReference(parentPath, refPath string, acceptSymlinks, evalPath
 }
 
 // ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, agentDir, refPath string, acceptSymlinks bool) (agent.Agent, error) {
-	absPath, err := resolveConfigReference(agentDir, refPath, acceptSymlinks, true)
+func ResolveAgentReference(ctx context.Context, agentDir, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(agentDir, refPath)
 	if err != nil {
 		return nil, err
 	}

@@ -211,7 +211,7 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 		// need the same containment check as agent refs: without it a workflow
 		// config can read and instantiate a node from anywhere on the filesystem.
 		var err error
-		absPath, err = resolveConfigReference(parentPath, ref, false, true)
+		absPath, err = resolveConfigReference(parentPath, ref)
 		if err != nil {
 			return nil, err
 		}
@@ -327,7 +327,7 @@ func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (
 	}
 
 	// Otherwise, it is a standard agent class. Resolve it as an agent and wrap in NewAgentNode.
-	ag, err := ResolveAgentReference(ctx, parentPath, ref, false)
+	ag, err := ResolveAgentReference(ctx, parentPath, ref)
 	if err != nil {
 		return nil, err
 	}

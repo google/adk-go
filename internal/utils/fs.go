@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -32,134 +33,82 @@ var (
 	ErrSymlinkInRelativePath = errors.New("relative path contains a symlink")
 )
 
-// SafeSubpath should be given a base path and a relative path (rel).
-// The base path should be absolute and is considered to be safe
-// The rel path is not considered to be safe.
-// On success, the result is a normalized absolute path and the base-path-relative equivalent path.
-// Returns an error if the result is not a valid subpath or the path contains unsafe elements (OS-specific)
-// Returns ErrNotValidRelativePath iff the path is invalid or is not relative
-// Returns ErrSymlinkInRelativePath iff you set acceptSymlinks to false and evalPath to true and the path being check contains symlinks.
-func SafeSubpath(base, rel string, acceptSymlinks, evalPath bool) (absPath, relPath string, resErr error) {
-	// check the base path.
+// SafeSubpath resolves rel below base without following links.
+//
+// The base path must be absolute and is trusted. rel is not. On success the
+// result is the normalized absolute path and its base-relative equivalent.
+//
+// Returns ErrNotValidRelativePath iff rel is not a local path below base:
+// absolute, empty, escaping through "..", effectively empty, or (on Windows)
+// carrying a drive, a stream, a reserved device name or a trailing dot/space.
+// Returns ErrSymlinkInRelativePath iff a component of rel below base is a
+// symlink or another link-like entry; a link is refused even if it stays
+// inside base.
+// A component that does not exist, or that sits below a non-directory, is not
+// an error here: nothing below it can exist, so the path is returned and the
+// caller's read reports the real problem.
+func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 	if !filepath.IsAbs(base) {
 		return "", "", fmt.Errorf("base path is not absolute")
 	}
 	absBase := filepath.Clean(base)
 
-	// validate rel
-	// on windows do not allow rel to start with "\\" - it will catch \\host\dir, \\.\long, \\?\ etc
-	if runtime.GOOS == "windows" && strings.HasPrefix(rel, "\\") {
-		return "", "", fmt.Errorf("%w: rel path should not start with \\", ErrNotValidRelativePath)
+	if rel == "" {
+		return "", "", fmt.Errorf("%w: rel path is empty", ErrNotValidRelativePath)
 	}
-	// do not allow rel to start with "/"
-	if strings.HasPrefix(rel, "/") {
-		return "", "", fmt.Errorf("%w: rel path should not start with /", ErrNotValidRelativePath)
+	// NUL char is not allowed both on linux and windows
+	if strings.Contains(rel, "\x00") {
+		return "", "", fmt.Errorf("%w: rel path contains null byte", ErrNotValidRelativePath)
 	}
-	// on windows we need additional tests for drives, ADS, special files, trailing " " and "."
+	// IsLocal settles absolute paths and any ".." that escapes. On Windows it also
+	// rejects drive-relative and UNC spellings and the reserved device names,
+	// matching them case-insensitively and with trailing spaces and dots.
+	if !filepath.IsLocal(rel) {
+		return "", "", fmt.Errorf("%w: rel path is not local", ErrNotValidRelativePath)
+	}
+	// on windows IsLocal does not look at alternate data streams ("test.txt:aaa") and
+	// does not refuse trailing " " and "." on every component
 	if runtime.GOOS == "windows" {
-		// this will prevent explicit drive like "c:\" and ADS ("test.txt:aaa")
 		if strings.ContainsAny(rel, windowsForbiddenStandardChars) {
 			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars: %v", ErrNotValidRelativePath, windowsForbiddenStandardChars)
 		}
 		if strings.ContainsAny(rel, windowsForbiddenLowChar) {
 			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars 1-31", ErrNotValidRelativePath)
 		}
-		fn := filepath.Base(rel)
-		// look at the file name and its extension
-		if noext, ext, found := strings.Cut(fn, "."); found {
-			// catches a.txt. and .....
-			if strings.HasSuffix(ext, ".") {
-				return "", "", fmt.Errorf("%w: rel path: file extension contains '.' at the end", ErrNotValidRelativePath)
-			}
-			if _, ok := windowsForbiddenFileNames[noext]; ok {
-				return "", "", fmt.Errorf("%w: rel path has a windows-specific forbidden file: %v", ErrNotValidRelativePath, noext)
-			}
-		} else {
-			if _, ok := windowsForbiddenFileNames[fn]; ok {
-				return "", "", fmt.Errorf("%w: rel path has a windows-specific forbidden file: %v", ErrNotValidRelativePath, noext)
-			}
-		}
-
-		// check for trailing " " and "." all along the path
-		p := rel
-		cont := true
-		for cont {
-			p = filepath.Clean(p)
-			d, f := filepath.Split(p)
-			if d == "" {
-				cont = false
-			}
+		for _, f := range splitPathToFragments(rel) {
 			if strings.HasSuffix(f, " ") {
 				return "", "", fmt.Errorf("%w: rel path contains trailing space", ErrNotValidRelativePath)
 			}
-			if strings.HasSuffix(f, ".") {
+			if strings.HasSuffix(f, ".") && f != "." && f != ".." {
 				return "", "", fmt.Errorf("%w: rel path contains trailing dot", ErrNotValidRelativePath)
 			}
-			if p == d {
-				cont = false
-			}
-			p = d
 		}
 	}
 
-	// NUL char is not allowed both on linux and windows
-	if strings.Contains(rel, "\x00") {
-		return "", "", fmt.Errorf("%w: rel path contains null byte", ErrNotValidRelativePath)
-	}
-
-	cleanRel := filepath.Clean(rel)
-	if (runtime.GOOS == "windows" && strings.HasPrefix(cleanRel, "..\\")) || strings.HasPrefix(cleanRel, "../") {
-		return "", "", fmt.Errorf("%w: rel path after cleaning should not start with '..'", ErrNotValidRelativePath)
-	}
-
-	// check if rel escapes absBase
-	p := filepath.Join(absBase, rel)
-	r, err := filepath.Rel(absBase, p)
+	// check if rel stays below absBase. Rel + IsLocal, not a string prefix: the
+	// prefix absBase+separator is wrong for a filesystem root ("//").
+	res := filepath.Join(absBase, rel)
+	r, err := filepath.Rel(absBase, res)
 	if err != nil {
-		return "", "", fmt.Errorf("filepath.Rel failed: %w", err)
+		return "", "", fmt.Errorf("%w: filepath.Rel failed: %w", ErrNotValidRelativePath, err)
 	}
-	res := filepath.Join(absBase, r)
-	// now compare res and absBase
-	if absBase == res { // r effectively is .
+	if r == "." { // rel is effectively empty
 		return "", "", fmt.Errorf("%w: rel is effectively empty", ErrNotValidRelativePath)
 	}
-	if !strings.HasPrefix(res, absBase+string(filepath.Separator)) {
+	if !filepath.IsLocal(r) {
 		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
 	}
 
-	if acceptSymlinks {
-		if evalPath {
-			fp := filepath.Join(absBase, r)
-			ev, err := filepath.EvalSymlinks(fp)
-			if err != nil {
-				return "", "", fmt.Errorf("%w: cannot evaluate symlinks: %w", ErrNotValidRelativePath, err)
-			}
-			if ev != fp {
-				// got symlink in rel
-				// make it relative to absBase
-				evr, err := filepath.Rel(absBase, ev)
-				if err != nil {
-					return "", "", fmt.Errorf("filepath.Rel failed: %w", err)
-				}
-
-				// make sure we are still safe - recheck everything as symlink-free
-				return SafeSubpath(absBase, evr, false, true)
-			}
-		} else {
-			return absBase, r, nil
+	hasLink, err := ContainsSymlink(absBase, r)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return res, r, nil
 		}
-	} else {
-		if evalPath {
-			hasSymlink, err := ContainsSymlink(absBase, rel)
-			if err != nil {
-				return "", "", fmt.Errorf("%w: cannot check for symlinks: %w", ErrNotValidRelativePath, err)
-			}
-			if hasSymlink {
-				return "", "", ErrSymlinkInRelativePath
-			}
-		}
+		return "", "", fmt.Errorf("cannot check for symlinks: %w", err)
 	}
-
+	if hasLink {
+		return "", "", ErrSymlinkInRelativePath
+	}
 	return res, r, nil
 }
 
@@ -214,41 +163,6 @@ const (
 	// windowsForbiddenLowChar contains low <32 chars which are not allowed to be used in a file/dir name
 	windowsForbiddenLowChar string = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
 )
-
-// windowsForbiddenFileNames lists names of files reserved on windows. Also file names with such suffixes are reserved.
-// please refer to https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
-var windowsForbiddenFileNames = map[string]bool{
-	"CON":     true,
-	"CONIN$":  true,
-	"CONOUT$": true,
-	"PRN":     true,
-	"AUX":     true,
-	"NUL":     true,
-	"COM1":    true,
-	"COM2":    true,
-	"COM3":    true,
-	"COM4":    true,
-	"COM5":    true,
-	"COM6":    true,
-	"COM7":    true,
-	"COM8":    true,
-	"COM9":    true,
-	"COM¹":    true,
-	"COM²":    true,
-	"COM³":    true,
-	"LPT1":    true,
-	"LPT2":    true,
-	"LPT3":    true,
-	"LPT4":    true,
-	"LPT5":    true,
-	"LPT6":    true,
-	"LPT7":    true,
-	"LPT8":    true,
-	"LPT9":    true,
-	"LPT¹":    true,
-	"LPT²":    true,
-	"LPT³":    true,
-}
 
 // isLinkLike reports whether a component may redirect the read somewhere other
 // than where its own name sits in the tree.
