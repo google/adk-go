@@ -353,13 +353,30 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
@@ -819,7 +836,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta, artifactDelta)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -997,6 +1014,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
 		}
 
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
+		}
+
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, artifactDelta, err)
@@ -1057,56 +1082,28 @@ type responseWithEventID struct {
 // generateContent wraps the LLM call with tracing and logging.
 // The generate_content span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*responseWithEventID, error] {
-	return func(yield func(*responseWithEventID, error) bool) {
-		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName:    m.Name(),
-			InvocationID: ctx.InvocationID(),
-			Request:      req,
-		})
-		ctx = ctx.WithContext(spanCtx)
-		backend := googlellm.GetGoogleLLMVariant(m)
-		// Log request before calling the model.
-		telemetry.LogRequest(ctx, req, backend)
-
-		var lastResponse responseWithEventID
-		var lastErr error
-		spanEnded := false
-		endSpanAndTrackResult := func() {
-			if spanEnded {
-				// Return to avoid spamming the logs with "span already ended" errors.
-				return
-			}
-			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
-				Response: lastResponse.LLMResponse,
-				EventID:  lastResponse.eventID,
-				Error:    lastErr,
-			})
-			span.End()
-			spanEnded = true
-		}
-		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
-		defer endSpanAndTrackResult()
-		for resp, err := range m.GenerateContent(ctx, req, useStream) {
-			if resp == nil && err == nil {
-				// Third-party model implementations may yield an empty response.
-				continue
-			}
-			response := newResponseWithEventID(ctx, resp)
-			lastResponse = *response
-			lastErr = err
-			// Complete the span immediately to avoid capturing the upstream yield processing time.
-			if err != nil {
-				endSpanAndTrackResult()
-			} else if !resp.Partial {
-				// Log only final responses.
-				telemetry.LogResponse(ctx, resp, backend)
-				endSpanAndTrackResult()
-			}
-			if !yield(response, err) {
-				return
-			}
-		}
+	params := telemetry.GenerateContentParams{
+		ModelName:    m.Name(),
+		InvocationID: ctx.InvocationID(),
+		Request:      req,
+		Backend:      googlellm.GetGoogleLLMVariant(m),
+		Stream:       useStream,
 	}
+	response := func(r *responseWithEventID) (*model.LLMResponse, string) { return r.LLMResponse, r.eventID }
+	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
+		ctx := ctx.WithContext(spanCtx)
+		return func(yield func(*responseWithEventID, error) bool) {
+			for resp, err := range m.GenerateContent(ctx, req, useStream) {
+				if resp == nil && err == nil {
+					// Third-party model implementations may yield an empty response.
+					continue
+				}
+				if !yield(newResponseWithEventID(ctx, resp), err) {
+					return
+				}
+			}
+		}
+	})
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
@@ -1177,7 +1174,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any, artifactDelta map[string]int64) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -1189,6 +1186,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp.LLMResponse
 	ev.Actions.StateDelta = stateDelta
+	ev.Actions.ArtifactDelta = artifactDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)

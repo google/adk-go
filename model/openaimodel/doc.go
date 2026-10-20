@@ -49,10 +49,10 @@
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
 //	            and on Responses also StopSequences, the penalties and Seed
-//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which resumes a
-//	            generation paused with CONTINUATION, as these APIs never do;
-//	            and on Chat Completions ThinkingConfig.IncludeThoughts, which
-//	            has no equivalent there
+//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
+//	            effect because these APIs never pause a generation with
+//	            CONTINUATION; and on Chat Completions
+//	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
