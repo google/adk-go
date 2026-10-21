@@ -16,7 +16,6 @@ package shared
 
 import (
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -70,15 +69,15 @@ func TestRejectUnsupportedFieldsRefusesFieldsAddedLater(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ""
-			if err := rejectUnsupportedFields("Knobs.", tc.in, []string{"Supported"}); err != nil {
-				if !errors.Is(err, ErrUnsupportedConfigField) {
-					t.Fatalf("rejectUnsupportedFields() error = %v, want %v", err, ErrUnsupportedConfigField)
+			err := rejectUnsupportedFields("Knobs.", tc.in, []string{"Supported"})
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("rejectUnsupportedFields() error = %v, want nil", err)
 				}
-				got = strings.TrimPrefix(err.Error(), ErrUnsupportedConfigField.Error()+": ")
+				return
 			}
-			if got != tc.want {
-				t.Errorf("rejectUnsupportedFields() named %q, want %q", got, tc.want)
+			if want := ErrUnsupportedConfigField.Error() + ": " + tc.want; !errors.Is(err, ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("rejectUnsupportedFields() error = %v, want %q", err, want)
 			}
 		})
 	}
