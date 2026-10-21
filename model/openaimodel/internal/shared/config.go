@@ -16,6 +16,8 @@ package shared
 
 import (
 	"fmt"
+	"reflect"
+	"slices"
 	"time"
 
 	oaishared "github.com/openai/openai-go/v3/shared"
@@ -50,26 +52,12 @@ func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 // the one backend that sees them.
 var IgnoredHTTPOptionFields = []string{"Headers"}
 
-// UnsupportedHTTPOptionFields lists the HTTPOptions fields that describe the
-// Gemini wire format rather than transport, and so cannot cross to OpenAI.
-// Unlike IgnoredHTTPOptionFields these have never been accepted here, so naming
-// them costs no compatibility.
-var UnsupportedHTTPOptionFields = []struct {
-	Name  string
-	IsSet func(*genai.HTTPOptions) bool
-}{
-	// The endpoint belongs to ClientConfig, which is also the only place it can
-	// be set coherently alongside the API key that authenticates against it.
-	{Name: "BaseURL", IsSet: func(o *genai.HTTPOptions) bool { return o.BaseURL != "" }},
-	{Name: "BaseURLResourceScope", IsSet: func(o *genai.HTTPOptions) bool { return o.BaseURLResourceScope != "" }},
-	{Name: "APIVersion", IsSet: func(o *genai.HTTPOptions) bool { return o.APIVersion != "" }},
-	// Both shape a Gemini request body, which is not the body being sent.
-	{Name: "ExtraBody", IsSet: func(o *genai.HTTPOptions) bool { return o.ExtraBody != nil }},
-	{Name: "ExtrasRequestProvider", IsSet: func(o *genai.HTTPOptions) bool { return o.ExtrasRequestProvider != nil }},
-	// openai-go retries too, but on its own schedule; honoring only the retry
-	// count would quietly discard the backoff the caller asked for.
-	{Name: "RetryOptions", IsSet: func(o *genai.HTTPOptions) bool { return o.RetryOptions != nil }},
-}
+// HandledHTTPOptionFields names the HTTPOptions fields that are not refused:
+// Timeout, which RequestTimeout extracts, and the ignored ones. Anything else is
+// refused, including fields genai adds after this list; those it has today
+// belong to ClientConfig (BaseURL, APIVersion), shape a Gemini body (ExtraBody),
+// or set a retry schedule openai-go already owns.
+var HandledHTTPOptionFields = append([]string{"Timeout"}, IgnoredHTTPOptionFields...)
 
 // ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning
 // effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
@@ -166,13 +154,11 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 	}
 	// HTTPOptions is taken field by field rather than whole. Timeout is
 	// extracted by RequestTimeout, Headers is deliberately ignored for the
-	// compatibility reason in IgnoredHTTPOptionFields, and what is left
-	// describes the Gemini wire format and is named here.
+	// compatibility reason in IgnoredHTTPOptionFields, and anything else is
+	// refused by name here.
 	if cfg.HTTPOptions != nil {
-		for _, field := range UnsupportedHTTPOptionFields {
-			if field.IsSet(cfg.HTTPOptions) {
-				return fmt.Errorf("%w: HTTPOptions.%s", ErrUnsupportedConfigField, field.Name)
-			}
+		if err := rejectUnhandledFields("HTTPOptions.", cfg.HTTPOptions, HandledHTTPOptionFields); err != nil {
+			return err
 		}
 		// openai-go treats a zero timeout as "no deadline", so forwarding a
 		// non-positive one would lift the caller's bound rather than apply it —
@@ -184,66 +170,45 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 	return nil
 }
 
-// UnsupportedConfigFields lists the GenerateContentConfig fields the Responses
-// API cannot take, each with a predicate reporting whether the caller set it;
-// the Chat Completions path removes the ones it can with ConfigFieldsWithout.
-// Presence, not value: setting a knob at all means the caller expected an effect.
-var UnsupportedConfigFields = []ConfigField{
-	{Name: "Seed", IsSet: func(c *genai.GenerateContentConfig) bool { return c.Seed != nil }},
-	{Name: "RoutingConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.RoutingConfig != nil }},
-	{Name: "ModelSelectionConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ModelSelectionConfig != nil }},
-	{Name: "CachedContent", IsSet: func(c *genai.GenerateContentConfig) bool { return c.CachedContent != "" }},
-	{Name: "ResponseModalities", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ResponseModalities != nil }},
-	{Name: "MediaResolution", IsSet: func(c *genai.GenerateContentConfig) bool { return c.MediaResolution != "" }},
-	{Name: "SpeechConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.SpeechConfig != nil }},
-	{Name: "AudioTimestamp", IsSet: func(c *genai.GenerateContentConfig) bool { return c.AudioTimestamp }},
-	{Name: "ImageConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ImageConfig != nil }},
-	{Name: "EnableEnhancedCivicAnswers", IsSet: func(c *genai.GenerateContentConfig) bool {
-		return c.EnableEnhancedCivicAnswers != nil
-	}},
-	{Name: "ModelArmorConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ModelArmorConfig != nil }},
-	{Name: "AudioTranscriptionConfig", IsSet: func(c *genai.GenerateContentConfig) bool { return c.AudioTranscriptionConfig != nil }},
-	{Name: "ContinuationToken", IsSet: func(c *genai.GenerateContentConfig) bool { return c.ContinuationToken != nil }},
+// HandledConfigFields names the GenerateContentConfig fields both endpoints
+// translate, refuse with a named error, or accept as having no effect; any other
+// field the caller sets is refused, including ones genai adds after this list.
+var HandledConfigFields = []string{
+	"HTTPOptions", "SystemInstruction", "Temperature", "TopP", "TopK",
+	"CandidateCount", "MaxOutputTokens", "StopSequences", "ResponseLogprobs",
+	"Logprobs", "PresencePenalty", "FrequencyPenalty", "ResponseMIMEType",
+	"ResponseSchema", "ResponseJsonSchema", "SafetySettings", "Tools",
+	"ToolConfig", "Labels", "ThinkingConfig", "ServiceTier",
+	// No effect: neither API pauses a generation with CONTINUATION.
+	"AutomaticContinuation",
 }
 
-// ConfigField names a GenerateContentConfig field alongside a predicate
-// reporting whether the caller set it.
-type ConfigField struct {
-	Name  string
-	IsSet func(*genai.GenerateContentConfig) bool
-}
+// HandledThinkingConfigFields names the ThinkingConfig fields both endpoints
+// read; any other field the caller sets is refused.
+var HandledThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget", "ThinkingLevel"}
 
-// RejectUnsupportedConfigFields reports the first unsupported field the caller set.
-func RejectUnsupportedConfigFields(cfg *genai.GenerateContentConfig) error {
-	for _, field := range UnsupportedConfigFields {
-		if field.IsSet(cfg) {
-			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.Name)
-		}
+// RejectUnhandledConfigFields reports the first field the caller set that is
+// not in handled, then the first unhandled ThinkingConfig field, each in genai's
+// declaration order. Presence, not value: setting a knob at all means the caller
+// expected an effect.
+func RejectUnhandledConfigFields(cfg *genai.GenerateContentConfig, handled []string) error {
+	if err := rejectUnhandledFields("", cfg, handled); err != nil {
+		return err
 	}
-	return nil
+	return rejectUnhandledFields("ThinkingConfig.", cfg.ThinkingConfig, HandledThinkingConfigFields)
 }
 
-// ConfigFieldsWithout returns UnsupportedConfigFields minus the named entries,
-// so an endpoint that supports one of them does not refuse it.
-func ConfigFieldsWithout(names ...string) []ConfigField {
-	drop := make(map[string]bool, len(names))
-	for _, name := range names {
-		drop[name] = true
+// rejectUnhandledFields reports the first exported field of the struct that s
+// points to that is set and not named in handled; a nil pointer has none.
+func rejectUnhandledFields(prefix string, s any, handled []string) error {
+	v := reflect.Indirect(reflect.ValueOf(s))
+	if !v.IsValid() {
+		return nil
 	}
-	kept := make([]ConfigField, 0, len(UnsupportedConfigFields))
-	for _, field := range UnsupportedConfigFields {
-		if !drop[field.Name] {
-			kept = append(kept, field)
-		}
-	}
-	return kept
-}
-
-// RejectConfigFields reports the first field in the list the caller set.
-func RejectConfigFields(fields []ConfigField, cfg *genai.GenerateContentConfig) error {
-	for _, field := range fields {
-		if field.IsSet(cfg) {
-			return fmt.Errorf("%w: %s", ErrUnsupportedConfigField, field.Name)
+	for i := range v.NumField() {
+		field := v.Type().Field(i)
+		if field.IsExported() && !slices.Contains(handled, field.Name) && !v.Field(i).IsZero() {
+			return fmt.Errorf("%w: %s%s", ErrUnsupportedConfigField, prefix, field.Name)
 		}
 	}
 	return nil

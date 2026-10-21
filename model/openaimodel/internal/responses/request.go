@@ -510,7 +510,7 @@ func applyGenerationConfig(params *oairesponses.ResponseNewParams, cfg *genai.Ge
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	return shared.RejectUnsupportedConfigFields(cfg)
+	return shared.RejectUnhandledConfigFields(cfg, shared.HandledConfigFields)
 }
 
 // serviceTiers maps genai's processing tiers onto the Responses equivalents.

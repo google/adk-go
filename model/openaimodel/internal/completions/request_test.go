@@ -19,12 +19,15 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -508,6 +511,33 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 			})
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+// Every exported field outside handledConfigFields must be refused rather than
+// dropped, including one genai adds after this test was written.
+func TestApplyGenerationConfig_UnhandledFieldsAreRejected(t *testing.T) {
+	// Only Seed may be added locally; a name added to the shared list is
+	// classified by the Responses accounting test instead.
+	want := slices.Sorted(slices.Values(append(slices.Clone(shared.HandledConfigFields), "Seed")))
+	if got := slices.Sorted(slices.Values(handledConfigFields)); !slices.Equal(got, want) {
+		t.Errorf("handledConfigFields = %v, want %v", got, want)
+	}
+
+	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
+	for i := range cfgType.NumField() {
+		field := cfgType.Field(i)
+		if !field.IsExported() || slices.Contains(handledConfigFields, field.Name) {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			cfg := &genai.GenerateContentConfig{}
+			reflect.ValueOf(cfg).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
+			err := applyGenerationConfig(&openai.ChatCompletionNewParams{}, cfg)
+			if !errors.Is(err, shared.ErrUnsupportedConfigField) || !strings.HasSuffix(err.Error(), ": "+field.Name) {
+				t.Errorf("applyGenerationConfig() with %s set: error = %v, want %v naming it", field.Name, err, shared.ErrUnsupportedConfigField)
 			}
 		})
 	}
