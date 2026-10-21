@@ -77,7 +77,9 @@ func TestModel_Generate(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			n := 0
 			for got, err := range testModel.GenerateContent(t.Context(), tt.req, false) {
+				n++
 				if (err != nil) != tt.wantErr {
 					t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
 					return
@@ -85,6 +87,9 @@ func TestModel_Generate(t *testing.T) {
 				if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(model.LLMResponse{}, "AvgLogprobs")); diff != "" {
 					t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
 				}
+			}
+			if n != 1 {
+				t.Errorf("Model.Generate() yielded %d responses, want 1", n)
 			}
 		})
 	}
