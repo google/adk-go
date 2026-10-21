@@ -46,6 +46,14 @@ var (
 	ErrSafetySettingsNotSupported = shared.ErrSafetySettingsNotSupported
 	// ErrUnsupportedMIMEType is returned when an unsupported MIME type is used.
 	ErrUnsupportedMIMEType = shared.ErrUnsupportedMIMEType
+	// ErrMediaMIMETypeRequired is returned when a part carries media without a MIME type.
+	ErrMediaMIMETypeRequired = shared.ErrMediaMIMETypeRequired
+	// ErrMediaDataRequired is returned when a part carries inline media with no bytes.
+	ErrMediaDataRequired = shared.ErrMediaDataRequired
+	// ErrMediaURIRequired is returned when a part carries file data without a URI.
+	ErrMediaURIRequired = shared.ErrMediaURIRequired
+	// ErrMediaOnAssistantTurn is returned when a replayed assistant turn carries media.
+	ErrMediaOnAssistantTurn = shared.ErrMediaOnAssistantTurn
 	// ErrUnsupportedConfigField is returned when a generation config field has no equivalent on the selected API; the message names it.
 	ErrUnsupportedConfigField = shared.ErrUnsupportedConfigField
 	// ErrEmptyJSONSchema is returned when an empty JSON schema is provided.

@@ -222,7 +222,7 @@ func (g *googleOIDC) validateToken(ctx context.Context, token string) (payload *
 // wiring PR, where the constructor gains an http.Client and can observe the
 // transport directly.
 func deny(err error) error {
-	log.Printf("adk: authn: rejected an OIDC-authenticated request: %v", err)
+	log.Printf("adk: authn: rejected an OIDC-authenticated request: %v", err) //nolint:forbidigo // pre-slog call site
 	return fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 }
 
@@ -234,7 +234,7 @@ func deny(err error) error {
 // writes "forbidden" here and "unauthorized" there -- but it differs only in
 // the way the status already does.
 func forbid(err error) error {
-	log.Printf("adk: authn: refused an OIDC-authenticated principal: %v", err)
+	log.Printf("adk: authn: refused an OIDC-authenticated principal: %v", err) //nolint:forbidigo // pre-slog call site
 	return fmt.Errorf("%w: %w", ErrForbidden, err)
 }
 

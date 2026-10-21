@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -688,6 +690,103 @@ func TestRunner_RunLive_BufferedEventExits(t *testing.T) {
 			}
 			if !slices.Equal(savedIDs, tc.wantSaved) {
 				t.Errorf("saved IDs = %v, want %v", savedIDs, tc.wantSaved)
+			}
+		})
+	}
+}
+
+type recordingLiveSession struct {
+	dummyLiveSession
+	requests []agent.LiveRequest
+}
+
+func (s *recordingLiveSession) Send(req agent.LiveRequest) error {
+	s.requests = append(s.requests, req)
+	return nil
+}
+
+func TestRunner_RunLive_SendDropsNilParts(t *testing.T) {
+	text := &genai.Part{Text: "hi"}
+	text2 := &genai.Part{Text: "there"}
+	funcResp := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "book_flight"}}
+	blob := &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0x00, 0x01}}
+	for _, tc := range []struct {
+		name          string
+		parts         []*genai.Part
+		realtimeInput any
+		wantParts     []*genai.Part
+		wantSaved     bool
+		wantNoCopy    bool
+	}{
+		{name: "nil before text", parts: []*genai.Part{nil, text}, wantParts: []*genai.Part{text}, wantSaved: true},
+		{name: "nil after text", parts: []*genai.Part{text, nil}, wantParts: []*genai.Part{text}, wantSaved: true},
+		{name: "nil between texts", parts: []*genai.Part{text, nil, text2}, wantParts: []*genai.Part{text, text2}, wantSaved: true},
+		{name: "nil after function response", parts: []*genai.Part{funcResp, nil}, wantParts: []*genai.Part{funcResp}},
+		{name: "only nil", parts: []*genai.Part{nil, nil}},
+		{name: "nil with realtime input", parts: []*genai.Part{nil, text}, realtimeInput: blob, wantParts: []*genai.Part{text}, wantSaved: true},
+		{name: "no nil", parts: []*genai.Part{text}, wantParts: []*genai.Part{text}, wantSaved: true, wantNoCopy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const sessionID = "testSessionNilParts"
+			sessionService := session.InMemoryService()
+			if _, err := sessionService.Create(t.Context(), &session.CreateRequest{
+				AppName:   "testApp",
+				UserID:    "testUser",
+				SessionID: sessionID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			agentSess := &recordingLiveSession{}
+			r, err := New(Config{
+				AppName: "testApp",
+				Agent: &mockLiveAgent{
+					Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+					runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+						return agentSess, func(func(*session.Event, error) bool) {}, nil
+					},
+				},
+				SessionService: sessionService,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sess, _, err := r.RunLive(t.Context(), "testUser", sessionID, agent.LiveRunConfig{})
+			if err != nil {
+				t.Fatalf("RunLive failed: %v", err)
+			}
+
+			content := &genai.Content{Role: genai.RoleUser, Parts: slices.Clone(tc.parts)}
+			if err := sess.Send(agent.LiveRequest{Content: content, RealtimeInput: tc.realtimeInput}); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+			if !slices.Equal(content.Parts, tc.parts) {
+				t.Error("Send() modified the caller's content")
+			}
+			want := &genai.Content{Role: genai.RoleUser, Parts: tc.wantParts}
+			if len(agentSess.requests) != 1 {
+				t.Fatalf("forwarded requests = %d, want 1", len(agentSess.requests))
+			}
+			if diff := cmp.Diff(want, agentSess.requests[0].Content, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("forwarded content mismatch (-want +got):\n%s", diff)
+			}
+			if agentSess.requests[0].RealtimeInput != tc.realtimeInput {
+				t.Errorf("forwarded RealtimeInput = %T, want %T", agentSess.requests[0].RealtimeInput, tc.realtimeInput)
+			}
+			if tc.wantNoCopy && agentSess.requests[0].Content != content {
+				t.Error("Send() copied a request without nil parts")
+			}
+			events := getRunLiveTestEvents(t, sessionService, sessionID)
+			if !tc.wantSaved {
+				if events.Len() != 0 {
+					t.Errorf("saved events = %d, want 0", events.Len())
+				}
+				return
+			}
+			if events.Len() != 1 {
+				t.Fatalf("saved events = %d, want 1", events.Len())
+			}
+			if diff := cmp.Diff(want, events.At(0).LLMResponse.Content); diff != "" {
+				t.Errorf("saved content mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
