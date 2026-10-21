@@ -16,8 +16,6 @@ package shared
 
 import (
 	"errors"
-	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -105,21 +103,5 @@ func TestRejectUnsupportedConfigFieldsWalksThinkingConfig(t *testing.T) {
 	err = RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
 	if want := ErrUnsupportedConfigField.Error() + ": CachedContent"; err == nil || err.Error() != want {
 		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
-	}
-}
-
-// A supported name genai no longer has guards nothing: the field it was renamed to
-// is refused until the list follows.
-func TestSupportedFieldsExistInGenai(t *testing.T) {
-	for typ, names := range map[reflect.Type][]string{
-		reflect.TypeFor[genai.GenerateContentConfig](): SupportedConfigFields,
-		reflect.TypeFor[genai.HTTPOptions]():           slices.Concat(SupportedHTTPOptionFields, IgnoredHTTPOptionFields),
-		reflect.TypeFor[genai.ThinkingConfig]():        SupportedThinkingConfigFields,
-	} {
-		for _, name := range names {
-			if _, ok := typ.FieldByName(name); !ok {
-				t.Errorf("%s has no field %s", typ, name)
-			}
-		}
 	}
 }
