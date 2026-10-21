@@ -566,9 +566,9 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 		}
 	})
 
-	// OpenAI accepts only ^[a-zA-Z0-9_-]+$ in the name while genai puts no
-	// constraint on Title, so the name is derived from the title and the body
-	// keeps the title the caller wrote.
+	// OpenAI accepts only ^[a-zA-Z0-9_-]{1,64}$ in the name while genai puts no
+	// constraint on Title, so an illegal title falls back to the default name
+	// and the body keeps the title the caller wrote.
 	t.Run("json schema title that is not a legal format name", func(t *testing.T) {
 		wire := requestWire(t, &model.LLMRequest{
 			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
@@ -581,8 +581,8 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 			}},
 		})
 		schema := wire["response_format"].(map[string]any)["json_schema"].(map[string]any)
-		if schema["name"] != "Weather_Report" {
-			t.Errorf("name = %v, want Weather_Report", schema["name"])
+		if schema["name"] != shared.DefaultResponseFormatName {
+			t.Errorf("name = %v, want %v", schema["name"], shared.DefaultResponseFormatName)
 		}
 		body := schema["schema"].(map[string]any)
 		if body["title"] != "Weather Report" {

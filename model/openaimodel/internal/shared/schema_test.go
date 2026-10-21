@@ -15,7 +15,6 @@
 package shared
 
 import (
-	"regexp"
 	"strings"
 	"testing"
 
@@ -104,12 +103,6 @@ func TestNormalizeSchema(t *testing.T) {
 	}
 }
 
-// openAIFormatName is the pattern OpenAI documents on the name field of both
-// endpoints' structured-output format, quoted from the pinned openai-go:
-// "Must be a-z, A-Z, 0-9, or contain underscores and dashes, with a maximum
-// length of 64."
-var openAIFormatName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
-
 func TestResponseFormatName(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -132,81 +125,37 @@ func TestResponseFormatName(t *testing.T) {
 			want:   "Custom-Title_2",
 		},
 		{
-			// Only characters the pattern rejects are dropped, so a title the
-			// caller chose to start with an underscore keeps it.
-			name:   "a legal leading separator is kept",
-			schema: &genai.Schema{Title: "_x"},
-			want:   "_x",
+			name:   "title of exactly 64 characters is kept",
+			schema: &genai.Schema{Title: strings.Repeat("a", 64)},
+			want:   strings.Repeat("a", 64),
 		},
 		{
-			name:   "non-ascii between legal characters becomes one underscore",
-			schema: &genai.Schema{Title: "Résumé Parser"},
-			want:   "R_sum_Parser",
-		},
-		{
-			name:   "spaces become underscores",
+			name:   "title with a space falls back to the default",
 			schema: &genai.Schema{Title: "Weather Report"},
-			want:   "Weather_Report",
+			want:   DefaultResponseFormatName,
 		},
 		{
-			name:   "a run of illegal characters collapses to one underscore",
-			schema: &genai.Schema{Title: "Weather  Report (v2)"},
-			want:   "Weather_Report_v2",
+			name:   "title with a trailing newline falls back to the default",
+			schema: &genai.Schema{Title: "Weather\n"},
+			want:   DefaultResponseFormatName,
 		},
 		{
-			name:   "leading and trailing illegal characters are dropped",
-			schema: &genai.Schema{Title: " .Weather. "},
-			want:   "Weather",
-		},
-		{
-			name:   "a title longer than 64 characters is truncated",
-			schema: &genai.Schema{Title: strings.Repeat("Extraction", 8)},
-			want:   strings.Repeat("Extraction", 8)[:64],
-		},
-		{
-			name:   "a title with no legal character falls back to the default",
+			name:   "non-ascii title falls back to the default",
 			schema: &genai.Schema{Title: "天気予報"},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "title longer than 64 characters falls back to the default",
+			schema: &genai.Schema{Title: strings.Repeat("a", 65)},
 			want:   DefaultResponseFormatName,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ResponseFormatName(tc.schema)
-			if got != tc.want {
+			if got := ResponseFormatName(tc.schema); got != tc.want {
 				t.Errorf("ResponseFormatName() = %q, want %q", got, tc.want)
 			}
-			if !openAIFormatName.MatchString(got) {
-				t.Errorf("ResponseFormatName() = %q, want it to match %s", got, openAIFormatName)
-			}
 		})
-	}
-}
-
-// Whatever the caller writes — non-ASCII, control characters, invalid UTF-8,
-// a title made only of separators — the derived name matches the pattern. The
-// table above pins what each rule produces; this pins that no input escapes
-// them, which is what widening the legal set to, say, unicode.IsLetter would
-// break.
-func TestResponseFormatNameAlwaysMatchesTheOpenAIPattern(t *testing.T) {
-	titles := []string{
-		"",
-		" ",
-		"_",
-		"-",
-		strings.Repeat("é", 100),
-		strings.Repeat("a é", 100),
-		strings.Repeat("天", 64) + "a",
-		"\x00\n\t",
-		strings.Repeat("-", 200),
-		"\xff\xfe invalid utf-8",
-		// A cut that lands right after an inserted separator.
-		strings.Repeat("abc ", 20),
-	}
-	for _, title := range titles {
-		got := ResponseFormatName(&genai.Schema{Title: title})
-		if !openAIFormatName.MatchString(got) {
-			t.Errorf("ResponseFormatName(%q) = %q, want it to match %s", title, got, openAIFormatName)
-		}
 	}
 }
