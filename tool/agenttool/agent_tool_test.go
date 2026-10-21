@@ -498,14 +498,20 @@ func TestAgentTool_Run_StateDelta(t *testing.T) {
 	}{
 		{
 			name:  "callback without content",
-			state: map[string]any{"result": "updated", "app:shared": true, "user:preference": true, "temp:progress": 1},
-			want:  map[string]any{"result": "updated", "app:shared": true, "user:preference": true, "temp:progress": 1},
+			state: map[string]any{"result": "updated", "app:shared": true, "user:preference": true, "temp:progress": 1, "temp:step": "child", "temperature": "warm"},
+			want:  map[string]any{"result": "updated", "app:shared": true, "user:preference": true, "temperature": "warm"},
 		},
 		{
 			name:      "output overwrites earlier callback update",
 			outputKey: "result",
 			state:     map[string]any{"result": "pending", "callback_ran": true},
 			want:      map[string]any{"result": "done", "callback_ran": true},
+		},
+		{
+			name:      "temporary output stays in child",
+			outputKey: "temp:progress",
+			state:     map[string]any{"callback_ran": true},
+			want:      map[string]any{"callback_ran": true},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -534,6 +540,9 @@ func TestAgentTool_Run_StateDelta(t *testing.T) {
 			if err := ctx.State().Set("result", "old"); err != nil {
 				t.Fatal(err)
 			}
+			if err := ctx.State().Set("temp:step", "parent"); err != nil {
+				t.Fatal(err)
+			}
 			wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
 			result, err := wrapped.Run(ctx, map[string]any{"request": "run"})
 			if err != nil {
@@ -553,6 +562,18 @@ func TestAgentTool_Run_StateDelta(t *testing.T) {
 			}
 			if got, err := ctx.State().Get("untouched"); err != nil || got != true {
 				t.Error("unrelated parent state changed")
+			}
+			if got, err := ctx.State().Get("temp:step"); err != nil || got != "parent" {
+				t.Error("child overwrote parent temporary state")
+			}
+			if ctx.Actions().StateDelta["temp:step"] != "parent" {
+				t.Error("child overwrote parent temporary state delta")
+			}
+			if _, err := ctx.State().Get("temp:progress"); !errors.Is(err, session.ErrStateKeyNotExist) {
+				t.Error("child temporary key reached parent state")
+			}
+			if _, ok := ctx.Actions().StateDelta["temp:progress"]; ok {
+				t.Error("child temporary key reached parent state delta")
 			}
 		})
 	}

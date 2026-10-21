@@ -104,7 +104,7 @@ func (t *agentTool) Declaration() *genai.FunctionDeclaration {
 // It creates a new session for the sub-agent, runs the agent, and returns
 // the final result. Artifacts are accessed through the parent tool context.
 // State changes from non-partial sub-agent events are applied to the
-// parent tool context.
+// parent tool context, except for temporary state keys prefixed with "temp:".
 func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error) {
 	margs, ok := args.(map[string]any)
 	if !ok {
@@ -211,6 +211,9 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		// matching the session service's handling of partial events.
 		if !event.Partial {
 			for key, value := range event.Actions.StateDelta {
+				if strings.HasPrefix(key, session.KeyPrefixTemp) {
+					continue
+				}
 				if err := toolCtx.State().Set(key, value); err != nil {
 					return nil, fmt.Errorf("failed to update parent state from sub-agent %s: %w", t.agent.Name(), err)
 				}
