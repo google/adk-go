@@ -1530,8 +1530,8 @@ func TestTraceManager_Runner(t *testing.T) {
 		EventToolCompleted:       2,
 		EventAgentCompleted:      1,
 		EventInvocationCompleted: 1,
-		// The function call, function response and final answer events.
-		legacyEventType: 3,
+		// The final answer session event emits AGENT_RESPONSE.
+		EventAgentResponse: 1,
 	}
 	if diff := cmp.Diff(wantCounts, gotCounts); diff != "" {
 		t.Fatalf("event type counts mismatch (-want +got):\n%s\nevent types: %v", diff, eventTypes(rows))
@@ -1777,9 +1777,9 @@ func TestTraceManager_SameAgentConcurrentNodePaths(t *testing.T) {
 	if placeOf(toolEnds[0]) != placeOf(toolStarts[0]) || placeOf(toolEnds[1]) != placeOf(toolStarts[1]) {
 		t.Errorf("TOOL_COMPLETED places = (%+v, %+v), want (%+v, %+v)", placeOf(toolEnds[0]), placeOf(toolEnds[1]), placeOf(toolStarts[0]), placeOf(toolStarts[1]))
 	}
-	legacyRows := rowsOfType(rows, legacyEventType)
-	if len(legacyRows) != 2 || placeOf(legacyRows[0]) != w1Span || placeOf(legacyRows[1]) != w2Span {
-		t.Errorf("EVENT places = %v, want (%+v, %+v)", legacyRows, w1Span, w2Span)
+	respRows := rowsOfType(rows, EventAgentResponse)
+	if len(respRows) != 2 || placeOf(respRows[0]) != w1Span || placeOf(respRows[1]) != w2Span {
+		t.Errorf("AGENT_RESPONSE places = %v, want (%+v, %+v)", respRows, w1Span, w2Span)
 	}
 	agentEnds := rowsOfType(rows, EventAgentCompleted)
 	if placeOf(agentEnds[0]) != w1Span || placeOf(agentEnds[1]) != w2Span || placeOf(agentEnds[2]) != wfSpan {
@@ -4749,6 +4749,7 @@ func TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK(t 
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			return func(yield func(*session.Event, error) bool) {
 				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.NodeInfo = &session.NodeInfo{Path: "custom_bot"}
 				ev.Output = map[string]any{"answer": 42}
 				yield(ev, nil)
 			}
@@ -4774,8 +4775,8 @@ func TestRunner_EventReplacingPluginAfterAnalytics_EmitsInvocationCompletedOK(t 
 	}
 
 	rows := collectRows(t, requests, untilInvocationEnd)
-	if n := len(rowsOfType(rows, legacyEventType)); n != 1 {
-		t.Errorf("got %d %s rows, want 1: the analytics plugin sees the event first", n, legacyEventType)
+	if n := len(rowsOfType(rows, EventNodeOutput)); n != 1 {
+		t.Errorf("got %d %s rows, want 1: the analytics plugin sees the event first", n, EventNodeOutput)
 	}
 	requireInvocationCompletedOK(t, rows)
 }
@@ -6313,7 +6314,7 @@ func TestTraceManager_AdoptFirstAgentOTelSpanWhenCallerHasNoSpan(t *testing.T) {
 			EventToolStarting,
 			EventToolCompleted,
 			EventAgentCompleted,
-			legacyEventType,
+			EventStateDelta,
 			EventInvocationCompleted,
 		} {
 			row := onlyRowOfType(t, rows, evType)
