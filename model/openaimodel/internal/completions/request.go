@@ -381,9 +381,10 @@ var serviceTiers = map[genai.ServiceTier]openai.ChatCompletionNewParamsServiceTi
 	genai.ServiceTierPriority:    openai.ChatCompletionNewParamsServiceTierPriority,
 }
 
-// handledConfigFields adds Seed, which only Chat Completions can express, to the
-// fields both endpoints handle, so this endpoint does not refuse it.
-var handledConfigFields = append(slices.Clone(shared.HandledConfigFields), "Seed")
+// supportedConfigFields adds the fields only Chat Completions can express to the
+// ones both endpoints support, so this endpoint does not refuse them.
+var supportedConfigFields = append(slices.Clone(shared.SupportedConfigFields),
+	"StopSequences", "PresencePenalty", "FrequencyPenalty", "Seed")
 
 // applyGenerationConfig translates the generation config onto Chat
 // Completions params. Stop sequences, the penalties and seed are translated
@@ -480,7 +481,7 @@ func applyGenerationConfig(params *openai.ChatCompletionNewParams, cfg *genai.Ge
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	return shared.RejectUnhandledConfigFields(cfg, handledConfigFields)
+	return shared.RejectUnsupportedConfigFields(cfg, supportedConfigFields)
 }
 
 // newResponseFormat builds the response_format Chat Completions takes,

@@ -1913,6 +1913,8 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 		{"unset CandidateCount", &genai.GenerateContentConfig{}},
 		// Zero and one both mean the single candidate Responses returns.
 		{"single CandidateCount", &genai.GenerateContentConfig{CandidateCount: 1}},
+		// An empty list asks for no stop sequences, so there is nothing to refuse.
+		{"empty StopSequences", &genai.GenerateContentConfig{StopSequences: []string{}}},
 		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
 			ResponseLogprobs: true,
 			Logprobs:         genai.Ptr(int32(5)),
@@ -2870,7 +2872,7 @@ func assertReRangeable(t *testing.T, stream bool) {
 }
 
 // geminiShapedHTTPOptions carries a realistic value for each HTTPOptions field
-// outside shared.HandledHTTPOptionFields.
+// outside shared.SupportedHTTPOptionFields and shared.IgnoredHTTPOptionFields.
 var geminiShapedHTTPOptions = []struct {
 	field string
 	opts  *genai.HTTPOptions
@@ -2901,7 +2903,7 @@ func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 	}
 }
 
-// A name in shared.HandledConfigFields is accepted, so a field listed there but
+// A name in shared.SupportedConfigFields is accepted, so a field listed there but
 // not translated would be dropped. Here every translated field has to reach the
 // params, with the ones needing a whole subsystem left to their own tests.
 func TestTranslatedFieldsAreNotRejected(t *testing.T) {

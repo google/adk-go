@@ -52,12 +52,12 @@ func RequestTimeout(cfg *genai.GenerateContentConfig) time.Duration {
 // the one backend that sees them.
 var IgnoredHTTPOptionFields = []string{"Headers"}
 
-// HandledHTTPOptionFields names the HTTPOptions fields that are not refused:
-// Timeout, which RequestTimeout extracts, and the ignored ones. Anything else is
-// refused, including fields genai adds after this list; those it has today
-// belong to ClientConfig (BaseURL, APIVersion), shape a Gemini body (ExtraBody),
-// or set a retry schedule openai-go already owns.
-var HandledHTTPOptionFields = append([]string{"Timeout"}, IgnoredHTTPOptionFields...)
+// SupportedHTTPOptionFields names the HTTPOptions fields both endpoints
+// support: Timeout, which RequestTimeout extracts. Any other field outside
+// IgnoredHTTPOptionFields is refused, including fields genai adds after this
+// list; those it has today belong to ClientConfig (BaseURL, APIVersion), shape a
+// Gemini body (ExtraBody), or set a retry schedule openai-go already owns.
+var SupportedHTTPOptionFields = []string{"Timeout"}
 
 // ReasoningEfforts maps every genai thinking level onto an OpenAI reasoning
 // effort. An explicit THINKING_LEVEL_UNSPECIFIED is distinct from unset and
@@ -157,7 +157,7 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 	// compatibility reason in IgnoredHTTPOptionFields, and anything else is
 	// refused by name here.
 	if cfg.HTTPOptions != nil {
-		if err := rejectUnhandledFields("HTTPOptions.", cfg.HTTPOptions, HandledHTTPOptionFields); err != nil {
+		if err := rejectUnsupportedFields("HTTPOptions.", cfg.HTTPOptions, slices.Concat(SupportedHTTPOptionFields, IgnoredHTTPOptionFields)); err != nil {
 			return err
 		}
 		// openai-go treats a zero timeout as "no deadline", so forwarding a
@@ -170,46 +170,46 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 	return nil
 }
 
-// HandledConfigFields names the GenerateContentConfig fields both endpoints
-// translate, refuse with a named error, or accept as having no effect; any other
-// field the caller sets is refused, including ones genai adds after this list.
-var HandledConfigFields = []string{
-	// Translated by both endpoints.
+// SupportedConfigFields names the GenerateContentConfig fields both endpoints
+// support. Each endpoint adds the ones only it supports, and any other field the
+// caller sets is refused, including ones genai adds after this list. A field
+// refused with its own error, such as TopK, needs no entry: that error fires
+// first for every value this check would catch.
+var SupportedConfigFields = []string{
 	"HTTPOptions", "SystemInstruction", "Temperature", "TopP", "MaxOutputTokens",
 	"ResponseLogprobs", "Logprobs", "ResponseMIMEType", "ResponseSchema",
 	"ResponseJsonSchema", "Tools", "ToolConfig", "ThinkingConfig", "ServiceTier",
-	// Refused with their own error, except where Chat Completions translates them.
-	"TopK", "CandidateCount", "StopSequences", "PresencePenalty", "FrequencyPenalty",
-	"SafetySettings", "Labels",
-	// No effect: neither API pauses a generation with CONTINUATION.
+	// One candidate is what both endpoints return; more is refused by name.
+	"CandidateCount",
+	// Accepted with no effect: neither API pauses a generation with CONTINUATION.
 	"AutomaticContinuation",
 }
 
-// HandledThinkingConfigFields names the ThinkingConfig fields both endpoints
-// read; any other field the caller sets is refused.
-var HandledThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget", "ThinkingLevel"}
+// SupportedThinkingConfigFields names the ThinkingConfig fields both endpoints
+// accept; any other field the caller sets is refused.
+var SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget", "ThinkingLevel"}
 
-// RejectUnhandledConfigFields reports the first field the caller set that is
-// not in handled, then the first unhandled ThinkingConfig field, each in genai's
-// declaration order. Presence, not value: setting a knob at all means the caller
-// expected an effect.
-func RejectUnhandledConfigFields(cfg *genai.GenerateContentConfig, handled []string) error {
-	if err := rejectUnhandledFields("", cfg, handled); err != nil {
+// RejectUnsupportedConfigFields reports the first field the caller set that is
+// not in supported, then the first unsupported ThinkingConfig field, each in
+// genai's declaration order. Presence, not value: setting a knob at all means
+// the caller expected an effect.
+func RejectUnsupportedConfigFields(cfg *genai.GenerateContentConfig, supported []string) error {
+	if err := rejectUnsupportedFields("", cfg, supported); err != nil {
 		return err
 	}
-	return rejectUnhandledFields("ThinkingConfig.", cfg.ThinkingConfig, HandledThinkingConfigFields)
+	return rejectUnsupportedFields("ThinkingConfig.", cfg.ThinkingConfig, SupportedThinkingConfigFields)
 }
 
-// rejectUnhandledFields reports the first exported field of the struct that s
-// points to that is set and not named in handled; a nil pointer has none.
-func rejectUnhandledFields(prefix string, s any, handled []string) error {
+// rejectUnsupportedFields reports the first exported field of the struct that s
+// points to that is set and not named in supported; a nil pointer has none.
+func rejectUnsupportedFields(prefix string, s any, supported []string) error {
 	v := reflect.Indirect(reflect.ValueOf(s))
 	if !v.IsValid() {
 		return nil
 	}
 	for i := range v.NumField() {
 		field := v.Type().Field(i)
-		if field.IsExported() && !slices.Contains(handled, field.Name) && !v.Field(i).IsZero() {
+		if field.IsExported() && !slices.Contains(supported, field.Name) && !v.Field(i).IsZero() {
 			return fmt.Errorf("%w: %s%s", ErrUnsupportedConfigField, prefix, field.Name)
 		}
 	}

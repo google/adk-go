@@ -17,6 +17,7 @@ package shared
 import (
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -45,15 +46,15 @@ func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	}
 }
 
-// rejectUnhandledFields stands in for genai growing a field: Later and Last
-// play fields added after the handled list was written, which must be refused
+// rejectUnsupportedFields stands in for genai growing a field: Later and Last
+// play fields added after the supported list was written, which must be refused
 // by name, first in declaration order, while zero and unexported ones pass.
-func TestRejectUnhandledFieldsRefusesFieldsAddedLater(t *testing.T) {
+func TestRejectUnsupportedFieldsRefusesFieldsAddedLater(t *testing.T) {
 	type knobs struct {
-		Handled  *int
-		Later    *bool
-		Last     []int
-		internal int
+		Supported *int
+		Later     *bool
+		Last      []int
+		internal  int
 	}
 	tests := []struct {
 		name string
@@ -63,7 +64,7 @@ func TestRejectUnhandledFieldsRefusesFieldsAddedLater(t *testing.T) {
 		{name: "untyped nil", in: nil},
 		{name: "nil pointer", in: (*knobs)(nil)},
 		{name: "nothing set", in: &knobs{}},
-		{name: "handled only", in: &knobs{Handled: new(int)}},
+		{name: "supported only", in: &knobs{Supported: new(int)}},
 		{name: "unexported", in: &knobs{internal: 1}},
 		{name: "added later", in: &knobs{Later: new(bool)}, want: "Knobs.Later"},
 		{name: "first of two", in: &knobs{Later: new(bool), Last: []int{1}}, want: "Knobs.Later"},
@@ -72,48 +73,48 @@ func TestRejectUnhandledFieldsRefusesFieldsAddedLater(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ""
-			if err := rejectUnhandledFields("Knobs.", tc.in, []string{"Handled"}); err != nil {
+			if err := rejectUnsupportedFields("Knobs.", tc.in, []string{"Supported"}); err != nil {
 				if !errors.Is(err, ErrUnsupportedConfigField) {
-					t.Fatalf("rejectUnhandledFields() error = %v, want %v", err, ErrUnsupportedConfigField)
+					t.Fatalf("rejectUnsupportedFields() error = %v, want %v", err, ErrUnsupportedConfigField)
 				}
 				got = strings.TrimPrefix(err.Error(), ErrUnsupportedConfigField.Error()+": ")
 			}
 			if got != tc.want {
-				t.Errorf("rejectUnhandledFields() named %q, want %q", got, tc.want)
+				t.Errorf("rejectUnsupportedFields() named %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
 // The ThinkingConfig walk has nothing to refuse until genai grows that type, so
-// narrowing the handled list stands in for the field it will one day add. It
+// narrowing the supported list stands in for the field it will one day add. It
 // swaps a package variable, so it must not run in parallel with other tests.
-func TestRejectUnhandledConfigFieldsWalksThinkingConfig(t *testing.T) {
-	saved := HandledThinkingConfigFields
-	t.Cleanup(func() { HandledThinkingConfigFields = saved })
-	HandledThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+func TestRejectUnsupportedConfigFieldsWalksThinkingConfig(t *testing.T) {
+	saved := SupportedThinkingConfigFields
+	t.Cleanup(func() { SupportedThinkingConfigFields = saved })
+	SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
 
 	cfg := &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}}
-	err := RejectUnhandledConfigFields(cfg, HandledConfigFields)
+	err := RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
 	if want := ErrUnsupportedConfigField.Error() + ": ThinkingConfig.ThinkingLevel"; err == nil || err.Error() != want {
-		t.Errorf("RejectUnhandledConfigFields() error = %v, want %q", err, want)
+		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
 	}
 
 	// A top-level field is reported first, matching genai's declaration order.
 	cfg.CachedContent = "cached"
-	err = RejectUnhandledConfigFields(cfg, HandledConfigFields)
+	err = RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
 	if want := ErrUnsupportedConfigField.Error() + ": CachedContent"; err == nil || err.Error() != want {
-		t.Errorf("RejectUnhandledConfigFields() error = %v, want %q", err, want)
+		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
 	}
 }
 
-// A handled name genai no longer has guards nothing: the field it was renamed to
+// A supported name genai no longer has guards nothing: the field it was renamed to
 // is refused until the list follows.
-func TestHandledFieldsExistInGenai(t *testing.T) {
+func TestSupportedFieldsExistInGenai(t *testing.T) {
 	for typ, names := range map[reflect.Type][]string{
-		reflect.TypeFor[genai.GenerateContentConfig](): HandledConfigFields,
-		reflect.TypeFor[genai.HTTPOptions]():           HandledHTTPOptionFields,
-		reflect.TypeFor[genai.ThinkingConfig]():        HandledThinkingConfigFields,
+		reflect.TypeFor[genai.GenerateContentConfig](): SupportedConfigFields,
+		reflect.TypeFor[genai.HTTPOptions]():           slices.Concat(SupportedHTTPOptionFields, IgnoredHTTPOptionFields),
+		reflect.TypeFor[genai.ThinkingConfig]():        SupportedThinkingConfigFields,
 	} {
 		for _, name := range names {
 			if _, ok := typ.FieldByName(name); !ok {
