@@ -2903,8 +2903,9 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions carries a realistic value for each HTTPOptions field
-// outside shared.SupportedHTTPOptionFields and shared.IgnoredHTTPOptionFields.
+// geminiShapedHTTPOptions carries realistic values for HTTPOptions fields both
+// endpoints refuse. A field genai adds later is covered by
+// TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists instead.
 var geminiShapedHTTPOptions = []struct {
 	field string
 	opts  *genai.HTTPOptions
