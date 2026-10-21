@@ -679,6 +679,78 @@ func TestWalkStruct_OmitEmptyShadowsEmbeddedField(t *testing.T) {
 	}
 }
 
+func TestWalkStruct_PromotesEmbeddedPointerToUnexportedStruct(t *testing.T) {
+	type promotedInner struct {
+		Name  string `json:"name"`
+		Token string `json:"token,omitempty"`
+	}
+	type promotedPtrOuter struct {
+		*promotedInner
+		Extra string `json:"extra"`
+	}
+
+	tests := []struct {
+		name string
+		v    promotedPtrOuter
+	}{
+		{
+			name: "non-nil embedded pointer",
+			v:    promotedPtrOuter{promotedInner: &promotedInner{Name: "inner-name"}, Extra: "outer-extra"},
+		},
+		{
+			name: "nil embedded pointer",
+			v:    promotedPtrOuter{Extra: "outer-extra"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+" matches encoding/json", func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.v, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate() error: %v", err)
+			}
+			if truncated {
+				t.Error("SmartTruncate() truncated = true, want false")
+			}
+			wantBytes, err := json.Marshal(tt.v)
+			if err != nil {
+				t.Fatalf("json.Marshal() error: %v", err)
+			}
+			var gotV, wantV any
+			if err := json.Unmarshal(got, &gotV); err != nil {
+				t.Fatalf("SmartTruncate() output %s is not JSON: %v", got, err)
+			}
+			if err := json.Unmarshal(wantBytes, &wantV); err != nil {
+				t.Fatalf("json.Unmarshal(%s) error: %v", wantBytes, err)
+			}
+			if !reflect.DeepEqual(gotV, wantV) {
+				t.Errorf("SmartTruncate() = %s, want %s (matching encoding/json)", got, wantBytes)
+			}
+		})
+	}
+
+	t.Run("sensitive promoted field is redacted rather than dropped", func(t *testing.T) {
+		v := promotedPtrOuter{
+			promotedInner: &promotedInner{Name: "inner-name", Token: "r14-promoted-token-secret"},
+			Extra:         "outer-extra",
+		}
+		got, _, err := SmartTruncate(v, 1000)
+		if err != nil {
+			t.Fatalf("SmartTruncate() error: %v", err)
+		}
+		if bytes.Contains(got, []byte("r14-promoted-token-secret")) {
+			t.Errorf("SmartTruncate() leaked the promoted token: %s", got)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(got, &m); err != nil {
+			t.Fatalf("SmartTruncate() output %s is not a JSON object: %v", got, err)
+		}
+		want := map[string]any{"name": "inner-name", "token": redactedValue, "extra": "outer-extra"}
+		if !reflect.DeepEqual(m, want) {
+			t.Errorf("SmartTruncate() = %v, want %v", m, want)
+		}
+	})
+}
+
 func TestSanitizeURI(t *testing.T) {
 	tests := []struct {
 		name        string

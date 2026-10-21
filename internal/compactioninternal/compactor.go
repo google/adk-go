@@ -20,8 +20,6 @@ import (
 	"reflect"
 	"slices"
 
-	"go.opentelemetry.io/otel/codes"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -159,8 +157,7 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("summarizer panicked: %v", r)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordError(span, err)
 			span.End()
 			finished = true
 			panic(r)
