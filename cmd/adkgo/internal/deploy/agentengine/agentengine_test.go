@@ -17,9 +17,130 @@ package agentengine
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestGoVersionFromModFile(t *testing.T) {
+	tests := []struct {
+		name string
+		mod  string
+		want string
+	}{
+		{"patch version", "module x\n\ngo 1.26.5\n", "1.26.5"},
+		{"minor version", "module x\n\ngo 1.26\n", "1.26"},
+		{
+			name: "ignores require block modules",
+			mod:  "module x\n\ngo 1.26.5\n\nrequire (\n\tgoogle.golang.org/adk/v2 v2.1.0\n)\n",
+			want: "1.26.5",
+		},
+		{
+			name: "ignores toolchain line",
+			mod:  "module x\n\ngo 1.26.5\n\ntoolchain go1.26.5\n",
+			want: "1.26.5",
+		},
+		{"no go directive", "module x\n", ""},
+		{"strips trailing line comment", "module x\n\ngo 1.26.5 // pinned by platform team\n", "1.26.5"},
+		{"rejects malformed version", "module x\n\ngo 1abc\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := goVersionFromModFile([]byte(tt.mod)); got != tt.want {
+				t.Errorf("goVersionFromModFile() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPrepareDockerfile_UsesGoModVersion guards that the generated builder image
+// tracks the application's go.mod Go version instead of a hardcoded tag, so a
+// managed Agent Engine build uses a toolchain that can actually compile the app.
+//
+// It is also the only test in this package that drives prepareDockerfile from a
+// receiver that is not the package global, which is what makes the EXPOSE and
+// RUN assertions below load-bearing: everywhere else the receiver and the global
+// are the same struct, so a value read off the global still emits the right
+// bytes.
+func TestPrepareDockerfile_UsesGoModVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/agent\n\ngo 1.26.5\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := filepath.Join(dir, "Dockerfile")
+
+	// The global holds a different value for every field asserted below, so a
+	// read of flags rather than the receiver emits someone else's bytes rather
+	// than empty ones. The assertions fail either way, but this way they fail
+	// for the reason they name, and without depending on no other test in the
+	// file having left a value behind.
+	resetFlags(t, "other.go")
+	flags.source.origEntryPointPath = "./other.go"
+	flags.build.execFile = "other"
+	flags.agentEngine.serverPort = 8080
+
+	f := &deployAgentEngineFlags{}
+	f.source.sourceDir = dir
+	f.source.origEntryPointPath = "./main.go"
+	f.build.execFile = "agent"
+	f.build.dockerfileBuildPath = dockerfile
+	// Deliberately not the 8080 default, and deliberately never written to the
+	// package global: a prepareDockerfile that read serverPort off the global
+	// would emit "EXPOSE 0" here.
+	f.agentEngine.serverPort = 9091
+
+	if err := f.prepareDockerfile(); err != nil {
+		t.Fatalf("prepareDockerfile() error = %v", err)
+	}
+	content, err := os.ReadFile(dockerfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "FROM golang:1.26.5 AS builder") {
+		t.Errorf("Dockerfile does not use the go.mod Go version:\n%s", content)
+	}
+	if strings.Contains(string(content), "golang:1.25") {
+		t.Errorf("Dockerfile still hardcodes golang:1.25:\n%s", content)
+	}
+	if !strings.Contains(string(content), "ENV GOTOOLCHAIN=auto") {
+		t.Errorf("Dockerfile is missing the GOTOOLCHAIN=auto safety net:\n%s", content)
+	}
+	if !strings.Contains(string(content), "\nEXPOSE 9091\n") {
+		t.Errorf("Dockerfile does not EXPOSE the receiver's server port:\n%s", content)
+	}
+	// execFile and origEntryPointPath are the two values the strict allow-list
+	// exists for in this package: they are the operands of the shell-form RUN
+	// line. TestPrepareDockerfile_EntryPointReachesRUNLine reads that line too,
+	// but it drives the global, so it cannot tell a receiver read from a global
+	// one. This can.
+	if !strings.Contains(string(content), "-o agent ./main.go\n") {
+		t.Errorf("RUN line does not build the receiver's execFile from its entry point:\n%s", content)
+	}
+	if !strings.Contains(string(content), "\nCOPY --from=builder /app/agent  /app/agent\n") {
+		t.Errorf("Dockerfile does not COPY the receiver's execFile out of the builder:\n%s", content)
+	}
+	if !strings.Contains(string(content), `["/app/agent", "web"`) {
+		t.Errorf("Dockerfile CMD does not run the receiver's execFile:\n%s", content)
+	}
+	// The web server defaults to loopback now, so the container CMD must opt
+	// back into all interfaces or Agent Engine cannot reach it. The receiver's
+	// port is pinned as well, so a dropped -host or a read of the global fails
+	// here rather than emitting an address nothing listens on.
+	if !strings.Contains(string(content), `["/app/agent", "web", "-host", "0.0.0.0", "-port", "9091"`) {
+		t.Errorf("Dockerfile CMD must bind the web server to all interfaces with -host 0.0.0.0:\n%s", content)
+	}
+}
+
+// TestDefaultBuilderGoVersionIsNotPinned guards that the last-resort tag stays a
+// rolling tag. A pinned version here would silently rot exactly like the
+// hardcoded tag this change removed, so it must never be reintroduced.
+func TestDefaultBuilderGoVersionIsNotPinned(t *testing.T) {
+	if isGoVersion(defaultBuilderGoVersion) {
+		t.Errorf("defaultBuilderGoVersion = %q pins a version; use a rolling tag such as %q",
+			defaultBuilderGoVersion, "latest")
+	}
+}
 
 func resetFlags(t *testing.T, entryPointPath string) {
 	t.Helper()
