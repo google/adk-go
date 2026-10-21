@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -508,6 +509,44 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 			})
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists checks that a
+// set field outside the supported lists is refused by name, whatever genai adds.
+// Dropping a name from a list stands in for a field genai adds later. It swaps
+// package variables, so it must not run in parallel with other tests.
+func TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists(t *testing.T) {
+	savedTop, savedHTTP, savedThinking := supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields
+	t.Cleanup(func() {
+		supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields = savedTop, savedHTTP, savedThinking
+	})
+	supportedConfigFields = slices.DeleteFunc(slices.Clone(savedTop), func(name string) bool { return name == "Temperature" })
+	shared.SupportedHTTPOptionFields = nil
+	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	temp := float32(0.5)
+	timeout := time.Second
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Temperature", &genai.GenerateContentConfig{Temperature: &temp}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}},
+		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			_, err := buildParams("m", &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config:   tt.cfg,
+			})
+			if want := shared.ErrUnsupportedConfigField.Error() + ": " + tt.field; !errors.Is(err, shared.ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("err = %v, want %q", err, want)
 			}
 		})
 	}

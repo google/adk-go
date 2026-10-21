@@ -1608,6 +1608,38 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
+// A set field outside the supported lists is refused by name, whatever genai
+// adds. Dropping a name from a list stands in for a field genai adds later. It
+// swaps package variables, so it must not run in parallel with other tests.
+func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T) {
+	savedTop, savedHTTP, savedThinking := supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields
+	t.Cleanup(func() {
+		supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields = savedTop, savedHTTP, savedThinking
+	})
+	supportedConfigFields = slices.DeleteFunc(slices.Clone(savedTop), func(name string) bool { return name == "Temperature" })
+	shared.SupportedHTTPOptionFields = nil
+	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Temperature", &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(time.Second)}}},
+		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
+			if want := shared.ErrUnsupportedConfigField.Error() + ": " + tc.field; !errors.Is(err, shared.ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("applyGenerationConfig() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 // AutomaticContinuation has no effect on these APIs, which never pause a
 // generation with CONTINUATION, so a config shared with a Gemini model that
 // sets it must be accepted.
