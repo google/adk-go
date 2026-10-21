@@ -24,6 +24,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -204,6 +206,53 @@ func (f *deployAgentEngineFlags) cleanTemp() error {
 		})
 }
 
+// Use a rolling tag when neither the module nor the running toolchain supplies a version.
+const defaultBuilderGoVersion = "latest"
+
+// builderGoVersion prefers the application's go directive, then the toolchain
+// used to build adkgo, then the default builder tag.
+func builderGoVersion(sourceDir string) string {
+	dir := sourceDir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil {
+		if v := goVersionFromModFile(data); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimPrefix(runtime.Version(), "go"); isGoVersion(v) {
+		return v
+	}
+	return defaultBuilderGoVersion
+}
+
+// goVersionFromModFile returns the go directive's version, or an empty string
+// if it is absent or malformed.
+func goVersionFromModFile(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "go ")
+		if !ok {
+			continue
+		}
+		if i := strings.Index(rest, "//"); i >= 0 {
+			rest = rest[:i]
+		}
+		if v := strings.TrimSpace(rest); isGoVersion(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+var goVersionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}([a-z]+[0-9]+)?$`)
+
+func isGoVersion(s string) bool {
+	return goVersionPattern.MatchString(s)
+}
+
 // prepareDockerfile creates a temporary Dockerfile which will be executed by agentEngine
 func (f *deployAgentEngineFlags) prepareDockerfile() error {
 	return util.LogStartStop("Preparing Dockerfile",
@@ -215,9 +264,11 @@ func (f *deployAgentEngineFlags) prepareDockerfile() error {
 			// global here would let the guard and the line it guards come apart
 			// for any caller that is not the cobra RunE.
 			var b strings.Builder
-			b.WriteString(`
-FROM golang:1.25 as builder
-WORKDIR /app
+			b.WriteString("\nFROM golang:" + builderGoVersion(f.source.sourceDir) + " AS builder\n")
+			// Official Go images set GOTOOLCHAIN=local. Allow upgrades when the
+			// application selects a newer toolchain than the image provides.
+			b.WriteString("ENV GOTOOLCHAIN=auto\n")
+			b.WriteString(`WORKDIR /app
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ` + f.build.execFile + ` ` + f.source.origEntryPointPath + `
 
