@@ -112,18 +112,20 @@ func formatContentParts(content *genai.Content, maxLength int, redact bool) ([]m
 			partObj["storage_mode"] = "EXTERNAL_URI"
 			truncated = truncated || changed
 		case part.FunctionCall != nil:
-			name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionCall.Name), maxLength, redact)
+			fc := part.FunctionCall
+			name, nameTrunc := sanitizeAndTruncateText(orUnknown(fc.Name), maxLength, redact)
 			attrs, attrTrunc := formatPartAttributes(map[string]any{
-				"function_name": part.FunctionCall.Name,
-				"function_call": part.FunctionCall,
+				"function_name": fc.Name,
+				"function_call": fc,
 			}, maxLength, redact)
 			partObj["mime_type"] = "application/json"
 			partObj["text"] = "Function: " + name
 			partObj["part_attributes"] = attrs
 			truncated = truncated || nameTrunc || attrTrunc
 		case part.FunctionResponse != nil:
-			name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), maxLength, redact)
-			attrs, attrTrunc := formatPartAttributes(map[string]any{"function_response": part.FunctionResponse}, maxLength, redact)
+			fr := part.FunctionResponse
+			name, nameTrunc := sanitizeAndTruncateText(orUnknown(fr.Name), maxLength, redact)
+			attrs, attrTrunc := formatPartAttributes(map[string]any{"function_response": fr}, maxLength, redact)
 			partObj["mime_type"] = "application/json"
 			partObj["text"] = "Function response: " + name
 			partObj["part_attributes"] = attrs
@@ -702,13 +704,14 @@ func isStructOrStructPointer(t reflect.Type) bool {
 }
 
 // embeddedStruct returns the value of an untagged embedded struct field,
-// whose fields are promoted. Embedded pointers that are nil, already
-// promoted or of an unexported type contribute no fields.
+// whose fields are promoted. Embedded pointers that are nil or already
+// promoted contribute no fields. As in encoding/json, an embedded pointer to
+// an unexported struct type still promotes its exported fields.
 func embeddedStruct(f reflect.StructField, fv reflect.Value, seen map[uintptr]bool) (reflect.Value, bool) {
 	if f.Type.Kind() != reflect.Pointer {
 		return fv, true
 	}
-	if !f.IsExported() || fv.IsNil() || seen[fv.Pointer()] {
+	if fv.IsNil() || seen[fv.Pointer()] {
 		return reflect.Value{}, false
 	}
 	seen[fv.Pointer()] = true
