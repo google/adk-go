@@ -98,10 +98,11 @@ func TestRejectUnsupportedConfigFieldsWalksThinkingConfig(t *testing.T) {
 		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
 	}
 
-	// A top-level field is reported first, matching genai's declaration order.
-	cfg.CachedContent = "cached"
+	// Every top-level field is reported before any ThinkingConfig field, even
+	// ImageConfig, which genai declares after ThinkingConfig.
+	cfg.ImageConfig = &genai.ImageConfig{}
 	err = RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
-	if want := ErrUnsupportedConfigField.Error() + ": CachedContent"; err == nil || err.Error() != want {
+	if want := ErrUnsupportedConfigField.Error() + ": ImageConfig"; err == nil || err.Error() != want {
 		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
 	}
 }
