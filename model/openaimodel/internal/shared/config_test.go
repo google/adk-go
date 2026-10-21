@@ -16,6 +16,8 @@ package shared
 
 import (
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,43 +55,33 @@ func TestRejectUnhandledFieldsRefusesFieldsAddedLater(t *testing.T) {
 		Last     []int
 		internal int
 	}
-	handled := []string{"Handled"}
 	tests := []struct {
 		name string
-		in   *knobs
-		want string // the field the error names, or "" for nil
+		in   any
+		want string // the field the error names, or "" for no error
 	}{
-		{name: "nil", in: nil},
+		{name: "untyped nil", in: nil},
+		{name: "nil pointer", in: (*knobs)(nil)},
 		{name: "nothing set", in: &knobs{}},
 		{name: "handled only", in: &knobs{Handled: new(int)}},
 		{name: "unexported", in: &knobs{internal: 1}},
 		{name: "added later", in: &knobs{Later: new(bool)}, want: "Knobs.Later"},
 		{name: "first of two", in: &knobs{Later: new(bool), Last: []int{1}}, want: "Knobs.Later"},
+		{name: "struct value", in: knobs{Last: []int{1}}, want: "Knobs.Last"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := rejectUnhandledFields("Knobs.", tc.in, handled)
-			if tc.want == "" {
-				if err != nil {
-					t.Fatalf("rejectUnhandledFields() error = %v, want nil", err)
+			got := ""
+			if err := rejectUnhandledFields("Knobs.", tc.in, []string{"Handled"}); err != nil {
+				if !errors.Is(err, ErrUnsupportedConfigField) {
+					t.Fatalf("rejectUnhandledFields() error = %v, want %v", err, ErrUnsupportedConfigField)
 				}
-				return
+				got = strings.TrimPrefix(err.Error(), ErrUnsupportedConfigField.Error()+": ")
 			}
-			if !errors.Is(err, ErrUnsupportedConfigField) {
-				t.Fatalf("rejectUnhandledFields() error = %v, want %v", err, ErrUnsupportedConfigField)
-			}
-			if want := ErrUnsupportedConfigField.Error() + ": " + tc.want; err.Error() != want {
-				t.Errorf("rejectUnhandledFields() error = %q, want %q", err, want)
+			if got != tc.want {
+				t.Errorf("rejectUnhandledFields() named %q, want %q", got, tc.want)
 			}
 		})
-	}
-
-	// s is an any, so an untyped nil and a struct passed by value must not panic.
-	if err := rejectUnhandledFields("Knobs.", nil, handled); err != nil {
-		t.Errorf("rejectUnhandledFields(nil) error = %v, want nil", err)
-	}
-	if err := rejectUnhandledFields("Knobs.", knobs{Later: new(bool)}, handled); !errors.Is(err, ErrUnsupportedConfigField) {
-		t.Errorf("rejectUnhandledFields(struct value) error = %v, want %v", err, ErrUnsupportedConfigField)
 	}
 }
 
@@ -112,5 +104,21 @@ func TestRejectUnhandledConfigFieldsWalksThinkingConfig(t *testing.T) {
 	err = RejectUnhandledConfigFields(cfg, HandledConfigFields)
 	if want := ErrUnsupportedConfigField.Error() + ": CachedContent"; err == nil || err.Error() != want {
 		t.Errorf("RejectUnhandledConfigFields() error = %v, want %q", err, want)
+	}
+}
+
+// A handled name genai no longer has guards nothing: the field it was renamed to
+// is refused until the list follows.
+func TestHandledFieldsExistInGenai(t *testing.T) {
+	for typ, names := range map[reflect.Type][]string{
+		reflect.TypeFor[genai.GenerateContentConfig](): HandledConfigFields,
+		reflect.TypeFor[genai.HTTPOptions]():           HandledHTTPOptionFields,
+		reflect.TypeFor[genai.ThinkingConfig]():        HandledThinkingConfigFields,
+	} {
+		for _, name := range names {
+			if _, ok := typ.FieldByName(name); !ok {
+				t.Errorf("%s has no field %s", typ, name)
+			}
+		}
 	}
 }

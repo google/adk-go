@@ -174,11 +174,13 @@ func RejectUntranslatableValues(cfg *genai.GenerateContentConfig) error {
 // translate, refuse with a named error, or accept as having no effect; any other
 // field the caller sets is refused, including ones genai adds after this list.
 var HandledConfigFields = []string{
-	"HTTPOptions", "SystemInstruction", "Temperature", "TopP", "TopK",
-	"CandidateCount", "MaxOutputTokens", "StopSequences", "ResponseLogprobs",
-	"Logprobs", "PresencePenalty", "FrequencyPenalty", "ResponseMIMEType",
-	"ResponseSchema", "ResponseJsonSchema", "SafetySettings", "Tools",
-	"ToolConfig", "Labels", "ThinkingConfig", "ServiceTier",
+	// Translated by both endpoints.
+	"HTTPOptions", "SystemInstruction", "Temperature", "TopP", "MaxOutputTokens",
+	"ResponseLogprobs", "Logprobs", "ResponseMIMEType", "ResponseSchema",
+	"ResponseJsonSchema", "Tools", "ToolConfig", "ThinkingConfig", "ServiceTier",
+	// Refused with their own error, except where Chat Completions translates them.
+	"TopK", "CandidateCount", "StopSequences", "PresencePenalty", "FrequencyPenalty",
+	"SafetySettings", "Labels",
 	// No effect: neither API pauses a generation with CONTINUATION.
 	"AutomaticContinuation",
 }

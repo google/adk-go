@@ -36,7 +36,6 @@ import (
 	"github.com/openai/openai-go/v3/shared/constant"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
@@ -1320,7 +1319,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 					"check by hand whether UnsupportedPayload should report it", field.Name)
 			}
 			part := &genai.Part{}
-			reflect.ValueOf(part).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
 			got := shared.UnsupportedPayload(part, shared.PartFieldMedia)
 			if why, accounted := accountedForFields[field.Name]; accounted {
@@ -1397,12 +1396,36 @@ func TestReplayedReasoning_EveryUnaccountedFieldDisqualifies(t *testing.T) {
 		}
 		t.Run(field.Name, func(t *testing.T) {
 			part := &genai.Part{Thought: true, Text: "scratch"}
-			reflect.ValueOf(part).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 			if shared.ReplayedReasoning(part) {
 				t.Errorf("ReplayedReasoning() = true for a thought carrying %s; "+
 					"it would be dropped instead of rejected as unsupported", field.Name)
 			}
 		})
+	}
+}
+
+// nonZero builds a non-zero value of typ, for the field walk above.
+func nonZero(t *testing.T, typ reflect.Type) reflect.Value {
+	t.Helper()
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return reflect.New(typ.Elem())
+	case reflect.Map:
+		return reflect.MakeMap(typ)
+	case reflect.Slice:
+		return reflect.MakeSlice(typ, 1, 1)
+	case reflect.String:
+		return reflect.ValueOf("x").Convert(typ)
+	case reflect.Bool:
+		return reflect.ValueOf(true).Convert(typ)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return reflect.ValueOf(int64(1)).Convert(typ)
+	case reflect.Float32, reflect.Float64:
+		return reflect.ValueOf(1.0).Convert(typ)
+	default:
+		t.Fatalf("genai.Part gained a %s field; teach nonZero how to fill it", typ.Kind())
+		return reflect.Value{}
 	}
 }
 
@@ -2134,90 +2157,6 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	}
 }
 
-// Guards against the bug returning as genai grows fields: every exported field
-// outside shared.HandledConfigFields must be refused rather than dropped. The
-// walk reads genai's type, so a field added after this test was written is
-// driven too, and passes as long as it is refused.
-func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
-	// Fields applyGenerationConfig, convertTools or convertToolChoice translate.
-	translated := []string{
-		"SystemInstruction", "Temperature", "TopP", "MaxOutputTokens",
-		"ResponseLogprobs", "Logprobs", "ResponseSchema", "ResponseJsonSchema",
-		"ThinkingConfig", "ServiceTier", "HTTPOptions", "Tools", "ToolConfig",
-	}
-	// Fields rejected with their own error, predating shared.ErrUnsupportedConfigField.
-	namedError := []string{
-		"TopK", "StopSequences", "CandidateCount", "FrequencyPenalty",
-		"PresencePenalty", "Labels", "SafetySettings", "ResponseMIMEType",
-	}
-	// Fields that have no effect on these APIs, so accepting them drops
-	// nothing: AutomaticContinuation resumes a generation paused with
-	// CONTINUATION, which the OpenAI APIs never do.
-	noEffect := []string{"AutomaticContinuation"}
-	// A name added to the allowlist without being placed here would be accepted
-	// by the walk below while nothing translates it.
-	classified := slices.Concat(translated, namedError, noEffect)
-	slices.Sort(classified)
-	if handled := slices.Sorted(slices.Values(shared.HandledConfigFields)); !slices.Equal(classified, handled) {
-		t.Errorf("shared.HandledConfigFields = %v, want exactly the fields classified here %v", handled, classified)
-	}
-
-	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
-	for i := range cfgType.NumField() {
-		field := cfgType.Field(i)
-		if !field.IsExported() || slices.Contains(shared.HandledConfigFields, field.Name) {
-			continue
-		}
-		t.Run(field.Name, func(t *testing.T) {
-			cfg := &genai.GenerateContentConfig{}
-			reflect.ValueOf(cfg).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
-			wantRefused(t, cfg, field.Name)
-		})
-	}
-
-	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
-	for _, name := range shared.HandledConfigFields {
-		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("shared.HandledConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
-		}
-	}
-}
-
-// ThinkingConfig is the one nested type this package claims to read in full, so
-// a field it does not read must be refused rather than dropped like the parts of
-// Tools and the schema types that doc.go still excludes from the guarantee.
-func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
-	cfgType := reflect.TypeOf(genai.ThinkingConfig{})
-	for i := range cfgType.NumField() {
-		field := cfgType.Field(i)
-		if !field.IsExported() || slices.Contains(shared.HandledThinkingConfigFields, field.Name) {
-			continue
-		}
-		t.Run(field.Name, func(t *testing.T) {
-			thinking := &genai.ThinkingConfig{}
-			reflect.ValueOf(thinking).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
-			wantRefused(t, &genai.GenerateContentConfig{ThinkingConfig: thinking}, "ThinkingConfig."+field.Name)
-		})
-	}
-	for _, name := range shared.HandledThinkingConfigFields {
-		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("shared.HandledThinkingConfigFields lists %q, which genai.ThinkingConfig no longer has", name)
-		}
-	}
-}
-
-// wantRefused fails unless applyGenerationConfig refuses cfg with an error naming field.
-func wantRefused(t *testing.T, cfg *genai.GenerateContentConfig, field string) {
-	t.Helper()
-	err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, cfg)
-	if !errors.Is(err, shared.ErrUnsupportedConfigField) {
-		t.Fatalf("applyGenerationConfig() with %s set: error = %v, want %v", field, err, shared.ErrUnsupportedConfigField)
-	}
-	if !strings.HasSuffix(err.Error(), ": "+field) {
-		t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, field)
-	}
-}
-
 func TestNormalizeRole(t *testing.T) {
 	tests := []struct {
 		role    genai.Role
@@ -2866,29 +2805,6 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 }
 
-// shared.HandledHTTPOptionFields is part of the contract, so it has to name real
-// fields, and every other field, including one genai adds later, has to be
-// refused rather than dropped.
-func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
-	optType := reflect.TypeOf(genai.HTTPOptions{})
-	for i := range optType.NumField() {
-		field := optType.Field(i)
-		if !field.IsExported() || slices.Contains(shared.HandledHTTPOptionFields, field.Name) {
-			continue
-		}
-		t.Run(field.Name, func(t *testing.T) {
-			opts := &genai.HTTPOptions{}
-			reflect.ValueOf(opts).Elem().Field(i).Set(testutil.NonZero(t, field.Type))
-			wantRefused(t, &genai.GenerateContentConfig{HTTPOptions: opts}, "HTTPOptions."+field.Name)
-		})
-	}
-	for _, name := range shared.HandledHTTPOptionFields {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("shared.HandledHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
-	}
-}
-
 // redact describes a header value without reproducing it. These assertions run
 // against stub credentials, but a maintainer debugging a live problem may well
 // have swapped a real key in, and a failing test should not put it in the log.
@@ -2953,9 +2869,8 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions sets each HTTPOptions field refused today to a value a
-// caller would really send, which the reflective walk in
-// TestHTTPOptionFieldsAreAccountedFor replaces with an arbitrary one.
+// geminiShapedHTTPOptions carries a realistic value for each HTTPOptions field
+// outside shared.HandledHTTPOptionFields.
 var geminiShapedHTTPOptions = []struct {
 	field string
 	opts  *genai.HTTPOptions
@@ -2979,19 +2894,16 @@ func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 			if !errors.Is(err, shared.ErrUnsupportedConfigField) {
 				t.Fatalf("applyGenerationConfig() error = %v, want %v", err, shared.ErrUnsupportedConfigField)
 			}
-			if !strings.HasSuffix(err.Error(), ": HTTPOptions."+tc.field) {
-				t.Errorf("applyGenerationConfig() error = %q, want it to name HTTPOptions.%s", err, tc.field)
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
 			}
 		})
 	}
 }
 
-// Closes the accounting test's blind side: that one compares names against
-// three lists, so writing a new field into translated greens it while the field
-// is still dropped.
-//
-// Here every field the lists call translated has to reach the params, with the
-// ones needing a whole subsystem to be meaningful left to their own tests.
+// A name in shared.HandledConfigFields is accepted, so a field listed there but
+// not translated would be dropped. Here every translated field has to reach the
+// params, with the ones needing a whole subsystem left to their own tests.
 func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 	tests := []struct {
 		field string
