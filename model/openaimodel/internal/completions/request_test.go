@@ -497,8 +497,17 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: shared.ErrLabelsNotSupported},
 		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: shared.ErrSafetySettingsNotSupported},
 		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: shared.ErrUnsupportedMIMEType},
+		{name: "routing config", cfg: &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "model selection config", cfg: &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: shared.ErrUnsupportedConfigField},
+		{name: "response modalities", cfg: &genai.GenerateContentConfig{ResponseModalities: []string{"AUDIO"}}, want: shared.ErrUnsupportedConfigField},
+		{name: "media resolution", cfg: &genai.GenerateContentConfig{MediaResolution: genai.MediaResolutionLow}, want: shared.ErrUnsupportedConfigField},
 		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "audio timestamp", cfg: &genai.GenerateContentConfig{AudioTimestamp: true}, want: shared.ErrUnsupportedConfigField},
+		{name: "image config", cfg: &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "enhanced civic answers", cfg: &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}, want: shared.ErrUnsupportedConfigField},
+		{name: "model armor config", cfg: &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "audio transcription config", cfg: &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "continuation token", cfg: &genai.GenerateContentConfig{ContinuationToken: []byte("token")}, want: shared.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
