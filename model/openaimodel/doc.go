@@ -50,7 +50,8 @@
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
-//	            and on Responses also StopSequences, the penalties and Seed
+//	            and on Responses also a non-empty StopSequences, the
+//	            penalties and Seed
 //	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
 //	            effect because these APIs never pause a generation with
 //	            CONTINUATION; and on Chat Completions
