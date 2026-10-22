@@ -156,6 +156,16 @@ func (a *workflowAgent) detectResume(ctx agent.InvocationContext) (map[string]an
 	if state == nil {
 		return nil, nil, false, nil
 	}
+	// The runner has already persisted this turn's answers. Rehydration
+	// unwraps and validates them; the ingress decoder must not replace
+	// those values with a differently decoded copy of the same answer.
+	for _, ns := range state.Nodes {
+		for id, response := range ns.ResumedInputs {
+			if _, matched := responses[id]; matched {
+				responses[id] = response
+			}
+		}
+	}
 
 	return responses, state, true, nil
 }

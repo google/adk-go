@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -28,7 +29,11 @@ const (
 	SchemaVersion = "2"
 )
 
-const defaultTableName = "agent_events"
+const (
+	defaultTableName               = "agent_events"
+	defaultMaxInlineTextSize       = 32 * 1024
+	defaultGCSMaxConcurrentUploads = 8
+)
 
 // Logger interface to use standard log operations natively.
 type Logger interface {
@@ -42,11 +47,17 @@ type Logger interface {
 // set MaxRetries: 0 alongside a non-zero InitialDelay, MaxDelay, or Multiplier.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
-// write made by a background or run-end flush, including its retries and the
-// backoff between them, ends when ShutdownTimeout expires, and the writes made
-// while Close drains the queue share a single ShutdownTimeout. If the attempts
-// and backoff allowed by a RetryConfig take longer than that, retrying stops
-// when the timeout expires and the batch is dropped.
+// write made by a background flush, including its retries and the backoff
+// between them, ends when ShutdownTimeout expires, while the writes made by a
+// run-end flush, and those made while Close drains the queue, share a single
+// ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
+// in-flight batch is deferred for at most one retry in the next flush
+// (background, run-end, or Close). This provides at-least-once delivery; if
+// the backend already committed the cut-off write, duplicates under the same
+// event_id can occur (and may differ if uploads cut short on the first attempt
+// succeed on retry; queries deduplicating by event_id should prefer rows where
+// storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
+// batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
 	MaxRetries   int
 	InitialDelay time.Duration
@@ -64,7 +75,44 @@ type RetryConfig struct {
 // never written.
 type ContentFormatter func(payload any, eventType string) (any, error)
 
+// GCSUploadRequest describes one payload to upload to Cloud Storage.
+type GCSUploadRequest struct {
+	// Path is the object name within the bucket; it already includes
+	// Config.GCSPathPrefix.
+	Path string
+	// Data is the raw payload to store in the object.
+	Data []byte
+	// ContentType is the MIME type to set on the stored object.
+	ContentType string
+}
+
+// GCSContentOffloader uploads multimodal or oversized text payloads to Cloud
+// Storage and returns the gs:// URI of the stored object.
+//
+// The plugin calls UploadContent from several goroutines at the same time.
+// GCSUploadRequest.Path is the object name within the bucket and already
+// includes Config.GCSPathPrefix. If UploadContent fails, a text part keeps its
+// inline text (truncated to MaxContentLen) in the BigQuery row, while a binary
+// part's text is set to "[UPLOAD FAILED]" and its raw bytes are not stored
+// inline.
+// UploadContent must return soon after ctx is done: the plugin waits for the
+// uploads of a batch before writing it, and Close waits for that write.
+type GCSContentOffloader interface {
+	UploadContent(ctx context.Context, req GCSUploadRequest) (gcsURI string, err error)
+}
+
 // Config represents settings mapping to adk-python's BigQueryLoggerConfig.
+//
+// GCSClientOptions, MaxInlineTextSize, GCSMaxConcurrentUploads,
+// GCSUploadTimeout, GCSMaxPendingUploadBytes and GCSOffloader have no
+// counterpart in BigQueryLoggerConfig. adk-python uploads while it parses an
+// event, before the row is queued, with a Cloud Storage client built from the
+// credentials of the plugin, a fixed 32 KiB inline text limit and the
+// parallelism of its thread pool. This plugin queues the payloads with their
+// rows and uploads them when a batch is flushed, before the batch is appended
+// to BigQuery. It therefore bounds the uploads of a batch (their parallelism,
+// their time, and the memory of the payloads that wait for them), and lets the
+// Cloud Storage client and the offloader be configured or replaced.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
@@ -99,12 +147,26 @@ type Config struct {
 	// DisableMultiModalContent is true.
 	LogMultiModalContent bool
 
-	// ShutdownTimeout bounds each batch write made by a background or run-end
-	// flush, including all retries and the backoff between them (see
-	// [RetryConfig]), and separately bounds the whole drain of queued rows
-	// during Close. Rows whose write is still unfinished when the timeout
-	// expires are dropped. It does not bound a run-end flush as a whole; see
-	// DisableFlushOnRunEnd.
+	// ShutdownTimeout bounds each batch write made by a background flush,
+	// including all retries and the backoff between them (see
+	// [RetryConfig]), and separately bounds a whole run-end flush (see
+	// DisableFlushOnRunEnd) and the BigQuery writes of the drain of queued
+	// rows during Close. The drain starts once a background write that is
+	// already in flight has finished. In a run-end flush, an in-flight batch
+	// that times out is deferred for at most one retry in the next flush
+	// (background, run-end, or Close); rows whose write remains unfinished
+	// after retrying or when the timeout expires during Close are dropped.
+	// (Duplicates under the same event_id can occur and may differ if cut-short
+	// uploads succeed on retry; prefer rows with GCS_REFERENCE storage_mode).
+	// Close logs each batch it drops.
+	//
+	// Cloud Storage uploads (see GCSBucketName) do not use up the time that
+	// the writes of the drain have: the uploads of all the queued rows share
+	// half a ShutdownTimeout, after which the parts that are not uploaded fall
+	// back (see GCSUploadTimeout). Close can therefore block for up to about
+	// two and a half times ShutdownTimeout. In a run-end flush, the uploads of
+	// each batch get at most half of what is left of the ShutdownTimeout of
+	// the flush.
 	ShutdownTimeout time.Duration
 
 	// Injected logger.
@@ -144,9 +206,13 @@ type Config struct {
 	DebugContentFormatterErrors bool
 
 	// EventAllowlist, if non-empty, limits logging to the listed event types.
+	// The legacy umbrella name "EVENT" matches all session-event rows
+	// (such as STATE_DELTA, AGENT_TRANSFER, and AGENT_RESPONSE).
 	EventAllowlist []string
 	// EventDenylist stops the listed event types from being logged. It takes
-	// precedence over EventAllowlist.
+	// precedence over EventAllowlist, including when "EVENT" is listed in
+	// EventAllowlist. The legacy umbrella name "EVENT" suppresses all
+	// session-event rows.
 	EventDenylist []string
 
 	// PayloadColumnDenylist names payload columns that are omitted from newly
@@ -167,10 +233,9 @@ type Config struct {
 	// DisableFlushOnRunEnd stops the synchronous best-effort flush when an
 	// invocation completes. When false (the default), AfterRunCallback flushes
 	// queued events, skipping the flush if a background flush is already
-	// running. ShutdownTimeout bounds each batch write, not the flush as a
-	// whole: the flush keeps writing batches while at least BatchSize rows are
-	// queued, so during a BigQuery outage under steady load AfterRunCallback
-	// can block for several ShutdownTimeout periods.
+	// running. A single ShutdownTimeout bounds the whole flush; rows that are
+	// still queued (or an in-flight batch deferred after a write timeout) when
+	// it expires are left for a later flush.
 	DisableFlushOnRunEnd bool
 
 	// DisableSchemaUpgrade stops the plugin from adding missing columns to an
@@ -188,23 +253,97 @@ type Config struct {
 	// EnableOTelCorrelation also writes the ambient OpenTelemetry trace and
 	// span IDs to attributes.otel.
 	EnableOTelCorrelation bool
+
+	// GCSBucketName enables offloading of large text and inline binary parts
+	// to the named Cloud Storage bucket. The plugin creates the Cloud Storage
+	// client from GCSClientOptions (or ClientOptions when GCSClientOptions is
+	// empty; shared options must be service-neutral) and closes it when the
+	// plugin is closed.
+	//
+	// Unlike adk-python, which uses the host's local date in object names,
+	// omits "size" from object_ref.details.gcs_metadata on all offloaded
+	// parts (both text and binary), and records "text/plain" as the
+	// content_type of offloaded text, this plugin uses the UTC date of the
+	// row's timestamp in object names, records "size" on both text and binary
+	// parts, and records "text/plain; charset=utf-8" for offloaded text
+	// (while keeping content_parts[].mime_type as "text/plain"); queries
+	// filtering on $.gcs_metadata.content_type in object_ref.details see
+	// "text/plain; charset=utf-8" for Go rows and "text/plain" for Python
+	// rows.
+	GCSBucketName string
+	// GCSClientOptions configures the Cloud Storage client created for
+	// GCSBucketName. When empty, ClientOptions is used.
+	GCSClientOptions []option.ClientOption
+	// GCSPathPrefix is prepended to the names of offloaded objects.
+	GCSPathPrefix string
+	// ConnectionID is the BigQuery connection recorded as the authorizer of
+	// offloaded objects, in the "location.connection_id" form, for example
+	// "us.my-connection".
+	ConnectionID string
+	// MaxInlineTextSize is the size in bytes above which a text part is
+	// offloaded. A text part that MaxContentLen would cut is offloaded as
+	// well. It has no effect unless GCSBucketName or GCSOffloader is set.
+	// Values <= 0 mean 32 KiB.
+	MaxInlineTextSize int
+	// GCSMaxConcurrentUploads bounds parallel uploads per batch. Uploads for a
+	// batch run during flush before the batch is appended to BigQuery, so
+	// sustained offload throughput is bounded by roughly
+	// GCSMaxConcurrentUploads / upload_latency. Values <= 0 mean 8.
+	GCSMaxConcurrentUploads int
+	// GCSUploadTimeout bounds how long a batch waits for its Cloud Storage
+	// uploads. The parts whose uploads are not finished by then fall back: a
+	// text part keeps its inline text (truncated to MaxContentLen), and a
+	// binary part's text is set to "[UPLOAD FAILED]", its raw bytes not being
+	// stored inline. When the uploads of a batch time out without any upload
+	// succeeding, or when an in-flight upload times out during the batch timeout
+	// (partial outage backoff), the plugin stops calling the offloader for
+	// another GCSUploadTimeout: every batch in that time falls back at once, so
+	// that an outage does not make each batch wait in turn. The deadline
+	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
+	// the uploads when it is still fresh (at least three quarters of
+	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
+	// without any upload in the batch succeeding (a run-end flush allocates half
+	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
+	// than twice the typical upload latency may pause uploads if storage does
+	// not finish within that slice), whereas a batch where at least one upload
+	// succeeded, an already-depleted budget (less than three quarters
+	// remaining), or a budget during Close does not pause.
+	// Values <= 0 mean 10s.
+	GCSUploadTimeout time.Duration
+	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by
+	// pending Cloud Storage uploads across queued rows. When reserving an
+	// upload would exceed this limit, the part is not uploaded and falls back
+	// as if its upload had failed. The limit counts each payload once, but an
+	// upload in flight holds more with the built-in offloader: a []byte copy
+	// of a text payload and the Cloud Storage writer's chunk buffer, which is
+	// as large as the payload, up to 16 MiB. In the worst case, the memory of
+	// text uploads is therefore about three times this limit, and that of
+	// binary uploads about twice. Values <= 0 mean 256 MiB.
+	GCSMaxPendingUploadBytes int64
+	// GCSOffloader overrides the offloader built from GCSBucketName. The
+	// plugin does not close an offloader that the caller supplies.
+	GCSOffloader GCSContentOffloader
 }
 
 // DefaultConfig returns the default configuration for the agent analytics plugin.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:              true,
-		MaxContentLen:        500 * 1024,
-		DatasetID:            "agent_analytics",
-		TableName:            defaultTableName,
-		ClusteringFields:     []string{"event_type", "agent", "user_id"},
-		LogMultiModalContent: true,
-		BatchSize:            100,
-		BatchFlushIntv:       time.Second,
-		ShutdownTimeout:      10 * time.Second,
-		QueueMaxSize:         10000,
-		CustomTags:           make(map[string]any),
-		Logger:               log.Default(), //nolint:forbidigo // pre-slog call site
+		Enabled:                  true,
+		MaxContentLen:            500 * 1024,
+		DatasetID:                "agent_analytics",
+		TableName:                defaultTableName,
+		ClusteringFields:         []string{"event_type", "agent", "user_id"},
+		LogMultiModalContent:     true,
+		BatchSize:                100,
+		BatchFlushIntv:           time.Second,
+		ShutdownTimeout:          10 * time.Second,
+		QueueMaxSize:             10000,
+		CustomTags:               make(map[string]any),
+		Logger:                   log.Default(), //nolint:forbidigo // pre-slog call site
+		MaxInlineTextSize:        defaultMaxInlineTextSize,
+		GCSMaxConcurrentUploads:  defaultGCSMaxConcurrentUploads,
+		GCSUploadTimeout:         gcsUploadTimeout,
+		GCSMaxPendingUploadBytes: defaultMaxPendingUploadBytes,
 		RetryConfig: RetryConfig{
 			MaxRetries:   3,
 			InitialDelay: 100 * time.Millisecond,
@@ -250,6 +389,18 @@ func applyDefaults(c Config) Config {
 		if c.RetryConfig.Multiplier == 0 {
 			c.RetryConfig.Multiplier = defaults.RetryConfig.Multiplier
 		}
+	}
+	if c.MaxInlineTextSize <= 0 {
+		c.MaxInlineTextSize = defaultMaxInlineTextSize
+	}
+	if c.GCSMaxConcurrentUploads <= 0 {
+		c.GCSMaxConcurrentUploads = defaultGCSMaxConcurrentUploads
+	}
+	if c.GCSUploadTimeout <= 0 {
+		c.GCSUploadTimeout = gcsUploadTimeout
+	}
+	if c.GCSMaxPendingUploadBytes <= 0 {
+		c.GCSMaxPendingUploadBytes = defaultMaxPendingUploadBytes
 	}
 	return c
 }

@@ -93,13 +93,17 @@ type spanRecord struct {
 	// task-mode sub-agent completed via finish_task, which is the only case
 	// where re-entry retirement is safe.
 	hasResponse bool
-	// taskDelegated is set on the parent agent activation when a child
+	// taskDelegated is set on the delegating agent activation when its child
 	// task-mode sub-agent completes via a finish_task function response
 	// (see popTaskAgentSpan). It distinguishes the task-mode delegation
-	// case — where ADK skips the parent's AfterAgentCallback and the
-	// parent's prior activation must be retired on re-entry — from an
+	// case — where dispatch interrupts the delegating chat activation and
+	// that prior activation must be retired on re-entry — from an
 	// ordinary transfer-back chain, where the parent is still running and
-	// must not be retired.
+	// must not be retired. Only an LLM agent (nonLLM == false) whose
+	// configured sub-agents include the task sub-agent can delegate via
+	// runChat; a workflow agent (nonLLM == true) runs its own
+	// AfterAgentCallback, and an ancestor LLM agent under which a resumed
+	// nested task was parented is still active in its own runChat loop.
 	taskDelegated bool
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
@@ -997,10 +1001,11 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 // that run under a workflow agent outside the runner's agent tree, such as a
 // graph node, are parented like those of the tree without overwriting sibling
 // graph nodes. If an agent activation of the same (name, branch, path) is
-// re-entered after delegating to a task-mode sub-agent that completed via
-// finish_task without running AfterAgentCallback for the delegating
-// activation, the delegating activation is retired first so the continuation
-// turn becomes a direct sibling under the parent span.
+// re-entered after a task-mode sub-agent completes via finish_task, the prior
+// activation interrupted by task dispatch is retired first so the continuation
+// turn becomes a direct sibling under the parent span. Only a direct LLM
+// parent is marked; workflow agents run their own AfterAgentCallback, so
+// nonLLM is defensively excluded.
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -1087,10 +1092,14 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
 // a finish_task function response (which ADK does without running
-// AfterAgentCallback), and marks its parent agent activation as having
+// AfterAgentCallback), and marks its delegating agent activation as having
 // delegated to a completed task. The mark lets pushAgentSpan retire the
 // parent's prior activation safely on re-entry, without retiring a parent
-// that is still running in an ordinary transfer-back chain.
+// that is still running in an ordinary transfer-back chain. Only a direct
+// LLM parent (nonLLM == false) whose configured sub-agents include the task
+// sub-agent is marked; a workflow agent (nonLLM == true) runs its own
+// AfterAgentCallback, and an ancestor LLM agent under which a resumed nested
+// task was parented is still active in its own runChat loop.
 func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -1104,11 +1113,16 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity) rowSp
 		return inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
 	}
 	rec := inv.agentStack[i]
-	// Mark the parent activation that delegated to this task sub-agent so
-	// that pushAgentSpan can retire it on re-entry. The parent is the agent
-	// span whose spanID equals rec.parentSpanID and whose kind is spanKindAgent.
+	// A resumed task can start before its delegating chat's callback, placing
+	// its span under a still-running ancestor instead. Only mark a parent
+	// activation that actually has this task configured as its child.
+	// Non-LLM workflow agents run their own AfterAgentCallback, so nonLLM is
+	// defensively excluded.
 	for j := range inv.agentStack {
-		if inv.agentStack[j].spanID == rec.parentSpanID && inv.agentStack[j].kind == spanKindAgent {
+		if inv.agentStack[j].spanID == rec.parentSpanID &&
+			inv.agentStack[j].kind == spanKindAgent &&
+			!inv.agentStack[j].nonLLM &&
+			slices.Contains(inv.agentStack[j].children, rec.name) {
 			inv.agentStack[j].taskDelegated = true
 			break
 		}
