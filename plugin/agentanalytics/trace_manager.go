@@ -99,7 +99,11 @@ type spanRecord struct {
 	// case — where dispatch interrupts the delegating chat activation and
 	// that prior activation must be retired on re-entry — from an
 	// ordinary transfer-back chain, where the parent is still running and
-	// must not be retired.
+	// must not be retired. Only an LLM agent (nonLLM == false) whose
+	// configured sub-agents include the task sub-agent can delegate via
+	// runChat; a workflow agent (nonLLM == true) runs its own
+	// AfterAgentCallback, and an ancestor LLM agent under which a resumed
+	// nested task was parented is still active in its own runChat loop.
 	taskDelegated bool
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
@@ -999,7 +1003,9 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 // graph nodes. If an agent activation of the same (name, branch, path) is
 // re-entered after a task-mode sub-agent completes via finish_task, the prior
 // activation interrupted by task dispatch is retired first so the continuation
-// turn becomes a direct sibling under the parent span.
+// turn becomes a direct sibling under the parent span. Only a direct LLM
+// parent is marked; workflow agents run their own AfterAgentCallback, so
+// nonLLM is defensively excluded.
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -1089,7 +1095,11 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 // AfterAgentCallback), and marks its delegating agent activation as having
 // delegated to a completed task. The mark lets pushAgentSpan retire the
 // parent's prior activation safely on re-entry, without retiring a parent
-// that is still running in an ordinary transfer-back chain.
+// that is still running in an ordinary transfer-back chain. Only a direct
+// LLM parent (nonLLM == false) whose configured sub-agents include the task
+// sub-agent is marked; a workflow agent (nonLLM == true) runs its own
+// AfterAgentCallback, and an ancestor LLM agent under which a resumed nested
+// task was parented is still active in its own runChat loop.
 func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -1106,8 +1116,13 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity) rowSp
 	// A resumed task can start before its delegating chat's callback, placing
 	// its span under a still-running ancestor instead. Only mark a parent
 	// activation that actually has this task configured as its child.
+	// Non-LLM workflow agents run their own AfterAgentCallback, so nonLLM is
+	// defensively excluded.
 	for j := range inv.agentStack {
-		if inv.agentStack[j].spanID == rec.parentSpanID && inv.agentStack[j].kind == spanKindAgent && slices.Contains(inv.agentStack[j].children, rec.name) {
+		if inv.agentStack[j].spanID == rec.parentSpanID &&
+			inv.agentStack[j].kind == spanKindAgent &&
+			!inv.agentStack[j].nonLLM &&
+			slices.Contains(inv.agentStack[j].children, rec.name) {
 			inv.agentStack[j].taskDelegated = true
 			break
 		}
