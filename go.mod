@@ -1,6 +1,6 @@
 module google.golang.org/adk/v2
 
-go 1.26.6
+go 1.26.10
 
 require (
 	cloud.google.com/go v0.123.0
