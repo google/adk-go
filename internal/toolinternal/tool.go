@@ -37,6 +37,28 @@ type StreamingFunctionTool interface {
 	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
+// ConfirmationGatedStreamingTool is a StreamingFunctionTool whose
+// human-in-the-loop confirmation gate can be applied apart from its stream.
+//
+// In live mode the flow answers a streaming call with a pending status and runs
+// the stream in a background goroutine. It calls CheckConfirmation on the
+// calling goroutine first, so that a call the gate stops is answered with an
+// error rather than a pending status, and so that the confirmation request the
+// gate records on the tool context is there before the function response event
+// is built from it.
+type ConfirmationGatedStreamingTool interface {
+	StreamingFunctionTool
+	// CheckConfirmation applies the confirmation gate to one call. It returns
+	// nil when the call may run, and otherwise the error RunStream would yield
+	// for the call: one wrapping tool.ErrConfirmationRequired after recording a
+	// confirmation request on ctx, one wrapping tool.ErrConfirmationRejected, or
+	// the error that stopped the check.
+	CheckConfirmation(ctx agent.Context, args any) error
+	// RunStreamUngated runs the call's stream without applying the gate again.
+	// Call it only after CheckConfirmation has returned nil for the same call.
+	RunStreamUngated(ctx agent.Context, args any) iter.Seq2[string, error]
+}
+
 type RequestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
