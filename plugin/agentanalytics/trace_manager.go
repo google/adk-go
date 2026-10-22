@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"cmp"
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -133,6 +134,8 @@ type invocationTrace struct {
 	// openCalls is the number of in-flight model and tool calls. Eviction
 	// reads it without holding mu.
 	openCalls atomic.Int64
+	// pendingSpans protects late state between lookup and registering a span.
+	pendingSpans atomic.Int64
 	// rootAgentAtomic holds the latest rootAgentName string for lock-free
 	// reads during eviction.
 	rootAgentAtomic atomic.Value
@@ -266,6 +269,12 @@ func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.T
 // call waiting for its completion callback.
 func (inv *invocationTrace) hasOpenCalls() bool {
 	return inv.openCalls.Load() > 0
+}
+
+func (inv *invocationTrace) hasOpenLateSpans() bool {
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	return inv.pendingSpans.Load() > 0 || inv.hasOpenCalls() || len(inv.agentStack) > 1
 }
 
 func (inv *invocationTrace) syncOpenCallsLocked() {
@@ -730,13 +739,15 @@ func withinPath(path, ancestor string, sameAgent bool) bool {
 // workflow.WithUseSubBranch when they want isolated session branch history in
 // addition to distinct node paths.
 type traceManager struct {
-	mu          sync.Mutex
-	invocations map[string]*invocationTrace
-	evicted     map[string]evictedTrace
-	knownParent map[agent.Agent]agent.Agent
-	traceSeed   string
-	inserts     int
-	logf        func(string, ...any)
+	mu              sync.Mutex
+	invocations     map[string]*invocationTrace
+	evicted         map[string]evictedTrace
+	completed       map[string]*completedTrace
+	completionOrder list.List
+	knownParent     map[agent.Agent]agent.Agent
+	traceSeed       string
+	inserts         int
+	logf            func(string, ...any)
 
 	// maxTracked, ttl and now are fields so that tests can change them.
 	maxTracked int
@@ -744,24 +755,27 @@ type traceManager struct {
 	now        func() time.Time
 }
 
-// evictedTrace retains the identity of an evicted or completed invocation, so
-// that later callbacks keep its invocation span after active tracking ends.
+// evictedTrace retains the identity of an invocation after active tracking ends.
 type evictedTrace struct {
 	traceID       string
 	spanID        string
 	parentSpanID  string
 	rootAgentName string
 	lastActive    int64
-	completed     bool
-	// late is created lazily for callbacks after completion, so the original
-	// invocation's span state can be released.
-	late *invocationTrace
+}
+
+type completedTrace struct {
+	identity evictedTrace
+	// Late calls share state without retaining the finished run's span stacks.
+	late     *invocationTrace
+	position *list.Element
 }
 
 func newTraceManager() *traceManager {
 	return &traceManager{
 		invocations: map[string]*invocationTrace{},
 		evicted:     map[string]evictedTrace{},
+		completed:   map[string]*completedTrace{},
 		knownParent: map[agent.Agent]agent.Agent{},
 		traceSeed:   newTraceID(),
 		maxTracked:  maxTrackedInvocations,
@@ -836,16 +850,20 @@ func (tm *traceManager) rememberAgentTree(runner agent.Agent) agent.Agent {
 // get a trace that is not tracked, so that their rows still have IDs. Completed
 // invocations are restored without restarting active tracking.
 func (tm *traceManager) invocation(ctx context.Context, id identity) *invocationTrace {
-	return tm.lookupInvocation(ctx, id, false)
+	return tm.lookupInvocation(ctx, id, false, false)
 }
 
 // lookupInvocation starts a fresh run only when start is true. Other callbacks
 // after AfterRun use the completed identity without restarting active tracking.
-func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start bool) *invocationTrace {
+func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start, reserveSpan bool) *invocationTrace {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
 	if id.invocationID == "" {
-		return newInvocationTraceWithSpan(sc, "", now)
+		inv := newInvocationTraceWithSpan(sc, "", now)
+		if reserveSpan {
+			inv.pendingSpans.Add(1)
+		}
+		return inv
 	}
 	var warnIDs []string
 	var maxTracked int
@@ -853,20 +871,24 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 	tm.mu.Lock()
 	inv, ok := tm.invocations[id.invocationID]
 	if !ok {
-		ev, wasEvicted := tm.evicted[id.invocationID]
-		if ev.completed {
+		if completed := tm.completed[id.invocationID]; completed != nil {
 			if !start {
-				if ev.late == nil {
-					ev.late = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
-					ev.late.restoreEvicted(ev)
-					tm.evicted[id.invocationID] = ev
+				if completed.late == nil {
+					completed.late = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+					completed.late.restoreEvicted(completed.identity)
+				}
+				completed.late.lastActive.Store(now.UnixNano())
+				tm.completionOrder.MoveToBack(completed.position)
+				if reserveSpan {
+					completed.late.pendingSpans.Add(1)
 				}
 				tm.mu.Unlock()
-				return ev.late
+				return completed.late
 			}
-			delete(tm.evicted, id.invocationID)
-			wasEvicted = false
+			tm.completionOrder.Remove(completed.position)
+			delete(tm.completed, id.invocationID)
 		}
+		ev, wasEvicted := tm.evicted[id.invocationID]
 		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 		if wasEvicted {
 			inv.restoreEvicted(ev)
@@ -878,6 +900,9 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 		logf = tm.logf
 	}
 	inv.lastActive.Store(now.UnixNano())
+	if reserveSpan {
+		inv.pendingSpans.Add(1)
+	}
 	tm.mu.Unlock()
 	if logf != nil {
 		for _, evictedID := range warnIDs {
@@ -948,18 +973,48 @@ func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, in
 	}
 	var ev evictedTrace
 	if inv != nil {
-		rootAgent, _ := inv.rootAgentAtomic.Load().(string)
-		ev = evictedTrace{
-			traceID:       inv.currentTraceID(),
-			spanID:        inv.rootSpanID,
-			parentSpanID:  inv.rootParentSpanID,
-			rootAgentName: rootAgent,
-			lastActive:    inv.lastActive.Load(),
-		}
+		ev = inv.savedIdentity()
 	} else {
 		ev.lastActive = now.UnixNano()
 	}
 	tm.evicted[invocationID] = ev
+}
+
+func (inv *invocationTrace) savedIdentity() evictedTrace {
+	rootAgent, _ := inv.rootAgentAtomic.Load().(string)
+	return evictedTrace{
+		traceID:       inv.currentTraceID(),
+		spanID:        inv.rootSpanID,
+		parentSpanID:  inv.rootParentSpanID,
+		rootAgentName: rootAgent,
+		lastActive:    inv.lastActive.Load(),
+	}
+}
+
+// Completed identities have their own capacity: finishing an ordinary run must
+// never evict the saved identity of a run that is still in progress. The order
+// makes ordinary completion pruning constant-time; late open calls are skipped.
+// tm.mu must be held.
+func (tm *traceManager) rememberCompletedLocked(invocationID string, inv *invocationTrace) {
+	completed := tm.completed[invocationID]
+	if completed == nil {
+		completed = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
+		tm.completed[invocationID] = completed
+	} else {
+		tm.completionOrder.MoveToBack(completed.position)
+	}
+	completed.identity = inv.savedIdentity()
+	limit := max(tm.maxTracked, 64)
+	for candidate := tm.completionOrder.Front(); len(tm.completed) > limit && candidate != nil; {
+		next := candidate.Next()
+		id := candidate.Value.(string)
+		entry := tm.completed[id]
+		if entry.late == nil || !entry.late.hasOpenLateSpans() {
+			delete(tm.completed, id)
+			tm.completionOrder.Remove(candidate)
+		}
+		candidate = next
+	}
 }
 
 // invocationSpan returns the place of a row written by a callback of the
@@ -967,7 +1022,7 @@ func (tm *traceManager) markEvictedLocked(now time.Time, invocationID string, in
 // agent that the runner runs, runner, which is used to record the root
 // agent.
 func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner agent.Agent) rowSpan {
-	inv := tm.lookupInvocation(ctx, id, true)
+	inv := tm.lookupInvocation(ctx, id, true, false)
 	rememberedRoot := tm.rememberAgentTree(runner)
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, runner, rememberedRoot)
@@ -981,8 +1036,8 @@ func (tm *traceManager) invocationSpan(ctx context.Context, id identity, runner 
 // endInvocation stops tracking the invocation and returns the place of its
 // INVOCATION_COMPLETED row, with the invocation latency if the invocation
 // was tracked from its start without being evicted mid-run. Its identity stays
-// in the bounded eviction cache for late callbacks. A new run with the same ID
-// discards that completed state; ordinary cache pruning can remove it earlier.
+// in a separate bounded cache for late callbacks. A new run with the same ID
+// discards that completed state; capacity pruning can remove idle entries earlier.
 func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
@@ -998,6 +1053,8 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 			if ev, ok := tm.evicted[id.invocationID]; ok {
 				inv.restoreEvicted(ev)
+			} else if completed := tm.completed[id.invocationID]; completed != nil {
+				inv.restoreEvicted(completed.identity)
 			}
 		}
 		tm.mu.Unlock()
@@ -1019,11 +1076,8 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 		// Publish the final identity, including any trace adopted by rowSpan,
 		// before removing active state. Late Live callbacks may start and end
 		// an operation, so their state is shared separately from the finished run.
-		tm.markEvictedLocked(now, id.invocationID, inv)
-		ev := tm.evicted[id.invocationID]
-		ev.completed = true
-		ev.lastActive = now.UnixNano()
-		tm.evicted[id.invocationID] = ev
+		tm.rememberCompletedLocked(id.invocationID, inv)
+		delete(tm.evicted, id.invocationID)
 		delete(tm.invocations, id.invocationID)
 		tm.mu.Unlock()
 	}
@@ -1042,7 +1096,8 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 // parent is marked; workflow agents run their own AfterAgentCallback, so
 // nonLLM is defensively excluded.
 func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) rowSpan {
-	inv := tm.invocation(ctx, id)
+	inv := tm.lookupInvocation(ctx, id, false, true)
+	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	// SubAgents is user code, so it is read before mu is taken.
@@ -1557,7 +1612,8 @@ func (inv *invocationTrace) lineageLocked(i int) map[string]bool {
 // LLM_REQUEST row. A model call of the same agent that never ended, for
 // example because a BeforeModelCallback answered it, is replaced.
 func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
-	inv := tm.invocation(ctx, id)
+	inv := tm.lookupInvocation(ctx, id, false, true)
+	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
@@ -1665,7 +1721,8 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
-	inv := tm.invocation(ctx, id)
+	inv := tm.lookupInvocation(ctx, id, false, true)
+	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
