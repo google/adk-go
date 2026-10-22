@@ -4254,27 +4254,68 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 	})
 
 	t.Run("unreachable plugin entry is removed from pluginRegistry after GC", func(t *testing.T) {
-		newWeakKey := func() weak.Pointer[baseplugin.Plugin] {
-			p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
-			if err != nil {
-				t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
-			}
-			key := weak.Make(p)
-			if _, ok := pluginRegistry.Load(key); !ok {
-				t.Fatal("pluginRegistry missing entry before GC")
-			}
-			return key
+		for _, tc := range []struct {
+			name string
+			// newPlugin returns a plugin that the caller drops.
+			newPlugin func(t *testing.T) *baseplugin.Plugin
+			// wantStats reports whether the registry entry holds drop
+			// counters, which only an enabled plugin has.
+			wantStats bool
+		}{
+			{
+				name: "disabled plugin",
+				newPlugin: func(t *testing.T) *baseplugin.Plugin {
+					p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+					if err != nil {
+						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+					}
+					return p
+				},
+			},
+			{
+				name: "enabled plugin after Close",
+				newPlugin: func(t *testing.T) *baseplugin.Plugin {
+					_, writeClient := newTestWriteClient(t)
+					cfg := DefaultConfig()
+					cfg.ProjectID = "test-project"
+					cfg.DatasetID = "test-dataset"
+					p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, writeClient)
+					if err != nil {
+						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+					}
+					if err := p.Close(); err != nil {
+						t.Fatalf("p.Close() error = %v", err)
+					}
+					return p
+				},
+				wantStats: true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				newWeakKey := func() weak.Pointer[baseplugin.Plugin] {
+					p := tc.newPlugin(t)
+					key := weak.Make(p)
+					v, ok := pluginRegistry.Load(key)
+					if !ok {
+						t.Fatal("pluginRegistry missing entry before GC")
+					}
+					if gotStats := v != nil; gotStats != tc.wantStats {
+						t.Fatalf("pluginRegistry entry holds drop counters = %t, want %t", gotStats, tc.wantStats)
+					}
+					return key
+				}
+				key := newWeakKey()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					runtime.GC()
+					if _, ok := pluginRegistry.Load(key); !ok {
+						return
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				t.Fatal("pluginRegistry still contained entry for unreachable plugin after GC")
+			})
 		}
-		key := newWeakKey()
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			runtime.GC()
-			if _, ok := pluginRegistry.Load(key); !ok {
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-		t.Fatal("pluginRegistry still contained entry for unreachable plugin after GC")
 	})
 }
 

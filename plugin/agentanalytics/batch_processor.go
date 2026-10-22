@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -483,12 +484,16 @@ func (b *BatchProcessor) flushRunEnd() {
 			firstUploadBatch = false
 		}
 
-		if err := b.appendBatch(flushCtx, batch); err != nil {
+		// A deferred batch is counted in DropStats only if a later flush drops
+		// it, so that a batch that the next flush writes is not reported as
+		// dropped, and one that fails again is not counted twice.
+		if err := b.tryAppendBatch(flushCtx, batch); err != nil {
 			if flushCtx.Err() != nil && !retry {
 				b.requeueDeferredUploads(batch)
 				b.deferredBatch = batch
 				return
 			}
+			b.recordAppendFailureDrop(int64(len(batch)))
 			for _, row := range batch {
 				b.releaseRowUploads(row)
 			}
@@ -588,15 +593,26 @@ func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Cont
 }
 
 // appendBatch appends batch, whose uploads are resolved, to BigQuery under
-// writeCtx. A writeCtx without a deadline gets one of ShutdownTimeout.
+// writeCtx, and counts the batch in DropStats if the append fails. A writeCtx
+// without a deadline gets one of ShutdownTimeout.
 func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[string]any) error {
+	err := b.tryAppendBatch(writeCtx, batch)
+	if err != nil {
+		b.recordAppendFailureDrop(int64(len(batch)))
+	}
+	return err
+}
+
+// tryAppendBatch is appendBatch without the drop accounting: a caller that
+// keeps a batch whose append failed, to retry it later, counts the batch only
+// once it gives up on it.
+func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[string]any) error {
 	if _, ok := writeCtx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		writeCtx, cancel = context.WithTimeout(writeCtx, b.shutdownTimeout())
 		defer cancel()
 	}
 	if err := writeCtx.Err(); err != nil {
-		b.recordAppendFailureDrop(int64(len(batch)))
 		return err
 	}
 
@@ -756,7 +772,6 @@ func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[strin
 
 	res, err := b.streamWriter.append(writeCtx, record)
 	if err != nil {
-		b.recordAppendFailureDrop(int64(len(batch)))
 		return fmt.Errorf("streamWriter append error: %w", err)
 	}
 
@@ -767,12 +782,10 @@ func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[strin
 	}
 
 	if res.GetError() != nil {
-		b.recordAppendFailureDrop(int64(len(batch)))
 		return fmt.Errorf("batch append error from BigQuery: %v", res.GetError().GetMessage())
 	}
 
 	if len(res.GetRowErrors()) > 0 {
-		b.recordAppendFailureDrop(int64(len(batch)))
 		return fmt.Errorf("batch append error from BigQuery: %d row errors found", len(res.GetRowErrors()))
 	}
 
@@ -791,7 +804,13 @@ type streamWriter struct {
 	baseCtx      context.Context
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
-	streamOffset atomic.Int64
+	// finalizeCtx carries the values of baseCtx, such as outgoing metadata,
+	// to the finalizations of retired streams; finalizeCancel, which Close
+	// calls through cancelFinalizations, ends those still running when the
+	// budget of Close runs out.
+	finalizeCtx    context.Context
+	finalizeCancel context.CancelFunc
+	streamOffset   atomic.Int64
 	// offsetDesynced is set when a batch with an ambiguous send ended without a
 	// confirmed outcome, so streamOffset can no longer be trusted.
 	offsetDesynced bool
@@ -814,14 +833,18 @@ func newStreamWriter(ctx context.Context, client *bqstorage.BigQueryWriteClient,
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	baseCtx := context.WithoutCancel(ctx)
+	finalizeCtx, finalizeCancel := context.WithCancel(baseCtx)
 	return &streamWriter{
-		writeClient:   client,
-		streamName:    streamName,
-		schemaBytes:   schemaBytes,
-		config:        config,
-		baseCtx:       context.WithoutCancel(ctx),
-		rotateTimeout: defaultRotateTimeout,
-		now:           time.Now,
+		writeClient:    client,
+		streamName:     streamName,
+		schemaBytes:    schemaBytes,
+		config:         config,
+		baseCtx:        baseCtx,
+		finalizeCtx:    finalizeCtx,
+		finalizeCancel: finalizeCancel,
+		rotateTimeout:  defaultRotateTimeout,
+		now:            time.Now,
 	}
 }
 
@@ -871,10 +894,24 @@ func (s *streamWriter) isRotationInCooldown() bool {
 	return s.config.ExactlyOnceDelivery && s.offsetDesynced && s.nowOrDefault().Before(s.rotateRetryAt)
 }
 
-func (s *streamWriter) closeStream() {
+// closeActiveStream closes the active bidi stream, if any.
+func (s *streamWriter) closeActiveStream() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.resetStream()
-	s.mu.Unlock()
+}
+
+// cancelFinalizations ends the finalizations of retired streams that are
+// still running, and any that would start later.
+func (s *streamWriter) cancelFinalizations() {
+	if s.finalizeCancel != nil {
+		s.finalizeCancel()
+	}
+}
+
+// waitFinalizations waits for the finalizations of retired streams to end.
+// To bound the wait, call cancelFinalizations once the time is up.
+func (s *streamWriter) waitFinalizations() {
 	s.finalizeWg.Wait()
 }
 
@@ -893,7 +930,16 @@ func (s *streamWriter) streamsToFinalize() []string {
 // COMMITTED write stream bounded by rotateTimeout, finalizes the retired
 // stream in the background, updates s.streamName, and resets s.streamOffset
 // to 0. If a prior rotation failed within the cooldown window, it returns an
-// error without calling CreateWriteStream.
+// error without calling CreateWriteStream. A failed CreateWriteStream arms the
+// cooldown even when ctx ended the call, as its deadline (ShutdownTimeout for
+// a batch write) is usually shorter than rotateTimeout. The exception is a
+// call that started with less than the smaller of rotateTimeout and half of
+// ShutdownTimeout left before ctx's deadline, and that ctx ended: a healthy
+// server may not have had time to answer, so the cooldown stays unarmed and
+// the next batch retries the rotation with a fresh budget.
+// The retired stream's finalization keeps the values of the context given to
+// NewBatchProcessor, is bounded by rotateTimeout and by Close, and logs a
+// failure.
 // Caller must hold s.mu.
 func (s *streamWriter) rotateCommittedStream(ctx context.Context) error {
 	s.resetStream()
@@ -901,11 +947,13 @@ func (s *streamWriter) rotateCommittedStream(ctx context.Context) error {
 		return fmt.Errorf("committed write stream rotation in cooldown until %s", s.rotateRetryAt.Format(time.RFC3339Nano))
 	}
 	timeout := s.rotateTimeoutOrDefault()
+	deadline, hasDeadline := ctx.Deadline()
+	starved := hasDeadline && time.Until(deadline) < min(timeout, s.config.ShutdownTimeout/2)
 	rotateCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	newStream, err := createCommittedWriteStream(rotateCtx, s.writeClient, s.config)
 	if err != nil {
-		if ctx.Err() == nil {
+		if !starved || ctx.Err() == nil {
 			s.rotateRetryAt = s.nowOrDefault().Add(timeout)
 		}
 		return err
@@ -913,17 +961,24 @@ func (s *streamWriter) rotateCommittedStream(ctx context.Context) error {
 	s.rotateRetryAt = time.Time{}
 	if s.streamName != "" {
 		retired := s.streamName
+		parentCtx := s.finalizeCtx
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
+		logf := s.config.logf
 		s.finalizeWg.Add(1)
 		go func(streamToFinalize string, wc *bqstorage.BigQueryWriteClient) {
 			defer s.finalizeWg.Done()
 			if wc == nil {
 				return
 			}
-			fctx, fcancel := context.WithTimeout(context.Background(), defaultRotateTimeout)
+			fctx, fcancel := context.WithTimeout(parentCtx, timeout)
 			defer fcancel()
-			_, _ = wc.FinalizeWriteStream(fctx, &storagepb.FinalizeWriteStreamRequest{
+			if _, err := wc.FinalizeWriteStream(fctx, &storagepb.FinalizeWriteStreamRequest{
 				Name: streamToFinalize,
-			})
+			}); err != nil {
+				logf("agentanalytics: failed to finalize write stream %s: %v", streamToFinalize, err)
+			}
 		}(retired, s.writeClient)
 	}
 	s.streamName = newStream
@@ -936,13 +991,18 @@ func (s *streamWriter) rotateCommittedStream(ctx context.Context) error {
 // When AlreadyExists occurs after a prior attempt whose Send succeeded but Recv
 // failed (hadAmbiguousSend == true), BigQuery is confirming that the previous
 // attempt committed the batch at that offset, so streamOffset is advanced and
-// the append succeeds. When AlreadyExists occurs without a prior ambiguous send
-// or OutOfRange/NotFound occurs, the stream offset is out of sync with the
-// server, so we rotate to a fresh COMMITTED stream (at most once per batch)
-// and reset streamOffset to 0. If rotation fails, already occurred in this
-// batch, or the current stream was freshly rotated and rejected on its first
-// append, rotateErr is returned (and the rotation cooldown is armed) so the
-// caller stops retrying or creating streams on every batch.
+// the append succeeds. When OutOfRange or NotFound occurs after such an
+// attempt, the batch may already be stored, so it is dropped instead of
+// resent, and the stream is replaced before the next batch (after the
+// rotation cooldown, which is armed if the stream was freshly rotated). When
+// AlreadyExists occurs without a prior ambiguous send or OutOfRange/NotFound
+// occurs, the stream offset is out of sync with the server, so we rotate to a
+// fresh COMMITTED stream (at most once per batch) and reset streamOffset to 0.
+// If rotation fails, already occurred in this batch, or the current stream was
+// freshly rotated and rejected on its first append, rotateErr is returned (and
+// the rotation cooldown is armed, unless rotateCommittedStream leaves it
+// unarmed after a failed rotation) so the caller stops retrying or creating
+// streams on every batch.
 // Caller must hold s.mu.
 func (s *streamWriter) handleExactlyOnceError(
 	ctx context.Context,
@@ -966,6 +1026,9 @@ func (s *streamWriter) handleExactlyOnceError(
 		if *hadAmbiguousSend {
 			*hadAmbiguousSend = false
 			s.offsetDesynced = true
+			if s.freshlyRotated {
+				s.rotateRetryAt = s.nowOrDefault().Add(s.rotateTimeoutOrDefault())
+			}
 			return false, nil, fmt.Errorf("batch outcome unknown on stream (%v); dropped to prevent duplicate delivery", code)
 		}
 		if *rotatedInBatch || s.freshlyRotated {
@@ -1047,7 +1110,9 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				baseCtx = context.WithoutCancel(ctx)
 			}
 			if s.streamName != "" {
-				baseCtx = metadata.AppendToOutgoingContext(baseCtx, "x-goog-request-params", "write_stream="+s.streamName)
+				// URL-encoded like the generated client's routing headers: gRPC rejects
+				// non-ASCII metadata values, and table names may contain Unicode.
+				baseCtx = metadata.AppendToOutgoingContext(baseCtx, "x-goog-request-params", "write_stream="+url.QueryEscape(s.streamName))
 			}
 			streamCtx, streamCancel := context.WithCancel(baseCtx)
 			stopOpen := context.AfterFunc(ctx, streamCancel)
@@ -1226,11 +1291,14 @@ func (b *BatchProcessor) stopAcceptingRows() {
 // ShutdownTimeout and the writes share one, both starting after that wait, so
 // a Cloud Storage outage does not use up the time that the writes need. Batches
 // that are unwritten when the write budget expires are dropped and logged.
-// When ExactlyOnceDelivery is enabled, FinalizeWriteStream runs within whatever
-// remains of the ShutdownTimeout write budget, and is skipped with a warning if
-// draining already exhausted it. Close can therefore block for up to about two
-// and a half times ShutdownTimeout: once for a write that was already in
-// flight, and then for the uploads and the writes of the drain.
+// When ExactlyOnceDelivery is enabled, the finalizations of retired streams
+// that are still running and the FinalizeWriteStream of the active stream
+// share whatever remains of the ShutdownTimeout write budget: finalizations of
+// retired streams still running when it runs out are canceled, and the active
+// stream's finalization is skipped with a warning if draining already
+// exhausted it. Close can therefore block for up to about two and a half times
+// ShutdownTimeout: once for a write that was already in flight, and then for
+// the uploads and the writes of the drain.
 func (b *BatchProcessor) Close() {
 	b.closeOnce.Do(func() {
 		b.stopAcceptingRows()
@@ -1238,25 +1306,28 @@ func (b *BatchProcessor) Close() {
 			<-b.done
 		}
 		writeLeft := b.flushAndWaitForInflightBatch()
-		b.streamWriter.closeStream()
-		if b.createdCommittedStream && b.writeClient != nil {
-			streams := b.streamWriter.streamsToFinalize()
-			if len(streams) > 0 {
-				if writeLeft <= 0 {
-					for _, name := range streams {
-						b.config.logf("agentanalytics: skipping FinalizeWriteStream for %s: shutdown timeout exhausted while draining; already committed rows remain visible", name)
-					}
-				} else {
-					finalizeCtx, finalizeCancel := context.WithTimeout(b.baseCtx, writeLeft)
-					defer finalizeCancel()
-					for _, name := range streams {
-						if _, err := b.writeClient.FinalizeWriteStream(finalizeCtx, &storagepb.FinalizeWriteStreamRequest{
-							Name: name,
-						}); err != nil {
-							b.config.logf("agentanalytics: failed to finalize write stream %s: %v", name, err)
-						}
-					}
+		b.streamWriter.closeActiveStream()
+		finalize := b.createdCommittedStream && b.writeClient != nil
+		if !finalize || writeLeft <= 0 {
+			b.streamWriter.cancelFinalizations()
+			b.streamWriter.waitFinalizations()
+			if finalize {
+				for _, name := range b.streamWriter.streamsToFinalize() {
+					b.config.logf("agentanalytics: skipping FinalizeWriteStream for %s: shutdown timeout exhausted while draining; already committed rows remain visible", name)
 				}
+			}
+			return
+		}
+		finalizeCtx, finalizeCancel := context.WithTimeout(b.baseCtx, writeLeft)
+		defer finalizeCancel()
+		stopBg := context.AfterFunc(finalizeCtx, b.streamWriter.cancelFinalizations)
+		defer stopBg()
+		b.streamWriter.waitFinalizations()
+		for _, name := range b.streamWriter.streamsToFinalize() {
+			if _, err := b.writeClient.FinalizeWriteStream(finalizeCtx, &storagepb.FinalizeWriteStreamRequest{
+				Name: name,
+			}); err != nil {
+				b.config.logf("agentanalytics: failed to finalize write stream %s: %v", name, err)
 			}
 		}
 	})
