@@ -6374,36 +6374,407 @@ func (m *transferModel) GenerateContent(context.Context, *model.LLMRequest, bool
 	return func(yield func(*model.LLMResponse, error) bool) { yield(resp, nil) }
 }
 
-func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: &transferModel{script: []string{"planner"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	planner, err := llmagent.New(llmagent.Config{Name: "planner", Model: &transferModel{script: []string{"helper"}}, SubAgents: []agent.Agent{helper}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, err := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	rows := collectRows(t, requests, untilInvocationEnd)
-	started := map[any]any{}
+func assertAgentSpansClosed(t *testing.T, rows []map[string]any) {
+	t.Helper()
+	starts := map[any]map[string]any{}
+	ends := map[any]bool{}
 	for _, row := range rowsOfType(rows, EventAgentStarting) {
-		started[row["span_id"]] = row["agent"]
+		id := row["span_id"]
+		if _, exists := starts[id]; exists {
+			t.Error("agent span started twice")
+		}
+		starts[id] = row
+	}
+	if len(starts) == 0 {
+		t.Fatal("no agent spans started")
 	}
 	for _, row := range rowsOfType(rows, EventAgentCompleted) {
-		if _, ok := started[row["span_id"]]; !ok {
-			t.Errorf("AGENT_COMPLETED of %v has span_id %v, which no AGENT_STARTING row has", row["agent"], row["span_id"])
+		id := row["span_id"]
+		opened, ok := starts[id]
+		if !ok {
+			t.Errorf("AGENT_COMPLETED of %v closes no started span", row["agent"])
+			continue
+		}
+		if ends[id] {
+			t.Error("agent span completed twice")
+		}
+		ends[id] = true
+		if row["agent"] != opened["agent"] || row["parent_span_id"] != opened["parent_span_id"] {
+			t.Error("agent completion changed its owner or parent")
 		}
 		if row["latency_ms"] == nil {
 			t.Errorf("AGENT_COMPLETED of %v has no latency_ms", row["agent"])
 		}
-		delete(started, row["span_id"])
 	}
-	if len(started) > 0 {
-		t.Errorf("AGENT_STARTING spans never closed: %v", started)
+	if len(ends) != len(starts) {
+		t.Errorf("closed %d of %d agent spans", len(ends), len(starts))
 	}
+}
+
+func TestRunner_TransferBackToRunningParent_ClosesEverySpan(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		first  []string
+		second []string
+	}{
+		{name: "parent", first: []string{"planner"}},
+		{name: "peer", first: []string{"second"}, second: []string{"first"}},
+		{name: "double bounce", first: []string{"second", "second"}, second: []string{"first", "first"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			first, err := llmagent.New(llmagent.Config{Name: "first", Model: &transferModel{script: tc.first}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			second, err := llmagent.New(llmagent.Config{Name: "second", Model: &transferModel{script: tc.second}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			planner, err := llmagent.New(llmagent.Config{
+				Name: "planner", Model: &transferModel{script: []string{"first"}}, SubAgents: []agent.Agent{first, second},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range newTestRunner(t, planner, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			assertAgentSpansClosed(t, rows)
+		})
+	}
+}
+
+func TestRunner_ResumedTaskThenTransferBack_ClosesEverySpan(t *testing.T) {
+	call := func(name string, args map[string]any) *model.LLMResponse {
+		return &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call-" + name, Name: name, Args: args}}}}}
+	}
+	text := func(s string) *model.LLMResponse {
+		return &model.LLMResponse{Content: textContent("model", s), TurnComplete: true}
+	}
+	newAgent := func(c llmagent.Config) agent.Agent {
+		a, err := llmagent.New(c)
+		if err != nil {
+			t.Fatalf("llmagent.New(%s): %v", c.Name, err)
+		}
+		return a
+	}
+
+	for _, tc := range []struct {
+		name      string
+		setupRoot func() (agent.Agent, []*scriptedLLM)
+	}{
+		{
+			name: "direct parent",
+			setupRoot: func() (agent.Agent, []*scriptedLLM) {
+				taskModel := &scriptedLLM{responses: []*model.LLMResponse{text("Which color?"), call("finish_task", map[string]any{"result": "blue"})}}
+				helperTask := newAgent(llmagent.Config{
+					Name: "helper_task", Description: "asks, then finishes", Mode: llmagent.ModeTask, Model: taskModel,
+				})
+				helperModel := &scriptedLLM{responses: []*model.LLMResponse{
+					call("helper_task", map[string]any{"request": "pick a color"}),
+					call("transfer_to_agent", map[string]any{"agent_name": "coord"}),
+				}}
+				helper := newAgent(llmagent.Config{
+					Name: "helper", Description: "delegates", SubAgents: []agent.Agent{helperTask}, Model: helperModel,
+				})
+				// Having a task child makes the runner restart at coord on turn 2.
+				coordTask := newAgent(llmagent.Config{Name: "coord_task", Description: "unused", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+				coordModel := &scriptedLLM{responses: []*model.LLMResponse{
+					call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("waiting for the user"),
+					call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("all done"),
+				}}
+				coord := newAgent(llmagent.Config{
+					Name: "coord", SubAgents: []agent.Agent{coordTask, helper}, Model: coordModel,
+				})
+				return coord, []*scriptedLLM{taskModel, helperModel, coordModel}
+			},
+		},
+		{
+			name: "intermediate chat agent",
+			setupRoot: func() (agent.Agent, []*scriptedLLM) {
+				taskModel := &scriptedLLM{responses: []*model.LLMResponse{text("Which color?"), call("finish_task", map[string]any{"result": "blue"})}}
+				helperTask := newAgent(llmagent.Config{
+					Name: "helper_task", Description: "asks, then finishes", Mode: llmagent.ModeTask, Model: taskModel,
+				})
+				helperModel := &scriptedLLM{responses: []*model.LLMResponse{
+					call("helper_task", map[string]any{"request": "pick a color"}),
+					call("transfer_to_agent", map[string]any{"agent_name": "mid"}),
+				}}
+				helper := newAgent(llmagent.Config{
+					Name: "helper", Description: "delegates", SubAgents: []agent.Agent{helperTask}, Model: helperModel,
+				})
+				midModel := &scriptedLLM{responses: []*model.LLMResponse{
+					call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("mid waiting"),
+					call("transfer_to_agent", map[string]any{"agent_name": "helper"}), text("mid done"),
+				}}
+				mid := newAgent(llmagent.Config{
+					Name: "mid", Description: "intermediate", SubAgents: []agent.Agent{helper}, Model: midModel,
+				})
+				coordTask := newAgent(llmagent.Config{Name: "coord_task", Description: "unused", Mode: llmagent.ModeTask, Model: &scriptedLLM{}})
+				coordModel := &scriptedLLM{responses: []*model.LLMResponse{
+					call("transfer_to_agent", map[string]any{"agent_name": "mid"}),
+					call("transfer_to_agent", map[string]any{"agent_name": "mid"}),
+				}}
+				coord := newAgent(llmagent.Config{
+					Name: "coord", SubAgents: []agent.Agent{coordTask, mid}, Model: coordModel,
+				})
+				return coord, []*scriptedLLM{taskModel, helperModel, midModel, coordModel}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			root, models := tc.setupRoot()
+			r := newTestRunner(t, root, p)
+			var resumedInvocation string
+			for _, msg := range []string{"start", "blue"} {
+				for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", msg), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("r.Run: %v", err)
+					}
+					if ev != nil {
+						resumedInvocation = ev.InvocationID
+					}
+				}
+			}
+			for i, m := range models {
+				if len(m.responses) != 0 {
+					t.Fatalf("model %d has %d unconsumed model responses", i, len(m.responses))
+				}
+			}
+			if resumedInvocation == "" {
+				t.Fatal("resumed run returned no invocation ID")
+			}
+			rows := collectRows(t, requests, func(rows []map[string]any) bool {
+				return len(rowsOfType(rows, EventInvocationCompleted))+len(rowsOfType(rows, EventInvocationError)) >= 2
+			})
+			var resumedRows []map[string]any
+			for _, row := range rows {
+				if row["invocation_id"] == resumedInvocation {
+					resumedRows = append(resumedRows, row)
+				}
+			}
+			if len(rowsOfType(resumedRows, EventInvocationCompleted)) != 1 || len(rowsOfType(resumedRows, EventInvocationError)) != 0 {
+				t.Fatal("resumed invocation did not complete successfully")
+			}
+			assertAgentSpansClosed(t, resumedRows)
+		})
+	}
+}
+
+// TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent verifies that
+// popTaskAgentSpan does NOT mark a non-LLM workflow parent (sequentialagent) as
+// taskDelegated when a child ModeTask agent completes via finish_task.
+func TestTraceManager_PopTaskAgentSpan_DoesNotMarkNonLLMParent(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+
+	taskModel := &scriptedLLM{responses: []*model.LLMResponse{
+		{Content: textContent("model", "done"), TurnComplete: true},
+	}}
+	stepTask, err := llmagent.New(llmagent.Config{
+		Name:        "step_task",
+		Description: "executes a step",
+		Mode:        llmagent.ModeTask,
+		Model:       taskModel,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(step_task): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq",
+			SubAgents: []agent.Agent{stepTask},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(seq): %v", err)
+	}
+
+	seqID := identity{invocationID: "inv-nonllm", agentName: "seq", path: "seq@0"}
+	taskID := identity{invocationID: "inv-nonllm", agentName: "step_task", path: "seq@0/step_task@1"}
+
+	tm.invocationSpan(contextRunning(seq), seqID, seq)
+	seqStart := tm.pushAgentSpan(contextRunning(seq), seqID)
+
+	// Verify seq was recorded as non-LLM with step_task as a child.
+	tm.mu.Lock()
+	inv := tm.invocations["inv-nonllm"]
+	tm.mu.Unlock()
+	inv.mu.Lock()
+	var seqRec *spanRecord
+	for i := range inv.agentStack {
+		if inv.agentStack[i].name == "seq" {
+			seqRec = inv.agentStack[i]
+		}
+	}
+	inv.mu.Unlock()
+	if seqRec == nil {
+		t.Fatalf("seq span not found on the stack")
+	}
+	if !seqRec.nonLLM {
+		t.Fatalf("seq.nonLLM = false, want true (sequentialagent is non-LLM)")
+	}
+	if !slices.Contains(seqRec.children, "step_task") {
+		t.Fatalf("seq.children = %v, want to contain \"step_task\"", seqRec.children)
+	}
+
+	// Push the task span (parented to seq because seq has step_task in children).
+	taskStart := tm.pushAgentSpan(contextRunning(stepTask), taskID)
+	if taskStart.parentSpanID != seqStart.spanID {
+		t.Fatalf("task parentSpanID = %q, want seq spanID %q", taskStart.parentSpanID, seqStart.spanID)
+	}
+
+	// Pop the task span as popTaskAgentSpan does (finish_task completion).
+	tm.popTaskAgentSpan(ctx, taskID)
+
+	// Verify seq was NOT marked taskDelegated (defensive guard).
+	inv.mu.Lock()
+	for i := range inv.agentStack {
+		if inv.agentStack[i].name == "seq" && inv.agentStack[i].taskDelegated {
+			inv.mu.Unlock()
+			t.Errorf("seq was marked taskDelegated, but a non-LLM workflow agent must never be marked")
+			return
+		}
+	}
+	inv.mu.Unlock()
+}
+
+// TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent verifies that
+// popTaskAgentSpan still correctly marks a direct LLM parent (nonLLM ==
+// false) whose configured SubAgents include the task sub-agent. This is the
+// positive control for the !nonLLM guard.
+func TestTraceManager_PopTaskAgentSpan_MarksDirectLLMParent(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+
+	taskWorker, err := llmagent.New(llmagent.Config{
+		Name:        "task_worker",
+		Description: "executes tasks",
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(task_worker): %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:        "coordinator",
+		Description: "Coordinates",
+		SubAgents:   []agent.Agent{taskWorker},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	coordID := identity{invocationID: "inv-llm-parent", agentName: "coordinator", path: "coordinator@0"}
+	taskID := identity{invocationID: "inv-llm-parent", agentName: "task_worker", path: "coordinator@0/task_worker@1"}
+
+	tm.invocationSpan(contextRunning(coordinator), coordID, coordinator)
+	coordStart := tm.pushAgentSpan(contextRunning(coordinator), coordID)
+
+	// Verify coordinator is an LLM agent with task_worker as a child.
+	tm.mu.Lock()
+	inv := tm.invocations["inv-llm-parent"]
+	tm.mu.Unlock()
+	inv.mu.Lock()
+	var coordRec *spanRecord
+	for i := range inv.agentStack {
+		if inv.agentStack[i].name == "coordinator" {
+			coordRec = inv.agentStack[i]
+		}
+	}
+	inv.mu.Unlock()
+	if coordRec == nil {
+		t.Fatalf("coordinator span not found on the stack")
+	}
+	if coordRec.nonLLM {
+		t.Fatalf("coordinator.nonLLM = true, want false (coordinator is an LLM agent)")
+	}
+	if !slices.Contains(coordRec.children, "task_worker") {
+		t.Fatalf("coordinator.children = %v, want to contain \"task_worker\"", coordRec.children)
+	}
+
+	taskStart := tm.pushAgentSpan(contextRunning(taskWorker), taskID)
+	if taskStart.parentSpanID != coordStart.spanID {
+		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
+	}
+
+	tm.popTaskAgentSpan(ctx, taskID)
+
+	// Verify coordinator WAS marked taskDelegated.
+	inv.mu.Lock()
+	var marked bool
+	for i := range inv.agentStack {
+		if inv.agentStack[i].name == "coordinator" && inv.agentStack[i].taskDelegated {
+			marked = true
+		}
+	}
+	inv.mu.Unlock()
+	if !marked {
+		t.Errorf("coordinator was not marked taskDelegated, but a direct LLM parent should be marked")
+	}
+}
+
+// TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor verifies that
+// popTaskAgentSpan does NOT mark an ancestor LLM agent (coordinator) as
+// taskDelegated when the completing task (task_worker) is not in that
+// coordinator's configured SubAgents. This pins the slices.Contains guard.
+func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+
+	otherWorker, err := llmagent.New(llmagent.Config{
+		Name:        "other_worker",
+		Description: "other tasks",
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(other_worker): %v", err)
+	}
+	taskWorker, err := llmagent.New(llmagent.Config{
+		Name:        "task_worker",
+		Description: "executes tasks",
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(task_worker): %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:        "coordinator",
+		Description: "Coordinates",
+		SubAgents:   []agent.Agent{otherWorker}, // note: does NOT contain taskWorker
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	coordID := identity{invocationID: "inv-ancestor", agentName: "coordinator", path: "coordinator@0"}
+	taskID := identity{invocationID: "inv-ancestor", agentName: "task_worker", path: "coordinator@0/task_worker@1"}
+
+	tm.invocationSpan(contextRunning(coordinator), coordID, coordinator)
+	coordStart := tm.pushAgentSpan(contextRunning(coordinator), coordID)
+
+	taskStart := tm.pushAgentSpan(contextRunning(taskWorker), taskID)
+	if taskStart.parentSpanID != coordStart.spanID {
+		t.Fatalf("task parentSpanID = %q, want coordinator spanID %q", taskStart.parentSpanID, coordStart.spanID)
+	}
+
+	tm.popTaskAgentSpan(ctx, taskID)
+
+	// Verify coordinator was NOT marked taskDelegated because task_worker is not in its children.
+	tm.mu.Lock()
+	inv := tm.invocations["inv-ancestor"]
+	tm.mu.Unlock()
+	inv.mu.Lock()
+	for i := range inv.agentStack {
+		if inv.agentStack[i].name == "coordinator" && inv.agentStack[i].taskDelegated {
+			inv.mu.Unlock()
+			t.Errorf("coordinator was marked taskDelegated, but task_worker is not in coordinator's SubAgents")
+			return
+		}
+	}
+	inv.mu.Unlock()
 }
