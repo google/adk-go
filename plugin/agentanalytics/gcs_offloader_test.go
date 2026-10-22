@@ -723,6 +723,10 @@ func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
 			}
 
 			bp.resolveUploads(ctx, false, []map[string]any{row})
+			// This test never requeues. Drop a deferred upload the way a
+			// successful write does; that is what logs it. Other failures
+			// were already logged.
+			bp.clearDeferredUploads([]map[string]any{row})
 
 			if diff := cmp.Diff(want, row[columnContentParts]); diff != "" {
 				t.Errorf("content_parts changed (-want +got):\n%s", diff)
@@ -3656,6 +3660,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		reserveBytes: bp.tryReserveUploadBytes,
 	}
 	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row1[eventIDField] = "ev-requeue"
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after row1 reservation = %d, want 64", got)
 	}
@@ -3676,9 +3681,28 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		t.Fatal("tryReserveUploadBytes(1) succeeded while 64/64 bytes were held by deferred upload")
 	}
 
+	// Nothing has been requeued or dropped yet, so the failure is not logged.
+	if logger.contains("GCS upload failed for event ev-requeue") {
+		t.Fatalf("failure logged before requeueDeferredUploads:\n%s", logger)
+	}
+
 	// Requeuing the deferred upload for the next flush must keep the existing
 	// 64-byte reservation without double-counting it to 128 bytes.
 	bp.requeueDeferredUploads([]map[string]any{row1})
+	retryLines, plainLines := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-requeue") {
+			continue
+		}
+		if strings.Contains(line, "pending retry on next flush") {
+			retryLines++
+		} else if strings.Contains(line, "GCS upload failed") {
+			plainLines++
+		}
+	}
+	if retryLines != 1 || plainLines != 0 {
+		t.Fatalf("requeueDeferredUploads retry lines = %d, plain lines = %d, want 1 and 0:\n%s", retryLines, plainLines, logger)
+	}
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after requeueDeferredUploads = %d, want 64 (must not exceed cap 64)", got)
 	}
@@ -3694,6 +3718,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 	// Verify clearDeferredUploads also releases deferred bytes when a batch's
 	// BigQuery write succeeds and the deferred uploads are discarded.
 	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row2[eventIDField] = "ev-discard"
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after row2 reservation = %d, want 64", got)
 	}
@@ -3704,9 +3729,26 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes while row2 upload is deferred = %d, want 64", got)
 	}
+	if logger.contains("GCS upload failed for event ev-discard") {
+		t.Fatalf("discarded upload logged before clearDeferredUploads:\n%s", logger)
+	}
 	bp.clearDeferredUploads([]map[string]any{row2})
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Fatalf("pendingUploadBytes after clearDeferredUploads = %d, want 0", got)
+	}
+	discardPlain, discardRetry := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-discard") {
+			continue
+		}
+		if strings.Contains(line, "pending retry") {
+			discardRetry++
+		} else if strings.Contains(line, "GCS upload failed") {
+			discardPlain++
+		}
+	}
+	if discardPlain != 1 || discardRetry != 0 {
+		t.Errorf("clearDeferredUploads plain lines = %d, retry lines = %d, want 1 and 0:\n%s", discardPlain, discardRetry, logger)
 	}
 }
 
@@ -3830,8 +3872,19 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 	if got := contentPartsOf(t, rows[0])[0]["text"]; got != uploadFailedText {
 		t.Errorf("part text = %v, want %q", got, uploadFailedText)
 	}
-	if !logger.contains("GCS upload failed for event ev-close-fail") {
-		t.Errorf("expected GCS upload failure logged under Close caller deadline, got:\n%s", logger)
+	closePlain, closeRetry := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-close-fail") {
+			continue
+		}
+		if strings.Contains(line, "pending retry") {
+			closeRetry++
+		} else if strings.Contains(line, "GCS upload failed") {
+			closePlain++
+		}
+	}
+	if closePlain != 1 || closeRetry != 0 {
+		t.Errorf("Close plain lines = %d, retry lines = %d, want 1 and 0:\n%s", closePlain, closeRetry, logger)
 	}
 }
 
@@ -3945,6 +3998,14 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 		defer cancel()
 		bp.resolveUploads(ctx, false, []map[string]any{row})
+	}()
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		// The failure is logged when the deferred upload is discarded.
+		bp.clearDeferredUploads([]map[string]any{row})
 	}()
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Errorf("pendingUploadBytes = %d, want 0", got)

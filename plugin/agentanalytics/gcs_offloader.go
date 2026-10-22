@@ -478,10 +478,23 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	completedNormally = true
 }
 
+// deferredUploadFailure is the log context for one upload deferred in this pass.
+// It is not part of the queued payload.
+type deferredUploadFailure struct {
+	eventID string
+	partIdx int
+	size    int
+	summary string
+}
+
 type deferredRowUploads struct {
 	pending              []pendingUpload
 	builder              *contentSummaryBuilder
 	nonDeferredTruncated bool
+	// failures is log context for uploads deferred in this pass. The retry
+	// sentence is logged from requeueDeferredUploads, only when that upload
+	// is actually put back on the row.
+	failures []deferredUploadFailure
 }
 
 func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
@@ -495,6 +508,11 @@ func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
 		total += u.reserved
 	}
 	b.releaseUploadBytes(total)
+	// Release first so a panicking logger cannot keep the reservation.
+	for _, f := range d.failures {
+		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+			f.eventID, f.partIdx, f.size, f.summary)
+	}
 }
 
 func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
@@ -531,6 +549,10 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 			row[summaryBuilderKey] = d.builder
 		} else if hasText {
 			row["is_truncated"] = d.nonDeferredTruncated
+		}
+		for _, f := range d.failures {
+			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+				f.eventID, f.partIdx, f.size, f.summary)
 		}
 	}
 }
@@ -652,12 +674,21 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	}
 	if err != nil {
 		eventID, _ := t.row[eventIDField].(string)
+		summary := safeUploadErrorSummary(err)
 		if deferred {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
-				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
+			// Logged later: the plain failure when the upload is dropped, or
+			// the retry sentence when requeueDeferredUploads puts it back.
+			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
+				d.failures = append(d.failures, deferredUploadFailure{
+					eventID: eventID,
+					partIdx: u.partIdx,
+					size:    u.size(),
+					summary: summary,
+				})
+			}
 		} else {
 			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
+				eventID, u.partIdx, u.size(), summary)
 		}
 		if !u.isText {
 			t.part["text"] = uploadFailedText
