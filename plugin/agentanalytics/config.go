@@ -24,9 +24,13 @@ import (
 
 const (
 	// SchemaVersion is the version of the events table schema written by this
-	// plugin. It matches the version written by adk-python and is stamped as the
-	// adk_schema_version label on created BigQuery tables.
+	// plugin and stored under the schemaVersionKey table label. It matches the
+	// version written by adk-python so that writers in either language agree on
+	// the table schema version.
 	SchemaVersion = "2"
+	// schemaVersionKey is the BigQuery table label key that records the schema
+	// version.
+	schemaVersionKey = "adk_schema_version"
 )
 
 const (
@@ -75,6 +79,40 @@ type RetryConfig struct {
 // never written.
 type ContentFormatter func(payload any, eventType string) (any, error)
 
+// DropStats reports cumulative event-drop and formatter-failure counts across
+// the plugin's event processing pipeline.
+// TotalDrops sums locally discarded events and writes whose success could not
+// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
+// include rows committed before an acknowledgment was lost, so it is an upper
+// bound. FormatterFailureDrops separately counts payload replacement or
+// omission, which does not itself discard a row.
+type DropStats struct {
+	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
+	QueueFullDrops int64 `json:"queue_full_drops"`
+	// AppendFailureDrops counts events dropped because a plugin callback or row
+	// construction panicked (each recovered callback panic counts as at most 1
+	// failed event write; counts are approximate under rare logger panics), a
+	// batch write was skipped before sending because its write deadline had
+	// already expired or its desynchronized committed stream could not be
+	// replaced (including while stream rotation is in cooldown), or a BigQuery
+	// Storage Write append was rejected by the server or exhausted its retries.
+	// If the last attempt's outcome was unknown (sent, but no response), the
+	// rows may in fact have been written, so this is an upper bound.
+	AppendFailureDrops int64 `json:"append_failure_drops"`
+	// FormatterFailureDrops counts events whose payload was replaced with
+	// "[FORMATTER_FAILED]" (or omitted from content_parts) because
+	// ContentFormatter returned an error or panicked; this does not itself
+	// discard a row.
+	FormatterFailureDrops int64 `json:"formatter_failure_drops"`
+	// ShutdownDrops counts events rejected because Append was called after Close,
+	// or queued events dropped during Close because ShutdownTimeout expired
+	// before their batch could be written.
+	ShutdownDrops int64 `json:"shutdown_drops"`
+	// TotalDrops sums locally discarded events and writes whose success could
+	// not be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops).
+	TotalDrops int64 `json:"total_drops"`
+}
+
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
 	// Path is the object name within the bucket; it already includes
@@ -104,15 +142,27 @@ type GCSContentOffloader interface {
 // Config represents settings mapping to adk-python's BigQueryLoggerConfig.
 //
 // GCSClientOptions, MaxInlineTextSize, GCSMaxConcurrentUploads,
-// GCSUploadTimeout, GCSMaxPendingUploadBytes and GCSOffloader have no
-// counterpart in BigQueryLoggerConfig. adk-python uploads while it parses an
-// event, before the row is queued, with a Cloud Storage client built from the
+// GCSUploadTimeout, GCSMaxPendingUploadBytes, and GCSOffloader have no
+// counterpart in BigQueryLoggerConfig. adk-python declares
+// exactly_once_delivery and creates a COMMITTED write stream when enabled, but
+// differs in handling: after OutOfRange or an unexpected AlreadyExists, Go
+// replaces the stream and resends the batch within the same append, whereas
+// adk-python drops the batch and replaces the stream before the next one.
+// After a successful Send, Go treats only ambiguous transport errors
+// (Unavailable, DeadlineExceeded, Canceled, Aborted, Internal, Unknown) as an
+// unknown outcome, whereas adk-python treats stream-level errors as
+// rejections. DropStats has four counters, whereas adk-python's get_drop_stats()
+// returns ten per-reason counts. adk-python uploads while it parses an event,
+// before the row is queued, with a Cloud Storage client built from the
 // credentials of the plugin, a fixed 32 KiB inline text limit and the
-// parallelism of its thread pool. This plugin queues the payloads with their
-// rows and uploads them when a batch is flushed, before the batch is appended
-// to BigQuery. It therefore bounds the uploads of a batch (their parallelism,
-// their time, and the memory of the payloads that wait for them), and lets the
-// Cloud Storage client and the offloader be configured or replaced.
+// parallelism of its thread pool. This plugin queues payloads with rows and
+// uploads them at batch flush time, bounds upload concurrency and memory,
+// supports customizable offloaders, exposes atomic DropStats counters, and
+// optionally writes through a COMMITTED stream with explicit offsets when
+// ExactlyOnceDelivery is enabled. ExactlyOnceDelivery handles offset
+// desynchronization (rotating to a fresh stream without consuming append retry
+// attempts) and distinguishes ambiguous transport errors from definite server
+// rejections.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
@@ -120,10 +170,11 @@ type GCSContentOffloader interface {
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
-// logging, redaction of sensitive keys and credentials, and run-end flushing
-// are enabled by default; DisableSessionMetadata, DisableSensitiveKeyRedaction,
-// and DisableFlushOnRunEnd opt out of each. Created and upgraded tables carry
-// label adk_schema_version="2" ([SchemaVersion]), while
+// logging, redaction of sensitive keys and credentials, run-end flushing, and
+// additive schema upgrades are enabled by default; DisableSessionMetadata,
+// DisableSensitiveKeyRedaction, DisableFlushOnRunEnd, and DisableSchemaUpgrade
+// opt out of each. Created and upgraded tables carry label
+// adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
@@ -239,15 +290,18 @@ type Config struct {
 	DisableFlushOnRunEnd bool
 
 	// DisableSchemaUpgrade stops the plugin from adding missing columns to an
-	// existing table during initialization; a missing table is still created.
-	// The schema of an existing table is then neither inspected nor upgraded,
-	// so the table must already have every column that the plugin writes:
-	// every column of [EventsSchema], including event_id, except those in
-	// PayloadColumnDenylist. Otherwise construction succeeds, but every
+	// existing table during initialization; when bqClient is non-nil, table
+	// metadata is still read to check whether the table exists, and a missing
+	// table is still created. The schema of an existing table is then neither
+	// diffed nor upgraded, so the table must already have every column that the
+	// plugin writes: every column of [EventsSchema], including event_id, except
+	// those in PayloadColumnDenylist. Otherwise construction succeeds, but every
 	// AppendRows call fails with "Input schema has more fields than BigQuery
-	// schema" and every row is dropped. When false (the default), missing
-	// columns are added, which needs the bigquery.tables.update permission; a
-	// table that already has every column is not updated.
+	// schema" and every row is dropped. For pre-provisioned append-only
+	// deployments without bigquery.tables.get permission, pass bqClient == nil
+	// to [NewBigQueryAgentAnalyticsPluginWithClients]. When false (the default),
+	// missing columns are added, which needs the bigquery.tables.update
+	// permission; a table that already has every column is not updated.
 	DisableSchemaUpgrade bool
 
 	// EnableOTelCorrelation also writes the ambient OpenTelemetry trace and
@@ -323,6 +377,23 @@ type Config struct {
 	// GCSOffloader overrides the offloader built from GCSBucketName. The
 	// plugin does not close an offloader that the caller supplies.
 	GCSOffloader GCSContentOffloader
+
+	// ExactlyOnceDelivery writes through a COMMITTED write stream with
+	// explicit offsets instead of the default stream (for which event_id
+	// remains the row-level deduplication key), so that retrying an append
+	// whose outcome is unknown does not write the rows twice. Only ambiguous
+	// transport errors (e.g. Unavailable, DeadlineExceeded) mark a send as
+	// ambiguous; definite server rejections (e.g. InvalidArgument) leave
+	// the offset in sync. When an offset desynchronization occurs (e.g.
+	// OutOfRange, NotFound), the plugin rotates to a fresh COMMITTED stream
+	// at offset 0 without burning an append retry attempt; rotation
+	// frequency across batches is bounded by a cooldown window. Replacing a
+	// desynchronized stream consumes CreateWriteStream quota and finalizes the
+	// retired stream in the background. Close waits for any in-flight
+	// retired-stream finalizations and finalizes the active stream within the
+	// remaining ShutdownTimeout write budget, skipping finalization if
+	// draining queued rows already exhausted ShutdownTimeout.
+	ExactlyOnceDelivery bool
 }
 
 // DefaultConfig returns the default configuration for the agent analytics plugin.
