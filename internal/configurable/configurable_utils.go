@@ -379,6 +379,11 @@ func resolveConfigReference(parentPath, refPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// A link that stays inside the directory is accepted, but the agent is keyed
+	// by the real path so one config cannot be registered under two spellings.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
 	return abs, nil
 }
 

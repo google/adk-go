@@ -29,11 +29,11 @@ import (
 var (
 	// ErrNotValidRelativePath means that a path is considered not relative or invalid
 	ErrNotValidRelativePath = errors.New("the path is not valid relative path in the subtree")
-	// ErrSymlinkInRelativePath means that a path contains a symlink when it should not
+	// ErrSymlinkInRelativePath means that a path contains a link that resolves outside the base
 	ErrSymlinkInRelativePath = errors.New("relative path contains a symlink")
 )
 
-// SafeSubpath resolves rel below base without following links.
+// SafeSubpath resolves rel below base and checks that the result stays inside it.
 //
 // The base path must be absolute and is trusted. rel is not. On success the
 // result is the normalized absolute path and its base-relative equivalent.
@@ -42,8 +42,9 @@ var (
 // absolute, empty, escaping through "..", effectively empty, or (on Windows)
 // carrying a drive, a stream, a reserved device name or a trailing dot/space.
 // Returns ErrSymlinkInRelativePath iff a component of rel below base is a
-// symlink or another link-like entry; a link is refused even if it stays
-// inside base.
+// symlink or another link-like entry that resolves outside base. A link that
+// resolves inside base is accepted, which keeps Kubernetes ConfigMap and Secret
+// mounts (a "..data" link and per-key links) working, as in adk-python.
 // A component that does not exist, or that sits below a non-directory, is not
 // an error here: nothing below it can exist, so the path is returned and the
 // caller's read reports the real problem.
@@ -99,17 +100,63 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
 	}
 
-	hasLink, err := ContainsSymlink(absBase, r)
+	inside, err := resolvesInside(absBase, res)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-			return res, r, nil
-		}
-		return "", "", fmt.Errorf("cannot check for symlinks: %w", err)
+		return "", "", fmt.Errorf("cannot resolve links: %w", err)
 	}
-	if hasLink {
+	if !inside {
 		return "", "", ErrSymlinkInRelativePath
 	}
 	return res, r, nil
+}
+
+// resolvesInside reports whether target, with every link on the way resolved,
+// is still below base (itself resolved, so a symlinked base is trusted).
+func resolvesInside(base, target string) (bool, error) {
+	realBase, err := resolveExisting(base)
+	if err != nil {
+		return false, err
+	}
+	realTarget, err := resolveExisting(target)
+	if err != nil {
+		if errors.Is(err, errDangling) {
+			return false, nil
+		}
+		return false, err
+	}
+	rel, err := filepath.Rel(realBase, realTarget)
+	if err != nil {
+		return false, nil
+	}
+	return rel == "." || filepath.IsLocal(rel), nil
+}
+
+var errDangling = errors.New("dangling link")
+
+// resolveExisting resolves the links in the deepest existing prefix of p and
+// appends the rest as is: a component that does not exist, or sits below a
+// non-directory, cannot hide a link. A dangling link is errDangling, because
+// its destination is unknown.
+func resolveExisting(p string) (string, error) {
+	existing, rest := p, ""
+	for {
+		real, err := filepath.EvalSymlinks(existing)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+			return "", err
+		}
+		if _, lerr := os.Lstat(existing); lerr == nil {
+			return "", errDangling
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			return filepath.Join(existing, rest), nil
+		}
+		rest = filepath.Join(filepath.Base(existing), rest)
+		existing = parent
+	}
 }
 
 // return a slice of path elements for a given path

@@ -249,22 +249,16 @@ func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 	}
 }
 
-// TestResolveConfigReferenceRefusesLinksThatStayInside pins the one behavior
-// this check deliberately chose: a link is refused for being a link, not for
-// where it points, so a link wholly inside the config directory is refused too.
+// TestResolveConfigReferenceAcceptsLinksThatStayInside pins the behavior chosen
+// in review: a link is judged by where it resolves, not by being a link, so a
+// link wholly inside the config directory keeps loading (as in adk-python).
 //
-// Without this, an implementation that went back to resolving links and
-// refusing only those that leave the directory would pass the rest of the suite
-// unchanged — and it would carry the hole that motivated refusing them, since a
-// link pointing outside at a target that does not exist yet resolves to nothing
-// and passes containment.
-//
-// The projected-volume case is the cost of that choice, and it is the reason
-// this is a trade rather than a free win: the kubelet materializes a Kubernetes
-// ConfigMap as a `..data` symlink to a timestamped directory plus one symlink
-// per key, so every reference in such a mount is refused. Bazel runfiles
-// forests and Nix store paths have the same shape.
-func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
+// The projected-volume case is the one that motivated it: the kubelet
+// materializes a Kubernetes ConfigMap as a `..data` symlink to a timestamped
+// directory plus one symlink per key. Bazel runfiles forests and Nix store
+// paths have the same shape. Links that leave the directory stay refused; see
+// the SafeSubpath tests in internal/utils.
+func TestResolveConfigReferenceAcceptsLinksThatStayInside(t *testing.T) {
 	const nodeYAML = "name: join_node\nagent_class: JoinNode\n"
 
 	for _, tc := range []struct {
@@ -316,20 +310,26 @@ func TestResolveConfigReferenceRefusesLinksThatStayInside(t *testing.T) {
 			}
 			refPath := tc.layout(t, dir)
 
-			parentPath := dir
-			if _, err := resolveConfigReference(parentPath, refPath); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
-				t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a link inside the directory is refused for being a link",
-					parentPath, refPath, err, utils.ErrSymlinkInRelativePath)
+			got, err := resolveConfigReference(dir, refPath)
+			if err != nil {
+				t.Fatalf("resolveConfigReference(%q, %q) = %v, want success: a link that stays inside the directory keeps loading", dir, refPath, err)
+			}
+			want, err := filepath.EvalSymlinks(filepath.Join(dir, refPath))
+			if err != nil {
+				t.Fatalf("EvalSymlinks failed: %v", err)
+			}
+			if got != want {
+				t.Errorf("resolveConfigReference(%q, %q) = %q, want the real path %q", dir, refPath, got, want)
 			}
 		})
 	}
 }
 
-// TestResolveConfigReferenceRefusesAliasedDirectory covers a reference that
-// reaches a config through a symlinked directory below the base. Production
-// refuses it, so the same agent cannot be registered under two spellings: the
-// real path is the only key that can reach agentRegistry.
-func TestResolveConfigReferenceRefusesAliasedDirectory(t *testing.T) {
+// TestResolveConfigReferenceAliasedDirectoryShareKey covers a reference that
+// reaches a config through a symlinked directory below the base. It loads, and
+// the agent is keyed by the real path, so the same agent cannot be registered
+// under two spellings.
+func TestResolveConfigReferenceAliasedDirectoryShareKey(t *testing.T) {
 	base := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(base); err == nil {
 		base = resolved
@@ -354,16 +354,19 @@ func TestResolveConfigReferenceRefusesAliasedDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveConfigReference through the real directory failed: %v", err)
 	}
-	if _, err := resolveConfigReference(base, "alias/sub_agent.yaml"); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
-		t.Errorf("resolveConfigReference(%q, %q) = %v, want %v: a symlinked directory below the base is refused",
-			base, "alias/sub_agent.yaml", err, utils.ErrSymlinkInRelativePath)
+	aliasKey, err := resolveConfigReference(base, "alias/sub_agent.yaml")
+	if err != nil {
+		t.Fatalf("resolveConfigReference through an inside link failed: %v", err)
+	}
+	if aliasKey != realKey {
+		t.Errorf("alias key = %q, want the real key %q", aliasKey, realKey)
 	}
 
 	if _, err := ResolveAgentReference(context.Background(), base, "real/sub_agent.yaml"); err != nil {
 		t.Fatalf("ResolveAgentReference through the real directory failed: %v", err)
 	}
-	if _, err := ResolveAgentReference(context.Background(), base, "alias/sub_agent.yaml"); !errors.Is(err, utils.ErrSymlinkInRelativePath) {
-		t.Errorf("ResolveAgentReference through the symlinked directory = %v, want %v", err, utils.ErrSymlinkInRelativePath)
+	if _, err := ResolveAgentReference(context.Background(), base, "alias/sub_agent.yaml"); err != nil {
+		t.Errorf("ResolveAgentReference through an inside link failed: %v", err)
 	}
 	registryMu.RLock()
 	defer registryMu.RUnlock()
