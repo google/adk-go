@@ -41,10 +41,14 @@ type BatchProcessor struct {
 	config       Config
 	queue        chan map[string]any
 
-	appendMu    sync.RWMutex
-	flushMu     sync.Mutex
-	arrowSchema *arrow.Schema
-	allocator   memory.Allocator
+	appendMu sync.RWMutex
+	flushMu  sync.Mutex
+	// deferredBatch holds at most one batch whose BigQuery write was cut
+	// short by flushRunEnd's ShutdownTimeout; guarded by flushMu and
+	// drained before the queue by flush, flushRunEnd, and Close.
+	deferredBatch []map[string]any
+	arrowSchema   *arrow.Schema
+	allocator     memory.Allocator
 
 	// baseCtx carries the values of the context that NewBatchProcessor was
 	// given, without its cancellation. Every append, and every upload made
@@ -66,7 +70,8 @@ type BatchProcessor struct {
 	// uploadTimeout overrides Config.GCSUploadTimeout in tests.
 	uploadTimeout time.Duration
 	// uploadCooldownUntil holds a UnixNano deadline while uploads are paused
-	// after a batch-level GCSUploadTimeout expiration.
+	// after a batch-level GCSUploadTimeout expiration (or a fresh caller
+	// deadline expiring on the first upload batch of a run-end flush).
 	uploadCooldownUntil atomic.Int64
 
 	// pendingUploadBytes tracks total bytes currently held in memory by
@@ -179,6 +184,7 @@ func (b *BatchProcessor) releaseUploadBytes(n int64) {
 }
 
 func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
+	b.clearDeferredRowUploads(row)
 	delete(row, summaryBuilderKey)
 	pending, ok := row[rawPartsKey].([]pendingUpload)
 	if !ok {
@@ -190,6 +196,19 @@ func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
 		total += u.reserved
 	}
 	b.releaseUploadBytes(total)
+}
+
+func (b *BatchProcessor) hasPendingWorkLocked() bool {
+	return len(b.deferredBatch) > 0 || len(b.queue) > 0
+}
+
+func (b *BatchProcessor) nextBatchLocked() []map[string]any {
+	if len(b.deferredBatch) > 0 {
+		batch := b.deferredBatch
+		b.deferredBatch = nil
+		return batch
+	}
+	return b.drainQueue()
 }
 
 // Append adds a row to the processor queue asynchronously. If the queue is
@@ -254,11 +273,11 @@ Loop:
 }
 
 // writeAndLogBatch writes the batch and logs any errors.
-func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, batch []map[string]any) {
+func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
-	if err := b.writeBatchWithContexts(uploadCtx, writeCtx, batch); err != nil && b.config.Logger != nil {
+	if err := b.writeBatchWithContexts(uploadCtx, writeCtx, pauseOnCallerDeadline, batch); err != nil && b.config.Logger != nil {
 		b.config.Logger.Printf("ERROR: Failed to write batch to BigQuery: %v", err)
 	}
 }
@@ -267,10 +286,20 @@ func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
-	b.writeAndLogBatch(b.uploadCtx, b.baseCtx, batch)
+	b.writeAndLogBatch(b.uploadCtx, b.baseCtx, false, batch)
 }
 
-// flush drains the current queue and appends it. Uses TryLock to avoid blocking.
+func batchHasPendingUploads(batch []map[string]any) bool {
+	for _, row := range batch {
+		if pending, ok := row[rawPartsKey].([]pendingUpload); ok && len(pending) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// flush drains any deferredBatch and full batches from the queue and appends
+// them. Uses TryLock to avoid blocking.
 func (b *BatchProcessor) flush() {
 	// Ensure single flush execution at any moment
 	if !b.flushMu.TryLock() {
@@ -281,13 +310,13 @@ func (b *BatchProcessor) flush() {
 		return
 	}
 
-	batch := b.drainQueue()
+	batch := b.nextBatchLocked()
 	b.writeBatchBounded(batch)
 
 	// If the queue has enough items for another batch, drain and write synchronously
 	// unless shutdown has started (in which case Close drains under ShutdownTimeout).
 	for !b.closed.Load() && len(b.queue) >= b.config.BatchSize {
-		batch = b.drainQueue()
+		batch = b.nextBatchLocked()
 		b.writeBatchBounded(batch)
 	}
 }
@@ -295,9 +324,14 @@ func (b *BatchProcessor) flush() {
 // flushRunEnd drains and writes queued events synchronously under a single
 // ShutdownTimeout budget, skipping if a background flush is already running.
 // The uploads of each batch get at most half of what is left of the budget, so
-// that a Cloud Storage problem leaves time for the BigQuery write. Once a
-// batch's uploads time out, the batches after it skip Cloud Storage for a
-// while instead of each waiting for it (see resolveUploads).
+// that a Cloud Storage problem leaves time for the BigQuery write. If the first
+// batch with uploads times out while the run-end budget is still fresh, later
+// batches skip Cloud Storage for a while instead of each waiting for it (see
+// resolveUploads). If the run-end budget expires during a batch's BigQuery
+// write, the batch (along with any uploads that were cut short by the depleted
+// run-end deadline) is retained in deferredBatch for the next flush or Close;
+// as with other context expirations after a write is sent, this provides
+// at-least-once delivery if the server had already committed the batch.
 func (b *BatchProcessor) flushRunEnd() {
 	if !b.flushMu.TryLock() {
 		return
@@ -306,19 +340,41 @@ func (b *BatchProcessor) flushRunEnd() {
 	if b.closed.Load() {
 		return
 	}
-	flushCtx, cancel := context.WithTimeout(b.baseCtx, b.shutdownTimeout())
+	shutdownTimeout := b.shutdownTimeout()
+	flushCtx, cancel := context.WithTimeout(b.baseCtx, shutdownTimeout)
 	defer cancel()
 	// flushCtx always has a deadline: it is made by WithTimeout.
 	flushDeadline, _ := flushCtx.Deadline()
 
-	for !b.closed.Load() && len(b.queue) > 0 && flushCtx.Err() == nil {
-		batch := b.drainQueue()
+	firstUploadBatch := true
+	for !b.closed.Load() && b.hasPendingWorkLocked() && flushCtx.Err() == nil {
+		retry := len(b.deferredBatch) > 0
+		batch := b.nextBatchLocked()
 		if len(batch) == 0 {
 			break
 		}
-		uploadCtx, cancelUploads := context.WithDeadline(b.uploadCtx, time.Now().Add(time.Until(flushDeadline)/2))
-		b.writeAndLogBatch(uploadCtx, flushCtx, batch)
+		hasUploads := batchHasPendingUploads(batch)
+		remaining := time.Until(flushDeadline)
+		pauseOnCallerDeadline := firstUploadBatch && hasUploads && remaining >= shutdownTimeout*3/4
+		uploadCtx, cancelUploads := context.WithDeadline(b.uploadCtx, time.Now().Add(remaining/2))
+		b.resolveUploads(uploadCtx, pauseOnCallerDeadline, batch)
 		cancelUploads()
+		if hasUploads {
+			firstUploadBatch = false
+		}
+
+		if err := b.appendBatch(flushCtx, batch); err != nil {
+			if flushCtx.Err() != nil && !retry {
+				b.requeueDeferredUploads(batch)
+				b.deferredBatch = batch
+				return
+			}
+			for _, row := range batch {
+				b.releaseRowUploads(row)
+			}
+			b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+		}
+		b.clearDeferredUploads(batch)
 	}
 }
 
@@ -345,8 +401,8 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() {
 
 	writeLeft := b.shutdownTimeout()
 	uploadLeft := writeLeft / 2
-	for len(b.queue) > 0 {
-		batch := b.drainQueue()
+	for b.hasPendingWorkLocked() {
+		batch := b.nextBatchLocked()
 		if len(batch) == 0 {
 			break
 		}
@@ -361,7 +417,7 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() {
 		// A context whose time is up ends the uploads at once.
 		start := time.Now()
 		uploadCtx, cancelUploads := context.WithTimeout(b.baseCtx, uploadLeft)
-		b.resolveUploads(uploadCtx, batch)
+		b.resolveUploads(uploadCtx, false, batch)
 		cancelUploads()
 		uploadLeft -= time.Since(start)
 
@@ -372,6 +428,7 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() {
 		}
 		cancelWrite()
 		writeLeft -= time.Since(start)
+		b.clearDeferredUploads(batch)
 	}
 }
 
@@ -379,14 +436,16 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() {
 // Payloads queued for offloading are uploaded to Cloud Storage first, so that
 // the rows are final by the time they are serialized.
 func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any) error {
-	return b.writeBatchWithContexts(ctx, ctx, batch)
+	return b.writeBatchWithContexts(ctx, ctx, false, batch)
 }
 
 // writeBatchWithContexts uploads the payloads of batch under uploadCtx and
 // then appends the batch under writeCtx.
-func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Context, batch []map[string]any) error {
-	b.resolveUploads(uploadCtx, batch)
-	return b.appendBatch(writeCtx, batch)
+func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) error {
+	b.resolveUploads(uploadCtx, pauseOnCallerDeadline, batch)
+	err := b.appendBatch(writeCtx, batch)
+	b.clearDeferredUploads(batch)
+	return err
 }
 
 // appendBatch appends batch, whose uploads are resolved, to BigQuery under

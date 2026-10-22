@@ -50,9 +50,14 @@ type Logger interface {
 // write made by a background flush, including its retries and the backoff
 // between them, ends when ShutdownTimeout expires, while the writes made by a
 // run-end flush, and those made while Close drains the queue, share a single
-// ShutdownTimeout. If the attempts and backoff allowed by a RetryConfig take
-// longer than that, retrying stops when the timeout expires and the batch is
-// dropped.
+// ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
+// in-flight batch is deferred for at most one retry in the next flush
+// (background, run-end, or Close). This provides at-least-once delivery; if
+// the backend already committed the cut-off write, duplicates under the same
+// event_id can occur (and may differ if uploads cut short on the first attempt
+// succeed on retry; queries deduplicating by event_id should prefer rows where
+// storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
+// batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
 	MaxRetries   int
 	InitialDelay time.Duration
@@ -87,8 +92,9 @@ type GCSUploadRequest struct {
 // The plugin calls UploadContent from several goroutines at the same time.
 // GCSUploadRequest.Path is the object name within the bucket and already
 // includes Config.GCSPathPrefix. If UploadContent fails, a text part keeps its
-// truncated inline text in the BigQuery row, while a binary part's text is set
-// to "[UPLOAD FAILED]" and its raw bytes are not stored inline.
+// inline text (truncated to MaxContentLen) in the BigQuery row, while a binary
+// part's text is set to "[UPLOAD FAILED]" and its raw bytes are not stored
+// inline.
 // UploadContent must return soon after ctx is done: the plugin waits for the
 // uploads of a batch before writing it, and Close waits for that write.
 type GCSContentOffloader interface {
@@ -146,8 +152,13 @@ type Config struct {
 	// [RetryConfig]), and separately bounds a whole run-end flush (see
 	// DisableFlushOnRunEnd) and the BigQuery writes of the drain of queued
 	// rows during Close. The drain starts once a background write that is
-	// already in flight has finished. Rows whose write is still unfinished
-	// when the timeout expires are dropped; Close logs each batch it drops.
+	// already in flight has finished. In a run-end flush, an in-flight batch
+	// that times out is deferred for at most one retry in the next flush
+	// (background, run-end, or Close); rows whose write remains unfinished
+	// after retrying or when the timeout expires during Close are dropped.
+	// (Duplicates under the same event_id can occur and may differ if cut-short
+	// uploads succeed on retry; prefer rows with GCS_REFERENCE storage_mode).
+	// Close logs each batch it drops.
 	//
 	// Cloud Storage uploads (see GCSBucketName) do not use up the time that
 	// the writes of the drain have: the uploads of all the queued rows share
@@ -223,7 +234,8 @@ type Config struct {
 	// invocation completes. When false (the default), AfterRunCallback flushes
 	// queued events, skipping the flush if a background flush is already
 	// running. A single ShutdownTimeout bounds the whole flush; rows that are
-	// still queued when it expires are left for a later flush.
+	// still queued (or an in-flight batch deferred after a write timeout) when
+	// it expires are left for a later flush.
 	DisableFlushOnRunEnd bool
 
 	// DisableSchemaUpgrade stops the plugin from adding missing columns to an
@@ -280,13 +292,23 @@ type Config struct {
 	GCSMaxConcurrentUploads int
 	// GCSUploadTimeout bounds how long a batch waits for its Cloud Storage
 	// uploads. The parts whose uploads are not finished by then fall back: a
-	// text part keeps its truncated inline text, and a binary part's text is
-	// set to "[UPLOAD FAILED]", its raw bytes not being stored inline. After
-	// the uploads of a batch time out, the plugin stops calling the offloader
-	// for another GCSUploadTimeout: every batch in that time falls back at
-	// once, so that an outage does not make each batch wait in turn. The
-	// deadline of a run-end flush or of Close (see ShutdownTimeout) pauses the
-	// uploads in the same way when it ends them first. Values <= 0 mean 10s.
+	// text part keeps its inline text (truncated to MaxContentLen), and a
+	// binary part's text is set to "[UPLOAD FAILED]", its raw bytes not being
+	// stored inline. When the uploads of a batch time out without any upload
+	// succeeding, or when an in-flight upload times out during the batch timeout
+	// (partial outage backoff), the plugin stops calling the offloader for
+	// another GCSUploadTimeout: every batch in that time falls back at once, so
+	// that an outage does not make each batch wait in turn. The deadline
+	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
+	// the uploads when it is still fresh (at least three quarters of
+	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
+	// without any upload in the batch succeeding (a run-end flush allocates half
+	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
+	// than twice the typical upload latency may pause uploads if storage does
+	// not finish within that slice), whereas a batch where at least one upload
+	// succeeded, an already-depleted budget (less than three quarters
+	// remaining), or a budget during Close does not pause.
+	// Values <= 0 mean 10s.
 	GCSUploadTimeout time.Duration
 	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by
 	// pending Cloud Storage uploads across queued rows. When reserving an

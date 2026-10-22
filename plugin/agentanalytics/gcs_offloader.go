@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -44,6 +45,13 @@ const (
 	// contentSummaryBuilder when a row has pending text uploads. Like
 	// rawPartsKey, it is deleted by resolveUploads before Arrow encoding.
 	summaryBuilderKey = "_summary_builder"
+
+	// deferredUploadsKey holds a *deferredRowUploads on a row whose uploads
+	// were cut short by a depleted caller deadline (!pauseOnCallerDeadline), so
+	// that if the batch's subsequent BigQuery write in flushRunEnd also runs
+	// out of flushCtx and the batch is deferred to the next flush, those
+	// uploads are retried under the next flush's budget.
+	deferredUploadsKey = "_deferred_uploads"
 
 	// mediaOffloadedText is the text of an uploaded binary part.
 	mediaOffloadedText = "[MEDIA OFFLOADED]"
@@ -290,26 +298,33 @@ type uploadTask struct {
 // "[UPLOAD FAILED]", its raw bytes not being stored inline.
 //
 // Uploads run concurrently, at most GCSMaxConcurrentUploads at a time, under a
-// single batch-level timeout that ctx can end sooner. If a deadline ends the
-// uploads of a batch, whether that timeout or the deadline of ctx, Cloud
-// Storage is not keeping up: the uploads are paused for the length of the
+// single batch-level timeout that ctx can end sooner. If the batch's own
+// GCSUploadTimeout ends the uploads after at least one upload started and
+// either an in-flight upload timed out under the batch deadline or no upload
+// in the batch succeeded (or if pauseOnCallerDeadline is true and the fresh
+// deadline of ctx ends them first without any upload in the batch succeeding),
+// Cloud Storage is not keeping up: the uploads are paused for the length of the
 // timeout, and the batches resolved in that time do not call the offloader but
-// fall back at once, so a Cloud Storage outage does not make every batch wait
-// in turn. A ctx that is canceled, or that is already done when resolveUploads
-// is called, says nothing about Cloud Storage and pauses nothing.
+// fall back at once, so neither a full Cloud Storage outage nor a partial
+// brownout makes every batch wait in turn. A depleted caller deadline
+// (pauseOnCallerDeadline == false), a caller deadline when at least one upload
+// succeeded, a ctx that is canceled, or a ctx that is already done before any
+// upload starts says nothing about Cloud Storage and pauses nothing.
 // resolveUploads does not reserve any of ctx for the caller's own work: a
 // caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, batch []map[string]any) {
+func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
 	}
 	var tasks []*uploadTask
 	var summaries []rowSummary
-	var reservedTotal int64
-	for _, row := range batch {
+	var reservedTotal, deferredReserved int64
+	for i := range batch {
+		row := batch[i]
+		b.clearDeferredRowUploads(row)
 		builder, _ := row[summaryBuilderKey].(*contentSummaryBuilder)
 		delete(row, summaryBuilderKey)
 		pending, ok := row[rawPartsKey].([]pendingUpload)
@@ -317,6 +332,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, batch []map[string]
 			continue
 		}
 		delete(row, rawPartsKey)
+		origTruncated, _ := row["is_truncated"].(bool)
 		parts, _ := row[columnContentParts].([]map[string]any)
 		hasRowTasks := false
 		for _, u := range pending {
@@ -333,14 +349,30 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, batch []map[string]
 				path:    b.objectPath(row, u),
 			})
 		}
-		if hasRowTasks && builder != nil {
-			summaries = append(summaries, rowSummary{row: row, builder: builder})
+		if hasRowTasks {
+			if !pauseOnCallerDeadline {
+				row[deferredUploadsKey] = &deferredRowUploads{
+					builder:              builder,
+					nonDeferredTruncated: origTruncated,
+				}
+			}
+			if builder != nil {
+				summaries = append(summaries, rowSummary{row: row, builder: builder})
+			}
 		}
 	}
-	defer b.releaseUploadBytes(reservedTotal)
+	var completedNormally bool
+	defer func() {
+		if !completedNormally {
+			b.releaseUploadBytes(reservedTotal)
+		} else {
+			b.releaseUploadBytes(reservedTotal - deferredReserved)
+		}
+	}()
 
 	offloader := b.config.GCSOffloader
 	if len(tasks) == 0 || offloader == nil {
+		b.clearDeferredUploads(batch)
 		if offloader == nil {
 			for _, t := range tasks {
 				if t.pending.isText {
@@ -357,21 +389,23 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, batch []map[string]
 				s.builder.applyToRow(s.row)
 			}
 		}
+		completedNormally = true
 		return
 	}
 
 	uploadTimeout := cmp.Or(b.uploadTimeout, b.config.GCSUploadTimeout, gcsUploadTimeout)
 	if until := b.uploadCooldownUntil.Load(); until > 0 && time.Now().UnixNano() < until {
+		b.clearDeferredUploads(batch)
 		for _, t := range tasks {
 			t.err = errUploadCooldown
-			b.applyUpload(t)
+			b.applyUpload(t, false)
 		}
 		for _, s := range summaries {
 			s.builder.applyToRow(s.row)
 		}
+		completedNormally = true
 		return
 	}
-	callerLive := ctx.Err() == nil
 	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
 
@@ -381,36 +415,123 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, batch []map[string]
 	}
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
+	var anyStarted, anySucceeded, anyStalledOnBatchTimeout atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			t.uri, t.err = b.upload(uploadCtx, offloader, t)
+			var started bool
+			t.uri, t.err, started = b.upload(uploadCtx, offloader, t)
+			if started {
+				anyStarted.Store(true)
+				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
+					anyStalledOnBatchTimeout.Store(true)
+				}
+			}
+			if t.err == nil && strings.HasPrefix(t.uri, "gs://") {
+				anySucceeded.Store(true)
+			}
 		}()
 	}
 	wg.Wait()
 
-	// Any deadline that ends the uploads of a live ctx pauses them: the
-	// batches that follow would wait for the same stalled Cloud Storage. A
-	// ctx that was done on arrival, or is canceled, proves nothing about it.
-	if callerLive && errors.Is(uploadCtx.Err(), context.DeadlineExceeded) {
+	// Pause uploads when at least one upload started and:
+	//   - the batch's own GCSUploadTimeout expired (ctx.Err() == nil) and either
+	//     an in-flight upload timed out under the batch deadline (brownout) or
+	//     no upload in the batch succeeded, or
+	//   - a fresh caller deadline allowed to pause (pauseOnCallerDeadline)
+	//     expired with no upload in the batch succeeding.
+	batchTimedOut := errors.Is(uploadCtx.Err(), context.DeadlineExceeded) &&
+		((ctx.Err() == nil && (anyStalledOnBatchTimeout.Load() || !anySucceeded.Load())) ||
+			(pauseOnCallerDeadline && !anySucceeded.Load()))
+	if anyStarted.Load() && batchTimedOut {
 		b.uploadCooldownUntil.Store(time.Now().Add(uploadTimeout).UnixNano())
-	} else {
-		for _, t := range tasks {
-			if t.err == nil {
-				b.uploadCooldownUntil.Store(0)
-				break
-			}
-		}
+	} else if anySucceeded.Load() {
+		b.uploadCooldownUntil.Store(0)
 	}
 
+	callerExpired := !pauseOnCallerDeadline && ctx.Err() != nil
 	for _, t := range tasks {
-		b.applyUpload(t)
+		deferred := false
+		if callerExpired && (errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && uploadCtx.Err() != nil)) {
+			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
+				d.pending = append(d.pending, t.pending)
+				deferredReserved += t.pending.reserved
+				deferred = true
+			}
+		}
+		if !deferred && t.err != nil && t.pending.isText && t.pending.fallbackTruncated {
+			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
+				d.nonDeferredTruncated = true
+			}
+		}
+		b.applyUpload(t, deferred)
+	}
+	if !callerExpired {
+		b.clearDeferredUploads(batch)
 	}
 	for _, s := range summaries {
 		s.builder.applyToRow(s.row)
+	}
+	completedNormally = true
+}
+
+type deferredRowUploads struct {
+	pending              []pendingUpload
+	builder              *contentSummaryBuilder
+	nonDeferredTruncated bool
+}
+
+func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
+	d, ok := row[deferredUploadsKey].(*deferredRowUploads)
+	delete(row, deferredUploadsKey)
+	if !ok {
+		return
+	}
+	var total int64
+	for _, u := range d.pending {
+		total += u.reserved
+	}
+	b.releaseUploadBytes(total)
+}
+
+func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
+	for _, row := range batch {
+		b.clearDeferredRowUploads(row)
+	}
+}
+
+func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
+	for _, row := range batch {
+		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
+		delete(row, deferredUploadsKey)
+		if !ok || len(d.pending) == 0 {
+			continue
+		}
+		parts, _ := row[columnContentParts].([]map[string]any)
+		hasText := false
+		for _, u := range d.pending {
+			if u.slot >= 0 && u.slot < len(parts) && !u.isText {
+				parts[u.slot]["text"] = inlineDataText
+			}
+			if u.isText {
+				hasText = true
+				if d.builder != nil {
+					d.builder.omitTextFromSummary(u.contentOrd, u.partIdx)
+				}
+			}
+		}
+		row[rawPartsKey] = d.pending
+		if d.builder != nil {
+			if hasText {
+				d.builder.applyToRow(row)
+			}
+			row[summaryBuilderKey] = d.builder
+		} else if hasText {
+			row["is_truncated"] = d.nonDeferredTruncated
+		}
 	}
 }
 
@@ -502,26 +623,28 @@ func stripURIQueries(msg string) string {
 // panic in it is turned into an error that names only its type. Once ctx is
 // done the offloader is no longer called, which is what ends the uploads that
 // were still waiting for their turn.
-func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, err error) {
+func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, err error, started bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			uri, err = "", offloaderPanicError{valueType: fmt.Sprintf("%T", r)}
 		}
 	}()
 	if cerr := ctx.Err(); cerr != nil {
-		return "", cerr
+		return "", cerr, false
 	}
-	return offloader.UploadContent(ctx, GCSUploadRequest{
+	started = true
+	uri, err = offloader.UploadContent(ctx, GCSUploadRequest{
 		Path:        t.path,
 		Data:        t.pending.payload(),
 		ContentType: t.pending.contentType(),
 	})
+	return uri, err, started
 }
 
 // applyUpload rewrites the content_parts entry of a successful upload to
 // refer to the object, and logs a failed one. The entry already has the MIME
 // type of the part, as it was queued with the one that is uploaded.
-func (b *BatchProcessor) applyUpload(t *uploadTask) {
+func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	u := t.pending
 	err := t.err
 	if err == nil && !strings.HasPrefix(t.uri, "gs://") {
@@ -529,8 +652,13 @@ func (b *BatchProcessor) applyUpload(t *uploadTask) {
 	}
 	if err != nil {
 		eventID, _ := t.row[eventIDField].(string)
-		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-			eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
+		if deferred {
+			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
+		} else {
+			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
+		}
 		if !u.isText {
 			t.part["text"] = uploadFailedText
 		} else {
