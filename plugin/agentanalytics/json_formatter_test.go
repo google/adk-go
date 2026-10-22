@@ -28,6 +28,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
 )
 
 func TestFormatContentParts(t *testing.T) {
@@ -4059,5 +4061,64 @@ func TestPartsCollector_QueuedTextDoesNotMarkTruncated(t *testing.T) {
 	}
 	if !cRejected.truncated || !cRejected.nonUploadTruncated {
 		t.Errorf("truncated=%v nonUploadTruncated=%v, want both true when reservation fails", cRejected.truncated, cRejected.nonUploadTruncated)
+	}
+}
+
+func TestContentSummary_PartWithTextAndFileDataPrecedence(t *testing.T) {
+	c := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{
+				Text:     "should be ignored in summary",
+				FileData: &genai.FileData{FileURI: "gs://bucket/file.png", MIMEType: "image/png"},
+			},
+		},
+	}
+	m := newMessageSummary(c, 0, 100, false)
+	if len(m.pieces) != 0 {
+		t.Fatalf("m.pieces len = %d, want 0 (FileData takes precedence over Text in contentSummary)", len(m.pieces))
+	}
+}
+
+func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: strings.Repeat("x", 50)},
+				},
+			},
+		},
+	}
+	parts := &partsCollector{
+		opts: partsOptions{
+			maxLen:       10,
+			offload:      true,
+			inlineLimit:  5,
+			reserveBytes: func(int) bool { return true },
+		},
+	}
+	_, _, builder := buildLLMRequestContent(req, 10, false, true, parts)
+	if builder == nil {
+		t.Fatal("builder is nil")
+	}
+	if len(parts.pending) != 1 {
+		t.Fatalf("pending len = %d, want 1", len(parts.pending))
+	}
+	u := parts.pending[0]
+	if !u.fallbackTruncated {
+		t.Fatalf("fallbackTruncated = false, want true")
+	}
+
+	row := map[string]any{"event_type": EventLLMRequest}
+	builder.retainInlineSummary(u.contentOrd, u.partIdx, "xxxxxxxxxx[TRUNCATED]", u.fallbackTruncated)
+	builder.applyToRow(row)
+
+	if _, ok := row[columnContent]; ok {
+		t.Errorf("row[%q] is set, want omitted when contentDenied is true", columnContent)
+	}
+	if got, _ := row["is_truncated"].(bool); !got {
+		t.Errorf("row[is_truncated] = %v, want true (pinned by hasFailedUploadTruncated)", row["is_truncated"])
 	}
 }

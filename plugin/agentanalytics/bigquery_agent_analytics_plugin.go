@@ -1226,6 +1226,7 @@ func buildLLMRequestContent(req *model.LLMRequest, maxLen int, redact, contentDe
 		}
 	}
 	content, contentTruncated = b.buildContent()
+	b.needsRebuild = false
 	return content, contentTruncated, b
 }
 
@@ -1277,6 +1278,7 @@ func buildLLMResponseContent(res *model.LLMResponse, maxLen int, redact, content
 		b.usage = usage
 	}
 	content, contentTruncated = b.buildContent()
+	b.needsRebuild = false
 	if len(content) == 0 {
 		return nil, false, nil
 	}
@@ -1702,6 +1704,7 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 			}
 		}
 		content, contentTruncated = builder.buildContent()
+		builder.needsRebuild = false
 		preFormatted = true
 	case *model.LLMRequest:
 		content, contentTruncated, builder = buildLLMRequestContent(v, maxLen, redact, contentDenied, parts)
