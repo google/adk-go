@@ -134,6 +134,50 @@ func TestUnsupportedPayload_EmittingMediaDoesNotHideAnythingElse(t *testing.T) {
 	if got := UnsupportedPayload(part, PartFieldMedia); got != "ExecutableCode" {
 		t.Errorf("UnsupportedPayload(PartFieldMedia) = %q, want %q", got, "ExecutableCode")
 	}
+	if got := UnsupportedPayload(part, PartFieldMedia, PartFieldCodeExecution); got != "" {
+		t.Errorf("UnsupportedPayload(PartFieldMedia, PartFieldCodeExecution) = %q, want %q", got, "")
+	}
+}
+
+func TestCodeExecutionText(t *testing.T) {
+	tests := []struct {
+		name string
+		part *genai.Part
+		want string
+	}{
+		{name: "nil", part: nil, want: ""},
+		{name: "neither field", part: &genai.Part{Text: "hi"}, want: ""},
+		{
+			name: "code",
+			part: &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+			want: "Code:```python\nprint(1)\n```",
+		},
+		{
+			name: "result",
+			part: &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}},
+			want: "Execution Result:```code_output\n1\n```",
+		},
+		{
+			name: "both, code first",
+			part: &genai.Part{
+				ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+				CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+			},
+			want: "Code:```python\nprint(1)\n```\nExecution Result:```code_output\n1\n```",
+		},
+		{
+			name: "empty code is still labeled",
+			part: &genai.Part{ExecutableCode: &genai.ExecutableCode{}},
+			want: "Code:```python\n\n```",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CodeExecutionText(tt.part); got != tt.want {
+				t.Errorf("CodeExecutionText() = %q, want %q", got, tt.want)
+			}
+		})
+	}
 }
 
 // TestReplayedReasoning_MediaStillDisqualifies states that the drop was not

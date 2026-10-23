@@ -138,9 +138,13 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		// Checked first, so a field this package cannot send is named even when
 		// text or a call on the same part would otherwise carry it out unnoticed.
 		// Media is excluded from the report because it is emitted below.
-		if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
+		if field := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution); field != "" {
 			return nil, fmt.Errorf("openai: unsupported content part: %s", field)
 		}
+		// Code execution has no wire field here. It goes out as the same
+		// fenced text the Responses path sends, so a Gemini turn replayed
+		// into this conversation is not dropped.
+		codeText := shared.CodeExecutionText(part)
 		// Classified before any of the part is emitted, so media that cannot be
 		// labeled fails the request instead of leaving with the text beside it.
 		media, err := shared.ClassifyMedia(part)
@@ -160,6 +164,10 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 			texts = append(texts, part.Text)
 			pieces = append(pieces, contentPiece{text: part.Text})
 		}
+		if codeText != "" {
+			texts = append(texts, codeText)
+			pieces = append(pieces, contentPiece{text: codeText})
+		}
 		for i := range media {
 			pieces = append(pieces, contentPiece{media: &media[i]})
 			hasMedia = true
@@ -177,7 +185,7 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 				return nil, err
 			}
 			messages = append(messages, *msg)
-		case !sendText && len(media) == 0 && !shared.ReplayedReasoning(part):
+		case !sendText && codeText == "" && len(media) == 0 && !shared.ReplayedReasoning(part):
 			return nil, errors.New("openai: unsupported content part: carries nothing to send")
 		}
 	}
