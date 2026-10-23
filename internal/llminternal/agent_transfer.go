@@ -26,11 +26,11 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
-	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // From src/google/adk/flows/llm_flows/auto_flow.py
@@ -265,17 +265,17 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 
 	var declarations []*genai.FunctionDeclaration
 
-	for i, tool := range tools {
-		if tool == nil || tool.Name() == "" {
-			return fmt.Errorf("tools[%d] tool without name: %v", i, tool)
+	for i, t := range tools {
+		if t == nil || t.Name() == "" {
+			return fmt.Errorf("tools[%d] tool without name: %v", i, t)
 		}
-		name := tool.Name()
+		name := t.Name()
 		if _, ok := r.Tools[name]; ok {
 			return fmt.Errorf("tools[%d] duplicate tool: %q", i, name)
 		}
-		r.Tools[name] = tool
+		r.Tools[name] = t
 
-		if fnTool, ok := tool.(toolinternal.FunctionTool); ok {
+		if fnTool, ok := tool.As[toolutils.Tool](t); ok {
 			if decl := fnTool.Declaration(); decl != nil {
 				// TODO: verify for duplicates.
 				declarations = append(declarations, decl)
