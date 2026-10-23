@@ -574,6 +574,119 @@ func TestRunLiveCloseStopsIdleSession(t *testing.T) {
 	assertNoRunLiveLeak(t, baseline)
 }
 
+// TestRunLiveSkipsNilRealtimeInput checks that a nil pointer of a documented
+// RealtimeInput type sends nothing. The sender goroutine used to dereference a
+// nil *genai.Blob, and its panic ended the process.
+func TestRunLiveSkipsNilRealtimeInput(t *testing.T) {
+	tests := []struct {
+		name   string
+		inputs []any
+		want   []string
+	}{
+		{
+			name:   "nil pointers",
+			inputs: []any{(*genai.Blob)(nil), (*genai.ActivityStart)(nil), (*genai.ActivityEnd)(nil)},
+		},
+		{
+			name:   "non-nil pointers",
+			inputs: []any{&genai.Blob{Data: []byte{1, 2}, MIMEType: "audio/pcm"}, &genai.ActivityStart{}, &genai.ActivityEnd{}},
+			want: []string{
+				`{"realtimeInput":{"mediaChunks":[{"data":"AQI=","mimeType":"audio/pcm"}]}}`,
+				`{"realtimeInput":{"activityStart":{}}}`,
+				`{"realtimeInput":{"activityEnd":{}}}`,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frames := make(chan string, len(tc.inputs)+1)
+			client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+				for {
+					_, msg, err := conn.ReadMessage()
+					if err != nil {
+						return
+					}
+					frames <- string(msg)
+				}
+			})
+			f := &Flow{
+				Model:             &fakeLiveModel{client: client},
+				RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+			}
+			ctx, cancel := newLiveInvocationContext(t)
+			defer cancel()
+
+			sess, seq, err := f.RunLive(ctx)
+			if err != nil {
+				t.Fatalf("RunLive failed: %v", err)
+			}
+			defer func() { _ = sess.Close() }()
+			// Drain the events. While an event waits for a reader, the flow
+			// reads no sender errors, so a failed send would hang the next
+			// Send.
+			go func() {
+				for range seq {
+				}
+			}()
+
+			for _, in := range tc.inputs {
+				if err := sess.Send(agent.LiveRequest{RealtimeInput: in}); err != nil {
+					t.Fatalf("Send(%T) failed: %v", in, err)
+				}
+			}
+			// Requests are sent in order, so every frame before this turn's
+			// came from the inputs. The nil Blob checks that a skipped
+			// RealtimeInput does not drop the Content sent with it.
+			if err := sess.Send(agent.LiveRequest{Content: genai.NewContentFromText("done", "user"), RealtimeInput: (*genai.Blob)(nil)}); err != nil {
+				t.Fatalf("Send(Content) failed: %v", err)
+			}
+			var got []string
+		read:
+			for {
+				select {
+				case msg := <-frames:
+					if strings.Contains(msg, `"clientContent"`) {
+						break read
+					}
+					got = append(got, msg)
+				case <-time.After(10 * time.Second):
+					t.Fatalf("the turn after the inputs was never sent; %d other frames arrived", len(got))
+				}
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("frames sent for the inputs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestHasRealtimeInput(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want bool
+	}{
+		{"untyped nil", nil, false},
+		{"nil blob", (*genai.Blob)(nil), false},
+		{"nil activity start", (*genai.ActivityStart)(nil), false},
+		{"nil activity end", (*genai.ActivityEnd)(nil), false},
+		{"blob", &genai.Blob{}, true},
+		{"activity start", &genai.ActivityStart{}, true},
+		{"activity end", &genai.ActivityEnd{}, true},
+		// Passed on, so that SendRealtime reports it as unsupported.
+		{"unsupported type", genai.Blob{}, true},
+		{"nil unsupported pointer", (*genai.Content)(nil), true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasRealtimeInput(tc.in); got != tc.want {
+				t.Errorf("hasRealtimeInput(%T) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 type longRunningMockTool struct{ mockFunctionTool }
 
 func (*longRunningMockTool) IsLongRunning() bool { return true }
