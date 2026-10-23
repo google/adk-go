@@ -158,9 +158,13 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.StructuredContent != nil {
-		return map[string]any{
-			"output": res.StructuredContent,
-		}, nil
+		out := map[string]any{"output": res.StructuredContent}
+		// Text blocks usually duplicate the structured output; keep only
+		// results that carry other blocks, such as embedded resources.
+		if hasNonTextContent(res.Content) {
+			out["content"] = formatMCPContent(res.Content)
+		}
+		return out, nil
 	}
 
 	content := formatMCPContent(res.Content)
@@ -168,6 +172,15 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	return map[string]any{
 		"output": content,
 	}, nil
+}
+
+func hasNonTextContent(contents []mcp.Content) bool {
+	for _, c := range contents {
+		if _, ok := c.(*mcp.TextContent); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 type formattedMCPContent struct {
