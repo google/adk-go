@@ -2644,16 +2644,19 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 		name           string
 		stalledBatch   int
 		partialSuccess bool
+		uploadDelay    time.Duration
 	}{
-		{name: "partial outage in first batch", partialSuccess: true},
-		{name: "outage in later batch", stalledBatch: 1},
-		{name: "partial outage in later batch", stalledBatch: 1, partialSuccess: true},
+		{name: "partial outage in first batch", partialSuccess: true, uploadDelay: 100 * time.Millisecond},
+		{name: "outage in later batch", stalledBatch: 1, uploadDelay: 100 * time.Millisecond},
+		{name: "partial outage in later batch", stalledBatch: 1, partialSuccess: true, uploadDelay: 100 * time.Millisecond},
+		{name: "outage after slow first batch", stalledBatch: 1, uploadDelay: 2800 * time.Millisecond},
+		{name: "partial outage after slow first batch", stalledBatch: 1, partialSuccess: true, uploadDelay: 2800 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
 					if int(req.Data[0])/2 < tt.stalledBatch || (tt.partialSuccess && req.Data[0]%2 == 0) {
-						time.Sleep(100 * time.Millisecond)
+						time.Sleep(tt.uploadDelay)
 						return nil
 					}
 					<-ctx.Done()
@@ -2671,7 +2674,8 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 				stream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}, sendDelay: 100 * time.Millisecond}
 				bp.streamWriter.stream = stream
 				opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50, reserveBytes: bp.tryReserveUploadBytes}
-				for i := range 6 {
+				const rowCount = 16
+				for i := range rowCount {
 					row := queuedRow(opts, imageContent(byte(i)))
 					row["event_type"] = EventLLMRequest
 					bp.queue <- row
@@ -2689,8 +2693,8 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 				for _, req := range stream.requests() {
 					rows = append(rows, decodeArrowRows(t, req)...)
 				}
-				if len(rows) != 6 {
-					t.Fatalf("persisted rows = %d, want 6", len(rows))
+				if len(rows) != rowCount {
+					t.Fatalf("persisted rows = %d, want %d", len(rows), rowCount)
 				}
 				for i, row := range rows {
 					wantMode := storageModeInline
@@ -3002,7 +3006,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			wantPaused: true,
 		},
 		{
-			name:                  "a depleted deadline of the caller runs out before the upload timeout",
+			name:                  "caller deadline not allowed to pause uploads",
 			uploadTimeout:         time.Minute,
 			pauseOnCallerDeadline: false,
 			newCtx: func(t *testing.T) context.Context {
@@ -3133,8 +3137,16 @@ func TestResolveUploads_RunEndStallDetection(t *testing.T) {
 		earlyTimeout  bool
 		wantPaused    bool
 	}{
-		{name: "depleted deadline", callerTimeout: time.Second},
-		{name: "minimum stall duration", callerTimeout: 3 * time.Second, wantPaused: true},
+		{name: "window below floor", callerTimeout: time.Second - time.Nanosecond},
+		{name: "window at floor", callerTimeout: time.Second, wantPaused: true},
+		{name: "just below floor", callerTimeout: 1200 * time.Millisecond, firstDelay: 200*time.Millisecond + time.Nanosecond, concurrency: 1},
+		{name: "at floor", callerTimeout: 1200 * time.Millisecond, firstDelay: 200 * time.Millisecond, concurrency: 1, wantPaused: true},
+		{name: "just below relative threshold", callerTimeout: 2 * time.Second, firstDelay: 500*time.Millisecond + time.Nanosecond, concurrency: 1},
+		{name: "at relative threshold", callerTimeout: 2 * time.Second, firstDelay: 500 * time.Millisecond, concurrency: 1, wantPaused: true},
+		{name: "just below full window threshold", callerTimeout: 4 * time.Second, firstDelay: time.Second + time.Nanosecond, concurrency: 1},
+		{name: "at full window threshold", callerTimeout: 4 * time.Second, firstDelay: time.Second, concurrency: 1, wantPaused: true},
+		{name: "just below cap", callerTimeout: 6 * time.Second, firstDelay: 3*time.Second + time.Nanosecond, concurrency: 1},
+		{name: "at cap", callerTimeout: 6 * time.Second, firstDelay: 3 * time.Second, concurrency: 1, wantPaused: true},
 		{name: "early timeout before another upload succeeds", callerTimeout: 4 * time.Second, earlyTimeout: true},
 		{name: "late upload slot", callerTimeout: 4 * time.Second, firstDelay: 3 * time.Second, concurrency: 1},
 		{name: "stall after waiting for a slot", callerTimeout: 4 * time.Second, firstDelay: 500 * time.Millisecond, concurrency: 1, wantPaused: true},
@@ -3202,6 +3214,111 @@ func TestResolveUploads_RunEndStallDetection(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestResolveUploads_RunEndShortFailuresDoNotPause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+			select {
+			case <-time.After(2 * time.Second):
+				return context.DeadlineExceeded
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
+		cfg := DefaultConfig()
+		cfg.GCSOffloader = off
+		cfg.GCSMaxConcurrentUploads = 8
+		cfg.Logger = &recordingLogger{}
+		bp := &BatchProcessor{config: cfg}
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50, reserveBytes: bp.tryReserveUploadBytes}
+		var batch []map[string]any
+		for range 24 {
+			batch = append(batch, queuedRow(opts, imageContent(1)))
+		}
+		// Three waves run for 2s, 2s, and 1s. None demonstrates a stall,
+		// even though every upload fails and the batch reaches its deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		bp.resolveUploads(ctx, true, batch)
+		if got := len(off.uploads()); got != 24 {
+			t.Fatalf("upload attempts = %d, want 24", got)
+		}
+		if bp.uploadCooldownUntil.Load() != 0 {
+			t.Error("short failures paused uploads")
+		}
+		bp.clearDeferredUploads(batch)
+		off.hook = nil
+		next := queuedRow(opts, imageContent(2))
+		bp.resolveUploads(context.Background(), true, []map[string]any{next})
+		if got := len(off.uploads()); got != 25 {
+			t.Errorf("upload attempts after recovery = %d, want 25", got)
+		}
+		if contentPartsOf(t, next)[0]["storage_mode"] != storageModeGCSReference {
+			t.Error("next batch did not upload after short failures")
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pending upload bytes = %d, want 0", got)
+		}
+	})
+}
+
+func TestGCSOffloading_RunEndManyHealthyBatchesDoNotPause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+			select {
+			case <-time.After(1200 * time.Millisecond):
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}}
+		cfg := DefaultConfig()
+		cfg.BatchSize = 1
+		cfg.GCSOffloader = off
+		cfg.Logger = &recordingLogger{}
+		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer bp.Close()
+		stream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+		bp.streamWriter.stream = stream
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50, reserveBytes: bp.tryReserveUploadBytes}
+		for range 12 {
+			row := queuedRow(opts, imageContent(1))
+			row["event_type"] = EventLLMRequest
+			bp.queue <- row
+		}
+		bp.flushRunEnd()
+		if bp.uploadCooldownUntil.Load() != 0 {
+			t.Error("shrinking windows paused healthy storage")
+		}
+		if got := len(off.uploads()); got != 12 {
+			t.Errorf("upload attempts = %d, want 12", got)
+		}
+		var rows []map[string]any
+		for _, req := range stream.requests() {
+			rows = append(rows, decodeArrowRows(t, req)...)
+		}
+		if len(rows) != 12 {
+			t.Fatalf("persisted rows = %d, want 12", len(rows))
+		}
+		// Seven uploads finish in 8.4s. Later windows are too short for a
+		// healthy upload, but must still attempt it and write the fallback.
+		for i, row := range rows {
+			wantMode := storageModeInline
+			if i < 7 {
+				wantMode = storageModeGCSReference
+			}
+			if contentPartsOf(t, row)[0]["storage_mode"] != wantMode {
+				t.Errorf("row %d has incorrect storage mode, want %s", i, wantMode)
+			}
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pending upload bytes = %d, want 0", got)
+		}
+	})
 }
 
 func TestGCSOffloading_ConfigurablePendingUploadBytesCap(t *testing.T) {
@@ -3551,8 +3668,8 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	if !uploads[0].HasDeadline || uploads[0].Remaining < 100*time.Millisecond || uploads[0].Remaining > 300*time.Millisecond {
 		t.Errorf("second batch upload context remaining = %v (hasDeadline=%v), want in [100ms, 300ms] (half of remaining ~400ms budget)", uploads[0].Remaining, uploads[0].HasDeadline)
 	}
-	if bp.uploadCooldownUntil.Load() != 0 {
-		t.Errorf("uploadCooldownUntil = %d, want 0 (depleted second-batch deadline must not pause storage)", bp.uploadCooldownUntil.Load())
+	if bp.uploadCooldownUntil.Load() == 0 {
+		t.Error("second-batch stall did not pause storage")
 	}
 }
 

@@ -304,11 +304,11 @@ type uploadTask struct {
 // in the batch succeeded, uploads are paused for one GCSUploadTimeout.
 // With pauseOnCallerDeadline, a caller deadline can also trigger that pause
 // when an upload times out after running for at least three quarters of the
-// full run-end upload window (half of ShutdownTimeout). That minimum does not
-// shrink with the remaining flush budget or include time waiting for an upload
-// slot, so a depleted deadline does not pause healthy storage. Successful
-// uploads in the same batch do not hide a stalled upload. A canceled context,
-// or one already done before any upload starts, does not trigger a pause.
+// batch's upload window, bounded below by ShutdownTimeout/8 and above by
+// 3*ShutdownTimeout/8. The floor keeps very short remaining windows from
+// pausing healthy storage. Time waiting for an upload slot does not count.
+// Successful uploads in the same batch do not hide a stalled upload. A canceled
+// context, or one already done before any upload starts, does not trigger a pause.
 // Batches resolved during the pause fall back at once without uploading.
 // Python uploads during content parsing; Go bounds uploads here so storage
 // stalls leave time to write the analytics rows.
@@ -408,6 +408,11 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	}
 	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
+	// WithTimeout uses the earlier of the caller's and the batch's deadlines.
+	deadline, _ := uploadCtx.Deadline()
+	window := time.Until(deadline)
+	shutdownTimeout := b.shutdownTimeout()
+	stallMin := min(shutdownTimeout/8*3, max(window/4*3, shutdownTimeout/8))
 
 	limit := b.config.GCSMaxConcurrentUploads
 	if limit <= 0 {
@@ -428,7 +433,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 				anyStarted.Store(true)
 				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
 					anyStalledOnBatchTimeout.Store(true)
-					if pauseOnCallerDeadline && time.Since(started) >= b.shutdownTimeout()/8*3 {
+					if pauseOnCallerDeadline && time.Since(started) >= stallMin {
 						anyStalledOnCallerDeadline.Store(true)
 					}
 				}
