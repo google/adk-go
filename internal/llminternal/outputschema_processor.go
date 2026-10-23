@@ -46,13 +46,14 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 		}
 
 		state := llmAgent.internal()
+		schema := OutputSchemaFor(ctx, ctx.Agent().Name(), state)
 		// Check if we need the processor in the first place.
-		if state.OutputSchema == nil || !needOutputSchemaProcessor(state) {
+		if schema == nil || !needOutputSchemaProcessor(state) {
 			return
 		}
 
 		// Add the set_model_response tool to handle structured output
-		setResponseTool := &setModelResponseTool{schema: state.OutputSchema}
+		setResponseTool := &setModelResponseTool{schema: schema}
 		if err := toolutils.PackTool(req, setResponseTool); err != nil {
 			yield(nil, fmt.Errorf("failed to pack set_model_response tool: %w", err))
 			return
