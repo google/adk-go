@@ -38,6 +38,8 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/memory"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/telemetry"
@@ -523,6 +525,206 @@ func TestRunShutsDownTelemetryWhenServerFailsToStart(t *testing.T) {
 
 	if !tracker.shutdownCalled.Load() {
 		t.Errorf("telemetry shutdown was not called after server startup failure")
+	}
+}
+
+// closingPlugin returns a plugin whose CloseFunc records that it ran, then runs
+// closeFunc when it is not nil.
+func closingPlugin(t *testing.T, closeFunc func() error) (*plugin.Plugin, *atomic.Bool) {
+	t.Helper()
+	var closed atomic.Bool
+	p, err := plugin.New(plugin.Config{
+		Name: "flushing",
+		CloseFunc: func() error {
+			closed.Store(true)
+			if closeFunc != nil {
+				return closeFunc()
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	return p, &closed
+}
+
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+	return &buf
+}
+
+// boundPort returns a port that is already in use, so the web server fails to
+// start on it.
+func boundPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// freePort returns a port that nothing listens on.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() failed: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if err := ln.Close(); err != nil {
+		t.Fatalf("listener Close() failed: %v", err)
+	}
+	return port
+}
+
+func parsedLauncher(t *testing.T, args ...string) *webLauncher {
+	t.Helper()
+	l := NewLauncher(telemetryFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse(append(args, "repro")); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	return l
+}
+
+// TestRunClosesPluginsWhenServerFailsToStart pins that Run closes the
+// configured plugins when it returns an error, and logs a close failure.
+func TestRunClosesPluginsWhenServerFailsToStart(t *testing.T) {
+	buf := captureLog(t)
+	p, closed := closingPlugin(t, func() error { return fmt.Errorf("simulated flush error") })
+	l := parsedLauncher(t, "--port", fmt.Sprint(boundPort(t)))
+	config := &launcher.Config{PluginConfig: runner.PluginConfig{Plugins: []*plugin.Plugin{p}}}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want server bind failure")
+	}
+
+	if !closed.Load() {
+		t.Error("Run() returned without closing the configured plugin")
+	}
+	if got := buf.String(); !strings.Contains(got, "plugin shutdown failed") || !strings.Contains(got, "simulated flush error") {
+		t.Errorf("log output = %q, want the plugin close failure logged", got)
+	}
+}
+
+// setupFailSublauncher fails while the web launcher builds its router.
+type setupFailSublauncher struct{ telemetryFailSublauncher }
+
+func (setupFailSublauncher) SetupSubrouters(*mux.Router, *launcher.Config) error {
+	return fmt.Errorf("simulated setup error")
+}
+
+// TestRunClosesPluginsWhenRouterSetupFails pins that plugins are closed when
+// Run fails while building its router, before anything else is set up.
+func TestRunClosesPluginsWhenRouterSetupFails(t *testing.T) {
+	p, closed := closingPlugin(t, nil)
+	l := NewLauncher(setupFailSublauncher{}).(*webLauncher)
+	if _, err := l.Parse([]string{"--port", fmt.Sprint(freePort(t)), "repro"}); err != nil {
+		t.Fatalf("Parse() failed: %v", err)
+	}
+	config := &launcher.Config{PluginConfig: runner.PluginConfig{Plugins: []*plugin.Plugin{p}}}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want router setup failure")
+	}
+
+	if !closed.Load() {
+		t.Error("Run() returned without closing the configured plugin")
+	}
+}
+
+// TestRunClosesPluginsWhenTelemetryInitFails pins that plugins are closed even
+// when Run fails during setup, before it starts serving.
+func TestRunClosesPluginsWhenTelemetryInitFails(t *testing.T) {
+	p, closed := closingPlugin(t, nil)
+	l := parsedLauncher(t, "--port", fmt.Sprint(freePort(t)))
+	// A resource whose schema URL conflicts with resource.Default()'s makes
+	// telemetry init fail without touching the network.
+	bad := resource.NewWithAttributes("https://conflicting.invalid/schema/v1")
+	config := &launcher.Config{
+		TelemetryOptions: []telemetry.Option{telemetry.WithResource(bad)},
+		PluginConfig:     runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+	}
+
+	if err := l.Run(t.Context(), config); err == nil {
+		t.Fatalf("Run() succeeded, want telemetry initialization failure")
+	}
+
+	if !closed.Load() {
+		t.Error("Run() returned without closing the configured plugin")
+	}
+}
+
+// TestRunClosesPluginsOnShutdown pins the normal path: ctx is canceled to stop
+// the server, and the plugins must still be closed with a context that is not.
+func TestRunClosesPluginsOnShutdown(t *testing.T) {
+	buf := captureLog(t)
+	p, closed := closingPlugin(t, nil)
+	port := freePort(t)
+	l := parsedLauncher(t, "--port", fmt.Sprint(port))
+	config := &launcher.Config{PluginConfig: runner.PluginConfig{Plugins: []*plugin.Plugin{p}}}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- l.Run(ctx, config) }()
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not start listening on %s", addr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil after shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run() did not return after ctx was canceled")
+	}
+	if !closed.Load() {
+		t.Errorf("Run() returned without closing the configured plugin, log: %q", buf.String())
+	}
+}
+
+// TestRunBoundsPluginCloseByShutdownTimeout pins that a plugin that never
+// finishes closing cannot hold Run open past --shutdown-timeout.
+func TestRunBoundsPluginCloseByShutdownTimeout(t *testing.T) {
+	buf := captureLog(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	p, _ := closingPlugin(t, func() error {
+		<-release
+		return nil
+	})
+	l := parsedLauncher(t, "--port", fmt.Sprint(boundPort(t)), "--shutdown-timeout", "100ms")
+	config := &launcher.Config{PluginConfig: runner.PluginConfig{Plugins: []*plugin.Plugin{p}}}
+
+	result := make(chan error, 1)
+	go func() { result <- l.Run(t.Context(), config) }()
+	select {
+	case <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() did not return: plugin close is not bounded by --shutdown-timeout")
+	}
+	if got := buf.String(); !strings.Contains(got, "did not finish closing") {
+		t.Errorf("log output = %q, want the unfinished plugin close logged", got)
 	}
 }
 

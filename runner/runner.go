@@ -82,11 +82,39 @@ type Config struct {
 	Compaction *compaction.Config
 }
 
-// PluginConfig configures the plugins a [Runner] applies and how long it waits
-// for them to close.
+// PluginConfig configures the plugins a [Runner] applies, and how long
+// [PluginConfig.Close] waits for each of them to close.
+//
+// A Runner does not own its plugins and never closes them. ADK's servers build
+// a new Runner for every request over one shared PluginConfig, so closing
+// belongs to whoever created the plugins, once the last run has returned. The
+// launchers in cmd/launcher do this at shutdown.
 type PluginConfig struct {
-	Plugins      []*plugin.Plugin
+	Plugins []*plugin.Plugin
+	// CloseTimeout bounds how long [PluginConfig.Close] waits for each plugin.
+	// Zero or negative means no limit per plugin, leaving only the context
+	// passed to Close as the bound.
 	CloseTimeout time.Duration
+}
+
+// Close closes the plugins in c.Plugins one at a time, in order, and returns
+// an error joining one entry per plugin that did not close cleanly. A plugin
+// that fails or runs out of time does not stop the rest. Once ctx is done, the
+// plugins not yet reached are reported and not started.
+//
+// [plugin.Config.CloseFunc] takes no context, so running out of time stops the
+// wait but cannot stop the CloseFunc, which keeps running in the background. A
+// CloseFunc that panics is not recovered. [plugin.Plugin.Close] runs a
+// CloseFunc at most once, so calling Close again, or closing a plugin directly
+// as well, is safe.
+func (c PluginConfig) Close(ctx context.Context) error {
+	// adk-python closes plugins in Runner.close, but its API server keeps one
+	// Runner per app, while ADK Go's servers build one per request over a shared
+	// PluginConfig. Closing therefore lives here, with the owner of the plugins.
+	// adk-python also defaults to five seconds per plugin. A zero CloseTimeout
+	// leaves the bound to ctx instead, so a caller that already passes a
+	// deadline gets no second, hidden cutoff.
+	return plugininternal.ClosePlugins(ctx, c.Plugins, c.CloseTimeout)
 }
 
 // RunOption customizes a single run invocation.
@@ -129,8 +157,7 @@ func New(cfg Config) (*Runner, error) {
 	}
 
 	pluginManager, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
-		Plugins:      cfg.PluginConfig.Plugins,
-		CloseTimeout: cfg.PluginConfig.CloseTimeout,
+		Plugins: cfg.PluginConfig.Plugins,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin manager: %w", err)
@@ -226,6 +253,10 @@ func NewInMemory(appName string, a agent.Agent) (*Runner, error) {
 // Runner manages the execution of the agent within a session, handling message
 // processing, event generation, and interaction with various services like
 // artifact storage, session management, and memory.
+//
+// A Runner never closes the plugins in [Config.PluginConfig]. They belong to
+// the caller, who closes them with [PluginConfig.Close] after the last run
+// returns.
 type Runner struct {
 	appName         string
 	rootAgent       agent.Agent
