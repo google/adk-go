@@ -43,14 +43,21 @@ const (
 
 	// summaryBuilderKey is the row key under which addContent attaches a
 	// contentSummaryBuilder when a row has pending text uploads. Like
-	// rawPartsKey, it is deleted by resolveUploads before Arrow encoding.
+	// rawPartsKey, it is deleted by resolveUploadsForBatch before Arrow
+	// encoding.
 	summaryBuilderKey = "_summary_builder"
 
-	// deferredUploadsKey holds a *deferredRowUploads on a row whose uploads
-	// were cut short by a depleted caller deadline (!pauseOnCallerDeadline), so
-	// that if the batch's subsequent BigQuery write in flushRunEnd also runs
-	// out of flushCtx and the batch is deferred to the next flush, those
-	// uploads are retried under the next flush's budget.
+	// deferredUploadsKey holds a *deferredRowUploads, which
+	// resolveUploadsForBatch attaches to every row with uploads. When canDefer
+	// is true and the end of the caller's context, rather than the batch's own
+	// upload timeout, ends the uploads of a batch that did not pause them, the
+	// row's uploads that returned an error are recorded on it (none if all of
+	// them succeeded), so that if the batch's subsequent BigQuery write in
+	// flushRunEnd also runs out of flushCtx and the batch is deferred to the
+	// next flush, that flush retries those uploads; the key then stays on the
+	// row until the caller requeues the uploads (requeueDeferredUploads) or
+	// clears them (clearDeferredUploads). Otherwise resolveUploadsForBatch
+	// removes it itself.
 	deferredUploadsKey = "_deferred_uploads"
 
 	// mediaOffloadedText is the text of an uploaded binary part.
@@ -291,30 +298,64 @@ type uploadTask struct {
 	err error
 }
 
-// resolveUploads uploads the payloads that were queued with the rows of batch
-// and rewrites the matching content_parts entries to refer to the objects. No
-// row is lost to a storage problem: a text part whose upload fails keeps its
-// truncated inline text, and a binary part whose upload fails gets the text
-// "[UPLOAD FAILED]", its raw bytes not being stored inline.
+// uploadResolveOptions configures how resolveUploadsForBatch handles a batch's
+// Cloud Storage uploads.
+type uploadResolveOptions struct {
+	pauseOnCallerDeadline bool
+	canDefer              bool
+}
+
+// resolveUploadsForBatch uploads the payloads that were queued with the rows of
+// batch and rewrites the matching content_parts entries to refer to the
+// objects. No row is lost to a storage problem: a text part whose upload fails
+// keeps its truncated inline text, and a binary part whose upload fails gets
+// the text "[UPLOAD FAILED]", its raw bytes not being stored inline.
 //
 // Uploads run concurrently, at most GCSMaxConcurrentUploads at a time, under a
-// single batch-level timeout that ctx can end sooner. If the batch's own
-// GCSUploadTimeout ends the uploads after at least one upload started and
-// either an in-flight upload timed out under the batch deadline or no upload
-// in the batch succeeded (or if pauseOnCallerDeadline is true and the fresh
-// deadline of ctx ends them first without any upload in the batch succeeding),
-// Cloud Storage is not keeping up: the uploads are paused for the length of the
-// timeout, and the batches resolved in that time do not call the offloader but
-// fall back at once, so neither a full Cloud Storage outage nor a partial
-// brownout makes every batch wait in turn. A depleted caller deadline
-// (pauseOnCallerDeadline == false), a caller deadline when at least one upload
-// succeeded, a ctx that is canceled, or a ctx that is already done before any
-// upload starts says nothing about Cloud Storage and pauses nothing.
-// resolveUploads does not reserve any of ctx for the caller's own work: a
-// caller that has to write the batch afterwards bounds ctx accordingly.
+// single batch-level timeout that ctx can end sooner. Cloud Storage is not
+// keeping up when at least one upload started and:
+//
+//   - the batch's own GCSUploadTimeout ended the uploads, and either an
+//     in-flight upload timed out under the batch deadline or no upload in the
+//     batch succeeded; or
+//   - opts.pauseOnCallerDeadline is true and the deadline of ctx ended the
+//     uploads first, and either no upload in the batch succeeded or the
+//     deadline cut short an upload that had been running for at least three
+//     quarters of the time that the batch had for its uploads, whether or not
+//     other uploads in the batch succeeded.
+//
+// The uploads are then paused for the length of the timeout, and the batches
+// resolved in that time do not call the offloader but fall back at once, so
+// neither a full Cloud Storage outage nor a partial brownout makes every
+// batch wait in turn. A caller deadline when opts.pauseOnCallerDeadline is
+// false, a caller deadline that cuts short only uploads that ran for less than
+// that in a batch where another upload succeeded (such as uploads that started
+// late, after waiting for a free slot behind other uploads), a ctx that is
+// canceled, or a ctx that is already done before any upload starts says
+// nothing about Cloud Storage and pauses nothing. The cause of the batch's
+// context tells which deadline ended the uploads, and the time that an upload
+// ran is counted up to that deadline, so that neither depends on how soon the
+// offloader returns once the context is done.
+//
+// resolveUploadsForBatch attaches deferredUploadsKey to every row with uploads.
+// When opts.canDefer is true, ctx has ended the uploads (its deadline passed or
+// it was canceled) rather than the batch's own timeout, and the batch did not
+// pause them, every upload in the batch that returned an error (whether ctx cut
+// it short in flight or while it waited for a slot, or it had already failed
+// with another error) is recorded on its row's deferredUploadsKey and stays
+// reserved: a caller that defers the batch requeues these uploads with it
+// (requeueDeferredUploads), and one that writes or drops the batch releases
+// them (clearDeferredUploads). Until then, a row whose uploads all succeeded
+// keeps an empty deferredUploadsKey. Otherwise resolveUploadsForBatch removes
+// the key from every row and keeps none of the uploads; in particular, a batch
+// that paused the uploads keeps none of them, like the batches resolved during
+// the pause. An upload that returned no error but a URI that is not a gs:// URI
+// fails only when it is applied, and is not kept.
+// resolveUploadsForBatch does not reserve any of ctx for the caller's own work:
+// a caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
@@ -350,11 +391,9 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			})
 		}
 		if hasRowTasks {
-			if !pauseOnCallerDeadline {
-				row[deferredUploadsKey] = &deferredRowUploads{
-					builder:              builder,
-					nonDeferredTruncated: origTruncated,
-				}
+			row[deferredUploadsKey] = &deferredRowUploads{
+				builder:              builder,
+				nonDeferredTruncated: origTruncated,
 			}
 			if builder != nil {
 				summaries = append(summaries, rowSummary{row: row, builder: builder})
@@ -406,8 +445,17 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		completedNormally = true
 		return
 	}
-	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
+	// The cause that WithTimeoutCause records tells which deadline ended the
+	// uploads, so that this does not depend on when the offloaders return.
+	now := time.Now()
+	uploadCtx, cancel := context.WithTimeoutCause(ctx, uploadTimeout, errBatchUploadTimeout)
 	defer cancel()
+	// An upload that the deadline ends is a stall if it had been running for at
+	// least three quarters of the time that the batch has for its uploads, which
+	// ends at the earlier of the batch's own timeout and the deadline of ctx.
+	// The time that it waited for a free slot before it started does not count.
+	deadline, _ := uploadCtx.Deadline()
+	stallAfter := max(deadline.Sub(now), 0) * 3 / 4
 
 	limit := b.config.GCSMaxConcurrentUploads
 	if limit <= 0 {
@@ -415,7 +463,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	}
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
-	var anyStarted, anySucceeded, anyStalledOnBatchTimeout atomic.Bool
+	var anyStarted, anySucceeded, anyCutShort, anyStalled atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
 		wg.Add(1)
@@ -423,11 +471,17 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			defer wg.Done()
 			defer func() { <-sem }()
 			var started bool
+			start := time.Now()
 			t.uri, t.err, started = b.upload(uploadCtx, offloader, t)
 			if started {
 				anyStarted.Store(true)
 				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
-					anyStalledOnBatchTimeout.Store(true)
+					anyCutShort.Store(true)
+					// The offloader may return a while after the deadline, which
+					// is no time that the upload spent running.
+					if ran := min(time.Since(start), deadline.Sub(start)); ran >= stallAfter {
+						anyStalled.Store(true)
+					}
 				}
 			}
 			if t.err == nil && strings.HasPrefix(t.uri, "gs://") {
@@ -438,24 +492,40 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	wg.Wait()
 
 	// Pause uploads when at least one upload started and:
-	//   - the batch's own GCSUploadTimeout expired (ctx.Err() == nil) and either
-	//     an in-flight upload timed out under the batch deadline (brownout) or
-	//     no upload in the batch succeeded, or
-	//   - a fresh caller deadline allowed to pause (pauseOnCallerDeadline)
-	//     expired with no upload in the batch succeeding.
-	batchTimedOut := errors.Is(uploadCtx.Err(), context.DeadlineExceeded) &&
-		((ctx.Err() == nil && (anyStalledOnBatchTimeout.Load() || !anySucceeded.Load())) ||
-			(pauseOnCallerDeadline && !anySucceeded.Load()))
-	if anyStarted.Load() && batchTimedOut {
+	//   - the batch's own GCSUploadTimeout ended the uploads and either an
+	//     in-flight upload timed out under the batch deadline (brownout) or no
+	//     upload in the batch succeeded, or
+	//   - a caller deadline allowed to pause (opts.pauseOnCallerDeadline) ended
+	//     the uploads before the batch's own timeout and either no upload in the
+	//     batch succeeded or the deadline cut short an upload that had been
+	//     running for at least stallAfter, even if other uploads in the batch
+	//     succeeded (partial outage).
+	ownTimeoutExpired := context.Cause(uploadCtx) == errBatchUploadTimeout
+	var batchTimedOut bool
+	switch {
+	case ownTimeoutExpired:
+		batchTimedOut = anyCutShort.Load() || !anySucceeded.Load()
+	case opts.pauseOnCallerDeadline && errors.Is(uploadCtx.Err(), context.DeadlineExceeded):
+		batchTimedOut = anyStalled.Load() || !anySucceeded.Load()
+	}
+	paused := anyStarted.Load() && batchTimedOut
+	if paused {
 		b.uploadCooldownUntil.Store(time.Now().Add(uploadTimeout).UnixNano())
 	} else if anySucceeded.Load() {
 		b.uploadCooldownUntil.Store(0)
 	}
 
-	callerExpired := !pauseOnCallerDeadline && ctx.Err() != nil
+	// When opts.canDefer is true and ctx has ended the uploads, rather than the
+	// batch's own timeout, every upload that returned an error in the batch is
+	// kept for a retry of the batch, unless this batch paused the uploads: the
+	// uploads that failed once ctx had ended them, and any that had already
+	// failed, so that a custom offloader that returns an opaque error when ctx
+	// ends is retried too. An upload that returned no error is not kept, even
+	// if its URI is not a gs:// URI.
+	keepCutShort := opts.canDefer && !ownTimeoutExpired && ctx.Err() != nil && !paused
 	for _, t := range tasks {
 		deferred := false
-		if callerExpired && (errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && uploadCtx.Err() != nil)) {
+		if keepCutShort && (errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && uploadCtx.Err() != nil)) {
 			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
 				d.pending = append(d.pending, t.pending)
 				deferredReserved += t.pending.reserved
@@ -469,7 +539,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		}
 		b.applyUpload(t, deferred)
 	}
-	if !callerExpired {
+	if !keepCutShort {
 		b.clearDeferredUploads(batch)
 	}
 	for _, s := range summaries {
@@ -570,6 +640,11 @@ func (e ownedUploadError) Unwrap() error {
 var (
 	errInvalidGCSURI  = errors.New("offloader returned a URI that is not a gs:// URI")
 	errUploadCooldown = errors.New("upload skipped during timeout cooldown")
+
+	// errBatchUploadTimeout is the cause of the context of the uploads of a
+	// batch when the batch's own timeout ended them, rather than the caller's
+	// context.
+	errBatchUploadTimeout = errors.New("batch upload timeout")
 )
 
 // safeUploadErrorSummary returns diagnostic metadata for err without calling
@@ -653,7 +728,7 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	if err != nil {
 		eventID, _ := t.row[eventIDField].(string)
 		if deferred {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline; kept for a retry if the batch is deferred",
 				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
 		} else {
 			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
