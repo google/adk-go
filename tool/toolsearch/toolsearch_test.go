@@ -574,6 +574,13 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	if strings.Contains(advertised, ToolName) {
 		t.Errorf("search_tools description advertises %q as loadable: %q", ToolName, advertised)
 	}
+	const wantContinue = "Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user."
+	if !strings.Contains(desc, wantContinue) {
+		t.Errorf("search_tools description = %q, want it to contain %q", desc, wantContinue)
+	}
+	if strings.Contains(desc, "finish this model response") || strings.Contains(desc, "End this response") {
+		t.Errorf("search_tools description tells the model to end the response: %q", desc)
+	}
 }
 
 // TestRevealTools_ReturnsStateError checks that a failed state write surfaces
@@ -620,10 +627,11 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 	if diff := cmp.Diff([]string{"list_recent_files"}, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
-	for _, want := range []string{"could be relevant to your task", "load only the most relevant one"} {
-		if !strings.Contains(out.NextStep, want) {
-			t.Errorf("next_step = %q, want it to contain %q", out.NextStep, want)
-		}
+	const wantNext = "If connected_skill could be relevant to your task " +
+		"and your application supports skills, load only the most relevant one unless the task requires multiple. " +
+		"Then use the matched tools in this model step. This search does not answer the user."
+	if out.NextStep != wantNext {
+		t.Errorf("next_step = %q, want %q", out.NextStep, wantNext)
 	}
 
 	checkNames(t, mustToolNames(t, gts, newCtx(state)), []string{"list_recent_files"}, nil)
@@ -645,6 +653,10 @@ func TestSearch_CappedResultsIncludeNote(t *testing.T) {
 	}
 	if out.Note == "" {
 		t.Error("executeSearch() note is empty, want a truncation note")
+	}
+	const wantNext = "The matched tools are now available. Call the appropriate tool in this model step to continue the user's request."
+	if out.NextStep != wantNext {
+		t.Errorf("next_step = %q, want %q", out.NextStep, wantNext)
 	}
 }
 
