@@ -71,8 +71,8 @@ type SaveRequest struct {
 	// when saving it and return the value as a string.
 	CustomMetadata map[string]any
 
-	// If set, the artifact will be saved with this version.
-	// If unset, a new version will be created.
+	// Version is ignored by Save: every Save creates a new version and returns
+	// it in SaveResponse.Version.
 	Version int64
 }
 
