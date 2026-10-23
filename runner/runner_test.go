@@ -17,6 +17,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"strings"
@@ -635,6 +636,93 @@ func TestRunner_AutoCreateSession(t *testing.T) {
 				if err != nil {
 					t.Errorf("expected session to exist, but got error: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// getErrSessionService fails Get with getErr and counts Create calls.
+type getErrSessionService struct {
+	session.Service
+	getErr  error
+	creates int
+}
+
+func (s *getErrSessionService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
+	return nil, s.getErr
+}
+
+func (s *getErrSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
+	s.creates++
+	return s.Service.Create(ctx, req)
+}
+
+func TestRunner_AutoCreateSession_GetError(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+	errTransient := errors.New("connection refused")
+
+	tests := []struct {
+		name              string
+		autoCreateSession bool
+		getErr            error
+		wantCreates       int
+		wantErr           error
+	}{
+		{
+			name:              "transient_error_is_returned_without_create",
+			autoCreateSession: true,
+			getErr:            errTransient,
+			wantCreates:       0,
+			wantErr:           errTransient,
+		},
+		{
+			name:              "wrapped_not_found_creates_once",
+			autoCreateSession: true,
+			getErr:            fmt.Errorf("%w: %q", session.ErrNotFound, "testSession"),
+			wantCreates:       1,
+		},
+		{
+			name:              "auto_create_false_returns_not_found",
+			autoCreateSession: false,
+			getErr:            session.ErrNotFound,
+			wantCreates:       0,
+			wantErr:           session.ErrNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &getErrSessionService{Service: session.InMemoryService(), getErr: tt.getErr}
+			r, err := New(Config{
+				AppName:           "testApp",
+				Agent:             testAgent,
+				SessionService:    svc,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+
+			var gotErr error
+			msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+			for _, err := range r.Run(t.Context(), "testUser", "testSession", msg, agent.RunConfig{}) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+
+			if !errors.Is(gotErr, tt.wantErr) {
+				t.Errorf("Runner.Run() error = %v, want %v", gotErr, tt.wantErr)
+			}
+			if svc.creates != tt.wantCreates {
+				t.Errorf("Create calls = %d, want %d", svc.creates, tt.wantCreates)
 			}
 		})
 	}

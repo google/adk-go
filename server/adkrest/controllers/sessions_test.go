@@ -16,7 +16,9 @@ package controllers_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,15 +77,15 @@ func TestGetSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			// The fake reports a missing session with a bare error rather than
-			// one wrapping session.ErrNotFound, which is how any other service
-			// failure looks: it stays a 500. The 404 path is covered by
-			// TestGetSessionMissingSessionIsNotFound.
-			name:           "session service error is not a missing session",
+			// The fake wraps session.ErrNotFound for a missing session, as the
+			// real services do, so the handler answers 404. A service failure
+			// that is not a missing session stays a 500: see
+			// TestGetSessionServiceFailureIsInternalError.
+			name:           "missing session is not found",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID:      id,
-			wantErr:        fmt.Errorf("not found"),
-			wantStatus:     http.StatusInternalServerError,
+			wantErr:        fmt.Errorf("session not found: %q", id.SessionID),
+			wantStatus:     http.StatusNotFound,
 		},
 		{
 			name: "user ID is missing in input",
@@ -460,6 +462,30 @@ func TestGetSessionMissingSessionIsNotFound(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+// getFailingService fails Get with a plain error that does not wrap
+// session.ErrNotFound.
+type getFailingService struct {
+	session.Service
+}
+
+func (getFailingService) Get(context.Context, *session.GetRequest) (*session.GetResponse, error) {
+	return nil, errors.New("connection refused")
+}
+
+// TestGetSessionServiceFailureIsInternalError is the other side of the 404
+// mapping: a Get failure that is not a missing session is the server's fault.
+func TestGetSessionServiceFailureIsInternalError(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	apiController := controllers.NewSessionsAPIController(getFailingService{})
+	rr := httptest.NewRecorder()
+
+	apiController.GetSessionHandler(rr, newSessionRequest(t, http.MethodGet, id, nil, id.UserID))
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("GetSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusInternalServerError, rr.Body.String())
 	}
 }
 
