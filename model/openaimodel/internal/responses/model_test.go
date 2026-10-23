@@ -2110,6 +2110,59 @@ func TestModel_GenerateStream_CompletedTextAfterEmptyFunctionArgs(t *testing.T) 
 	}
 }
 
+// Terminal call IDs must be adopted before comparing completed content, or
+// an item-ID fallback prevents text present only in the terminal event from reaching the caller.
+func TestModel_GenerateStream_CompletedTextAfterCallIDFallback(t *testing.T) {
+	const (
+		addedWithoutCallID = `{"type":"response.output_item.added","item":{"id":"item_1","type":"function_call","name":"ping"}}`
+		argsDone           = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{}"}`
+		terminalCall       = `{"id":"item_1","type":"function_call","call_id":"call_1","name":"ping","arguments":"{}"}`
+	)
+	tests := []struct {
+		name         string
+		streamedText string
+		terminalText string
+		incomplete   bool
+		wantText     string
+	}{
+		{name: "terminal-only text", terminalText: "pong", wantText: "pong"},
+		{name: "terminal extends streamed text", streamedText: "po", terminalText: "pong", wantText: "pong"},
+		{name: "terminal omits streamed text", streamedText: "checking", terminalText: "pong", wantText: "checking"},
+		{name: "incomplete terminal keeps streamed text", streamedText: "po", terminalText: "pong", incomplete: true, wantText: "po"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, eventType := "completed", "response.completed"
+			if tc.incomplete {
+				status, eventType = "incomplete", "response.incomplete"
+			}
+			body := fmt.Sprintf(`{"id":"resp_1","model":"stream-model","status":%q,"output":[%s,{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}`, status, terminalCall, tc.terminalText)
+			events := []string{evCreated, addedWithoutCallID, argsDone}
+			if tc.streamedText != "" {
+				events = append(events, fmt.Sprintf(`{"type":"response.output_text.delta","delta":%q}`, tc.streamedText))
+			}
+			events = append(events, fmt.Sprintf(`{"type":%q,"response":%s}`, eventType, body))
+			got, err := runStream(t, events...)
+			if err != nil {
+				t.Fatal("streaming failed")
+			}
+			final := assertTurnShape(t, got)
+			if allText(final.Content) != tc.wantText {
+				t.Error("final text does not match the expected retained content")
+			}
+			wantCalls := []*genai.FunctionCall{{Name: "ping", ID: "call_1", Args: map[string]any{}}}
+			if !cmp.Equal(wantCalls, functionCalls(final)) {
+				t.Error("final calls do not match the terminal call")
+			}
+			for _, response := range got {
+				if response.Partial && allText(response.Content) == tc.terminalText {
+					t.Error("terminal text was emitted as a partial response")
+				}
+			}
+		})
+	}
+}
+
 func TestModel_GenerateStream_UnusableCompletedContent(t *testing.T) {
 	tests := []struct {
 		name   string
