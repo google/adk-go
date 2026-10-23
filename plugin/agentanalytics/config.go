@@ -352,16 +352,16 @@ type Config struct {
 	// succeeding, or when an in-flight upload times out during the batch timeout
 	// (partial outage backoff), the plugin stops calling the offloader for
 	// another GCSUploadTimeout: every batch in that time falls back at once, so
-	// that an outage does not make each batch wait in turn. The deadline
-	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
-	// the uploads when it is still fresh (at least three quarters of
-	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
-	// without any upload in the batch succeeding (a run-end flush allocates half
-	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
-	// than twice the typical upload latency may pause uploads if storage does
-	// not finish within that slice), whereas a batch where at least one upload
-	// succeeded, an already-depleted budget (less than three quarters
-	// remaining), or a budget during Close does not pause.
+	// that an outage does not make each batch wait in turn. A run-end deadline
+	// can also pause uploads if an upload ran for at least three quarters of
+	// the full run-end upload window (half of ShutdownTimeout) before timing
+	// out, even if other uploads succeeded or earlier batches completed.
+	// Time waiting for a concurrent upload slot does not count, and this
+	// minimum does not shrink as the flush budget is spent. Set ShutdownTimeout
+	// high enough for normal upload latency: a shorter run-end window may
+	// treat a slow but healthy upload as stalled. Caller cancellation, an
+	// already-expired deadline, or a deadline during Close does not pause
+	// uploads.
 	// Values <= 0 mean 10s.
 	GCSUploadTimeout time.Duration
 	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by

@@ -121,8 +121,8 @@ type BatchProcessor struct {
 	// uploadTimeout overrides Config.GCSUploadTimeout in tests.
 	uploadTimeout time.Duration
 	// uploadCooldownUntil holds a UnixNano deadline while uploads are paused
-	// after a batch-level GCSUploadTimeout expiration (or a fresh caller
-	// deadline expiring on the first upload batch of a run-end flush).
+	// after a batch-level GCSUploadTimeout expiration or a stalled upload
+	// timing out during a run-end flush.
 	uploadCooldownUntil atomic.Int64
 
 	// pendingUploadBytes tracks total bytes currently held in memory by
@@ -401,15 +401,6 @@ func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
 	b.writeAndLogBatch(b.uploadCtx, b.baseCtx, false, batch)
 }
 
-func batchHasPendingUploads(batch []map[string]any) bool {
-	for _, row := range batch {
-		if pending, ok := row[rawPartsKey].([]pendingUpload); ok && len(pending) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // flush drains any deferredBatch and full batches from the queue and appends
 // them. Uses TryLock to avoid blocking.
 func (b *BatchProcessor) flush() {
@@ -436,9 +427,9 @@ func (b *BatchProcessor) flush() {
 // flushRunEnd drains and writes queued events synchronously under a single
 // ShutdownTimeout budget, skipping if a background flush is already running.
 // The uploads of each batch get at most half of what is left of the budget, so
-// that a Cloud Storage problem leaves time for the BigQuery write. If the first
-// batch with uploads times out while the run-end budget is still fresh, later
-// batches skip Cloud Storage for a while instead of each waiting for it (see
+// that a Cloud Storage problem leaves time for the BigQuery write. If an
+// upload stalls for most of the full run-end upload window, later batches
+// skip Cloud Storage for a while instead of each waiting for it (see
 // resolveUploads). If the run-end budget expires during a batch's BigQuery
 // write, the batch (along with any uploads that were cut short by the depleted
 // run-end deadline) is retained in deferredBatch for the next flush or Close;
@@ -458,7 +449,6 @@ func (b *BatchProcessor) flushRunEnd() {
 	// flushCtx always has a deadline: it is made by WithTimeout.
 	flushDeadline, _ := flushCtx.Deadline()
 
-	firstUploadBatch := true
 	for !b.closed.Load() && b.hasPendingWorkLocked() && flushCtx.Err() == nil {
 		retry := len(b.deferredBatch) > 0
 		batch := b.nextBatchLocked()
@@ -473,15 +463,10 @@ func (b *BatchProcessor) flushRunEnd() {
 			b.config.logf("ERROR: Failed to write batch to BigQuery: committed write stream rotation in cooldown")
 			continue
 		}
-		hasUploads := batchHasPendingUploads(batch)
 		remaining := time.Until(flushDeadline)
-		pauseOnCallerDeadline := firstUploadBatch && hasUploads && remaining >= shutdownTimeout*3/4
 		uploadCtx, cancelUploads := context.WithDeadline(b.uploadCtx, time.Now().Add(remaining/2))
-		b.resolveUploads(uploadCtx, pauseOnCallerDeadline, batch)
+		b.resolveUploads(uploadCtx, true, batch)
 		cancelUploads()
-		if hasUploads {
-			firstUploadBatch = false
-		}
 
 		if err := b.appendBatch(flushCtx, batch); err != nil {
 			if flushCtx.Err() != nil && !retry {
