@@ -4428,7 +4428,6 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	requests := make(chan *storagepb.AppendRowsRequest, 16)
 	gSrv := grpc.NewServer()
 	var serverDelay atomic.Int64
-	serverDelay.Store(int64(50 * time.Millisecond))
 
 	storagepb.RegisterBigQueryWriteServer(gSrv, &dynamicDelayBigQueryWriteServer{
 		delay:    &serverDelay,
@@ -4461,7 +4460,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.BatchSize = 1
 	cfg.BatchFlushIntv = time.Hour
-	cfg.ShutdownTimeout = 120 * time.Millisecond
+	cfg.ShutdownTimeout = 1200 * time.Millisecond
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.GCSMaxPendingUploadBytes = 64
@@ -4472,14 +4471,25 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 		t.Fatalf("NewBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": "WARMUP"}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	serverDelay.Store(int64(500 * time.Millisecond))
 	bp.Start()
 
-	// Batch 0: no upload; takes 50ms in AppendRows, leaving ~70ms of 120ms ShutdownTimeout (< 3/4).
+	// Batch 0: no upload; takes 500ms in AppendRows, leaving ~700ms of 1200ms ShutdownTimeout (< 3/4).
 	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
 
 	// Batch 1: 64-byte upload; because budget is already depleted, pauseOnCallerDeadline is false.
-	// Upload stalls for 35ms (half remaining) and is deferred with 64 bytes retained in pendingUploadBytes.
-	// AppendRows takes 50ms, exceeding the remaining ~35ms, so flushRunEnd saves batch 1 in deferredBatch.
+	// Upload stalls for ~350ms (half remaining) and is deferred with 64 bytes retained in pendingUploadBytes.
+	// AppendRows takes 500ms, exceeding the remaining ~350ms, so flushRunEnd saves batch 1 in deferredBatch.
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
 	row["event_type"] = EventLLMRequest
 	bp.queue <- row
@@ -4488,6 +4498,9 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 
 	if len(bp.deferredBatch) != 1 {
 		t.Fatalf("deferredBatch length after flushRunEnd = %d, want 1", len(bp.deferredBatch))
+	}
+	if got := bp.deferredBatch[0]["event_type"]; got != EventLLMRequest {
+		t.Fatalf("deferredBatch[0] event_type = %v, want %s", got, EventLLMRequest)
 	}
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after flushRunEnd = %d, want 64", got)
@@ -4507,12 +4520,34 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 		t.Fatalf("pendingUploadBytes after flush = %d, want 0", got)
 	}
 
-	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 2 })
-	if len(rows) != 2 {
-		t.Fatalf("persisted rows = %d, want 2", len(rows))
+	// Under at-least-once delivery, the timed-out INLINE attempt for batch 1
+	// may also be recorded before the retried GCS_REFERENCE write.
+	rows := collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rows) >= 2
+	})
+	if contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"] == "INLINE" {
+		select {
+		case req := <-requests:
+			rows = append(rows, decodeArrowRows(t, req)...)
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
-	if got := contentPartsOf(t, rows[1])[0]["storage_mode"]; got != "GCS_REFERENCE" {
-		t.Errorf("part storage_mode = %v, want GCS_REFERENCE", got)
+	if len(rows) != 2 && len(rows) != 3 {
+		t.Fatalf("persisted rows = %d, want 2 or 3", len(rows))
+	}
+	if got := rows[0]["event_type"]; got != EventUserMessageReceived {
+		t.Errorf("rows[0] event_type = %v, want %s", got, EventUserMessageReceived)
+	}
+	if len(rows) == 3 {
+		if got := rows[1]["event_type"]; got != EventLLMRequest {
+			t.Errorf("rows[1] event_type = %v, want %s", got, EventLLMRequest)
+		}
+	}
+	if got := rows[len(rows)-1]["event_type"]; got != EventLLMRequest {
+		t.Errorf("last row event_type = %v, want %s", got, EventLLMRequest)
+	}
+	if got := contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("last row part storage_mode = %v, want GCS_REFERENCE", got)
 	}
 	if ds := bp.DropStats(); ds.TotalDrops != 0 {
 		t.Errorf("DropStats after both rows were written = %+v, want no drops", ds)
