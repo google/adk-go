@@ -646,3 +646,128 @@ func TestParallelAgent_StateSync(t *testing.T) {
 		t.Fatalf("expected state value 'test_value', got %v", gotValue)
 	}
 }
+
+// adk-python's ParallelAgent stops its remaining branches as soon as a direct
+// sub-agent yields an event with Actions.escalate (parallel_agent.py,
+// _asks_this_agent_to_exit; asserted by
+// test_run_async_short_circuits_other_agents_on_escalate_action). The Go
+// agent kept every sibling running to completion.
+func TestParallelAgent_EscalateStopsSiblings(t *testing.T) {
+	escalator, err := agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow, err := agent.New(agent.Config{
+		Name: "slow",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				select {
+				case <-time.After(300 * time.Millisecond):
+				case <-ctx.Done():
+					return
+				}
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("slow finished", genai.RoleModel)},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{escalator, slow}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var authors []string
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		authors = append(authors, ev.Author)
+	}
+	if slices.Contains(authors, "slow") {
+		t.Errorf("events authored by %v: sibling kept running after escalate, want it stopped", authors)
+	}
+	if !slices.Contains(authors, "escalator") {
+		t.Errorf("events authored by %v: missing the escalating event", authors)
+	}
+}
+
+// An escalation from a deeper agent ends that agent's own parent workflow, not
+// this one. adk-python only reacts to escalations authored by a direct
+// sub-agent (parallel_agent.py, _asks_this_agent_to_exit).
+func TestParallelAgent_NestedEscalateKeepsSiblings(t *testing.T) {
+	escalator, err := agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := loopagent.New(loopagent.Config{
+		AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{escalator}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slow, err := agent.New(agent.Config{
+		Name: "slow",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				time.Sleep(100 * time.Millisecond)
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("slow finished", genai.RoleModel)},
+				}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parallelAgent, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "par", SubAgents: []agent.Agent{inner, slow}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: parallelAgent, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var authors []string
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		authors = append(authors, ev.Author)
+	}
+	if !slices.Contains(authors, "slow") {
+		t.Errorf("events authored by %v: sibling was stopped by a nested escalate, want it to finish", authors)
+	}
+}
