@@ -3977,9 +3977,79 @@ func (reproPanicLogger) Printf(format string, _ ...any) {
 func (reproPanicLogger) Println(...any) {}
 
 func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T) {
+	// The first part waits out the caller deadline and is deferred. The second
+	// returns a non-gs URI, which is logged from applyUpload. That log panics
+	// inside resolveUploads, after the deferred reservation is recorded.
+	secondStarted := make(chan struct{})
+	off := &fakeOffloader{
+		hook: func(ctx context.Context, req GCSUploadRequest) error {
+			if strings.Contains(req.Path, "_c1_p0") {
+				close(secondStarted)
+				return nil
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		},
+		uri: func(req GCSUploadRequest) string {
+			if strings.Contains(req.Path, "_c1_p0") {
+				return "https://example.com/not-gs"
+			}
+			return "gs://fake-bucket/" + req.Path
+		},
+	}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxConcurrentUploads:  2,
+			GCSMaxPendingUploadBytes: 128,
+			Logger:                   reproPanicLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 128,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(bytes.Repeat([]byte{1}, 64)...), imageContent(bytes.Repeat([]byte{2}, 64)...))
+	if got := bp.pendingUploadBytes.Load(); got != 128 {
+		t.Fatalf("pendingUploadBytes after reservation = %d, want 128", got)
+	}
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			select {
+			case <-secondStarted:
+			case <-time.After(2 * time.Second):
+			}
+			cancel()
+		}()
+		bp.resolveUploads(ctx, false, []map[string]any{row})
+	}()
+	if !panicked {
+		t.Fatal("resolveUploads did not panic")
+	}
+	// Unwind releases reservedTotal-deferredReserved, so the deferred 64 bytes
+	// stay with the row and the other 64 are released.
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes = %d, want 64", got)
+	}
+}
+
+func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		<-ctx.Done()
-		return ctx.Err()
+		if stalled.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
 	}}
 	bp := &BatchProcessor{
 		config: applyDefaults(Config{
@@ -3993,21 +4063,113 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 	}
 	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
 	row := queuedRow(opts, imageContent(make([]byte, 64)...))
-	func() {
-		defer func() { _ = recover() }()
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-		defer cancel()
-		bp.resolveUploads(ctx, false, []map[string]any{row})
-	}()
+	row[eventIDField] = "ev-requeue-panic"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
 	}
+	panicked := false
 	func() {
-		defer func() { _ = recover() }()
-		// The failure is logged when the deferred upload is discarded.
-		bp.clearDeferredUploads([]map[string]any{row})
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		bp.requeueDeferredUploads([]map[string]any{row})
 	}()
+	if !panicked {
+		t.Fatal("requeueDeferredUploads did not panic")
+	}
+	if len(bp.deferredBatch) != 1 {
+		t.Fatalf("deferredBatch len = %d, want 1", len(bp.deferredBatch))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after logger panic = %d, want 64", got)
+	}
+	saved := bp.deferredBatch
+	bp.deferredBatch = nil
+	stalled.Store(false)
+	bp.config.Logger = &recordingLogger{}
+	bp.resolveUploads(context.Background(), false, saved)
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Errorf("pendingUploadBytes = %d, want 0", got)
+		t.Fatalf("pendingUploadBytes after resolving the saved batch = %d, want 0", got)
+	}
+}
+
+func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 128,
+			Logger:                   reproPanicLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 128,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row1[eventIDField] = "ev-drop-1"
+	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row2[eventIDField] = "ev-drop-2"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row1, row2})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 128 {
+		t.Fatalf("pendingUploadBytes while uploads are deferred = %d, want 128", got)
+	}
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		bp.clearDeferredUploads([]map[string]any{row1, row2})
+	}()
+	if !panicked {
+		t.Fatal("clearDeferredUploads did not panic")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes = %d, want 0", got)
+	}
+}
+
+func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return errors.New("custom offloader failure")
+	}}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 64,
+			Logger:                   &recordingLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 64,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	bp.resolveUploads(ctx, false, []map[string]any{row})
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes = %d, want 64", got)
+	}
+	if _, ok := row[rawPartsKey]; ok {
+		t.Fatal("rawPartsKey set before requeueDeferredUploads")
+	}
+	bp.requeueDeferredUploads([]map[string]any{row})
+	pending, ok := row[rawPartsKey].([]pendingUpload)
+	if !ok || len(pending) != 1 {
+		t.Fatalf("requeued uploads = %v, want the deferred part", row[rawPartsKey])
 	}
 }
