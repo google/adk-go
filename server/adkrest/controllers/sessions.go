@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/gorilla/mux"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
@@ -73,6 +74,14 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		if err != nil && !errors.Is(err, io.EOF) {
 			http.Error(rw, err.Error(), http.StatusBadRequest)
 			return
+		}
+	}
+	// Null parts are dropped rather than rejected; see decodeRequestBody.
+	for _, event := range createSessionRequest.Events {
+		if event.Content != nil {
+			event.Content.Parts = slices.DeleteFunc(event.Content.Parts, func(p *genai.Part) bool {
+				return p == nil
+			})
 		}
 	}
 	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest)

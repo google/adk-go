@@ -184,10 +184,13 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	if e.Content != nil {
 		aux.Content = &ProxyContent{
 			Content: e.Content,
-			Parts:   make([]*ProxyPart, len(e.Content.Parts)),
+			Parts:   make([]*ProxyPart, 0, len(e.Content.Parts)),
 		}
 
-		for i, part := range e.Content.Parts {
+		for _, part := range e.Content.Parts {
+			if part == nil {
+				continue
+			}
 			// Wrap the original part
 			proxyPart := &ProxyPart{Part: part}
 
@@ -204,7 +207,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 					Args:         args,
 				}
 			}
-			aux.Content.Parts[i] = proxyPart
+			aux.Content.Parts = append(aux.Content.Parts, proxyPart)
 		}
 	}
 
