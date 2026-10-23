@@ -34,8 +34,9 @@ type Config struct {
 
 	OnEventCallback OnEventCallback
 
-	BeforeRunCallback BeforeRunCallback
-	AfterRunCallback  AfterRunCallback
+	BeforeRunCallback  BeforeRunCallback
+	AfterRunCallback   AfterRunCallback
+	OnRunErrorCallback OnRunErrorCallback
 
 	BeforeAgentCallback agent.BeforeAgentCallback
 	AfterAgentCallback  agent.AfterAgentCallback
@@ -59,6 +60,7 @@ func New(cfg Config) (*Plugin, error) {
 		onEventCallback:       cfg.OnEventCallback,
 		beforeRunCallback:     cfg.BeforeRunCallback,
 		afterRunCallback:      cfg.AfterRunCallback,
+		onRunErrorCallback:    cfg.OnRunErrorCallback,
 		beforeAgentCallback:   cfg.BeforeAgentCallback,
 		afterAgentCallback:    cfg.AfterAgentCallback,
 		beforeModelCallback:   cfg.BeforeModelCallback,
@@ -88,8 +90,9 @@ type Plugin struct {
 	onUserMessageCallback OnUserMessageCallback
 	onEventCallback       OnEventCallback
 
-	beforeRunCallback BeforeRunCallback
-	afterRunCallback  AfterRunCallback
+	beforeRunCallback  BeforeRunCallback
+	afterRunCallback   AfterRunCallback
+	onRunErrorCallback OnRunErrorCallback
 
 	beforeAgentCallback agent.BeforeAgentCallback
 	afterAgentCallback  agent.AfterAgentCallback
@@ -135,6 +138,11 @@ func (p *Plugin) BeforeRunCallback() BeforeRunCallback {
 // AfterRunCallback returns the plugin's AfterRunCallback.
 func (p *Plugin) AfterRunCallback() AfterRunCallback {
 	return p.afterRunCallback
+}
+
+// OnRunErrorCallback returns the plugin's OnRunErrorCallback.
+func (p *Plugin) OnRunErrorCallback() OnRunErrorCallback {
+	return p.onRunErrorCallback
 }
 
 // BeforeAgentCallback returns the plugin's BeforeAgentCallback.
@@ -187,6 +195,13 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
 // AfterRunCallback is invoked after a run completes.
 type AfterRunCallback func(agent.InvocationContext)
+
+// OnRunErrorCallback observes each error from Runner.Run or Runner.RunLive
+// after an invocation context exists, including post-invocation compaction
+// failures. Errors from a live session's Send and Close methods are outside
+// this callback. It has no return value and cannot change the run error.
+// Like other Go plugin callbacks, a panic in the callback propagates.
+type OnRunErrorCallback func(agent.InvocationContext, error)
 
 // OnEventCallback is invoked for each event, and may return a replacement event.
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)

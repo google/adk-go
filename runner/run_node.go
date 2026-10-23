@@ -83,10 +83,12 @@ func (r *Runner) runNode(
 	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 	invocationFailed := false
+	var invocationCtx agent.InvocationContext
 	emit := yield
 	yield = func(ev *session.Event, err error) bool {
 		if err != nil {
 			invocationFailed = true
+			r.notifyRunError(invocationCtx, err)
 		}
 		return emit(ev, err)
 	}
@@ -107,8 +109,6 @@ func (r *Runner) runNode(
 	// called once it has returned false, so it is logged instead.
 	// Assigned once the invocation context exists, below. The compaction hook
 	// runs from a defer, so it reads whatever this holds by then.
-	var invocationCtx agent.InvocationContext
-
 	compacted := false
 	compactOnce := func() error {
 		if compacted || invocationFailed {
@@ -119,6 +119,7 @@ func (r *Runner) runNode(
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
+			r.notifyRunError(invocationCtx, err)
 			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
@@ -144,6 +145,7 @@ func (r *Runner) runNode(
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
 	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
+	invocationCtx = ictx
 	if err != nil {
 		yield(nil, err)
 		return

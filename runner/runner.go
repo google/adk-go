@@ -251,6 +251,12 @@ func invocationIDOf(ictx agent.InvocationContext) string {
 	return ictx.InvocationID()
 }
 
+func (r *Runner) notifyRunError(ictx agent.InvocationContext, err error) {
+	if ictx != nil && err != nil && r.pluginManager != nil {
+		r.pluginManager.RunOnRunErrorCallback(ictx, err)
+	}
+}
+
 // compactAfterInvocation runs post-invocation sliding-window compaction and
 // persists the summary, if one was produced.
 //
@@ -549,20 +555,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		// An invocation that ended in an error is not a finished turn and must
-		// not be summarized: the window would hold a question with no answer,
-		// and that summary is stored permanently and degrades every later
-		// prompt. Observing it here, rather than at each error site, means no
-		// path can forget to.
-		invocationFailed := false
-		emit := yield
-		yield = func(ev *session.Event, err error) bool {
-			if err != nil {
-				invocationFailed = true
-			}
-			return emit(ev, err)
-		}
-
 		options := runOptions{}
 		for _, opt := range opts {
 			opt(&options)
@@ -649,6 +641,22 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
+		// An invocation that ended in an error is not a finished turn and must
+		// not be summarized: the window would hold a question with no answer,
+		// and that summary is stored permanently and degrades every later
+		// prompt. Observing it here, rather than at each error site, means no
+		// path can forget to.
+		invocationFailed := false
+		var invocationCtx agent.InvocationContext
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil {
+				invocationFailed = true
+				r.notifyRunError(invocationCtx, err)
+			}
+			return emit(ev, err)
+		}
+
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
 		// what the A2A executor does, so a hook placed only after the loop
@@ -659,8 +667,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// be called once it has returned false, so it is logged instead.
 		// Assigned once the invocation context exists, below. The compaction
 		// hook runs from a defer, so it reads whatever this holds by then.
-		var invocationCtx agent.InvocationContext
-
 		compacted := false
 		compactOnce := func() error {
 			if compacted || invocationFailed {
@@ -671,6 +677,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
+				r.notifyRunError(invocationCtx, err)
 				log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 			}
 		}()
@@ -707,6 +714,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		invocationCtx = ic
 		ctx := agent.NewContext(ic)
 		ctx, _, err = r.appendMessageToSession(ctx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, options.stateDelta)
+		invocationCtx = ctx
 		if err != nil {
 			yield(nil, err)
 			return
@@ -961,6 +969,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if r.pluginManager != nil {
 		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
 		if err != nil {
+			r.notifyRunError(iCtx, err)
 			return nil, nil, err
 		}
 		if earlyExitResult != nil {
@@ -970,7 +979,9 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				Content: earlyExitResult,
 			}
 			if err := r.sessionService.AppendEvent(iCtx, storedSession, earlyExitEvent); err != nil {
-				return nil, nil, fmt.Errorf("failed to add event to session: %w", err)
+				err = fmt.Errorf("failed to add event to session: %w", err)
+				r.notifyRunError(iCtx, err)
+				return nil, nil, err
 			}
 
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
@@ -982,10 +993,18 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 
 	agentSess, innerIter, err := lAgent.RunLive(iCtx)
 	if err != nil {
+		r.notifyRunError(iCtx, err)
 		return nil, nil, err
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil {
+				r.notifyRunError(iCtx, err)
+			}
+			return emit(ev, err)
+		}
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
