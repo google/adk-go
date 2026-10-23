@@ -380,25 +380,87 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// unsupported part leaves the request empty, so a build that skipped it
 	// silently would still fail with shared.ErrNoContents and look like a rejection.
 	//
-	// The part carries executable code rather than media: media has a wire
-	// field on this endpoint now, and the walk below covers what is left.
+	// The part carries a server-side tool call rather than media or code:
+	// both of those have a way out of this endpoint now, and the walk below
+	// covers what is left.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					{ToolCall: &genai.ToolCall{ID: "t1"}},
 				},
 			},
 		},
 	}
 	_, err := buildParams("fallback", req)
 	if err == nil {
-		t.Fatalf("expected error for an executable code part")
+		t.Fatalf("expected error for a tool call part")
 	}
 	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
+	}
+}
+
+// TestBuildParams_CodeExecutionAsText pins the regression for a Gemini
+// code-execution turn replayed into an OpenAI request: the parts used to
+// fail the whole request, and now go out as the fenced text adk-python sends.
+func TestBuildParams_CodeExecutionAsText(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		want     []string
+	}{
+		{
+			name: "code_and_result_on_a_model_turn",
+			contents: []*genai.Content{
+				modelContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}}),
+				modelContent(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}}),
+			},
+			want: []string{
+				"out/assistant:Code:```python\nprint(1)\n```",
+				"out/assistant:Execution Result:```code_output\n1\n```",
+			},
+		},
+		{
+			name: "text_keeps_its_place_ahead_of_the_code",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{Text: "For context:"},
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				),
+			},
+			want: []string{"in/user:For context:|Code:```python\nprint(1)\n```"},
+		},
+		{
+			name: "both_fields_on_one_part_render_code_then_result",
+			contents: []*genai.Content{
+				userContent(&genai.Part{
+					ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+					CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+				}),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```\nExecution Result:```code_output\n1\n```"},
+		},
+		{
+			name: "empty_code_is_still_sent",
+			contents: []*genai.Content{
+				userContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{}}),
+			},
+			want: []string{"in/user:Code:```python\n\n```"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -669,7 +731,9 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			name: "thought_text_riding_on_code_is_still_rejected",
+			// Marking the part as a thought drops the scratchpad and leaves
+			// the code, the same split media already gets.
+			name: "thought_text_riding_on_code_drops_only_the_text",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				modelTurn(&genai.Part{
@@ -678,7 +742,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "out/assistant:Code:```python\nprint(1)\n```"},
 		},
 		{
 			// Dropping the reasoning must not swallow the role error the same
@@ -1288,7 +1352,9 @@ func TestReplayedReasoning(t *testing.T) {
 //
 // It is per-endpoint rather than global because the two endpoints no longer
 // agree: Responses emits media and so passes shared.PartFieldMedia, while Chat
-// Completions still reports it. The default answer — the one with no field
+// Completions still reports it. Both endpoints pass
+// shared.PartFieldCodeExecution, so executable code and its result are
+// accounted for here. The default answer — the one with no field
 // emitted — is pinned in the shared package, so that a converter gaining a
 // wire field has to say so here before media stops being reported.
 //
@@ -1297,16 +1363,18 @@ func TestReplayedReasoning(t *testing.T) {
 // construction and the walk below demands it be reported instead of silently
 // accepted — the failure a denylist would not produce.
 var accountedForFields = map[string]string{
-	"Text":             "sent, or dropped when it is reasoning",
-	"Thought":          "the marker deciding which",
-	"ThoughtSignature": "no request field on either endpoint carries one",
-	"FunctionCall":     "sent as a call",
-	"FunctionResponse": "sent as the call's result",
-	"VideoMetadata":    "qualifies media carried in another field",
-	"MediaResolution":  "qualifies media carried in another field",
-	"PartMetadata":     "caller bookkeeping, never content",
-	"InlineData":       "sent as an input_image or input_file carrying the bytes",
-	"FileData":         "sent as an input_image or input_file naming an upload or a location",
+	"Text":                "sent, or dropped when it is reasoning",
+	"Thought":             "the marker deciding which",
+	"ThoughtSignature":    "no request field on either endpoint carries one",
+	"FunctionCall":        "sent as a call",
+	"FunctionResponse":    "sent as the call's result",
+	"VideoMetadata":       "qualifies media carried in another field",
+	"MediaResolution":     "qualifies media carried in another field",
+	"PartMetadata":        "caller bookkeeping, never content",
+	"InlineData":          "sent as an input_image or input_file carrying the bytes",
+	"FileData":            "sent as an input_image or input_file naming an upload or a location",
+	"ExecutableCode":      "sent as a fenced python block",
+	"CodeExecutionResult": "sent as a fenced code_output block",
 }
 
 func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
@@ -1321,7 +1389,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := shared.UnsupportedPayload(part, shared.PartFieldMedia)
+			got := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",

@@ -156,6 +156,73 @@ func TestBuildParams_MultiTurnHistory(t *testing.T) {
 	}
 }
 
+// TestBuildParams_CodeExecutionAsText pins the regression for a Gemini
+// code-execution turn replayed into a Chat Completions request. The parts
+// used to fail the request; they now go out as the same fenced text the
+// Responses path sends, rather than being dropped.
+func TestBuildParams_CodeExecutionAsText(t *testing.T) {
+	code := "Code:```python\nprint(1)\n```"
+	result := "Execution Result:```code_output\n1\n```"
+	tests := []struct {
+		name     string
+		req      *model.LLMRequest
+		want     string
+		wantRole string
+	}{
+		{
+			name:     "user code",
+			req:      userReq(&genai.Part{Text: "For context:"}, &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}),
+			want:     "For context:\n" + code,
+			wantRole: "user",
+		},
+		{
+			name: "model code and result",
+			req: &model.LLMRequest{Contents: []*genai.Content{{
+				Role: "model",
+				Parts: []*genai.Part{
+					{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}},
+					{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}},
+				},
+			}}},
+			want:     code + "\n" + result,
+			wantRole: "assistant",
+		},
+		{
+			name: "thought text is dropped and the code remains",
+			req: &model.LLMRequest{Contents: []*genai.Content{{
+				Role: "model",
+				Parts: []*genai.Part{{
+					Thought:        true,
+					Text:           "scratch",
+					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
+				}},
+			}}},
+			want:     code,
+			wantRole: "assistant",
+		},
+		{
+			name:     "empty code is still sent",
+			req:      userReq(&genai.Part{ExecutableCode: &genai.ExecutableCode{}}),
+			want:     "Code:```python\n\n```",
+			wantRole: "user",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := wireMessages(t, requestWire(t, tt.req))
+			if len(msgs) != 1 {
+				t.Fatalf("messages = %d, want 1: %#v", len(msgs), msgs)
+			}
+			if got := msgs[0]["role"]; got != tt.wantRole {
+				t.Errorf("role = %v, want %v", got, tt.wantRole)
+			}
+			if got := msgs[0]["content"]; got != tt.want {
+				t.Errorf("content = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildParams_TextPartsJoin(t *testing.T) {
 	wire := requestWire(t, userReq(&genai.Part{Text: "one"}, &genai.Part{Text: "  "}, &genai.Part{Text: "two"}))
 	msgs := wireMessages(t, wire)
