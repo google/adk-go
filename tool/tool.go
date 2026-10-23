@@ -236,6 +236,15 @@ type streamingRunnableTool interface {
 	RunStream(ctx agent.Context, args any) iter.Seq2[string, error]
 }
 
+// gatedStreamingRunnableTool mirrors
+// adk/internal/toolinternal.ConfirmationGatedStreamingTool, for the same
+// reason as streamingRunnableTool.
+type gatedStreamingRunnableTool interface {
+	streamingRunnableTool
+	CheckConfirmation(ctx agent.Context, args any) error
+	RunStreamUngated(ctx agent.Context, args any) iter.Seq2[string, error]
+}
+
 func (t *confirmationTool) Declaration() *genai.FunctionDeclaration {
 	return t.runnableTool.Declaration()
 }
@@ -301,14 +310,37 @@ func (t *confirmationStreamingTool) ProcessRequest(ctx agent.Context, req *model
 
 func (t *confirmationStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
+		if err := t.CheckConfirmation(ctx, args); err != nil {
 			yield("", err)
 			return
 		}
-		for chunk, err := range t.streamingRunnableTool.RunStream(ctx, args) {
+		for chunk, err := range t.RunStreamUngated(ctx, args) {
 			if !yield(chunk, err) {
 				return
 			}
 		}
 	}
+}
+
+// CheckConfirmation implements adk/internal/toolinternal.ConfirmationGatedStreamingTool.
+// It applies this wrapper's gate and then the inner tool's own, so a tool that
+// asks for confirmation itself is still gated when the flow skips RunStream.
+func (t *confirmationStreamingTool) CheckConfirmation(ctx agent.Context, args any) error {
+	if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
+		return err
+	}
+	if inner, ok := t.streamingRunnableTool.(gatedStreamingRunnableTool); ok {
+		return inner.CheckConfirmation(ctx, args)
+	}
+	return nil
+}
+
+// RunStreamUngated implements adk/internal/toolinternal.ConfirmationGatedStreamingTool.
+// An inner tool that does not expose its gate is run through its RunStream,
+// which applies whatever checks the tool keeps there.
+func (t *confirmationStreamingTool) RunStreamUngated(ctx agent.Context, args any) iter.Seq2[string, error] {
+	if inner, ok := t.streamingRunnableTool.(gatedStreamingRunnableTool); ok {
+		return inner.RunStreamUngated(ctx, args)
+	}
+	return t.streamingRunnableTool.RunStream(ctx, args)
 }

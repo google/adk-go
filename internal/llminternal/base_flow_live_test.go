@@ -39,6 +39,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // fakeLiveModel implements model.LLM plus the Client() accessor RunLive
@@ -628,5 +630,84 @@ func TestRunLiveMarksLongRunningCalls(t *testing.T) {
 			t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
 		}
 		return
+	}
+}
+
+// TestRunLiveEmitsToolConfirmationRequest checks that a live call the
+// confirmation gate stops reaches the caller as an adk_request_confirmation
+// call right after its function response, as it does in the non-live flow.
+// Without it the caller has no call ID to approve or reject against.
+func TestRunLiveEmitsToolConfirmationRequest(t *testing.T) {
+	type Args struct{}
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"gated_1","name":"gated_stream","args":{}}]}}`
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
+			t.Errorf("writing toolCall failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+
+	gated, err := functiontool.NewStreaming(functiontool.Config{Name: "gated_stream", RequireConfirmation: true},
+		func(agent.Context, Args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) { yield("chunk", nil) }
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		Tools:             []tool.Tool{gated},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	// A live session never ends by itself, so a missing event would block
+	// next() forever. Closing the session ends the iterator instead.
+	deadline := time.AfterFunc(10*time.Second, func() { _ = sess.Close() })
+	defer deadline.Stop()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	nextEvent := func() *session.Event {
+		t.Helper()
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the expected event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		return ev
+	}
+
+	var respEv *session.Event
+	for respEv == nil {
+		ev := nextEvent()
+		if ev != nil && len(utils.FunctionResponses(ev.Content)) > 0 {
+			respEv = ev
+		}
+	}
+	if _, ok := respEv.Actions.RequestedToolConfirmations["gated_1"]; !ok {
+		t.Fatalf("function response RequestedToolConfirmations = %v, want an entry for gated_1", respEv.Actions.RequestedToolConfirmations)
+	}
+
+	confirmationEv := nextEvent()
+	calls := utils.FunctionCalls(confirmationEv.Content)
+	if len(calls) != 1 || calls[0].Name != toolconfirmation.FunctionCallName {
+		t.Fatalf("event after the function response has calls %+v, want one %s call", calls, toolconfirmation.FunctionCallName)
+	}
+	original, _ := calls[0].Args["originalFunctionCall"].(*genai.FunctionCall)
+	if original == nil || original.ID != "gated_1" {
+		t.Errorf("originalFunctionCall = %+v, want the call with ID gated_1", calls[0].Args["originalFunctionCall"])
+	}
+	if diff := cmp.Diff([]string{calls[0].ID}, confirmationEv.LongRunningToolIDs); diff != "" {
+		t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
 	}
 }

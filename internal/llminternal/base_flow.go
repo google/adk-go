@@ -702,6 +702,16 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
+							// A confirmation request is otherwise only in the
+							// response's actions, and the caller needs the
+							// adk_request_confirmation call to have something to
+							// approve or reject, as in the non-live flow.
+							if confirmationEv := generateRequestConfirmationEvent(ctx, ev, respEv); confirmationEv != nil {
+								if !sess.pushEvent(confirmationEv) {
+									cleanup()
+									return
+								}
+							}
 							// Check if task_completed was invoked.
 							var isTaskCompleted bool
 							if respEv.LLMResponse.Content != nil {
@@ -1376,46 +1386,68 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 					}
 				} else if streamTool, ok := curTool.(toolinternal.StreamingFunctionTool); ok {
 					if liveSess != nil {
-						result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
-						cancelCtx, cancel := toolCtx.WithAgentCancel()
-						cancelToolCtx := &cancelledToolContext{
-							Context:   toolCtx,
-							cancelCtx: cancelCtx,
+						// The model is told the call is pending and the stream
+						// runs in the background, so the confirmation gate runs
+						// here first. A call it stops gets an error response
+						// rather than a pending one, and the request it records
+						// is on toolCtx before the response event copies
+						// toolCtx.Actions() below.
+						runStream := streamTool.RunStream
+						var gateErr error
+						if gated, ok := streamTool.(toolinternal.ConfirmationGatedStreamingTool); ok {
+							gateErr = gated.CheckConfirmation(toolCtx, fnCall.Args)
+							runStream = gated.RunStreamUngated
 						}
-						if impl, ok := liveSess.(*liveSessionImpl); ok {
-							impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
-						}
-						go func() {
-							defer func() {
-								if impl, ok := liveSess.(*liveSessionImpl); ok {
-									impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
-								}
-								cancel()
-							}()
-							for chunk, err := range streamTool.RunStream(cancelToolCtx, fnCall.Args) {
-								select {
-								case <-cancelCtx.Done():
-									return
-								default:
-								}
-								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
-									return
-								}
-								updatedContent := &genai.Content{
-									Role: "user",
-									Parts: []*genai.Part{
-										{
-											Text: fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk),
-										},
-									},
-								}
-								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
-									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
-									return
-								}
+						if gateErr != nil {
+							result = map[string]any{"error": gateErr.Error()}
+						} else {
+							result = map[string]any{"status": "The function is running asynchronously and the results are pending."}
+							cancelCtx, cancel := toolCtx.WithAgentCancel()
+							cancelToolCtx := &cancelledToolContext{
+								Context:   toolCtx,
+								cancelCtx: cancelCtx,
 							}
-						}()
+							if impl, ok := liveSess.(*liveSessionImpl); ok {
+								impl.RegisterStreamingTool(streamTool.Name(), fnCall.ID, cancel)
+							}
+							go func() {
+								defer func() {
+									if impl, ok := liveSess.(*liveSessionImpl); ok {
+										impl.UnregisterStreamingTool(streamTool.Name(), fnCall.ID)
+									}
+									cancel()
+								}()
+								for chunk, err := range runStream(cancelToolCtx, fnCall.Args) {
+									select {
+									case <-cancelCtx.Done():
+										return
+									default:
+									}
+									text := fmt.Sprintf("Function %s returned: %s", streamTool.Name(), chunk)
+									if err != nil {
+										// The model holds a pending response for this
+										// call and waits for its output, so it has to
+										// hear that the stream failed.
+										text = fmt.Sprintf("Function %s failed: %v", streamTool.Name(), err)
+									}
+									updatedContent := &genai.Content{
+										Role: "user",
+										Parts: []*genai.Part{
+											{
+												Text: text,
+											},
+										},
+									}
+									if sendErr := liveSess.Send(agent.LiveRequest{Content: updatedContent}); sendErr != nil {
+										fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), sendErr) //nolint:forbidigo // pre-slog call site
+										return
+									}
+									if err != nil {
+										return
+									}
+								}
+							}()
+						}
 					} else {
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {

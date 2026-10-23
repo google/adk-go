@@ -736,3 +736,108 @@ func TestWithConfirmation_StreamingProcessRequest_Packing(t *testing.T) {
 		})
 	}
 }
+
+// TestWithConfirmation_StreamingGateSplit checks the wrapper's gate and its
+// ungated stream, which the live flow calls separately. The gate has to cover
+// the toolset's setting and the inner tool's own, and the ungated stream must
+// apply neither.
+func TestWithConfirmation_StreamingGateSplit(t *testing.T) {
+	tests := []struct {
+		name             string
+		toolsetRequires  bool
+		toolRequires     bool
+		toolConfirmation *toolconfirmation.ToolConfirmation
+		wantErr          error
+	}{
+		{name: "toolset requires confirmation", toolsetRequires: true, wantErr: tool.ErrConfirmationRequired},
+		{name: "tool requires confirmation, toolset does not", toolRequires: true, wantErr: tool.ErrConfirmationRequired},
+		{name: "neither requires confirmation"},
+		{
+			name:             "both require confirmation, confirmed",
+			toolsetRequires:  true,
+			toolRequires:     true,
+			toolConfirmation: &toolconfirmation.ToolConfirmation{Confirmed: true},
+		},
+		{
+			name:             "both require confirmation, rejected",
+			toolsetRequires:  true,
+			toolRequires:     true,
+			toolConfirmation: &toolconfirmation.ToolConfirmation{Confirmed: false},
+			wantErr:          tool.ErrConfirmationRejected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handlerRan := false
+			streamTool, err := functiontool.NewStreaming(
+				functiontool.Config{Name: "streamTool", RequireConfirmation: tt.toolRequires},
+				func(ctx agent.Context, in struct{}) iter.Seq2[string, error] {
+					return func(yield func(string, error) bool) {
+						handlerRan = true
+						yield("did the thing", nil)
+					}
+				})
+			if err != nil {
+				t.Fatalf("functiontool.NewStreaming() failed: %v", err)
+			}
+			tools, err := tool.WithConfirmation(&testToolset{tools: []tool.Tool{streamTool}}, tt.toolsetRequires, nil).Tools(nil)
+			if err != nil {
+				t.Fatalf("Tools() failed: %v", err)
+			}
+			gated, ok := tools[0].(toolinternal.ConfirmationGatedStreamingTool)
+			if !ok {
+				t.Fatalf("%T does not implement ConfirmationGatedStreamingTool, so the live flow cannot gate it before streaming", tools[0])
+			}
+
+			ctx := &testContext{Context: t.Context(), toolConfirmationResult: tt.toolConfirmation}
+			if err := gated.CheckConfirmation(ctx, map[string]any{}); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("CheckConfirmation() error = %v, want %v", err, tt.wantErr)
+			}
+			if wantRequested := errors.Is(tt.wantErr, tool.ErrConfirmationRequired); ctx.requestConfirmationCalled != wantRequested {
+				t.Errorf("requestConfirmationCalled = %v, want %v", ctx.requestConfirmationCalled, wantRequested)
+			}
+			if handlerRan {
+				t.Fatal("CheckConfirmation() ran the handler")
+			}
+
+			ungatedCtx := &testContext{Context: t.Context()}
+			for _, err := range gated.RunStreamUngated(ungatedCtx, map[string]any{}) {
+				if err != nil {
+					t.Errorf("RunStreamUngated() error = %v, want none", err)
+				}
+			}
+			if !handlerRan {
+				t.Error("RunStreamUngated() did not run the handler")
+			}
+			if ungatedCtx.requestConfirmationCalled {
+				t.Error("RunStreamUngated() requested confirmation, want no gate applied")
+			}
+		})
+	}
+}
+
+// TestWithConfirmation_UngatedStreamOfToolWithoutGate checks that the ungated
+// stream of a wrapper around a tool that does not expose its gate still runs
+// the tool, through its RunStream.
+func TestWithConfirmation_UngatedStreamOfToolWithoutGate(t *testing.T) {
+	streamRan := false
+	ts := &testToolset{tools: []tool.Tool{&bareStreamingTool{name: "bare", streamRan: &streamRan}}}
+	tools, err := tool.WithConfirmation(ts, true, nil).Tools(nil)
+	if err != nil {
+		t.Fatalf("Tools() failed: %v", err)
+	}
+	gated := tools[0].(toolinternal.ConfirmationGatedStreamingTool)
+
+	if err := gated.CheckConfirmation(&testContext{Context: t.Context()}, map[string]any{}); !errors.Is(err, tool.ErrConfirmationRequired) {
+		t.Fatalf("CheckConfirmation() error = %v, want ErrConfirmationRequired", err)
+	}
+	for _, err := range gated.RunStreamUngated(&testContext{Context: t.Context()}, map[string]any{}) {
+		if err != nil {
+			t.Errorf("RunStreamUngated() error = %v, want none", err)
+		}
+	}
+	if !streamRan {
+		t.Error("RunStreamUngated() did not run the inner tool")
+	}
+}
