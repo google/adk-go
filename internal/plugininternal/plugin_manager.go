@@ -75,6 +75,15 @@ func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
 	return nil
 }
 
+// HasPlugins reports whether the PluginManager has any registered plugins.
+// It is safe to call on a nil PluginManager.
+func (pm *PluginManager) HasPlugins() bool {
+	if pm == nil {
+		return false
+	}
+	return len(pm.plugins) > 0
+}
+
 // RunOnUserMessageCallback runs the OnUserMessageCallback for all plugins.
 func (pm *PluginManager) RunOnUserMessageCallback(cctx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
 	for _, plugin := range pm.plugins {
@@ -289,4 +298,10 @@ func (pm *PluginManager) Close() error {
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
+}
+
+// FromContext returns the PluginManager stored in ctx, or nil if there is none.
+func FromContext(ctx context.Context) *PluginManager {
+	m, _ := ctx.Value(plugincontext.PluginManagerCtxKey).(*PluginManager)
+	return m
 }
