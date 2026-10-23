@@ -58,7 +58,8 @@ const (
 	toolDescription = "Discover tools that are not yet loaded. Describe your task in natural language, " +
 		"use select:tool_a,tool_b for exact names, or a regex over tool names such as get_.*_file. " +
 		"Natural-language results match tool names, descriptions, and argument metadata. " +
-		"After searching, finish this model response. Call discovered tools in the next model response, not alongside search_tools."
+		"Do not call search_tools in the same request as a tool it has not yet returned. " +
+		"Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user."
 
 	// skillHint follows toolDescription only when SkillAnnotations is set, since
 	// no result carries a connected_skill otherwise.
@@ -307,12 +308,14 @@ func executeSearch(
 		return searchOutput{}, fmt.Errorf("toolsearch: persist discovered tools: %w", err)
 	}
 
+	// Read on the model step after search_tools returns. Ask for the tools just
+	// found. Do not say to end or finish the response; that is read as ending the turn.
 	nextStep := "The matched tools are now available. " +
-		"End this response now and call the appropriate tool in your next response."
+		"Call the appropriate tool in this model step to continue the user's request."
 	if hasConnectedSkill {
-		nextStep = "End this model response now. In the next response, if connected_skill could be relevant to your task " +
+		nextStep = "If connected_skill could be relevant to your task " +
 			"and your application supports skills, load only the most relevant one unless the task requires multiple. " +
-			"Then use the matched tools."
+			"Then use the matched tools in this model step. This search does not answer the user."
 	}
 
 	return searchOutput{Matches: searchMatches, Note: note, NextStep: nextStep}, nil
