@@ -913,9 +913,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			taskID := evID
 			taskID.agentName = ev.Author
 			taskID.branch = ev.Branch
-			p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan {
-				return p.traces.popTaskAgentSpan(ctx, taskID)
-			}, nil)
+			if span, ok := p.traces.popTaskAgentSpan(ctx, taskID); ok {
+				p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+			}
 		}
 	}
 	return nil, nil
@@ -959,9 +959,16 @@ func functionResponseCalls(c *genai.Content) []string {
 	return calls
 }
 
+// beforeAgent writes the AGENT_STARTING row of an agent. When a coordinator
+// starts again after the task-mode sub-agent that it delegated to completed,
+// it first writes the AGENT_COMPLETED row of the activation that the
+// delegation interrupted, which ADK ends without an AfterAgentCallback.
 func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
 	defer p.recoverCallback(EventAgentStarting)
 	id := identityOf(ctx)
+	if span, ok := p.traces.popDelegatingAgentSpan(ctx, id); ok {
+		p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan { return span }, nil)
+	}
 	// pushAgentSpan runs before the AGENT_STARTING row so that logPurgedAgents
 	// can write the AGENT_ERROR rows of the previous attempt before the new
 	// attempt's row, with their own timestamps (see unclosedAgentSpan).
