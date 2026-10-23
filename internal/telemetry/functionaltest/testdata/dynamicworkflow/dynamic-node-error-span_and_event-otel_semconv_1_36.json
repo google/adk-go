@@ -2,7 +2,7 @@
   "root_span": {
     "name": "invocation",
     "attributes": {},
-    "status": "UNSET",
+    "status": "ERROR",
     "children": [
       {
         "name": "invoke_workflow my_workflow",

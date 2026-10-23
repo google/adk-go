@@ -1,7 +1,11 @@
 {
   "root_span": {
-    "name": "invocation",
-    "attributes": {},
+    "name": "invoke_workflow some_delegating_agent",
+    "attributes": {
+      "gen_ai.conversation.id": "PRESENT",
+      "gen_ai.operation.name": "invoke_workflow",
+      "gen_ai.workflow.name": "some_delegating_agent"
+    },
     "status": "UNSET",
     "children": [
       {
@@ -30,26 +34,17 @@
             "children": [],
             "logs": [
               {
-                "event_name": "gen_ai.system.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.user.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.choice",
-                "body": {
-                  "content": "<elided>",
-                  "index": 0
-                },
-                "attributes": {}
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "tool_call"
+                  ]
+                }
               }
             ]
           },
@@ -57,16 +52,6 @@
             "name": "execute_tool some_delegate_agent",
             "attributes": {
               "gcp.vertex.agent.event_id": "PRESENT",
-              "gcp.vertex.agent.tool_call_args": {
-                "JSON_STRING": {
-                  "request": "delegate this"
-                }
-              },
-              "gcp.vertex.agent.tool_response": {
-                "JSON_STRING": {
-                  "result": "delegate response"
-                }
-              },
               "gen_ai.operation.name": "execute_tool",
               "gen_ai.tool.call.id": "PRESENT",
               "gen_ai.tool.description": "A delegate agent.",
@@ -75,23 +60,33 @@
             "status": "UNSET",
             "children": [
               {
-                "name": "invocation",
-                "attributes": {},
+                "name": "invoke_agent some_delegate_agent",
+                "attributes": {
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.agent.description": "A delegate agent.",
+                  "gen_ai.agent.name": "some_delegate_agent",
+                  "gen_ai.conversation.id": "PRESENT",
+                  "gen_ai.operation.name": "invoke_agent"
+                },
                 "status": "UNSET",
                 "children": [
                   {
-                    "name": "invoke_agent some_delegate_agent",
+                    "name": "generate_content mock",
                     "attributes": {
+                      "gcp.vertex.agent.event_id": "PRESENT",
                       "gcp.vertex.agent.invocation_id": "PRESENT",
-                      "gen_ai.agent.description": "A delegate agent.",
-                      "gen_ai.agent.name": "some_delegate_agent",
-                      "gen_ai.conversation.id": "PRESENT",
-                      "gen_ai.operation.name": "invoke_agent"
+                      "gen_ai.operation.name": "generate_content",
+                      "gen_ai.request.model": "mock",
+                      "gen_ai.response.finish_reasons": [
+                        "stop"
+                      ]
                     },
                     "status": "UNSET",
-                    "children": [
+                    "children": [],
+                    "logs": [
                       {
-                        "name": "generate_content mock",
+                        "event_name": "gen_ai.client.inference.operation.details",
+                        "body": null,
                         "attributes": {
                           "gcp.vertex.agent.event_id": "PRESENT",
                           "gcp.vertex.agent.invocation_id": "PRESENT",
@@ -100,37 +95,9 @@
                           "gen_ai.response.finish_reasons": [
                             "stop"
                           ]
-                        },
-                        "status": "UNSET",
-                        "children": [],
-                        "logs": [
-                          {
-                            "event_name": "gen_ai.system.message",
-                            "body": {
-                              "content": "<elided>"
-                            },
-                            "attributes": {}
-                          },
-                          {
-                            "event_name": "gen_ai.user.message",
-                            "body": {
-                              "content": "<elided>"
-                            },
-                            "attributes": {}
-                          },
-                          {
-                            "event_name": "gen_ai.choice",
-                            "body": {
-                              "content": "<elided>",
-                              "finish_reason": "STOP",
-                              "index": 0
-                            },
-                            "attributes": {}
-                          }
-                        ]
+                        }
                       }
-                    ],
-                    "logs": []
+                    ]
                   }
                 ],
                 "logs": []
@@ -153,40 +120,17 @@
             "children": [],
             "logs": [
               {
-                "event_name": "gen_ai.system.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.user.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.user.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.user.message",
-                "body": {
-                  "content": "<elided>"
-                },
-                "attributes": {}
-              },
-              {
-                "event_name": "gen_ai.choice",
-                "body": {
-                  "content": "<elided>",
-                  "index": 0
-                },
-                "attributes": {}
+                "event_name": "gen_ai.client.inference.operation.details",
+                "body": null,
+                "attributes": {
+                  "gcp.vertex.agent.event_id": "PRESENT",
+                  "gcp.vertex.agent.invocation_id": "PRESENT",
+                  "gen_ai.operation.name": "generate_content",
+                  "gen_ai.request.model": "mock",
+                  "gen_ai.response.finish_reasons": [
+                    "stop"
+                  ]
+                }
               }
             ]
           }

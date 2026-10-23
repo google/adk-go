@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -34,6 +35,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
@@ -51,6 +53,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTransport struct {
@@ -141,6 +144,7 @@ type mockInvocationContext struct {
 	userID         string
 	appName        string
 	branch         string
+	path           string
 	functionCallID string
 	state          mapState
 }
@@ -155,6 +159,7 @@ func (m *mockInvocationContext) SessionID() string    { return m.sessionID }
 func (m *mockInvocationContext) InvocationID() string { return m.invocationID }
 func (m *mockInvocationContext) UserID() string       { return m.userID }
 func (m *mockInvocationContext) Branch() string       { return m.branch }
+func (m *mockInvocationContext) Path() string         { return m.path }
 
 func (m *mockInvocationContext) UserContent() *genai.Content { return nil }
 
@@ -410,6 +415,44 @@ func TestAfterModelCallback_PartialChunksDoNotEachLogUsage(t *testing.T) {
 	})
 	if streaming != baseline {
 		t.Errorf("expected streaming turn to log the same number of rows as the baseline turn (%d), got %d", baseline, streaming)
+	}
+}
+
+// TestHasGeneratedContent verifies which streamed chunks count as the first
+// token of a model call: only those with a part that holds generated content.
+// The chunks that carry only metadata, such as token usage or the role of the
+// content, do not.
+func TestHasGeneratedContent(t *testing.T) {
+	content := func(parts ...*genai.Part) *model.LLMResponse {
+		return &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model", Parts: parts}}
+	}
+	tests := []struct {
+		name string
+		res  *model.LLMResponse
+		want bool
+	}{
+		{name: "nil response", res: nil, want: false},
+		{name: "usage only", res: &model.LLMResponse{Partial: true, UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}}, want: false},
+		{name: "no content", res: &model.LLMResponse{Partial: true}, want: false},
+		{name: "role only", res: &model.LLMResponse{Partial: true, Content: &genai.Content{Role: "model"}}, want: false},
+		{name: "empty parts", res: content(), want: false},
+		{name: "nil part", res: content(nil), want: false},
+		{name: "empty part", res: content(&genai.Part{}), want: false},
+		{name: "text", res: content(&genai.Part{Text: "Hel"}), want: true},
+		{name: "inline data", res: content(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}), want: true},
+		{name: "file data", res: content(&genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/object", MIMEType: "image/png"}}), want: true},
+		{name: "function call", res: content(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup"}}), want: true},
+		{name: "function response", res: content(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "lookup"}}), want: true},
+		{name: "executable code", res: content(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}}), want: true},
+		{name: "code execution result", res: content(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"}}), want: true},
+		{name: "text after empty parts", res: content(nil, &genai.Part{}, &genai.Part{Text: "Hel"}), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasGeneratedContent(tt.res); got != tt.want {
+				t.Errorf("hasGeneratedContent() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -752,6 +795,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				"turn_complete":  `true`,
 				"interrupted":    `false`,
 				"usage_metadata": `{"prompt_token_count":10,"candidates_token_count":5,"total_token_count":15}`,
+				"cache_type":     `"none"`,
 			},
 		},
 		{
@@ -782,11 +826,14 @@ func TestCallbacks_WriteRows(t *testing.T) {
 			attrs:     map[string]string{"adk.function_call_id": `"call-1"`},
 		},
 		{
-			eventType: legacyEventType,
-			content:   `{"text_summary":"event text"}`,
+			eventType: EventAgentResponse,
+			content:   `{"response":"text: 'event text'"}`,
 			parts:     []map[string]any{textPart("event text", 0)},
 			attrs: map[string]string{
 				"event_author":        `"test-agent"`,
+				"source_event_id":     `"event-1"`,
+				"source_event_author": `"test-agent"`,
+				"source_event_branch": `"root.test-agent"`,
 				"adk.source_event_id": `"event-1"`,
 				"adk.branch":          `"root.test-agent"`,
 				"adk.node":            `{"path":"wf@0/review@2","run_id":"2","parent_run_id":"0","output_for":["wf@0"]}`,
@@ -879,6 +926,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				"adk.session_id":     `"sess-id"`,
 				"adk.user_id":        `"user-id"`,
 				"adk.author":         `"test-agent"`,
+				"root_agent_name":    `"test-agent"`,
 				"custom_tags":        `{"team":"search","labels":{"tier":"gold"}}`,
 				"session_metadata": `{"session_id":"sess-id","app_name":"test-app","user_id":"user-id",` +
 					`"state":{"user_pref":"dark","temp:scratch":"[REDACTED]","api_key":"[REDACTED]"}}`,
@@ -891,7 +939,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				t.Errorf("attributes.adk.adk_version = %v, want either absent or a real version", v)
 			}
 			_, hasBranch := lookup(attrs, "adk", "branch")
-			if wantBranch := w.eventType == legacyEventType; hasBranch != wantBranch {
+			if wantBranch := w.eventType == EventAgentResponse; hasBranch != wantBranch {
 				t.Errorf("attributes.adk.branch present = %v, want %v", hasBranch, wantBranch)
 			}
 			_, hasCallID := lookup(attrs, "adk", "function_call_id")
@@ -967,10 +1015,8 @@ func TestAttributes_OptionalSections(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPluginWithConfig(t, tt.mutate)
 			mCtx.appName = "test-app"
-			wantTrace, wantSpan := "", ""
 			if tt.inSpan {
 				mCtx.ctx = trace.ContextWithSpanContext(mCtx.ctx, spanCtx)
-				wantTrace, wantSpan = traceHex, spanHex
 			}
 			if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "hello")); err != nil {
 				t.Fatalf("OnUserMessageCallback error: %v", err)
@@ -978,10 +1024,20 @@ func TestAttributes_OptionalSections(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventUserMessageReceived)
+			// The row belongs to the invocation span. Inside an ambient
+			// span, the invocation continues the ambient trace under the
+			// ambient span; outside one, it starts a trace of its own.
 			gotTrace, _ := row["trace_id"].(string)
 			gotSpan, _ := row["span_id"].(string)
-			if gotTrace != wantTrace || gotSpan != wantSpan {
-				t.Errorf("trace_id, span_id = %q, %q, want %q, %q", gotTrace, gotSpan, wantTrace, wantSpan)
+			gotParent, hasParent := row["parent_span_id"].(string)
+			switch {
+			case tt.inSpan && (gotTrace != traceHex || gotParent != spanHex):
+				t.Errorf("trace_id, parent_span_id = %q, %q, want %q, %q", gotTrace, gotParent, traceHex, spanHex)
+			case !tt.inSpan && (!eventIDPattern.MatchString(gotTrace) || hasParent):
+				t.Errorf("trace_id, parent_span_id = %q, %q, want 32 hex digits and no parent", gotTrace, gotParent)
+			}
+			if !spanIDPattern.MatchString(gotSpan) || gotSpan == spanHex {
+				t.Errorf("span_id = %q, want 16 hex digits of a span of the invocation", gotSpan)
 			}
 			attrs := jsonObjectColumn(t, row, "attributes")
 			for path, wantJSON := range tt.want {
@@ -1042,7 +1098,7 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
@@ -1309,7 +1365,7 @@ func TestContentFormatter_PreservesExistingErrorMessage(t *testing.T) {
 	}
 	p.AfterRunCallback()(mCtx)
 
-	row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+	row := onlyRowOfType(t, collectRows(t, requests, untilInvocationEnd), EventLLMResponse)
 	if got := row["status"]; got != "ERROR" {
 		t.Errorf("status = %v, want ERROR", got)
 	}
@@ -1568,7 +1624,10 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.CustomMetadataAllowlist = tt.allowlist })
 			md := map[string]any{"a2a:task_id": "task-1", "private": "p"}
 			var errs callbackErrors
-			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{CustomMetadata: md}})
+			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: textContent("model", "hi"), CustomMetadata: md},
+			})
 			errs.add(gotEv, evErr)
 			if gotEv != nil {
 				t.Errorf("OnEventCallback returned %v, want nil so subsequent plugins run", gotEv)
@@ -1578,7 +1637,7 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-			for _, eventType := range []string{legacyEventType, EventLLMResponse} {
+			for _, eventType := range []string{EventAgentResponse, EventLLMResponse} {
 				attrs := jsonObjectColumn(t, onlyRowOfType(t, rows, eventType), "attributes")
 				got, ok := lookup(attrs, "custom_metadata")
 				switch {
@@ -1654,21 +1713,25 @@ func TestFinalResponseToolNames(t *testing.T) {
 }
 
 // TestToolFailure_WritesErrorRows replays the callbacks ADK runs for a failed
-// tool call: OnToolErrorCallback, then AfterToolCallback with the same error.
-// Only TOOL_ERROR should be emitted, without a duplicate TOOL_COMPLETED row.
+// tool call: BeforeToolCallback, OnToolErrorCallback, then
+// AfterToolCallback with the same error. The call ends with a single
+// TOOL_ERROR row, as in adk-python, which runs no after_tool_callback for
+// failed calls.
 func TestToolFailure_WritesErrorRows(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
+	mCtx.functionCallID = "call-1"
 	lookupTool := &fakeTool{name: "lookup"}
 	args := map[string]any{"query": "weather"}
 	toolErr := errors.New("lookup failed")
 	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, lookupTool, args))
 	errs.add(p.OnToolErrorCallback()(mCtx, lookupTool, args, toolErr))
 	errs.add(p.AfterToolCallback()(mCtx, lookupTool, args, nil, toolErr))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	if diff := cmp.Diff([]string{EventToolError, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
+	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
 	row := onlyRowOfType(t, rows, EventToolError)
@@ -1680,6 +1743,67 @@ func TestToolFailure_WritesErrorRows(t *testing.T) {
 	}
 	checkJSON(t, "content", jsonObjectColumn(t, row, "content"),
 		`{"tool":"lookup","args":{"query":"weather"},"tool_origin":"UNKNOWN"}`)
+	if got, want := row["span_id"], onlyRowOfType(t, rows, EventToolStarting)["span_id"]; got != want {
+		t.Errorf("TOOL_ERROR span_id = %v, want the TOOL_STARTING span_id %v", got, want)
+	}
+	if _, ok := row[columnLatencyMS]; !ok {
+		t.Error("TOOL_ERROR row has no latency_ms")
+	}
+}
+
+// TestToolConfirmationRequired_CompletesCall replays the callbacks ADK runs
+// for a call of a tool that waits for the user's confirmation: the tool
+// fails with tool.ErrConfirmationRequired before it runs, so ADK runs
+// BeforeToolCallback, OnToolErrorCallback, then AfterToolCallback with the
+// same error. As in adk-python, whose tools return the confirmation request
+// as their result, the call ends with a TOOL_COMPLETED row whose result is
+// the error that ADK sends the model, and no TOOL_ERROR row. A final
+// response tool writes its AGENT_RESPONSE row when the confirmed call runs.
+func TestToolConfirmationRequired_CompletesCall(t *testing.T) {
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"deploy"} })
+	mCtx.functionCallID = "call-1"
+	deployTool := &fakeTool{name: "deploy"}
+	args := map[string]any{"region": "us-central1"}
+	toolErr := fmt.Errorf("error tool %q %w", "deploy", tool.ErrConfirmationRequired)
+	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	if res, err := p.OnToolErrorCallback()(mCtx, deployTool, args, toolErr); res != nil || err != nil {
+		t.Errorf("OnToolErrorCallback() = %v, %v; want nil, nil", res, err)
+	}
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, nil, toolErr))
+	// The user confirms the call, and ADK runs the tool.
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, map[string]any{"cluster_id": "c-123"}, nil))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	wantTypes := []string{
+		EventToolStarting, EventToolCompleted, // waits for confirmation
+		EventToolStarting, EventToolCompleted, EventAgentResponse, // confirmed
+		EventInvocationCompleted,
+	}
+	if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+	}
+	row := rowsOfType(rows, EventToolCompleted)[0]
+	if got := row["status"]; got != "OK" {
+		t.Errorf("status = %v, want OK", got)
+	}
+	if got, ok := row["error_message"]; ok {
+		t.Errorf("error_message = %v, want none", got)
+	}
+	checkJSON(t, "content", jsonObjectColumn(t, row, "content"),
+		`{"tool":"deploy","result":{"error":"error tool \"deploy\" requires confirmation, please approve or reject"},"tool_origin":"UNKNOWN"}`)
+	checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), `"call-1"`, "adk", "function_call_id")
+	if got, want := row["span_id"], rowsOfType(rows, EventToolStarting)[0]["span_id"]; got != want {
+		t.Errorf("TOOL_COMPLETED span_id = %v, want the TOOL_STARTING span_id %v", got, want)
+	}
+	if _, ok := row[columnLatencyMS]; !ok {
+		t.Error("TOOL_COMPLETED row has no latency_ms")
+	}
+	checkJSON(t, "AGENT_RESPONSE content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventAgentResponse), "content"),
+		`{"response":{"region":"us-central1"}}`)
 }
 
 func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
@@ -1695,11 +1819,18 @@ func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
 	if diff := cmp.Diff([]string{EventToolStarting, EventToolError, EventToolCompleted, EventInvocationCompleted}, eventTypes(rows)); diff != "" {
 		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
-	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolStarting), "content"),
+	startRow := onlyRowOfType(t, rows, EventToolStarting)
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	doneRow := onlyRowOfType(t, rows, EventToolCompleted)
+	if errRow["span_id"] != startRow["span_id"] || doneRow["span_id"] != startRow["span_id"] {
+		t.Errorf("span_ids = (%v, %v, %v), want all equal to TOOL_STARTING span_id",
+			startRow["span_id"], errRow["span_id"], doneRow["span_id"])
+	}
+	checkJSON(t, "TOOL_STARTING content", jsonObjectColumn(t, startRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
-	checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolError), "content"),
+	checkJSON(t, "TOOL_ERROR content", jsonObjectColumn(t, errRow, "content"),
 		`{"tool":"","args":{"q":"1"},"tool_origin":"UNKNOWN"}`)
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
+	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, doneRow, "content"),
 		`{"tool":"","result":{"ok":true},"tool_origin":"UNKNOWN"}`)
 }
 
@@ -1735,8 +1866,13 @@ func TestAfterModelCallback_Status(t *testing.T) {
 		"error-code":     {"status": "OK"},
 		"message-only":   {"status": "OK", "error_message": "quota exceeded"},
 	}
+	rows := collectRows(t, requests, untilEventType(EventInvocationError))
+	invErr := onlyRowOfType(t, rows, EventInvocationError)
+	if invErr["error_message"] != "stream broken" {
+		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", invErr["error_message"], "stream broken")
+	}
 	got := map[string]map[string]any{}
-	for _, row := range rowsOfType(collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse) {
+	for _, row := range rowsOfType(rows, EventLLMResponse) {
 		version, _ := lookup(jsonObjectColumn(t, row, "attributes"), "model_version")
 		columns := map[string]any{"status": row["status"]}
 		if msg, ok := row["error_message"]; ok {
@@ -1786,7 +1922,7 @@ func TestTruncation(t *testing.T) {
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			row := onlyRowOfType(t, rows, EventUserMessageReceived)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), strconv.Quote(tt.wantSummary), "text_summary")
 			if got := row["is_truncated"]; got != tt.wantTrunc {
@@ -1832,13 +1968,17 @@ func (noAgentContext) AgentName() string { panic("invocation has no agent") }
 func TestIdentity_AgentFallsBackToEventAuthor(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
 	ctx := noAgentContext{mCtx}
-	if _, err := p.OnEventCallback()(ctx, &session.Event{Author: "event-author"}); err != nil {
+	ev := &session.Event{
+		Author:      "event-author",
+		LLMResponse: model.LLMResponse{Content: textContent("model", "hi")},
+	}
+	if _, err := p.OnEventCallback()(ctx, ev); err != nil {
 		t.Fatalf("OnEventCallback error: %v", err)
 	}
 	p.AfterRunCallback()(ctx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	row := onlyRowOfType(t, rows, legacyEventType)
+	row := onlyRowOfType(t, rows, EventAgentResponse)
 	if got := row["agent"]; got != "event-author" {
 		t.Errorf("agent = %v, want the event author", got)
 	}
@@ -2568,7 +2708,7 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 	errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: structuredContent}, nil))
 	errs.add(p.OnEventCallback()(mCtx, &session.Event{
 		Author:      "test-agent",
-		LLMResponse: model.LLMResponse{Content: structuredContent},
+		LLMResponse: model.LLMResponse{Content: textContent("model", `{"api_key":"sk-secret-key","note":"hello world"}`)},
 	}))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
@@ -2588,33 +2728,43 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 		t.Errorf("LLM_REQUEST content %s leaked secret from JSON text", raw)
 	}
 
-	for _, eventType := range []string{EventLLMResponse, legacyEventType} {
-		row := onlyRowOfType(t, rows, eventType)
-		if raw, _ := row["content"].(string); strings.Contains(raw, "sk-secret") {
-			t.Errorf("%s content %s leaked secret", eventType, raw)
-		}
-		parts, _ := row["content_parts"].([]map[string]any)
-		if len(parts) != 5 {
-			t.Fatalf("%s content_parts len = %d, want 5: %v", eventType, len(parts), parts)
-		}
-		if parts[1]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[1] mime_type = %v", eventType, parts[1]["mime_type"])
-		}
-		if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[1] part_attributes = %s, want redacted args", eventType, attrs)
-		}
-		if parts[2]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[2] mime_type = %v", eventType, parts[2]["mime_type"])
-		}
-		if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[2] part_attributes = %s, want redacted response", eventType, attrs)
-		}
-		if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
-			t.Errorf("%s parts[3] = %v", eventType, parts[3])
-		}
-		if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
-			t.Errorf("%s parts[4] = %v", eventType, parts[4])
-		}
+	resRow := onlyRowOfType(t, rows, EventLLMResponse)
+	if raw, _ := resRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("LLM_RESPONSE content %s leaked secret", raw)
+	}
+	parts, _ := resRow["content_parts"].([]map[string]any)
+	if len(parts) != 5 {
+		t.Fatalf("LLM_RESPONSE content_parts len = %d, want 5: %v", len(parts), parts)
+	}
+	if parts[1]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[1] mime_type = %v", parts[1]["mime_type"])
+	}
+	if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[1] part_attributes = %s, want redacted args", attrs)
+	}
+	if parts[2]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[2] mime_type = %v", parts[2]["mime_type"])
+	}
+	if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[2] part_attributes = %s, want redacted response", attrs)
+	}
+	if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
+		t.Errorf("LLM_RESPONSE parts[3] = %v", parts[3])
+	}
+	if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
+		t.Errorf("LLM_RESPONSE parts[4] = %v", parts[4])
+	}
+
+	agentRespRow := onlyRowOfType(t, rows, EventAgentResponse)
+	if raw, _ := agentRespRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE content %s leaked secret", raw)
+	}
+	respParts, _ := agentRespRow["content_parts"].([]map[string]any)
+	if len(respParts) != 1 {
+		t.Fatalf("AGENT_RESPONSE content_parts len = %d, want 1: %v", len(respParts), respParts)
+	}
+	if text, _ := respParts[0]["text"].(string); strings.Contains(text, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE parts[0] text = %s leaked secret", text)
 	}
 
 	proseCases := []string{
@@ -2959,6 +3109,469 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 	}
 }
 
+// TestValueEndingInKeyName checks that a credential whose value only ends in
+// a sensitive key name, as in the text that fmt.Errorf("password=%s: %w", ...)
+// writes before a wrapped error, is redacted from error_message, content,
+// content_parts, tool arguments and results, and event attributes, and that
+// no row holds a credential. When the text is a JSON object or array whose
+// string also holds a password after an escaped line break, error_message
+// redacts each pair, while content, content_parts, tool arguments and
+// results, and event attributes are written as [REDACTED_SENSITIVE_TEXT].
+func TestValueEndingInKeyName(t *testing.T) {
+	marshalN := func(s string, n int) string {
+		for range n {
+			b, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			s = string(b)
+		}
+		return s
+	}
+	secrets := []string{"SECRET123", "hunter2", "s3cr3t", "bob pw", "OTHER pass"}
+	tests := []struct {
+		name string
+		text string
+		// want is the error_message, and also the content, content_parts and
+		// attributes text unless wantContent is set.
+		want        string
+		wantContent string
+		// wantResponse is the AGENT_RESPONSE content.response, if it is not
+		// "text: '" + the content + "'". The response is redacted again
+		// once the text is quoted, and a redacted value that runs to the
+		// end of the text then also takes the closing "'".
+		wantResponse string
+	}{
+		{
+			name: "password before a wrapped error",
+			text: "connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused",
+			want: "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused",
+		},
+		{
+			name: "quoted password before an error",
+			text: `login failed: password="SECRET123-secret": invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name:         "API key before a wrapped error",
+			text:         "api_key=prodSECRET123-api-key: permission denied",
+			want:         "api_key=[REDACTED]",
+			wantResponse: "text: 'api_key=[REDACTED]",
+		},
+		{
+			name: "token in prose",
+			text: "my login is token=abc-SECRET123-token: please check",
+			want: "my login is token=[REDACTED] check",
+		},
+		{
+			name: "temp: value ending in a key name before a wrapped error",
+			text: "password=temp:SECRET123-token: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "temp: value before a wrapped error",
+			text: "password=temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "user:temp: value before a wrapped error",
+			text: "password=user:temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "quoted temp: value before a wrapped error",
+			text: `password="temp:SECRET123": dial tcp`,
+			want: `password="[REDACTED]" tcp`,
+		},
+		{
+			name:         "temp: key on the line of credentials",
+			text:         "credentials: temp:foo: SECRET123",
+			want:         "credentials:[REDACTED]",
+			wantResponse: "text: 'credentials:[REDACTED]",
+		},
+		{
+			name:         "temp: key on an indented line under credentials",
+			text:         "credentials:\n  temp:foo: SECRET123",
+			want:         "credentials:\n  temp:foo:[REDACTED]",
+			wantResponse: "text: 'credentials:[REDACTED]",
+		},
+		{
+			name:        "password after an escaped line break in a JSON message",
+			text:        `{"msg":"retry\npassword=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON error",
+			text:        `{"error":"connect failed\npassword=hunter2 credentials: user/password:\"bob pw\""}`,
+			want:        `{"error":"connect failed\npassword=[REDACTED] credentials:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON object whose last field is a bare pair",
+			text:        `{"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\"","code":"token=abc"}`,
+			want:        `{"code":"token=[REDACTED]","msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON error with a password after an escaped line break",
+			text:        `POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefix with bracket tag before JSON error with a password after an escaped line break",
+			text:        `POST /v1/login [400]: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "bracket-led log line before JSON error with only an escaped-newline password",
+			text:        `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "bracket-prefixed JSON error with a password after an escaped line break and a raw marker",
+			text:        `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "JSON error followed by trailing status text with a password after an escaped line break",
+			text:        `POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object whose string ends with a value ending in a key name before a word",
+			text:        `{"msg":"retry\npassword=dev-SECRET123-password: dial"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object with a password after an escaped line break and a final value ending in a key name",
+			text:        `{"msg":"retry\npassword=hunter2 token=abc-SECRET123-token: dial"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED] token=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON array whose string ends with a value ending in a key name before a word",
+			text:        `["retry\npassword=dev-SECRET123-password: dial"]`,
+			want:        `["retry\npassword=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object whose string ends with a value ending in a key name",
+			text:        `{"msg":"retry\npassword=dev-SECRET123-password"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON array whose string ends with a value ending in a key name",
+			text:        `["retry\npassword=dev-SECRET123-password"]`,
+			want:        `["retry\npassword=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "stray quote before JSON error with an escaped-newline password",
+			text:        `bad token " in body: {"msg":"retry\npassword=SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "escaped quote before JSON error with an escaped-newline password",
+			text:        `flag \"foo: {"msg":"retry\npassword=SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "non-JSON backslash before escaped quote and escaped-newline password",
+			text:        `err: "dir C:\work\"retry\npassword=SECRET123"`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "5-deep marshaled JSON string with an escaped-newline password",
+			text:        "upstream: " + marshalN(`"retry\npassword=SECRET123"`, 5),
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "9-deep marshaled JSON string with an escaped-newline password",
+			text:        "upstream: " + marshalN(`"retry\npassword=SECRET123"`, 9),
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "truncated unclosed JSON error body with an escaped-newline password",
+			text:        `upstream error: {"error":"login failed\npassword=SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "single-quoted Python dict with an escaped-newline password",
+			text:        `{'error': 'retry\npassword=SECRET123'}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "prefixed single-quoted Python dict with an escaped-newline password",
+			text:        `bad config: {'error': 'retry\npassword=SECRET123'}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "unquoted escaped log line with an escaped-newline password",
+			text:        `err=retry\npassword=SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows escaped newline before value ending in key name",
+			text:        `{"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want:        `{"msg":"token=[REDACTED]\npassword:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows escaped newline before value ending in key name",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier compound key value swallows escaped newline before password",
+			text:        `{"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want:        `{"msg":"secret:[REDACTED]\npassword:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier compound key value swallows escaped newline before password",
+			text:        `POST /v1/login: 400: {"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by escaped newline and space",
+			text:        `{"msg":"password:\n SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where password colon is followed by escaped newline and space",
+			text:        `POST /v1/login: 400: {"msg":"password:\n SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed single-quoted Python dict where earlier token swallows escaped newline before password",
+			text:        `bad config: {'error': 'token=abc\npassword: SECRET123'}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "truncated JSON error body where earlier token swallows escaped newline before password",
+			text:        `upstream error: {"error":"token=abc\npassword: SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "bare token value ending with escaped quote before password key",
+			text:        `token=abc\"password\": SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed quoted string where earlier token swallows escaped newline before password",
+			text:        `upstream failed: "token=abc\npassword: SECRET123"`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows percent-encoded newline before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc%0Apassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows double-escaped unicode newline before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\\u000apassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows escaped newline and unicode colon before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\npassword\u003a SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			text:        `{"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows percent-escaped backslash and n before password",
+			text:        `{"msg":"token=abc%5Cnpassword: SECRET123"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows hex-escaped backslash and n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\x5cnpassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows unicode-escaped backslash and unicode n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\u005c\u006epassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by escaped backspace and space",
+			text:        `{"msg":"password:\b SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where password colon is followed by escaped backspace and space",
+			text:        `POST /v1/login: 400: {"msg":"password:\b SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "plain text where password colon is followed by escaped backspace and space",
+			text:        `password:\b SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode backspace and space",
+			text:        `{"msg":"password:\u0008 SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode vertical tab and space",
+			text:        `{"msg":"password:\u000b SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode NUL and space",
+			text:        `{"msg":"password:\u0000 SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:         "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			text:         "failed: {Password:abc-token: }\bSECRET123",
+			want:         "failed: {Password:[REDACTED]",
+			wantContent:  "failed: {Password:[REDACTED]",
+			wantResponse: "text: 'failed: {Password:[REDACTED]",
+		},
+		{
+			name:        "Go struct field ending in key name followed by space, backspace byte and closing brace",
+			text:        "failed: {Password:abc-token: \b}",
+			want:        "failed: {Password:[REDACTED] \b}",
+			wantContent: "failed: {Password:[REDACTED] \b}",
+		},
+		{
+			name:        "caller-supplied redaction placeholders splitting secret after escaped newline",
+			text:        `password:\n [REDACTED]a[REDACTED]u[REDACTED]t[REDACTED]h[REDACTED] authorization=1 authorization=2`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{
+				Model:    "gemini-test",
+				Contents: []*genai.Content{textContent("user", tt.text)},
+			}))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
+			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "db"}, map[string]any{"input": tt.text}, errors.New(tt.text)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:          "event-1",
+				Author:      "test-agent",
+				Branch:      tt.text,
+				LLMResponse: model.LLMResponse{Content: textContent("model", tt.text)},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			wantContent := tt.want
+			if tt.wantContent != "" {
+				wantContent = tt.wantContent
+			}
+			wantResponse := "text: '" + wantContent + "'"
+			if tt.wantResponse != "" {
+				wantResponse = tt.wantResponse
+			}
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, wantContent)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, wantContent)
+			}
+			llmRow := onlyRowOfType(t, rows, EventLLMRequest)
+			if prompt, _ := lookup(jsonObjectColumn(t, llmRow, "content"), "prompt"); len(prompt.([]any)) != 1 || prompt.([]any)[0].(map[string]any)["content"] != wantContent {
+				t.Errorf("LLM_REQUEST content.prompt = %v, want content %q", prompt, wantContent)
+			}
+			if parts, _ := llmRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("LLM_REQUEST content_parts = %v, want text %q", parts, wantContent)
+			}
+			startRow := onlyRowOfType(t, rows, EventToolStarting)
+			if got, _ := lookup(jsonObjectColumn(t, startRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, wantContent)
+			}
+			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != wantContent {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, wantContent)
+			}
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			if got := errRow["error_message"]; got != tt.want {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			if got, _ := lookup(jsonObjectColumn(t, errRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, wantContent)
+			}
+			evRow := onlyRowOfType(t, rows, EventAgentResponse)
+			if got, _ := lookup(jsonObjectColumn(t, evRow, "content"), "response"); got != wantResponse {
+				t.Errorf("AGENT_RESPONSE content.response = %v, want %q", got, wantResponse)
+			}
+			if parts, _ := evRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("AGENT_RESPONSE content_parts = %v, want text %q", parts, wantContent)
+			}
+			if got, _ := lookup(jsonObjectColumn(t, evRow, "attributes"), "adk", "branch"); got != wantContent {
+				t.Errorf("AGENT_RESPONSE attributes.adk.branch = %v, want %q", got, wantContent)
+			}
+			for _, row := range rows {
+				s := fmt.Sprint(row)
+				for _, secret := range secrets {
+					if strings.Contains(s, secret) {
+						t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestFileDataURICredentialsAreRedacted checks that credentials in the path,
 // a nested URL, a query value or the fragment of a FileData URI do not reach
 // content_parts.uri.
@@ -3068,6 +3681,39 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 		}
 		if got := userRow["is_truncated"]; got != false {
 			t.Errorf("is_truncated = %v, want false", got)
+		}
+	})
+
+	t.Run("large user message with pattern words and backslashes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			text   string
+			prefix string
+		}{
+			{
+				name:   "52KB prose",
+				text:   strings.Repeat("design review notes; ", 2_500) + strings.Repeat(`\`, 256) + " end",
+				prefix: "design review notes; ",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				start := time.Now()
+				var errs callbackErrors
+				errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tc.text)))
+				errs.check(t)
+				if d := time.Since(start); d > 3*time.Second {
+					t.Errorf("OnUserMessageCallback took %v for a %d-byte text", d, len(tc.text))
+				}
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				gotSummary, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary")
+				if s, _ := gotSummary.(string); !strings.HasPrefix(s, tc.prefix) {
+					t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %q, want prefix %q", s, tc.prefix)
+				}
+			})
 		}
 	})
 }
@@ -3217,4 +3863,538 @@ func TestADKVersionFromBuildInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCacheType(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *genai.GenerateContentResponseUsageMetadata
+		want  string
+	}{
+		{name: "no usage", want: "none"},
+		{name: "no cached tokens", usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10}, want: "none"},
+		{name: "cached tokens", usage: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10, CachedContentTokenCount: 1}, want: "implicit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cacheType(tt.usage); got != tt.want {
+				t.Errorf("cacheType(%+v) = %q, want %q", tt.usage, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
+	if _, ok := AsBigQueryAgentAnalyticsPlugin(nil); ok {
+		t.Error("AsBigQueryAgentAnalyticsPlugin(nil) = true, want false")
+	}
+	var nilPlugin *BigQueryAgentAnalyticsPlugin
+	if got := nilPlugin.DropStats(); got != (DropStats{}) {
+		t.Errorf("nil BigQueryAgentAnalyticsPlugin.DropStats() = %+v, want zero DropStats", got)
+	}
+
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.ContentFormatter = func(_ any, eventType string) (any, error) {
+			if eventType == EventUserMessageReceived {
+				return nil, errors.New("formatter error")
+			}
+			return "ok", nil
+		}
+	})
+
+	bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+	if !ok || bqaap == nil {
+		t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) failed")
+	}
+	if got := bqaap.DropStats(); got != (DropStats{}) {
+		t.Errorf("initial DropStats() = %+v, want zero DropStats", got)
+	}
+
+	if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "secret")); err != nil {
+		t.Fatalf("OnUserMessageCallback error: %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+	_ = collectRows(t, requests, untilEventType(EventInvocationCompleted))
+
+	want := DropStats{
+		FormatterFailureDrops: 1,
+		TotalDrops:            0,
+	}
+	if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+		t.Errorf("BigQueryAgentAnalyticsPlugin.DropStats() mismatch (-want +got):\n%s", diff)
+	}
+
+	counters, _ := bqaap.stats.(*dropCounters)
+	// Verify a recovered panic inside logEvent increments AppendFailureDrops and TotalDrops once.
+	ap := &analyticsPlugin{
+		config:    DefaultConfig(),
+		processor: &BatchProcessor{counters: counters},
+	}
+	ap.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in callback")
+	})
+	wantAfterPanic := DropStats{
+		AppendFailureDrops:    1,
+		FormatterFailureDrops: 1,
+		TotalDrops:            1,
+	}
+	if diff := cmp.Diff(wantAfterPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a recovered panic inside logSessionEvent also increments AppendFailureDrops and TotalDrops once.
+	ap.logSessionEvent(context.Background(), identity{}, EventStateDelta, rowSpan{}, func(*eventData) {
+		panic("boom in logSessionEvent")
+	})
+	wantAfterSessionPanic := DropStats{
+		AppendFailureDrops:    2,
+		FormatterFailureDrops: 1,
+		TotalDrops:            2,
+	}
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logSessionEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a disabled analyticsPlugin does not increment AppendFailureDrops on panic.
+	disabledCfg := DefaultConfig()
+	disabledCfg.Enabled = false
+	disabledAP := &analyticsPlugin{
+		config:    disabledCfg,
+		processor: &BatchProcessor{counters: counters},
+	}
+	disabledAP.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in disabled plugin")
+	})
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after panic in disabled plugin mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *testing.T) {
+	ctx := context.Background()
+
+	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		wc, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+		return wc
+	}
+
+	t.Run("rejects nil writeClient when plugin is enabled", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "writeClient must not be nil") {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(writeClient=nil) error = %v, want error containing %q", err, "writeClient must not be nil")
+		}
+	})
+
+	t.Run("succeeds with bqClient == nil for pre-provisioned append-only deployments", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(bqClient=nil) error = %v, want nil", err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+	})
+
+	t.Run("closes writeClient when table metadata returns non-retryable HTTP 400", func(t *testing.T) {
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"bad request"}}`)),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want HTTP 400 error")
+		}
+		// Verify writeClient was closed by attempting to open an AppendRows stream on it.
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after constructor error (resource leak)")
+		}
+	})
+
+	t.Run("closes writeClient when validateConfig fails", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{"not_a_valid_column"}
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want validation error")
+		}
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after validateConfig error (resource leak)")
+		}
+	})
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTableViaHTTP(t *testing.T) {
+	ctx := context.Background()
+
+	var patchBody string
+	var patchIfMatch string
+	patchCalls := 0
+
+	httpClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Etag": []string{"etag-http-1"}},
+						Body: io.NopCloser(strings.NewReader(`{
+							"etag": "etag-http-1",
+							"schema": {
+								"fields": [
+									{"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
+								]
+							}
+						}`)),
+					}, nil
+				}
+				if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					patchCalls++
+					patchIfMatch = r.Header.Get("If-Match")
+					b, _ := io.ReadAll(r.Body)
+					patchBody = string(b)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"etag":"etag-http-2"}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			},
+		},
+	}
+
+	bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("bq.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = bqClient.Close() })
+
+	srv := &committedStreamTestServer{
+		createdStreamName: "projects/test-project/datasets/test-dataset/tables/test-table/streams/committed-http-1",
+	}
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test-dataset"
+	cfg.TableName = "test-table"
+	cfg.ExactlyOnceDelivery = true
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+	}
+
+	if patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", patchCalls)
+	}
+	if patchIfMatch != "etag-http-1" {
+		t.Errorf("If-Match header = %q, want %q", patchIfMatch, "etag-http-1")
+	}
+
+	var parsed struct {
+		Labels map[string]string `json:"labels"`
+		Schema struct {
+			Fields []struct {
+				Name string `json:"name"`
+			} `json:"fields"`
+		} `json:"schema"`
+	}
+	if err := json.Unmarshal([]byte(patchBody), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(patchBody) error = %v", err)
+	}
+	if got := parsed.Labels[schemaVersionKey]; got != SchemaVersion {
+		t.Errorf("patched label %q = %q, want %q", schemaVersionKey, got, SchemaVersion)
+	}
+	if len(parsed.Schema.Fields) != len(EventsSchema()) {
+		t.Errorf("patched field count = %d, want %d", len(parsed.Schema.Fields), len(EventsSchema()))
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("p.Close() error = %v", err)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.createReqs) != 1 {
+		t.Fatalf("CreateWriteStream calls = %d, want 1", len(srv.createReqs))
+	}
+	if got := srv.createReqs[0].GetWriteStream().GetType(); got != storagepb.WriteStream_COMMITTED {
+		t.Errorf("CreateWriteStream type = %v, want %v", got, storagepb.WriteStream_COMMITTED)
+	}
+	if len(srv.finalizeReqs) != 1 || srv.finalizeReqs[0].GetName() != srv.createdStreamName {
+		t.Errorf("FinalizeWriteStream reqs = %+v, want [%q]", srv.finalizeReqs, srv.createdStreamName)
+	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("enabled plugin remains reachable via AsBigQueryAgentAnalyticsPlugin after Close", func(t *testing.T) {
+		p, _, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.QueueMaxSize = 1
+		})
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		// A caller holding only *baseplugin.Plugin can still call AsBigQueryAgentAnalyticsPlugin(p) after Close().
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+		_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", "after_close"))
+		want := DropStats{
+			ShutdownDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+			t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithConfig remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+		}
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if got := bqaap.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero DropStats", got)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithClients remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, Config{Enabled: false}, nil, nil)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("unreachable plugin entry is removed from pluginRegistry after GC", func(t *testing.T) {
+		newWeakKey := func() weak.Pointer[baseplugin.Plugin] {
+			p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+			if err != nil {
+				t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+			}
+			key := weak.Make(p)
+			if _, ok := pluginRegistry.Load(key); !ok {
+				t.Fatal("pluginRegistry missing entry before GC")
+			}
+			return key
+		}
+		key := newWeakKey()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			runtime.GC()
+			if _, ok := pluginRegistry.Load(key); !ok {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("pluginRegistry still contained entry for unreachable plugin after GC")
+	})
+}
+
+func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("content denied but content_parts enabled records formatter failure drop and omits content_parts", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: textContent("user", "hello")}
+		truncated := p.addContent(row, EventUserMessageReceived, ed)
+		if truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if _, exists := row[columnContent]; exists {
+			t.Errorf("row[%q] = %v, want omitted when columnContent is denied", columnContent, row[columnContent])
+		}
+		if _, exists := row[columnContentParts]; exists {
+			t.Errorf("row[%q] = %v, want omitted when ContentFormatter fails", columnContentParts, row[columnContentParts])
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("both content and content_parts denied skips formatter and records zero drops", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent, columnContentParts}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		if truncated := p.addContent(row, EventUserMessageReceived, &eventData{content: textContent("user", "hello")}); truncated {
+			t.Error("addContent() truncated = true, want false when both content and content_parts are denied")
+		}
+		if got := bp.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero drops when both content and content_parts are denied", got)
+		}
+	})
+
+	t.Run("content denied and multimodal content off still runs formatter and records failure on LLM_REQUEST", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.DisableMultiModalContent = true
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("formatter boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: &model.LLMRequest{Model: "gemini-2.5-flash"}}
+		if truncated := p.addContent(row, EventLLMRequest, ed); truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if !strings.Contains(ed.errMsg, "content_formatter raised") {
+			t.Errorf("ed.errMsg = %q, want formatter failure note", ed.errMsg)
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

@@ -539,14 +539,16 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+	})
+}
+
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
+	// TODO: setup tracer.
 	return func(yield func(*session.Event, error) bool) {
-		// Keep the context local to this iteration so re-ranging does not
-		// parent a new invocation to the previous one's ended span.
-		runCtx, span := telemetry.StartTrace(ctx, "invocation")
-		defer span.End()
-
 		// An invocation that ended in an error is not a finished turn and must
 		// not be summarized: the window would hold a question with no answer,
 		// and that summary is stored permanently and degrades every later
@@ -566,7 +568,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		storedSession, err := r.getOrCreateSession(runCtx, userID, sessionID)
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -599,7 +601,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			// placement that resolves a mode and then keeps it to itself,
 			// which is how a later reader would come to be right about graph
 			// nodes and wrong about roots.
-			rootCtx := llminternal.WithBoundMode(runCtx, r.rootAgent.Name(), llmInternalState, rootMode)
+			//
+			// Kept in a local rather than assigned back to ctx, this closure's
+			// captured parameter, so ranging the returned iterator twice cannot
+			// accumulate wrappers. The non-LlmAgent path below does assign back,
+			// but this branch returns before reaching it, so on this path the
+			// iterator really is clean for a re-range.
+			rootCtx := llminternal.WithBoundMode(ctx, r.rootAgent.Name(), llmInternalState, rootMode)
 
 			hasTaskSubAgent := func() bool {
 				for _, subAgent := range r.rootAgent.SubAgents() {
@@ -633,13 +641,13 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
-		runCtx = parentmap.ToContext(runCtx, r.parents)
-		runCtx = runconfig.ToContext(runCtx, &runconfig.RunConfig{
+		ctx = parentmap.ToContext(ctx, r.parents)
+		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
-		runCtx = plugininternal.ToContext(runCtx, r.pluginManager)
-		runCtx = compactionctx.ToContext(runCtx, r.compactionRuntime())
+		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
@@ -659,7 +667,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				return nil
 			}
 			compacted = true
-			return r.compactAfterInvocation(runCtx, storedSession, invocationCtx)
+			return r.compactAfterInvocation(ctx, storedSession, invocationCtx)
 		}
 		defer func() {
 			if err := compactOnce(); err != nil {
@@ -687,7 +695,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		ic := icontext.NewInvocationContext(runCtx, icontext.InvocationContextParams{
+		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:    artifacts,
 			Memory:       memoryImpl,
 			Session:      storedSession,
@@ -894,7 +902,7 @@ func (s *closedLiveSession) Close() error {
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	// Unlike Python's live generator, Go starts callbacks before returning
 	// the session and iterator, so the span must start here too.
-	ctx, span := telemetry.StartTrace(ctx, "invocation")
+	ctx, span := telemetry.StartInvocationSpan(ctx, r.rootAgent, sessionID)
 	ownedByIterator := false
 	defer func() {
 		if !ownedByIterator {

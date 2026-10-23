@@ -76,6 +76,7 @@
                         "event_name": "gen_ai.choice",
                         "body": {
                           "content": "<elided>",
+                          "finish_reason": "STOP",
                           "index": 0
                         },
                         "attributes": {}
@@ -128,6 +129,7 @@
                         "event_name": "gen_ai.choice",
                         "body": {
                           "content": "<elided>",
+                          "finish_reason": "STOP",
                           "index": 0
                         },
                         "attributes": {}

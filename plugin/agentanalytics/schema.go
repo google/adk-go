@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"strings"
 
 	bq "cloud.google.com/go/bigquery"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -38,8 +39,8 @@ func EventsSchema() bq.Schema {
 		{Name: "invocation_id", Type: bq.StringFieldType, Required: false, Description: "A unique identifier for a single turn or execution within a session. Groups related events like LLM request and response."},
 		{Name: "user_id", Type: bq.StringFieldType, Required: false, Description: "The identifier of the end-user participating in the session, if available."},
 		{Name: "trace_id", Type: bq.StringFieldType, Required: false, Description: "OpenTelemetry trace ID for distributed tracing across services."},
-		{Name: "span_id", Type: bq.StringFieldType, Required: false, Description: "OpenTelemetry span ID of the ambient span when the event was logged. Plugin-internal execution-tree span ids are not written yet, and parent_span_id is currently unset. For span-level Cloud Trace correlation use attributes.otel.span_id (best-effort)."},
-		{Name: "parent_span_id", Type: bq.StringFieldType, Required: false, Description: "Parent execution-tree span ID, currently unset. Plugin-internal execution-tree span ids are not written yet."},
+		{Name: "span_id", Type: bq.StringFieldType, Required: false, Description: "Unique identifier for this specific operation or span within the trace (invocation, agent run, model call, or tool call). When EnableOTelCorrelation is set, raw ambient OpenTelemetry span IDs are also written to attributes.otel.span_id."},
+		{Name: "parent_span_id", Type: bq.StringFieldType, Required: false, Description: "Identifier of the parent span in the execution tree, establishing causality and hierarchy across invocations, agent runs, model calls, and tool calls."},
 		{Name: "content", Type: bq.JSONFieldType, Required: false, Description: "The primary payload of the event, stored as a JSON string. The structure depends on the event_type (e.g., prompt text for LLM_REQUEST, tool output for TOOL_RESPONSE)."},
 		{
 			Name:        "content_parts",
@@ -193,8 +194,8 @@ func serializeArrowSchema(schema *arrow.Schema) ([]byte, error) {
 
 // upgradeTableSchema compares an existing BigQuery table schema with the
 // desired schema, preserving existing column order and appending any missing
-// fields (or nested RECORD sub-fields). It returns the merged schema and
-// whether any additions were needed.
+// fields (or nested RECORD sub-fields) as NULLABLE. It returns the merged
+// schema and whether any additions were needed.
 func upgradeTableSchema(existing, desired bq.Schema) (bq.Schema, bool, error) {
 	return mergeSchemaFields(existing, desired, "")
 }
@@ -202,26 +203,31 @@ func upgradeTableSchema(existing, desired bq.Schema) (bq.Schema, bool, error) {
 func mergeSchemaFields(existing, desired bq.Schema, prefix string) (bq.Schema, bool, error) {
 	existingByName := make(map[string]*bq.FieldSchema, len(existing))
 	for _, f := range existing {
-		existingByName[f.Name] = f
+		existingByName[strings.ToLower(f.Name)] = f
 	}
 	var newFields bq.Schema
 	updatedRecords := make(map[string]*bq.FieldSchema)
 
 	for _, df := range desired {
-		ef, ok := existingByName[df.Name]
+		key := strings.ToLower(df.Name)
+		ef, ok := existingByName[key]
 		if !ok {
-			newFields = append(newFields, df)
+			newFields = append(newFields, cloneNullableFieldSchema(df))
 			continue
 		}
 		fieldPath := df.Name
 		if prefix != "" {
 			fieldPath = prefix + "." + df.Name
 		}
-		if ef.Type != df.Type || ef.Required != df.Required || ef.Repeated != df.Repeated {
+		if ef.Type != df.Type || (ef.Required && !df.Required) || ef.Repeated != df.Repeated {
 			return nil, false, &schemaMismatchError{
-				field:   fieldPath,
-				gotType: ef.Type, gotReq: ef.Required, gotRep: ef.Repeated,
-				wantType: df.Type, wantReq: df.Required, wantRep: df.Repeated,
+				field:    fieldPath,
+				gotType:  ef.Type,
+				gotReq:   ef.Required,
+				gotRep:   ef.Repeated,
+				wantType: df.Type,
+				wantReq:  df.Required,
+				wantRep:  df.Repeated,
 			}
 		}
 		if df.Type == bq.RecordFieldType && len(df.Schema) > 0 {
@@ -232,7 +238,7 @@ func mergeSchemaFields(existing, desired bq.Schema, prefix string) (bq.Schema, b
 			if subChanged {
 				clone := *ef
 				clone.Schema = mergedSub
-				updatedRecords[df.Name] = &clone
+				updatedRecords[key] = &clone
 			}
 		}
 	}
@@ -243,7 +249,7 @@ func mergeSchemaFields(existing, desired bq.Schema, prefix string) (bq.Schema, b
 
 	merged := make(bq.Schema, 0, len(existing)+len(newFields))
 	for _, ef := range existing {
-		if updated, ok := updatedRecords[ef.Name]; ok {
+		if updated, ok := updatedRecords[strings.ToLower(ef.Name)]; ok {
 			merged = append(merged, updated)
 		} else {
 			merged = append(merged, ef)
@@ -251,6 +257,18 @@ func mergeSchemaFields(existing, desired bq.Schema, prefix string) (bq.Schema, b
 	}
 	merged = append(merged, newFields...)
 	return merged, true, nil
+}
+
+func cloneNullableFieldSchema(f *bq.FieldSchema) *bq.FieldSchema {
+	cloned := *f
+	cloned.Required = false
+	if len(f.Schema) > 0 {
+		cloned.Schema = make(bq.Schema, len(f.Schema))
+		for i, sf := range f.Schema {
+			cloned.Schema[i] = cloneNullableFieldSchema(sf)
+		}
+	}
+	return &cloned
 }
 
 type schemaMismatchError struct {
