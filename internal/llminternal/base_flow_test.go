@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockFunctionTool struct {
@@ -1408,5 +1409,57 @@ func TestCallLLMSkipsNilResponseAndContinues(t *testing.T) {
 				t.Fatalf("callLLM() yielded %d responses, want %d", gotResponses, tc.wantResponses)
 			}
 		})
+	}
+}
+
+// newPackableTool returns a tool whose ProcessRequest packs a declaration into the
+// request, so a duplicate name surfaces the way it does at runtime.
+func newPackableTool(t *testing.T, name string) tool.Tool {
+	t.Helper()
+	tl, err := functiontool.New(functiontool.Config{Name: name, Description: "test tool"},
+		func(_ agent.Context, _ struct{}) (string, error) { return "", nil })
+	if err != nil {
+		t.Fatalf("functiontool.New(%q) failed: %v", name, err)
+	}
+	return tl
+}
+
+// A toolset tool that answers to a name the framework dispatches itself must not be
+// able to fail the run. An MCP server controls its own tool listing, so erroring here
+// would let an untrusted server abort every invocation of an agent that happens to
+// declare an output schema -- which is the defect this guards.
+func TestToolPreprocess_FrameworkNameDoesNotFailTheRun(t *testing.T) {
+	// The output-schema and agent-transfer processors run before toolPreprocess and
+	// have already registered their names when this loop adds the agent's tools.
+	frameworkTool := newPackableTool(t, "set_model_response")
+	req := &model.LLMRequest{Tools: map[string]any{"set_model_response": frameworkTool}}
+
+	colliding := newPackableTool(t, "set_model_response")
+	ordinary := newPackableTool(t, "get_weather")
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	if err := toolPreprocess(ctx, req, []tool.Tool{colliding, ordinary}); err != nil {
+		t.Fatalf("toolPreprocess() error = %v; a colliding name must not fail the run", err)
+	}
+
+	if got := req.Tools["set_model_response"]; got != frameworkTool {
+		t.Errorf("req.Tools[set_model_response] = %v, want the framework's tool to win", got)
+	}
+	if _, ok := req.Tools["get_weather"]; !ok {
+		t.Error("colliding with a framework name cost the ordinary tool its registration")
+	}
+}
+
+// A duplicate among the tools the application contributes is not a framework name,
+// so there is no correct winner to pick and it must still fail loudly.
+func TestToolPreprocess_DuplicateAmongAgentToolsStillFails(t *testing.T) {
+	req := &model.LLMRequest{Tools: map[string]any{}}
+	first := newPackableTool(t, "duplicate_name")
+	second := newPackableTool(t, "duplicate_name")
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+	err := toolPreprocess(ctx, req, []tool.Tool{first, second})
+	if err == nil {
+		t.Fatal("toolPreprocess() error = nil, want an error for two application tools sharing a name")
 	}
 }
