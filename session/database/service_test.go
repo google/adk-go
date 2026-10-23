@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -27,7 +28,9 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -658,5 +661,91 @@ func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected no persisted session for the failing write, found %d", count)
+	}
+}
+
+func TestDatabaseService_RespectsTablePrefix(t *testing.T) {
+	ctx := t.Context()
+	prefix := "test_pfx_"
+	gormConfig := &gorm.Config{
+		NamingStrategy: schema.NamingStrategy{
+			TablePrefix: prefix,
+		},
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "prefix_test.db")
+	service, err := NewSessionService(sqlite.Open(dbPath), gormConfig)
+	if err != nil {
+		t.Fatalf("NewSessionService failed: %v", err)
+	}
+	dbSvc, ok := service.(*databaseService)
+	if !ok {
+		t.Fatalf("invalid session service type")
+	}
+	if err := AutoMigrate(service); err != nil {
+		t.Fatalf("AutoMigrate failed: %v", err)
+	}
+	t.Cleanup(func() {
+		sqlDB, err := dbSvc.db.DB()
+		if err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	migrator := dbSvc.db.Migrator()
+	for _, expectedTable := range []string{
+		prefix + "sessions",
+		prefix + "events",
+		prefix + "app_states",
+		prefix + "user_states",
+	} {
+		if !migrator.HasTable(expectedTable) {
+			t.Errorf("expected table %q to exist, but it was not created", expectedTable)
+		}
+	}
+
+	for _, unexpectedTable := range []string{
+		"sessions",
+		"events",
+		"app_states",
+		"user_states",
+	} {
+		if migrator.HasTable(unexpectedTable) {
+			t.Errorf("unexpected unprefixed table %q exists", unexpectedTable)
+		}
+	}
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "s1",
+		State:     map[string]any{"k": "v"},
+	})
+	if err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	ev := &session.Event{
+		ID:        "ev1",
+		Author:    "user",
+		Timestamp: time.Now(),
+		LLMResponse: model.LLMResponse{
+			Content: genai.NewContentFromText("hello", genai.RoleUser),
+		},
+	}
+	if err := service.AppendEvent(ctx, createResp.Session, ev); err != nil {
+		t.Fatalf("AppendEvent failed: %v", err)
+	}
+
+	getResp, err := service.Get(ctx, &session.GetRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "s1",
+	})
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got := getResp.Session.Events().Len(); got != 1 {
+		t.Fatalf("got %d events, want 1", got)
 	}
 }
