@@ -93,6 +93,9 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	}
 	m.addHeaders(req.Config.HTTPOptions.Headers)
 
+	if req.CacheConfig != nil {
+		return m.generateWithContextCache(ctx, req, stream)
+	}
 	if stream {
 		return m.generateStream(ctx, req)
 	}
@@ -100,6 +103,58 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp, err := m.generate(ctx, req)
 		yield(resp, err)
+	}
+}
+
+// generateWithContextCache calls the model through a context cache, creating
+// the cache first when one is due, and records the cache's state on every
+// complete response. Partial streaming chunks are not stored as events, so
+// they carry nothing.
+//
+// Whether a response the flow will store reached the consumer decides which
+// cache is deleted afterwards. If one did, the session now records the new
+// state, and a cache it replaced can go. If none did, nothing records a cache
+// created for this call, so that one goes instead.
+//
+// The model cannot see two later outcomes. If a post-processing step or an
+// after-model callback returns an error for a response this call delivered,
+// the session never records it, so the cache it replaced is deleted while the
+// session still names it, and the new one stays until its TTL runs out.
+func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
+		plan := cache.prepare(ctx, req)
+		delivered := false
+		defer func() { cache.finish(ctx, plan, delivered) }()
+		record := func(resp *model.LLMResponse) {
+			if resp == nil || resp.Partial || plan.metadata == nil {
+				return
+			}
+			recorded := *plan.metadata
+			resp.CacheMetadata = &recorded
+			// The flow drops a response with no content, error or interruption
+			// without storing an event, so its metadata is recorded nowhere.
+			if resp.Content != nil || resp.ErrorCode != "" || resp.Interrupted {
+				delivered = true
+			}
+		}
+
+		if !stream {
+			resp, err := m.generate(ctx, plan.req)
+			if err == nil {
+				record(resp)
+			}
+			yield(resp, err)
+			return
+		}
+		for resp, err := range m.generateStream(ctx, plan.req) {
+			if err == nil {
+				record(resp)
+			}
+			if !yield(resp, err) {
+				return
+			}
+		}
 	}
 }
 
