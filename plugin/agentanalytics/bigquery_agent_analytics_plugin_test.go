@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -34,6 +35,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
@@ -3880,4 +3882,519 @@ func TestCacheType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
+	if _, ok := AsBigQueryAgentAnalyticsPlugin(nil); ok {
+		t.Error("AsBigQueryAgentAnalyticsPlugin(nil) = true, want false")
+	}
+	var nilPlugin *BigQueryAgentAnalyticsPlugin
+	if got := nilPlugin.DropStats(); got != (DropStats{}) {
+		t.Errorf("nil BigQueryAgentAnalyticsPlugin.DropStats() = %+v, want zero DropStats", got)
+	}
+
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.ContentFormatter = func(_ any, eventType string) (any, error) {
+			if eventType == EventUserMessageReceived {
+				return nil, errors.New("formatter error")
+			}
+			return "ok", nil
+		}
+	})
+
+	bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+	if !ok || bqaap == nil {
+		t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) failed")
+	}
+	if got := bqaap.DropStats(); got != (DropStats{}) {
+		t.Errorf("initial DropStats() = %+v, want zero DropStats", got)
+	}
+
+	if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "secret")); err != nil {
+		t.Fatalf("OnUserMessageCallback error: %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+	_ = collectRows(t, requests, untilEventType(EventInvocationCompleted))
+
+	want := DropStats{
+		FormatterFailureDrops: 1,
+		TotalDrops:            0,
+	}
+	if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+		t.Errorf("BigQueryAgentAnalyticsPlugin.DropStats() mismatch (-want +got):\n%s", diff)
+	}
+
+	counters, _ := bqaap.stats.(*dropCounters)
+	// Verify a recovered panic inside logEvent increments AppendFailureDrops and TotalDrops once.
+	ap := &analyticsPlugin{
+		config:    DefaultConfig(),
+		processor: &BatchProcessor{counters: counters},
+	}
+	ap.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in callback")
+	})
+	wantAfterPanic := DropStats{
+		AppendFailureDrops:    1,
+		FormatterFailureDrops: 1,
+		TotalDrops:            1,
+	}
+	if diff := cmp.Diff(wantAfterPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a recovered panic inside logSessionEvent also increments AppendFailureDrops and TotalDrops once.
+	ap.logSessionEvent(context.Background(), identity{}, EventStateDelta, rowSpan{}, func(*eventData) {
+		panic("boom in logSessionEvent")
+	})
+	wantAfterSessionPanic := DropStats{
+		AppendFailureDrops:    2,
+		FormatterFailureDrops: 1,
+		TotalDrops:            2,
+	}
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logSessionEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a disabled analyticsPlugin does not increment AppendFailureDrops on panic.
+	disabledCfg := DefaultConfig()
+	disabledCfg.Enabled = false
+	disabledAP := &analyticsPlugin{
+		config:    disabledCfg,
+		processor: &BatchProcessor{counters: counters},
+	}
+	disabledAP.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in disabled plugin")
+	})
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after panic in disabled plugin mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *testing.T) {
+	ctx := context.Background()
+
+	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		wc, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+		return wc
+	}
+
+	t.Run("rejects nil writeClient when plugin is enabled", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "writeClient must not be nil") {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(writeClient=nil) error = %v, want error containing %q", err, "writeClient must not be nil")
+		}
+	})
+
+	t.Run("succeeds with bqClient == nil for pre-provisioned append-only deployments", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(bqClient=nil) error = %v, want nil", err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+	})
+
+	t.Run("closes writeClient when table metadata returns non-retryable HTTP 400", func(t *testing.T) {
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"bad request"}}`)),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want HTTP 400 error")
+		}
+		// Verify writeClient was closed by attempting to open an AppendRows stream on it.
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after constructor error (resource leak)")
+		}
+	})
+
+	t.Run("closes writeClient when validateConfig fails", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{"not_a_valid_column"}
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want validation error")
+		}
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after validateConfig error (resource leak)")
+		}
+	})
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTableViaHTTP(t *testing.T) {
+	ctx := context.Background()
+
+	var patchBody string
+	var patchIfMatch string
+	patchCalls := 0
+
+	httpClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Etag": []string{"etag-http-1"}},
+						Body: io.NopCloser(strings.NewReader(`{
+							"etag": "etag-http-1",
+							"schema": {
+								"fields": [
+									{"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
+								]
+							}
+						}`)),
+					}, nil
+				}
+				if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					patchCalls++
+					patchIfMatch = r.Header.Get("If-Match")
+					b, _ := io.ReadAll(r.Body)
+					patchBody = string(b)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"etag":"etag-http-2"}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			},
+		},
+	}
+
+	bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("bq.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = bqClient.Close() })
+
+	srv := &committedStreamTestServer{
+		createdStreamName: "projects/test-project/datasets/test-dataset/tables/test-table/streams/committed-http-1",
+	}
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test-dataset"
+	cfg.TableName = "test-table"
+	cfg.ExactlyOnceDelivery = true
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+	}
+
+	if patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", patchCalls)
+	}
+	if patchIfMatch != "etag-http-1" {
+		t.Errorf("If-Match header = %q, want %q", patchIfMatch, "etag-http-1")
+	}
+
+	var parsed struct {
+		Labels map[string]string `json:"labels"`
+		Schema struct {
+			Fields []struct {
+				Name string `json:"name"`
+			} `json:"fields"`
+		} `json:"schema"`
+	}
+	if err := json.Unmarshal([]byte(patchBody), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(patchBody) error = %v", err)
+	}
+	if got := parsed.Labels[schemaVersionKey]; got != SchemaVersion {
+		t.Errorf("patched label %q = %q, want %q", schemaVersionKey, got, SchemaVersion)
+	}
+	if len(parsed.Schema.Fields) != len(EventsSchema()) {
+		t.Errorf("patched field count = %d, want %d", len(parsed.Schema.Fields), len(EventsSchema()))
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("p.Close() error = %v", err)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.createReqs) != 1 {
+		t.Fatalf("CreateWriteStream calls = %d, want 1", len(srv.createReqs))
+	}
+	if got := srv.createReqs[0].GetWriteStream().GetType(); got != storagepb.WriteStream_COMMITTED {
+		t.Errorf("CreateWriteStream type = %v, want %v", got, storagepb.WriteStream_COMMITTED)
+	}
+	if len(srv.finalizeReqs) != 1 || srv.finalizeReqs[0].GetName() != srv.createdStreamName {
+		t.Errorf("FinalizeWriteStream reqs = %+v, want [%q]", srv.finalizeReqs, srv.createdStreamName)
+	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("enabled plugin remains reachable via AsBigQueryAgentAnalyticsPlugin after Close", func(t *testing.T) {
+		p, _, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.QueueMaxSize = 1
+		})
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		// A caller holding only *baseplugin.Plugin can still call AsBigQueryAgentAnalyticsPlugin(p) after Close().
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+		_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", "after_close"))
+		want := DropStats{
+			ShutdownDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+			t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithConfig remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+		}
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if got := bqaap.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero DropStats", got)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithClients remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, Config{Enabled: false}, nil, nil)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("unreachable plugin entry is removed from pluginRegistry after GC", func(t *testing.T) {
+		newWeakKey := func() weak.Pointer[baseplugin.Plugin] {
+			p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+			if err != nil {
+				t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+			}
+			key := weak.Make(p)
+			if _, ok := pluginRegistry.Load(key); !ok {
+				t.Fatal("pluginRegistry missing entry before GC")
+			}
+			return key
+		}
+		key := newWeakKey()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			runtime.GC()
+			if _, ok := pluginRegistry.Load(key); !ok {
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("pluginRegistry still contained entry for unreachable plugin after GC")
+	})
+}
+
+func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("content denied but content_parts enabled records formatter failure drop and omits content_parts", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: textContent("user", "hello")}
+		truncated := p.addContent(row, EventUserMessageReceived, ed)
+		if truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if _, exists := row[columnContent]; exists {
+			t.Errorf("row[%q] = %v, want omitted when columnContent is denied", columnContent, row[columnContent])
+		}
+		if _, exists := row[columnContentParts]; exists {
+			t.Errorf("row[%q] = %v, want omitted when ContentFormatter fails", columnContentParts, row[columnContentParts])
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("both content and content_parts denied skips formatter and records zero drops", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent, columnContentParts}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		if truncated := p.addContent(row, EventUserMessageReceived, &eventData{content: textContent("user", "hello")}); truncated {
+			t.Error("addContent() truncated = true, want false when both content and content_parts are denied")
+		}
+		if got := bp.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero drops when both content and content_parts are denied", got)
+		}
+	})
+
+	t.Run("content denied and multimodal content off still runs formatter and records failure on LLM_REQUEST", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.DisableMultiModalContent = true
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("formatter boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: &model.LLMRequest{Model: "gemini-2.5-flash"}}
+		if truncated := p.addContent(row, EventLLMRequest, ed); truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if !strings.Contains(ed.errMsg, "content_formatter raised") {
+			t.Errorf("ed.errMsg = %q, want formatter failure note", ed.errMsg)
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
 }

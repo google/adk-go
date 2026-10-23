@@ -23,20 +23,20 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"net/http"
 	"reflect"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"weak"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
-	"google.golang.org/api/googleapi"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -164,8 +164,7 @@ func NewBigQueryAgentAnalyticsPluginWithConfig(
 	config Config,
 ) (*baseplugin.Plugin, error) {
 	if !config.Enabled {
-		// Return empty plugin wrapped
-		return baseplugin.New(baseplugin.Config{Name: pluginName})
+		return newDisabledPlugin()
 	}
 	config = applyDefaults(config)
 	// Reject invalid settings before any client is created.
@@ -194,17 +193,96 @@ func NewBigQueryAgentAnalyticsPluginWithConfig(
 	return NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
 }
 
+type dropStatsProvider interface {
+	DropStats() DropStats
+}
+
+// pluginRegistry maps weak pointers of constructed ADK plugins to their
+// drop stats provider so callers of NewBigQueryAgentAnalyticsPlugin* can inspect
+// drop stats via AsBigQueryAgentAnalyticsPlugin both before and after Close
+// without pinning unclosed plugins in memory.
+var pluginRegistry sync.Map // map[weak.Pointer[baseplugin.Plugin]]dropStatsProvider
+
+func registerPlugin(adkPlugin *baseplugin.Plugin, stats dropStatsProvider) {
+	if adkPlugin == nil {
+		return
+	}
+	key := weak.Make(adkPlugin)
+	pluginRegistry.Store(key, stats)
+	runtime.AddCleanup(adkPlugin, func(k weak.Pointer[baseplugin.Plugin]) {
+		pluginRegistry.Delete(k)
+	}, key)
+}
+
+func newDisabledPlugin() (*baseplugin.Plugin, error) {
+	adkPlugin, err := baseplugin.New(baseplugin.Config{
+		Name: pluginName,
+		CloseFunc: func() error {
+			return nil
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	registerPlugin(adkPlugin, nil)
+	return adkPlugin, nil
+}
+
+// BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
+// BigQuery Agent Analytics operational metrics such as [DropStats].
+type BigQueryAgentAnalyticsPlugin struct {
+	*baseplugin.Plugin
+	stats dropStatsProvider
+}
+
+// DropStats returns cumulative event-drop and formatter-failure counts.
+// TotalDrops sums locally discarded events and writes whose success could not
+// be confirmed (QueueFullDrops + AppendFailureDrops + ShutdownDrops); it can
+// include rows committed before an acknowledgment was lost, so it is an upper
+// bound. FormatterFailureDrops separately counts payload replacement or
+// omission, which does not itself discard a row.
+func (p *BigQueryAgentAnalyticsPlugin) DropStats() DropStats {
+	if p == nil || p.stats == nil {
+		return DropStats{}
+	}
+	return p.stats.DropStats()
+}
+
+// AsBigQueryAgentAnalyticsPlugin returns the [BigQueryAgentAnalyticsPlugin]
+// associated with p if p was constructed by this package. It remains available
+// after p.Close() so callers holding p can inspect final [DropStats] (including
+// any losses during the shutdown drain); the registry entry is released
+// automatically when p becomes unreachable.
+func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyticsPlugin, bool) {
+	if p == nil {
+		return nil, false
+	}
+	v, ok := pluginRegistry.Load(weak.Make(p))
+	if !ok {
+		return nil, false
+	}
+	stats, _ := v.(dropStatsProvider)
+	return &BigQueryAgentAnalyticsPlugin{
+		Plugin: p,
+		stats:  stats,
+	}, true
+}
+
 // NewBigQueryAgentAnalyticsPluginWithClients creates a newly configured analytics plugin using the provided BigQuery clients.
 //
-// It creates the events table if it does not exist and, unless
-// DisableSchemaUpgrade is set, adds any missing columns to an existing table.
-// ctx bounds this table setup; background writes use only its values (see
-// [NewBatchProcessor]).
+// When bqClient is not nil, it creates the events table if it does not exist
+// and, unless DisableSchemaUpgrade is set, adds any missing columns to an
+// existing table. Any failure to read, create, or upgrade the table fails
+// construction and closes writeClient. Passing bqClient == nil skips table
+// inspection, creation, and schema upgrades for pre-provisioned append-only
+// deployments. ctx bounds this table setup; background writes use only its
+// values (see [NewBatchProcessor]).
 //
 // The plugin owns writeClient and closes it when the plugin is closed. It
 // also closes writeClient right away when config.Enabled is false, and before
 // it returns any error, such as an invalid config or a table that cannot be
-// read, created or upgraded.
+// read, created or upgraded. bqClient and a supplied GCSOffloader remain
+// caller-owned.
 //
 // Register the plugin before any plugin whose callbacks return replacement
 // events, model responses, tool results or agent content. ADK runs the
@@ -223,14 +301,16 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 	if !config.Enabled {
 		// The disabled plugin never writes, so it does not keep writeClient.
 		closeWriteClient(writeClient, config)
-		// Return empty plugin wrapped
-		return baseplugin.New(baseplugin.Config{Name: pluginName})
+		return newDisabledPlugin()
 	}
 	config = applyDefaults(config)
 	deniedColumns, err := validateConfig(config)
 	if err != nil {
 		closeWriteClient(writeClient, config)
 		return nil, err
+	}
+	if writeClient == nil {
+		return nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
 	}
 	validateEventFilterLists(config)
 
@@ -250,40 +330,41 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 			}
 			o, err := newGCSOffloader(ctx, config.GCSBucketName, gcsOpts...)
 			if err != nil {
-				if closeErr := writeClient.Close(); closeErr != nil {
-					config.logf("failed to close BigQuery write client: %v", closeErr)
-				}
+				closeWriteClient(writeClient, config)
 				return nil, fmt.Errorf("failed to create GCS offloader: %w", err)
 			}
 			ownedOffloader = o
 			config.GCSOffloader = o
 		}
 	}
-
-	// Ensure table exists and has all required columns (done once per instance)
-	tableSchema := projectEventsSchema(deniedColumns)
-	tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
-	if err := ensureTable(ctx, tableRef, tableSchema, config); err != nil {
+	closeOwnedResources := func() {
 		closeWriteClient(writeClient, config)
 		if ownedOffloader != nil {
 			if closeErr := ownedOffloader.Close(); closeErr != nil {
 				config.logf("failed to close GCS offloader: %v", closeErr)
 			}
 		}
-		return nil, err
 	}
 
-	// Determine destination stream
-	streamName := fmt.Sprintf("projects/%s/datasets/%s/tables/%s/streams/_default", config.ProjectID, config.DatasetID, config.TableName)
+	// Ensure table exists and optionally upgrade schema (done once per instance).
+	if bqClient != nil {
+		tableRef := bqClient.Dataset(config.DatasetID).Table(config.TableName)
+		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
+			closeOwnedResources()
+			return nil, err
+		}
+	}
+
+	// Determine destination stream: default stream unless ExactlyOnceDelivery
+	// is enabled, in which case NewBatchProcessor creates a COMMITTED stream.
+	streamName := ""
+	if !config.ExactlyOnceDelivery {
+		streamName = fmt.Sprintf("projects/%s/datasets/%s/tables/%s/streams/_default", config.ProjectID, config.DatasetID, config.TableName)
+	}
 
 	processor, err := NewBatchProcessor(ctx, writeClient, streamName, config)
 	if err != nil {
-		closeWriteClient(writeClient, config)
-		if ownedOffloader != nil {
-			if closeErr := ownedOffloader.Close(); closeErr != nil {
-				config.logf("failed to close GCS offloader: %v", closeErr)
-			}
-		}
+		closeOwnedResources()
 		return nil, fmt.Errorf("failed to initialize batch processor: %w", err)
 	}
 	processor.Start()
@@ -301,7 +382,7 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 		traces:             traces,
 	}
 
-	return baseplugin.New(baseplugin.Config{
+	adkPlugin, err := baseplugin.New(baseplugin.Config{
 		Name: pluginName,
 
 		OnUserMessageCallback: p.onUserMessage,
@@ -329,69 +410,22 @@ func NewBigQueryAgentAnalyticsPluginWithClients(
 					errs = append(errs, fmt.Errorf("failed to close GCS offloader: %w", err))
 				}
 			}
-			if err := writeClient.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("failed to close BigQuery write client: %w", err))
+			if writeClient != nil {
+				if err := writeClient.Close(); err != nil {
+					errs = append(errs, fmt.Errorf("failed to close BigQuery write client: %w", err))
+				}
 			}
 			return errors.Join(errs...)
 		},
 	})
-}
-
-// ensureTable makes sure the events table exists. A missing table is created
-// with every column in schema. An existing table, including one that another
-// writer creates concurrently, gains any columns in schema that it lacks.
-// With DisableSchemaUpgrade, the schema of an existing table is neither
-// inspected nor upgraded, so a table that lacks a column in schema is not
-// detected here: the plugin starts, and every write to the table fails. Any
-// other failure to read, create or upgrade the table is returned.
-func ensureTable(ctx context.Context, tableRef *bq.Table, schema bq.Schema, config Config) error {
-	meta, err := tableRef.Metadata(ctx)
-	if hasHTTPStatus(err, http.StatusNotFound) {
-		config.logf("Table %s not found. Creating it...", config.TableName)
-		err = tableRef.Create(ctx, &bq.TableMetadata{
-			Schema: schema,
-			Labels: map[string]string{
-				"adk_schema_version": SchemaVersion,
-			},
-			// Partition by DAY on timestamp for parity with adk-python and adk-java.
-			TimePartitioning: &bq.TimePartitioning{
-				Field: timestampField,
-				Type:  bq.DayPartitioningType,
-			},
-			Clustering: &bq.Clustering{
-				Fields: config.ClusteringFields,
-			},
-		})
-		if err == nil {
-			return nil
-		}
-		if !hasHTTPStatus(err, http.StatusConflict) {
-			return fmt.Errorf("failed to create BigQuery table %s: %w", config.TableName, err)
-		}
-		// Another writer created the table first, possibly with an older
-		// schema; handle it like any existing table.
-		if config.DisableSchemaUpgrade {
-			return nil
-		}
-		meta, err = tableRef.Metadata(ctx)
-	}
 	if err != nil {
-		return fmt.Errorf("failed to get BigQuery table %s metadata: %w", config.TableName, err)
+		processor.Close()
+		closeOwnedResources()
+		return nil, err
 	}
-	if config.DisableSchemaUpgrade {
-		return nil
-	}
-	if err := upgradeExistingTable(ctx, tableRef, meta, schema); err != nil {
-		return fmt.Errorf("failed to upgrade BigQuery table %s schema: %w", config.TableName, err)
-	}
-	return nil
-}
 
-// hasHTTPStatus reports whether err is a BigQuery API error with the given
-// HTTP status code.
-func hasHTTPStatus(err error, code int) bool {
-	var apiErr *googleapi.Error
-	return errors.As(err, &apiErr) && apiErr.Code == code
+	registerPlugin(adkPlugin, processor.counters)
+	return adkPlugin, nil
 }
 
 // closeWriteClient closes a write client that the plugin will not use,
@@ -403,42 +437,6 @@ func closeWriteClient(writeClient *bqstorage.BigQueryWriteClient, config Config)
 	if err := writeClient.Close(); err != nil {
 		config.logf("failed to close BigQuery write client: %v", err)
 	}
-}
-
-func upgradeExistingTable(ctx context.Context, tableRef *bq.Table, meta *bq.TableMetadata, required bq.Schema) error {
-	merged, changed, err := upgradeTableSchema(meta.Schema, required)
-	if err != nil || !changed {
-		return err
-	}
-	update := bq.TableMetadataToUpdate{Schema: merged}
-	update.SetLabel("adk_schema_version", SchemaVersion)
-	_, err = tableRef.Update(ctx, update, meta.ETag)
-	if !isBQPreconditionFailed(err) {
-		return err
-	}
-	latest, metaErr := tableRef.Metadata(ctx)
-	if metaErr != nil {
-		return err
-	}
-	merged, changed, err = upgradeTableSchema(latest.Schema, required)
-	if err != nil || !changed {
-		return err
-	}
-	retryUpdate := bq.TableMetadataToUpdate{Schema: merged}
-	retryUpdate.SetLabel("adk_schema_version", SchemaVersion)
-	_, err = tableRef.Update(ctx, retryUpdate, latest.ETag)
-	return err
-}
-
-func isBQPreconditionFailed(err error) bool {
-	if err == nil {
-		return false
-	}
-	var apiErr *googleapi.Error
-	if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
-		return true
-	}
-	return strings.Contains(err.Error(), "412")
 }
 
 // validateConfig rejects settings that cannot take effect and returns the
@@ -571,6 +569,9 @@ func (p *analyticsPlugin) denied(column string) bool {
 // that analytics logging never breaks the agent run.
 func (p *analyticsPlugin) recoverCallback(eventType string) {
 	if r := recover(); r != nil {
+		if p.config.Enabled && p.processor != nil {
+			p.processor.recordAppendFailureDrop(1)
+		}
 		p.config.logf("agentanalytics: dropped %s event: recovered panic of type %T", eventType, r)
 	}
 }
@@ -1660,6 +1661,9 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 				d.errMsg += "; "
 			}
 			d.errMsg += errNote
+		}
+		if p.processor != nil {
+			p.processor.recordFormatterFailureDrop()
 		}
 		if !contentDenied {
 			row[columnContent] = strconv.Quote(formattingFailedPlaceholder)
