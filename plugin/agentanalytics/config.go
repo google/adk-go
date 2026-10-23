@@ -365,12 +365,13 @@ type Config struct {
 	// another GCSUploadTimeout: every batch in that time falls back at once, so
 	// that an outage does not make each batch wait in turn. A run-end deadline
 	// can also pause uploads if an upload ran for at least three quarters of
-	// the full run-end upload window (half of ShutdownTimeout) before timing
-	// out, even if other uploads succeeded or earlier batches completed.
-	// Time waiting for a concurrent upload slot does not count, and this
-	// minimum does not shrink as the flush budget is spent. Set ShutdownTimeout
-	// high enough for normal upload latency: a shorter run-end window may
-	// treat a slow but healthy upload as stalled. Caller cancellation, an
+	// that batch's upload window before timing out, even if other uploads succeeded
+	// or earlier batches completed. The required duration is bounded below by
+	// ShutdownTimeout/8 and above by 3*ShutdownTimeout/8 (1.25s and 3.75s by
+	// default). A window shorter than ShutdownTimeout/8 cannot trigger this
+	// pause. Time waiting for a concurrent upload slot does not count.
+	// Set ShutdownTimeout high enough for normal upload latency: a shorter
+	// run-end window may treat a slow but healthy upload as stalled. Caller cancellation, an
 	// already-expired deadline, or a deadline during Close does not pause
 	// uploads.
 	// Values <= 0 mean 10s.

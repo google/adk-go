@@ -446,11 +446,11 @@ func (b *BatchProcessor) flush() {
 // ShutdownTimeout budget, skipping if a background flush is already running.
 // The uploads of each batch get at most half of what is left of the budget, so
 // that a Cloud Storage problem leaves time for the BigQuery write. If an
-// upload stalls for most of the full run-end upload window, later batches
+// upload stalls long enough under that batch's upload window, later batches
 // skip Cloud Storage for a while instead of each waiting for it (see
 // resolveUploads). If the run-end budget expires during a batch's BigQuery
-// write, the batch (along with any uploads that were cut short by the depleted
-// run-end deadline) is retained in deferredBatch for the next flush or Close;
+// write, the batch (along with uploads cut short without confirming a stall)
+// is retained in deferredBatch for the next flush or Close;
 // as with other context expirations after a write is sent, this provides
 // at-least-once delivery if the server had already committed the batch.
 func (b *BatchProcessor) flushRunEnd() {
