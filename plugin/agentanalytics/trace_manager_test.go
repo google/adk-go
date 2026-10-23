@@ -2860,7 +2860,9 @@ func TestTraceManager_ShortCircuitedLastChildRetiredWhenParentPops(t *testing.T)
 		t.Fatalf("open agent spans before parent pop = %d, want 2", got.agents)
 	}
 	// shortcut_last was short-circuited in BeforeAgentCallback, so only
-	// sequence runs popAgentSpan.
+	// sequence runs popAgentSpan. ADK writes the callback's content as an
+	// event of shortcut_last, which shows that it responded.
+	tm.completeResponse(ctx, childID, "shortcut_last", "", nil)
 	tm.popAgentSpan(ctx, seqID)
 	if got := openSpans(t, tm, "inv-last-child"); got != (spanCounts{}) {
 		t.Errorf("openSpans after parent pop = %+v, want empty", got)
@@ -2964,8 +2966,10 @@ func TestTraceManager_ConcurrentSiblingsAndInterleavedSameAgentActivations(t *te
 			t.Errorf("x@2 parentSpanID = %q, want p@2 spanID %q", x2Start.parentSpanID, p2Start.spanID)
 		}
 
-		// Suppose x@1 was short-circuited in BeforeAgentCallback and p@1
-		// finishes while p@2 and p@2/x@2 are still open.
+		// Suppose x@1 was short-circuited in BeforeAgentCallback, which writes
+		// an event of x@1, and p@1 finishes while p@2 and p@2/x@2 are still
+		// open.
+		tm.completeResponse(ctx, x1ID, "x", "", nil)
 		p1End := tm.popAgentSpan(ctx, p1ID)
 		if p1End.spanID != p1Start.spanID || p1End.latency == nil {
 			t.Errorf("p@1 popAgentSpan = %+v, want spanID %q with latency", p1End, p1Start.spanID)
@@ -3489,24 +3493,28 @@ func TestRunner_CustomAgentOutputEvent_EmitsInvocationCompletedOK(t *testing.T) 
 	}
 }
 
-// TestOnEvent_FinalContentOrOutputMarksAuthorResponded verifies which session
-// events show that their author responded, so that its agent span, left open
-// when the invocation terminates, is not reported as failed: an event (final or
-// streamed partial) with Content or with a typed Output, as the events of a
-// custom agent or of a workflow node carry. An event with neither does not.
-func TestOnEvent_FinalContentOrOutputMarksAuthorResponded(t *testing.T) {
+// TestOnEvent_ResponseOrPartialEventKeepsAuthorFromFailing verifies which
+// session events show that their author responded, so that its agent span,
+// left open when the invocation terminates, is not reported as failed: an
+// event (final or streamed partial) with Content or with a typed Output, as
+// the events of a custom agent or of a workflow node carry. A final event with
+// neither does not. A partial event with neither, which ADK emits for a streamed chunk that
+// carries only an error code, shows that its author was streaming when the
+// caller stopped reading, which is not a failure either.
+func TestOnEvent_ResponseOrPartialEventKeepsAuthorFromFailing(t *testing.T) {
 	tests := []struct {
 		name          string
 		event         session.Event
-		wantResponded bool
+		wantCompleted bool
 	}{
-		{name: "content", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}}, wantResponded: true},
-		{name: "output", event: session.Event{Output: "result"}, wantResponded: true},
-		{name: "content and output", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}, Output: "result"}, wantResponded: true},
-		{name: "partial content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, Content: textContent("model", "h")}}, wantResponded: true},
-		{name: "partial output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}, Output: "result"}, wantResponded: true},
-		{name: "partial without content or output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}}, wantResponded: false},
-		{name: "neither content nor output", event: session.Event{}, wantResponded: false},
+		{name: "content", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}}, wantCompleted: true},
+		{name: "output", event: session.Event{Output: "result"}, wantCompleted: true},
+		{name: "content and output", event: session.Event{LLMResponse: model.LLMResponse{Content: textContent("model", "hi")}, Output: "result"}, wantCompleted: true},
+		{name: "partial content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, Content: textContent("model", "h")}}, wantCompleted: true},
+		{name: "partial output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}, Output: "result"}, wantCompleted: true},
+		{name: "partial without content or output", event: session.Event{LLMResponse: model.LLMResponse{Partial: true}}, wantCompleted: true},
+		{name: "partial error code without content", event: session.Event{LLMResponse: model.LLMResponse{Partial: true, ErrorCode: "SAFETY"}}, wantCompleted: true},
+		{name: "neither content nor output", event: session.Event{}, wantCompleted: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3520,7 +3528,7 @@ func TestOnEvent_FinalContentOrOutputMarksAuthorResponded(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			rows := collectRows(t, requests, untilInvocationEnd)
-			if tt.wantResponded {
+			if tt.wantCompleted {
 				if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
 					t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED: the author responded; event types: %v", eventTypes(rows))
 				}
@@ -4168,6 +4176,28 @@ func requireInvocationCompletedOK(t *testing.T, rows []map[string]any) {
 	if diff := cmp.Diff(map[string]int{}, agentErrorCounts(rows)); diff != "" {
 		t.Errorf("AGENT_ERROR rows per agent mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// requireChildStartedAfterPartialStop calls attempt, which runs an agent
+// until the caller stops reading on a partial event and returns the rows of
+// the run, until the rows hold an AGENT_STARTING row of an agent named child,
+// and requires every run to be reported as completed.
+func requireChildStartedAfterPartialStop(t *testing.T, attempt func(t *testing.T) []map[string]any) {
+	t.Helper()
+	// A parallel agent closes the event's ackChan right before it calls
+	// cancelSubAgents when its caller stops reading, so about one run in 30 the
+	// branch sees done or ctx.Done() first and returns before it runs child.
+	const maxAttempts = 20
+	for range maxAttempts {
+		rows := attempt(t)
+		requireInvocationCompletedOK(t, rows)
+		for _, row := range rowsOfType(rows, EventAgentStarting) {
+			if row["agent"] == "child" {
+				return
+			}
+		}
+	}
+	t.Fatalf("child never started after partial stop across %d attempts", maxAttempts)
 }
 
 // TestRunner_AfterToolShortCircuit_EarlyStopDoesNotFail runs an agent
@@ -6778,4 +6808,3395 @@ func TestTraceManager_PopTaskAgentSpan_IgnoresUnrelatedAncestor(t *testing.T) {
 		}
 	}
 	inv.mu.Unlock()
+}
+
+// singlePartialChunkLLM yields one streamed partial LLMResponse and stops if
+// the caller breaks out.
+type singlePartialChunkLLM struct {
+	chunk *model.LLMResponse
+}
+
+func (m *singlePartialChunkLLM) Name() string { return "single-partial-chunk-llm" }
+
+func (m *singlePartialChunkLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(m.chunk, nil)
+	}
+}
+
+// TestRunner_FirstStreamedChunkRejectedByAgentCallback_EmitsErrorTerminalRows
+// verifies that when an agent-level AfterModelCallback rejects the first
+// streamed chunk (after plugin AfterModelCallback already ran), the invocation
+// ends with AGENT_ERROR and INVOCATION_ERROR rather than INVOCATION_COMPLETED.
+func TestRunner_FirstStreamedChunkRejectedByAgentCallback_EmitsErrorTerminalRows(t *testing.T) {
+	tests := []struct {
+		name  string
+		chunk *model.LLMResponse
+	}{
+		{
+			name: "generated content chunk rejected by AfterModelCallback",
+			chunk: &model.LLMResponse{
+				Partial: true,
+				Content: textContent("model", "hello "),
+			},
+		},
+		{
+			name: "metadata-only leading chunk rejected by AfterModelCallback",
+			chunk: &model.LLMResponse{
+				Partial:       true,
+				UsageMetadata: &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 5},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			rejectErr := errors.New("policy rejected first chunk")
+			bot, err := llmagent.New(llmagent.Config{
+				Name:  "bot",
+				Model: &singlePartialChunkLLM{chunk: tc.chunk},
+				AfterModelCallbacks: []llmagent.AfterModelCallback{
+					func(_ agent.Context, _ *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+						return nil, rejectErr
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			r := newTestRunner(t, bot, p)
+
+			var gotErr error
+			var sawPartial bool
+			for ev, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{
+				StreamingMode: agent.StreamingModeSSE,
+			}) {
+				if runErr != nil {
+					gotErr = runErr
+				}
+				if ev != nil && ev.Partial {
+					sawPartial = true
+				}
+			}
+			if gotErr == nil {
+				t.Fatal("expected runner.Run to yield AfterModelCallback error")
+			}
+			if sawPartial {
+				t.Fatal("did not expect a rejected partial chunk to be yielded as a session event")
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+			}
+			invErr := onlyRowOfType(t, rows, EventInvocationError)
+			if invErr["status"] != "ERROR" {
+				t.Errorf("INVOCATION_ERROR status = %v, want ERROR", invErr["status"])
+			}
+			if got, want := agentErrorCounts(rows), map[string]int{"bot": 1}; !maps.Equal(got, want) {
+				t.Errorf("AGENT_ERROR counts = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestRunner_PartialEventFromCustomRootThenSubAgentError_EmitsErrorTerminalRows
+// verifies that a partial event of a custom root does not hide the failure of
+// a sub-agent that the root runs after it: the sub-agent's
+// BeforeModelCallback fails, which no error callback reports, whether the
+// caller stops at the error or reads to the end.
+func TestRunner_PartialEventFromCustomRootThenSubAgentError_EmitsErrorTerminalRows(t *testing.T) {
+	for _, stopAtError := range []bool{true, false} {
+		t.Run(fmt.Sprintf("stop at error %v", stopAtError), func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			subBot, err := llmagent.New(llmagent.Config{
+				Name:  "sub_bot",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "unused"), TurnComplete: true}}},
+				BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+					func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+						return nil, errors.New("sub_bot before-model boom")
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(sub_bot): %v", err)
+			}
+			customRoot, err := agent.New(agent.Config{
+				Name:      "custom_root",
+				SubAgents: []agent.Agent{subBot},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						partial := session.NewEvent(ctx, ctx.InvocationID())
+						partial.Author = "custom_root"
+						partial.Branch = ctx.Branch()
+						partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "progress update...")}
+						if !yield(partial, nil) {
+							return
+						}
+						for ev, err := range subBot.Run(ctx) {
+							if !yield(ev, err) || err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(custom_root): %v", err)
+			}
+
+			r := newTestRunner(t, customRoot, p)
+			var sawPartial, sawErr bool
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					sawErr = true
+					if stopAtError {
+						break
+					}
+					continue
+				}
+				if ev != nil && ev.Partial {
+					sawPartial = true
+				}
+			}
+			if !sawPartial || !sawErr {
+				t.Fatalf("runner.Run yielded partial event %v and error %v, want both", sawPartial, sawErr)
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+			}
+			onlyRowOfType(t, rows, EventInvocationError)
+			if got := agentErrorCounts(rows); got["sub_bot"] != 1 {
+				t.Errorf("AGENT_ERROR rows per agent = %v, want one for sub_bot", got)
+			}
+		})
+	}
+}
+
+// requireCompletedWithHandledAgentError fails the test unless rows end the
+// invocation with INVOCATION_COMPLETED, status OK, and hold one AGENT_ERROR
+// row, of agentName, in the span of its first AGENT_STARTING row, with latency
+// and an error message that contains wantErr: ADK handled the failure of that
+// activation itself.
+func requireCompletedWithHandledAgentError(t *testing.T, rows []map[string]any, agentName, wantErr string) {
+	t.Helper()
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	if invRow := onlyRowOfType(t, rows, EventInvocationCompleted); invRow["status"] != "OK" {
+		t.Errorf("INVOCATION_COMPLETED status = %v, want OK", invRow["status"])
+	}
+	errRow := onlyRowOfType(t, rows, EventAgentError)
+	if errRow["agent"] != agentName {
+		t.Errorf("AGENT_ERROR agent = %v, want %q", errRow["agent"], agentName)
+	}
+	var start map[string]any
+	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		if row["agent"] == agentName {
+			start = row
+			break
+		}
+	}
+	if start == nil {
+		t.Fatalf("no AGENT_STARTING row of %q; event types: %v", agentName, eventTypes(rows))
+	}
+	if got, want := placeOf(errRow), placeOf(start); got != want {
+		t.Errorf("AGENT_ERROR place = %+v, want AGENT_STARTING place %+v", got, want)
+	}
+	mustLatency(t, errRow)
+	if msg, _ := errRow["error_message"].(string); !strings.Contains(msg, wantErr) {
+		t.Errorf("AGENT_ERROR error_message = %q, want it to contain %q", msg, wantErr)
+	}
+}
+
+// TestRunner_InternallyRecoveredErrors_SingleTurnToolAndWorkflowRetry_EmitsCompletedTerminalRows
+// verifies that failures handled internally by ADK — a ModeSingleTurn sub-agent
+// tool failure converted into a tool error response for its parent, and a
+// workflow node retried by RetryConfig — do not cause the enclosing invocation
+// to end with INVOCATION_ERROR, while the failed activation ends with an
+// AGENT_ERROR row of its own.
+func TestRunner_InternallyRecoveredErrors_SingleTurnToolAndWorkflowRetry_EmitsCompletedTerminalRows(t *testing.T) {
+	t.Run("single_turn sub-agent tool fails and parent recovers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+
+		helper, err := llmagent.New(llmagent.Config{
+			Name:        "helper",
+			Description: "Runs a single-turn helper task.",
+			Mode:        llmagent.ModeSingleTurn,
+			Model:       &failingLLM{err: errors.New("helper model unavailable")},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(helper): %v", err)
+		}
+
+		coordinator, err := llmagent.New(llmagent.Config{
+			Name:      "coordinator",
+			Mode:      llmagent.ModeChat,
+			SubAgents: []agent.Agent{helper},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call-helper-1",
+										Name: "helper",
+										Args: map[string]any{"request": "try helper"},
+									},
+								},
+							},
+						},
+					},
+					{
+						Content:      textContent("model", "answered directly after helper failed"),
+						TurnComplete: true,
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coordinator): %v", err)
+		}
+
+		r := newTestRunner(t, coordinator, p)
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "help me"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireCompletedWithHandledAgentError(t, rows, "helper", "helper model unavailable")
+		if n := len(rowsOfType(rows, EventLLMError)); n != 1 {
+			t.Errorf("got %d LLM_ERROR rows, want 1", n)
+		}
+		if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+			t.Errorf("got %d TOOL_ERROR rows, want 1", n)
+		}
+	})
+
+	t.Run("workflow node RetryConfig recovers on retry attempt", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+
+		flaky, err := llmagent.New(llmagent.Config{
+			Name:  "flaky",
+			Mode:  llmagent.ModeSingleTurn,
+			Model: &flakyOnFirstPassLLM{err: errors.New("transient 503"), reply: "succeeded on attempt 2"},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(flaky): %v", err)
+		}
+
+		node, err := workflow.NewAgentNode(flaky, workflow.NodeConfig{
+			RetryConfig: &workflow.RetryConfig{
+				MaxAttempts:   2,
+				InitialDelay:  time.Millisecond,
+				MaxDelay:      time.Millisecond,
+				BackoffFactor: 1.0,
+			},
+		})
+		if err != nil {
+			t.Fatalf("workflow.NewAgentNode(flaky): %v", err)
+		}
+
+		wfRoot, err := workflowagent.New(workflowagent.Config{
+			Name: "wf_root",
+			Edges: []workflow.Edge{
+				{From: workflow.Start, To: node},
+			},
+		})
+		if err != nil {
+			t.Fatalf("workflowagent.New(wf_root): %v", err)
+		}
+
+		r := newTestRunner(t, wfRoot, p)
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "run workflow"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireCompletedWithHandledAgentError(t, rows, "flaky", "transient 503")
+		if n := len(rowsOfType(rows, EventLLMError)); n != 1 {
+			t.Errorf("got %d LLM_ERROR rows, want 1 (from failed attempt 1)", n)
+		}
+		if n := len(rowsOfType(rows, EventLLMResponse)); n != 1 {
+			t.Errorf("got %d LLM_RESPONSE rows, want 1 (from successful retry)", n)
+		}
+	})
+}
+
+// TestRunner_SingleTurnToolAnsweredByBeforeAgentCallback_EmitsNoAgentError
+// verifies that a ModeSingleTurn sub-agent tool whose BeforeAgentCallback
+// answers with cached content, so that it never gets an AfterAgentCallback,
+// is not reported with an AGENT_ERROR row once its owner's tool calls end, and
+// that the invocation still ends with INVOCATION_COMPLETED, whether the owner
+// calls it once or twice in one turn.
+func TestRunner_SingleTurnToolAnsweredByBeforeAgentCallback_EmitsNoAgentError(t *testing.T) {
+	helperCall := func(id string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "helper", Args: map[string]any{"request": "cached?"}}}
+	}
+	tests := []struct {
+		name  string
+		calls []*genai.Part
+	}{
+		{name: "one call", calls: []*genai.Part{helperCall("call-helper-1")}},
+		{name: "two calls in one turn", calls: []*genai.Part{helperCall("call-helper-1"), helperCall("call-helper-2")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+
+			helper, err := llmagent.New(llmagent.Config{
+				Name:        "helper",
+				Description: "Answers from a cache.",
+				Mode:        llmagent.ModeSingleTurn,
+				Model:       &scriptedLLM{},
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						return textContent("model", "cached answer"), nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(helper): %v", err)
+			}
+
+			coordinator, err := llmagent.New(llmagent.Config{
+				Name:      "coordinator",
+				Mode:      llmagent.ModeChat,
+				SubAgents: []agent.Agent{helper},
+				Model: &scriptedLLM{responses: []*model.LLMResponse{
+					{Content: &genai.Content{Role: "model", Parts: tt.calls}},
+					{Content: textContent("model", "done with the cached answer"), TurnComplete: true},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coordinator): %v", err)
+			}
+
+			r := newTestRunner(t, coordinator, p)
+			for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "help me"), agent.RunConfig{}) {
+				if runErr != nil {
+					t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := agentErrorCounts(rows)["helper"]; n != 0 {
+				t.Errorf("got %d AGENT_ERROR rows for helper, want 0; event types: %v", n, eventTypes(rows))
+			}
+			if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+				t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+			}
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+		})
+	}
+}
+
+// TestRunner_RetriedCompositeNodeSkipsCachedChildAgentError verifies that when
+// RetryConfig runs a workflow node again that wraps a sequential agent, only
+// the failing lineage of the failed attempt ends with an AGENT_ERROR row: the
+// child that its BeforeAgentCallback answered with cached content never got an
+// AfterAgentCallback, but it did not fail, so it ends without a row and does
+// not take the error of the sibling that failed.
+func TestRunner_RetriedCompositeNodeSkipsCachedChildAgentError(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	cached, err := llmagent.New(llmagent.Config{
+		Name:  "cached",
+		Model: &scriptedLLM{},
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(agent.Context) (*genai.Content, error) { return textContent("model", "cached answer"), nil },
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(cached): %v", err)
+	}
+	flaky, err := llmagent.New(llmagent.Config{
+		Name:  "flaky",
+		Model: &flakyOnFirstPassLLM{err: errors.New("flaky backend unavailable"), reply: "succeeded on attempt 2"},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(flaky): %v", err)
+	}
+	pipeline, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "pipeline", SubAgents: []agent.Agent{cached, flaky}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(pipeline): %v", err)
+	}
+	node, err := workflow.NewAgentNode(pipeline, workflow.NodeConfig{
+		RetryConfig: &workflow.RetryConfig{
+			MaxAttempts:   2,
+			InitialDelay:  time.Millisecond,
+			MaxDelay:      time.Millisecond,
+			BackoffFactor: 1.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(pipeline): %v", err)
+	}
+	wfRoot, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_root",
+		Edges: []workflow.Edge{{From: workflow.Start, To: node}},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_root): %v", err)
+	}
+
+	r := newTestRunner(t, wfRoot, p)
+	for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "run the pipeline"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	if got, want := agentErrorCounts(rows), map[string]int{"flaky": 1, "pipeline": 1}; !maps.Equal(got, want) {
+		t.Errorf("AGENT_ERROR rows per agent = %v, want %v; event types: %v", got, want, eventTypes(rows))
+	}
+	for _, row := range rowsOfType(rows, EventAgentError) {
+		if msg, _ := row["error_message"].(string); !strings.Contains(msg, "flaky backend unavailable") {
+			t.Errorf("AGENT_ERROR of %v error_message = %q, want it to contain the failure of flaky", row["agent"], msg)
+		}
+	}
+}
+
+// newHelperCoordinator returns a coordinator that calls its single_turn
+// sub-agent helper, whose model is helperModel, as a tool once.
+func newHelperCoordinator(t *testing.T, helperModel model.LLM) agent.Agent {
+	t.Helper()
+	helper, err := llmagent.New(llmagent.Config{
+		Name:        "helper",
+		Description: "Runs a single-turn helper task.",
+		Mode:        llmagent.ModeSingleTurn,
+		Model:       helperModel,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{helper},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "call-helper-1", Name: "helper", Args: map[string]any{"request": "stream something"},
+			}}}}},
+			{Content: textContent("model", "done after the helper"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+	return coordinator
+}
+
+// runHelperCoordinator runs a coordinator that calls a streaming single_turn
+// helper as a tool, and returns the rows of the run. The caller stops reading
+// on the first partial event of the helper if stop is set, and reads to the
+// end otherwise.
+func runHelperCoordinator(t *testing.T, helperModel model.LLM, stop bool) []map[string]any {
+	t.Helper()
+	p, requests, _ := setupTestPlugin(t)
+	var sawPartial bool
+	for ev, err := range newTestRunner(t, newHelperCoordinator(t, helperModel), p).Run(t.Context(), "u1", "s1", textContent("user", "help me"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+		if ev != nil && ev.Partial && ev.Author == "helper" {
+			sawPartial = true
+			if stop {
+				break
+			}
+		}
+	}
+	if !sawPartial {
+		t.Fatal("runner.Run yielded no partial event of helper")
+	}
+	return collectRows(t, requests, untilInvocationEnd)
+}
+
+// TestRunner_StopOnToolRunHelperPartialEvent_EmitsNoAgentError verifies that a
+// single_turn helper that its coordinator runs as a tool, and that the run
+// cancels because the caller stopped reading on one of its partial events, is
+// not reported as failed: the invocation completes, as for any other agent
+// that the stop canceled, so no AGENT_ERROR row of the helper contradicts it.
+func TestRunner_StopOnToolRunHelperPartialEvent_EmitsNoAgentError(t *testing.T) {
+	rows := runHelperCoordinator(t, streamThenWaitLLM{}, true)
+	if !slices.ContainsFunc(rowsOfType(rows, EventLLMError), func(row map[string]any) bool { return row["agent"] == "helper" }) {
+		t.Fatalf("got no LLM_ERROR row of helper, want the model call that the stop canceled; event types: %v", eventTypes(rows))
+	}
+	requireInvocationCompletedOK(t, rows)
+}
+
+// TestRunner_ToolRunHelperCanceledItselfAfterPartial_EmitsAgentError verifies
+// that a single_turn helper whose model cancels a request context of its own
+// after a partial chunk still ends with an AGENT_ERROR row when the caller
+// reads on: only the cancellation by a stop is no failure, and ADK hands the
+// failure to the coordinator's model, so the invocation completes.
+func TestRunner_ToolRunHelperCanceledItselfAfterPartial_EmitsAgentError(t *testing.T) {
+	rows := runHelperCoordinator(t, &selfCancelingStreamLLM{}, false)
+	requireCompletedWithHandledAgentError(t, rows, "helper", "context canceled")
+}
+
+// TestRunner_ToolRunHelperCanceledByOuterCtxAfterPartial_EmitsAgentError
+// verifies that when the outer run context is canceled while a single_turn
+// tool-run helper is streaming a partial event, the helper emits AGENT_ERROR
+// and the invocation ends INVOCATION_ERROR (the cancellation is not a consumer
+// stop: it is a failure of the run).
+func TestRunner_ToolRunHelperCanceledByOuterCtxAfterPartial_EmitsAgentError(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	coordinator := newHelperCoordinator(t, streamThenWaitLLM{})
+	r := newTestRunner(t, coordinator, p)
+	for ev, err := range r.Run(ctx, "u1", "s1", textContent("user", "help me"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			break
+		}
+		if ev != nil && ev.Partial && ev.Author == "helper" {
+			cancel()
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	// The helper must get an AGENT_ERROR row and the run must end
+	// INVOCATION_ERROR: canceling the outer run context is a failure of the
+	// run, not a consumer stop.
+	if got := agentErrorCounts(rows)["helper"]; got != 1 {
+		t.Errorf("AGENT_ERROR rows for helper = %d, want 1; event types: %v", got, eventTypes(rows))
+	}
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED, want INVOCATION_ERROR; event types: %v", eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationError)
+}
+
+// TestRunner_TwoHelpersPartialThenHandledError_EmitsCompleted verifies that
+// when a coordinator calls two single_turn helpers concurrently, one emits a
+// partial event and then hits a model error that ADK handles as a tool error,
+// while the other blocks until the consumer stops on the partial event,
+// the invocation ends INVOCATION_COMPLETED: the handled helper's model error
+// becomes its own AGENT_ERROR row, the other helper is retired quietly, and
+// the purged helper's context.Canceled does not become an invocation failure.
+// The purge must preserve lastSessionEventPartial and partialLineage so that
+// the consumer-stop suppression survives the purge.
+func TestRunner_TwoHelpersPartialThenHandledError_EmitsCompleted(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	slowEntered := make(chan struct{})
+
+	// helperModel streams a partial event once slow is inside GenerateContent,
+	// then returns a model error.
+	helperModel := &streamThenErrorLLM{
+		partial: &model.LLMResponse{Content: textContent("model", "partial..."), Partial: true},
+		err:     errors.New("helper unavailable"),
+	}
+	helper, err := llmagent.New(llmagent.Config{
+		Name:        "helper",
+		Description: "Runs a single-turn helper task.",
+		Mode:        llmagent.ModeSingleTurn,
+		Model:       helperModel,
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			select {
+			case <-slowEntered:
+				return nil, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+
+	// slowModel signals slowEntered, blocks until ctx.Done, then returns the context error.
+	slow, err := llmagent.New(llmagent.Config{
+		Name:        "slow",
+		Description: "Runs a single-turn slow task.",
+		Mode:        llmagent.ModeSingleTurn,
+		Model:       &contextCanceledOnDoneLLM{entered: slowEntered},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(slow): %v", err)
+	}
+
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{helper, slow},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "call-helper", Name: "helper", Args: map[string]any{"request": "stream"}},
+			}, {
+				FunctionCall: &genai.FunctionCall{ID: "call-slow", Name: "slow", Args: map[string]any{"request": "wait"}},
+			}}}},
+			{Content: textContent("model", "done"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	r := newTestRunner(t, coordinator, p)
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			break
+		}
+		if ev != nil && ev.Partial && ev.Author == "helper" {
+			break // consumer stops on the partial event
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+
+	// The handled helper's model error becomes its own AGENT_ERROR row.
+	if got := agentErrorCounts(rows)["helper"]; got != 1 {
+		t.Errorf("AGENT_ERROR rows for helper = %d, want 1; event types: %v", got, eventTypes(rows))
+	}
+	// The slow helper is retired quietly: no AGENT_ERROR.
+	if got := agentErrorCounts(rows)["slow"]; got != 0 {
+		t.Errorf("AGENT_ERROR rows for slow = %d, want 0; event types: %v", got, eventTypes(rows))
+	}
+	// The invocation completes despite the handled failure.
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR, want INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+}
+
+// TestRunner_StopOnContentlessPartialHelper_EmitsNoAgentError verifies that a
+// single_turn helper that streams one partial chunk with no content, and then
+// blocks until ctx.Done, is retired quietly when the caller stops on that
+// partial event: the helper never responded, but canceledByStop() exempts it
+// because the consumer stop canceled it.
+func TestRunner_StopOnContentlessPartialHelper_EmitsNoAgentError(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+
+	// contentlessPartialLLM streams one partial chunk with no content, then
+	// blocks until ctx.Done.
+	contentlessModel := &contentlessPartialLLM{}
+	helper, err := llmagent.New(llmagent.Config{
+		Name:        "helper",
+		Description: "Runs a single-turn helper task.",
+		Mode:        llmagent.ModeSingleTurn,
+		Model:       contentlessModel,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name:      "coordinator",
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{helper},
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "call-helper", Name: "helper", Args: map[string]any{"request": "stream"}},
+			}}}},
+			{Content: textContent("model", "done"), TurnComplete: true},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coordinator): %v", err)
+	}
+
+	r := newTestRunner(t, coordinator, p)
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			break
+		}
+		if ev != nil && ev.Partial && ev.Author == "helper" {
+			break
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	if got := agentErrorCounts(rows)["helper"]; got != 0 {
+		t.Errorf("AGENT_ERROR rows for helper = %d, want 0; event types: %v", got, eventTypes(rows))
+	}
+}
+
+// TestTraceManager_PurgedActivationLatencyFromLastActivity verifies that a
+// purged activation's latency and timestamp reflect the latest callback under
+// it, not the retry delay that follows it. For each callback that touches an
+// agent's lastActivity, the purged activation's latency_ms is the time from
+// the activation's start to that callback, and its timestamp is the callback's
+// time, not the purge time.
+//
+// setupFunc runs while the clock is at t0 (the activation's start); touchFunc
+// runs after the clock advances to t1, so the test isolates the callback that
+// sets lastActivity and fails when that callback's touchAgentActivityLocked
+// call is deleted.
+func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
+	ctx := context.Background()
+	const invID = "inv-activity"
+	node := identity{invocationID: invID, agentName: "node", path: "wf@1/node@1"}
+	child := identity{invocationID: invID, agentName: "child", path: "wf@1/node@1"}
+	t0 := time.Unix(1000, 0)
+	t1 := t0.Add(50 * time.Millisecond)
+	t2 := t0.Add(2000 * time.Millisecond)
+	tests := []struct {
+		name      string
+		setupFunc func(tm *traceManager)
+		touchFunc func(tm *traceManager)
+	}{
+		{
+			name:      "pushAgentSpan",
+			setupFunc: func(tm *traceManager) {},
+			touchFunc: func(tm *traceManager) {
+				tm.pushAgentSpan(ctx, child)
+			},
+		},
+		{
+			name: "popAgentSpan",
+			setupFunc: func(tm *traceManager) {
+				tm.pushAgentSpan(ctx, child)
+				tm.pushLLMSpan(ctx, child)
+				tm.popLLMSpan(ctx, child, true)
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.popAgentSpan(ctx, child)
+			},
+		},
+		{
+			name: "popTaskAgentSpan",
+			setupFunc: func(tm *traceManager) {
+				tm.pushAgentSpan(ctx, child)
+				tm.pushLLMSpan(ctx, child)
+				tm.popLLMSpan(ctx, child, true)
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.popTaskAgentSpan(ctx, child)
+			},
+		},
+		{
+			name:      "pushLLMSpan",
+			setupFunc: func(tm *traceManager) {},
+			touchFunc: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, node)
+			},
+		},
+		{
+			name: "recordFirstToken",
+			setupFunc: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, node)
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.recordFirstToken(ctx, node)
+			},
+		},
+		{
+			name: "recordStreamed without content",
+			setupFunc: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, node)
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.recordStreamed(ctx, node, "node", "", false)
+			},
+		},
+		{
+			name: "popLLMSpan not responded",
+			setupFunc: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, node)
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.popLLMSpan(ctx, node, false)
+			},
+		},
+		{
+			name:      "pushToolSpan",
+			setupFunc: func(tm *traceManager) {},
+			touchFunc: func(tm *traceManager) {
+				tm.pushToolSpan(ctx, node, toolKey(node, "call-1", "lookup"))
+			},
+		},
+		{
+			name: "popToolSpan",
+			setupFunc: func(tm *traceManager) {
+				tm.pushToolSpan(ctx, node, toolKey(node, "call-1", "lookup"))
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.popToolSpan(ctx, node, toolKey(node, "call-1", "lookup"), false)
+			},
+		},
+		{
+			name:      "recordError",
+			setupFunc: func(tm *traceManager) {},
+			touchFunc: func(tm *traceManager) {
+				tm.recordError(ctx, node, llmKey(node), errors.New("model failed"))
+			},
+		},
+		{
+			name: "completeResponse with open span",
+			setupFunc: func(tm *traceManager) {
+				tm.pushAgentSpan(ctx, child)
+				tm.recordError(ctx, node, llmKey(node), errors.New("tool failed"))
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.completeResponse(ctx, child, "child", "", nil)
+			},
+		},
+		{
+			name: "completeResponse with no open span",
+			setupFunc: func(tm *traceManager) {
+				tm.recordError(ctx, node, llmKey(node), errors.New("tool failed"))
+			},
+			touchFunc: func(tm *traceManager) {
+				// completeResponse with an author that has no open agent span
+				// touches the activation that the author would have run under.
+				tm.completeResponse(ctx, node, "ghost", "", nil)
+			},
+		},
+		{
+			name: "eventSpan",
+			setupFunc: func(tm *traceManager) {
+				tm.recordError(ctx, node, llmKey(node), errors.New("tool failed"))
+			},
+			touchFunc: func(tm *traceManager) {
+				tm.eventSpan(ctx, node, "node", "")
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clock := t0
+			tm := newTraceManager()
+			tm.now = func() time.Time { return clock }
+			tm.invocationSpan(ctx, node, nil)
+			tm.pushAgentSpan(ctx, node)
+			tt.setupFunc(tm)
+			clock = t1
+			tt.touchFunc(tm)
+			clock = t2
+			tm.pushAgentSpan(ctx, node)
+			purged := tm.takePurged(ctx, node)
+			var p *unclosedAgentSpan
+			for i := range purged {
+				if purged[i].agentName == "node" {
+					p = &purged[i]
+					break
+				}
+			}
+			if p == nil {
+				t.Fatalf("takePurged has no entry for node; entries: %d", len(purged))
+			}
+			wantMS := t1.Sub(t0).Milliseconds()
+			if got := p.span.latency["total_ms"]; got != wantMS {
+				t.Errorf("latency total_ms = %v, want %d (start→t1), not %d (start→t2)", got, wantMS, t2.Sub(t0).Milliseconds())
+			}
+			if p.timestamp != t1 {
+				t.Errorf("timestamp = %v, want %v (t1), not %v (t2)", p.timestamp, t1, t2)
+			}
+		})
+	}
+}
+
+// TestTraceManager_TouchAgentActivityMonotonic verifies that touchAgentActivity
+// never moves lastActivity backward: touching with an earlier clock after a
+// later one leaves lastActivity unchanged.
+func TestTraceManager_TouchAgentActivityMonotonic(t *testing.T) {
+	ctx := context.Background()
+	const invID = "inv-mono"
+	node := identity{invocationID: invID, agentName: "node", path: "wf@1/node@1"}
+	clock := time.Unix(1000, 0)
+	tm := newTraceManager()
+	tm.now = func() time.Time { return clock }
+	tm.invocationSpan(ctx, node, nil)
+	tm.pushAgentSpan(ctx, node)
+	// Touch at a later time via pushLLMSpan.
+	clock = clock.Add(100 * time.Millisecond)
+	tm.pushLLMSpan(ctx, node)
+	tm.popLLMSpan(ctx, node, true)
+	// Touch at an earlier time via recordError.
+	clock = clock.Add(-50 * time.Millisecond)
+	tm.recordError(ctx, node, llmKey(node), errors.New("model failed"))
+	// Purge at an even later time.
+	clock = clock.Add(5000 * time.Millisecond)
+	tm.pushAgentSpan(ctx, node)
+	purged := tm.takePurged(ctx, node)
+	if len(purged) != 1 {
+		t.Fatalf("takePurged = %d entries, want 1", len(purged))
+	}
+	p := purged[0]
+	// lastActivity should be the pushLLMSpan time (1000.1s), not the
+	// earlier recordError time (1000.05s).
+	want := time.Unix(1000, 0).Add(100 * time.Millisecond)
+	wantMS := want.Sub(time.Unix(1000, 0)).Milliseconds()
+	if got := p.span.latency["total_ms"]; got != wantMS {
+		t.Errorf("latency total_ms = %v, want %d (monotonic, not regressed by earlier recordError)", got, wantMS)
+	}
+	if p.timestamp != want {
+		t.Errorf("timestamp = %v, want %v (monotonic)", p.timestamp, want)
+	}
+}
+
+// TestRunner_PurgedRetryAttemptTimestampPrecedesNextAttempt verifies that a
+// retried attempt's AGENT_ERROR row is timestamped before the next attempt's
+// AGENT_STARTING row, and its latency reflects its own work, not the retry
+// delay.
+func TestRunner_PurgedRetryAttemptTimestampPrecedesNextAttempt(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	flaky, err := llmagent.New(llmagent.Config{
+		Name: "flaky",
+		Model: &flakyOnFirstPassLLM{
+			err:   errors.New("flaky backend unavailable"),
+			reply: "succeeded on attempt 2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(flaky): %v", err)
+	}
+	delay := 25 * time.Millisecond
+	node, err := workflow.NewAgentNode(flaky, workflow.NodeConfig{
+		RetryConfig: &workflow.RetryConfig{
+			MaxAttempts:   2,
+			InitialDelay:  delay,
+			MaxDelay:      delay,
+			BackoffFactor: 1.0,
+		},
+	})
+	if err != nil {
+		t.Fatalf("workflow.NewAgentNode(flaky): %v", err)
+	}
+	wfRoot, err := workflowagent.New(workflowagent.Config{
+		Name:  "wf_root",
+		Edges: []workflow.Edge{{From: workflow.Start, To: node}},
+	})
+	if err != nil {
+		t.Fatalf("workflowagent.New(wf_root): %v", err)
+	}
+	r := newTestRunner(t, wfRoot, p)
+	for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "run"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+		t.Fatalf("got INVOCATION_ERROR, want COMPLETED; event types: %v", eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationCompleted)
+	// Find the first AGENT_ERROR(flaky), the first and second
+	// AGENT_STARTING(flaky), the first LLM_ERROR(flaky), and their row indices.
+	var errRow, start1, start2, llmErrRow map[string]any
+	errIdx, start2Idx := -1, -1
+	startCount := 0
+	for i, row := range rows {
+		agentName, _ := row["agent"].(string)
+		if agentName != "flaky" {
+			continue
+		}
+		switch row["event_type"] {
+		case EventAgentError:
+			if errRow == nil {
+				errRow = row
+				errIdx = i
+			}
+		case EventAgentStarting:
+			startCount++
+			switch startCount {
+			case 1:
+				start1 = row
+			case 2:
+				start2 = row
+				start2Idx = i
+			}
+		case EventLLMError:
+			if llmErrRow == nil {
+				llmErrRow = row
+			}
+		}
+	}
+	if errRow == nil {
+		t.Fatal("no AGENT_ERROR(flaky) row found")
+	}
+	if start1 == nil || start2 == nil {
+		t.Fatalf("missing AGENT_STARTING(flaky) rows: start1=%v start2=%v", start1 != nil, start2 != nil)
+	}
+	errTS, _ := errRow[timestampField].(time.Time)
+	start1TS, _ := start1[timestampField].(time.Time)
+	start2TS, _ := start2[timestampField].(time.Time)
+	if errTS.IsZero() || start1TS.IsZero() || start2TS.IsZero() {
+		t.Fatalf("AGENT_ERROR or AGENT_STARTING timestamp is zero: err=%v start1=%v start2=%v", errTS, start1TS, start2TS)
+	}
+	if !errTS.Before(start2TS) {
+		t.Errorf("AGENT_ERROR(flaky) timestamp %v is not before the second AGENT_STARTING(flaky) timestamp %v", errTS, start2TS)
+	}
+	// The purged AGENT_ERROR(flaky) row must appear before the second
+	// AGENT_STARTING(flaky) row in the output, pinning the write order.
+	if errIdx < 0 || start2Idx < 0 || errIdx >= start2Idx {
+		t.Errorf("AGENT_ERROR(flaky) row index %d is not before second AGENT_STARTING(flaky) index %d", errIdx, start2Idx)
+	}
+	// The purged AGENT_ERROR timestamp must not be before the LLM_ERROR
+	// timestamp of the same attempt, so the agent error does not sort
+	// microseconds before the model error that caused it.
+	if llmErrRow != nil {
+		llmErrTS, _ := llmErrRow[timestampField].(time.Time)
+		if llmErrTS.IsZero() {
+			t.Fatalf("LLM_ERROR(flaky) timestamp is zero")
+		}
+		if errTS.Before(llmErrTS) {
+			t.Errorf("AGENT_ERROR(flaky) timestamp %v is before LLM_ERROR(flaky) timestamp %v", errTS, llmErrTS)
+		}
+	}
+	// The gap from the error to the next start must include the retry backoff.
+	if start2TS.Sub(errTS) < 20*time.Millisecond {
+		t.Errorf("start2TS - errTS = %v, want >= 20ms (retry delay is %v)", start2TS.Sub(errTS), delay)
+	}
+	// The purged attempt's latency runs from start1TS (rec.start) to errTS
+	// (lastActivity), excluding the retry backoff regardless of CPU load.
+	lat := mustLatency(t, errRow)
+	wantTotalMS := errTS.Sub(start1TS).Milliseconds()
+	if diff := lat["total_ms"] - wantTotalMS; diff < -1 || diff > 1 {
+		t.Errorf("AGENT_ERROR(flaky) latency total_ms = %d, want %d ±1ms (errTS %v - start1TS %v)", lat["total_ms"], wantTotalMS, errTS, start1TS)
+	}
+}
+
+// TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated verifies
+// that session-event signal rows (STATE_DELTA via eventSpan), AGENT_COMPLETED
+// rows (via popAgentSpan), and end-of-run AGENT_ERROR rows (via
+// popUnclosedAgentSpans) carry the clock time of their own emission rather than
+// being backdated to spanRecord.lastActivity.
+func TestRunner_AgentCompletedAndEndOfRunErrorTimestampsAreNotBackdated(t *testing.T) {
+	t.Run("state_delta_and_agent_completed", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		const stepDelay = 25 * time.Millisecond
+		root, err := agent.New(agent.Config{
+			Name: "custom_ok",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					time.Sleep(stepDelay)
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Actions.StateDelta = map[string]any{"step": "done"}
+					if !yield(ev, nil) {
+						return
+					}
+					time.Sleep(stepDelay)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(custom_ok): %v", err)
+		}
+		r := newTestRunner(t, root, p)
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationCompleted)
+		startRow := onlyRowOfType(t, rows, EventAgentStarting)
+		deltaRow := onlyRowOfType(t, rows, EventStateDelta)
+		completedRow := onlyRowOfType(t, rows, EventAgentCompleted)
+		startTS, _ := startRow[timestampField].(time.Time)
+		deltaTS, _ := deltaRow[timestampField].(time.Time)
+		completedTS, _ := completedRow[timestampField].(time.Time)
+		if startTS.IsZero() || deltaTS.IsZero() || completedTS.IsZero() {
+			t.Fatalf("zero timestamp in AGENT_STARTING=%v, STATE_DELTA=%v, AGENT_COMPLETED=%v", startTS, deltaTS, completedTS)
+		}
+		if deltaTS.Sub(startTS) < 20*time.Millisecond {
+			t.Errorf("STATE_DELTA timestamp - AGENT_STARTING timestamp = %v, want >= 20ms (not backdated to AGENT_STARTING)", deltaTS.Sub(startTS))
+		}
+		if completedTS.Sub(deltaTS) < 20*time.Millisecond {
+			t.Errorf("AGENT_COMPLETED timestamp - STATE_DELTA timestamp = %v, want >= 20ms (not backdated to lastActivity)", completedTS.Sub(deltaTS))
+		}
+	})
+
+	t.Run("end_of_run_agent_error", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		const failDelay = 25 * time.Millisecond
+		root, err := agent.New(agent.Config{
+			Name: "custom_fail",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					time.Sleep(failDelay)
+					yield(nil, errors.New("custom agent boom"))
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(custom_fail): %v", err)
+		}
+		r := newTestRunner(t, root, p)
+		var gotErr error
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				gotErr = runErr
+				break
+			}
+		}
+		if gotErr == nil {
+			t.Fatal("r.Run yielded nil error, want custom agent boom")
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		onlyRowOfType(t, rows, EventInvocationError)
+		startRow := onlyRowOfType(t, rows, EventAgentStarting)
+		errRow := onlyRowOfType(t, rows, EventAgentError)
+		startTS, _ := startRow[timestampField].(time.Time)
+		errTS, _ := errRow[timestampField].(time.Time)
+		if startTS.IsZero() || errTS.IsZero() {
+			t.Fatalf("zero timestamp in AGENT_STARTING=%v, AGENT_ERROR=%v", startTS, errTS)
+		}
+		if errTS.Sub(startTS) < 20*time.Millisecond {
+			t.Errorf("end-of-run AGENT_ERROR timestamp - AGENT_STARTING timestamp = %v, want >= 20ms (not backdated to lastActivity)", errTS.Sub(startTS))
+		}
+	})
+}
+
+// TestRunner_SequentialRootWithFailedCustomChild_EmitsErrorTerminalRows
+// verifies that when a sequential root runs an ok child followed by a custom
+// child whose Run yields (nil, err) and no events, draining runner.Run (so
+// seq_root's AfterAgentCallback runs) still preserves custom_fail_child as
+// failed and ends the invocation with AGENT_ERROR and INVOCATION_ERROR.
+func TestRunner_SequentialRootWithFailedCustomChild_EmitsErrorTerminalRows(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	childErr := errors.New("custom child failed")
+
+	okChild, err := llmagent.New(llmagent.Config{
+		Name:  "ok_child",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "step 1 ok"), TurnComplete: true}}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(ok_child): %v", err)
+	}
+
+	customFailChild, err := agent.New(agent.Config{
+		Name: "custom_fail_child",
+		Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, childErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(custom_fail_child): %v", err)
+	}
+
+	seqRoot, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "seq_root",
+			SubAgents: []agent.Agent{okChild, customFailChild},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(seq_root): %v", err)
+	}
+
+	r := newTestRunner(t, seqRoot, p)
+	var errs []error
+	for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			errs = append(errs, runErr)
+		}
+	}
+	if len(errs) != 1 || !errors.Is(errs[0], childErr) {
+		t.Fatalf("r.Run errors = %v, want [%v]", errs, childErr)
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+	}
+	invErr := onlyRowOfType(t, rows, EventInvocationError)
+	if invErr["status"] != "ERROR" {
+		t.Errorf("INVOCATION_ERROR status = %v, want ERROR", invErr["status"])
+	}
+	if got, want := agentErrorCounts(rows), map[string]int{"custom_fail_child": 1}; !maps.Equal(got, want) {
+		t.Errorf("AGENT_ERROR counts = %v, want %v", got, want)
+	}
+}
+
+// contextCanceledOnDoneLLM signals entered when GenerateContent starts, blocks
+// until ctx is canceled, and then yields ctx.Err() as a real streaming/API
+// model does when parallelagent cancels subAgentsCtx on consumer break.
+type contextCanceledOnDoneLLM struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (m *contextCanceledOnDoneLLM) Name() string { return "context-canceled-on-done-llm" }
+
+func (m *contextCanceledOnDoneLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.once.Do(func() { close(m.entered) })
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
+}
+
+// TestRunner_ParallelRootStoppedMidStream_SiblingModelReturnsContextCanceled_EmitsCompletedTerminalRows
+// verifies that when a caller breaks out of runner.Run mid-stream on a partial
+// event from one branch of a parallelagent and parallelagent's deferred
+// subAgentsCtx cancellation causes a sibling branch's model to return
+// context.Canceled (triggering onModelError), the invocation still terminates
+// with INVOCATION_COMPLETED rather than INVOCATION_ERROR.
+func TestRunner_ParallelRootStoppedMidStream_SiblingModelReturnsContextCanceled_EmitsCompletedTerminalRows(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	slowEntered := make(chan struct{})
+
+	slow, err := llmagent.New(llmagent.Config{
+		Name:  "slow",
+		Model: &contextCanceledOnDoneLLM{entered: slowEntered},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(slow): %v", err)
+	}
+	bot, err := llmagent.New(llmagent.Config{
+		Name: "bot",
+		Model: &waitThenStreamPartialLLM{
+			ready:     slowEntered,
+			chunkText: "hello ",
+			finalText: "hello world",
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	par, err := parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "par_root",
+			SubAgents: []agent.Agent{bot, slow},
+		},
+	})
+	if err != nil {
+		t.Fatalf("parallelagent.New(par_root): %v", err)
+	}
+
+	r := newTestRunner(t, par, p)
+	var sawPartial bool
+	for ev, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
+	}) {
+		if runErr != nil {
+			t.Fatalf("r.Run error: %v", runErr)
+		}
+		if ev != nil && ev.Partial {
+			sawPartial = true
+			break
+		}
+	}
+	if !sawPartial {
+		t.Fatal("did not observe a partial event in StreamingModeSSE")
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	if n := len(rowsOfType(rows, EventLLMError)); n != 1 {
+		t.Errorf("got %d LLM_ERROR rows, want 1 (from slow branch context.Canceled)", n)
+	}
+}
+
+// TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError verifies
+// that a caller that stops reading at a partial event of a parallel branch
+// stops mid-stream, not at a failure, when the branch then starts work that
+// ends on the branch's cancellation. A parallel agent lets the branch go on
+// once the event was yielded, even when the caller stopped reading on it, and
+// then cancels its branches.
+func TestRunner_ParallelStreamStop_CanceledWorkAfterPartialIsNotAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		newChild func(t *testing.T) agent.Agent
+	}{
+		{
+			name: "sub-agent that fails with the context's error",
+			newChild: func(t *testing.T) agent.Agent {
+				a, err := agent.New(agent.Config{
+					Name: "child",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							<-ctx.Done()
+							yield(nil, ctx.Err())
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(child): %v", err)
+				}
+				return a
+			},
+		},
+		{
+			name: "model call that fails with the context's error",
+			newChild: func(t *testing.T) agent.Agent {
+				a, err := llmagent.New(llmagent.Config{
+					Name:  "child",
+					Model: &contextCanceledOnDoneLLM{entered: make(chan struct{})},
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(child): %v", err)
+				}
+				return a
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireChildStartedAfterPartialStop(t, func(t *testing.T) []map[string]any {
+				p, requests, _ := setupTestPlugin(t)
+				child := tc.newChild(t)
+				streamer, err := agent.New(agent.Config{
+					Name:      "streamer",
+					SubAgents: []agent.Agent{child},
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							partial := session.NewEvent(ctx, ctx.InvocationID())
+							partial.Author = "streamer"
+							partial.Branch = ctx.Branch()
+							partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "progress update...")}
+							if !yield(partial, nil) {
+								return
+							}
+							for ev, err := range child.Run(ctx) {
+								if !yield(ev, err) || err != nil {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(streamer): %v", err)
+				}
+				par, err := parallelagent.New(parallelagent.Config{
+					AgentConfig: agent.Config{
+						Name:      "par_root",
+						SubAgents: []agent.Agent{streamer},
+					},
+				})
+				if err != nil {
+					t.Fatalf("parallelagent.New(par_root): %v", err)
+				}
+
+				r := newTestRunner(t, par, p)
+				var sawPartial bool
+				for ev, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+					StreamingMode: agent.StreamingModeSSE,
+				}) {
+					if runErr != nil {
+						t.Fatalf("r.Run error: %v", runErr)
+					}
+					if ev != nil && ev.Partial {
+						sawPartial = true
+						break
+					}
+				}
+				if !sawPartial {
+					t.Fatal("did not observe a partial event in StreamingModeSSE")
+				}
+				return collectRows(t, requests, untilInvocationEnd)
+			})
+		})
+	}
+}
+
+// newStreamingAuthor returns a custom agent named author that writes one
+// partial event, with or without content, and then runs child.
+func newStreamingAuthor(t *testing.T, child agent.Agent, withContent bool) agent.Agent {
+	t.Helper()
+	author, err := agent.New(agent.Config{
+		Name:      "author",
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				partial := session.NewEvent(ctx, ctx.InvocationID())
+				partial.Author = "author"
+				partial.Branch = ctx.Branch()
+				partial.LLMResponse = model.LLMResponse{Partial: true}
+				if withContent {
+					partial.Content = textContent("model", "progress...")
+				}
+				if !yield(partial, nil) {
+					return
+				}
+				for ev, err := range child.Run(ctx) {
+					if !yield(ev, err) || err != nil {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(author): %v", err)
+	}
+	return author
+}
+
+// TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError verifies that a
+// caller that stops reading on the partial event of an agent that goes on
+// without waiting for the caller stops mid-stream, not at a failure: the agent
+// then runs its child, which the run cancels, under a parallel agent, whose
+// sibling waits for its cancellation, and as a node of a workflow, which does
+// not wait for its caller to read a partial event.
+func TestRunner_StopOnPartialEventOfAsyncAuthor_IsNotAnError(t *testing.T) {
+	newChild := func(t *testing.T) agent.Agent {
+		t.Helper()
+		child, err := agent.New(agent.Config{
+			Name: "child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					answer := session.NewEvent(ctx, ctx.InvocationID())
+					answer.Author = "child"
+					answer.Branch = ctx.Branch()
+					answer.Content = textContent("model", "child answer")
+					yield(answer, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(child): %v", err)
+		}
+		return child
+	}
+	newParallel := func(t *testing.T, withContent bool) agent.Agent {
+		t.Helper()
+		waiter, err := agent.New(agent.Config{
+			Name: "waiter",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					<-ctx.Done()
+					yield(nil, ctx.Err())
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(waiter): %v", err)
+		}
+		par, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "par_root",
+				SubAgents: []agent.Agent{newStreamingAuthor(t, newChild(t), withContent), waiter},
+			},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New(par_root): %v", err)
+		}
+		return par
+	}
+	for _, tc := range []struct {
+		name    string
+		newRoot func(t *testing.T) agent.Agent
+	}{
+		{name: "parallel agent, partial event with content", newRoot: func(t *testing.T) agent.Agent { return newParallel(t, true) }},
+		{name: "parallel agent, partial event without content", newRoot: func(t *testing.T) agent.Agent { return newParallel(t, false) }},
+		{name: "workflow node", newRoot: func(t *testing.T) agent.Agent {
+			node, err := workflow.NewAgentNode(newStreamingAuthor(t, newChild(t), true), workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode(author): %v", err)
+			}
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name:  "wf_root",
+				Edges: []workflow.Edge{{From: workflow.Start, To: node}},
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New(wf_root): %v", err)
+			}
+			return wf
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireChildStartedAfterPartialStop(t, func(t *testing.T) []map[string]any {
+				p, requests, _ := setupTestPlugin(t)
+				r := newTestRunner(t, tc.newRoot(t), p)
+				var sawPartial bool
+				for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("r.Run error: %v", err)
+					}
+					if ev != nil && ev.Partial {
+						sawPartial = true
+						break
+					}
+				}
+				if !sawPartial {
+					t.Fatal("runner.Run yielded no partial event")
+				}
+				return collectRows(t, requests, untilInvocationEnd)
+			})
+		})
+	}
+}
+
+// selfCancelingStreamLLM streams one partial chunk and then cancels a request
+// context of its own and fails with its error, as a model client does that
+// gives up on a request.
+type selfCancelingStreamLLM struct{}
+
+func (m *selfCancelingStreamLLM) Name() string { return "self-canceling-stream-llm" }
+
+func (m *selfCancelingStreamLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		requestCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		if !yield(&model.LLMResponse{Content: textContent("model", "hello "), Partial: true}, nil) {
+			return
+		}
+		cancel()
+		yield(nil, requestCtx.Err())
+	}
+}
+
+// TestRunner_ModelCanceledOwnRequestAfterPartial_EmitsErrorTerminalRows
+// verifies that a model call that canceled a request context of its own after
+// it streamed a chunk fails the invocation when the caller reads to the end:
+// only a cancellation of the work by the run, for a caller that stopped
+// reading, is not a failure.
+func TestRunner_ModelCanceledOwnRequestAfterPartial_EmitsErrorTerminalRows(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: &selfCancelingStreamLLM{}})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	seq, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{bot}},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(seq_root): %v", err)
+	}
+
+	r := newTestRunner(t, seq, p)
+	var sawPartial bool
+	var gotErr error
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "stream please"), agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
+	}) {
+		if err != nil {
+			gotErr = err
+		}
+		if ev != nil && ev.Partial {
+			sawPartial = true
+		}
+	}
+	if !sawPartial || !errors.Is(gotErr, context.Canceled) {
+		t.Fatalf("runner.Run yielded partial event %v and error %v, want a partial event and context.Canceled", sawPartial, gotErr)
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationError)
+}
+
+// TestRunner_AgentCanceledSubAgentContextAfterPartial_EmitsErrorTerminalRows
+// verifies that a partial event does not hide a sub-agent whose context the
+// agent that runs it canceled itself, as on a step timeout of its own, while
+// the caller reads on: the sub-agent's model ends the call with
+// context.Canceled and the run yields it, whether the custom agent that writes
+// the partial event and cancels the sub-agent's context is the root or runs
+// under a sequential or a parallel agent.
+func TestRunner_AgentCanceledSubAgentContextAfterPartial_EmitsErrorTerminalRows(t *testing.T) {
+	for _, wrap := range []string{"root", "sequential", "parallel"} {
+		t.Run(wrap, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			entered := make(chan struct{})
+			subBot, err := llmagent.New(llmagent.Config{
+				Name:  "sub_bot",
+				Model: &contextCanceledOnDoneLLM{entered: entered},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(sub_bot): %v", err)
+			}
+			custom, err := agent.New(agent.Config{
+				Name:      "custom",
+				SubAgents: []agent.Agent{subBot},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						partial := session.NewEvent(ctx, ctx.InvocationID())
+						partial.Author = "custom"
+						partial.Branch = ctx.Branch()
+						partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "progress update...")}
+						if !yield(partial, nil) {
+							return
+						}
+						subCtx, cancel := context.WithCancel(ctx)
+						defer cancel()
+						go func() {
+							<-entered
+							cancel()
+						}()
+						for ev, err := range subBot.Run(ctx.WithContext(subCtx)) {
+							if !yield(ev, err) || err != nil {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(custom): %v", err)
+			}
+			root := custom
+			switch wrap {
+			case "sequential":
+				root, err = sequentialagent.New(sequentialagent.Config{
+					AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{custom}},
+				})
+			case "parallel":
+				root, err = parallelagent.New(parallelagent.Config{
+					AgentConfig: agent.Config{Name: "par_root", SubAgents: []agent.Agent{custom}},
+				})
+			}
+			if err != nil {
+				t.Fatalf("New(%s root): %v", wrap, err)
+			}
+
+			r := newTestRunner(t, root, p)
+			var sawPartial bool
+			var gotErr error
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					gotErr = err
+				}
+				if ev != nil && ev.Partial {
+					sawPartial = true
+				}
+			}
+			if !sawPartial || !errors.Is(gotErr, context.Canceled) {
+				t.Fatalf("runner.Run yielded partial event %v and error %v, want a partial event and context.Canceled", sawPartial, gotErr)
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+			}
+			onlyRowOfType(t, rows, EventInvocationError)
+			if got := agentErrorCounts(rows); got["sub_bot"] != 1 {
+				t.Errorf("AGENT_ERROR rows per agent = %v, want one for sub_bot", got)
+			}
+		})
+	}
+}
+
+// streamThenWaitLLM streams one partial chunk, optionally closes acked once
+// the partial chunk's yield returned true, and then blocks until its context is
+// canceled, as a streaming model does while a parallel agent cancels the branch
+// that it runs in because a sibling failed.
+type streamThenWaitLLM struct {
+	acked chan struct{}
+}
+
+func (streamThenWaitLLM) Name() string { return "stream-then-wait-llm" }
+
+func (m streamThenWaitLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !yield(&model.LLMResponse{Content: textContent("model", "streaming..."), Partial: true}, nil) {
+			return
+		}
+		if m.acked != nil {
+			close(m.acked)
+		}
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
+}
+
+// contentlessPartialLLM streams one partial chunk with no content, then blocks
+// until ctx.Done. It pins the canceledByStop exemption for an unresponded
+// activation that the consumer stop canceled.
+type contentlessPartialLLM struct{}
+
+func (contentlessPartialLLM) Name() string { return "contentless-partial-llm" }
+
+func (contentlessPartialLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !yield(&model.LLMResponse{Partial: true, ErrorCode: "PROBE"}, nil) {
+			return
+		}
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
+}
+
+// streamThenErrorLLM streams one partial response, then returns an error.
+type streamThenErrorLLM struct {
+	partial *model.LLMResponse
+	err     error
+}
+
+func (m *streamThenErrorLLM) Name() string { return "stream-then-error-llm" }
+
+func (m *streamThenErrorLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if m.partial != nil {
+			if !yield(m.partial, nil) {
+				return
+			}
+		}
+		yield(nil, m.err)
+	}
+}
+
+// errSiblingFailed is the failure of the branch that fails while its sibling
+// streams.
+var errSiblingFailed = errors.New("guardrail rejected the request")
+
+// newGuardedAgent returns an llmagent named failer that waits for seen to be
+// closed, and then fails with errSiblingFailed from its BeforeModelCallback,
+// which no plugin callback of the analytics plugin observes.
+func newGuardedAgent(t *testing.T, seen <-chan struct{}) agent.Agent {
+	t.Helper()
+	failer, err := llmagent.New(llmagent.Config{
+		Name:  "failer",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "unused"), TurnComplete: true}}},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+			<-seen
+			return nil, errSiblingFailed
+		}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(failer): %v", err)
+	}
+	return failer
+}
+
+// newCustomFailer returns a custom agent named failer that waits for seen to
+// be closed, and then yields errSiblingFailed.
+func newCustomFailer(t *testing.T, seen <-chan struct{}) agent.Agent {
+	t.Helper()
+	failer, err := agent.New(agent.Config{
+		Name: "failer",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-seen
+				yield(nil, errSiblingFailed)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(failer): %v", err)
+	}
+	return failer
+}
+
+// newStreamingLLMAgent returns an llmagent named streamer whose model streams
+// a chunk, optionally closes acked once the partial chunk's yield returned
+// true, and then waits for its context to be canceled.
+func newStreamingLLMAgent(t *testing.T, acked chan struct{}) agent.Agent {
+	t.Helper()
+	streamer, err := llmagent.New(llmagent.Config{Name: "streamer", Model: streamThenWaitLLM{acked: acked}})
+	if err != nil {
+		t.Fatalf("llmagent.New(streamer): %v", err)
+	}
+	return streamer
+}
+
+// newCustomStreamingAgent returns a custom agent named streamer that yields one
+// partial event with content, optionally closes acked once yield returned true,
+// and then waits for its context to be canceled without calling any model.
+func newCustomStreamingAgent(t *testing.T, acked chan struct{}) agent.Agent {
+	t.Helper()
+	streamer, err := agent.New(agent.Config{
+		Name: "streamer",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				partial := session.NewEvent(ctx, ctx.InvocationID())
+				partial.Author = "streamer"
+				partial.Branch = ctx.Branch()
+				partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "streaming...")}
+				if !yield(partial, nil) {
+					return
+				}
+				if acked != nil {
+					close(acked)
+				}
+				<-ctx.Done()
+				yield(nil, ctx.Err())
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(streamer): %v", err)
+	}
+	return streamer
+}
+
+// beforeAckStreamLLM streams one partial chunk and closes exited when its
+// GenerateContent iterator returns. When an OnEventCallback holds the partial
+// event's acknowledgement until a failing sibling cancels the parallel
+// errgroup, yield returns false and GenerateContent returns without calling
+// yield(nil, ctx.Err()), so no OnModelErrorCallback runs.
+type beforeAckStreamLLM struct {
+	exited chan struct{}
+}
+
+func (*beforeAckStreamLLM) Name() string { return "before-ack-stream-llm" }
+
+func (m *beforeAckStreamLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		defer close(m.exited)
+		if !yield(&model.LLMResponse{Content: textContent("model", "streaming..."), Partial: true}, nil) {
+			return
+		}
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
+}
+
+// newParallelAgent returns a parallel agent named name that runs branches.
+func newParallelAgent(t *testing.T, name string, branches ...agent.Agent) agent.Agent {
+	t.Helper()
+	par, err := parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: branches}})
+	if err != nil {
+		t.Fatalf("parallelagent.New(%s): %v", name, err)
+	}
+	return par
+}
+
+// runUntilBranchFails runs the agent that newRoot returns, whose branch of a
+// parallel agent fails once the first partial event of a sibling branch went
+// through the plugins and its producer resumed past the event acknowledgement,
+// and returns the rows of the run and the last error that the caller received.
+// Waiting for both the observer plugin's OnEventCallback (seen) and the
+// sibling's post-acknowledgement signal (acked) keeps the post-ack cases
+// deterministic both when parallelagent yields directly to runner.Run and when
+// workflow.Scheduler queues partial events asynchronously under an LLM root.
+// The caller stops reading at the first error if stopAtError is set, and reads
+// on until the end otherwise.
+func runUntilBranchFails(t *testing.T, newRoot func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent, cfg agent.RunConfig, stopAtError bool) ([]map[string]any, error) {
+	t.Helper()
+	ctx := t.Context()
+	p, requests, _ := setupTestPlugin(t)
+	seen := make(chan struct{})
+	acked := make(chan struct{})
+	ready := make(chan struct{})
+	go func() {
+		select {
+		case <-seen:
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-acked:
+			close(ready)
+		case <-ctx.Done():
+		}
+	}()
+	var once sync.Once
+	observer, err := baseplugin.New(baseplugin.Config{
+		Name: "observer",
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			if ev != nil && ev.Partial {
+				once.Do(func() { close(seen) })
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(observer): %v", err)
+	}
+	var gotErr error
+	for _, err := range newTestRunner(t, newRoot(t, ready, acked), p, observer).Run(ctx, "u1", "s1", textContent("user", "go"), cfg) {
+		if err != nil {
+			gotErr = err
+			if stopAtError {
+				break
+			}
+		}
+	}
+	if !errors.Is(gotErr, errSiblingFailed) {
+		t.Fatalf("runner.Run error = %v, want %v", gotErr, errSiblingFailed)
+	}
+	return collectRows(t, requests, untilInvocationEnd), gotErr
+}
+
+// branchFailureCases are runs in which a branch of a parallel agent fails
+// while a sibling branch streams after its partial event was acknowledged: the
+// last session event is the sibling's partial event, and the parallel agent's
+// errgroup cancels the sibling's work with the failing branch's error as the
+// cause.
+var branchFailureCases = []struct {
+	name              string
+	cfg               agent.RunConfig
+	wantErrorAgent    string
+	wantAnyErrorAgent []string
+	noLLMError        bool
+	newRoot           func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent
+}{
+	{
+		name:           "parallel root, model callback error",
+		cfg:            agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		wantErrorAgent: "failer",
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			return newParallelAgent(t, "par_root", newStreamingLLMAgent(t, acked), newGuardedAgent(t, ready))
+		},
+	},
+	{
+		name:           "parallel root, custom agent error",
+		cfg:            agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		wantErrorAgent: "failer",
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			return newParallelAgent(t, "par_root", newStreamingLLMAgent(t, acked), newCustomFailer(t, ready))
+		},
+	},
+	{
+		name:           "parallel agent under a sequential root",
+		cfg:            agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		wantErrorAgent: "failer",
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			par := newParallelAgent(t, "par", newStreamingLLMAgent(t, acked), newGuardedAgent(t, ready))
+			seq, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{par}}})
+			if err != nil {
+				t.Fatalf("sequentialagent.New(seq_root): %v", err)
+			}
+			return seq
+		},
+	},
+	{
+		name:              "progress event without content, no streaming",
+		wantAnyErrorAgent: []string{"failer", "worker"},
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			worker, err := llmagent.New(llmagent.Config{Name: "worker", Model: &contextCanceledOnDoneLLM{entered: acked}})
+			if err != nil {
+				t.Fatalf("llmagent.New(worker): %v", err)
+			}
+			return newParallelAgent(t, "par_root", newStreamingAuthor(t, worker, false), newCustomFailer(t, ready))
+		},
+	},
+	{
+		name:           "parallel agent that an LLM root transfers to",
+		cfg:            agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+		wantErrorAgent: "failer",
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			par := newParallelAgent(t, "par", newStreamingLLMAgent(t, acked), newGuardedAgent(t, ready))
+			coord, err := llmagent.New(llmagent.Config{
+				Name: "coord",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call-transfer", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "par"}},
+				}}}}}},
+				SubAgents: []agent.Agent{par},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coord): %v", err)
+			}
+			return coord
+		},
+	},
+	{
+		name:           "parallel root, custom streaming sibling",
+		wantErrorAgent: "failer",
+		noLLMError:     true,
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			return newParallelAgent(t, "par_root", newCustomStreamingAgent(t, acked), newCustomFailer(t, ready))
+		},
+	},
+	{
+		name:           "LLM root with custom streaming sibling",
+		wantErrorAgent: "failer",
+		noLLMError:     true,
+		newRoot: func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+			par := newParallelAgent(t, "par", newCustomStreamingAgent(t, acked), newGuardedAgent(t, ready))
+			coord, err := llmagent.New(llmagent.Config{
+				Name: "coord",
+				Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{ID: "call-transfer", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "par"}},
+				}}}}}},
+				SubAgents: []agent.Agent{par},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(coord): %v", err)
+			}
+			return coord
+		},
+	},
+}
+
+// assertTerminalErrorRowsContain verifies that INVOCATION_ERROR and every
+// AGENT_ERROR row carry wantSubstr in their error_message column.
+func assertTerminalErrorRowsContain(t *testing.T, rows []map[string]any, wantSubstr string) {
+	t.Helper()
+	invRow := onlyRowOfType(t, rows, EventInvocationError)
+	if msg, _ := invRow["error_message"].(string); !strings.Contains(msg, wantSubstr) {
+		t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, wantSubstr)
+	}
+	for _, r := range rowsOfType(rows, EventAgentError) {
+		if msg, _ := r["error_message"].(string); !strings.Contains(msg, wantSubstr) {
+			t.Errorf("AGENT_ERROR(%v) error_message = %q, want substring %q", r["agent"], msg, wantSubstr)
+		}
+	}
+}
+
+// TestRunner_ParallelBranchFailsWhileSiblingStreams_EmitsErrorTerminalRows
+// verifies that a branch of a parallel agent that fails without any callback
+// observing the failure, while a sibling branch streams, fails the invocation
+// when the caller reads on: the caller received the error, and ADK ran the
+// AfterAgentCallback of the agent that the runner runs, which it does only if
+// the caller read every event, so the work that the parallel agent canceled
+// does not stand for a caller that stopped reading mid-stream.
+func TestRunner_ParallelBranchFailsWhileSiblingStreams_EmitsErrorTerminalRows(t *testing.T) {
+	for _, tc := range branchFailureCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, gotErr := runUntilBranchFails(t, tc.newRoot, tc.cfg, false)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got INVOCATION_COMPLETED although the caller received %q; event types: %v", gotErr, eventTypes(rows))
+			}
+			assertTerminalErrorRowsContain(t, rows, errSiblingFailed.Error())
+			errCounts := agentErrorCounts(rows)
+			if len(tc.wantAnyErrorAgent) > 0 {
+				total := 0
+				for _, name := range tc.wantAnyErrorAgent {
+					total += errCounts[name]
+				}
+				if total != 1 {
+					t.Errorf("AGENT_ERROR counts = %v, want total 1 across %v; event types: %v", errCounts, tc.wantAnyErrorAgent, eventTypes(rows))
+				}
+			} else if errCounts[tc.wantErrorAgent] != 1 {
+				t.Errorf("AGENT_ERROR counts = %v, want 1 for %q; event types: %v", errCounts, tc.wantErrorAgent, eventTypes(rows))
+			}
+			if tc.wantErrorAgent == "failer" && errCounts["streamer"] != 0 {
+				t.Errorf("AGENT_ERROR counts = %v, want 0 for streamer", errCounts)
+			}
+			if tc.noLLMError {
+				if n := len(rowsOfType(rows, EventLLMError)); n != 0 {
+					t.Errorf("got %d LLM_ERROR rows, want 0; event types: %v", n, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestRunner_ParallelBranchFailsWhileSiblingStreams_StopAtErrorEmitsErrorTerminalRows
+// verifies that a caller that stops reading at the failure of the branch
+// still gets INVOCATION_ERROR: the parallel agent's errgroup cancels the
+// sibling branch with the failing branch's error as the cause, so
+// context.Cause(ctx) is not context.Canceled, distinguishing the sibling
+// failure from a caller that stopped reading mid-stream.
+func TestRunner_ParallelBranchFailsWhileSiblingStreams_StopAtErrorEmitsErrorTerminalRows(t *testing.T) {
+	for _, tc := range branchFailureCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, _ := runUntilBranchFails(t, tc.newRoot, tc.cfg, true)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got INVOCATION_COMPLETED; event types: %v", eventTypes(rows))
+			}
+			assertTerminalErrorRowsContain(t, rows, errSiblingFailed.Error())
+			errCounts := agentErrorCounts(rows)
+			if len(tc.wantAnyErrorAgent) > 0 {
+				total := 0
+				for _, name := range tc.wantAnyErrorAgent {
+					total += errCounts[name]
+				}
+				if total != 1 {
+					t.Errorf("AGENT_ERROR counts = %v, want total 1 across %v; event types: %v", errCounts, tc.wantAnyErrorAgent, eventTypes(rows))
+				}
+			} else if errCounts[tc.wantErrorAgent] != 1 {
+				t.Errorf("AGENT_ERROR counts = %v, want 1 for %q; event types: %v", errCounts, tc.wantErrorAgent, eventTypes(rows))
+			}
+			if tc.wantErrorAgent == "failer" && errCounts["streamer"] != 0 {
+				t.Errorf("AGENT_ERROR counts = %v, want 0 for streamer", errCounts)
+			}
+			if tc.noLLMError {
+				if n := len(rowsOfType(rows, EventLLMError)); n != 0 {
+					t.Errorf("got %d LLM_ERROR rows, want 0; event types: %v", n, eventTypes(rows))
+				}
+			}
+		})
+	}
+}
+
+// TestRunner_ParallelBranchFailsBeforePartialAck_EmitsErrorTerminalRows
+// verifies that when a sibling branch fails while the streaming branch is still
+// waiting for parallelagent to acknowledge its partial event (so errgroup
+// cancellation makes parallelagent.runSubAgent exit via ctx.Done before closing
+// ackChan, yield returns false in GenerateContent, and no OnModelErrorCallback
+// runs), openFailureCauseLocked still detects the non-context.Canceled errgroup
+// cause and emits AGENT_ERROR(failer) and INVOCATION_ERROR for both draining
+// and stopping consumers.
+func TestRunner_ParallelBranchFailsBeforePartialAck_EmitsErrorTerminalRows(t *testing.T) {
+	cases := []struct {
+		name    string
+		newRoot func(t *testing.T, seen <-chan struct{}, exited chan struct{}) agent.Agent
+	}{
+		{
+			name: "parallel root, model callback error",
+			newRoot: func(t *testing.T, seen <-chan struct{}, exited chan struct{}) agent.Agent {
+				streamer, err := llmagent.New(llmagent.Config{Name: "streamer", Model: &beforeAckStreamLLM{exited: exited}})
+				if err != nil {
+					t.Fatalf("llmagent.New(streamer): %v", err)
+				}
+				return newParallelAgent(t, "par_root", streamer, newGuardedAgent(t, seen))
+			},
+		},
+		{
+			name: "parallel root, custom agent error",
+			newRoot: func(t *testing.T, seen <-chan struct{}, exited chan struct{}) agent.Agent {
+				streamer, err := llmagent.New(llmagent.Config{Name: "streamer", Model: &beforeAckStreamLLM{exited: exited}})
+				if err != nil {
+					t.Fatalf("llmagent.New(streamer): %v", err)
+				}
+				return newParallelAgent(t, "par_root", streamer, newCustomFailer(t, seen))
+			},
+		},
+		{
+			name: "parallel agent under a sequential root",
+			newRoot: func(t *testing.T, seen <-chan struct{}, exited chan struct{}) agent.Agent {
+				streamer, err := llmagent.New(llmagent.Config{Name: "streamer", Model: &beforeAckStreamLLM{exited: exited}})
+				if err != nil {
+					t.Fatalf("llmagent.New(streamer): %v", err)
+				}
+				par := newParallelAgent(t, "par", streamer, newGuardedAgent(t, seen))
+				seq, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{par}}})
+				if err != nil {
+					t.Fatalf("sequentialagent.New(seq_root): %v", err)
+				}
+				return seq
+			},
+		},
+	}
+
+	for _, stopAtError := range []bool{false, true} {
+		mode := "drain"
+		if stopAtError {
+			mode = "stop_at_error"
+		}
+		t.Run(mode, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					p, requests, _ := setupTestPlugin(t)
+					seen := make(chan struct{})
+					exited := make(chan struct{})
+					var once sync.Once
+					observer, err := baseplugin.New(baseplugin.Config{
+						Name: "observer",
+						OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+							if ev != nil && ev.Partial {
+								once.Do(func() {
+									close(seen)
+									select {
+									case <-exited:
+									case <-time.After(5 * time.Second):
+										t.Error("timed out waiting for streaming producer to exit before partial ack")
+									}
+								})
+							}
+							return nil, nil
+						},
+					})
+					if err != nil {
+						t.Fatalf("baseplugin.New(observer): %v", err)
+					}
+
+					var gotErr error
+					for _, err := range newTestRunner(t, tc.newRoot(t, seen, exited), p, observer).Run(
+						t.Context(),
+						"u1",
+						"s1",
+						textContent("user", "go"),
+						agent.RunConfig{StreamingMode: agent.StreamingModeSSE},
+					) {
+						if err != nil {
+							gotErr = err
+							if stopAtError {
+								break
+							}
+						}
+					}
+					if !errors.Is(gotErr, errSiblingFailed) {
+						t.Fatalf("runner.Run error = %v, want %v", gotErr, errSiblingFailed)
+					}
+
+					rows := collectRows(t, requests, untilInvocationEnd)
+					if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+						t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+					}
+					assertTerminalErrorRowsContain(t, rows, errSiblingFailed.Error())
+					if n := len(rowsOfType(rows, EventLLMError)); n != 0 {
+						t.Errorf("got %d LLM_ERROR rows, want 0 (canceled before partial ack); event types: %v", n, eventTypes(rows))
+					}
+					errCounts := agentErrorCounts(rows)
+					if errCounts["failer"] != 1 || errCounts["streamer"] != 0 {
+						t.Errorf("AGENT_ERROR counts = %v, want failer=1 and streamer=0; event types: %v", errCounts, eventTypes(rows))
+					}
+				})
+			}
+		})
+	}
+}
+
+// delayedStreamLLM waits for delay after starting (so an earlier workflow
+// node's WithAgentTimeout has already expired with context.DeadlineExceeded)
+// before yielding a partial chunk and a final response.
+type delayedStreamLLM struct {
+	delay time.Duration
+}
+
+func (*delayedStreamLLM) Name() string { return "delayed-stream-llm" }
+
+func (m *delayedStreamLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		timer := time.NewTimer(m.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return
+		}
+		if !yield(&model.LLMResponse{Content: textContent("model", "streaming..."), Partial: true}, nil) {
+			return
+		}
+		yield(&model.LLMResponse{Content: textContent("model", "final answer"), TurnComplete: true}, nil)
+	}
+}
+
+// TestRunner_WorkflowNodeTimeoutAfterBeforeAgentShortcut_ConsumerStopCompletes
+// verifies that an expired NodeConfig.Timeout on an earlier workflow node that
+// already completed via BeforeAgentCallback (leaving its responded shortcut
+// span open on an uncanceled WithAgentTimeout context) does not turn a later
+// consumer stop on a partial or final event, or a drained run, into
+// INVOCATION_ERROR "context deadline exceeded".
+func TestRunner_WorkflowNodeTimeoutAfterBeforeAgentShortcut_ConsumerStopCompletes(t *testing.T) {
+	for _, callerMode := range []string{"stop_on_partial", "stop_on_final", "drain"} {
+		t.Run(callerMode, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			cached, err := llmagent.New(llmagent.Config{
+				Name:  "cached",
+				Model: &scriptedLLM{},
+				BeforeAgentCallbacks: []agent.BeforeAgentCallback{func(agent.Context) (*genai.Content, error) {
+					return textContent("model", "cached answer"), nil
+				}},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(cached): %v", err)
+			}
+			cachedNode, err := workflow.NewAgentNode(cached, workflow.NodeConfig{Timeout: 25 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode(cached): %v", err)
+			}
+			writer, err := llmagent.New(llmagent.Config{
+				Name:  "writer",
+				Model: &delayedStreamLLM{delay: 80 * time.Millisecond},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(writer): %v", err)
+			}
+			writerNode, err := workflow.NewAgentNode(writer, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode(writer): %v", err)
+			}
+			wfRoot, err := workflowagent.New(workflowagent.Config{
+				Name: "wf_root",
+				Edges: []workflow.Edge{
+					{From: workflow.Start, To: cachedNode},
+					{From: cachedNode, To: writerNode},
+				},
+			})
+			if err != nil {
+				t.Fatalf("workflowagent.New(wf_root): %v", err)
+			}
+
+			r := newTestRunner(t, wfRoot, p)
+			for ev, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{
+				StreamingMode: agent.StreamingModeSSE,
+			}) {
+				if runErr != nil {
+					t.Fatalf("r.Run yielded unexpected error: %v", runErr)
+				}
+				if ev == nil || ev.Author != "writer" {
+					continue
+				}
+				if callerMode == "stop_on_partial" && ev.Partial {
+					break
+				}
+				if callerMode == "stop_on_final" && !ev.Partial {
+					break
+				}
+			}
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+				t.Fatalf("got %d INVOCATION_ERROR rows, want 0; rows: %v", n, rowsOfType(rows, EventInvocationError))
+			}
+			onlyRowOfType(t, rows, EventInvocationCompleted)
+			if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
+				t.Errorf("got %d AGENT_ERROR rows, want 0; event types: %v", n, eventTypes(rows))
+			}
+		})
+	}
+}
+
+// TestRunner_ParallelThreeBranchesAndStreamingBranchFailure_RecordsCallerError
+// verifies that when a parallel agent has three branches ([streamer, failer,
+// idle]) or when the streaming branch itself fails after emitting partial
+// content ([streamfail, waiter]), both INVOCATION_ERROR and the attributed
+// AGENT_ERROR rows carry the failing branch's error text across both draining
+// and stopping consumers.
+func TestRunner_ParallelThreeBranchesAndStreamingBranchFailure_RecordsCallerError(t *testing.T) {
+	for _, stopAtError := range []bool{false, true} {
+		mode := "drain"
+		if stopAtError {
+			mode = "stop_at_error"
+		}
+		t.Run(mode, func(t *testing.T) {
+			t.Run("three_branches", func(t *testing.T) {
+				newRoot := func(t *testing.T, ready <-chan struct{}, acked chan struct{}) agent.Agent {
+					idle, err := agent.New(agent.Config{
+						Name: "idle",
+						Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+							return func(yield func(*session.Event, error) bool) {
+								<-ctx.Done()
+								yield(nil, ctx.Err())
+							}
+						},
+					})
+					if err != nil {
+						t.Fatalf("agent.New(idle): %v", err)
+					}
+					return newParallelAgent(t, "par_root", newStreamingLLMAgent(t, acked), newCustomFailer(t, ready), idle)
+				}
+				rows, _ := runUntilBranchFails(t, newRoot, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}, stopAtError)
+				if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+					t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+				}
+				assertTerminalErrorRowsContain(t, rows, errSiblingFailed.Error())
+				errCounts := agentErrorCounts(rows)
+				if errCounts["streamer"] != 0 {
+					t.Errorf("AGENT_ERROR counts = %v, want 0 for streamer", errCounts)
+				}
+				if errCounts["failer"]+errCounts["idle"] != 1 {
+					t.Errorf("AGENT_ERROR counts = %v, want total 1 across [failer, idle]", errCounts)
+				}
+			})
+
+			t.Run("streaming_branch_fails", func(t *testing.T) {
+				errStreamBackend := errors.New("stream backend failed")
+				p, requests, _ := setupTestPlugin(t)
+				waiterEntered := make(chan struct{})
+				seen := make(chan struct{})
+				var seenOnce sync.Once
+				observer, err := baseplugin.New(baseplugin.Config{
+					Name: "observer",
+					OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+						if ev != nil && ev.Partial {
+							seenOnce.Do(func() { close(seen) })
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New(observer): %v", err)
+				}
+				streamfail, err := agent.New(agent.Config{
+					Name: "streamfail",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							<-waiterEntered
+							partial := session.NewEvent(ctx, ctx.InvocationID())
+							partial.Author = "streamfail"
+							partial.Branch = ctx.Branch()
+							partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "streaming...")}
+							if !yield(partial, nil) {
+								return
+							}
+							<-seen
+							yield(nil, errStreamBackend)
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(streamfail): %v", err)
+				}
+				waiter, err := agent.New(agent.Config{
+					Name: "waiter",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							close(waiterEntered)
+							<-ctx.Done()
+							yield(nil, ctx.Err())
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(waiter): %v", err)
+				}
+				parRoot := newParallelAgent(t, "par_root", streamfail, waiter)
+				var gotErr error
+				for _, runErr := range newTestRunner(t, parRoot, p, observer).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						gotErr = runErr
+						if stopAtError {
+							break
+						}
+					}
+				}
+				if !errors.Is(gotErr, errStreamBackend) {
+					t.Fatalf("runner.Run error = %v, want %v", gotErr, errStreamBackend)
+				}
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+					t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+				}
+				assertTerminalErrorRowsContain(t, rows, errStreamBackend.Error())
+				errCounts := agentErrorCounts(rows)
+				if errCounts["waiter"] != 1 || errCounts["streamfail"] != 0 {
+					t.Errorf("AGENT_ERROR counts = %v, want waiter=1 and streamfail=0", errCounts)
+				}
+			})
+		})
+	}
+}
+
+// TestRunner_ParallelRespondedBranchFailsWhileSiblingStreams_ConsistentAcrossDrainAndStop
+// verifies that when a parallel branch fails after already emitting a response
+// while a sibling branch streams, retiredCause preserves the errgroup cause
+// across root retirement on drain so both draining and stopping callers report
+// INVOCATION_ERROR with the branch's error and zero AGENT_ERROR rows under
+// both non-LLM and LLM roots.
+func TestRunner_ParallelRespondedBranchFailsWhileSiblingStreams_ConsistentAcrossDrainAndStop(t *testing.T) {
+	for _, rootKind := range []string{"parallel_root", "llm_root_transfer"} {
+		t.Run(rootKind, func(t *testing.T) {
+			for _, stopAtError := range []bool{false, true} {
+				mode := "drain"
+				if stopAtError {
+					mode = "stop_at_error"
+				}
+				t.Run(mode, func(t *testing.T) {
+					ctx := t.Context()
+					p, requests, _ := setupTestPlugin(t)
+					finalSeen := make(chan struct{})
+					partialSeen := make(chan struct{})
+					acked := make(chan struct{})
+					ready := make(chan struct{})
+					go func() {
+						select {
+						case <-partialSeen:
+						case <-ctx.Done():
+							return
+						}
+						select {
+						case <-acked:
+							close(ready)
+						case <-ctx.Done():
+						}
+					}()
+					var finalOnce, partialOnce sync.Once
+					observer, err := baseplugin.New(baseplugin.Config{
+						Name: "observer",
+						OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+							if ev == nil {
+								return nil, nil
+							}
+							if !ev.Partial && ev.Author == "failer" {
+								finalOnce.Do(func() { close(finalSeen) })
+							}
+							if ev.Partial && ev.Author == "streamer" {
+								partialOnce.Do(func() { close(partialSeen) })
+							}
+							return nil, nil
+						},
+					})
+					if err != nil {
+						t.Fatalf("baseplugin.New(observer): %v", err)
+					}
+
+					streamer, err := agent.New(agent.Config{
+						Name: "streamer",
+						Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+							return func(yield func(*session.Event, error) bool) {
+								<-finalSeen
+								partial := session.NewEvent(ctx, ctx.InvocationID())
+								partial.Author = "streamer"
+								partial.Branch = ctx.Branch()
+								partial.LLMResponse = model.LLMResponse{Partial: true, Content: textContent("model", "streaming...")}
+								if !yield(partial, nil) {
+									return
+								}
+								close(acked)
+								<-ctx.Done()
+								yield(nil, ctx.Err())
+							}
+						},
+					})
+					if err != nil {
+						t.Fatalf("agent.New(streamer): %v", err)
+					}
+					failer, err := agent.New(agent.Config{
+						Name: "failer",
+						Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+							return func(yield func(*session.Event, error) bool) {
+								finalEv := session.NewEvent(ctx, ctx.InvocationID())
+								finalEv.Author = "failer"
+								finalEv.Branch = ctx.Branch()
+								finalEv.LLMResponse = model.LLMResponse{Content: textContent("model", "initial answer"), TurnComplete: true}
+								if !yield(finalEv, nil) {
+									return
+								}
+								<-ready
+								yield(nil, errSiblingFailed)
+							}
+						},
+					})
+					if err != nil {
+						t.Fatalf("agent.New(failer): %v", err)
+					}
+
+					var root agent.Agent
+					if rootKind == "parallel_root" {
+						root = newParallelAgent(t, "par_root", streamer, failer)
+					} else {
+						par := newParallelAgent(t, "par", streamer, failer)
+						root, err = llmagent.New(llmagent.Config{
+							Name: "coord",
+							Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{ID: "call-transfer", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "par"}},
+							}}}}}},
+							SubAgents: []agent.Agent{par},
+						})
+						if err != nil {
+							t.Fatalf("llmagent.New(coord): %v", err)
+						}
+					}
+
+					var gotErr error
+					for _, runErr := range newTestRunner(t, root, p, observer).Run(ctx, "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+						if runErr != nil {
+							gotErr = runErr
+							if stopAtError {
+								break
+							}
+						}
+					}
+					if !errors.Is(gotErr, errSiblingFailed) {
+						t.Fatalf("runner.Run error = %v, want %v", gotErr, errSiblingFailed)
+					}
+
+					rows := collectRows(t, requests, untilInvocationEnd)
+					if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+						t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+					}
+					assertTerminalErrorRowsContain(t, rows, errSiblingFailed.Error())
+					if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
+						t.Errorf("got %d AGENT_ERROR rows, want 0 (all branches responded); rows: %v", n, rowsOfType(rows, EventAgentError))
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestTraceManager_RespondedBranchFailureCauseFallback verifies that when a
+// branch context ends with a non-context.Canceled, non-context.DeadlineExceeded
+// cause after every open activation has already responded and no open call or
+// recorded error identifies a failing activation, popUnclosedAgentSpans
+// preserves that cause as the terminal error without fabricating AGENT_ERROR
+// attribution.
+func TestTraceManager_RespondedBranchFailureCauseFallback(t *testing.T) {
+	ctx := context.Background()
+	errBranch := errors.New("branch exploded")
+	branchCtx, cancelBranch := context.WithCancelCause(ctx)
+	t.Cleanup(func() { cancelBranch(nil) })
+
+	tm := newTraceManager()
+	par := identity{invocationID: "inv-cause-fallback", agentName: "par"}
+	branch := identity{invocationID: "inv-cause-fallback", agentName: "branch", branch: "par.branch"}
+	tm.invocationSpan(ctx, par, nil)
+	tm.pushAgentSpan(ctx, par)
+	tm.pushAgentSpan(branchCtx, branch)
+	tm.recordStreamed(ctx, branch, "branch", branch.branch, true)
+	cancelBranch(errBranch)
+
+	unclosed, termErr := tm.popUnclosedAgentSpans(ctx, par)
+	if !errors.Is(termErr, errBranch) {
+		t.Fatalf("popUnclosedAgentSpans terminal error = %v, want %v", termErr, errBranch)
+	}
+	if len(unclosed) != 0 {
+		t.Errorf("popUnclosedAgentSpans unclosed = %d spans, want 0", len(unclosed))
+	}
+}
+
+// TestTraceManager_PopAgentSpanClearsPartialOnlyForDirectWorkflowRoot
+// verifies which end of an agent shows that the caller read past the last
+// partial event: only that of the workflow or custom agent that the runner
+// runs directly. An llmagent that the runner runs is a workflow node that does
+// not wait for its caller, and an agent below another agent, such as a branch
+// of a parallel agent, can end after the caller stopped reading on a partial
+// event, so neither says what the caller did. The sibling that never
+// responded fails the invocation only when the caller read on.
+func TestTraceManager_PopAgentSpanClearsPartialOnlyForDirectWorkflowRoot(t *testing.T) {
+	const invID = "inv-root-end"
+	ctx := context.Background()
+	llmRoot, err := llmagent.New(llmagent.Config{Name: "root"})
+	if err != nil {
+		t.Fatalf("llmagent.New(root) error: %v", err)
+	}
+	author := newTestAgent(t, "author")
+	failer := newTestAgent(t, "failer")
+	workflowRoot := newTestAgent(t, "root", author, failer)
+	rootID := identity{invocationID: invID, agentName: "root"}
+	authorID := identity{invocationID: invID, agentName: "author", branch: "root.author"}
+	failerID := identity{invocationID: invID, agentName: "failer", branch: "root.failer"}
+	for _, tc := range []struct {
+		name string
+		root agent.Agent
+		// ends is the agent that ends before the invocation does.
+		ends    identity
+		wantErr bool
+	}{
+		{name: "workflow agent that the runner runs", root: workflowRoot, ends: rootID, wantErr: true},
+		{name: "llmagent that the runner runs", root: llmRoot, ends: rootID, wantErr: false},
+		{name: "workflow agent below another agent", root: workflowRoot, ends: authorID, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.invocationSpan(contextRunning(tc.root), rootID, tc.root)
+			tm.pushAgentSpan(contextRunning(tc.root), rootID)
+			tm.pushAgentSpan(contextRunning(author), authorID)
+			tm.pushAgentSpan(contextRunning(failer), failerID)
+			tm.recordStreamed(ctx, authorID, "author", authorID.branch, true)
+
+			tm.popAgentSpan(ctx, tc.ends)
+
+			if _, err := tm.popUnclosedAgentSpans(ctx, rootID); (err != nil) != tc.wantErr {
+				t.Errorf("popUnclosedAgentSpans error = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestRunner_ProgressEventWithoutContent verifies how a run ends after a
+// custom agent writes a partial event without content, such as a progress
+// event: a caller that stops reading on it stops mid-stream, and a sibling
+// that a sequential agent starts next and that fails is reported, because the
+// event is not a response of the sequential agent either.
+func TestRunner_ProgressEventWithoutContent(t *testing.T) {
+	newPinger := func(t *testing.T, name string) agent.Agent {
+		t.Helper()
+		a, err := agent.New(agent.Config{
+			Name: name,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ping := session.NewEvent(ctx, ctx.InvocationID())
+					ping.Branch = ctx.Branch()
+					ping.Partial = true
+					yield(ping, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", name, err)
+		}
+		return a
+	}
+	failErr := errors.New("failer failed")
+	failer, err := agent.New(agent.Config{
+		Name: "failer",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, failErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(failer): %v", err)
+	}
+
+	t.Run("caller stops on the event", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		r := newTestRunner(t, newPinger(t, "worker"), p)
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("r.Run error: %v", err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatal("runner.Run yielded no partial event")
+		}
+		requireInvocationCompletedOK(t, collectRows(t, requests, untilInvocationEnd))
+	})
+
+	t.Run("sequential sibling fails after the event", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		seq, err := sequentialagent.New(sequentialagent.Config{
+			AgentConfig: agent.Config{Name: "seq_root", SubAgents: []agent.Agent{newPinger(t, "pinger"), failer}},
+		})
+		if err != nil {
+			t.Fatalf("sequentialagent.New(seq_root): %v", err)
+		}
+		r := newTestRunner(t, seq, p)
+		var gotErr error
+		for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				gotErr = err
+				break
+			}
+		}
+		if !errors.Is(gotErr, failErr) {
+			t.Fatalf("runner.Run error = %v, want %v", gotErr, failErr)
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+		}
+		onlyRowOfType(t, rows, EventInvocationError)
+		if got := agentErrorCounts(rows); got["failer"] != 1 {
+			t.Errorf("AGENT_ERROR rows per agent = %v, want one for failer", got)
+		}
+	})
+}
+
+// TestTraceManager_PartialEventWithoutContentIsNoResponse verifies that a
+// partial event without content does not count as a response of its author,
+// so that the author's failure is reported once a session event that is not
+// partial, such as one that carries only actions, shows that the caller read
+// on.
+func TestTraceManager_PartialEventWithoutContentIsNoResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		withContent bool
+		wantErr     bool
+	}{
+		{name: "partial event without content", withContent: false, wantErr: true},
+		{name: "partial event with content", withContent: true, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			worker := identity{invocationID: "inv-ping", agentName: "worker"}
+			tm.invocationSpan(ctx, worker, nil)
+			tm.pushAgentSpan(ctx, worker)
+			tm.recordStreamed(ctx, worker, "worker", "", tc.withContent)
+			tm.clearLastPartial(ctx, worker)
+			if _, err := tm.popUnclosedAgentSpans(ctx, worker); (err != nil) != tc.wantErr {
+				t.Errorf("popUnclosedAgentSpans error = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTraceManager_StopOnProgressEventOfParallelBranch verifies that a caller
+// that stops reading on a partial event without content of a parallel
+// branch, whose author then starts work that the parallel agent cancels,
+// stops mid-stream: the parallel agent wrote the event through its branch,
+// though its own context is not canceled. The run does fail when a session
+// event that is not partial followed, and so does the author of an earlier
+// partial event that such a session event followed.
+func TestTraceManager_StopOnProgressEventOfParallelBranch(t *testing.T) {
+	const invID = "inv-progress"
+	par := identity{invocationID: invID, agentName: "par"}
+	author := identity{invocationID: invID, agentName: "author", branch: "par.author"}
+	child := identity{invocationID: invID, agentName: "child", branch: "par.author"}
+	pinger := identity{invocationID: invID, agentName: "pinger", branch: "par.pinger"}
+	other := identity{invocationID: invID, agentName: "other", branch: "par.other"}
+	for _, tc := range []struct {
+		name string
+		// before writes session events before the author's partial event.
+		before  func(context.Context, *traceManager)
+		after   func(context.Context, *traceManager)
+		wantErr bool
+	}{
+		{name: "caller stops on the event", wantErr: false},
+		{name: "session event after the event", after: func(ctx context.Context, tm *traceManager) {
+			tm.clearLastPartial(ctx, par)
+		}, wantErr: true},
+		{name: "earlier partial event of another branch", before: func(ctx context.Context, tm *traceManager) {
+			tm.recordStreamed(ctx, pinger, "pinger", pinger.branch, false)
+			tm.completeResponse(ctx, other, "other", other.branch, nil)
+		}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pingerCtx := context.Background()
+			branchCtx, cancel := context.WithCancel(ctx)
+			t.Cleanup(cancel)
+			tm := newTraceManager()
+			tm.invocationSpan(ctx, par, nil)
+			tm.pushAgentSpan(ctx, par)
+			tm.pushAgentSpan(pingerCtx, pinger)
+			tm.pushAgentSpan(branchCtx, other)
+			tm.pushAgentSpan(branchCtx, author)
+			if tc.before != nil {
+				tc.before(ctx, tm)
+			}
+			tm.recordStreamed(ctx, author, "author", author.branch, false)
+			tm.pushAgentSpan(branchCtx, child)
+			if tc.after != nil {
+				tc.after(ctx, tm)
+			}
+			cancel()
+			if tc.before == nil {
+				// The pinger branch ended without failing.
+				tm.popAgentSpan(pingerCtx, pinger)
+			}
+			if _, err := tm.popUnclosedAgentSpans(ctx, par); (err != nil) != tc.wantErr {
+				t.Errorf("popUnclosedAgentSpans error = %v, want error %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestOnEvent_ProgressEventIsNoResponse verifies that a partial event without
+// content does not count as a response of its author: once a session event
+// that is not partial followed, the author that never responded fails.
+func TestOnEvent_ProgressEventIsNoResponse(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(mCtx))
+	ping := session.NewEvent(t.Context(), mCtx.invocationID)
+	ping.Author = mCtx.agentName
+	ping.Partial = true
+	errs.add(p.OnEventCallback()(mCtx, ping))
+	stateOnly := session.NewEvent(t.Context(), mCtx.invocationID)
+	stateOnly.Author = mCtx.agentName
+	errs.add(p.OnEventCallback()(mCtx, stateOnly))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got INVOCATION_COMPLETED, want INVOCATION_ERROR: the author never responded; event types: %v", eventTypes(rows))
+	}
+	onlyRowOfType(t, rows, EventInvocationError)
+	if got, want := agentErrorCounts(rows), map[string]int{mCtx.agentName: 1}; !maps.Equal(got, want) {
+		t.Errorf("AGENT_ERROR rows per agent = %v, want %v", got, want)
+	}
+}
+
+// TestAfterTool_FailedToolRunEndsWithAgentError verifies that a sub-agent that
+// a tool call ran and that failed, which ADK ends without AfterAgentCallback,
+// ends with an AGENT_ERROR row of its own once its owner has no tool call left
+// open, even when the last call to end succeeded, and that the invocation
+// still completes.
+func TestAfterTool_FailedToolRunEndsWithAgentError(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	with := func(agentName, branch, path, callID string) *mockInvocationContext {
+		c := *mCtx
+		c.agentName, c.branch, c.path, c.functionCallID = agentName, branch, path, callID
+		return &c
+	}
+	coord := with(mCtx.agentName, "", "", "")
+	callA, callB := with(mCtx.agentName, "", "", "call-a"), with(mCtx.agentName, "", "", "call-b")
+	helper := with("helper", "helper@1", "/helper@1", "")
+	helperTool := &fakeTool{name: "helper"}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(coord))
+	errs.add(p.BeforeToolCallback()(callA, helperTool, nil))
+	errs.add(p.BeforeToolCallback()(callB, helperTool, nil))
+	errs.add(p.BeforeAgentCallback()(helper))
+	errs.add(p.BeforeModelCallback()(helper, &model.LLMRequest{}))
+	errs.add(p.OnModelErrorCallback()(helper, &model.LLMRequest{}, errors.New("helper model failed")))
+	errs.add(p.OnToolErrorCallback()(callA, helperTool, nil, errors.New("helper failed")))
+	errs.add(p.AfterToolCallback()(callB, helperTool, nil, map[string]any{"answer": "ok"}, nil))
+	answer := session.NewEvent(t.Context(), mCtx.invocationID)
+	answer.Author = mCtx.agentName
+	answer.Content = textContent("model", "done")
+	errs.add(p.OnEventCallback()(coord, answer))
+	errs.check(t)
+	p.AfterRunCallback()(coord)
+
+	requireCompletedWithHandledAgentError(t, collectRows(t, requests, untilInvocationEnd), "helper", "helper model failed")
+}
+
+// TestOnToolError_FailedToolRunEndsWithAgentError verifies that a sub-agent
+// that the last open tool call ran and that failed ends with an AGENT_ERROR
+// row of its own when only OnToolErrorCallback ends the call, as when an
+// earlier plugin's AfterToolCallback answers it, and that the invocation still
+// completes.
+func TestOnToolError_FailedToolRunEndsWithAgentError(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	with := func(agentName, branch, path, callID string) *mockInvocationContext {
+		c := *mCtx
+		c.agentName, c.branch, c.path, c.functionCallID = agentName, branch, path, callID
+		return &c
+	}
+	coord := with(mCtx.agentName, "", "", "")
+	call := with(mCtx.agentName, "", "", "call-a")
+	helper := with("helper", "helper@1", "/helper@1", "")
+	helperTool := &fakeTool{name: "helper"}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(coord))
+	errs.add(p.BeforeToolCallback()(call, helperTool, nil))
+	errs.add(p.BeforeAgentCallback()(helper))
+	errs.add(p.BeforeModelCallback()(helper, &model.LLMRequest{}))
+	errs.add(p.OnModelErrorCallback()(helper, &model.LLMRequest{}, errors.New("helper model failed")))
+	errs.add(p.OnToolErrorCallback()(call, helperTool, nil, errors.New("helper failed")))
+	answer := session.NewEvent(t.Context(), mCtx.invocationID)
+	answer.Author = mCtx.agentName
+	answer.Content = textContent("model", "done")
+	errs.add(p.OnEventCallback()(coord, answer))
+	errs.check(t)
+	p.AfterRunCallback()(coord)
+
+	requireCompletedWithHandledAgentError(t, collectRows(t, requests, untilInvocationEnd), "helper", "helper model failed")
+}
+
+// TestRunner_StopReadingOnPartialEventWithoutContent_IsNotAnError verifies
+// that a caller that stops reading on a partial event without content or
+// output, such as the progress event of a custom agent, stops mid-stream
+// rather than at a failure: alone, and as a sub-agent of a parallel agent
+// whose other sub-agent is still running when the caller stops.
+func TestRunner_StopReadingOnPartialEventWithoutContent_IsNotAnError(t *testing.T) {
+	newPinger := func(t *testing.T) agent.Agent {
+		t.Helper()
+		a, err := agent.New(agent.Config{
+			Name: "pinger",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ping := session.NewEvent(ctx, ctx.InvocationID())
+					ping.Branch = ctx.Branch()
+					ping.Partial = true
+					if !yield(ping, nil) {
+						return
+					}
+					done := session.NewEvent(ctx, ctx.InvocationID())
+					done.Branch = ctx.Branch()
+					done.Content = textContent("model", "done")
+					yield(done, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(pinger): %v", err)
+		}
+		return a
+	}
+	newParallel := func(t *testing.T) agent.Agent {
+		t.Helper()
+		// waiter runs until the parallel agent stops it and then fails with
+		// the context's error, without any event.
+		waiter, err := agent.New(agent.Config{
+			Name: "waiter",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					<-ctx.Done()
+					yield(nil, ctx.Err())
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(waiter): %v", err)
+		}
+		par, err := parallelagent.New(parallelagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "par_root",
+				SubAgents: []agent.Agent{newPinger(t), waiter},
+			},
+		})
+		if err != nil {
+			t.Fatalf("parallelagent.New(par_root): %v", err)
+		}
+		return par
+	}
+	tests := []struct {
+		name string
+		root func(*testing.T) agent.Agent
+	}{
+		{name: "custom root", root: newPinger},
+		{name: "sub-agent of a parallel root", root: newParallel},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			r := newTestRunner(t, tt.root(t), p)
+			var sawPartial bool
+			for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run error: %v", err)
+				}
+				if ev != nil && ev.Partial {
+					sawPartial = true
+					break
+				}
+			}
+			if !sawPartial {
+				t.Fatal("runner.Run yielded no partial event")
+			}
+
+			requireInvocationCompletedOK(t, collectRows(t, requests, untilInvocationEnd))
+		})
+	}
+}
+
+// TestTraceManager_ToolRunsPurgedOnceNoToolCallIsOpen verifies that the
+// activations that an agent's tool calls ran and that never ended, as a failed
+// single_turn sub-agent does, are purged with their errors only once the agent
+// has no tool call left open: until then, an activation may still be running
+// for another call.
+func TestTraceManager_ToolRunsPurgedOnceNoToolCallIsOpen(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-tool-runs"
+	coord := identity{invocationID: invID, agentName: "coordinator"}
+	helper := func(runID string) identity {
+		return identity{invocationID: invID, agentName: "helper", branch: "helper@" + runID, path: "/helper@" + runID}
+	}
+	failed, running := helper("1"), helper("2")
+	callA, callB := toolKey(coord, "call-a", "helper"), toolKey(coord, "call-b", "helper")
+
+	tm.invocationSpan(ctx, coord, nil)
+	tm.pushAgentSpan(ctx, coord)
+	tm.pushToolSpan(ctx, coord, callA)
+	tm.pushToolSpan(ctx, coord, callB)
+	tm.pushAgentSpan(ctx, failed)
+	tm.pushAgentSpan(ctx, running)
+	tm.pushLLMSpan(ctx, failed)
+	tm.recordError(ctx, failed, llmKey(failed), errors.New("helper model failed"))
+	tm.popLLMSpan(ctx, failed, false)
+
+	tm.popToolSpan(ctx, coord, callA, true)
+	if got := openSpans(t, tm, invID).agents; got != 3 {
+		t.Fatalf("open agent spans while call-b is open = %d, want 3", got)
+	}
+	if end := tm.popAgentSpan(ctx, running); end.latency == nil {
+		t.Errorf("AGENT_COMPLETED of the running helper = %+v, want its span with latency", end)
+	}
+
+	tm.popToolSpan(ctx, coord, callB, false)
+	if got := openSpans(t, tm, invID); got.agents != 1 || got.models != 0 {
+		t.Errorf("open spans after the last tool call ended = %+v, want the coordinator alone", got)
+	}
+	tm.completeResponse(ctx, coord, "coordinator", "", nil)
+	if unclosed, err := tm.popUnclosedAgentSpans(ctx, coord); err != nil || len(unclosed) != 0 {
+		t.Errorf("popUnclosedAgentSpans = (%v, %v), want no failure", unclosed, err)
+	}
+}
+
+// TestTraceManager_NodeReentryPurgesOnlyFailedAttempt verifies that an agent
+// that runs again on the same node path drops its earlier activation, with its
+// calls and errors, only if that activation failed, as an attempt that
+// RetryConfig runs again did. A healthy earlier activation, such as the first
+// planner of a transfer-back chain within the node, is still running.
+func TestTraceManager_NodeReentryPurgesOnlyFailedAttempt(t *testing.T) {
+	ctx := context.Background()
+	flaky := identity{invocationID: "inv-retry", agentName: "flaky", path: "wf@1/flaky@1"}
+	tests := []struct {
+		name string
+		// attempt runs the first activation of flaky.
+		attempt func(*traceManager)
+	}{
+		{
+			name:    "never responded",
+			attempt: func(tm *traceManager) {},
+		},
+		{
+			name: "unrecovered error after a partial event",
+			attempt: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, flaky)
+				tm.recordStreamed(ctx, flaky, "flaky", "", true)
+				tm.recordError(ctx, flaky, llmKey(flaky), errors.New("stream broken"))
+				tm.popLLMSpan(ctx, flaky, false)
+			},
+		},
+		{
+			name: "open tool call",
+			attempt: func(tm *traceManager) {
+				tm.pushLLMSpan(ctx, flaky)
+				tm.popLLMSpan(ctx, flaky, true)
+				tm.pushToolSpan(ctx, flaky, toolKey(flaky, "call-1", "lookup"))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.invocationSpan(ctx, flaky, nil)
+			tm.pushAgentSpan(ctx, flaky)
+			tt.attempt(tm)
+
+			tm.pushAgentSpan(ctx, flaky)
+			if got := openSpans(t, tm, flaky.invocationID); got != (spanCounts{agents: 1}) {
+				t.Errorf("open spans after the retry started = %+v, want the retry alone", got)
+			}
+			// Nothing of the failed attempt, its partial event included,
+			// hides that the retry never responded.
+			if _, err := tm.popUnclosedAgentSpans(ctx, flaky); err == nil || !strings.Contains(err.Error(), "execution failed") {
+				t.Errorf("popUnclosedAgentSpans error = %v, want the failure of the retry", err)
+			}
+		})
+	}
+
+	t.Run("running transfer-back chain", func(t *testing.T) {
+		tm := newTraceManager()
+		planner := identity{invocationID: "inv-chain", agentName: "planner", path: "wf@1/planner@1"}
+		helper := identity{invocationID: "inv-chain", agentName: "helper", path: "wf@1/planner@1"}
+		tm.invocationSpan(ctx, planner, nil)
+		tm.pushAgentSpan(ctx, planner)
+		tm.pushLLMSpan(ctx, planner)
+		tm.popLLMSpan(ctx, planner, true)
+		tm.pushAgentSpan(ctx, helper)
+		tm.pushLLMSpan(ctx, helper)
+		tm.popLLMSpan(ctx, helper, true)
+
+		tm.pushAgentSpan(ctx, planner)
+		if got := openSpans(t, tm, "inv-chain").agents; got != 3 {
+			t.Errorf("open agent spans after planner re-entered = %d, want 3: the first planner and helper still run", got)
+		}
+	})
+
+	t.Run("failed activation outside a node", func(t *testing.T) {
+		// A custom agent that stops reading its sub-agent at an error and runs
+		// it again may have yielded the error, so the activation that failed
+		// keeps it.
+		tm := newTraceManager()
+		bot := identity{invocationID: "inv-custom-retry", agentName: "bot"}
+		tm.invocationSpan(ctx, bot, nil)
+		tm.pushAgentSpan(ctx, bot)
+		tm.pushLLMSpan(ctx, bot)
+		tm.recordError(ctx, bot, llmKey(bot), errors.New("model failed"))
+		tm.popLLMSpan(ctx, bot, false)
+
+		tm.pushAgentSpan(ctx, bot)
+		tm.pushLLMSpan(ctx, bot)
+		tm.popLLMSpan(ctx, bot, true)
+		tm.popAgentSpan(ctx, bot)
+		if _, err := tm.popUnclosedAgentSpans(ctx, bot); err == nil {
+			t.Error("popUnclosedAgentSpans error = nil, want the error of the first activation")
+		}
+	})
+}
+
+// TestTraceManager_LastPartialClearedByWorkUnderItsAuthor verifies that work
+// that starts under the author of the last partial event shows that the caller
+// kept reading after the event, so a failure that follows is reported, while
+// work of a concurrent sibling of the author, such as another sub-agent of a
+// parallel agent, does not.
+func TestTraceManager_LastPartialClearedByWorkUnderItsAuthor(t *testing.T) {
+	ctx := context.Background()
+	const invID = "inv-partial"
+	par := identity{invocationID: invID, agentName: "par"}
+	author := identity{invocationID: invID, agentName: "author", branch: "par.author"}
+	sibling := identity{invocationID: invID, agentName: "sibling", branch: "par.sibling"}
+	child := identity{invocationID: invID, agentName: "child", branch: "par.author"}
+	tests := []struct {
+		name    string
+		work    func(*traceManager)
+		wantErr bool
+	}{
+		{name: "sub-agent of the author starts", work: func(tm *traceManager) { tm.pushAgentSpan(ctx, child) }, wantErr: true},
+		{name: "author starts a model call", work: func(tm *traceManager) { tm.pushLLMSpan(ctx, author) }, wantErr: true},
+		{name: "author starts a tool call", work: func(tm *traceManager) { tm.pushToolSpan(ctx, author, toolKey(author, "call-1", "lookup")) }, wantErr: true},
+		{name: "sibling starts a model call", work: func(tm *traceManager) { tm.pushLLMSpan(ctx, sibling) }, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.invocationSpan(ctx, par, nil)
+			tm.pushAgentSpan(ctx, par)
+			tm.pushAgentSpan(ctx, author)
+			tm.pushAgentSpan(ctx, sibling)
+			tm.recordStreamed(ctx, author, "author", author.branch, true)
+
+			tt.work(tm)
+
+			if _, err := tm.popUnclosedAgentSpans(ctx, par); (err != nil) != tt.wantErr {
+				t.Errorf("popUnclosedAgentSpans error = %v, want error %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestTraceManager_CanceledWorkAfterPartialIsNotAFailure verifies that work
+// that the author of the last session event, a partial one, starts afterwards
+// does not fail the invocation once the context of the work is canceled, as
+// when a parallel agent lets the author go on after the caller stopped
+// reading and then cancels its sub-agents. The work still fails the
+// invocation when its context is live, and when a session event followed the
+// partial one.
+func TestTraceManager_CanceledWorkAfterPartialIsNotAFailure(t *testing.T) {
+	const invID = "inv-canceled-work"
+	par := identity{invocationID: invID, agentName: "par"}
+	author := identity{invocationID: invID, agentName: "author", branch: "par.author"}
+	sibling := identity{invocationID: invID, agentName: "sibling", branch: "par.sibling"}
+	child := identity{invocationID: invID, agentName: "child", branch: "par.author"}
+	works := []struct {
+		name string
+		// work starts work with ctx; stop cancels ctx, if the case does,
+		// as a parallel agent does once it stops.
+		work func(ctx context.Context, stop func(), tm *traceManager)
+	}{
+		{name: "sub-agent of the author starts", work: func(ctx context.Context, _ func(), tm *traceManager) { tm.pushAgentSpan(ctx, child) }},
+		{name: "author starts a model call", work: func(ctx context.Context, _ func(), tm *traceManager) { tm.pushLLMSpan(ctx, author) }},
+		{name: "author starts a tool call", work: func(ctx context.Context, _ func(), tm *traceManager) {
+			tm.pushToolSpan(ctx, author, toolKey(author, "call-1", "lookup"))
+		}},
+		{name: "sub-agent of the author fails with the context's error", work: func(ctx context.Context, stop func(), tm *traceManager) {
+			tm.pushAgentSpan(ctx, child)
+			tm.pushLLMSpan(ctx, child)
+			stop()
+			tm.recordError(ctx, child, llmKey(child), context.Canceled)
+			tm.popLLMSpan(ctx, child, false)
+		}},
+	}
+	cases := []struct {
+		name string
+		// cancel cancels the context of the sub-agents of par before the
+		// invocation ends, as a parallel agent does once it stops.
+		cancel bool
+		// eventAfter writes a final session event of sibling after the work.
+		eventAfter bool
+		wantErr    bool
+	}{
+		{name: "context canceled", cancel: true, wantErr: false},
+		{name: "context live", cancel: false, wantErr: true},
+		{name: "session event after the partial one", cancel: true, eventAfter: true, wantErr: true},
+	}
+	for _, w := range works {
+		for _, tc := range cases {
+			t.Run(w.name+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				branchCtx, cancel := context.WithCancel(ctx)
+				t.Cleanup(cancel)
+				stop := func() {
+					if tc.cancel {
+						cancel()
+					}
+				}
+				tm := newTraceManager()
+				tm.invocationSpan(ctx, par, nil)
+				tm.pushAgentSpan(ctx, par)
+				tm.pushAgentSpan(branchCtx, author)
+				tm.pushAgentSpan(branchCtx, sibling)
+				tm.recordStreamed(ctx, author, "author", author.branch, true)
+
+				w.work(branchCtx, stop, tm)
+				if tc.eventAfter {
+					tm.completeResponse(ctx, sibling, "sibling", sibling.branch, nil)
+				}
+				stop()
+
+				if _, err := tm.popUnclosedAgentSpans(ctx, par); (err != nil) != tc.wantErr {
+					t.Errorf("popUnclosedAgentSpans error = %v, want error %v", err, tc.wantErr)
+				}
+			})
+		}
+	}
+}
+
+// TestTraceManager_ToolEndKeepsFailedActivationOutsideToolRun verifies that a
+// failed activation under an agent that no tool call ran, such as a transfer
+// target on the agent's own node path, stays open with its error when a tool
+// call of the agent ends.
+func TestTraceManager_ToolEndKeepsFailedActivationOutsideToolRun(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	coord := identity{invocationID: "inv-peer", agentName: "coordinator"}
+	peer := identity{invocationID: "inv-peer", agentName: "peer"}
+	call := toolKey(coord, "call-1", "lookup")
+	tm.invocationSpan(ctx, coord, nil)
+	tm.pushAgentSpan(ctx, coord)
+	tm.pushLLMSpan(ctx, coord)
+	tm.popLLMSpan(ctx, coord, true)
+	tm.pushAgentSpan(ctx, peer)
+	tm.pushLLMSpan(ctx, peer)
+	tm.recordError(ctx, peer, llmKey(peer), errors.New("peer model failed"))
+	tm.popLLMSpan(ctx, peer, false)
+
+	tm.pushToolSpan(ctx, coord, call)
+	tm.popToolSpan(ctx, coord, call, false)
+	if _, err := tm.popUnclosedAgentSpans(ctx, coord); err == nil {
+		t.Error("popUnclosedAgentSpans error = nil, want the error of peer")
+	}
+}
+
+// TestTraceManager_CanceledModelCallAfterStopMidStream verifies that a model
+// call that ended with context.Canceled does not fail the invocation when the
+// caller stopped reading on a partial event while the invocation's own context
+// was live and the context of the error's branch was canceled, as when a
+// parallel agent stops its other sub-agents, and that it still fails it, and is
+// attributed to its own activation, otherwise, as when a model cancels a
+// request context of its own or an agent cancels the context of its
+// sub-agent.
+func TestTraceManager_CanceledModelCallAfterStopMidStream(t *testing.T) {
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		partial bool
+		err     error
+		// errCtx is the context of the callback that records err, and
+		// slowCtx the context that slow's activation starts with.
+		errCtx  context.Context
+		slowCtx context.Context
+		// wantUnclosed is the number of spans that the error is attributed
+		// to: slow and par, or none if the invocation did not fail.
+		wantUnclosed int
+	}{
+		{name: "stopped mid-stream", ctx: context.Background(), partial: true, err: context.Canceled, errCtx: canceledCtx, slowCtx: canceledCtx, wantUnclosed: 0},
+		{name: "model canceled its own request", ctx: context.Background(), partial: true, err: context.Canceled, errCtx: context.Background(), slowCtx: context.Background(), wantUnclosed: 2},
+		{name: "agent canceled its sub-agent's context", ctx: context.Background(), partial: true, err: context.Canceled, errCtx: canceledCtx, slowCtx: context.Background(), wantUnclosed: 2},
+		{name: "no partial event", ctx: context.Background(), partial: false, err: context.Canceled, errCtx: canceledCtx, slowCtx: canceledCtx, wantUnclosed: 2},
+		{name: "other error after a partial event", ctx: context.Background(), partial: true, err: errors.New("model failed"), errCtx: canceledCtx, slowCtx: canceledCtx, wantUnclosed: 2},
+		{name: "invocation canceled", ctx: canceledCtx, partial: true, err: context.Canceled, errCtx: canceledCtx, slowCtx: canceledCtx, wantUnclosed: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tm := newTraceManager()
+			par := identity{invocationID: "inv-cancel", agentName: "par"}
+			bot := identity{invocationID: "inv-cancel", agentName: "bot", branch: "par.bot"}
+			slow := identity{invocationID: "inv-cancel", agentName: "slow", branch: "par.slow"}
+			tm.invocationSpan(tt.ctx, par, nil)
+			tm.pushAgentSpan(tt.ctx, par)
+			tm.pushAgentSpan(tt.ctx, bot)
+			tm.pushAgentSpan(tt.slowCtx, slow)
+			// slow responded once, so only its error can fail it.
+			tm.pushLLMSpan(tt.ctx, slow)
+			tm.popLLMSpan(tt.ctx, slow, true)
+			tm.pushLLMSpan(tt.ctx, slow)
+			if tt.partial {
+				tm.recordStreamed(tt.ctx, bot, "bot", bot.branch, true)
+			} else {
+				tm.completeResponse(tt.ctx, bot, "bot", bot.branch, nil)
+			}
+			tm.recordError(tt.errCtx, slow, llmKey(slow), tt.err)
+			tm.popLLMSpan(tt.ctx, slow, false)
+
+			unclosed, err := tm.popUnclosedAgentSpans(tt.ctx, par)
+			if (err != nil) != (tt.wantUnclosed > 0) || len(unclosed) != tt.wantUnclosed {
+				t.Errorf("popUnclosedAgentSpans = (%d spans, %v), want %d spans", len(unclosed), err, tt.wantUnclosed)
+			}
+		})
+	}
+}
+
+// TestTraceManager_StopPointNodePathDiffersFromParent verifies that an agent
+// activation on a node path that differs from its agent parent's is a stop
+// point, so a context.Canceled error recorded for it after a partial event
+// stop is attributed to the stop and does not fail the invocation. The
+// stopPoint literal in pushAgentSpan includes id.path != parent.path for
+// this case; deleting that clause makes this test fail.
+func TestTraceManager_StopPointNodePathDiffersFromParent(t *testing.T) {
+	ctx := context.Background()
+	const invID = "inv-stoppoint-path"
+	// agent runs right under the invocation with no branch of its own.
+	agent := identity{invocationID: invID, agentName: "agent", branch: ""}
+	// helper runs on a distinct node path under agent, in the same branch:
+	// only id.path != parent.path makes it a stop point.
+	helper := identity{invocationID: invID, agentName: "helper", branch: "", path: "agent/helper@1"}
+
+	// agent's context is not canceled, but helper's own context is.
+	agentCtx, agentCancel := context.WithCancel(ctx)
+	t.Cleanup(agentCancel)
+	helperCtx, helperCancel := context.WithCancel(agentCtx)
+	t.Cleanup(helperCancel)
+
+	tm := newTraceManager()
+	tm.invocationSpan(ctx, agent, nil)
+	tm.pushAgentSpan(agentCtx, agent)
+	// agent streams a partial event with content.
+	tm.pushLLMSpan(agentCtx, agent)
+	tm.recordStreamed(ctx, agent, "agent", agent.branch, true)
+	// helper runs on its own node path and then gets canceled.
+	tm.pushAgentSpan(helperCtx, helper)
+	tm.pushLLMSpan(helperCtx, helper)
+	helperCancel()
+	tm.recordError(helperCtx, helper, llmKey(helper), context.Canceled)
+	tm.popLLMSpan(helperCtx, helper, false)
+
+	if _, err := tm.popUnclosedAgentSpans(ctx, agent); err != nil {
+		t.Errorf("popUnclosedAgentSpans error = %v, want nil: helper's context.Canceled should be attributed to the stop, not a failure", err)
+	}
 }
