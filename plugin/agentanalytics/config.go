@@ -145,13 +145,23 @@ type GCSContentOffloader interface {
 // GCSUploadTimeout, GCSMaxPendingUploadBytes, and GCSOffloader have no
 // counterpart in BigQueryLoggerConfig. adk-python declares
 // exactly_once_delivery and creates a COMMITTED write stream when enabled, but
-// differs in handling: after OutOfRange or an unexpected AlreadyExists, Go
-// replaces the stream and resends the batch within the same append, whereas
-// adk-python drops the batch and replaces the stream before the next one.
-// After a successful Send, Go treats only ambiguous transport errors
-// (Unavailable, DeadlineExceeded, Canceled, Aborted, Internal, Unknown) as an
-// unknown outcome, whereas adk-python treats stream-level errors as
-// rejections. DropStats has four counters, whereas adk-python's get_drop_stats()
+// differs in handling. After OutOfRange, NotFound, or an unexpected
+// AlreadyExists, Go replaces the stream (at most once per batch) and resends
+// the batch within the same append, with two exceptions: if the stream was
+// rotated by an earlier batch and has not committed yet, Go drops the batch
+// and pauses rotation; if an earlier attempt of the batch had an unknown
+// outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
+// duplicate delivery, and replace the stream before the next batch (pausing
+// rotation if the stream had not committed yet). adk-python drops the batch
+// after any of the three and replaces the stream before the next one. On an
+// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
+// carrying one of these codes is a server rejection), Go treats Unavailable,
+// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
+// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
+// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
+// replaces the stream only if an earlier attempt of the batch had an unknown
+// outcome, whereas adk-python also replaces it when the error is not a schema
+// mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
 // returns ten per-reason counts. adk-python uploads while it parses an event,
 // before the row is queued, with a Cloud Storage client built from the
 // credentials of the plugin, a fixed 32 KiB inline text limit and the
@@ -386,13 +396,23 @@ type Config struct {
 	// ambiguous; definite server rejections (e.g. InvalidArgument) leave
 	// the offset in sync. When an offset desynchronization occurs (e.g.
 	// OutOfRange, NotFound), the plugin rotates to a fresh COMMITTED stream
-	// at offset 0 without burning an append retry attempt; rotation
-	// frequency across batches is bounded by a cooldown window. Replacing a
-	// desynchronized stream consumes CreateWriteStream quota and finalizes the
-	// retired stream in the background. Close waits for any in-flight
-	// retired-stream finalizations and finalizes the active stream within the
-	// remaining ShutdownTimeout write budget, skipping finalization if
-	// draining queued rows already exhausted ShutdownTimeout.
+	// at offset 0 without burning an append retry attempt. When a rotation
+	// fails, or a freshly rotated stream is desynchronized again before it
+	// commits a batch, rotation pauses for 30 seconds: batches flushed
+	// during the pause are dropped without calling CreateWriteStream and
+	// counted in DropStats.AppendFailureDrops, or in DropStats.ShutdownDrops
+	// during Close once its write budget is used up. A
+	// failed rotation does not pause rotation if the batch write reached it
+	// with less than half of ShutdownTimeout (and less than 30 seconds) left
+	// and the write's deadline ended the CreateWriteStream call; the next
+	// batch retries the rotation instead.
+	// Replacing a desynchronized stream consumes CreateWriteStream quota and
+	// finalizes the retired stream in the background. Close waits for
+	// retired-stream finalizations that are still running and finalizes the
+	// active stream only within the remaining ShutdownTimeout write budget: it
+	// cancels the finalizations still running when the budget runs out, and
+	// skips the active stream's if draining queued rows already exhausted
+	// ShutdownTimeout.
 	ExactlyOnceDelivery bool
 }
 
