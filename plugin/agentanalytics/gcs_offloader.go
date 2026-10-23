@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -322,9 +323,10 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	var tasks []*uploadTask
 	var summaries []rowSummary
 	var reservedTotal, deferredReserved int64
+	var staleDrops []deferredUploadFailure
 	for i := range batch {
 		row := batch[i]
-		b.clearDeferredRowUploads(row)
+		staleDrops = append(staleDrops, b.releaseDeferredRowUpload(row)...)
 		builder, _ := row[summaryBuilderKey].(*contentSummaryBuilder)
 		delete(row, summaryBuilderKey)
 		pending, ok := row[rawPartsKey].([]pendingUpload)
@@ -361,15 +363,24 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			}
 		}
 	}
-	// Release every reservation this pass did not leave on a deferred row.
-	// deferredReserved is updated before applyUpload, so a logger panic inside
-	// applyUpload still keeps those bytes with the row that owns them.
-	// The flush defer runs first, so a panic while logging a drop still
-	// reaches the release.
+	// A normal return leaves deferred rows with the caller, which still holds
+	// the batch. A panic does not: flushRunEnd has already taken the batch off
+	// the queue and has not stored it, and afterRun recovers the panic. Release
+	// those rows too, or their bytes stay reserved for the life of the process.
+	// This defer is registered first so it still runs when the log defer panics.
 	defer func() {
+		if r := recover(); r != nil {
+			for i := range batch {
+				b.releaseDeferredRowUpload(batch[i])
+			}
+			b.releaseUploadBytes(reservedTotal - deferredReserved)
+			panic(r)
+		}
 		b.releaseUploadBytes(reservedTotal - deferredReserved)
 	}()
-	defer b.flushDeferredDropLogs()
+	defer func() {
+		logDroppedDeferredUploads(b.config.Logger, staleDrops)
+	}()
 
 	offloader := b.config.GCSOffloader
 	if len(tasks) == 0 || offloader == nil {
@@ -512,88 +523,87 @@ func (b *BatchProcessor) releaseDeferredRowUpload(row map[string]any) []deferred
 	return d.failures
 }
 
-func (b *BatchProcessor) logDroppedDeferredUploads(failures []deferredUploadFailure) {
+func logDroppedDeferredUploads(logger Logger, failures []deferredUploadFailure) {
+	if logger == nil {
+		return
+	}
 	for _, f := range failures {
-		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+		logger.Printf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
 			f.eventID, f.partIdx, f.size, f.summary)
 	}
 }
 
-// deferredDropLogs holds plain failure lines that clearDeferredRowUploads has
-// not logged yet. releaseRowUploads calls that once per row while a failed
-// batch is dropped; logging inside the row would let a panicking logger skip
-// the rest of the batch.
-type deferredDropLogs struct {
+// deferredDropSlot buffers plain failure lines for one processor until the
+// batch-failure log that follows the per-row release loop. The buffer is not
+// stored on Config: callbacks read Config.Logger without flushMu.
+type deferredDropSlot struct {
 	mu       sync.Mutex
 	failures []deferredUploadFailure
 }
 
-// deferredDropLogger emits stashed drop lines on the next log, which the
-// failed-write loops make only after every row has been released.
-type deferredDropLogger struct {
-	inner Logger
-	logs  *deferredDropLogs
-}
+var deferredDropSlots sync.Map // *BatchProcessor -> *deferredDropSlot
 
-func (l *deferredDropLogger) Printf(format string, args ...any) {
-	l.logs.flushTo(l.inner)
-	if l.inner != nil {
-		l.inner.Printf(format, args...)
+func (b *BatchProcessor) deferredDropSlot() *deferredDropSlot {
+	if v, ok := deferredDropSlots.Load(b); ok {
+		return v.(*deferredDropSlot)
 	}
-}
-
-func (l *deferredDropLogger) Println(args ...any) {
-	l.logs.flushTo(l.inner)
-	if l.inner != nil {
-		l.inner.Println(args...)
-	}
-}
-
-func (d *deferredDropLogs) flushTo(inner Logger) {
-	if d == nil || inner == nil {
-		return
-	}
-	d.mu.Lock()
-	failures := d.failures
-	d.failures = nil
-	d.mu.Unlock()
-	for _, f := range failures {
-		inner.Printf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-			f.eventID, f.partIdx, f.size, f.summary)
-	}
-}
-
-func (b *BatchProcessor) deferredDropLogBuf() *deferredDropLogs {
-	if wrapped, ok := b.config.Logger.(*deferredDropLogger); ok {
-		return wrapped.logs
-	}
-	if b.config.Logger == nil {
-		return nil
-	}
-	logs := &deferredDropLogs{}
-	b.config.Logger = &deferredDropLogger{inner: b.config.Logger, logs: logs}
-	return logs
+	slot := &deferredDropSlot{}
+	actual, _ := deferredDropSlots.LoadOrStore(b, slot)
+	return actual.(*deferredDropSlot)
 }
 
 func (b *BatchProcessor) stashDeferredDropLogs(failures []deferredUploadFailure) {
-	if len(failures) == 0 {
+	if len(failures) == 0 || b.config.Logger == nil {
 		return
 	}
-	logs := b.deferredDropLogBuf()
-	if logs == nil {
-		return
-	}
-	logs.mu.Lock()
-	logs.failures = append(logs.failures, failures...)
-	logs.mu.Unlock()
+	slot := b.deferredDropSlot()
+	slot.mu.Lock()
+	slot.failures = append(slot.failures, failures...)
+	slot.mu.Unlock()
 }
 
-func (b *BatchProcessor) flushDeferredDropLogs() {
-	wrapped, ok := b.config.Logger.(*deferredDropLogger)
+func (b *BatchProcessor) takeDeferredDropLogs() []deferredUploadFailure {
+	v, ok := deferredDropSlots.Load(b)
 	if !ok {
+		return nil
+	}
+	slot := v.(*deferredDropSlot)
+	slot.mu.Lock()
+	failures := slot.failures
+	slot.failures = nil
+	slot.mu.Unlock()
+	return failures
+}
+
+// loggerMatches reports whether a and b are the same logger value. A logger
+// whose dynamic type is not comparable does not match; its lines are emitted
+// from clearDeferredUploads instead.
+func loggerMatches(a, b Logger) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
+	if ta != tb || !ta.Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// flushDeferredDropLogs emits drop lines stashed for processors that use logger.
+// Config.logf calls it immediately before a batch-failure line, after every
+// row in that batch has been released.
+func flushDeferredDropLogs(logger Logger) {
+	if logger == nil {
 		return
 	}
-	wrapped.logs.flushTo(wrapped.inner)
+	deferredDropSlots.Range(func(key, _ any) bool {
+		b := key.(*BatchProcessor)
+		if !loggerMatches(b.config.Logger, logger) {
+			return true
+		}
+		logDroppedDeferredUploads(logger, b.takeDeferredDropLogs())
+		return true
+	})
 }
 
 func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
@@ -605,8 +615,10 @@ func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
 	for _, row := range batch {
 		failures = append(failures, b.releaseDeferredRowUpload(row)...)
 	}
-	b.flushDeferredDropLogs()
-	b.logDroppedDeferredUploads(failures)
+	// Covers a logger value that is not comparable, which flushDeferredDropLogs
+	// cannot look up. releaseRowUploads has already released every row.
+	failures = append(b.takeDeferredDropLogs(), failures...)
+	logDroppedDeferredUploads(b.config.Logger, failures)
 }
 
 func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {

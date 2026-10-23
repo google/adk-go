@@ -4034,10 +4034,10 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 	if !panicked {
 		t.Fatal("resolveUploads did not panic")
 	}
-	// Unwind releases reservedTotal-deferredReserved, so the deferred 64 bytes
-	// stay with the row and the other 64 are released.
-	if got := bp.pendingUploadBytes.Load(); got != 64 {
-		t.Fatalf("pendingUploadBytes = %d, want 64", got)
+	// The panic leaves flushRunEnd before the batch is requeued, so the deferred
+	// row is gone too. Unwind must release those bytes as well.
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes = %d, want 0", got)
 	}
 }
 
@@ -4188,6 +4188,64 @@ func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Fatalf("pendingUploadBytes = %d, want 0", got)
 	}
+}
+
+type callbackRaceLogger struct {
+	n atomic.Int32
+}
+
+func (l *callbackRaceLogger) Printf(string, ...any) { l.n.Add(1) }
+func (l *callbackRaceLogger) Println(...any)        { l.n.Add(1) }
+
+func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &callbackRaceLogger{}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 64,
+			BatchSize:                1000,
+			Logger:                   logger,
+		}),
+		queue:                 make(chan map[string]any),
+		maxPendingUploadBytes: 64,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				bp.uploadBudgetWarned.Store(false)
+				bp.tryReserveUploadBytes(1)
+				bp.Append(map[string]any{eventIDField: "drop"})
+			}
+		}
+	}()
+	for range 8 {
+		runtime.Gosched()
+	}
+	bp.releaseRowUploads(row)
+	close(stop)
+	wg.Wait()
+	bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
 }
 
 func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {
