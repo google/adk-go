@@ -660,3 +660,36 @@ func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
 		t.Errorf("expected no persisted session for the failing write, found %d", count)
 	}
 }
+
+func TestDatabaseService_ListOrderedByLastUpdateTime(t *testing.T) {
+	svc := emptyService(t)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	created := map[string]session.Session{}
+	// Create in reverse ID order so neither PK order nor creation order equals the want.
+	for i, id := range []string{"c", "b", "a"} {
+		cctx := platform.WithTimeProvider(ctx, func() time.Time { return base.Add(time.Duration(i) * time.Second) })
+		resp, err := svc.Create(cctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created[id] = resp.Session
+	}
+	// "c" (created first) becomes most recently active.
+	ev := session.NewEvent(ctx, "inv")
+	ev.Timestamp = base.Add(time.Minute)
+	if err := svc.AppendEvent(ctx, created["c"], ev); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.ID())
+	}
+	if want := []string{"b", "a", "c"}; !slices.Equal(got, want) {
+		t.Errorf("List() order = %v, want %v", got, want)
+	}
+}

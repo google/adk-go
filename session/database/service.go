@@ -283,7 +283,7 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 		})
 	}
 
-	err := listQuery.Find(&foundSessions).Error
+	err := listQuery.Order("update_time ASC, user_id ASC, id ASC").Find(&foundSessions).Error
 	if err != nil {
 		// Specifically check if the error is "record not found".
 		if errors.Is(err, gorm.ErrRecordNotFound) {

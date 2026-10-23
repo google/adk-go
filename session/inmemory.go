@@ -15,6 +15,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"iter"
@@ -170,6 +171,13 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
 		sessions = append(sessions, copiedSession)
 	}
+	slices.SortStableFunc(sessions, func(a, b Session) int {
+		return cmp.Or(
+			a.LastUpdateTime().Compare(b.LastUpdateTime()),
+			strings.Compare(a.UserID(), b.UserID()),
+			strings.Compare(a.ID(), b.ID()),
+		)
+	})
 	return &ListResponse{
 		Sessions: sessions,
 	}, nil
