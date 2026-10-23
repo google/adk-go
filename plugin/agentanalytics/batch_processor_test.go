@@ -4477,7 +4477,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	// Batch 0: no upload; takes 50ms in AppendRows, leaving ~70ms of 120ms ShutdownTimeout (< 3/4).
 	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
 
-	// Batch 1: 64-byte upload; because budget is already depleted, pauseOnCallerDeadline is false.
+	// Batch 1: 64-byte upload; the depleted budget is too short to demonstrate a storage stall.
 	// Upload stalls for 35ms (half remaining) and is deferred with 64 bytes retained in pendingUploadBytes.
 	// AppendRows takes 50ms, exceeding the remaining ~35ms, so flushRunEnd saves batch 1 in deferredBatch.
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
