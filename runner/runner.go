@@ -897,7 +897,19 @@ func (s *closedLiveSession) Close() error {
 
 // RunLive starts a live, bidirectional agent session, returning the session
 // and a stream of events from the agents.
+// Consume the event stream to finish the invocation and its plugin callbacks,
+// including after closing the live session.
 func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+	// Unlike Python's live generator, Go starts callbacks before returning
+	// the session and iterator, so the span must start here too.
+	ctx, span := telemetry.StartInvocationSpan(ctx, r.rootAgent, sessionID)
+	ownedByIterator := false
+	defer func() {
+		if !ownedByIterator {
+			span.End()
+		}
+	}()
+
 	options := runOptions{}
 	for _, opt := range opts {
 		opt(&options)
@@ -986,6 +998,10 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	}
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
+		// Close can precede iteration; keep the span open through the
+		// remaining events and AfterRunCallback.
+		defer span.End()
+
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
 		}
@@ -1123,6 +1139,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 	}
 
+	ownedByIterator = true
 	return &runnerLiveSession{
 		sess:          agentSess,
 		r:             r,
