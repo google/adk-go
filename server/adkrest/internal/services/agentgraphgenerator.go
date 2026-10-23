@@ -16,13 +16,18 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/awalterschulze/gographviz"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	llmagentinternal "google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
@@ -78,6 +83,45 @@ type namedInstance interface {
 	Name() string
 }
 
+// dotKeywords are the DOT keywords, which are case-insensitive. A bare keyword
+// is not a node ID: `node [...]` sets the defaults for every node.
+var dotKeywords = []string{"node", "edge", "graph", "digraph", "subgraph", "strict"}
+
+// dotEscaper escapes a string for use inside a DOT double-quoted string.
+// Escaping the backslash keeps a trailing one from swallowing the closing
+// quote.
+var dotEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// dotID returns name as a DOT ID. Agent names and tool names are not limited
+// to DOT identifiers: an MCP server picks its tool names, and hyphens are
+// common. A plain ASCII identifier that is not a keyword is returned unchanged,
+// so graphs that render today keep the same source; anything else is quoted.
+//
+// Every name that reaches the graph as a node, edge endpoint, cluster or
+// ltail/lhead value goes through dotID. Everything else, including highlight
+// matching, keeps the raw name.
+func dotID(name string) string {
+	if isPlainDOTID(name) {
+		return name
+	}
+	return `"` + dotEscaper.Replace(name) + `"`
+}
+
+func isPlainDOTID(s string) bool {
+	if s == "" || slices.Contains(dotKeywords, strings.ToLower(s)) {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_', 'a' <= r && r <= 'z', 'A' <= r && r <= 'Z':
+		case i > 0 && '0' <= r && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func nodeName(instance any) string {
 	switch i := instance.(type) {
 	case agent.Agent:
@@ -94,11 +138,13 @@ func nodeName(instance any) string {
 // the returned cluster id is applied as ltail or lhead. A cluster that was
 // never added, or that has no node inside it, falls back to the plain name
 // with no cluster id.
+//
+// nodeID is a raw name; clusterID is already a DOT ID.
 func edgeAnchor(graph *gographviz.Graph, instance any, fromClusterEnd bool) (nodeID, clusterID string) {
 	if !shouldBuildAgentCluster(instance) {
 		return nodeName(instance), ""
 	}
-	clusterID = "cluster_" + nodeName(instance)
+	clusterID = clusterDOTID(nodeName(instance))
 	if !graph.IsSubGraph(clusterID) {
 		return nodeName(instance), ""
 	}
@@ -111,10 +157,15 @@ func edgeAnchor(graph *gographviz.Graph, instance any, fromClusterEnd bool) (nod
 		child = subs[len(subs)-1]
 	}
 	nodeID, _ = edgeAnchor(graph, child, fromClusterEnd)
-	if !graph.IsNode(nodeID) {
+	if !graph.IsNode(dotID(nodeID)) {
 		return nodeName(instance), ""
 	}
 	return nodeID, clusterID
+}
+
+// clusterDOTID is the DOT ID of the cluster drawn for the workflow agent name.
+func clusterDOTID(name string) string {
+	return dotID("cluster_" + name)
 }
 
 func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][]string, theme Theme) error {
@@ -123,7 +174,7 @@ func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][
 	// cluster_<name> is a subgraph, not a node. Using it as an endpoint makes
 	// Graphviz draw a stray ellipse. Skip the edge when either side was never
 	// drawn as a node, which is what an empty cluster leaves us with.
-	if !graph.IsNode(src) || !graph.IsNode(dst) {
+	if !graph.IsNode(dotID(src)) || !graph.IsNode(dotID(dst)) {
 		return nil
 	}
 	if err := drawEdge(graph, src, dst, highlightedPairs, theme); err != nil {
@@ -135,7 +186,7 @@ func drawClusterEdge(graph *gographviz.Graph, from, to any, highlightedPairs [][
 	if err := graph.AddAttr(graph.Name, "compound", "true"); err != nil {
 		return err
 	}
-	edges := graph.Edges.SrcToDsts[src][dst]
+	edges := graph.Edges.SrcToDsts[dotID(src)][dotID(dst)]
 	edge := edges[len(edges)-1]
 	if ltail != "" {
 		if err := edge.Attrs.Add("ltail", ltail); err != nil {
@@ -166,7 +217,7 @@ func nodeCaption(instance any) string {
 	default:
 		caption = "Unsupported agent or tool type"
 	}
-	return "\"" + caption + "\""
+	return "\"" + dotEscaper.Replace(caption) + "\""
 }
 
 func nodeShape(instance any) string {
@@ -232,7 +283,7 @@ func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawCluster(ctx context.Context, parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	agentInternal, ok := agent.(agentinternal.Agent)
 	if !ok {
 		return nil
@@ -242,7 +293,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	// destination cluster was actually added; a name already visited as a tool
 	// is skipped and must not be linked through a node that was never drawn.
 	for _, subAgent := range subs {
-		err := buildGraph(cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err := buildGraph(ctx, cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
@@ -273,7 +324,7 @@ func drawCluster(parentGraph, cluster *gographviz.Graph, agent agent.Agent, high
 	return nil
 }
 
-func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawNode(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
@@ -287,7 +338,7 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 			return nil
 		}
 		cluster := gographviz.NewGraph()
-		err := cluster.SetName("cluster_" + name)
+		err := cluster.SetName(clusterDOTID(name))
 		if err != nil {
 			return fmt.Errorf("set cluster name: %w", err)
 		}
@@ -302,7 +353,7 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 		if err != nil {
 			return fmt.Errorf("add cluster: %w", err)
 		}
-		return drawCluster(parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
+		return drawCluster(ctx, parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
 	} else {
 		nodeAttributes := map[string]string{
 			"label":     caption,
@@ -317,11 +368,17 @@ func drawNode(graph, parentGraph *gographviz.Graph, instance any, highlightedPai
 			nodeAttributes["color"] = theme.Foreground
 			nodeAttributes["style"] = "rounded"
 		}
-		return parentGraph.AddNode(graph.Name, name, nodeAttributes)
+		return parentGraph.AddNode(graph.Name, dotID(name), nodeAttributes)
 	}
 }
 
+// drawEdge draws an edge between the nodes named from and to. Both are raw
+// names, which highlightedPairs is matched against.
 func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]string, theme Theme) error {
+	src, dst := dotID(from), dotID(to)
+	if graph.Edges != nil && graph.Edges.SrcToDsts != nil && graph.Edges.SrcToDsts[src] != nil && len(graph.Edges.SrcToDsts[src][dst]) > 0 {
+		return nil
+	}
 	edgeHighlighted := edgeHighlighted(from, to, highlightedPairs)
 	edgeAttributes := map[string]string{}
 	if edgeHighlighted != nil {
@@ -336,10 +393,41 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 		edgeAttributes["color"] = theme.Foreground
 		edgeAttributes["arrowhead"] = "none"
 	}
-	return graph.AddEdge(from, to, true, edgeAttributes)
+	return graph.AddEdge(src, dst, true, edgeAttributes)
 }
 
-func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+// toolsetPanicError is a panic recovered from Toolset.Tools.
+type toolsetPanicError struct {
+	value any
+}
+
+func (e *toolsetPanicError) Error() string {
+	return fmt.Sprintf("toolset.Tools panicked: %v", e.value)
+}
+
+// logSkippedToolset records that the graph of a leaves out toolset because
+// listing its tools failed with err. The graph still renders, so the caller
+// gets no error, and without this line a developer has no way to see why the
+// toolset's tools are missing.
+//
+// It logs types, not the error or panic value: those can carry a server URL
+// or credentials.
+func logSkippedToolset(ctx context.Context, a agent.Agent, toolset tool.Toolset, err error) {
+	kind, errType := "error", fmt.Sprintf("%T", err)
+	var p *toolsetPanicError
+	if errors.As(err, &p) {
+		kind, errType = "panic", fmt.Sprintf("%T", p.value)
+	}
+	slog.WarnContext(ctx, "agent graph: skipping a toolset that could not list its tools", //nolint:forbidigo // the graph still renders without this toolset, so there is no error to return
+		"agent", a.Name(),
+		"toolset", toolset.Name(),
+		"toolset_type", fmt.Sprintf("%T", toolset),
+		"kind", kind,
+		"error_type", errType,
+	)
+}
+
+func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil
@@ -348,7 +436,7 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 		return nil
 	}
 
-	err := drawNode(graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
+	err := drawNode(ctx, graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return fmt.Errorf("draw node: %w", err)
 	}
@@ -360,24 +448,79 @@ func buildGraph(graph, parentGraph *gographviz.Graph, instance any, highlightedP
 	if ok {
 		tools := llmagentinternal.Reveal(llmAgent).Tools
 		for _, tool := range tools {
-			err = drawNode(graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+			err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool node: %w", err)
 			}
-			err = drawEdge(graph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
+			err = drawEdge(parentGraph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool edge: %w", err)
 			}
 		}
+		for _, toolset := range llmagentinternal.Reveal(llmAgent).Toolsets {
+			if toolset == nil {
+				continue
+			}
+			var tsTools []tool.Tool
+			var tsErr error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						tsErr = &toolsetPanicError{value: r}
+					}
+				}()
+				// The graph is drawn outside any run, so there is no session,
+				// user or invocation to give the toolset; only the agent.
+				rCtx := icontext.NewReadonlyContext(icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: agent}))
+				tsTools, tsErr = toolset.Tools(rCtx)
+			}()
+			if tsErr != nil {
+				// A toolset that needs a run (per-user auth, the session) or an
+				// unreachable server cannot list its tools here. Skip it, as
+				// adk-python does, so the rest of the graph still renders.
+				logSkippedToolset(ctx, agent, toolset, tsErr)
+				continue
+			}
+			for _, tool := range tsTools {
+				err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+				if err != nil {
+					return fmt.Errorf("draw tool node: %w", err)
+				}
+				err = drawEdge(parentGraph, nodeName(agent), nodeName(tool), highlightedPairs, theme)
+				if err != nil {
+					return fmt.Errorf("draw tool edge: %w", err)
+				}
+			}
+		}
 	}
 	for _, subAgent := range agent.SubAgents() {
-		err = buildGraph(graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err = buildGraph(ctx, graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("build sub agent graph: %w", err)
+		}
+		if !shouldBuildAgentCluster(agent) {
+			err = drawClusterEdge(parentGraph, agent, subAgent, highlightedPairs, theme)
+			if err != nil {
+				return fmt.Errorf("draw sub agent edge: %w", err)
+			}
 		}
 	}
 	return nil
 }
+
+// toolsetResolveBudget is the deadline one graph gives toolset resolution,
+// across every agent in the tree rather than per agent. Toolsets may reach out
+// over the network (an MCP server, for example), and the graph must not wait
+// on an unresponsive one indefinitely. The deadline binds only toolsets that
+// honor their context; those return the context error once it passes and are
+// logged and skipped like any other failing toolset.
+//
+// It has to leave room under the web launcher's default 15s write timeout,
+// past which the client gets no response at all. An MCP toolset can spend
+// about 5s more after its context ends, cleaning up a session with a server
+// that does not answer; a 10s budget measured 15s in total and the response
+// was dropped. It is a variable so tests can shorten it.
+var toolsetResolveBudget = 5 * time.Second
 
 // GetAgentGraph renders the agent tree as Graphviz DOT source in the dark
 // theme. It is kept for callers that do not care about the palette.
@@ -401,8 +544,11 @@ func GetAgentGraphWithTheme(ctx context.Context, agent agent.Agent, highlightedP
 	if err := graph.AddAttr(graph.Name, "bgcolor", theme.Background); err != nil {
 		return "", fmt.Errorf("set graph background color: %w", err)
 	}
+	// One budget for the whole walk, not one per agent.
+	ctx, cancel := context.WithTimeout(ctx, toolsetResolveBudget)
+	defer cancel()
 	visitedNodes := map[string]bool{}
-	err := buildGraph(graph, graph, agent, highlightedPairs, visitedNodes, theme)
+	err := buildGraph(ctx, graph, graph, agent, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return "", fmt.Errorf("build root graph: %w", err)
 	}
