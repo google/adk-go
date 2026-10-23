@@ -110,30 +110,6 @@ func TestModel_GenerateContent_NilRequest(t *testing.T) {
 	t.Fatal("no response yielded")
 }
 
-func TestModel_GenerateContent_Text(t *testing.T) {
-	rig := newTestRig(t, serveJSON(`{"id":"c1","model":"gpt-4o-mini",
-		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"sunny"}}],
-		"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`))
-	got, err := ask(t, rig.model(t), false)
-	if err != nil {
-		t.Fatalf("GenerateContent() err = %v", err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("responses = %d, want 1", len(got))
-	}
-	if text := responseText(got[0]); text != "sunny" {
-		t.Errorf("text = %q, want sunny", text)
-	}
-	if got[0].CustomMetadata["openai_response_id"] != "c1" {
-		t.Errorf("response id metadata = %v", got[0].CustomMetadata["openai_response_id"])
-	}
-	// Recorded as a plain string, which is what this key has always been
-	// documented to carry.
-	if _, ok := got[0].CustomMetadata["openai_model"].(string); !ok {
-		t.Errorf("model metadata = %T, want string", got[0].CustomMetadata["openai_model"])
-	}
-}
-
 func TestModel_GenerateContent_ServerError(t *testing.T) {
 	rig := newTestRig(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

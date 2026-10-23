@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"iter"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -78,7 +77,9 @@ func TestModel_Generate(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			n := 0
 			for got, err := range testModel.GenerateContent(t.Context(), tt.req, false) {
+				n++
 				if (err != nil) != tt.wantErr {
 					t.Errorf("Model.Generate() error = %v, wantErr %v", err, tt.wantErr)
 					return
@@ -86,6 +87,9 @@ func TestModel_Generate(t *testing.T) {
 				if diff := cmp.Diff(tt.want, got, cmpopts.IgnoreFields(model.LLMResponse{}, "AvgLogprobs")); diff != "" {
 					t.Errorf("Model.Generate() = %v, want %v\ndiff(-want +got):\n%v", got, tt.want, diff)
 				}
+			}
+			if n != 1 {
+				t.Errorf("Model.Generate() yielded %d responses, want 1", n)
 			}
 		})
 	}
@@ -121,7 +125,7 @@ func TestModel_GenerateStream(t *testing.T) {
 			}
 
 			// Transforms the stream into strings, concatenating the text value of the response parts
-			got, err := readResponse(model.GenerateContent(t.Context(), tt.req, true))
+			got, err := testutil.ReadTextResponse(model.GenerateContent(t.Context(), tt.req, true))
 			if (err != nil) != tt.wantErr {
 				t.Errorf("Model.GenerateStream() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -707,45 +711,6 @@ func TestModel_RespectsRequestModel(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TextResponse holds the concatenated text from a response stream,
-// separated into partial and final parts.
-type TextResponse struct {
-	// PartialText is the full text concatenated from all partial (streaming) responses.
-	PartialText string
-	// FinalText is the full text concatenated from all final (non-partial) responses.
-	FinalText string
-}
-
-// readResponse transforms a sequence into a TextResponse, concatenating the text value of the response parts
-// depending on the readPartial value it will only concatenate the text of partial events or the text of non partial events
-func readResponse(s iter.Seq2[*model.LLMResponse, error]) (TextResponse, error) {
-	var partialBuilder, finalBuilder strings.Builder
-	var result TextResponse
-
-	for resp, err := range s {
-		if err != nil {
-			// Return what we have so far, along with the error.
-			result.PartialText = partialBuilder.String()
-			result.FinalText = finalBuilder.String()
-			return result, err
-		}
-		if resp.Content == nil || len(resp.Content.Parts) == 0 {
-			return result, fmt.Errorf("encountered an empty response: %v", resp)
-		}
-
-		text := resp.Content.Parts[0].Text
-		if resp.Partial {
-			partialBuilder.WriteString(text)
-		} else {
-			finalBuilder.WriteString(text)
-		}
-	}
-
-	result.PartialText = partialBuilder.String()
-	result.FinalText = finalBuilder.String()
-	return result, nil
 }
 
 // headerInterceptor is a http.RoundTripper that executes a check function on the request
