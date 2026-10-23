@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -582,6 +583,179 @@ func (*longRunningMockTool) IsLongRunning() bool { return true }
 // received in live mode is recorded with its ID in LongRunningToolIDs. The
 // tool returns no response, so without the marker prompt assembly would treat
 // the pending call as unanswered and drop it on a later turn.
+// TestRunLiveToolResponseSharesSenderGoroutine pins that a tool response
+// reaches the model through the sender goroutine — the same single writer that
+// sends user input.
+//
+// Before the fix the event loop wrote the function response directly with
+// liveConn.SendContent (base_flow.go), a second concurrent writer on one
+// gorilla/websocket connection. gorilla documents one concurrent writer and
+// panics on two, and go.yml's -race run reports the two stacks touching the
+// writer state on every execution of this scenario, even when the writes do
+// not collide in wall-clock time.
+func TestRunLiveToolResponseSharesSenderGoroutine(t *testing.T) {
+	baseline, _ := runLiveStacks()
+
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"t1","name":"slow_tool","args":{}}]}}`
+
+	toolStarted := make(chan struct{})
+	toolRelease := make(chan struct{})
+
+	// payloads collects the JSON of every client message after the tool call,
+	// in arrival order, so the test can check the user send and the tool
+	// response both reached the wire, response after input.
+	var mu sync.Mutex
+	var payloads []string
+
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
+			t.Errorf("writing toolCall failed: %v", err)
+			return
+		}
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			payloads = append(payloads, string(data))
+			mu.Unlock()
+		}
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		Tools: []tool.Tool{
+			&mockFunctionTool{name: "slow_tool", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
+				close(toolStarted)
+				<-toolRelease
+				return map[string]any{"ok": true}, nil
+			}},
+		},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the function call event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev != nil && len(utils.FunctionCalls(ev.LLMResponse.Content)) > 0 {
+			break
+		}
+	}
+
+	select {
+	case <-toolStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("slow_tool never started")
+	}
+
+	// User input while the tool runs: the sender goroutine writes it. When the
+	// tool then returns, the event loop used to write the function response
+	// directly on the same connection — the second writer this test pins.
+	if err := sess.Send(agent.LiveRequest{Content: genai.NewContentFromText("ping", "user")}); err != nil {
+		t.Fatalf("Send failed: %v", err)
+	}
+	close(toolRelease)
+
+	// The tool response event, pushed once the tool returns. Consuming it
+	// keeps pushEvent from blocking the event loop before the response write.
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the tool response event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || ev.LLMResponse.Content == nil {
+			continue
+		}
+		hasResponse := false
+		for _, part := range ev.LLMResponse.Content.Parts {
+			if part.FunctionResponse != nil {
+				hasResponse = true
+				break
+			}
+		}
+		if hasResponse {
+			break
+		}
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		done := false
+		for _, p := range payloads {
+			if strings.Contains(p, "functionResponse") {
+				done = true
+				break
+			}
+		}
+		mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			mu.Lock()
+			t.Fatalf("tool response never reached the wire; payloads: %v", payloads)
+			mu.Unlock()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	// Pull to exhaustion through next(): seq is already owned by Pull2, and
+	// ranging it here would drive the same iterator from a second goroutine,
+	// which never finishes and parks RunLive's goroutines for the leak assert.
+	for {
+		if _, _, ok := next(); !ok {
+			break
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	var userIdx, respIdx int = -1, -1
+	for i, p := range payloads {
+		if userIdx == -1 && strings.Contains(p, `"text":"ping"`) {
+			userIdx = i
+		}
+		if respIdx == -1 && strings.Contains(p, "functionResponse") {
+			respIdx = i
+		}
+	}
+	if userIdx == -1 {
+		t.Errorf("user send never reached the wire; payloads: %v", payloads)
+	}
+	if respIdx == -1 {
+		t.Errorf("tool response never reached the wire; payloads: %v", payloads)
+	}
+	if userIdx != -1 && respIdx != -1 && respIdx < userIdx {
+		t.Errorf("tool response (payload %d) arrived before the user send (payload %d)", respIdx, userIdx)
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1 (scenario needs no reconnect)", got)
+	}
+	assertNoRunLiveLeak(t, baseline)
+}
+
 func TestRunLiveMarksLongRunningCalls(t *testing.T) {
 	const toolCall = `{"toolCall":{"functionCalls":[{"id":"lr_1","name":"long_job","args":{}},{"id":"plain_1","name":"plain_job","args":{}}]}}`
 	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {

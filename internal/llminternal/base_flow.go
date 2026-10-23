@@ -640,10 +640,32 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}()
 
+			// pendingSend holds a function response awaiting delivery to the
+			// model, queued on sess.inputCh so the sender goroutine is the
+			// connection's only writer; a direct write from this loop races
+			// it and panics (#1819). It is declared inside the per-connection
+			// loop, so a response pending when the connection drops is
+			// discarded with the socket: carrying one across needs the value
+			// to survive until the write is confirmed, which stays open on
+			// #1819.
+			var pendingSend *genai.Content
+
 			reconnect := false
 			for !reconnect {
+				// Arm the inputCh send only while a response is pending, and
+				// hold further events until it is delivered, so a second tool
+				// response cannot overwrite the first (nil channel cases never
+				// fire in a select).
+				eventCase := eventsChan
+				var inputCase chan agent.LiveRequest
+				var inputReq agent.LiveRequest
+				if pendingSend != nil {
+					inputCase = sess.inputCh
+					inputReq = agent.LiveRequest{Content: pendingSend}
+					eventCase = nil
+				}
 				select {
-				case ev := <-eventsChan:
+				case ev := <-eventCase:
 					fnCalls := utils.FunctionCalls(ev.LLMResponse.Content)
 					var tools map[string]tool.Tool
 					if len(fnCalls) > 0 {
@@ -717,14 +739,13 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
-							// Send function response back to model
-							if err := liveConn.SendContent(connCtx, respEv.LLMResponse.Content); err != nil {
-								sess.pushError(err)
-								cleanup()
-								return
-							}
+							// Queue the function response for the sender
+							// goroutine, the connection's only writer.
+							pendingSend = respEv.LLMResponse.Content
 						}
 					}
+				case inputCase <- inputReq:
+					pendingSend = nil
 				case ce := <-errChan:
 					if isResumable(ce.err) {
 						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
