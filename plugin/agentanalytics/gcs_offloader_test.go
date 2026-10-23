@@ -4141,6 +4141,55 @@ func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 	}
 }
 
+func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
+	// flushRunEnd drops a failed write by calling releaseRowUploads once per
+	// row and only then logging. A panic on the first row's line must not
+	// keep the later rows' bytes.
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 128,
+			Logger:                   reproPanicLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 128,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row1[eventIDField] = "ev-write-fail-1"
+	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row2[eventIDField] = "ev-write-fail-2"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row1, row2})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 128 {
+		t.Fatalf("pendingUploadBytes while uploads are deferred = %d, want 128", got)
+	}
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		for _, row := range []map[string]any{row1, row2} {
+			bp.releaseRowUploads(row)
+		}
+		bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
+	}()
+	if !panicked {
+		t.Fatal("logger did not panic")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes = %d, want 0", got)
+	}
+}
+
 func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		<-ctx.Done()
