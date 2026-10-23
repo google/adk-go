@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/storage v1.69.0
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/awalterschulze/gographviz v2.0.3+incompatible
+	github.com/ergochat/readline v0.1.3
 	github.com/glebarez/sqlite v1.11.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/jsonschema-go v0.4.3
