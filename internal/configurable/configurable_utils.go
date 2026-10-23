@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/exampletool"
@@ -43,7 +43,7 @@ import (
 	"google.golang.org/adk/v2/tool/mcptoolset"
 )
 
-type AgentFactory func(ctx context.Context, configBytes []byte, configPath string) (agent.Agent, error)
+type AgentFactory func(ctx context.Context, configBytes []byte, agentDir string) (agent.Agent, error)
 
 type ToolFactory func(ctx context.Context, args map[string]any) (tool.Tool, error)
 
@@ -332,9 +332,10 @@ func FromConfig(ctx context.Context, configPath string) (agent.Agent, error) {
 		return nil, fmt.Errorf("invalid agent class '%s': not registered. Ensure the package is imported", agentClass)
 	}
 
+	agentDir := filepath.Dir(absPath)
 	// 4. Delegate creation to the specific factory.
 	// We pass the raw data so the factory can unmarshal into its specific Config struct.
-	return factory(ctx, data, absPath)
+	return factory(ctx, data, agentDir)
 }
 
 func ResolveToolReference(ctx context.Context, toolName string, args map[string]any) (tool.Tool, tool.Toolset, error) {
@@ -373,40 +374,24 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
+func resolveConfigReference(parentPath, refPath string) (string, error) {
+	abs, _, err := utils.SafeSubpath(parentPath, refPath)
+	if err != nil {
+		return "", err
+	}
+	// A link that stays inside the directory is accepted, but the agent is keyed
+	// by the real path so one config cannot be registered under two spellings.
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	return abs, nil
+}
+
 // ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, parentPath, refPath string) (agent.Agent, error) {
-	if refPath == "" {
-		return nil, fmt.Errorf("agent reference path cannot be empty")
-	}
-
-	if filepath.IsAbs(refPath) {
-		return nil, fmt.Errorf("absolute paths are not allowed in AgentTool config_path: %s", refPath)
-	}
-
-	targetPath := filepath.Join(filepath.Dir(parentPath), refPath)
-
-	absPath, err := filepath.Abs(targetPath)
+func ResolveAgentReference(ctx context.Context, agentDir, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(agentDir, refPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve absolute path: %w", err)
-	}
-
-	// Prevent path traversal outside the parent agent's directory. Both sides are
-	// made absolute before comparing, and symlinks are resolved where the paths
-	// exist, so a symlink inside the agent directory cannot be used to escape it.
-	parentDir, err := filepath.Abs(filepath.Dir(parentPath))
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve agent directory: %w", err)
-	}
-	if resolved, err := filepath.EvalSymlinks(parentDir); err == nil {
-		parentDir = resolved
-	}
-	checkPath := absPath
-	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-		checkPath = resolved
-	}
-	if !strings.HasPrefix(checkPath, parentDir+string(os.PathSeparator)) && checkPath != parentDir {
-		return nil, fmt.Errorf(
-			"path traversal detected: config_path %q resolves outside agent directory", refPath)
+		return nil, err
 	}
 
 	registryMu.RLock()
