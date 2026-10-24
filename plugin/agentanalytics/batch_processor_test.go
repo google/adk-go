@@ -4392,12 +4392,15 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	for _, tt := range []struct {
 		name         string
 		firstWrite   time.Duration
+		skippedBatch bool
 		wantReserved int64
 		wantCalls    int
 		wantMode     string
 	}{
 		{name: "upload window below floor", firstWrite: 100 * time.Millisecond, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
-		{name: "confirmed stall", firstWrite: 50 * time.Millisecond, wantCalls: 1, wantMode: storageModeInline},
+		{name: "local stop retains upload", firstWrite: 50 * time.Millisecond, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
+		{name: "locally skipped batch retains upload", firstWrite: 50 * time.Millisecond, skippedBatch: true, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
+		{name: "shared cooldown releases upload", wantCalls: 1, wantMode: storageModeInline},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -4411,6 +4414,9 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 				cfg.RetryConfig.MaxRetries = 0
 				cfg.GCSOffloader = off
 				cfg.GCSMaxPendingUploadBytes = 64
+				if tt.skippedBatch {
+					cfg.GCSMaxPendingUploadBytes = 128
+				}
 				cfg.Logger = &recordingLogger{}
 				bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
 				if err != nil {
@@ -4434,22 +4440,38 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 							time.Sleep(tt.firstWrite)
 							return
 						}
+						if tt.skippedBatch && writes == 2 {
+							return
+						}
 						<-streamCtx.Done()
 					},
 					recvSeq: []mockRecv{{res: &storagepb.AppendRowsResponse{}}, {err: context.Canceled}},
+				}
+				if tt.skippedBatch {
+					stream.recvSeq = []mockRecv{{res: &storagepb.AppendRowsResponse{}}, {res: &storagepb.AppendRowsResponse{}}, {err: context.Canceled}}
 				}
 				bp.streamWriter.stream = stream
 				bp.streamWriter.streamCtx = streamCtx
 				bp.streamWriter.streamCancel = cancelStream
 				bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
 
-				// The second batch gets either 10ms or 35ms to upload. Only
-				// the latter can reach the 15ms floor. Its BigQuery write then
-				// consumes the rest of the budget, deferring the row either way.
+				// The second batch gets 10ms, 35ms, or 60ms to upload. Only
+				// the last reaches the shared 45ms threshold. Its BigQuery
+				// write consumes the remaining budget and defers the row.
 				row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
 				row["event_type"] = EventLLMRequest
 				bp.queue <- row
+				if tt.skippedBatch {
+					// The preceding batch stops uploads locally and writes
+					// successfully; this batch skips its upload, then defers.
+					next := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
+					next["event_type"] = EventLLMRequest
+					bp.queue <- next
+				}
 				bp.flushRunEnd()
+				if got, want := bp.uploadCooldownUntil.Load() != 0, tt.wantReserved == 0; got != want {
+					t.Errorf("shared cooldown = %v, want %v", got, want)
+				}
 				if len(bp.deferredBatch) != 1 {
 					t.Fatalf("deferredBatch length = %d, want 1", len(bp.deferredBatch))
 				}
@@ -4458,7 +4480,7 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 				}
 
 				// Restore storage and writes; the deferred row must go before
-				// newly queued rows, retrying its upload only without a stall.
+				// newly queued rows, retrying uploads without a shared cooldown.
 				off.hook = nil
 				retryStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 				bp.streamWriter.stream = retryStream
