@@ -47,8 +47,8 @@ const (
 	summaryBuilderKey = "_summary_builder"
 
 	// deferredUploadsKey holds a *deferredRowUploads on a row whose uploads
-	// were cut short by a caller deadline without evidence of a stall, so
-	// that if the batch's subsequent BigQuery write in flushRunEnd also runs
+	// were cut short or skipped under a caller deadline without triggering the
+	// shared cooldown. If the batch's subsequent BigQuery write in flushRunEnd runs
 	// out of flushCtx and the batch is deferred to the next flush, those
 	// uploads are retried under the next flush's budget.
 	deferredUploadsKey = "_deferred_uploads"
@@ -302,11 +302,13 @@ type uploadTask struct {
 // GCSUploadTimeout ends the uploads after at least one upload started and
 // either an in-flight upload timed out under the batch deadline or no upload
 // in the batch succeeded, uploads are paused for one GCSUploadTimeout.
-// With pauseOnCallerDeadline, a caller deadline can also trigger that pause
-// when an upload times out after running for at least three quarters of the
-// batch's upload window, bounded below by ShutdownTimeout/8 and above by
-// 3*ShutdownTimeout/8. The floor keeps very short remaining windows from
-// pausing healthy storage. Time waiting for an upload slot does not count.
+// With pauseOnCallerDeadline, it returns true when a timed-out upload ran for
+// at least three quarters of the batch's upload window, bounded below by
+// ShutdownTimeout/8 and above by 3*ShutdownTimeout/8. The caller then skips
+// uploads for the rest of this run-end flush. Pausing uploads across flushes
+// requires at least 3*ShutdownTimeout/8 of upload time, so a shrinking run-end
+// budget alone does not trigger the shared cooldown. Time waiting for an
+// upload slot or cleaning up after the deadline does not count.
 // Successful uploads in the same batch do not hide a stalled upload. A canceled
 // context, or one already done before any upload starts, does not trigger a pause.
 // Batches resolved during the pause fall back at once without uploading.
@@ -316,7 +318,7 @@ type uploadTask struct {
 // caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) bool {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
@@ -390,7 +392,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			}
 		}
 		completedNormally = true
-		return
+		return false
 	}
 
 	uploadTimeout := cmp.Or(b.uploadTimeout, b.config.GCSUploadTimeout, gcsUploadTimeout)
@@ -404,7 +406,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			s.builder.applyToRow(s.row)
 		}
 		completedNormally = true
-		return
+		return false
 	}
 	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
@@ -412,7 +414,8 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	deadline, _ := uploadCtx.Deadline()
 	window := time.Until(deadline)
 	shutdownTimeout := b.shutdownTimeout()
-	stallMin := min(shutdownTimeout/8*3, max(window/4*3, shutdownTimeout/8))
+	sharedStallMin := shutdownTimeout / 8 * 3
+	localStallMin := min(sharedStallMin, max(window/4*3, shutdownTimeout/8))
 
 	limit := b.config.GCSMaxConcurrentUploads
 	if limit <= 0 {
@@ -421,6 +424,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 	var anyStarted, anySucceeded, anyStalledOnBatchTimeout, anyStalledOnCallerDeadline atomic.Bool
+	var anyStalledInWindow atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
 		wg.Add(1)
@@ -433,8 +437,15 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 				anyStarted.Store(true)
 				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
 					anyStalledOnBatchTimeout.Store(true)
-					if pauseOnCallerDeadline && time.Since(started) >= stallMin {
-						anyStalledOnCallerDeadline.Store(true)
+					if pauseOnCallerDeadline {
+						// Offloaders may take time to return after cancellation.
+						elapsed := min(time.Since(started), deadline.Sub(started))
+						if elapsed >= localStallMin {
+							anyStalledInWindow.Store(true)
+						}
+						if elapsed >= sharedStallMin {
+							anyStalledOnCallerDeadline.Store(true)
+						}
 					}
 				}
 			}
@@ -449,8 +460,8 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	//   - the batch's own GCSUploadTimeout expired (ctx.Err() == nil) and either
 	//     an in-flight upload timed out under the batch deadline (brownout) or
 	//     no upload in the batch succeeded, or
-	//   - a caller deadline expired after an upload had enough time to
-	//     demonstrate a stall, even if other uploads succeeded.
+	//   - a caller deadline expired after an upload ran for at least
+	//     3*ShutdownTimeout/8, even if other uploads succeeded.
 	batchTimedOut := errors.Is(uploadCtx.Err(), context.DeadlineExceeded) &&
 		((ctx.Err() == nil && (anyStalledOnBatchTimeout.Load() || !anySucceeded.Load())) ||
 			anyStalledOnCallerDeadline.Load())
@@ -484,6 +495,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		s.builder.applyToRow(s.row)
 	}
 	completedNormally = true
+	return errors.Is(uploadCtx.Err(), context.DeadlineExceeded) && anyStalledInWindow.Load()
 }
 
 type deferredRowUploads struct {
