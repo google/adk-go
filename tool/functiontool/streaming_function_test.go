@@ -78,7 +78,9 @@ func TestStreamingFunctionTool_SanitizesAnyOfInputSchema(t *testing.T) {
 	}, func(ctx agent.Context, input streamingArgs) iter.Seq2[string, error] {
 		return func(yield func(string, error) bool) {}
 	})
-	decl := st.(interface{ Declaration() *genai.FunctionDeclaration }).Declaration()
+	decl := st.(interface {
+		Declaration() *genai.FunctionDeclaration
+	}).Declaration()
 	raw, err := json.Marshal(decl.ParametersJsonSchema)
 	if err != nil {
 		t.Fatal(err)

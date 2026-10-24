@@ -164,6 +164,63 @@ func TestSanitizeSchemaForVertex_RewritesFirstAnyOfBranch(t *testing.T) {
 	}
 }
 
+func TestSanitizeSchemaForVertex_LeavesNonSchemasUnchanged(t *testing.T) {
+	props := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"anyOf":       map[string]any{"type": "string"},
+			"title":       map[string]any{"type": "string"},
+			"description": map[string]any{"type": "string"},
+		},
+		"required": []any{"title"},
+	}
+	out := SanitizeSchemaForVertex(props).(map[string]any)
+	gotProps := out["properties"].(map[string]any)
+	if _, ok := gotProps["title"]; !ok || gotProps["description"] == nil || gotProps["anyOf"] == nil {
+		t.Fatalf("property names were rewritten: %#v", out)
+	}
+	if _, ok := out["required"].([]any); !ok {
+		t.Fatalf("required = %#v", out["required"])
+	}
+
+	inst := SanitizeSchemaForVertex(map[string]any{
+		"const": map[string]any{"anyOf": []any{1, 2}, "title": "x"},
+	}).(map[string]any)
+	constant := inst["const"].(map[string]any)
+	if constant["title"] != "x" {
+		t.Fatalf("const value was rewritten: %#v", inst)
+	}
+
+	// A property named anyOf is still a schema, so annotations on that value go.
+	named := SanitizeSchemaForVertex(map[string]any{
+		"properties": map[string]any{
+			"anyOf": map[string]any{
+				"title": "T",
+				"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}},
+			},
+		},
+	}).(map[string]any)
+	field := named["properties"].(map[string]any)["anyOf"].(map[string]any)
+	if _, ok := field["title"]; ok {
+		t.Fatalf("schema stored under a property named anyOf kept its title: %#v", field)
+	}
+	if _, ok := field["anyOf"]; !ok {
+		t.Fatalf("schema stored under a property named anyOf = %#v", field)
+	}
+}
+
+func TestSanitizeSchemaForVertex_KeepsAnnotationsBesideValidation(t *testing.T) {
+	out := SanitizeSchemaForVertex(map[string]any{
+		"title":       "Age",
+		"description": "years",
+		"type":        "object",
+		"anyOf":       []any{map[string]any{"required": []any{"age"}}},
+	}).(map[string]any)
+	if out["title"] != "Age" || out["description"] != "years" {
+		t.Fatalf("annotations beside a validation keyword were removed: %#v", out)
+	}
+}
+
 func TestSanitizeSchemaForVertex_BareUnionUnchanged(t *testing.T) {
 	in := &jsonschema.Schema{}
 	if err := json.Unmarshal([]byte(`{"anyOf":[{"type":"string"},{"type":"null"}]}`), in); err != nil {

@@ -20,12 +20,21 @@ import (
 	"reflect"
 )
 
-// SanitizeSchemaForVertex strips annotation siblings (title, description,
-// default, …) from maps that contain anyOf/oneOf so Vertex AI accepts the
-// declaration. Validation keywords beside a union (type, properties,
-// required, discriminator, …) and maps that are not schemas are left
-// unchanged — the same shapes adk-python leaves alone. Nested schemas are
-// walked recursively. See https://github.com/google/adk-go/issues/1659.
+// SanitizeSchemaForVertex removes annotation siblings from a schema node
+// whose only other keyword is a single anyOf or oneOf. Vertex AI rejects
+// anyOf/oneOf beside title, description, default, and the other annotation
+// keywords.
+//
+// Annotations stay when the union also has a validation keyword (type,
+// properties, required, discriminator, minimum, and so on), and a node that
+// has both anyOf and oneOf is left as it is. Those are the same shapes
+// adk-python leaves alone.
+//
+// Nested schemas are walked. Instance values (const, enum, default,
+// examples) are not. Dictionaries of schemas — properties,
+// patternProperties, $defs, definitions, and dependentSchemas — are walked
+// entry by entry and are not themselves treated as schemas.
+// See https://github.com/google/adk-go/issues/1659.
 func SanitizeSchemaForVertex(schema any) any {
 	schema, _ = sanitizeSchemaForVertex(schema)
 	return schema
@@ -43,7 +52,7 @@ func sanitizeSchemaForVertex(schema any) (any, bool) {
 				continue
 			}
 			if out == nil {
-				// Copy prefixes with make+copy so a rewrite of s[0] is kept:
+				// Copy the whole slice on the first change so a rewrite of s[0] is kept:
 				// append(nil, s[:0]...) is still nil and would drop the change.
 				out = make([]any, len(s))
 				copy(out, s)
@@ -97,16 +106,26 @@ func isScalar(value any) bool {
 func sanitizeSchemaMap(schema map[string]any) (any, bool) {
 	var out map[string]any
 	for key, value := range schema {
-		sanitized, changed := sanitizeSchemaForVertex(value)
-		if changed && out == nil {
+		var sanitized any
+		var changed bool
+		switch {
+		case isInstanceValue(key):
+			continue
+		case isSchemaDictionary(key):
+			sanitized, changed = sanitizeSchemaDictionary(value)
+		default:
+			sanitized, changed = sanitizeSchemaForVertex(value)
+		}
+		if !changed {
+			continue
+		}
+		if out == nil {
 			out = make(map[string]any, len(schema))
 			for copiedKey, copiedValue := range schema {
 				out[copiedKey] = copiedValue
 			}
 		}
-		if out != nil {
-			out[key] = sanitized
-		}
+		out[key] = sanitized
 	}
 	childrenChanged := out != nil
 	if out == nil {
@@ -148,6 +167,55 @@ func sanitizeSchemaMap(schema map[string]any) (any, bool) {
 		}
 	}
 	return map[string]any{unionKey: unionValue}, true
+}
+
+// isInstanceValue reports keywords whose values are data, not schemas.
+// default and examples are also annotations, so a bare union still drops
+// the keyword itself; only the value is left unwalked.
+func isInstanceValue(key string) bool {
+	switch key {
+	case "const", "default", "enum", "example", "examples":
+		return true
+	default:
+		return false
+	}
+}
+
+// isSchemaDictionary reports keywords whose value is a map from a name to a
+// schema. The map is not a schema, so a property named anyOf must not be
+// treated as the anyOf keyword.
+func isSchemaDictionary(key string) bool {
+	switch key {
+	case "$defs", "definitions", "dependentSchemas", "patternProperties", "properties":
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeSchemaDictionary(value any) (any, bool) {
+	dict, ok := value.(map[string]any)
+	if !ok {
+		return value, false
+	}
+	var out map[string]any
+	for key, child := range dict {
+		sanitized, changed := sanitizeSchemaForVertex(child)
+		if !changed {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]any, len(dict))
+			for copiedKey, copiedValue := range dict {
+				out[copiedKey] = copiedValue
+			}
+		}
+		out[key] = sanitized
+	}
+	if out == nil {
+		return value, false
+	}
+	return out, true
 }
 
 func isAnnotation(key string) bool {
