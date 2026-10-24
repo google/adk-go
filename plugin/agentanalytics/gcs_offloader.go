@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"mime"
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -533,81 +532,14 @@ func logDroppedDeferredUploads(logger Logger, failures []deferredUploadFailure) 
 	}
 }
 
-// deferredDropSlot buffers plain failure lines for one processor until the
-// batch-failure log that follows the per-row release loop. The buffer is not
-// stored on Config: callbacks read Config.Logger without flushMu.
-type deferredDropSlot struct {
-	mu       sync.Mutex
-	failures []deferredUploadFailure
-}
-
-var deferredDropSlots sync.Map // *BatchProcessor -> *deferredDropSlot
-
-func (b *BatchProcessor) deferredDropSlot() *deferredDropSlot {
-	if v, ok := deferredDropSlots.Load(b); ok {
-		return v.(*deferredDropSlot)
-	}
-	slot := &deferredDropSlot{}
-	actual, _ := deferredDropSlots.LoadOrStore(b, slot)
-	return actual.(*deferredDropSlot)
-}
-
-func (b *BatchProcessor) stashDeferredDropLogs(failures []deferredUploadFailure) {
-	if len(failures) == 0 || b.config.Logger == nil {
-		return
-	}
-	slot := b.deferredDropSlot()
-	slot.mu.Lock()
-	slot.failures = append(slot.failures, failures...)
-	slot.mu.Unlock()
-}
-
-func (b *BatchProcessor) takeDeferredDropLogs() []deferredUploadFailure {
-	v, ok := deferredDropSlots.Load(b)
-	if !ok {
-		return nil
-	}
-	slot := v.(*deferredDropSlot)
-	slot.mu.Lock()
-	failures := slot.failures
-	slot.failures = nil
-	slot.mu.Unlock()
-	return failures
-}
-
-// loggerMatches reports whether a and b are the same logger value. A logger
-// whose dynamic type is not comparable does not match; its lines are emitted
-// from clearDeferredUploads instead.
-func loggerMatches(a, b Logger) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
-	if ta != tb || !ta.Comparable() {
-		return false
-	}
-	return a == b
-}
-
-// flushDeferredDropLogs emits drop lines stashed for processors that use logger.
-// Config.logf calls it immediately before a batch-failure line, after every
-// row in that batch has been released.
-func flushDeferredDropLogs(logger Logger) {
-	if logger == nil {
-		return
-	}
-	deferredDropSlots.Range(func(key, _ any) bool {
-		b := key.(*BatchProcessor)
-		if !loggerMatches(b.config.Logger, logger) {
-			return true
-		}
-		logDroppedDeferredUploads(logger, b.takeDeferredDropLogs())
-		return true
-	})
-}
-
+// clearDeferredRowUploads releases one row's deferred bytes without logging.
+// releaseRowUploads calls it once per row of a dropped batch, so a panicking
+// log here would skip the release of the rows after it. The failures stay on
+// the row, and clearDeferredUploads logs them once the batch is released.
 func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
-	b.stashDeferredDropLogs(b.releaseDeferredRowUpload(row))
+	if failures := b.releaseDeferredRowUpload(row); len(failures) > 0 {
+		row[deferredUploadsKey] = &deferredRowUploads{failures: failures}
+	}
 }
 
 func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
@@ -615,9 +547,6 @@ func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
 	for _, row := range batch {
 		failures = append(failures, b.releaseDeferredRowUpload(row)...)
 	}
-	// Covers a logger value that is not comparable, which flushDeferredDropLogs
-	// cannot look up. releaseRowUploads has already released every row.
-	failures = append(b.takeDeferredDropLogs(), failures...)
 	logDroppedDeferredUploads(b.config.Logger, failures)
 }
 

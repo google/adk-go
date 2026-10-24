@@ -4177,10 +4177,12 @@ func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
 				panicked = true
 			}
 		}()
-		for _, row := range []map[string]any{row1, row2} {
+		batch := []map[string]any{row1, row2}
+		for _, row := range batch {
 			bp.releaseRowUploads(row)
 		}
 		bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
+		bp.clearDeferredUploads(batch)
 	}()
 	if !panicked {
 		t.Fatal("logger did not panic")
@@ -4245,7 +4247,48 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 	bp.releaseRowUploads(row)
 	close(stop)
 	wg.Wait()
-	bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
+	bp.clearDeferredUploads([]map[string]any{row})
+}
+
+func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &recordingLogger{}
+	newProcessor := func() *BatchProcessor {
+		return &BatchProcessor{
+			config: applyDefaults(Config{
+				GCSOffloader:             off,
+				GCSUploadTimeout:         time.Minute,
+				GCSMaxPendingUploadBytes: 64,
+				Logger:                   logger,
+			}),
+			queue:                 make(chan map[string]any, 4),
+			maxPendingUploadBytes: 64,
+		}
+	}
+	other, bp := newProcessor(), newProcessor()
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row[eventIDField] = "ev-shared-logger"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
+
+	bp.releaseRowUploads(row)
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes after releaseRowUploads = %d, want 0", got)
+	}
+	other.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("other processor"))
+	if logger.contains("ev-shared-logger") {
+		t.Fatalf("another processor logged this processor's drop line:\n%s", logger)
+	}
+	bp.clearDeferredUploads([]map[string]any{row})
+	const want = "GCS upload failed for event ev-shared-logger part 0 (64 bytes)"
+	if !logger.contains(want) || logger.contains("pending retry") {
+		t.Fatalf("log = %q, want the plain drop line for ev-shared-logger", logger)
+	}
 }
 
 func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {

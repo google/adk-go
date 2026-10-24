@@ -17,7 +17,6 @@ package agentanalytics
 import (
 	"context"
 	"log"
-	"strings"
 	"time"
 
 	"google.golang.org/api/option"
@@ -432,11 +431,6 @@ func (c Config) maxContentLength() int {
 
 // logf logs through c.Logger when one is configured.
 func (c Config) logf(format string, args ...any) {
-	// Drop lines stashed by releaseRowUploads are emitted here, on the call
-	// that follows that loop, before this line itself.
-	if strings.Contains(format, "Failed to write batch") {
-		flushDeferredDropLogs(c.Logger)
-	}
 	if c.Logger != nil {
 		c.Logger.Printf(format, args...)
 	}
