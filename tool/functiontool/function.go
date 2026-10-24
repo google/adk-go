@@ -157,7 +157,7 @@ func (f *functionTool[TArgs, TResults]) ProcessRequest(ctx agent.Context, req *m
 	return toolutils.PackTool(req, f)
 }
 
-// FunctionDeclaration implements interfaces.FunctionTool.
+// Declaration implements interfaces.FunctionTool.
 func (f *functionTool[TArgs, TResults]) Declaration() *genai.FunctionDeclaration {
 	decl := &genai.FunctionDeclaration{
 		Name:        f.Name(),

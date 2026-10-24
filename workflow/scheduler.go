@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -31,7 +32,7 @@ import (
 
 // defaultEventQueueCapacity bounds the buffered channel between
 // node-runner goroutines and the consumer. A small fixed capacity
-// keeps backpressure tight without serialising producers.
+// keeps backpressure tight without serializing producers.
 const defaultEventQueueCapacity = 16
 
 var (
@@ -92,7 +93,8 @@ type scheduler struct {
 	eventQueue chan queueItem
 	wg         sync.WaitGroup
 
-	parentCtx agent.Context
+	parentCtx    agent.Context
+	workflowName string
 
 	// maxConcurrency caps len(runsByName); 0 disables the cap.
 	// When at the cap, scheduleResumedNode enqueues into
@@ -221,8 +223,9 @@ func (eventItem) isQueueItem() {}
 // consumer via errors.Is (currently: context.Canceled,
 // context.DeadlineExceeded, anything else → NodeFailed).
 type completionItem struct {
-	nodeName string
-	err      error
+	nodeName  string
+	err       error
+	inventory failureInventory
 }
 
 func (completionItem) isQueueItem() {}
@@ -237,7 +240,7 @@ type retryItem struct {
 
 func (retryItem) isQueueItem() {}
 
-// newScheduler returns an initialised scheduler ready for the
+// newScheduler returns an initialized scheduler ready for the
 // consumer to drive. The caller is responsible for seeding the
 // initial trigger (typically Start with the user input).
 //
@@ -322,7 +325,7 @@ func (s *scheduler) tryDispatchPending() {
 // nodes can read the user-supplied response payload via
 // ctx.ResumedInput(interruptID). resumeInputs is keyed by
 // InterruptID; nil disables re-entry semantics and yields the same
-// behaviour as scheduleNode.
+// behavior as scheduleNode.
 //
 // When the engine's max-concurrency cap is reached, the
 // activation is enqueued onto pendingQueue and the node enters
@@ -352,7 +355,7 @@ func (s *scheduler) scheduleResumedNode(n Node, input any, triggeredBy, branch s
 
 // startNode is the unguarded core of scheduleResumedNode: it
 // creates the per-node context, registers bookkeeping, and
-// launches the runner goroutine. Always honours the call; the
+// launches the runner goroutine. Always honors the call; the
 // concurrency-cap check is done by scheduleResumedNode (the
 // public entry point) before reaching here.
 func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, resumeInputs map[string]any) {
@@ -394,6 +397,7 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 
 	ns := s.state.EnsureNode(name)
 	ns.Status = NodeRunning
+	ns.Output = nil
 	ns.Input = input
 	ns.TriggeredBy = triggeredBy
 	ns.Branch = branch
@@ -410,12 +414,10 @@ func (s *scheduler) startNode(n Node, input any, triggeredBy, branch string, res
 // move the node to a different branch.
 func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string, delay time.Duration) {
 	timer := time.AfterFunc(delay, func() {
-		go func() {
-			select {
-			case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
-			case <-s.parentCtx.Done():
-			}
-		}()
+		select {
+		case s.eventQueue <- retryItem{node: n, input: input, triggeredBy: triggeredBy, branch: branch}:
+		case <-s.parentCtx.Done():
+		}
 	})
 	s.retryTimers[n.Name()] = timer
 }
@@ -426,7 +428,7 @@ func (s *scheduler) scheduleRetry(n Node, input any, triggeredBy, branch string,
 // reported as a completion error so the consumer never deadlocks
 // waiting for a vanished goroutine.
 //
-// Event sends select on ctx.Done(): if the scheduler has cancelled
+// Event sends select on ctx.Done(): if the scheduler has canceled
 // this node, an in-progress send to a full eventQueue does not
 // deadlock — the goroutine drops the pending event and proceeds to
 // completion. The completion send is unconditional because the
@@ -451,6 +453,7 @@ func runNode(
 	defer func() {
 		if r := recover(); r != nil {
 			completion.err = fmt.Errorf("node %q panicked: %v", name, r)
+			completion.inventory = failureInventory{}
 		}
 		span.recordError(completion.err, nil)
 		out <- completion
@@ -461,10 +464,12 @@ func runNode(
 		completion.err = fmt.Errorf("%w for node %q: %w", ErrInputValidation, name, err)
 		return
 	}
+	ctx, inventoryRecorder := withFailureInventory(ctx, n)
 
 	for ev, err := range n.Run(ctx, validated) {
 		if err != nil {
 			completion.err = err
+			completion.inventory = inventoryRecorder.snapshot()
 			return
 		}
 		// Block on non-partial events until the consumer has persisted
@@ -490,7 +495,7 @@ func runNode(
 		}
 	}
 	// If the node's iter returned cleanly but the context was
-	// cancelled or its deadline elapsed, surface that as the
+	// canceled or its deadline elapsed, surface that as the
 	// completion error: the node likely returned because it observed
 	// ctx.Done(), and the consumer needs to classify it.
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -515,7 +520,7 @@ func (s *scheduler) echoesCancellation(err error) bool {
 		errors.Is(err, context.Cause(s.parentCtx))
 }
 
-// cancelAll cancels every running task. Idempotent: cancelled
+// cancelAll cancels every running task. Idempotent: canceled
 // goroutines may still push events that already left the producer
 // before observing ctx.Done(); the consumer continues draining
 // until runsByName is empty.
@@ -540,7 +545,9 @@ func (s *scheduler) cancelAll() {
 // run is the single-consumer loop. It drains the eventQueue, applies
 // state-side effects, yields events to the caller, and schedules
 // successor nodes when a node completes. Returns when all running
-// tasks have signalled completion.
+// tasks have signaled completion.
+// Start with draining=true only after canceling tasks for a caller that
+// has already stopped consuming. In that mode yield is never called.
 //
 // On non-nil yield-return-false (caller broke from the range loop)
 // or on a non-retryable node error, run cancels all in-flight
@@ -550,11 +557,11 @@ func (s *scheduler) cancelAll() {
 // run runs on the caller's goroutine (the goroutine that called
 // Workflow.Run); it is the only mutator of state.Nodes and the
 // node-side accumulators.
-func (s *scheduler) run(yield func(*session.Event, error) bool) {
-	var pendingErr error  // first non-nil node error; surfaced after drain
-	var cancelErr error   // cause of an external cancellation; surfaced only when no node reported an error
-	draining := false     // true once cancelAll has run; remaining queue items are drained without yielding or scheduling new successors
-	consumerGone := false // true once the caller broke the range loop; no further yield is allowed
+func (s *scheduler) run(yield func(*session.Event, error) bool, draining bool) {
+	var pendingErr error // first non-nil node error; surfaced after drain
+	var pendingInventory failureInventory
+	var cancelErr error      // cause of an external cancellation; surfaced only when no node reported an error
+	consumerGone := draining // no further yield is allowed after consumer exit, including initial cleanup
 
 	doneChan := s.parentCtx.Done()
 
@@ -600,9 +607,20 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 				close(it.processed)
 			}
 		case completionItem:
+			nr := s.runsByName[it.nodeName]
 			err := s.handleCompletion(it, !draining)
+			if !consumerGone {
+				if ev := s.completionEvent(it.nodeName, nr, it.inventory); ev != nil && !yield(ev, nil) {
+					consumerGone = true
+					draining = true
+					s.cancelAll()
+				}
+			}
 			if err != nil && pendingErr == nil {
 				pendingErr = err
+				if it.err != nil {
+					pendingInventory = it.inventory.clone()
+				}
 				if !draining {
 					draining = true
 					s.cancelAll()
@@ -634,17 +652,63 @@ func (s *scheduler) run(yield func(*session.Event, error) bool) {
 		runErr = cancelErr
 	}
 	if runErr != nil && !consumerGone {
+		// A WorkflowNode forwards this error unchanged. Bridge its recovery
+		// evidence to the enclosing activation without wrapping that error.
+		publishFailureInventory(s.parentCtx, s.graph, pendingInventory)
 		yield(nil, runErr)
 		return
 	}
 
-	// Skip finalize when draining (cancelled, consumer gone, or a node
+	// Skip finalize when draining (canceled, consumer gone, or a node
 	// errored): the run did not complete normally.
 	if !draining {
 		if err := s.finalize(); err != nil {
 			yield(nil, err)
 		}
 	}
+}
+
+// Output events alone cannot distinguish success from a partial result
+// followed by failure, or record successful completion with no output.
+// Keep those outcomes in history without persisting the node's error text.
+func (s *scheduler) completionEvent(name string, nr *nodeRun, inventory failureInventory) *session.Event {
+	if name == Start.Name() || s.graph.isRootWrapper {
+		return nil
+	}
+	ns := s.state.Nodes[name]
+	if ns == nil || nr == nil {
+		return nil
+	}
+	var outcome string
+	switch ns.Status {
+	case NodeFailed, NodePending:
+		outcome = workflowNodeFailureOutcome
+	case NodeCancelled:
+		outcome = workflowNodeCancelledOutcome
+	case NodeCompleted:
+		if ns.Output != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	ev := session.NewEvent(s.parentCtx, s.parentCtx.InvocationID())
+	ev.Branch = ns.Branch
+	path := nr.nodePath
+	if path == "" {
+		path = name
+	}
+	ev.NodeInfo = &session.NodeInfo{Path: path}
+	ev.CustomMetadata = map[string]any{workflowBasePathPrefix + s.workflowName: s.parentCtx.Path()}
+	if outcome != "" {
+		// A failed attempt can still recover through retries or a parent
+		// fallback. ErrorCode would terminate AgentTool/A2A consumers.
+		ev.CustomMetadata[workflowNodeOutcomeKey] = outcome
+		recordFailedChildPaths(ev.CustomMetadata, inventory)
+	} else {
+		ev.CustomMetadata[workflowNodeCompletedKey] = true
+	}
+	return ev
 }
 
 // finalize errors if more than one terminal node (no outgoing edges,
@@ -721,6 +785,14 @@ func (s *scheduler) handleEvent(it eventItem) {
 	if it.ev == nil {
 		return
 	}
+	if !s.graph.isRootWrapper {
+		metadata := maps.Clone(it.ev.CustomMetadata)
+		if metadata == nil {
+			metadata = map[string]any{}
+		}
+		metadata[workflowBasePathPrefix+s.workflowName] = s.parentCtx.Path()
+		it.ev.CustomMetadata = metadata
+	}
 	// Stamp the activation's branch onto events that left
 	// Event.Branch empty; nodes that set a non-empty Event.Branch
 	// keep it.
@@ -762,6 +834,21 @@ func (s *scheduler) handleEvent(it eventItem) {
 		it.ev.NodeInfo.Path = expectedPath
 		path = expectedPath
 	}
+	if value, delegated := completedDelegatedOutput(it.ev); delegated {
+		if value == nil {
+			return
+		}
+		// The dynamic body completed with a delegated (possibly cached)
+		// result. It is now safe to use it as this activation's output.
+		validated, err := validateAndStampOutput(s.nodesByName[it.nodeName], value, it.ev)
+		if err != nil {
+			nr.recordErr(err)
+			return
+		}
+		it.ev.CustomMetadata[workflowDelegatedOutputKey] = validated
+		nr.setOutput(validated, it.nodeName)
+		return
+	}
 	if it.ev.Routes != nil {
 		nr.setRoutingEvent(it.ev, it.nodeName)
 	}
@@ -788,7 +875,7 @@ func (s *scheduler) handleEvent(it eventItem) {
 	}
 }
 
-// handleCompletion finalises a node's run: transitions its lifecycle
+// handleCompletion finalizes a node's run: transitions its lifecycle
 // status, removes the live task, and (if scheduleNewWork is true)
 // schedules retries or successors. When the consumer is draining (caller
 // stopped or a node failed), pass scheduleNewWork=false so the workflow
@@ -832,14 +919,14 @@ func (s *scheduler) handleCompletion(it completionItem, scheduleNewWork bool) er
 	//
 	// run surfaces the cancellation cause on its own, so a node that has
 	// nothing of its own to report returns nil here. One that failed for
-	// its own reason keeps that error, which says more than "cancelled".
+	// its own reason keeps that error, which says more than "canceled".
 	if s.parentCtx.Err() != nil {
 		if it.err != nil && !s.echoesCancellation(it.err) {
 			ns.Status = NodeFailed
 			return it.err
 		}
 		// Matches adk-python, which marks every task it reaps during
-		// shutdown CANCELLED regardless of who cancelled it
+		// shutdown CANCELLED regardless of who canceled it //nolint:misspell
 		// (_workflow.py _cleanup_all_tasks, run from a finally).
 		ns.Status = NodeCancelled
 		return nil
