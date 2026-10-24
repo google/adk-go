@@ -168,8 +168,7 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 	// Keys outside the agentskills.io set are ignored, as adk-python does: a
 	// SKILL.md shared with other agent runtimes carries their keys too.
 	fmYAML := frontmatterYAML{}
-	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes.Bytes()))
-	if err := decoder.Decode(&fmYAML); err != nil {
+	if err := yaml.Unmarshal(yamlBytes.Bytes(), &fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
 	fm := fmYAML.toFrontmatter()
