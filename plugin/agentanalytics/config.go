@@ -227,8 +227,14 @@ type Config struct {
 	// half a ShutdownTimeout, after which the parts that are not uploaded fall
 	// back (see GCSUploadTimeout). Close can therefore block for up to about
 	// two and a half times ShutdownTimeout. In a run-end flush, the uploads of
-	// each batch get at most half of what is left of the ShutdownTimeout of
-	// the flush.
+	// each fresh batch get at most half of what is left of the ShutdownTimeout
+	// of the flush, and those of a deferred batch that it retries get at most
+	// a quarter of what is left (leaving three quarters for the BigQuery
+	// write, which cannot be deferred again). If this limit, or Close
+	// canceling the uploads, has ended the uploads of a fresh batch that is
+	// then deferred, the next flush retries the uploads of the batch that
+	// returned an error, unless the batch paused the uploads (see
+	// GCSUploadTimeout).
 	ShutdownTimeout time.Duration
 
 	// Injected logger.
@@ -363,16 +369,32 @@ type Config struct {
 	// succeeding, or when an in-flight upload times out during the batch timeout
 	// (partial outage backoff), the plugin stops calling the offloader for
 	// another GCSUploadTimeout: every batch in that time falls back at once, so
-	// that an outage does not make each batch wait in turn. The deadline
-	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
-	// the uploads when it is still fresh (at least three quarters of
-	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
-	// without any upload in the batch succeeding (a run-end flush allocates half
-	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
-	// than twice the typical upload latency may pause uploads if storage does
-	// not finish within that slice), whereas a batch where at least one upload
-	// succeeded, an already-depleted budget (less than three quarters
-	// remaining), or a budget during Close does not pause.
+	// that an outage does not make each batch wait in turn. In a run-end flush
+	// (see ShutdownTimeout), which gives the uploads of each fresh batch half of
+	// its remaining budget (and those of a deferred batch that it retries at
+	// most a quarter), that deadline pauses the uploads too on a fresh batch
+	// when it ends them before GCSUploadTimeout, provided that the batch
+	// started with at least a quarter of ShutdownTimeout left, and either no
+	// upload in the batch succeeded or the deadline cut short an upload that
+	// had been running for at least three quarters of the batch's upload time,
+	// even if other uploads in the batch succeeded. A fresh batch's upload time
+	// can thus be as short as an eighth of ShutdownTimeout, so a single upload
+	// that is still running after three thirty-seconds of ShutdownTimeout
+	// (about 0.94s by default) can pause the uploads, even if storage is
+	// healthy and only that upload is slow: a ShutdownTimeout smaller than
+	// eight times the latency of an upload (about eleven times if it waited a
+	// quarter of the batch's upload time for a free slot) may pause them.
+	// An upload cut short after running for less than three
+	// quarters of the batch's upload time (for example after waiting for a
+	// free slot behind other uploads) does not pause the uploads when another
+	// upload in the batch succeeded, and neither does a budget during Close.
+	// The run-end deadline of a retried deferred batch, or of a batch that
+	// started with less than a quarter of ShutdownTimeout left, does not pause
+	// them either, though the batch's own GCSUploadTimeout still does when that
+	// ends its uploads first. A pause that a run-end flush starts lasts
+	// GCSUploadTimeout as well, so it outlasts the flush: until it ends,
+	// background flushes, later run-end flushes and Close also fall back
+	// without calling the offloader.
 	// Values <= 0 mean 10s.
 	GCSUploadTimeout time.Duration
 	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by
