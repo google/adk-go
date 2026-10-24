@@ -135,7 +135,10 @@ var knownEventTypes = newSet(
 // earlier hides what it replaces from this one. This plugin then misses the
 // rows of what was hidden and, because it infers failures from the callbacks
 // that it saw, it can end a successful run with AGENT_ERROR and
-// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED. In particular, the
+// plugin tells that a model call is streaming from the partial events that
+// its OnEventCallback sees, so if an earlier plugin replaces a partial event,
+// a caller that stops reading mid-stream is reported as a failure.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -158,7 +161,10 @@ func NewBigQueryAgentAnalyticsPlugin(
 // earlier hides what it replaces from this one. This plugin then misses the
 // rows of what was hidden and, because it infers failures from the callbacks
 // that it saw, it can end a successful run with AGENT_ERROR and
-// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED. In particular, the
+// plugin tells that a model call is streaming from the partial events that
+// its OnEventCallback sees, so if an earlier plugin replaces a partial event,
+// a caller that stops reading mid-stream is reported as a failure.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -335,7 +341,10 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // earlier hides what it replaces from this one. This plugin then misses the
 // rows of what was hidden and, because it infers failures from the callbacks
 // that it saw, it can end a successful run with AGENT_ERROR and
-// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED.
+// INVOCATION_ERROR rows instead of INVOCATION_COMPLETED. In particular, the
+// plugin tells that a model call is streaming from the partial events that
+// its OnEventCallback sees, so if an earlier plugin replaces a partial event,
+// a caller that stops reading mid-stream is reported as a failure.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -641,6 +650,13 @@ type eventData struct {
 	// customMetadataTruncated reports that scrubbing customMetadata hit a
 	// safety cap or placeholder.
 	customMetadataTruncated bool
+	// timestamp overrides span.timestamp when non-zero. Live callbacks leave
+	// it zero and set span.timestamp from the trace manager's clock; a
+	// mid-run purged activation (see purgeActivationLocked / takePurged) sets
+	// it to lastActivity while span.timestamp is zero, so its AGENT_ERROR row
+	// is timestamped before the next attempt's AGENT_STARTING; end-of-run rows
+	// from popUnclosedAgentSpans leave both zero so buildRow writes time.Now().
+	timestamp time.Time
 }
 
 // shouldLogEvent applies EventDenylist, then EventAllowlist if it is set.
@@ -770,8 +786,12 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 // INVOCATION_COMPLETED.
 //
 // Only detectable failures are reported: unrecovered model errors,
-// cancellation, agents stopped with an open model or tool call, and open
-// agent spans whose activation produced no response. A run that fails after
+// cancellation, agents stopped with an open model or tool call, open agent
+// spans whose activation produced no response, and spans whose callback
+// context ended with a cause other than context.Canceled or
+// context.DeadlineExceeded (such as a parallel agent's errgroup cause when a
+// branch fails). Outside such a context cause (for example when a sibling
+// branch of a parallel agent is still running), a run that fails after
 // producing a response, such as a custom agent that writes an event and then
 // returns an error, or an AfterAgentCallback that returns an error, ends with
 // INVOCATION_COMPLETED, and so does a run in which a sub-agent fails without
@@ -795,28 +815,7 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 		// session compaction ran.
 		unrecErr = orZero(ctx.Err)
 	}
-	for _, u := range unclosed {
-		agentID := id
-		if u.agentName != "" {
-			agentID.agentName = u.agentName
-		}
-		agentID.branch = u.branch
-		agentID.path = u.path
-		p.logEvent(ctx, agentID, EventAgentError, func() rowSpan {
-			return u.span
-		}, func(d *eventData) {
-			d.failed = true
-			err := u.err
-			if err == nil {
-				err = unrecErr
-			}
-			if err != nil {
-				d.errMsg = err.Error()
-				d.content = map[string]any{"error_traceback": err.Error()}
-			}
-			d.author = u.agentName
-		})
-	}
+	p.logAgentErrors(ctx, id, unclosed, unrecErr)
 
 	if unrecErr != nil || len(unclosed) > 0 {
 		p.logEvent(ctx, id, EventInvocationError, func() rowSpan {
@@ -839,6 +838,43 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	}
 }
 
+// logAgentErrors writes an AGENT_ERROR row for each activation in unclosed of
+// the invocation that id belongs to, with the activation's own error, or else
+// with err.
+func (p *analyticsPlugin) logAgentErrors(ctx context.Context, id identity, unclosed []unclosedAgentSpan, err error) {
+	for _, u := range unclosed {
+		agentID := id
+		if u.agentName != "" {
+			agentID.agentName = u.agentName
+		}
+		agentID.branch = u.branch
+		agentID.path = u.path
+		p.logEvent(ctx, agentID, EventAgentError, func() rowSpan {
+			return u.span
+		}, func(d *eventData) {
+			d.failed = true
+			d.timestamp = u.timestamp
+			agentErr := u.err
+			if agentErr == nil {
+				agentErr = err
+			}
+			if agentErr != nil {
+				d.errMsg = agentErr.Error()
+				d.content = map[string]any{"error_traceback": agentErr.Error()}
+			}
+			d.author = u.agentName
+		})
+	}
+}
+
+// logPurgedAgents writes the AGENT_ERROR rows of the activations that a
+// callback of the invocation that id belongs to removed because ADK handled
+// their failure itself (see traceManager.takePurged): such an activation gets
+// no AfterAgentCallback, and its failure does not fail the invocation.
+func (p *analyticsPlugin) logPurgedAgents(ctx context.Context, id identity) {
+	p.logAgentErrors(ctx, id, p.traces.takePurged(ctx, id), nil)
+}
+
 // onEvent writes the rows of a session event. The event callback gets the
 // agent that the runner runs, so the event is placed by its author, branch
 // and node path. A non-partial event with content or a typed output also
@@ -849,6 +885,10 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 // answer, which an earlier plugin's AfterToolCallback may have hidden from
 // this plugin. Streamed partial events end nothing: AfterModelCallback ends
 // the model call with the final response, which carries the call's latency.
+// A partial event, with or without content, records instead that its author
+// is streaming, so that a caller that stops reading on it is not taken for a
+// failure, and one with content or a typed output also records that its
+// author responded (see recordStreamed).
 //
 // Because ADK stops an event callback chain at the first plugin that returns an
 // event, this callback does not run for events that an earlier-registered
@@ -861,13 +901,11 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
-		if ev.Content != nil || ev.Output != nil {
-			if ev.Partial {
-				p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch)
-			} else {
-				p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
-			}
-		} else if !ev.Partial {
+		if ev.Partial {
+			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
+		} else if ev.Content != nil || ev.Output != nil {
+			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
 		p.emitSessionEventSignals(ctx, ev)
@@ -875,9 +913,9 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			taskID := evID
 			taskID.agentName = ev.Author
 			taskID.branch = ev.Branch
-			p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan {
-				return p.traces.popTaskAgentSpan(ctx, taskID)
-			}, nil)
+			if span, ok := p.traces.popTaskAgentSpan(ctx, taskID); ok {
+				p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+			}
 		}
 	}
 	return nil, nil
@@ -921,10 +959,23 @@ func functionResponseCalls(c *genai.Content) []string {
 	return calls
 }
 
+// beforeAgent writes the AGENT_STARTING row of an agent. When a coordinator
+// starts again after the task-mode sub-agent that it delegated to completed,
+// it first writes the AGENT_COMPLETED row of the activation that the
+// delegation interrupted, which ADK ends without an AfterAgentCallback.
 func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
+	defer p.recoverCallback(EventAgentStarting)
 	id := identityOf(ctx)
+	if span, ok := p.traces.popDelegatingAgentSpan(ctx, id); ok {
+		p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan { return span }, nil)
+	}
+	// pushAgentSpan runs before the AGENT_STARTING row so that logPurgedAgents
+	// can write the AGENT_ERROR rows of the previous attempt before the new
+	// attempt's row, with their own timestamps (see unclosedAgentSpan).
+	span := p.traces.pushAgentSpan(ctx, id)
+	p.logPurgedAgents(ctx, id)
 	p.logEvent(ctx, id, EventAgentStarting, func() rowSpan {
-		return p.traces.pushAgentSpan(ctx, id)
+		return span
 	}, func(d *eventData) {
 		// The context that ADK gives agent callbacks logs a warning and
 		// returns nil from Agent, so the agent is looked up by name in the
@@ -957,16 +1008,16 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 	defer p.recoverCallback(EventLLMResponse)
 	id := identityOf(ctx)
 	if res != nil && res.Partial {
-		// A streamed chunk marks the model call and its agent lineage as
-		// streaming so a caller that stops reading mid-stream is not mistaken
-		// for a failed call, and times the first token when the chunk carries
-		// generated content: a leading chunk of usage or role metadata is not
-		// the first token. adk-python writes a row for every chunk; the final
-		// response alone is written here so that token usage is counted once.
+		// A streamed chunk times the first token when it carries generated
+		// content: a leading chunk of usage or role metadata is not the first
+		// token. It does not mark the call as streaming: agent
+		// AfterModelCallbacks run after this one and may still reject the
+		// chunk, so onEvent does that for the partial event that ADK emits once
+		// the chunk is accepted. adk-python writes a row for every chunk; the
+		// final response alone is written here so that token usage is counted
+		// once.
 		if hasGeneratedContent(res) {
 			p.traces.recordFirstToken(ctx, id)
-		} else {
-			p.traces.recordStreamed(ctx, id, id.agentName, id.branch)
 		}
 		return nil, nil
 	}
@@ -1079,6 +1130,8 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
 	span, closedByError := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), false)
+	// An agent that the call ran as a tool and that failed ends with it.
+	p.logPurgedAgents(ctx, id)
 	// A tool that waits for or is rejected by the user's confirmation fails
 	// with tool.ErrConfirmationRequired or tool.ErrConfirmationRejected before
 	// it runs. adk-python returns the confirmation outcome as the tool's
@@ -1134,6 +1187,8 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 		span, _ := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), true)
 		return span
 	}, name, callID, args, err)
+	// An agent that the call ran as a tool and that failed ends with it.
+	p.logPurgedAgents(ctx, id)
 	return nil, nil
 }
 
@@ -1670,8 +1725,14 @@ func runnerAgentOf(ctx agent.InvocationContext) agent.Agent {
 
 func (p *analyticsPlugin) buildRow(ctx context.Context, id identity, eventType string, d *eventData) map[string]any {
 	eventID := newEventID()
+	rowTS := time.Now()
+	if !d.timestamp.IsZero() {
+		rowTS = d.timestamp
+	} else if !d.span.timestamp.IsZero() {
+		rowTS = d.span.timestamp
+	}
 	row := map[string]any{
-		timestampField:  time.Now(),
+		timestampField:  rowTS,
 		eventIDField:    eventID,
 		"event_type":    eventType,
 		"invocation_id": id.invocationID,
