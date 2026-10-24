@@ -275,6 +275,10 @@ func TestParse_InvalidFormat(t *testing.T) {
 			input: "---\n_ : invalid : _\n---\n# Markdown\nBody",
 		},
 		{
+			name:  "empty frontmatter",
+			input: "---\n---\n# Markdown\nBody",
+		},
+		{
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
 		},
