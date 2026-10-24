@@ -794,7 +794,8 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts are omitted; a non-empty event containing only thoughts returns nil.
+// Thought parts and standalone metadata are omitted. A non-empty event with no
+// remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -825,7 +826,10 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 			converted.Parts = append(converted.Parts, &genai.Part{
 				Text: fmt.Sprintf("[%s] `%s` tool returned result: %v", ev.Author, p.FunctionResponse.Name, stringify(p.FunctionResponse.Response)),
 			})
-		default: // fallback to the original part for non-text and non-functionCall parts.
+		case p.InlineData != nil || p.FileData != nil || p.ExecutableCode != nil || p.CodeExecutionResult != nil ||
+			p.ToolCall != nil || p.ToolResponse != nil || p.AudioTranscription != nil:
+			// Keep Go's server-tool and transcript parts alongside Python's
+			// media/code payloads. Standalone metadata has no relay payload.
 			converted.Parts = append(converted.Parts, p)
 		}
 	}
