@@ -434,6 +434,16 @@ func TestBuildParams_CodeExecutionAsText(t *testing.T) {
 			want: []string{"in/user:For context:|Code:```python\nprint(1)\n```"},
 		},
 		{
+			name: "code_keeps_its_place_on_a_media_message",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```|img/auto:image_url=data:image/png;base64,AQ=="},
+		},
+		{
 			name: "both_fields_on_one_part_render_code_then_result",
 			contents: []*genai.Content{
 				userContent(&genai.Part{
