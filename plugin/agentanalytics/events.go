@@ -654,9 +654,10 @@ func compactionTimestampValue(v any) any {
 	return compactionTimestamp(rv)
 }
 
-// compactionTimestamp returns a compaction struct's timestamp field in epoch
-// seconds. A time.Time is converted; a number is taken to be epoch seconds
-// already and kept as is. Zero values are unset and return nil.
+// compactionTimestamp returns a compaction struct or map's timestamp field in
+// epoch seconds. A time.Time or an RFC 3339 string is converted to epoch
+// seconds; a number is taken to be epoch seconds already and kept as is. Zero
+// or unparseable values return nil.
 func compactionTimestamp(f reflect.Value) any {
 	if !f.IsValid() || !f.CanInterface() || f.IsZero() {
 		return nil
@@ -672,6 +673,12 @@ func compactionTimestamp(f reflect.Value) any {
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 		reflect.Float32, reflect.Float64:
 		return f.Interface()
+	case reflect.String:
+		ts, err := time.Parse(time.RFC3339Nano, f.String())
+		if err != nil {
+			return nil
+		}
+		return epochSeconds(ts)
 	default:
 		return nil
 	}
