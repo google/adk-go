@@ -31,14 +31,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
-	"runtime/debug"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/google/go-cmp/cmp"
 	"go.opentelemetry.io/otel/trace"
@@ -5869,6 +5871,7 @@ func TestRunner_StopReadingMidStream_IsNotAnError(t *testing.T) {
 	})
 }
 
+// flakyOnFirstPassLLM fails with err on call 1 and returns text on
 // call 2+.
 type flakyOnFirstPassLLM struct {
 	mu    sync.Mutex
@@ -6006,9 +6009,10 @@ func TestRunner_SubAgentModelError_CallerKeepsReading_EmitsInvocationError(t *te
 //     the task agent with its span_id, parent_span_id, and latency.
 //  2. When the coordinator re-enters Agent.Run on the same branch and path to
 //     continue after the task agent completes, the coordinator's first
-//     responded activation is retired so the second coordinator activation is
-//     parented to the invocation span rather than to the finished task agent or
-//     the first coordinator activation.
+//     activation, which the delegation interrupted, ends with an
+//     AGENT_COMPLETED row and its latency, and the second coordinator
+//     activation is parented to the invocation span rather than to the
+//     finished task agent or the first coordinator activation.
 //  3. If the coordinator's continuation fails, neither the completed task agent
 //     nor the first coordinator activation receives a spurious AGENT_ERROR row.
 func TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinatorActivation(t *testing.T) {
@@ -6126,13 +6130,16 @@ func TestRunner_TaskModeDelegation_EmitsAgentCompletedAndRetiresFirstCoordinator
 		}
 		mustLatency(t, workerCompletes[0])
 
-		if len(coordCompletes) != 1 {
-			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 1", len(coordCompletes))
+		if len(coordCompletes) != 2 {
+			t.Fatalf("coordinator AGENT_COMPLETED count = %d, want 2", len(coordCompletes))
 		}
-		if got, want := placeOf(coordCompletes[0]), placeOf(coordStarts[1]); got != want {
-			t.Errorf("coordinator AGENT_COMPLETED place = %+v, want second coordinator activation %+v", got, want)
+		for i, row := range coordCompletes {
+			if got, want := placeOf(row), placeOf(coordStarts[i]); got != want {
+				t.Errorf("coordinator AGENT_COMPLETED[%d] place = %+v, want coordinator activation %d %+v", i, got, i, want)
+			}
+			mustLatency(t, row)
 		}
-		mustLatency(t, coordCompletes[0])
+		assertAgentSpansClosed(t, rows)
 	})
 
 	t.Run("continuation failure after task completion", func(t *testing.T) {
@@ -6194,13 +6201,13 @@ func (m *firstCallResponseThenErrLLM) GenerateContent(_ context.Context, _ *mode
 	}
 }
 
-// TestProbe1_ConcurrentGraphParentsSameChildNames verifies that when a workflow
-// graph runs two sequential workflow agents (flow_a and flow_b) concurrently
-// and both have children with the same names ("gate" and "step"), each child's
-// AGENT_STARTING and AGENT_COMPLETED rows are parented to its own sequential
-// parent (flow_a or flow_b) rather than escaping to the root or invocation
-// span.
-func TestProbe1_ConcurrentGraphParentsSameChildNames(t *testing.T) {
+// TestRunner_ConcurrentGraphParentsSameChildNames verifies that when a
+// workflow graph runs two sequential workflow agents (flow_a and flow_b)
+// concurrently and both have children with the same names ("gate", answered in
+// BeforeAgentCallback, and "step"), each child's AGENT_STARTING row and step's
+// AGENT_COMPLETED row are parented to its own sequential parent (flow_a or
+// flow_b) rather than escaping to the root or invocation span.
+func TestRunner_ConcurrentGraphParentsSameChildNames(t *testing.T) {
 	p, requests, _ := setupTestPlugin(t)
 
 	gatesReady := make(chan struct{})
@@ -6282,32 +6289,72 @@ func TestProbe1_ConcurrentGraphParentsSameChildNames(t *testing.T) {
 	rows := collectRows(t, requests, untilInvocationEnd)
 	requireInvocationCompletedOK(t, rows)
 
-	var flowASpan, flowBSpan string
-	var gateParents, stepParents []string
+	var rootStart, flowAStart, flowBStart tracePlace
+	var gateParents, stepStartParents []string
+	stepStartBySpan := map[string]tracePlace{}
 	for _, row := range rowsOfType(rows, EventAgentStarting) {
+		pl := placeOf(row)
 		switch row["agent"] {
+		case "root":
+			rootStart = pl
 		case "flow_a":
-			flowASpan = placeOf(row).span
+			flowAStart = pl
 		case "flow_b":
-			flowBSpan = placeOf(row).span
+			flowBStart = pl
 		case "gate":
-			gateParents = append(gateParents, placeOf(row).parent)
+			gateParents = append(gateParents, pl.parent)
 		case "step":
-			stepParents = append(stepParents, placeOf(row).parent)
+			stepStartParents = append(stepStartParents, pl.parent)
+			stepStartBySpan[pl.span] = pl
 		}
 	}
-	if flowASpan == "" || flowBSpan == "" {
-		t.Fatalf("missing flow spans: flow_a=%q flow_b=%q", flowASpan, flowBSpan)
+	if rootStart.span == "" || flowAStart.span == "" || flowBStart.span == "" {
+		t.Fatalf("missing spans: root=%q flow_a=%q flow_b=%q", rootStart.span, flowAStart.span, flowBStart.span)
 	}
-	wantFlowSpans := []string{flowASpan, flowBSpan}
+	wantFlowSpans := []string{flowAStart.span, flowBStart.span}
 	slices.Sort(wantFlowSpans)
 	slices.Sort(gateParents)
-	slices.Sort(stepParents)
+	slices.Sort(stepStartParents)
 	if diff := cmp.Diff(wantFlowSpans, gateParents); diff != "" {
 		t.Errorf("gate AGENT_STARTING parent_span_id mismatch (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(wantFlowSpans, stepParents); diff != "" {
+	if diff := cmp.Diff(wantFlowSpans, stepStartParents); diff != "" {
 		t.Errorf("step AGENT_STARTING parent_span_id mismatch (-want +got):\n%s", diff)
+	}
+
+	var stepCompleteParents []string
+	var flowAComplete, flowBComplete tracePlace
+	for _, row := range rowsOfType(rows, EventAgentCompleted) {
+		pl := placeOf(row)
+		switch row["agent"] {
+		case "flow_a":
+			flowAComplete = pl
+			mustLatency(t, row)
+		case "flow_b":
+			flowBComplete = pl
+			mustLatency(t, row)
+		case "step":
+			mustLatency(t, row)
+			startPl, ok := stepStartBySpan[pl.span]
+			if !ok {
+				t.Errorf("step AGENT_COMPLETED span_id %q does not match any step AGENT_STARTING span", pl.span)
+				continue
+			}
+			if pl != startPl {
+				t.Errorf("step AGENT_COMPLETED place = %+v, want %+v", pl, startPl)
+			}
+			stepCompleteParents = append(stepCompleteParents, pl.parent)
+		}
+	}
+	if flowAComplete != flowAStart || flowAStart.parent != rootStart.span {
+		t.Errorf("flow_a AGENT_COMPLETED = %+v, start = %+v (want parent %q)", flowAComplete, flowAStart, rootStart.span)
+	}
+	if flowBComplete != flowBStart || flowBStart.parent != rootStart.span {
+		t.Errorf("flow_b AGENT_COMPLETED = %+v, start = %+v (want parent %q)", flowBComplete, flowBStart, rootStart.span)
+	}
+	slices.Sort(stepCompleteParents)
+	if diff := cmp.Diff(wantFlowSpans, stepCompleteParents); diff != "" {
+		t.Errorf("step AGENT_COMPLETED parent_span_id mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -7715,6 +7762,14 @@ func TestTraceManager_PurgedActivationLatencyFromLastActivity(t *testing.T) {
 			name: "popTaskAgentSpan",
 			setupFunc: func(tm *traceManager) {
 				tm.pushAgentSpan(ctx, child)
+				// Synthetic ctx (context.Background) does not implement
+				// WithICDelta (see runningAgentChildren), so pushAgentSpan leaves
+				// taskMode=false. Set it so popTaskAgentSpan genuinely
+				// pops the child (ok==true).
+				inv := tm.invocations[invID]
+				inv.mu.Lock()
+				inv.agentStack[len(inv.agentStack)-1].taskMode = true
+				inv.mu.Unlock()
 				tm.pushLLMSpan(ctx, child)
 				tm.popLLMSpan(ctx, child, true)
 			},
@@ -11493,22 +11548,23 @@ var adkStopsSequentialOnSubAgentError = sync.OnceValue(func() bool {
 	return !afterRan.Load()
 })
 
-// adkIsInRepoModule reports whether the test binary is linked against the
-// in-repo google.golang.org/adk/v2 module (via go.work or a replace directive,
-// where dep.Version is "(devel)" or dep.Replace != nil) rather than a released
-// module version under GOWORK=off. Against the in-repo module, all capability
-// probes must succeed and a probe failure fails the test instead of skipping.
+// adkIsInRepoModule reports whether the test binary is built from the in-repo
+// google.golang.org/adk/v2 source (via go.work or a replace directive) rather
+// than from a released module version, as under GOWORK=off. It looks at the
+// source file the binary records for an ADK function: a released version is
+// read from the module cache, whose directory for it ends in "@" and the
+// version, and -trimpath keeps that "@" too. debug.ReadBuildInfo cannot tell
+// the two apart, because a go test binary records no Deps. Against the in-repo
+// module, all capability probes must succeed and a probe failure fails the
+// test instead of skipping.
 var adkIsInRepoModule = sync.OnceValue(func() bool {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
+	pc := reflect.ValueOf(agent.New).Pointer()
+	fn := runtime.FuncForPC(pc)
+	if fn == nil {
 		return false
 	}
-	for _, dep := range info.Deps {
-		if dep.Path == "google.golang.org/adk/v2" {
-			return dep.Version == "(devel)" || dep.Replace != nil || dep.Sum == ""
-		}
-	}
-	return false
+	file, _ := fn.FileLine(pc)
+	return file != "" && !strings.Contains(file, "google.golang.org/adk/v2@")
 })
 
 func skipOrFailADKProbe(t *testing.T, msg string) {
@@ -11875,56 +11931,74 @@ func TestRunner_CustomParentOverSequenceWithCachedStep_EmitsInvocationCompleted(
 
 // TestRunner_WorkflowAgentRunAgainAfterForwardedNodeError_EmitsInvocationError
 // verifies that a node error which reached the caller still fails the run when
-// the workflow agent runs again and its node starts on the same path.
+// the workflow agent runs again and its node starts on the same path, whether
+// or not the caller read the first run of the workflow agent to its end.
 func TestRunner_WorkflowAgentRunAgainAfterForwardedNodeError_EmitsInvocationError(t *testing.T) {
-	p, requests, _ := setupTestPlugin(t)
-	modelErr := errors.New("pass 1 model failure 503")
-	x, err := llmagent.New(llmagent.Config{Name: "x", Model: &flakyOnFirstPassLLM{err: modelErr, reply: "ok on pass 2"}})
-	if err != nil {
-		t.Fatalf("llmagent.New(x): %v", err)
-	}
-	node, err := workflow.NewAgentNode(x, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("workflow.NewAgentNode(x): %v", err)
-	}
-	wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: []workflow.Edge{{From: workflow.Start, To: node}}})
-	if err != nil {
-		t.Fatalf("workflowagent.New(wf): %v", err)
-	}
-	// guard forwards every event and error of wf and then runs wf once more.
-	guard, err := agent.New(agent.Config{
-		Name:      "guard",
-		SubAgents: []agent.Agent{wf},
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				for range 2 {
-					for ev, err := range wf.Run(ctx) {
-						if !yield(ev, err) {
-							return
+	for _, tc := range []struct {
+		name string
+		// stopAtError makes guard stop reading the first run of wf at the
+		// node error. That run then gets no AfterAgentCallback, so its span
+		// is still open when wf runs again.
+		stopAtError bool
+	}{
+		{name: "guard reads wf to its end", stopAtError: false},
+		{name: "guard stops reading wf at the node error", stopAtError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			modelErr := errors.New("pass 1 model failure 503")
+			x, err := llmagent.New(llmagent.Config{Name: "x", Model: &flakyOnFirstPassLLM{err: modelErr, reply: "ok on pass 2"}})
+			if err != nil {
+				t.Fatalf("llmagent.New(x): %v", err)
+			}
+			node, err := workflow.NewAgentNode(x, workflow.NodeConfig{})
+			if err != nil {
+				t.Fatalf("workflow.NewAgentNode(x): %v", err)
+			}
+			wf, err := workflowagent.New(workflowagent.Config{Name: "wf", Edges: []workflow.Edge{{From: workflow.Start, To: node}}})
+			if err != nil {
+				t.Fatalf("workflowagent.New(wf): %v", err)
+			}
+			// guard forwards the events and errors of wf, stops at the node
+			// error if tc.stopAtError, and then runs wf once more.
+			guard, err := agent.New(agent.Config{
+				Name:      "guard",
+				SubAgents: []agent.Agent{wf},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for range 2 {
+							for ev, err := range wf.Run(ctx) {
+								if !yield(ev, err) {
+									return
+								}
+								if err != nil && tc.stopAtError {
+									break
+								}
+							}
 						}
 					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(guard): %v", err)
+			}
+			var errs []error
+			for _, runErr := range newTestRunner(t, guard, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+				if runErr != nil {
+					errs = append(errs, runErr)
 				}
 			}
-		},
-	})
-	if err != nil {
-		t.Fatalf("agent.New(guard): %v", err)
-	}
-	var errs []error
-	for _, runErr := range newTestRunner(t, guard, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-		if runErr != nil {
-			errs = append(errs, runErr)
-		}
-	}
-	if len(errs) != 1 || !errors.Is(errs[0], modelErr) {
-		t.Fatalf("r.Run errors = %v, want [%v]", errs, modelErr)
-	}
-	rows := collectRows(t, requests, untilInvocationEnd)
-	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
-		t.Fatalf("got INVOCATION_COMPLETED although the caller received %v; event types: %v", modelErr, eventTypes(rows))
-	}
-	if got := onlyRowOfType(t, rows, EventInvocationError)["error_message"]; got != modelErr.Error() {
-		t.Errorf("INVOCATION_ERROR error_message = %v, want %q", got, modelErr.Error())
+			if len(errs) != 1 || !errors.Is(errs[0], modelErr) {
+				t.Fatalf("r.Run errors = %v, want [%v]", errs, modelErr)
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got INVOCATION_COMPLETED although the caller received %v; event types: %v", modelErr, eventTypes(rows))
+			}
+			if got := onlyRowOfType(t, rows, EventInvocationError)["error_message"]; got != modelErr.Error() {
+				t.Errorf("INVOCATION_ERROR error_message = %v, want %q", got, modelErr.Error())
+			}
+		})
 	}
 }
 
@@ -12957,6 +13031,20 @@ func TestTraceManager_SettleWaitsForLauncher(t *testing.T) {
 		{
 			name:   "custom non-LLM agent above parallel-looking branch without SubAgents",
 			before: func(tm *traceManager) { setAgentSpan(t, tm, invID, "par", nonLLM) },
+			end: func(tm *traceManager) {
+				tm.popAgentSpan(ctx, branchB)
+				tm.popAgentSpan(ctx, par)
+			},
+			blocked: true,
+		},
+		{
+			name: "custom non-LLM agent above parallel-looking branch with SubAgents",
+			before: func(tm *traceManager) {
+				setAgentSpan(t, tm, invID, "par", func(rec *spanRecord) {
+					rec.nonLLM = true
+					rec.children = []string{"branch_a", "branch_b"}
+				})
+			},
 			end: func(tm *traceManager) {
 				tm.popAgentSpan(ctx, branchB)
 				tm.popAgentSpan(ctx, par)
@@ -18267,9 +18355,13 @@ func TestConcurrencyRace_ForwardedFinishTaskEventDoesNotEndRunningChild(t *testi
 	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
 		t.Errorf("got %d AGENT_ERROR rows, want 0; event types: %v", n, eventTypes(rows))
 	}
+	// The sub-agent does not run in task mode, so its finish_task response
+	// does not end its span (see TestRunner_NonTaskModeFinishTaskTool), and ADK
+	// runs no AfterAgentCallback for an agent that ended its invocation: its
+	// span retires with the custom agent's, without a closing row.
 	starts, ends := agentRowsOfType(rows, EventAgentStarting, "child"), agentRowsOfType(rows, EventAgentCompleted, "child")
-	if len(starts) != 1 || len(ends) != 1 || placeOf(ends[0]) != placeOf(starts[0]) {
-		t.Errorf("child rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want one of each at one place; event types: %v", len(starts), len(ends), eventTypes(rows))
+	if len(starts) != 1 || len(ends) != 0 {
+		t.Errorf("child rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want 1 and 0; event types: %v", len(starts), len(ends), eventTypes(rows))
 	}
 }
 
@@ -18514,6 +18606,3112 @@ func TestRunner_ReportedNodeOutcomeBeforeDelayedResponse_EmitsNoAgentError(t *te
 	requireInvocationCompletedOK(t, rows)
 	if n := len(rowsOfType(rows, EventAgentError)); n != 0 {
 		t.Errorf("got %d AGENT_ERROR rows for two eventually successful runs, want 0; counts: %v; event types: %v", n, agentErrorCounts(rows), eventTypes(rows))
+	}
+}
+
+// TestTraceManager_ToolSpanAcrossAfterRun verifies that tool and model calls
+// started before AfterRun preserve their open/completed spans on
+// completed.late across endInvocation, so completion or error callbacks firing
+// after AfterRun reuse the original span_id, parent_span_id, and latency_ms.
+func TestTraceManager_ToolSpanAcrossAfterRun(t *testing.T) {
+	t.Run("direct pushToolSpan across endInvocation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		now := time.Unix(2000, 0)
+		tm.now = func() time.Time { return now }
+
+		id := identity{invocationID: "inv-live-tool", agentName: "live_agent"}
+		invStart := tm.invocationSpan(ctx, id, nil)
+		agentStart, _ := tm.pushAgentSpan(ctx, id)
+		key := toolKey(id, "call-1", "search")
+		toolStart := tm.pushToolSpan(ctx, id, key)
+
+		now = now.Add(25 * time.Millisecond)
+		tm.popAgentSpan(ctx, id)
+		invEnd := tm.endInvocation(ctx, id)
+		if invEnd.spanID != invStart.spanID {
+			t.Fatalf("endInvocation spanID = %q, want %q", invEnd.spanID, invStart.spanID)
+		}
+
+		now = now.Add(40 * time.Millisecond)
+		toolEnd, _, closedByError := tm.popToolSpan(ctx, id, key, false)
+		if closedByError {
+			t.Errorf("popToolSpan closedByError = true, want false")
+		}
+		if toolEnd.traceID != toolStart.traceID {
+			t.Errorf("popToolSpan traceID = %q, want %q", toolEnd.traceID, toolStart.traceID)
+		}
+		if toolEnd.spanID != toolStart.spanID {
+			t.Errorf("popToolSpan spanID = %q, want original TOOL_STARTING spanID %q", toolEnd.spanID, toolStart.spanID)
+		}
+		if toolEnd.parentSpanID != agentStart.spanID {
+			t.Errorf("popToolSpan parentSpanID = %q, want agent spanID %q", toolEnd.parentSpanID, agentStart.spanID)
+		}
+		if got, _ := toolEnd.latency["total_ms"].(int64); got != 65 {
+			t.Errorf("popToolSpan total_ms = %v, want 65 (latency=%v)", toolEnd.latency["total_ms"], toolEnd.latency)
+		}
+	})
+
+	t.Run("model error before endInvocation and recovered response after", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-live-model", agentName: "live_agent"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		start := tm.pushLLMSpan(ctx, id)
+		// OnModelErrorCallback ends the call, and a plugin recovers from the
+		// error, so ADK runs AfterModelCallback for it after the run ended.
+		tm.popLLMSpan(ctx, id, false)
+		tm.popAgentSpan(ctx, id)
+		tm.endInvocation(ctx, id)
+
+		end := tm.popLLMSpan(ctx, id, true)
+		if end.spanID != start.spanID || end.latency != nil {
+			t.Errorf("LLM_RESPONSE place = %+v, want span %q of LLM_REQUEST without latency", end, start.spanID)
+		}
+	})
+
+	t.Run("made-up span of an unseen call stays behind", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		id := identity{invocationID: "inv-live-unseen", agentName: "live_agent"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		// ADK runs OnToolErrorCallback alone for a call of a tool that does
+		// not exist, so the call has no completion callback to wait for.
+		tm.popToolSpan(ctx, id, toolKey(id, "call-missing", "missing"), true)
+		tm.popAgentSpan(ctx, id)
+		tm.endInvocation(ctx, id)
+
+		tm.mu.Lock()
+		entry := tm.completed[id.invocationID]
+		var late *invocationTrace
+		if entry != nil {
+			late = entry.late
+		}
+		tm.mu.Unlock()
+		if late != nil {
+			t.Error("endInvocation kept late state for a run whose only call this plugin did not see start")
+		}
+		if entry != nil {
+			if len(entry.endedTools) != 0 || len(entry.endedModels) != 0 {
+				t.Errorf("endedTools = %d, endedModels = %d, want 0 and 0: a call this plugin did not see start must not wait in the lightweight maps", len(entry.endedTools), len(entry.endedModels))
+			}
+		}
+	})
+
+	t.Run("plugin AfterToolCallback after AfterRunCallback", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		toolCtx := withFunctionCall(mCtx, "call-live-ok")
+		lookup := &fakeTool{name: "lookup"}
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(mCtx))
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, lookup, map[string]any{"q": "go"}))
+		ev := session.NewEvent(t.Context(), mCtx.invocationID)
+		ev.Author = mCtx.agentName
+		ev.Content = textContent("model", "streaming answer")
+		ev.Partial = true
+		errs.add(p.OnEventCallback()(mCtx, ev))
+		errs.check(t)
+
+		// Consumer stops reading in RunLive: AfterRun runs while tool is in flight.
+		p.AfterRunCallback()(mCtx)
+
+		errs.add(p.AfterToolCallback()(toolCtx, lookup, map[string]any{"q": "go"}, map[string]any{"ok": true}, nil))
+		errs.check(t)
+
+		rows := collectRows(t, requests, untilEventType(EventToolCompleted))
+		agentStart := placeOf(onlyRowOfType(t, rows, EventAgentStarting))
+		toolStart := placeOf(onlyRowOfType(t, rows, EventToolStarting))
+		toolCompRow := onlyRowOfType(t, rows, EventToolCompleted)
+		toolComp := placeOf(toolCompRow)
+
+		if toolComp != toolStart {
+			t.Errorf("TOOL_COMPLETED place = %+v, want TOOL_STARTING place %+v", toolComp, toolStart)
+		}
+		if toolComp.parent != agentStart.span {
+			t.Errorf("TOOL_COMPLETED parent_span_id = %q, want AGENT_STARTING span_id %q", toolComp.parent, agentStart.span)
+		}
+		mustLatency(t, toolCompRow)
+	})
+
+	t.Run("plugin OnToolErrorCallback and AfterToolCallback after AfterRunCallback", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		toolCtx := withFunctionCall(mCtx, "call-live-err")
+		lookup := &fakeTool{name: "lookup"}
+		boom := errors.New("live tool failed")
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(mCtx))
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, lookup, nil))
+		ev := session.NewEvent(t.Context(), mCtx.invocationID)
+		ev.Author = mCtx.agentName
+		ev.Content = textContent("model", "partial")
+		ev.Partial = true
+		errs.add(p.OnEventCallback()(mCtx, ev))
+		errs.check(t)
+
+		p.AfterRunCallback()(mCtx)
+
+		errs.add(p.OnToolErrorCallback()(toolCtx, lookup, nil, boom))
+		errs.add(p.AfterToolCallback()(toolCtx, lookup, nil, nil, boom))
+		errs.check(t)
+
+		rows := collectRows(t, requests, untilEventType(EventToolError))
+		if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+			t.Fatalf("got %d TOOL_ERROR rows, want 1", n)
+		}
+		toolStart := placeOf(onlyRowOfType(t, rows, EventToolStarting))
+		toolErrRow := onlyRowOfType(t, rows, EventToolError)
+		if got := placeOf(toolErrRow); got != toolStart {
+			t.Errorf("TOOL_ERROR place = %+v, want TOOL_STARTING place %+v", got, toolStart)
+		}
+		mustLatency(t, toolErrRow)
+	})
+
+	t.Run("plugin AfterModelCallback after AfterRunCallback", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(mCtx))
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-live"}))
+		errs.check(t)
+
+		// The call has streamed nothing, so it moves to the late state: the
+		// model call of an agent that a tool of RunLive runs can end after
+		// AfterRun. AfterRun reports the open call; only the late row matters
+		// here.
+		p.AfterRunCallback()(mCtx)
+
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", "final")}, nil))
+		errs.check(t)
+
+		rows := collectRows(t, requests, untilEventType(EventLLMResponse))
+		llmReq := placeOf(onlyRowOfType(t, rows, EventLLMRequest))
+		llmRespRow := onlyRowOfType(t, rows, EventLLMResponse)
+		if got := placeOf(llmRespRow); got != llmReq {
+			t.Errorf("LLM_RESPONSE place = %+v, want LLM_REQUEST place %+v", got, llmReq)
+		}
+		mustLatency(t, llmRespRow)
+	})
+
+	t.Run("plugin OnToolErrorCallback before AfterRunCallback and AfterToolCallback after", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		toolCtx := withFunctionCall(mCtx, "call-split-err")
+		lookup := &fakeTool{name: "lookup"}
+		boom := errors.New("tool failed before stop")
+
+		var errs callbackErrors
+		errs.add(p.BeforeRunCallback()(mCtx))
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(toolCtx, lookup, nil))
+		errs.add(p.OnToolErrorCallback()(toolCtx, lookup, nil, boom))
+		ev := session.NewEvent(t.Context(), mCtx.invocationID)
+		ev.Author = mCtx.agentName
+		ev.Content = textContent("model", "partial")
+		ev.Partial = true
+		errs.add(p.OnEventCallback()(mCtx, ev))
+		errs.check(t)
+
+		p.AfterRunCallback()(mCtx)
+		errs.add(p.AfterToolCallback()(toolCtx, lookup, nil, nil, boom))
+		errs.check(t)
+
+		// Flush with a sentinel row after AfterToolCallback so any duplicate
+		// TOOL_ERROR would be observed before collection stops.
+		mCtx2 := &mockInvocationContext{
+			ctx:          mCtx.ctx,
+			agentName:    "sentinel",
+			sessionID:    "sess-sentinel",
+			invocationID: "inv-sentinel",
+			userID:       "user-sentinel",
+		}
+		errs.add(p.BeforeRunCallback()(mCtx2))
+		errs.check(t)
+
+		rows := collectRows(t, requests, func(rows []map[string]any) bool {
+			return len(rowsOfType(rows, EventInvocationStarting)) >= 2
+		})
+		if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+			t.Fatalf("got %d TOOL_ERROR rows, want 1", n)
+		}
+		toolStart := placeOf(onlyRowOfType(t, rows, EventToolStarting))
+		toolErrRow := onlyRowOfType(t, rows, EventToolError)
+		if got := placeOf(toolErrRow); got != toolStart {
+			t.Errorf("TOOL_ERROR place = %+v, want TOOL_STARTING place %+v", got, toolStart)
+		}
+	})
+
+	t.Run("handed-over tool call holds back late settle until popToolSpan", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-live-tool-seq"
+		live := identity{invocationID: invID, agentName: "live_agent"}
+		early := identity{invocationID: invID, agentName: "early"}
+		call := toolKey(live, "call-1", "run_cached")
+
+		tm.invocationSpan(ctx, live, nil)
+		tm.pushAgentSpan(ctx, live)
+		tm.pushAgentSpan(ctx, early)
+		tm.popAgentSpan(ctx, early)
+		tm.pushToolSpan(ctx, live, call)
+		tm.popAgentSpan(ctx, live)
+		tm.endInvocation(ctx, live)
+
+		branchA := identity{invocationID: invID, agentName: "branch_a", branch: "branch_a"}
+		cached := identity{invocationID: invID, agentName: "cached", branch: "branch_a"}
+		tm.pushAgentSpan(ctx, branchA)
+		src := &endedContext{Context: ctx, end: true}
+		tm.pushAgentSpan(src, cached)
+		branchARec := lateReviewAgent(t, tm, invID, "branch_a")
+		cachedRec := lateReviewAgent(t, tm, invID, "cached")
+		tm.popAgentSpan(ctx, branchA)
+		atBranchEnd := src.reads
+		tm.popToolSpan(ctx, live, call, false)
+		if atBranchEnd != 0 || src.reads != 1 {
+			t.Errorf("reads of late sub-agent's ended InvocationContext at branch_a end and after popToolSpan = %d, %d; want 0, 1", atBranchEnd, src.reads)
+		}
+		c := tm.completed[invID]
+		// Nothing can end either activation anymore, so neither record
+		// keeps a context of its callbacks or the span that it ran under.
+		checkLateRecordDropped(t, c.late, branchARec)
+		checkLateRecordDropped(t, c.late, cachedRec)
+		c.late.mu.Lock()
+		defer c.late.mu.Unlock()
+		if got := len(c.late.agentStack); got != 1 {
+			t.Fatalf("len(late.agentStack) = %d, want 1", got)
+		}
+		if got := c.late.openAgents.Load(); got {
+			t.Fatalf("late.openAgents = %v, want false", got)
+		}
+	})
+}
+
+// TestLateShortcutAgentRetained verifies that a shortcut agent (one whose
+// BeforeAgentCallback answered, so that it ends its InvocationContext and
+// never gets an AfterAgentCallback) that starts in the late state under a
+// late agent leaves the late state once nothing can end it anymore: its
+// parent ended while the tool call that AfterRun handed over still held it
+// back, and then that call returned. Its record keeps no context of its
+// callbacks, and the completed run no longer counts as one with open late
+// spans, so that the idle runs that complete after it prune it first.
+func TestLateShortcutAgentRetained(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	tm.maxTracked = 1 // Completed runs are kept up to 64 (see rememberCompletedLocked).
+	const invID = "inv-late-shortcut"
+	live := identity{invocationID: invID, agentName: "live_agent"}
+	call := toolKey(live, "call-1", "run_cached")
+
+	tm.invocationSpan(ctx, live, nil)
+	tm.pushAgentSpan(ctx, live)
+	tm.pushToolSpan(ctx, live, call)
+	tm.popAgentSpan(ctx, live)
+	tm.endInvocation(ctx, live)
+
+	branchA := identity{invocationID: invID, agentName: "branch_a", branch: "branch_a"}
+	cached := identity{invocationID: invID, agentName: "cached", branch: "branch_a"}
+	tm.pushAgentSpan(ctx, branchA)
+	tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, cached)
+	cachedRec := lateReviewAgent(t, tm, invID, "cached")
+	tm.popAgentSpan(ctx, branchA)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"cached"}) {
+		t.Fatalf("late agents after branch_a ended = %v, want [cached], held back by the open tool call", got)
+	}
+	tm.popToolSpan(ctx, live, call, false)
+
+	late := lateReviewTrace(t, tm, invID)
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after the tool call returned = %v, want none", got)
+	}
+	if late.openAgents.Load() {
+		t.Error("late.openAgents = true after the tool call returned, want false")
+	}
+	checkLateRecordDropped(t, late, cachedRec)
+	for i := range 64 {
+		idle := identity{invocationID: fmt.Sprintf("idle-%d", i), agentName: "root"}
+		tm.invocationSpan(ctx, idle, nil)
+		tm.endInvocation(ctx, idle)
+	}
+	tm.mu.Lock()
+	_, kept := tm.completed[invID]
+	tm.mu.Unlock()
+	if kept {
+		t.Error("completed run with nothing open in its late state outlived the 64 idle runs that completed after it, want it pruned first")
+	}
+}
+
+// TestRunner_NonTaskModeFinishTaskTool verifies that a non-ModeTask LLM agent
+// defining a custom tool named "finish_task" that returns
+// {"result": "Task completed."} does not trigger popTaskAgentSpan in onEvent
+// or emit a premature duplicate AGENT_COMPLETED row.
+func TestRunner_NonTaskModeFinishTaskTool(t *testing.T) {
+	type emptyArgs struct{}
+	newCustomFinishTaskTool := func(t *testing.T) tool.Tool {
+		t.Helper()
+		ft, err := functiontool.New(
+			functiontool.Config{Name: "finish_task", Description: "Custom non-task finish tool"},
+			func(_ agent.Context, _ emptyArgs) (map[string]any, error) {
+				return map[string]any{"result": "Task completed."}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("functiontool.New(finish_task): %v", err)
+		}
+		return ft
+	}
+
+	t.Run("chat-mode root agent with custom finish_task tool", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "chat_bot",
+			Tools: []tool.Tool{newCustomFinishTaskTool(t)},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call-custom-finish",
+										Name: "finish_task",
+										Args: map[string]any{},
+									},
+								},
+							},
+						},
+					},
+					{Content: textContent("model", "finished normally"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(chat_bot): %v", err)
+		}
+
+		r := newTestRunner(t, bot, p)
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("r.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		if got := len(rowsOfType(rows, EventAgentCompleted)); got != 1 {
+			t.Fatalf("got %d AGENT_COMPLETED rows, want 1; event types: %v", got, eventTypes(rows))
+		}
+		assertAgentSpansClosed(t, rows)
+	})
+
+	t.Run("single-turn sub-agent with custom finish_task tool", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		helper, err := llmagent.New(llmagent.Config{
+			Name:        "single_turn_helper",
+			Description: "Runs in single-turn mode",
+			Mode:        llmagent.ModeSingleTurn,
+			Tools:       []tool.Tool{newCustomFinishTaskTool(t)},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call-helper-finish",
+										Name: "finish_task",
+										Args: map[string]any{},
+									},
+								},
+							},
+						},
+					},
+					{Content: textContent("model", "helper summary"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(single_turn_helper): %v", err)
+		}
+		coord, err := llmagent.New(llmagent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{helper},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										ID:   "call-helper",
+										Name: "single_turn_helper",
+										Args: map[string]any{"request": "do work"},
+									},
+								},
+							},
+						},
+					},
+					{Content: textContent("model", "coord done"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(coord): %v", err)
+		}
+
+		r := newTestRunner(t, coord, p)
+		for _, runErr := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("r.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		assertAgentSpansClosed(t, rows)
+	})
+}
+
+// TestTraceManager_CompleteResponseEndsOnlyItsAuthorsModelCalls verifies that
+// a final response of an agent ends the model calls of its own activation,
+// which ADK may end no other way, and leaves open those of a descendant
+// activation that the response settles: the descendant's call may still be
+// running, and its AfterModelCallback ends it with its span and latency.
+func TestTraceManager_CompleteResponseEndsOnlyItsAuthorsModelCalls(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+
+	sub, err := llmagent.New(llmagent.Config{Name: "sub"})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub): %v", err)
+	}
+	coord, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "coord",
+			SubAgents: []agent.Agent{sub},
+		},
+	})
+	if err != nil {
+		t.Fatalf("sequentialagent.New(coord): %v", err)
+	}
+
+	coordID := identity{invocationID: "inv-settled-llm", agentName: "coord", path: "coord@0"}
+	subID := identity{invocationID: "inv-settled-llm", agentName: "sub", path: "coord@0/sub@1"}
+
+	tm.invocationSpan(ctx, coordID, coord)
+	tm.pushAgentSpan(ctx, coordID)
+	tm.pushLLMSpan(ctx, coordID)
+	tm.pushAgentSpan(ctx, subID)
+	start := tm.pushLLMSpan(ctx, subID)
+
+	// coord emits a final response settling both coord and sub.
+	tm.completeResponse(ctx, coordID, "coord", "", nil)
+
+	if got := openSpans(t, tm, "inv-settled-llm"); got.models != 1 {
+		t.Fatalf("open model spans after completeResponse = %d, want 1, the call of sub", got.models)
+	}
+	if end := tm.popLLMSpan(ctx, subID, true); end.spanID != start.spanID || end.latency == nil {
+		t.Errorf("LLM_RESPONSE place of sub = %+v, want the span %q of LLM_REQUEST with latency", end, start.spanID)
+	}
+	unclosed, termErr := tm.popUnclosedAgentSpans(ctx, coordID)
+	if termErr != nil || len(unclosed) != 0 {
+		t.Errorf("popUnclosedAgentSpans = (%v, %v), want (nil, nil)", unclosed, termErr)
+	}
+}
+
+// TestTraceManager_StoppedStreamDoesNotPinCompletedRun verifies that runs
+// whose caller stopped reading mid-stream, which end with their streaming
+// model call open, leave no late state behind, so that the completed runs
+// stay within capacity however many of them stop within the TTL. The partial
+// event may carry a node path that the context of the model callbacks lacks,
+// as for the agent that runner.Run runs.
+func TestTraceManager_StoppedStreamDoesNotPinCompletedRun(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		eventPath string
+	}{
+		{name: "event without node path", eventPath: ""},
+		{name: "event with node path", eventPath: "bot"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.maxTracked = 1
+			limit := max(tm.maxTracked, 64)
+			for i := range 5 * limit {
+				id := identity{invocationID: fmt.Sprintf("stopped-%d", i), agentName: "bot"}
+				tm.invocationSpan(ctx, id, nil)
+				tm.pushAgentSpan(ctx, id)
+				tm.pushLLMSpan(ctx, id)
+				tm.recordFirstToken(ctx, id)
+				evID := id
+				evID.path = tc.eventPath
+				tm.recordStreamed(ctx, evID, "bot", "", true)
+				if unclosed, err := tm.popUnclosedAgentSpans(ctx, id); err != nil || len(unclosed) != 0 {
+					t.Fatalf("popUnclosedAgentSpans = (%v, %v), want no failure", unclosed, err)
+				}
+				tm.endInvocation(ctx, id)
+			}
+
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			if got := len(tm.completed); got > limit {
+				t.Errorf("completed runs = %d, want at most %d", got, limit)
+			}
+			for id, c := range tm.completed {
+				if c.late != nil {
+					t.Errorf("completed run %q kept late state for a stream that its caller stopped reading", id)
+				}
+			}
+		})
+	}
+}
+
+// TestTraceManager_PartialEventStreamsOnlyItsAuthorsCall verifies that a
+// partial event whose node path the context of the model callbacks lacks
+// marks only the model call of its author as streaming: the open call of
+// another agent still moves to the late state, so that a late
+// AfterModelCallback ends the call's own span.
+func TestTraceManager_PartialEventStreamsOnlyItsAuthorsCall(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	root := identity{invocationID: "two-calls", agentName: "root"}
+	streaming := identity{invocationID: "two-calls", agentName: "streaming"}
+	waiting := identity{invocationID: "two-calls", agentName: "waiting"}
+	tm.invocationSpan(ctx, root, nil)
+	tm.pushAgentSpan(ctx, root)
+	tm.pushAgentSpan(ctx, streaming)
+	tm.pushAgentSpan(ctx, waiting)
+	tm.pushLLMSpan(ctx, streaming)
+	start := tm.pushLLMSpan(ctx, waiting)
+	evID := streaming
+	evID.path = streaming.agentName
+	tm.recordStreamed(ctx, evID, streaming.agentName, "", true)
+	tm.endInvocation(ctx, root)
+
+	tm.mu.Lock()
+	c := tm.completed[root.invocationID]
+	tm.mu.Unlock()
+	if c == nil || c.late == nil {
+		t.Fatal("finished run kept no late state for the open call that did not stream")
+	}
+	c.late.mu.Lock()
+	kept := slices.Sorted(maps.Keys(c.late.llmSpans))
+	c.late.mu.Unlock()
+	if want := []string{llmKey(waiting)}; !slices.Equal(kept, want) {
+		t.Errorf("model calls kept for late callbacks = %q, want %q", kept, want)
+	}
+	if end := tm.popLLMSpan(ctx, waiting, true); end.spanID != start.spanID || end.latency == nil {
+		t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST with latency", end, start.spanID)
+	}
+}
+
+// TestTraceManager_CompletedRunsWithOpenLateCallsStayBounded verifies that
+// runs that end with calls still open stay within capacity, as their calls may
+// never end, while a run that waits for a late call is kept over ordinary
+// completions (up to half of capacity) and a run with a pending span
+// reservation is kept over runs waiting for late calls.
+func TestTraceManager_CompletedRunsWithOpenLateCallsStayBounded(t *testing.T) {
+	ctx := context.Background()
+	// endWithOpenTool runs id until its tool call starts and then ends it.
+	endWithOpenTool := func(tm *traceManager, id identity) rowSpan {
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		span := tm.pushToolSpan(ctx, id, toolKey(id, "call", "lookup"))
+		tm.endInvocation(ctx, id)
+		return span
+	}
+	completed := func(tm *traceManager, id identity) bool {
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		return tm.completed[id.invocationID] != nil
+	}
+
+	t.Run("open calls beyond capacity", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		limit := max(tm.maxTracked, 64)
+		var ids []identity
+		for i := range limit + 6 {
+			id := identity{invocationID: fmt.Sprintf("open-%d", i), agentName: "live"}
+			ids = append(ids, id)
+			endWithOpenTool(tm, id)
+		}
+		tm.mu.Lock()
+		got := len(tm.completed)
+		tm.mu.Unlock()
+		if got != limit {
+			t.Errorf("completed runs = %d, want %d", got, limit)
+		}
+		if completed(tm, ids[0]) || !completed(tm, ids[len(ids)-1]) {
+			t.Error("capacity pruning did not drop the least recently active run first")
+		}
+	})
+
+	t.Run("late call outlives ordinary completions", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		limit := max(tm.maxTracked, 64)
+		live := identity{invocationID: "live", agentName: "live"}
+		start := endWithOpenTool(tm, live)
+		for i := range limit + 6 {
+			other := identity{invocationID: fmt.Sprintf("finished-%d", i), agentName: "root"}
+			tm.invocationSpan(ctx, other, nil)
+			tm.endInvocation(ctx, other)
+		}
+		if end, _, _ := tm.popToolSpan(ctx, live, toolKey(live, "call", "lookup"), false); end.spanID != start.spanID || end.latency == nil {
+			t.Errorf("TOOL_COMPLETED place = %+v, want the span %q of TOOL_STARTING with latency", end, start.spanID)
+		}
+	})
+
+	t.Run("late state in which a callback is starting a span", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		limit := max(tm.maxTracked, 64)
+		id := identity{invocationID: "starting-late-span", agentName: "root"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.endInvocation(ctx, id)
+		ready, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		var clockCalls atomic.Int64
+		tm.now = func() time.Time {
+			// The second reading of the clock is the start of the late span,
+			// after its lookup reserved the late state.
+			if clockCalls.Add(1) == 2 {
+				close(ready)
+				<-release
+			}
+			return time.Unix(1000, 0)
+		}
+		started := make(chan rowSpan, 1)
+		go func() { started <- tm.pushToolSpan(ctx, id, "call") }()
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("late span did not reach its start after invocation lookup")
+		}
+		for i := range limit + 1 {
+			endWithOpenTool(tm, identity{invocationID: fmt.Sprintf("open-%d", i), agentName: "live"})
+		}
+		unblock()
+		span := <-started
+		if end, _, _ := tm.popToolSpan(ctx, id, "call", false); end.spanID != span.spanID || end.latency == nil {
+			t.Errorf("TOOL_COMPLETED place = %+v, want the span %q of TOOL_STARTING with latency", end, span.spanID)
+		}
+	})
+}
+
+// partialThenWaitLLM yields one partial streamed chunk and then waits until its
+// context is done, as a model that streams slowly does when its caller stops
+// reading, and returns without an error.
+type partialThenWaitLLM struct {
+	chunkText string
+}
+
+func (m *partialThenWaitLLM) Name() string { return "partial-then-wait-llm" }
+
+func (m *partialThenWaitLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !yield(&model.LLMResponse{
+			Content: textContent("model", m.chunkText),
+			Partial: true,
+		}, nil) {
+			return
+		}
+		<-ctx.Done()
+	}
+}
+
+// newTraceOnlyPlugin returns a plugin whose callbacks keep the trace in tm
+// and write no rows: every event type is filtered out, so it needs no
+// processor. It registers the callbacks that the production plugin registers.
+func newTraceOnlyPlugin(t *testing.T, tm *traceManager) *baseplugin.Plugin {
+	t.Helper()
+	config := applyDefaults(DefaultConfig())
+	config.DisableFlushOnRunEnd = true
+	ap := &analyticsPlugin{config: config, allowlist: newSet("NO_SUCH_EVENT"), traces: tm}
+	p, err := baseplugin.New(baseplugin.Config{
+		Name:                  "trace-only",
+		OnUserMessageCallback: ap.onUserMessage,
+		BeforeRunCallback:     ap.beforeRun,
+		AfterRunCallback:      ap.afterRun,
+		OnEventCallback:       ap.onEvent,
+		BeforeAgentCallback:   ap.beforeAgent,
+		AfterAgentCallback:    ap.afterAgent,
+		BeforeModelCallback:   ap.beforeModel,
+		AfterModelCallback:    ap.afterModel,
+		OnModelErrorCallback:  ap.onModelError,
+		BeforeToolCallback:    ap.beforeTool,
+		AfterToolCallback:     ap.afterTool,
+		OnToolErrorCallback:   ap.onToolError,
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	return p
+}
+
+// TestRunner_StoppedStreamsKeepCompletedRunsBounded verifies through
+// runner.Run that runs whose caller stops reading at a partial event while the
+// model is still streaming, which leave their model call open when
+// AfterRunCallback runs, leave no late state behind, so that the completed
+// runs stay within the trace manager's capacity.
+func TestRunner_StoppedStreamsKeepCompletedRunsBounded(t *testing.T) {
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	limit := max(tm.maxTracked, 64)
+	p := newTraceOnlyPlugin(t, tm)
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &partialThenWaitLLM{chunkText: "hello "},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	r := newTestRunner(t, bot, p)
+
+	for i := range limit + 6 {
+		var sawPartial bool
+		for ev, err := range r.Run(t.Context(), "u1", fmt.Sprintf("s%d", i), textContent("user", "hi"), agent.RunConfig{
+			StreamingMode: agent.StreamingModeSSE,
+		}) {
+			if err != nil {
+				t.Fatalf("run %d: r.Run error: %v", i, err)
+			}
+			if ev != nil && ev.Partial {
+				sawPartial = true
+				break
+			}
+		}
+		if !sawPartial {
+			t.Fatalf("run %d yielded no partial event", i)
+		}
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if got := len(tm.completed); got > limit {
+		t.Errorf("completed runs = %d, want at most %d", got, limit)
+	}
+	for id, c := range tm.completed {
+		if c.late != nil {
+			t.Errorf("completed run %q kept late state for a stream that its caller stopped reading", id)
+		}
+	}
+}
+
+// straddleEndOfRun runs callback on another goroutine, holds it once it has
+// looked up the invocation of id, ends the run, and then lets callback go on
+// while meanwhile, if any, runs on the test goroutine: a callback reads the
+// clock in lookupInvocation and then once more before it locks the trace that
+// it found.
+func straddleEndOfRun(t *testing.T, tm *traceManager, id identity, callback func(), meanwhile ...func()) {
+	t.Helper()
+	ready, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var clockCalls atomic.Int64
+	tm.now = func() time.Time {
+		if clockCalls.Add(1) == 2 {
+			close(ready)
+			<-release
+		}
+		return time.Now()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		callback()
+	}()
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("callback did not look up its invocation")
+	}
+	tm.endInvocation(context.Background(), id)
+	unblock()
+	for _, f := range meanwhile {
+		f()
+	}
+	<-done
+}
+
+// lateOpenCalls returns the number of model and tool calls that the late
+// state of the completed run id holds open, and whether it has open spans.
+func lateOpenCalls(t *testing.T, tm *traceManager, id identity) (open int, hasOpenSpans bool) {
+	t.Helper()
+	tm.mu.Lock()
+	c := tm.completed[id.invocationID]
+	var late *invocationTrace
+	if c != nil {
+		late = c.late
+	}
+	tm.mu.Unlock()
+	if c == nil {
+		t.Fatalf("run %q is not completed", id.invocationID)
+	}
+	if late == nil {
+		return 0, false
+	}
+	hasOpenSpans = late.hasOpenLateSpans()
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	return len(late.llmSpans) + len(late.toolSpans), hasOpenSpans
+}
+
+// TestTraceManager_CallbacksAcrossEndOfRun verifies that a model or tool
+// callback that looked the invocation up before AfterRun and acts after
+// AfterRun moved the run's calls to the late state acts on the late state,
+// where the callbacks that follow look for the call: a call that starts or
+// ends leaves no open call behind that would keep the completed run from
+// being pruned, a call that an error callback ended is found by the callback
+// after it, so that AfterToolCallback writes no second TOOL_ERROR row (it
+// writes one only if closedByError is false) and AfterModelCallback reports
+// no second latency, and the first token of a call is recorded under the lock
+// of the late state, where a late AfterModelCallback may end the call at the
+// same time.
+func TestTraceManager_CallbacksAcrossEndOfRun(t *testing.T) {
+	ctx := context.Background()
+	// start runs id with an agent span open.
+	start := func(tm *traceManager, id identity) {
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+	}
+
+	t.Run("tool call ends", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.maxTracked = 1
+		id := identity{invocationID: "straddle", agentName: "live"}
+		key := toolKey(id, "call", "lookup")
+		start(tm, id)
+		begin := tm.pushToolSpan(ctx, id, key)
+		var end rowSpan
+		straddleEndOfRun(t, tm, id, func() { end, _, _ = tm.popToolSpan(ctx, id, key, false) })
+		if end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("TOOL_COMPLETED place = %+v, want the span %q of TOOL_STARTING with latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+		// Ordinary completions beyond capacity prune the run first, as it
+		// waits for no call.
+		for i := range max(tm.maxTracked, 64) {
+			other := identity{invocationID: fmt.Sprintf("finished-%d", i), agentName: "root"}
+			tm.invocationSpan(ctx, other, nil)
+			tm.endInvocation(ctx, other)
+		}
+		tm.mu.Lock()
+		_, kept := tm.completed[id.invocationID]
+		tm.mu.Unlock()
+		if kept {
+			t.Error("capacity pruning kept the run whose call ended across AfterRun over ordinary completions")
+		}
+	})
+
+	t.Run("tool call fails, then AfterToolCallback", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		key := toolKey(id, "call", "lookup")
+		start(tm, id)
+		begin := tm.pushToolSpan(ctx, id, key)
+		var failed rowSpan
+		straddleEndOfRun(t, tm, id, func() { failed, _, _ = tm.popToolSpan(ctx, id, key, true) })
+		if failed.spanID != begin.spanID || failed.latency == nil {
+			t.Errorf("TOOL_ERROR place = %+v, want the span %q of TOOL_STARTING with latency", failed, begin.spanID)
+		}
+		if _, _, closedByError := tm.popToolSpan(ctx, id, key, false); !closedByError {
+			t.Error("AfterToolCallback did not find the call that OnToolErrorCallback ended, so it writes a second TOOL_ERROR row")
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+	})
+
+	t.Run("call of an unknown tool fails, then AfterToolCallback", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		key := toolKey(id, "call", "missing")
+		start(tm, id)
+		var failed rowSpan
+		straddleEndOfRun(t, tm, id, func() { failed, _, _ = tm.popToolSpan(ctx, id, key, true) })
+		if completed, _, closedByError := tm.popToolSpan(ctx, id, key, false); !closedByError || completed.spanID != failed.spanID {
+			t.Errorf("AfterToolCallback = (%+v, %v), want the span %q of TOOL_ERROR, closed by the error", completed, closedByError, failed.spanID)
+		}
+	})
+
+	t.Run("tool call starts, then ends", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		key := toolKey(id, "call", "lookup")
+		start(tm, id)
+		var begin rowSpan
+		straddleEndOfRun(t, tm, id, func() { begin = tm.pushToolSpan(ctx, id, key) })
+		if end, _, _ := tm.popToolSpan(ctx, id, key, false); end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("TOOL_COMPLETED place = %+v, want the span %q of TOOL_STARTING with latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+	})
+
+	t.Run("model call ends", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		start(tm, id)
+		begin := tm.pushLLMSpan(ctx, id)
+		var end rowSpan
+		straddleEndOfRun(t, tm, id, func() { end = tm.popLLMSpan(ctx, id, true) })
+		if end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST with latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+	})
+
+	t.Run("model call starts, then ends", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		start(tm, id)
+		var begin rowSpan
+		straddleEndOfRun(t, tm, id, func() { begin = tm.pushLLMSpan(ctx, id) })
+		if end := tm.popLLMSpan(ctx, id, true); end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST with latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+	})
+
+	t.Run("agent starts, then ends", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		child := identity{invocationID: "straddle", agentName: "child"}
+		start(tm, id)
+		var begin rowSpan
+		straddleEndOfRun(t, tm, id, func() { begin, _ = tm.pushAgentSpan(ctx, child) })
+		if end := tm.popAgentSpan(ctx, child); end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("AGENT_COMPLETED place = %+v, want the span %q of AGENT_STARTING with latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late state after the agent ended: %d open calls (open spans %v), want none", open, hasOpenSpans)
+		}
+	})
+
+	t.Run("first token arrives while the call ends", func(t *testing.T) {
+		// Use a fake clock so start (t0 = 0ms), first-token arrival
+		// (t1 = 10ms), run completion (t2 = 50ms) and call end
+		// (t3 = 60ms) happen at distinct deterministic timestamps.
+		// Without the lockLive re-lookup in recordFirstToken, a first
+		// token that straddles endInvocation finds no record on the
+		// cleared finished trace and loses time_to_first_token_ms
+		// (it falls back to total_ms = 60). With the re-lookup, the
+		// token is recorded on the late state while preserving the
+		// captured t1 = 10ms arrival timestamp rather than re-reading
+		// the clock at t2 = 50ms, so time_to_first_token_ms == 10 and
+		// total_ms == 60.
+		tm := newTraceManager()
+		base := time.Unix(1000, 0)
+		t0 := base
+		t1 := base.Add(10 * time.Millisecond) // first token
+		t2 := base.Add(50 * time.Millisecond) // endInvocation
+		t3 := base.Add(60 * time.Millisecond) // popLLMSpan
+		var mu sync.Mutex
+		clock := t0
+		tm.now = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return clock
+		}
+		id := identity{invocationID: "straddle", agentName: "live"}
+		start(tm, id)
+		begin := tm.pushLLMSpan(ctx, id)
+
+		// Straddle recordFirstToken across endInvocation: block on the
+		// second tm.now call (the one in recordFirstToken after the
+		// invocation lookup), end the run, then release.
+		ready, release := make(chan struct{}), make(chan struct{})
+		var once sync.Once
+		unblock := func() { once.Do(func() { close(release) }) }
+		t.Cleanup(unblock)
+		var clockCalls atomic.Int64
+		realNow := tm.now
+		tm.now = func() time.Time {
+			if clockCalls.Add(1) == 2 {
+				mu.Lock()
+				clock = t1 // first token time
+				mu.Unlock()
+				close(ready)
+				<-release
+				return t1
+			}
+			return realNow()
+		}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tm.recordFirstToken(ctx, id)
+		}()
+		select {
+		case <-ready:
+		case <-time.After(5 * time.Second):
+			t.Fatal("recordFirstToken did not read clock after looking up its invocation")
+		}
+		mu.Lock()
+		clock = t2 // endInvocation time
+		mu.Unlock()
+		tm.endInvocation(ctx, id)
+		unblock()
+		wg.Wait()
+
+		mu.Lock()
+		clock = t3 // popLLMSpan time
+		mu.Unlock()
+		// Restore the plain clock for popLLMSpan.
+		tm.now = func() time.Time {
+			mu.Lock()
+			defer mu.Unlock()
+			return clock
+		}
+		end := tm.popLLMSpan(ctx, id, true)
+		if end.spanID != begin.spanID || end.latency == nil {
+			t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST with latency", end, begin.spanID)
+		}
+		if end.latency["time_to_first_token_ms"] != int64(10) || end.latency["total_ms"] != int64(60) {
+			t.Errorf("time_to_first_token_ms = %v, total_ms = %v, want 10 and 60", end.latency["time_to_first_token_ms"], end.latency["total_ms"])
+		}
+	})
+
+	t.Run("model call fails, then AfterModelCallback", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "straddle", agentName: "live"}
+		start(tm, id)
+		begin := tm.pushLLMSpan(ctx, id)
+		var failed rowSpan
+		straddleEndOfRun(t, tm, id, func() { failed = tm.popLLMSpan(ctx, id, false) })
+		if failed.spanID != begin.spanID || failed.latency == nil {
+			t.Errorf("LLM_ERROR place = %+v, want the span %q of LLM_REQUEST with latency", failed, begin.spanID)
+		}
+		// A plugin recovered from the error, so ADK runs AfterModelCallback.
+		if end := tm.popLLMSpan(ctx, id, true); end.spanID != begin.spanID || end.latency != nil {
+			t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST without latency", end, begin.spanID)
+		}
+		if open, hasOpenSpans := lateOpenCalls(t, tm, id); open != 0 || hasOpenSpans {
+			t.Errorf("late open calls after the call ended = %d (open spans %v), want 0", open, hasOpenSpans)
+		}
+	})
+}
+
+// TestTraceManager_StreamedEventRacingEndOfRunSharesNoCall verifies, under
+// -race, that a recordStreamed that looked the run up before AfterRun and
+// takes its lock after it does not write to a model call that moved to the
+// late state, which callbacks after AfterRun read under the late state's own
+// lock.
+func TestTraceManager_StreamedEventRacingEndOfRunSharesNoCall(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	for i := range 200 {
+		id := identity{invocationID: fmt.Sprintf("streamed-race-%d", i), agentName: "live"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		tm.pushLLMSpan(ctx, id)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			tm.recordStreamed(ctx, id, id.agentName, id.branch, true)
+		})
+		wg.Go(func() {
+			<-start
+			tm.endInvocation(ctx, id)
+			tm.mu.Lock()
+			late := tm.completed[id.invocationID].late
+			tm.mu.Unlock()
+			if late == nil {
+				// recordStreamed ran first, so the streaming call did not move.
+				return
+			}
+			late.mu.Lock()
+			late.openCallOwnersLocked(nil)
+			late.mu.Unlock()
+			tm.popLLMSpan(ctx, id, true)
+		})
+		close(start)
+		wg.Wait()
+	}
+}
+
+// TestTraceManager_LateStateKeepsNoCallbackContext verifies that the calls
+// that stay behind when a run ends keep no context of the run's callbacks:
+// not the context of the callback that started a call, not the
+// InvocationContext of an activation or a retired cause, which only the
+// records of activations get but which a call drops all the same, and not the
+// span that it started under, whose record keeps the context of its own
+// callback. That holds for the calls that are open at AfterRun and move to the
+// late state, for those that an error callback ended, whether they move along
+// or wait in the completed entry for a callback after AfterRun, and for the
+// span that popToolSpan makes up for a call whose start it did not see.
+func TestTraceManager_LateStateKeepsNoCallbackContext(t *testing.T) {
+	ctx := context.Background()
+	// holdsNoContext fails the test for each call in calls that keeps a
+	// context of its callback, and returns the number of calls, so that a test
+	// can tell clean calls from none.
+	holdsNoContext := func(t *testing.T, where string, calls map[string]*spanRecord) int {
+		t.Helper()
+		for key, rec := range calls {
+			if rec.canceled != nil {
+				t.Errorf("%s call %q keeps the context of its callback", where, key)
+			}
+			if rec.ended != nil || rec.activation != nil {
+				t.Errorf("%s call %q keeps the InvocationContext of an activation", where, key)
+			}
+			if rec.parent != nil {
+				t.Errorf("%s call %q keeps the span that it started under", where, key)
+			}
+			if len(rec.retiredCauses) > 0 || rec.openFailureCause() != nil {
+				t.Errorf("%s call %q keeps a failure cause (%v)", where, key, rec.openFailureCause())
+			}
+		}
+		return len(calls)
+	}
+
+	t.Run("late state", func(t *testing.T) {
+		tm := newTraceManager()
+		live := identity{invocationID: "late-context", agentName: "live"}
+		failed := identity{invocationID: "late-context", agentName: "failed"}
+		tm.invocationSpan(ctx, live, nil)
+		inv := tm.invocation(ctx, live)
+		// withActivation gives the record of a call what the record of an
+		// activation keeps of its run's InvocationContext, so that the test
+		// sees the call drop it too.
+		withActivation := func(call func() *spanRecord) {
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			rec := call()
+			rec.ended = func() bool { return false }
+			rec.activation = &live
+		}
+		tm.pushAgentSpan(ctx, live)
+		tm.pushLLMSpan(ctx, live)
+		tm.pushToolSpan(ctx, live, toolKey(live, "open", "lookup"))
+		tm.pushToolSpan(ctx, live, toolKey(live, "failed", "lookup"))
+		withActivation(func() *spanRecord { return inv.toolSpans[toolKey(live, "failed", "lookup")] })
+		tm.popToolSpan(ctx, live, toolKey(live, "failed", "lookup"), true)
+		tm.pushAgentSpan(ctx, failed)
+		tm.pushLLMSpan(ctx, failed)
+		withActivation(func() *spanRecord { return inv.llmSpans[llmKey(failed)] })
+		tm.popLLMSpan(ctx, failed, false)
+		withActivation(func() *spanRecord { return inv.llmSpans[llmKey(live)] })
+		withActivation(func() *spanRecord { return inv.toolSpans[toolKey(live, "open", "lookup")] })
+		inv.mu.Lock()
+		inv.toolSpans[toolKey(live, "open", "lookup")].retiredCauses = []retiredCause{{err: errors.New("retired branch failed"), name: "branch"}}
+		inv.mu.Unlock()
+		tm.endInvocation(ctx, live)
+
+		tm.mu.Lock()
+		late := tm.completed[live.invocationID].late
+		tm.mu.Unlock()
+		if late == nil {
+			t.Fatal("the run's open calls did not move to the late state")
+		}
+		late.mu.Lock()
+		defer late.mu.Unlock()
+		got := holdsNoContext(t, "open model", late.llmSpans) +
+			holdsNoContext(t, "open tool", late.toolSpans) +
+			holdsNoContext(t, "ended model", late.completedModels) +
+			holdsNoContext(t, "ended tool", late.completedTools)
+		if got != 4 {
+			t.Errorf("late calls = %d, want 4", got)
+		}
+	})
+
+	t.Run("ended calls waiting in the completed entry", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "ended-context", agentName: "bot"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		tm.pushToolSpan(ctx, id, toolKey(id, "call", "lookup"))
+		tm.popToolSpan(ctx, id, toolKey(id, "call", "lookup"), true)
+		tm.pushLLMSpan(ctx, id)
+		tm.popLLMSpan(ctx, id, false)
+		tm.endInvocation(ctx, id)
+
+		tm.mu.Lock()
+		defer tm.mu.Unlock()
+		completed := tm.completed[id.invocationID]
+		if completed == nil || completed.late != nil {
+			t.Fatal("a run that left only ended calls behind did not keep them in its completed entry, without late state")
+		}
+		got := holdsNoContext(t, "ended model", completed.endedModels) +
+			holdsNoContext(t, "ended tool", completed.endedTools)
+		if got != 2 {
+			t.Errorf("ended calls = %d, want 2", got)
+		}
+	})
+
+	t.Run("span made up for a call that was not seen to start", func(t *testing.T) {
+		tm := newTraceManager()
+		id := identity{invocationID: "made-up-context", agentName: "bot"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		// ADK runs OnToolErrorCallback alone for a call of a tool that does
+		// not exist.
+		tm.popToolSpan(ctx, id, toolKey(id, "call", "missing"), true)
+
+		inv := tm.invocation(ctx, id)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		if got := holdsNoContext(t, "made-up", inv.completedTools); got != 1 {
+			t.Errorf("made-up calls = %d, want 1", got)
+		}
+	})
+}
+
+// TestTraceManager_ToolEndBeforeEndOfRunReturnsPurgedActivations verifies
+// that an OnToolErrorCallback that ends a tool call before AfterRun gets the
+// failed sub-agent activation that the call ran, purged from agentStack,
+// straight from popToolSpan, so that the plugin writes its AGENT_ERROR row
+// then. AfterRun then keeps the ended call in completed.endedTools, without
+// late state, and an AfterToolCallback of the call that comes after AfterRun
+// still finds it, with the span of its TOOL_ERROR row, and gets nothing purged
+// again, so no second TOOL_ERROR or AGENT_ERROR row is written.
+func TestTraceManager_ToolEndBeforeEndOfRunReturnsPurgedActivations(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	coord := identity{invocationID: "purged-late", agentName: "coordinator"}
+	helper := identity{invocationID: "purged-late", agentName: "helper", branch: "helper@1", path: "/helper@1"}
+	key := toolKey(coord, "call", "helper")
+	tm.invocationSpan(ctx, coord, nil)
+	tm.pushAgentSpan(ctx, coord)
+	tm.pushToolSpan(ctx, coord, key)
+	tm.pushAgentSpan(ctx, helper)
+	toolErr, purged, closedByError := tm.popToolSpan(ctx, coord, key, true)
+	if closedByError {
+		t.Fatal("OnToolErrorCallback reported closedByError = true")
+	}
+	if len(purged) != 1 || purged[0].agentName != "helper" || purged[0].err == nil {
+		t.Errorf("activations purged on popToolSpan = %+v, want the helper that the tool call ran, with an error", purged)
+	}
+	tm.endInvocation(ctx, coord)
+
+	tm.mu.Lock()
+	c := tm.completed[coord.invocationID]
+	tm.mu.Unlock()
+	if c == nil || c.late != nil || len(c.endedTools) != 1 {
+		t.Fatalf("completed entry = %+v, want nil late state with 1 lightweight endedTools entry", c)
+	}
+	end, again, closedByError := tm.popToolSpan(ctx, coord, key, false)
+	if !closedByError || end.spanID != toolErr.spanID || len(again) != 0 {
+		t.Errorf("late AfterToolCallback = (%+v, %+v, %v), want span %q with no purged entries and closedByError = true", end, again, closedByError, toolErr.spanID)
+	}
+}
+
+// TestTraceManager_RunsWithOnlyEndedCallsKeepNoLateState verifies that runs
+// that end with no call open, but with calls that an error callback ended, as
+// every run does whose model error no plugin recovered from, keep no late
+// state, and that a callback after AfterRun still finds such a call: the
+// AfterModelCallback of a plugin that recovered from the error late, or the
+// AfterToolCallback that ADK runs after OnToolErrorCallback.
+func TestTraceManager_RunsWithOnlyEndedCallsKeepNoLateState(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const runs = 2000
+	var last identity
+	var lastBegin, lastToolError rowSpan
+	var lastTool string
+	for i := range runs {
+		id := identity{invocationID: fmt.Sprintf("failed-%d", i), agentName: "bot"}
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		tool := toolKey(id, "call", "lookup")
+		tm.pushToolSpan(ctx, id, tool)
+		toolError, _, _ := tm.popToolSpan(ctx, id, tool, true)
+		begin := tm.pushLLMSpan(ctx, id)
+		tm.recordError(ctx, id, llmKey(id), errors.New("model unavailable"))
+		tm.popLLMSpan(ctx, id, false)
+		_, _ = tm.popUnclosedAgentSpans(ctx, id)
+		tm.endInvocation(ctx, id)
+		last, lastBegin, lastTool, lastToolError = id, begin, tool, toolError
+	}
+
+	tm.mu.Lock()
+	var withLateState int
+	for _, c := range tm.completed {
+		if c.late != nil {
+			withLateState++
+		}
+	}
+	tm.mu.Unlock()
+	if withLateState != 0 {
+		t.Errorf("completed runs with late state = %d of %d, want 0", withLateState, runs)
+	}
+	// A plugin that recovered from the error late makes ADK run
+	// AfterModelCallback after AfterRun.
+	if end := tm.popLLMSpan(ctx, last, true); end.spanID != lastBegin.spanID || end.latency != nil {
+		t.Errorf("LLM_RESPONSE place = %+v, want the span %q of LLM_REQUEST without latency", end, lastBegin.spanID)
+	}
+	if end, _, closedByError := tm.popToolSpan(ctx, last, lastTool, false); !closedByError || end.spanID != lastToolError.spanID {
+		t.Errorf("AfterToolCallback = (%+v, %v), want the span %q of TOOL_ERROR, closed by the error", end, closedByError, lastToolError.spanID)
+	}
+}
+
+// TestRunner_FailedModelRunsKeepNoLateState verifies through runner.Run that
+// runs whose model call fails, which ADK ends without AfterModelCallback when
+// no plugin recovers from the error, keep no late state.
+func TestRunner_FailedModelRunsKeepNoLateState(t *testing.T) {
+	tm := newTraceManager()
+	p := newTraceOnlyPlugin(t, tm)
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &failingLLM{err: errors.New("model unavailable")},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	r := newTestRunner(t, bot, p)
+	const runs = 20
+	for i := range runs {
+		var sawErr bool
+		for _, err := range r.Run(t.Context(), "u1", fmt.Sprintf("s%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+			sawErr = sawErr || err != nil
+		}
+		if !sawErr {
+			t.Fatalf("run %d: r.Run yielded no error", i)
+		}
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if got := len(tm.completed); got != runs {
+		t.Fatalf("completed runs = %d, want %d", got, runs)
+	}
+	for id, c := range tm.completed {
+		if c.late != nil {
+			t.Errorf("completed run %q keeps late state", id)
+		}
+	}
+}
+
+// TestRunner_ContentEventKeepsInFlightSubAgentModelCall verifies through
+// runner.Run that a custom agent's content event, written while the model
+// call of its sub-agent is in flight, leaves the call open: the call's
+// LLM_REQUEST and LLM_RESPONSE rows share a span, and the response carries
+// the call's latency.
+func TestRunner_ContentEventKeepsInFlightSubAgentModelCall(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	gate := &blockingLLM{entered: make(chan struct{}), release: make(chan struct{})}
+	sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: gate})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{sub},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				// sub runs on a goroutine of its own, and each of its events
+				// is acknowledged once yielded, as a parallel agent does.
+				type result struct {
+					ev  *session.Event
+					err error
+					ack chan struct{}
+				}
+				results := make(chan result)
+				go func() {
+					defer close(results)
+					for ev, err := range sub.Run(ctx) {
+						ack := make(chan struct{})
+						results <- result{ev: ev, err: err, ack: ack}
+						<-ack
+					}
+				}()
+				<-gate.entered
+				progress := session.NewEvent(ctx, ctx.InvocationID())
+				progress.Author = "root"
+				progress.Branch = ctx.Branch()
+				progress.LLMResponse = model.LLMResponse{Content: textContent("model", "working on it")}
+				reading := yield(progress, nil)
+				close(gate.release)
+				for res := range results {
+					if reading {
+						reading = yield(res.ev, res.err)
+					}
+					close(res.ack)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	r := newTestRunner(t, root, p)
+	for _, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run error: %v", err)
+		}
+	}
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	requireInvocationCompletedOK(t, rows)
+	request := placeOf(onlyRowOfType(t, rows, EventLLMRequest))
+	response := onlyRowOfType(t, rows, EventLLMResponse)
+	if got := placeOf(response); got != request {
+		t.Errorf("LLM_RESPONSE place = %+v, want LLM_REQUEST place %+v", got, request)
+	}
+	mustLatency(t, response)
+}
+
+// TestOnEvent_FinishTaskOfAgentWithoutSpanWritesNoAgentCompleted verifies
+// that a successful finish_task function response of an author that has no
+// open agent span writes no AGENT_COMPLETED row.
+func TestOnEvent_FinishTaskOfAgentWithoutSpanWritesNoAgentCompleted(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(mCtx))
+	ev := session.NewEvent(t.Context(), mCtx.invocationID)
+	ev.Author = "unstarted_helper"
+	ev.Content = &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			Name:     "finish_task",
+			Response: map[string]any{"result": "Task completed."},
+		}}},
+	}
+	errs.add(p.OnEventCallback()(mCtx, ev))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventAgentCompleted)); n != 0 {
+		t.Errorf("got %d AGENT_COMPLETED rows, want 0; event types: %v", n, eventTypes(rows))
+	}
+}
+
+// TestTraceManager_LiveToLatePendingReservationSurvivesCompletionPressure
+// verifies that a pushToolSpan or pushLLMSpan callback that reserved pendingSpans
+// on a live invocation before AfterRun is not evicted from tm.completed by
+// completion pressure (either ordinary completions or completions leaving open
+// late calls) before lockLive re-enters lookupInvocation on the late state.
+func TestTraceManager_LiveToLatePendingReservationSurvivesCompletionPressure(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name     string
+		stuck    bool
+		start    func(tm *traceManager, id identity) rowSpan
+		complete func(tm *traceManager, id identity) rowSpan
+	}{
+		{
+			name:  "tool_call_ordinary_pressure",
+			stuck: false,
+			start: func(tm *traceManager, id identity) rowSpan {
+				return tm.pushToolSpan(ctx, id, toolKey(id, "call-1", "lookup"))
+			},
+			complete: func(tm *traceManager, id identity) rowSpan {
+				end, _, _ := tm.popToolSpan(ctx, id, toolKey(id, "call-1", "lookup"), false)
+				return end
+			},
+		},
+		{
+			name:  "tool_call_open_late_pressure",
+			stuck: true,
+			start: func(tm *traceManager, id identity) rowSpan {
+				return tm.pushToolSpan(ctx, id, toolKey(id, "call-1", "lookup"))
+			},
+			complete: func(tm *traceManager, id identity) rowSpan {
+				end, _, _ := tm.popToolSpan(ctx, id, toolKey(id, "call-1", "lookup"), false)
+				return end
+			},
+		},
+		{
+			name:  "model_call_ordinary_pressure",
+			stuck: false,
+			start: func(tm *traceManager, id identity) rowSpan {
+				return tm.pushLLMSpan(ctx, id)
+			},
+			complete: func(tm *traceManager, id identity) rowSpan {
+				return tm.popLLMSpan(ctx, id, true)
+			},
+		},
+		{
+			name:  "model_call_open_late_pressure",
+			stuck: true,
+			start: func(tm *traceManager, id identity) rowSpan {
+				return tm.pushLLMSpan(ctx, id)
+			},
+			complete: func(tm *traceManager, id identity) rowSpan {
+				return tm.popLLMSpan(ctx, id, true)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.maxTracked = 1
+			handoffID := identity{invocationID: "inv-handoff", agentName: "live"}
+			invStart := tm.invocationSpan(ctx, handoffID, nil)
+
+			ready, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+
+			var clockCalls atomic.Int64
+			tm.now = func() time.Time {
+				if clockCalls.Add(1) == 2 {
+					close(ready)
+					<-release
+				}
+				return time.Now()
+			}
+
+			var begin rowSpan
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				begin = tc.start(tm, handoffID)
+			}()
+
+			select {
+			case <-ready:
+			case <-time.After(5 * time.Second):
+				t.Fatal("callback did not pause after lookupInvocation")
+			}
+
+			// Move inv-handoff to tm.completed while its live pendingSpans == 1,
+			// then flood tm.completed past max(maxTracked, 64) = 64 before the
+			// paused callback reaches lockLive().
+			tm.endInvocation(ctx, handoffID)
+			for i := range 70 {
+				other := identity{invocationID: fmt.Sprintf("other-%d", i), agentName: "root"}
+				tm.invocationSpan(ctx, other, nil)
+				if tc.stuck {
+					tm.pushToolSpan(ctx, other, toolKey(other, "stuck", "bg"))
+				}
+				tm.endInvocation(ctx, other)
+			}
+
+			tm.mu.Lock()
+			_, stillActive := tm.invocations[handoffID.invocationID]
+			completed := tm.completed[handoffID.invocationID]
+			tm.mu.Unlock()
+			if stillActive {
+				t.Fatal("inv-handoff remained in tm.invocations after endInvocation")
+			}
+			if completed == nil {
+				t.Fatal("inv-handoff was pruned from tm.completed while live pendingSpans was held")
+			}
+
+			unblock()
+			<-done
+
+			if begin.traceID != invStart.traceID || begin.parentSpanID != invStart.spanID {
+				t.Fatalf("start span = %+v, want traceID=%q parentSpanID=%q", begin, invStart.traceID, invStart.spanID)
+			}
+
+			end := tc.complete(tm, handoffID)
+			if end.spanID != begin.spanID || end.latency == nil {
+				t.Fatalf("completion span = %+v, want spanID=%q with non-nil latency", end, begin.spanID)
+			}
+
+			// Once both livePending and late open calls are 0, subsequent
+			// completions prune inv-handoff normally.
+			for i := range 65 {
+				later := identity{invocationID: fmt.Sprintf("later-%d", i), agentName: "root"}
+				tm.invocationSpan(ctx, later, nil)
+				tm.endInvocation(ctx, later)
+			}
+			tm.mu.Lock()
+			_, kept := tm.completed[handoffID.invocationID]
+			tm.mu.Unlock()
+			if kept {
+				t.Error("inv-handoff remained in tm.completed after its late call finished and capacity rolled over")
+			}
+		})
+	}
+}
+
+// TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent verifies that
+// popTaskAgentSpan returns false without touching the parent's
+// lastActivity when the agent is not in task mode. This guards the fix that
+// moved the taskMode check before touchAgentActivityLocked: a rejected
+// non-task finish_task must not count as a completed descendant.
+func TestTraceManager_PopTaskAgentSpanRejectsNonTaskAgent(t *testing.T) {
+	ctx := context.Background()
+	const invID = "inv-task-reject"
+	parent := identity{invocationID: invID, agentName: "parent", path: ""}
+	child := identity{invocationID: invID, agentName: "child", path: "parent.child@1"}
+
+	clock := time.Unix(1000, 0)
+	t0 := clock
+	t1 := t0.Add(100 * time.Millisecond)
+	t2 := t0.Add(200 * time.Millisecond)
+
+	tm := newTraceManager()
+	tm.now = func() time.Time { return clock }
+	tm.invocationSpan(ctx, parent, nil)
+
+	// Push parent and child. Synthetic ctx (context.Background) does not
+	// implement WithICDelta (see runningAgentChildren), so pushAgentSpan leaves
+	// taskMode=false on child.
+	clock = t0
+	tm.pushAgentSpan(ctx, parent)
+	tm.pushAgentSpan(ctx, child)
+
+	// Record parent agent's lastActivity at t1 via an LLM span.
+	clock = t1
+	tm.pushLLMSpan(ctx, parent)
+	tm.popLLMSpan(ctx, parent, true)
+
+	// Find the parent agent record (agentStack[1], not [0] which is
+	// the invocation root).
+	inv := tm.invocations[invID]
+	inv.mu.Lock()
+	parentRec := inv.agentStack[1]
+	wantActivity := t1
+	if parentRec.lastActivity != wantActivity {
+		inv.mu.Unlock()
+		t.Fatalf("parent.lastActivity = %v, want %v after LLM pop", parentRec.lastActivity, wantActivity)
+	}
+	inv.mu.Unlock()
+
+	// Call popTaskAgentSpan on the non-task child at t2. It should return
+	// false and NOT advance parent.lastActivity.
+	clock = t2
+	_, ok := tm.popTaskAgentSpan(ctx, child, nil)
+	if ok {
+		t.Fatal("popTaskAgentSpan returned ok=true for non-task child, want false")
+	}
+
+	// parent.lastActivity must still be t1, not t2.
+	inv.mu.Lock()
+	if parentRec.lastActivity != wantActivity {
+		inv.mu.Unlock()
+		t.Fatalf("parent.lastActivity = %v after rejected popTaskAgentSpan, want %v (must not advance)", parentRec.lastActivity, wantActivity)
+	}
+	inv.mu.Unlock()
+}
+
+// TestTraceManager_StraddlingPushDoesNotRetainInvocationTrace runs a callback
+// that looks the run up and reserves a span on it before AfterRun, and acts on
+// the late state after AfterRun (see lockLive), as pushToolSpan does when it
+// straddles the end of the run. Once the callback releases its reservation,
+// completedTrace.livePending is a standalone counter at zero, and neither the
+// finished run's invocationTrace nor the context of its root callback stays
+// reachable: both are garbage collected without any further lookup.
+func TestTraceManager_StraddlingPushDoesNotRetainInvocationTrace(t *testing.T) {
+	type payload struct{ _ [64]byte }
+	type payloadKey struct{}
+	ctx := context.Background()
+	tm := newTraceManager()
+	id := identity{invocationID: "inv-straddle", agentName: "root"}
+	rootPayload := func() weak.Pointer[payload] {
+		p := &payload{}
+		tm.invocationSpan(context.WithValue(ctx, payloadKey{}, p), id, nil)
+		return weak.Make(p)
+	}()
+	var completed *completedTrace
+	liveInv := func() weak.Pointer[invocationTrace] {
+		inv := tm.lookupInvocation(ctx, id, false, true)
+		tm.endInvocation(ctx, id)
+		tm.mu.Lock()
+		completed = tm.completed[id.invocationID]
+		tm.mu.Unlock()
+		if completed == nil {
+			t.Fatal("completed trace not found after endInvocation")
+		}
+		if completed.livePending == nil || completed.livePending.Load() != 1 {
+			t.Fatal("completed.livePending does not hold the straddling callback's reservation")
+		}
+		if inv.lockLive() {
+			inv.mu.Unlock()
+			t.Fatal("lockLive reported the run as live after endInvocation")
+		}
+		tm.pushToolSpan(ctx, id, "straddle-call")
+		inv.pendingSpans.Add(-1)
+		return weak.Make(inv)
+	}()
+	if completed.livePending != nil && completed.livePending.Load() != 0 {
+		t.Fatalf("completed.livePending = %d after the straddling callback released its reservation, want 0", completed.livePending.Load())
+	}
+	runtime.GC()
+	if liveInv.Value() != nil {
+		t.Error("the finished run's invocationTrace is still reachable after GC")
+	}
+	if rootPayload.Value() != nil {
+		t.Error("the context of the run's root callback is still reachable after GC")
+	}
+	tm.popToolSpan(ctx, id, "straddle-call", false)
+}
+
+// TestRepro_FailedModelCallsPinCompletedCache verifies through runner.Run that
+// model calls which ADK ends without any model callback, because an agent's
+// BeforeModelCallback returned an error after this plugin's own callback
+// started the call, hold no completed-run slot, and that an ordinary run
+// that completes after a capacity's worth of them keeps its identity.
+func TestRepro_FailedModelCallsPinCompletedCache(t *testing.T) {
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	limit := max(tm.maxTracked, 64)
+	config := applyDefaults(DefaultConfig())
+	config.DisableFlushOnRunEnd = true
+	ap := &analyticsPlugin{config: config, allowlist: newSet("NO_SUCH_EVENT"), traces: tm}
+	p, err := baseplugin.New(baseplugin.Config{
+		Name:                  "trace-bound",
+		OnUserMessageCallback: ap.onUserMessage,
+		BeforeRunCallback:     ap.beforeRun,
+		AfterRunCallback:      ap.afterRun,
+		OnEventCallback:       ap.onEvent,
+		BeforeAgentCallback:   ap.beforeAgent,
+		AfterAgentCallback:    ap.afterAgent,
+		BeforeModelCallback:   ap.beforeModel,
+		AfterModelCallback:    ap.afterModel,
+		OnModelErrorCallback:  ap.onModelError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	guarded, err := llmagent.New(llmagent.Config{
+		Name:  "guarded",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "never")}}},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return nil, errors.New("blocked by guardrail")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rg := newTestRunner(t, guarded, p)
+	for i := range limit + 6 {
+		for range rg.Run(t.Context(), "u1", fmt.Sprintf("g%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+		}
+	}
+	tm.mu.Lock()
+	pinned := 0
+	for _, c := range tm.completed {
+		if c.late != nil && c.late.hasOpenCalls() {
+			pinned++
+		}
+	}
+	tm.mu.Unlock()
+
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invID string
+	for ev, err := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "ordinary", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev != nil && invID == "" {
+			invID = ev.InvocationID
+		}
+	}
+	tm.mu.Lock()
+	kept := tm.completed[invID] != nil
+	tm.mu.Unlock()
+	if pinned > 0 || !kept {
+		t.Errorf("runs pinned by a call with no callback = %d, want 0; ordinary run's identity kept = %v, want true", pinned, kept)
+	}
+}
+
+// newTraceOnlyToolPlugin returns a plugin like newTraceOnlyPlugin that also
+// keeps the trace of tool calls.
+func newTraceOnlyToolPlugin(t *testing.T, tm *traceManager) *baseplugin.Plugin {
+	t.Helper()
+	config := applyDefaults(DefaultConfig())
+	config.DisableFlushOnRunEnd = true
+	ap := &analyticsPlugin{config: config, allowlist: newSet("NO_SUCH_EVENT"), traces: tm}
+	p, err := baseplugin.New(baseplugin.Config{
+		Name:                  "trace-only-with-tools",
+		OnUserMessageCallback: ap.onUserMessage,
+		BeforeRunCallback:     ap.beforeRun,
+		AfterRunCallback:      ap.afterRun,
+		OnEventCallback:       ap.onEvent,
+		BeforeAgentCallback:   ap.beforeAgent,
+		AfterAgentCallback:    ap.afterAgent,
+		BeforeModelCallback:   ap.beforeModel,
+		AfterModelCallback:    ap.afterModel,
+		OnModelErrorCallback:  ap.onModelError,
+		BeforeToolCallback:    ap.beforeTool,
+		AfterToolCallback:     ap.afterTool,
+		OnToolErrorCallback:   ap.onToolError,
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	return p
+}
+
+// toolThenTextLLM asks for a call of the tool toolName until the request ends
+// with a function response, and then answers with text.
+type toolThenTextLLM struct {
+	toolName string
+}
+
+func (m *toolThenTextLLM) Name() string { return "tool-then-text-model" }
+
+func (m *toolThenTextLLM) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if n := len(req.Contents); n > 0 && req.Contents[n-1] != nil {
+			for _, part := range req.Contents[n-1].Parts {
+				if part != nil && part.FunctionResponse != nil {
+					yield(&model.LLMResponse{Content: textContent("model", "done"), TurnComplete: true}, nil)
+					return
+				}
+			}
+		}
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: m.toolName, Args: map[string]any{}}}},
+		}}, nil)
+	}
+}
+
+// transferToLLM asks to transfer to the agent target.
+type transferToLLM struct {
+	target string
+}
+
+func (m *transferToLLM) Name() string { return "transfer-to-model" }
+
+func (m *transferToLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: &genai.Content{
+			Role:  genai.RoleModel,
+			Parts: []*genai.Part{genai.NewPartFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": m.target})},
+		}}, nil)
+	}
+}
+
+// setMaxLLMCalls sets cfg.MaxLLMCalls to n and reports whether the ADK version
+// in use has that field, which was added after ADK v2.0.0.
+func setMaxLLMCalls(cfg *agent.RunConfig, n int) bool {
+	f := reflect.ValueOf(cfg).Elem().FieldByName("MaxLLMCalls")
+	if !f.IsValid() || !f.CanSet() || f.Kind() != reflect.Int {
+		return false
+	}
+	f.SetInt(int64(n))
+	return true
+}
+
+// runOrdinaryBot runs an agent whose model answers at once through a runner
+// with plugin p and returns the run's invocation ID.
+func runOrdinaryBot(t *testing.T, p *baseplugin.Plugin) string {
+	t.Helper()
+	bot, err := llmagent.New(llmagent.Config{
+		Name:  "bot",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	var invID string
+	for ev, err := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "ordinary", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("ordinary run: %v", err)
+		}
+		if ev != nil && invID == "" {
+			invID = ev.InvocationID
+		}
+	}
+	return invID
+}
+
+// checkLateLookupFindsCompletedRun checks that the run of invID kept its
+// identity at its completion, and that a callback after its AfterRun, such as
+// OnEventCallback for the compaction summary event of the run, gets the run's
+// own trace and invocation span without starting an active invocation.
+func checkLateLookupFindsCompletedRun(t *testing.T, tm *traceManager, invID, author string) {
+	t.Helper()
+	tm.mu.Lock()
+	completed := tm.completed[invID]
+	var want evictedTrace
+	if completed != nil {
+		want = completed.identity
+	}
+	tm.mu.Unlock()
+	if invID == "" || completed == nil {
+		t.Fatalf("completed run %q lost its identity at its own completion", invID)
+	}
+	span := tm.eventSpan(context.Background(), identity{invocationID: invID, agentName: author}, author, "")
+	tm.mu.Lock()
+	_, active := tm.invocations[invID]
+	tm.mu.Unlock()
+	if active || span.traceID != want.traceID || span.spanID != want.spanID {
+		t.Errorf("late event place = (trace %q, span %q), active invocation started = %v; want the completed run's (trace %q, span %q) and none started",
+			span.traceID, span.spanID, active, want.traceID, want.spanID)
+	}
+}
+
+// TestRunner_CallsWithoutCallbacksHoldNoCompletedRuns verifies through
+// runner.Run that runs whose model calls ADK leaves without any model
+// callback once this plugin's BeforeModelCallback started them (because the
+// BeforeModelCallback of an agent, also of one that a sequential, parallel or
+// workflow agent, a custom agent or a transfer runs, or of a later plugin
+// returns an error, or the model-call budget runs out), as well as runs in
+// which a later plugin answers a model or tool call instead, keep no completed
+// run waiting for late calls, whether the caller reads each run to its end or
+// stops reading at its first error: after a capacity's worth of them, an
+// ordinary run keeps its identity at its completion, and a callback after its
+// AfterRun finds it.
+func TestRunner_CallsWithoutCallbacksHoldNoCompletedRuns(t *testing.T) {
+	lookup, err := functiontool.New(functiontool.Config{Name: "lookup", Description: "Looks something up"},
+		func(_ agent.Context, _ struct{}) (struct{}, error) { return struct{}{}, nil })
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	refuse := func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+		return nil, errors.New("blocked by guardrail")
+	}
+	newAgent := func(t *testing.T, cfg llmagent.Config) agent.Agent {
+		t.Helper()
+		a, err := llmagent.New(cfg)
+		if err != nil {
+			t.Fatalf("llmagent.New(%s): %v", cfg.Name, err)
+		}
+		return a
+	}
+	newGuarded := func(t *testing.T) agent.Agent {
+		t.Helper()
+		return newAgent(t, llmagent.Config{Name: "guarded", Model: &toolThenTextLLM{toolName: "lookup"}, BeforeModelCallbacks: []llmagent.BeforeModelCallback{refuse}})
+	}
+	newCustom := func(t *testing.T, run func(ctx agent.InvocationContext, guarded agent.Agent, yield func(*session.Event, error) bool)) agent.Agent {
+		t.Helper()
+		guarded := newGuarded(t)
+		custom, err := agent.New(agent.Config{
+			Name:      "custom",
+			SubAgents: []agent.Agent{guarded},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) { run(ctx, guarded, yield) }
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(custom): %v", err)
+		}
+		return custom
+	}
+	for _, tc := range []struct {
+		name        string
+		root        func(t *testing.T) agent.Agent
+		later       baseplugin.Config
+		maxLLMCalls int
+	}{
+		{
+			name: "agent's BeforeModelCallback returns an error",
+			root: newGuarded,
+		},
+		{
+			name: "agent's BeforeModelCallback in a sub-agent of a sequential agent returns an error",
+			root: func(t *testing.T) agent.Agent {
+				seq, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "pipeline", SubAgents: []agent.Agent{newGuarded(t)}}})
+				if err != nil {
+					t.Fatalf("sequentialagent.New: %v", err)
+				}
+				return seq
+			},
+		},
+		{
+			name: "agent's BeforeModelCallback in a branch of a parallel agent returns an error",
+			root: func(t *testing.T) agent.Agent {
+				par, err := parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "fanout", SubAgents: []agent.Agent{newGuarded(t)}}})
+				if err != nil {
+					t.Fatalf("parallelagent.New: %v", err)
+				}
+				return par
+			},
+		},
+		{
+			name: "agent's BeforeModelCallback in a node of a workflow agent returns an error",
+			root: func(t *testing.T) agent.Agent {
+				node, err := workflow.NewAgentNode(newGuarded(t), workflow.NodeConfig{})
+				if err != nil {
+					t.Fatalf("workflow.NewAgentNode: %v", err)
+				}
+				wf, err := workflowagent.New(workflowagent.Config{Name: "graph", Edges: []workflow.Edge{{From: workflow.Start, To: node}}})
+				if err != nil {
+					t.Fatalf("workflowagent.New: %v", err)
+				}
+				return wf
+			},
+		},
+		{
+			name: "agent's BeforeModelCallback in a sub-agent that a custom agent runs in line returns an error",
+			root: func(t *testing.T) agent.Agent {
+				return newCustom(t, func(ctx agent.InvocationContext, guarded agent.Agent, yield func(*session.Event, error) bool) {
+					for ev, err := range guarded.Run(ctx) {
+						if !yield(ev, err) {
+							return
+						}
+					}
+				})
+			},
+		},
+		{
+			name: "agent's BeforeModelCallback in a sub-agent that a custom agent runs on a goroutine and waits for returns an error",
+			root: func(t *testing.T) agent.Agent {
+				return newCustom(t, func(ctx agent.InvocationContext, guarded agent.Agent, yield func(*session.Event, error) bool) {
+					type result struct {
+						ev  *session.Event
+						err error
+					}
+					results := make(chan result)
+					go func() {
+						defer close(results)
+						for ev, err := range guarded.Run(ctx) {
+							results <- result{ev: ev, err: err}
+						}
+					}()
+					reading := true
+					for res := range results {
+						if reading {
+							reading = yield(res.ev, res.err)
+						}
+					}
+				})
+			},
+		},
+		{
+			name: "agent's BeforeModelCallback in an agent that the root agent transfers to returns an error",
+			root: func(t *testing.T) agent.Agent {
+				return newAgent(t, llmagent.Config{Name: "coordinator", Model: &transferToLLM{target: "guarded"}, SubAgents: []agent.Agent{newGuarded(t)}})
+			},
+		},
+		{
+			name: "later plugin's BeforeModelCallback returns an error",
+			root: func(t *testing.T) agent.Agent {
+				return newAgent(t, llmagent.Config{Name: "guarded", Model: &toolThenTextLLM{toolName: "lookup"}})
+			},
+			later: baseplugin.Config{Name: "guardrail", BeforeModelCallback: refuse},
+		},
+		{
+			name: "later plugin's BeforeModelCallback returns a response",
+			root: func(t *testing.T) agent.Agent {
+				return newAgent(t, llmagent.Config{Name: "cached", Model: &toolThenTextLLM{toolName: "lookup"}})
+			},
+			later: baseplugin.Config{Name: "cache", BeforeModelCallback: func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return &model.LLMResponse{Content: textContent("model", "cached"), TurnComplete: true}, nil
+			}},
+		},
+		{
+			name: "model-call budget runs out",
+			root: func(t *testing.T) agent.Agent {
+				return newAgent(t, llmagent.Config{Name: "budgeted", Model: &toolThenTextLLM{toolName: "lookup"}, Tools: []tool.Tool{lookup}})
+			},
+			maxLLMCalls: 1,
+		},
+		{
+			name: "later plugin's BeforeToolCallback returns an error",
+			root: func(t *testing.T) agent.Agent {
+				return newAgent(t, llmagent.Config{Name: "tooled", Model: &toolThenTextLLM{toolName: "lookup"}, Tools: []tool.Tool{lookup}})
+			},
+			later: baseplugin.Config{Name: "tool-guardrail", BeforeToolCallback: func(agent.Context, tool.Tool, map[string]any) (map[string]any, error) {
+				return nil, errors.New("tool blocked")
+			}},
+		},
+	} {
+		for _, mode := range []struct {
+			name        string
+			stopAtError bool
+		}{
+			{name: "caller reads to the end"},
+			{name: "caller stops at the first error", stopAtError: true},
+		} {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				var cfg agent.RunConfig
+				if tc.maxLLMCalls != 0 && !setMaxLLMCalls(&cfg, tc.maxLLMCalls) {
+					t.Skip("agent.RunConfig.MaxLLMCalls was added after ADK v2.0.0")
+				}
+				tm := newTraceManager()
+				tm.maxTracked = 1
+				limit := max(tm.maxTracked, 64)
+				p := newTraceOnlyToolPlugin(t, tm)
+				plugins := []*baseplugin.Plugin{p}
+				if tc.later.Name != "" {
+					later, err := baseplugin.New(tc.later)
+					if err != nil {
+						t.Fatalf("baseplugin.New(%s): %v", tc.later.Name, err)
+					}
+					plugins = append(plugins, later)
+				}
+				r := newTestRunner(t, tc.root(t), plugins...)
+				for i := range limit + 6 {
+					for _, err := range r.Run(t.Context(), "u1", fmt.Sprintf("s%d", i), textContent("user", "hi"), cfg) {
+						if err != nil && mode.stopAtError {
+							break
+						}
+					}
+				}
+				tm.mu.Lock()
+				waiting := 0
+				for _, c := range tm.completed {
+					if c.hasPendingOrOpenLateSpans() {
+						waiting++
+					}
+				}
+				tm.mu.Unlock()
+				if waiting != 0 {
+					t.Errorf("completed runs waiting for late calls = %d, want 0", waiting)
+				}
+				checkLateLookupFindsCompletedRun(t, tm, runOrdinaryBot(t, p), "bot")
+			})
+		}
+	}
+}
+
+// TestRunner_UnjoinedSubAgentCallOutlivesAfterRun verifies through runner.Run
+// that the model call of a sub-agent that a custom agent, or a function node
+// of a workflow agent, runs on a goroutine that it does not wait for, which
+// may get its callbacks after AfterRun, moves to the late state, where its
+// AfterModelCallback ends it without starting an active invocation: neither
+// the custom agent nor the workflow agent waits for that goroutine.
+func TestRunner_UnjoinedSubAgentCallOutlivesAfterRun(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// root returns the agent that the runner runs, which calls start and
+		// then returns once wait returns, without waiting for the run that
+		// start begins.
+		root func(t *testing.T, sub agent.Agent, start func(agent.InvocationContext), wait func()) agent.Agent
+	}{
+		{
+			name: "custom agent",
+			root: func(t *testing.T, sub agent.Agent, start func(agent.InvocationContext), wait func()) agent.Agent {
+				root, err := agent.New(agent.Config{
+					Name:      "root",
+					SubAgents: []agent.Agent{sub},
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(func(*session.Event, error) bool) {
+							start(ctx)
+							wait()
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+				return root
+			},
+		},
+		{
+			name: "function node of a workflow agent",
+			root: func(t *testing.T, _ agent.Agent, start func(agent.InvocationContext), wait func()) agent.Agent {
+				fan := workflow.NewFunctionNode("fan", func(ctx agent.Context, _ any) (string, error) {
+					start(ctx)
+					wait()
+					return "started", nil
+				}, workflow.NodeConfig{})
+				root, err := workflowagent.New(workflowagent.Config{Name: "root", Edges: workflow.Chain(workflow.Start, fan)})
+				if err != nil {
+					t.Fatalf("workflowagent.New(root): %v", err)
+				}
+				return root
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			p := newTraceOnlyPlugin(t, tm)
+			gate := &blockingLLM{entered: make(chan struct{}, 1), release: make(chan struct{})}
+			sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: gate})
+			if err != nil {
+				t.Fatalf("llmagent.New(sub): %v", err)
+			}
+			done := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(gate.release) }) }
+			t.Cleanup(func() {
+				release()
+				select {
+				case <-done:
+				case <-time.After(10 * time.Second):
+					t.Error("the unjoined sub-agent never finished")
+				}
+			})
+			start := func(ctx agent.InvocationContext) {
+				go func() {
+					defer close(done)
+					for range sub.Run(ctx) {
+					}
+				}()
+			}
+			// Return once the model call started, without waiting for it.
+			wait := func() { <-gate.entered }
+			var invID string
+			for ev := range newTestRunner(t, tc.root(t, sub, start, wait), p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+				if ev != nil && invID == "" {
+					invID = ev.InvocationID
+				}
+			}
+			tm.mu.Lock()
+			if invID == "" && tm.completionOrder.Back() != nil {
+				invID, _ = tm.completionOrder.Back().Value.(string)
+			}
+			completed := tm.completed[invID]
+			tm.mu.Unlock()
+			if completed == nil || completed.late == nil || !completed.late.hasOpenCalls() {
+				t.Fatalf("completed run %q handed no open model call to the late state", invID)
+			}
+
+			release()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the unjoined sub-agent never finished")
+			}
+			tm.mu.Lock()
+			_, active := tm.invocations[invID]
+			tm.mu.Unlock()
+			if completed.late.hasOpenCalls() || active {
+				t.Errorf("after the unjoined model call ended: call still open in the late state = %v, active invocation started = %v; want false, false",
+					completed.late.hasOpenCalls(), active)
+			}
+		})
+	}
+}
+
+func TestRepro_ParallelWorkerGuardrailPinsNothing(t *testing.T) {
+	// The items run one ModeSingleTurn agent concurrently.
+	requireADKRaceFreeSharedSingleTurnTool(t)
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	limit := max(tm.maxTracked, 64)
+	p := newTraceOnlyPlugin(t, tm)
+	guarded, err := llmagent.New(llmagent.Config{
+		Name:  "guarded",
+		Model: &scriptedLLM{},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return nil, errors.New("blocked by guardrail")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := workflow.NewFunctionNode("items", func(agent.Context, any) ([]string, error) {
+		return []string{"a", "b"}, nil
+	}, workflow.NodeConfig{})
+	node, err := workflow.NewAgentNode(guarded, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	perItem, err := workflow.NewParallelWorker("per_item", node, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := workflowagent.New(workflowagent.Config{Name: "root", Edges: workflow.Chain(workflow.Start, items, perItem)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRunner(t, root, p)
+	errs := 0
+	for i := range limit + 6 {
+		for _, err := range r.Run(t.Context(), "u1", fmt.Sprintf("s%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+			if err != nil {
+				errs++
+			}
+		}
+	}
+	tm.mu.Lock()
+	pinned := 0
+	for _, c := range tm.completed {
+		if c.late != nil && c.late.hasOpenCalls() {
+			pinned++
+		}
+	}
+	tm.mu.Unlock()
+	t.Logf("runs=%d errors=%d pinned=%d", limit+6, errs, pinned)
+	if errs == 0 {
+		t.Fatal("no run yielded an error: the guardrail never ran")
+	}
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "ok"), TurnComplete: true}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var invID string
+	for ev, err := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "ordinary", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev != nil && invID == "" {
+			invID = ev.InvocationID
+		}
+	}
+	tm.mu.Lock()
+	kept := tm.completed[invID] != nil
+	tm.mu.Unlock()
+	t.Logf("ordinary run identity kept = %v", kept)
+	if pinned > 0 || !kept {
+		t.Errorf("runs pinned by calls with no callback = %d, want 0; ordinary identity kept = %v, want true", pinned, kept)
+	}
+}
+
+type gatedLLM struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *gatedLLM) Name() string { return "gated" }
+
+func (m *gatedLLM) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		close(m.entered)
+		select {
+		case <-m.release:
+		case <-time.After(10 * time.Second):
+		}
+		yield(&model.LLMResponse{Content: textContent("model", "late"), TurnComplete: true}, nil)
+	}
+}
+
+type waitLLM struct{ wait <-chan struct{} }
+
+func (m *waitLLM) Name() string { return "wait" }
+
+func (m *waitLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		<-m.wait
+		yield(&model.LLMResponse{Content: textContent("model", "b"), TurnComplete: true}, nil)
+	}
+}
+
+// A custom agent starts its sub-agent on a goroutine it does not wait for and
+// returns before the sub-agent's model call starts. That call can still get
+// its AfterModelCallback after AfterRun, so it should move to the late state.
+func TestRepro_UnjoinedCallStartedAfterLauncherReturnedMovesToLate(t *testing.T) {
+	tm := newTraceManager()
+	p := newTraceOnlyPlugin(t, tm)
+	sStarted, cReturned := make(chan struct{}), make(chan struct{})
+	sModel := &gatedLLM{entered: make(chan struct{}), release: make(chan struct{})}
+	s, err := llmagent.New(llmagent.Config{
+		Name:  "s",
+		Model: sModel,
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{func(agent.Context) (*genai.Content, error) {
+			close(sStarted)
+			<-cReturned
+			return nil, nil
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sDone := make(chan struct{})
+	c, err := agent.New(agent.Config{
+		Name:      "c",
+		SubAgents: []agent.Agent{s},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				go func() {
+					defer close(sDone)
+					for range s.Run(ctx) {
+					}
+				}()
+				<-sStarted
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := llmagent.New(llmagent.Config{Name: "b", Model: &waitLLM{wait: sModel.entered}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "pipeline", SubAgents: []agent.Agent{c, b}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signal, err := baseplugin.New(baseplugin.Config{
+		Name: "signal",
+		AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+			if ctx.AgentName() == "c" {
+				close(cReturned)
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newTestRunner(t, pipeline, p, signal)
+	var invID string
+	for ev, err := range r.Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if ev != nil && invID == "" {
+			invID = ev.InvocationID
+		}
+	}
+	tm.mu.Lock()
+	cmp := tm.completed[invID]
+	moved := 0
+	if cmp != nil && cmp.late != nil {
+		cmp.late.mu.Lock()
+		moved = len(cmp.late.llmSpans)
+		cmp.late.mu.Unlock()
+	}
+	tm.mu.Unlock()
+	close(sModel.release)
+	<-sDone
+	t.Logf("open model calls moved to late state = %d", moved)
+	if moved != 1 {
+		t.Errorf("s's model call, still running at AfterRun, moved to late state = %d, want 1", moved)
+	}
+}
+
+// TestRunner_JoinedChildStoppedAtErrorKeepsCompletedIdentities verifies
+// through runner.Run that runs that end with a model call that no callback
+// ends, and that the callbacks do not show as over, cost the runs that follow
+// them neither their completed identity nor their late callbacks. A custom
+// agent runs its sub-agent on a goroutine of its own, stops reading it at the
+// error that the sub-agent's BeforeModelCallback returns after this plugin's
+// started the model call, and waits for the goroutine before it returns: the
+// callbacks show neither the end of the sub-agent's run nor that the custom
+// agent waited for it, as for a sub-agent whose call does end after AfterRun
+// (TestRunner_UnjoinedSubAgentCallOutlivesAfterRun). Such runs go first
+// while more of them than half of the capacity remain, so each of the
+// ordinary runs that follow keeps its identity, and an event of it after
+// AfterRun, as of compaction, finds that identity instead of starting a new
+// invocation; after half of the capacity's worth of ordinary runs, such runs
+// hold at most half of it.
+func TestRunner_JoinedChildStoppedAtErrorKeepsCompletedIdentities(t *testing.T) {
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	limit := max(tm.maxTracked, 64)
+	p := newTraceOnlyPlugin(t, tm)
+	child, err := llmagent.New(llmagent.Config{
+		Name:  "child",
+		Model: &scriptedLLM{},
+		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+			func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+				return nil, errors.New("blocked by guardrail")
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(child): %v", err)
+	}
+	parent, err := agent.New(agent.Config{
+		Name:      "parent",
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var childErr error
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					for _, err := range child.Run(ctx) {
+						if err != nil {
+							childErr = err
+							break
+						}
+					}
+				}()
+				<-done
+				if childErr != nil {
+					yield(nil, childErr)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(parent): %v", err)
+	}
+	r := newTestRunner(t, parent, p)
+	errs := 0
+	for i := range limit + 6 {
+		for _, err := range r.Run(t.Context(), "u1", fmt.Sprintf("j%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+			if err != nil {
+				errs++
+			}
+		}
+	}
+	if errs != limit+6 {
+		t.Fatalf("runs that yielded the guardrail's error = %d, want %d", errs, limit+6)
+	}
+
+	answers := &scriptedLLM{}
+	for range limit / 2 {
+		answers.responses = append(answers.responses, &model.LLMResponse{Content: textContent("model", "ok"), TurnComplete: true})
+	}
+	bot, err := llmagent.New(llmagent.Config{Name: "bot", Model: answers})
+	if err != nil {
+		t.Fatalf("llmagent.New(bot): %v", err)
+	}
+	rb := newTestRunner(t, bot, p)
+	var ordinary []string
+	for i := range limit / 2 {
+		var invID string
+		for ev, err := range rb.Run(t.Context(), "u1", fmt.Sprintf("o%d", i), textContent("user", "hi"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("ordinary run %d: %v", i, err)
+			}
+			if ev != nil && invID == "" {
+				invID = ev.InvocationID
+			}
+		}
+		tm.mu.Lock()
+		completed := tm.completed[invID]
+		tm.mu.Unlock()
+		if completed == nil {
+			t.Fatalf("ordinary run %d lost its completed identity at its own completion", i)
+		}
+		late := tm.invocation(t.Context(), identity{invocationID: invID, agentName: "bot"})
+		tm.mu.Lock()
+		_, active := tm.invocations[invID]
+		tm.mu.Unlock()
+		if active || late.rootSpanID != completed.identity.spanID {
+			t.Fatalf("event of ordinary run %d after AfterRun: new active invocation = %v, root span = %q, want false and the run's %q",
+				i, active, late.rootSpanID, completed.identity.spanID)
+		}
+		ordinary = append(ordinary, invID)
+	}
+
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	waiting := 0
+	for _, c := range tm.completed {
+		if c.waitsForLateCalls() {
+			waiting++
+		}
+	}
+	if waiting > limit/2 {
+		t.Errorf("completed runs that wait for late calls = %d, want at most %d", waiting, limit/2)
+	}
+	for i, invID := range ordinary {
+		if tm.completed[invID] == nil {
+			t.Errorf("ordinary run %d lost its completed identity to runs that wait for late calls", i)
+		}
+	}
+}
+
+// TestRunner_LiveToolSubAgentCallMovesToLateState verifies through
+// runner.RunLive that the open model call of a sub-agent that a tool of a live
+// run starts, on a goroutine that the tool does not wait for, moves to the
+// late state when the run ends, so that its AfterModelCallback ends the call's
+// own span. RunLive runs no agent callbacks for the agent that it runs, so the
+// sub-agent's activation runs right under the invocation, where only an
+// activation named like the agent that the runner runs is taken for the
+// runner's own, whose run is over (see endedWithRun).
+func TestRunner_LiveToolSubAgentCallMovesToLateState(t *testing.T) {
+	tm := newTraceManager()
+	p := newTraceOnlyPlugin(t, tm)
+	helperModel := &gatedLLM{entered: make(chan struct{}), release: make(chan struct{})}
+	helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: helperModel})
+	if err != nil {
+		t.Fatalf("llmagent.New(helper): %v", err)
+	}
+	helperDone := make(chan struct{})
+	startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			subPath := "helper@1"
+			runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+			go func() {
+				defer close(helperDone)
+				for range helper.Run(runCtx) {
+				}
+			}()
+			select {
+			case <-helperModel.entered:
+			case <-time.After(10 * time.Second):
+				return nil, errors.New("helper never started its model call")
+			}
+			return map[string]any{"started": true}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New(start_helper): %v", err)
+	}
+	client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+		Backend: genai.BackendGeminiAPI,
+		APIKey:  "test-api-key",
+		HTTPOptions: genai.HTTPOptions{
+			BaseURL: newFakeLiveServer(t,
+				`{"toolCall":{"functionCalls":[{"id":"call-1","name":"start_helper","args":{}}]}}`,
+				`{"serverContent":{"modelTurn":{"parts":[{"text":"done"}],"role":"model"},"turnComplete":true}}`,
+			),
+			APIVersion: "v1beta",
+		},
+	})
+	if err != nil {
+		t.Fatalf("genai.NewClient: %v", err)
+	}
+	toolDone := make(chan struct{})
+	root, err := llmagent.New(llmagent.Config{
+		Name:  "live_root",
+		Model: &liveTestLLM{client: client},
+		Tools: []tool.Tool{startHelper},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+				close(toolDone)
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(live_root): %v", err)
+	}
+	liveSess, events, err := newTestRunner(t, root, p).RunLive(t.Context(), "u1", "s1", agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("r.RunLive: %v", err)
+	}
+	go func() {
+		select {
+		case <-toolDone:
+		case <-time.After(10 * time.Second):
+		}
+		_ = liveSess.Close()
+	}()
+	for _, err := range events {
+		if err != nil {
+			t.Errorf("live event error: %v", err)
+		}
+	}
+	tm.mu.Lock()
+	runs, moved := len(tm.completed), 0
+	for _, c := range tm.completed {
+		if c.late != nil {
+			c.late.mu.Lock()
+			moved += len(c.late.llmSpans)
+			c.late.mu.Unlock()
+		}
+	}
+	tm.mu.Unlock()
+	close(helperModel.release)
+	select {
+	case <-helperDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("helper run never finished")
+	}
+	if runs != 1 || moved != 1 {
+		t.Errorf("completed runs = %d, open model calls moved to the late state = %d, want 1 and 1, the call of helper", runs, moved)
+	}
+}
+
+// TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen verifies
+// through runner.RunLive, with the BigQuery plugin, that a Live function tool
+// that starts a helper on a goroutine of its own and returns while the
+// helper's model call is still in flight does not end the helper: the tool's
+// return does not show that the helper's run is over, so neither its open call
+// nor its own completion is a failure then. The helper's model call is
+// released either by the root agent's AfterToolCallback, which also waits for
+// the helper to return, so that the run completes with no AGENT_ERROR row and
+// the helper's AGENT_COMPLETED row closes the span of its AGENT_STARTING row
+// with a latency, or only after the live session closed, so that its callbacks
+// run after AfterRun. Either way the helper's LLM_RESPONSE row closes the span
+// of its LLM_REQUEST row with a latency, as the tool's TOOL_COMPLETED row and
+// the invocation's end row do for their starting rows.
+func TestRunner_LiveToolReturnsBeforeHelperModelCallEnds_KeepsHelperOpen(t *testing.T) {
+	for _, joined := range []bool{false, true} {
+		name := "helper released after the session closed"
+		if joined {
+			name = "helper released and joined before the session closed"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			gate := &blockingLLM{entered: make(chan struct{}, 1), release: make(chan struct{})}
+			helper, err := llmagent.New(llmagent.Config{Name: "helper", Model: gate})
+			if err != nil {
+				t.Fatalf("llmagent.New(helper): %v", err)
+			}
+			helperDone := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(gate.release) }) }
+			t.Cleanup(release)
+			waitHelper := func() error {
+				select {
+				case <-helperDone:
+					return nil
+				case <-time.After(10 * time.Second):
+					return errors.New("helper never returned")
+				}
+			}
+			startHelper, err := functiontool.New(functiontool.Config{Name: "start_helper", Description: "Starts helper without waiting for it"},
+				func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+					subPath := "helper@1"
+					runCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{Path: &subPath}).WithICDelta(nil)
+					go func() {
+						defer close(helperDone)
+						for range helper.Run(runCtx) {
+						}
+					}()
+					select {
+					case <-gate.entered:
+					case <-time.After(10 * time.Second):
+						return nil, errors.New("helper never started its model call")
+					}
+					return map[string]any{"started": true}, nil
+				})
+			if err != nil {
+				t.Fatalf("functiontool.New(start_helper): %v", err)
+			}
+			client, err := genai.NewClient(t.Context(), &genai.ClientConfig{
+				Backend: genai.BackendGeminiAPI,
+				APIKey:  "test-api-key",
+				HTTPOptions: genai.HTTPOptions{
+					BaseURL: newFakeLiveServer(t,
+						`{"toolCall":{"functionCalls":[{"id":"call-1","name":"start_helper","args":{}}]}}`,
+						`{"serverContent":{"modelTurn":{"parts":[{"text":"done"}],"role":"model"},"turnComplete":true}}`,
+					),
+					APIVersion: "v1beta",
+				},
+			})
+			if err != nil {
+				t.Fatalf("genai.NewClient: %v", err)
+			}
+			toolDone := make(chan struct{})
+			root, err := llmagent.New(llmagent.Config{
+				Name:  "live_root",
+				Model: &liveTestLLM{client: client},
+				Tools: []tool.Tool{startHelper},
+				AfterToolCallbacks: []llmagent.AfterToolCallback{
+					func(agent.Context, tool.Tool, map[string]any, map[string]any, error) (map[string]any, error) {
+						defer close(toolDone)
+						if joined {
+							release()
+							return nil, waitHelper()
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New(live_root): %v", err)
+			}
+			liveSess, events, err := newTestRunner(t, root, p).RunLive(t.Context(), "u1", "s1", agent.LiveRunConfig{})
+			if err != nil {
+				t.Fatalf("r.RunLive: %v", err)
+			}
+			go func() {
+				select {
+				case <-toolDone:
+				case <-time.After(10 * time.Second):
+				}
+				_ = liveSess.Close()
+			}()
+			for _, err := range events {
+				if err != nil {
+					t.Errorf("live event error: %v", err)
+				}
+			}
+			if !joined {
+				release()
+				if err := waitHelper(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows := collectRows(t, requests, func(rows []map[string]any) bool {
+				return untilInvocationEnd(rows) && len(agentRowsOfType(rows, EventLLMResponse, "helper")) > 0 &&
+					(!joined || len(agentRowsOfType(rows, EventAgentCompleted, "helper")) > 0)
+			})
+			invocationEnds := rowsOfType(rows, EventInvocationCompleted)
+			if joined {
+				requireInvocationCompletedOK(t, rows)
+			} else {
+				// The helper still runs when the session closes, so AfterRun, as on
+				// main, reports it with AGENT_ERROR and the run with
+				// INVOCATION_ERROR: no callback shows whether it will end. The
+				// tool's return did not end it before then.
+				invocationEnds = append(invocationEnds, rowsOfType(rows, EventInvocationError)...)
+				toolEnd := slices.IndexFunc(rows, func(row map[string]any) bool { return row["event_type"] == EventToolCompleted })
+				if i := slices.IndexFunc(rows, func(row map[string]any) bool { return row["event_type"] == EventAgentError }); i >= 0 && i < toolEnd {
+					t.Errorf("AGENT_ERROR row before the TOOL_COMPLETED row of the call that started the helper; event types: %v", eventTypes(rows))
+				}
+			}
+			// requireClosedPair checks that the only end row of a kind closes the
+			// span of the only start row of that kind with a latency.
+			requireClosedPair := func(start, end []map[string]any, what string) {
+				t.Helper()
+				if len(start) != 1 || len(end) != 1 {
+					t.Errorf("%s: %d start rows and %d end rows, want one of each; event types: %v", what, len(start), len(end), eventTypes(rows))
+					return
+				}
+				if got, want := placeOf(end[0]), placeOf(start[0]); got != want {
+					t.Errorf("%s: end row at %+v, want the place of its start row %+v", what, got, want)
+				}
+				mustLatency(t, end[0])
+			}
+			requireClosedPair(agentRowsOfType(rows, EventLLMRequest, "helper"), agentRowsOfType(rows, EventLLMResponse, "helper"), "helper model call")
+			requireClosedPair(rowsOfType(rows, EventToolStarting), rowsOfType(rows, EventToolCompleted), "start_helper tool call")
+			requireClosedPair(rowsOfType(rows, EventInvocationStarting), invocationEnds, "invocation")
+			if joined {
+				requireClosedPair(agentRowsOfType(rows, EventAgentStarting, "helper"), agentRowsOfType(rows, EventAgentCompleted, "helper"), "helper run")
+			}
+		})
+	}
+}
+
+// TestTraceManager_ClosedHandoffThenLateCallIsNotPrunedAsWaiting verifies that
+// a completed run waits for late calls only while a call that AfterRun handed
+// over to its late state is open: once that call ended, a call that a callback
+// starts after AfterRun does not make the run wait, so under capacity pressure
+// the runs that still wait for handed-over calls are pruned before it, and the
+// later call keeps its span and latency.
+func TestTraceManager_ClosedHandoffThenLateCallIsNotPrunedAsWaiting(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	tm.maxTracked = 1
+	limit := max(tm.maxTracked, 64)
+	// endWithOpenTool runs id until its tool call key starts and then ends the
+	// run, which hands the call over to the late state.
+	endWithOpenTool := func(id identity, key string) {
+		tm.invocationSpan(ctx, id, nil)
+		tm.pushAgentSpan(ctx, id)
+		tm.pushToolSpan(ctx, id, key)
+		tm.endInvocation(ctx, id)
+	}
+	victim := identity{invocationID: "victim", agentName: "live"}
+	handed := toolKey(victim, "handed", "lookup")
+	endWithOpenTool(victim, handed)
+	if end, _, _ := tm.popToolSpan(ctx, victim, handed, false); end.latency == nil {
+		t.Fatalf("TOOL_COMPLETED of the handed-over call = %+v, want a latency", end)
+	}
+	later := toolKey(victim, "later", "lookup")
+	start := tm.pushToolSpan(ctx, victim, later)
+	for i := range limit - 1 {
+		id := identity{invocationID: fmt.Sprintf("waiting-%d", i), agentName: "live"}
+		endWithOpenTool(id, toolKey(id, "call", "lookup"))
+	}
+	idle := identity{invocationID: "idle", agentName: "root"}
+	tm.invocationSpan(ctx, idle, nil)
+	tm.endInvocation(ctx, idle)
+	tm.mu.Lock()
+	_, victimKept := tm.completed[victim.invocationID]
+	_, firstWaitingKept := tm.completed["waiting-0"]
+	tm.mu.Unlock()
+	if !victimKept || firstWaitingKept {
+		t.Errorf("after capacity was exceeded: run with only a post-AfterRun call kept = %v, least recently active run with a handed-over call kept = %v; want true and false", victimKept, firstWaitingKept)
+	}
+	if end, _, _ := tm.popToolSpan(ctx, victim, later, false); end.spanID != start.spanID || end.latency == nil {
+		t.Errorf("TOOL_COMPLETED place = %+v, want the span %q of TOOL_STARTING with latency", end, start.spanID)
+	}
+}
+
+// newQueuedRowsPlugin returns a plugin with the callbacks that the production
+// plugin registers, whose trace manager is tm and whose rows wait in the queue
+// of a batch processor that never starts, until the returned function takes
+// them.
+func newQueuedRowsPlugin(t *testing.T, tm *traceManager) (*baseplugin.Plugin, func() []map[string]any) {
+	t.Helper()
+	config := applyDefaults(DefaultConfig())
+	config.DisableFlushOnRunEnd = true
+	processor, err := NewBatchProcessor(t.Context(), nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		// Close writes the rows that are left, which needs a write client.
+		processor.drainQueue()
+		processor.Close()
+	})
+	ap := &analyticsPlugin{config: config, processor: processor, traces: tm}
+	p, err := baseplugin.New(baseplugin.Config{
+		Name:                  "queued-rows",
+		OnUserMessageCallback: ap.onUserMessage,
+		BeforeRunCallback:     ap.beforeRun,
+		AfterRunCallback:      ap.afterRun,
+		OnEventCallback:       ap.onEvent,
+		BeforeAgentCallback:   ap.beforeAgent,
+		AfterAgentCallback:    ap.afterAgent,
+		BeforeModelCallback:   ap.beforeModel,
+		AfterModelCallback:    ap.afterModel,
+		OnModelErrorCallback:  ap.onModelError,
+		BeforeToolCallback:    ap.beforeTool,
+		AfterToolCallback:     ap.afterTool,
+		OnToolErrorCallback:   ap.onToolError,
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+	return p, processor.drainQueue
+}
+
+// clockReadBy reports whether the traceManager method that reads the clock in
+// the caller's stack, the innermost one, is the method name.
+func clockReadBy(name string) bool {
+	pcs := make([]uintptr, 32)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		frame, more := frames.Next()
+		if _, method, ok := strings.Cut(frame.Function, ".(*traceManager)."); ok {
+			return method == name
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// TestRunner_AgentStartingAcrossAfterRunStartsInLateState verifies through
+// runner.Run that an agent that a custom agent starts on a goroutine that it
+// does not wait for, and whose start looked the invocation up before AfterRun
+// ended the run but adds its span only after that, starts in the late state,
+// where its later callbacks find it: its AGENT_COMPLETED row closes the span of
+// its AGENT_STARTING row with a latency, and its model call is under it.
+func TestRunner_AgentStartingAcrossAfterRunStartsInLateState(t *testing.T) {
+	tm := newTraceManager()
+	p, takeRows := newQueuedRowsPlugin(t, tm)
+	var childGoroutine atomic.Uint64
+	held, release := make(chan struct{}), make(chan struct{})
+	var holdOnce, releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	tm.now = func() time.Time {
+		// pushAgentSpan reads the clock once it looked the invocation up.
+		if g := childGoroutine.Load(); g != 0 && g == currentGoroutineID() && clockReadBy("pushAgentSpan") {
+			holdOnce.Do(func() {
+				close(held)
+				<-release
+			})
+		}
+		return time.Now()
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:  "child",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{{Content: textContent("model", "late"), TurnComplete: true}}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(child): %v", err)
+	}
+	childDone := make(chan struct{})
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{child},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				go func() {
+					defer close(childDone)
+					childGoroutine.Store(currentGoroutineID())
+					for range child.Run(ctx) {
+					}
+				}()
+				select {
+				case <-held:
+				case <-time.After(10 * time.Second):
+					yield(nil, errors.New("the child's start never looked the invocation up"))
+					return
+				}
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "root"
+				ev.Content = textContent("model", "started")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("runner.Run error: %v", err)
+		}
+	}
+	unblock()
+	select {
+	case <-childDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the child never returned")
+	}
+	rows := takeRows()
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 1 {
+		t.Fatalf("INVOCATION_COMPLETED rows = %d, want 1; event types: %v", n, eventTypes(rows))
+	}
+	starts, ends := agentRowsOfType(rows, EventAgentStarting, "child"), agentRowsOfType(rows, EventAgentCompleted, "child")
+	if len(starts) != 1 || len(ends) != 1 {
+		t.Fatalf("child rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want one of each; event types: %v", len(starts), len(ends), eventTypes(rows))
+	}
+	if got, want := placeOf(ends[0]), placeOf(starts[0]); got != want {
+		t.Errorf("child AGENT_COMPLETED is at %+v, want the place of its AGENT_STARTING %+v", got, want)
+	}
+	mustLatency(t, ends[0])
+	for _, row := range agentRowsOfType(rows, EventLLMRequest, "child") {
+		if got, want := placeOf(row).parent, placeOf(starts[0]).span; got != want {
+			t.Errorf("child LLM_REQUEST parent = %q, want the child's span %q", got, want)
+		}
+	}
+}
+
+// TestRunner_UnjoinedStoppedStreamLeavesNoLateState verifies through
+// runner.Run the stopped stream for which only its partial event leaves the
+// open model call behind at AfterRun: a custom agent reads a sub-agent on a
+// goroutine that it does not wait for, forwards the sub-agent's partial event
+// and stops reading the sub-agent, whose model call then never ends. The
+// sub-agent's activation is not known to have finished running (see
+// endedWithRun), so without the partial event the call would move to the late
+// state and hold the completed run's slot.
+func TestRunner_UnjoinedStoppedStreamLeavesNoLateState(t *testing.T) {
+	tm := newTraceManager()
+	p := newTraceOnlyPlugin(t, tm)
+	sub, err := llmagent.New(llmagent.Config{Name: "sub", Model: &partialThenWaitLLM{chunkText: "hello "}})
+	if err != nil {
+		t.Fatalf("llmagent.New(sub): %v", err)
+	}
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{sub},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				partial := make(chan *session.Event, 1)
+				go func() {
+					defer close(partial)
+					for ev, err := range sub.Run(ctx) {
+						if err == nil && ev != nil && ev.Partial {
+							partial <- ev
+							return
+						}
+					}
+				}()
+				if ev, ok := <-partial; ok {
+					yield(ev, nil)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+	var invID string
+	var sawPartial bool
+	for ev, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "hi"), agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
+	}) {
+		if err != nil {
+			t.Fatalf("runner.Run error: %v", err)
+		}
+		if ev != nil {
+			invID = ev.InvocationID
+			sawPartial = sawPartial || ev.Partial
+		}
+	}
+	if !sawPartial {
+		t.Fatal("the run yielded no partial event")
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	c := tm.completed[invID]
+	if c == nil {
+		t.Fatalf("run %q is not completed", invID)
+	}
+	if c.late != nil {
+		t.Errorf("completed run kept late state (open calls %d) for a stream that its reader stopped reading", c.late.openCalls.Load())
 	}
 }
 
@@ -19053,5 +22251,308 @@ func TestParallelAgentBranchFailureAfterContent_EmitsInvocationError(t *testing.
 				t.Errorf("AGENT_ERROR(failer) error_message = %q, want it to contain %q", msg, "errFailer")
 			}
 		}
+	}
+}
+
+// lateReviewEnded completes the run of invID with nothing open, so that the
+// callbacks of the invocation that follow act on its late state.
+func lateReviewEnded(tm *traceManager, invID string) {
+	live := identity{invocationID: invID, agentName: "live_agent"}
+	tm.invocationSpan(context.Background(), live, nil)
+	tm.endInvocation(context.Background(), live)
+}
+
+// lateReviewTrace returns the late state of the completed run invID.
+func lateReviewTrace(t *testing.T, tm *traceManager, invID string) *invocationTrace {
+	t.Helper()
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	c := tm.completed[invID]
+	if c == nil || c.late == nil {
+		t.Fatalf("completed run %q has no late state", invID)
+	}
+	return c.late
+}
+
+// lateReviewStack returns the names of the activations on the late agentStack
+// of the completed run invID.
+func lateReviewStack(t *testing.T, tm *traceManager, invID string) []string {
+	t.Helper()
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	var names []string
+	for _, rec := range late.agentStack[1:] {
+		names = append(names, rec.name)
+	}
+	return names
+}
+
+// lateReviewAgent returns the record of the activation named name on the late
+// agentStack of the completed run invID.
+func lateReviewAgent(t *testing.T, tm *traceManager, invID, name string) *spanRecord {
+	t.Helper()
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	for _, rec := range late.agentStack[1:] {
+		if rec.name == name {
+			return rec
+		}
+	}
+	t.Fatalf("no activation %q on the late agentStack of %q", name, invID)
+	return nil
+}
+
+// checkLateRecordDropped fails t if rec, the record of an activation that
+// nothing can end anymore, is still on the agentStack of late or keeps a
+// context of its callbacks, the span that it ran under or a failure cause
+// (see dropRetiredLateContextsLocked).
+func checkLateRecordDropped(t *testing.T, late *invocationTrace, rec *spanRecord) {
+	t.Helper()
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	if slices.Contains(late.agentStack, rec) {
+		t.Errorf("activation %q is still on the late agentStack", rec.name)
+	}
+	if rec.canceled != nil {
+		t.Errorf("retired late activation %q keeps the context of its callback", rec.name)
+	}
+	if rec.ended != nil || rec.activation != nil {
+		t.Errorf("retired late activation %q keeps its InvocationContext", rec.name)
+	}
+	if rec.parent != nil {
+		t.Errorf("retired late activation %q keeps the span that it ran under", rec.name)
+	}
+	if len(rec.retiredCauses) > 0 {
+		t.Errorf("retired late activation %q keeps a failure cause (%v)", rec.name, rec.firstRetiredCause())
+	}
+}
+
+// TestLateReviewChildOutlivesParent verifies that the AfterAgentCallback of a
+// late sub-agent that outlives its parent, because its model call was still
+// open when the parent ended, ends the sub-agent's own span, with its latency,
+// and no other: a sibling that started after it keeps its span until its own
+// AfterAgentCallback.
+func TestLateReviewChildOutlivesParent(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name     string
+		children []string
+	}{
+		{name: "sub-agent", children: []string{"x"}},
+		{name: "sub-agent and a sibling after it", children: []string{"x", "y"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			const invID = "inv-llm"
+			lateReviewEnded(tm, invID)
+			p := identity{invocationID: invID, agentName: "p"}
+			tm.pushAgentSpan(ctx, p)
+			starts := make(map[string]rowSpan)
+			for _, name := range tc.children {
+				id := identity{invocationID: invID, agentName: name}
+				starts[name], _ = tm.pushAgentSpan(ctx, id)
+				tm.pushLLMSpan(ctx, id)
+			}
+			tm.popAgentSpan(ctx, p)
+			for _, name := range tc.children {
+				id := identity{invocationID: invID, agentName: name}
+				tm.popLLMSpan(ctx, id, true)
+				var end rowSpan
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							t.Fatalf("AfterAgentCallback of %q panicked: %v", name, r)
+						}
+					}()
+					end = tm.popAgentSpan(ctx, id)
+				}()
+				if end.spanID != starts[name].spanID {
+					t.Errorf("AGENT_COMPLETED span of %q = %q, want the span of its AGENT_STARTING row %q", name, end.spanID, starts[name].spanID)
+				}
+				if len(end.latency) == 0 {
+					t.Errorf("AGENT_COMPLETED row of %q has no latency", name)
+				}
+			}
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents at the end = %v, want none", got)
+			}
+		})
+	}
+}
+
+// TestLateReviewToolRunFailedGrandchild verifies that when a late tool call
+// that ran an agent returns, the activations under that agent that failed are
+// reported with the failure recorded or propagated for them, and that the
+// agent that made the call, which nothing has ended yet, stays open with the
+// context of its callbacks.
+func TestLateReviewToolRunFailedGrandchild(t *testing.T) {
+	ctx := context.Background()
+	// checkOwnerOpen fails t unless o, the agent that made the call, is the
+	// only late activation left and keeps the context of its callback and
+	// the span that it runs under.
+	checkOwnerOpen := func(t *testing.T, tm *traceManager, invID string) {
+		t.Helper()
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+			t.Fatalf("late agents after the tool call returned = %v, want [o]", got)
+		}
+		o := lateReviewAgent(t, tm, invID, "o")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		defer late.mu.Unlock()
+		if o.canceled == nil || o.parent == nil {
+			t.Errorf("open late agent o keeps the context of its callback = %t and its parent = %t, want both", o.canceled != nil, o.parent != nil)
+		}
+	}
+
+	t.Run("model error of a grandchild", func(t *testing.T) {
+		tm := newTraceManager()
+		const invID = "inv-tool-run"
+		lateReviewEnded(tm, invID)
+		o := identity{invocationID: invID, agentName: "o"}
+		g := identity{invocationID: invID, agentName: "g", path: "g"}
+		s := identity{invocationID: invID, agentName: "s", path: "g/s"}
+		c := identity{invocationID: invID, agentName: "c", path: "g/s/c"}
+		call := toolKey(o, "call-1", "g")
+		boom := errors.New("boom")
+		tm.pushAgentSpan(ctx, o)
+		tm.pushToolSpan(ctx, o, call)
+		tm.pushAgentSpan(ctx, g)
+		tm.pushAgentSpan(ctx, s)
+		tm.pushAgentSpan(ctx, c)
+		tm.pushLLMSpan(ctx, c)
+		tm.recordError(ctx, c, llmKey(c), boom)
+		tm.popLLMSpan(ctx, c, false)
+		tm.popAgentSpan(ctx, s)
+		cRec := lateReviewAgent(t, tm, invID, "c")
+		gRec := lateReviewAgent(t, tm, invID, "g")
+		_, purged, _ := tm.popToolSpan(ctx, o, call, false)
+		errs := make(map[string]error)
+		for _, p := range purged {
+			errs[p.agentName] = p.err
+		}
+		if len(purged) != 2 || !errors.Is(errs["c"], boom) || !errors.Is(errs["g"], boom) {
+			t.Errorf("AGENT_ERROR rows when the tool call returned = %v, want c and g, each with %v", errs, boom)
+		}
+		checkOwnerOpen(t, tm, invID)
+		late := lateReviewTrace(t, tm, invID)
+		checkLateRecordDropped(t, late, cRec)
+		checkLateRecordDropped(t, late, gRec)
+	})
+
+	t.Run("failure cause of a sub-agent that ended", func(t *testing.T) {
+		tm := newTraceManager()
+		const invID = "inv-tool-cause"
+		lateReviewEnded(tm, invID)
+		o := identity{invocationID: invID, agentName: "o"}
+		g := identity{invocationID: invID, agentName: "g", path: "g"}
+		// In direct traceManager tests, an agent on a branch of its own
+		// counts as a parallel branch (see isParallelBranch), whose context
+		// failure moves up to the agent above it when it ends.
+		c := identity{invocationID: invID, agentName: "c", path: "g/c", branch: "g.c"}
+		call := toolKey(o, "call-1", "g")
+		siblingErr := errors.New("sibling failed")
+		tm.pushAgentSpan(ctx, o)
+		tm.pushToolSpan(ctx, o, call)
+		tm.pushAgentSpan(ctx, g)
+		cctx, cancel := context.WithCancelCause(ctx)
+		tm.pushAgentSpan(cctx, c)
+		cancel(siblingErr)
+		tm.popAgentSpan(cctx, c)
+		gRec := lateReviewAgent(t, tm, invID, "g")
+		_, purged, _ := tm.popToolSpan(ctx, o, call, false)
+		if len(purged) != 1 || purged[0].agentName != "g" || !errors.Is(purged[0].err, siblingErr) {
+			var got []string
+			for _, p := range purged {
+				got = append(got, fmt.Sprintf("%s: %v", p.agentName, p.err))
+			}
+			t.Errorf("AGENT_ERROR rows when the tool call returned = %q, want only g, with %v", got, siblingErr)
+		}
+		checkOwnerOpen(t, tm, invID)
+		checkLateRecordDropped(t, lateReviewTrace(t, tm, invID), gRec)
+	})
+}
+
+// TestLateReviewShortcutUnderInvocationSpan verifies that a shortcut sub-agent
+// that starts right under the late invocation span, while a tool call that
+// AfterRun handed over is open, stays until that call returns, which may have
+// run it, and then leaves the late state, as nothing can end it anymore,
+// keeping no context of its callbacks.
+func TestLateReviewShortcutUnderInvocationSpan(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-root-shortcut"
+	live := identity{invocationID: invID, agentName: "live_agent"}
+	call := toolKey(live, "call-1", "t")
+	tm.invocationSpan(ctx, live, nil)
+	tm.pushAgentSpan(ctx, live)
+	tm.pushToolSpan(ctx, live, call)
+	tm.popAgentSpan(ctx, live)
+	tm.endInvocation(ctx, live)
+	sub := identity{invocationID: invID, agentName: "sub"}
+	tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, sub)
+	subRec := lateReviewAgent(t, tm, invID, "sub")
+	tm.popToolSpan(ctx, live, call, false)
+
+	late := lateReviewTrace(t, tm, invID)
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after the tool call returned = %v, want none", got)
+	}
+	if late.openAgents.Load() {
+		t.Error("late.openAgents = true after the tool call returned, want false")
+	}
+	checkLateRecordDropped(t, late, subRec)
+}
+
+// TestLateFailureCauseKeepsActivation verifies that a late activation that
+// carries a failure cause stays in the late state, although its run is over,
+// it ended its InvocationContext and its parent already ended, until the
+// agent above it that is still open ends and takes the cause on: failure
+// reporting reads such a cause (see failuresLocked).
+func TestLateFailureCauseKeepsActivation(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-cause"
+	lateReviewEnded(tm, invID)
+	o := identity{invocationID: invID, agentName: "o"}
+	p := identity{invocationID: invID, agentName: "p", path: "p"}
+	x := identity{invocationID: invID, agentName: "x", path: "p/x"}
+	// c is a parallel branch, as in TestLateReviewToolRunFailedGrandchild.
+	c := identity{invocationID: invID, agentName: "c", path: "p/x/c", branch: "x.c"}
+	siblingErr := errors.New("sibling failed")
+	tm.pushAgentSpan(ctx, o)
+	tm.pushAgentSpan(ctx, p)
+	xctx := &endedContext{Context: ctx, end: true}
+	tm.pushAgentSpan(xctx, x)
+	cctx, cancel := context.WithCancelCause(ctx)
+	tm.pushAgentSpan(cctx, c)
+	cancel(siblingErr)
+	tm.popAgentSpan(cctx, c)
+	// x's open model call keeps it open when p ends.
+	tm.pushLLMSpan(xctx, x)
+	tm.popAgentSpan(ctx, p)
+	tm.popLLMSpan(xctx, x, true)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "x"}) {
+		t.Fatalf("late agents after x's model call ended = %v, want [o x]", got)
+	}
+	xRec := lateReviewAgent(t, tm, invID, "x")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	settled, cause := xRec.runDone && xRec.contextEnded, xRec.openFailureCause()
+	late.mu.Unlock()
+	if !settled || !errors.Is(cause, siblingErr) {
+		t.Fatalf("x settled = %v with failure cause %v, want true with %v", settled, cause, siblingErr)
+	}
+
+	tm.popAgentSpan(ctx, o)
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after o ended = %v, want none", got)
+	}
+	checkLateRecordDropped(t, late, xRec)
+	late.mu.Lock()
+	defer late.mu.Unlock()
+	if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
+		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
 	}
 }
