@@ -37,6 +37,7 @@ const (
 	defaultTableName               = "agent_events"
 	defaultMaxInlineTextSize       = 32 * 1024
 	defaultGCSMaxConcurrentUploads = 8
+	defaultViewPrefix              = "v"
 )
 
 // Logger interface to use standard log operations natively.
@@ -180,11 +181,11 @@ type GCSContentOffloader interface {
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
-// logging, redaction of sensitive keys and credentials, run-end flushing, and
-// additive schema upgrades are enabled by default; DisableSessionMetadata,
-// DisableSensitiveKeyRedaction, DisableFlushOnRunEnd, and DisableSchemaUpgrade
-// opt out of each. Created and upgraded tables carry label
-// adk_schema_version="2" ([SchemaVersion]), while
+// logging, redaction of sensitive keys and credentials, run-end flushing,
+// additive schema upgrades, and per-event view creation are enabled by default;
+// DisableSessionMetadata, DisableSensitiveKeyRedaction, DisableFlushOnRunEnd,
+// DisableSchemaUpgrade, and DisableCreateViews opt out of each. Created and
+// upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
@@ -362,16 +363,19 @@ type Config struct {
 	// succeeding, or when an in-flight upload times out during the batch timeout
 	// (partial outage backoff), the plugin stops calling the offloader for
 	// another GCSUploadTimeout: every batch in that time falls back at once, so
-	// that an outage does not make each batch wait in turn. The deadline
-	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
-	// the uploads when it is still fresh (at least three quarters of
-	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
-	// without any upload in the batch succeeding (a run-end flush allocates half
-	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
-	// than twice the typical upload latency may pause uploads if storage does
-	// not finish within that slice), whereas a batch where at least one upload
-	// succeeded, an already-depleted budget (less than three quarters
-	// remaining), or a budget during Close does not pause.
+	// that an outage does not make each batch wait in turn. A run-end deadline
+	// stops uploads for the rest of that flush if an upload ran for at least
+	// three quarters of its batch's upload window before timing out, even if
+	// other uploads succeeded or earlier batches completed. This duration is
+	// bounded below by ShutdownTimeout/8 and above by 3*ShutdownTimeout/8
+	// (1.25s and 3.75s by default). A window shorter than ShutdownTimeout/8
+	// cannot trigger this stop. A run-end deadline triggers the shared cooldown
+	// only after at least 3*ShutdownTimeout/8 of upload time. Time waiting for a
+	// concurrent upload slot or cleaning up after the deadline does not count.
+	// Set ShutdownTimeout high enough for normal upload latency: a shorter
+	// run-end window may treat a slow but healthy upload as stalled. Caller
+	// cancellation, an already-expired deadline, or a deadline during Close
+	// does not pause uploads.
 	// Values <= 0 mean 10s.
 	GCSUploadTimeout time.Duration
 	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by
@@ -388,6 +392,28 @@ type Config struct {
 	// plugin does not close an offloader that the caller supplies.
 	GCSOffloader GCSContentOffloader
 
+	// DisableCreateViews stops the plugin from creating or replacing the 25
+	// pre-built per-event BigQuery views (see [Config.ViewDefinitions]), named
+	// "<ViewPrefix>_<lower-case event type>" (for example v_tool_starting), in
+	// the dataset of the events table. When false (the default) and the
+	// plugin has a BigQuery client, the views are created in the background
+	// once the table is ready, with one CREATE OR REPLACE VIEW job per view;
+	// this needs bigquery.jobs.create and bigquery.tables.create/update, and
+	// replaces existing views of the same names, while a table of the same
+	// name that is not a view is left alone and its view reported as failed.
+	// Closing the plugin stops starting further view jobs and cancels the
+	// client wait on an in-flight request, though a job already submitted to
+	// BigQuery may still finish on the server. Background failures are
+	// reported only when a non-default Logger is set;
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] creates the views synchronously
+	// and returns the error, even when DisableCreateViews is true. Deployments
+	// that start many instances may set DisableCreateViews and call SyncViews
+	// once at deploy time.
+	DisableCreateViews bool
+	// ViewPrefix is the name prefix of the created views. Empty means "v".
+	// It may contain only letters, digits, '_' and '-'. Give each events
+	// table that shares a dataset its own prefix.
+	ViewPrefix string
 	// ExactlyOnceDelivery writes through a COMMITTED write stream with
 	// explicit offsets instead of the default stream (for which event_id
 	// remains the row-level deduplication key), so that retrying an append
@@ -435,6 +461,7 @@ func DefaultConfig() Config {
 		GCSMaxConcurrentUploads:  defaultGCSMaxConcurrentUploads,
 		GCSUploadTimeout:         gcsUploadTimeout,
 		GCSMaxPendingUploadBytes: defaultMaxPendingUploadBytes,
+		ViewPrefix:               defaultViewPrefix,
 		RetryConfig: RetryConfig{
 			MaxRetries:   3,
 			InitialDelay: 100 * time.Millisecond,
@@ -493,6 +520,9 @@ func applyDefaults(c Config) Config {
 	if c.GCSMaxPendingUploadBytes <= 0 {
 		c.GCSMaxPendingUploadBytes = defaultMaxPendingUploadBytes
 	}
+	if c.ViewPrefix == "" {
+		c.ViewPrefix = defaultViewPrefix
+	}
 	return c
 }
 
@@ -512,6 +542,10 @@ func (c Config) flushOnRunEnd() bool {
 	return !c.DisableFlushOnRunEnd
 }
 
+func (c Config) createViews() bool {
+	return !c.DisableCreateViews
+}
+
 // maxContentLength returns the text truncation limit; -1 means no limit.
 func (c Config) maxContentLength() int {
 	if c.CaptureFullMessageContent {
@@ -525,4 +559,14 @@ func (c Config) logf(format string, args ...any) {
 	if c.Logger != nil {
 		c.Logger.Printf(format, args...)
 	}
+}
+
+// viewLogf returns c.Logger.Printf when the caller set a non-default Logger, or
+// nil when Logger is nil or DefaultConfig's log.Default(), so background view
+// creation never writes diagnostics to the process-wide standard logger.
+func (c Config) viewLogf() func(format string, args ...any) {
+	if c.Logger == nil || c.Logger == log.Default() { //nolint:forbidigo // comparing against DefaultConfig's pre-slog Logger value
+		return nil
+	}
+	return c.Logger.Printf
 }

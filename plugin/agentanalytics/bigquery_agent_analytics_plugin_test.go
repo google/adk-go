@@ -26,6 +26,8 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -61,7 +63,35 @@ type mockTransport struct {
 }
 
 func (m *mockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	return m.roundTrip(r)
+	if m.roundTrip != nil {
+		resp, err := m.roundTrip(r)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil {
+			if strings.Contains(r.URL.Path, "/jobs") && resp.StatusCode == http.StatusOK {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				bodyStr := strings.TrimSpace(string(bodyBytes))
+				if bodyStr == "" || bodyStr == "{}" {
+					resp.Body = io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`))
+				} else {
+					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+			}
+			return resp, nil
+		}
+	}
+	if strings.Contains(r.URL.Path, "/jobs") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("{}")),
+	}, nil
 }
 
 // fakeBigQueryWriteServer implements a fake gRPC BigQueryWriteServer for testing.
@@ -270,7 +300,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 	config := DefaultConfig()
 	config.Enabled = true
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 	if mutate != nil {
 		mutate(&config)
@@ -278,6 +308,12 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
+				}, nil
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("{}")),
@@ -492,7 +528,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 	config := DefaultConfig()
 	config.Enabled = true
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 
 	createCalled := false
@@ -501,14 +537,14 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
 			// Table metadata request: returns 404 Not Found to trigger creation
-			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
 				}, nil
 			}
 			// Table creation request
-			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables") {
 				createCalled = true
 				bodyBytes, _ := io.ReadAll(r.Body)
 				requestBody = string(bodyBytes)
@@ -517,6 +553,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 				}, nil
 			}
 			return &http.Response{
@@ -658,17 +700,20 @@ func TestConfig_DefaultOnFeatures(t *testing.T) {
 	cleared.DisableSessionMetadata = true
 	cleared.DisableSensitiveKeyRedaction = true
 	cleared.DisableFlushOnRunEnd = true
+	cleared.DisableCreateViews = true
 	disabled := Config{
 		DisableMultiModalContent:     true,
 		DisableSessionMetadata:       true,
 		DisableSensitiveKeyRedaction: true,
 		DisableFlushOnRunEnd:         true,
+		DisableCreateViews:           true,
 	}
 	defaultDisabled := DefaultConfig()
 	defaultDisabled.DisableMultiModalContent = true
 	defaultDisabled.DisableSessionMetadata = true
 	defaultDisabled.DisableSensitiveKeyRedaction = true
 	defaultDisabled.DisableFlushOnRunEnd = true
+	defaultDisabled.DisableCreateViews = true
 
 	tests := []struct {
 		name   string
@@ -688,6 +733,7 @@ func TestConfig_DefaultOnFeatures(t *testing.T) {
 				"logSessionMetadata":   tt.config.logSessionMetadata(),
 				"redactSensitiveKeys":  tt.config.redactSensitiveKeys(),
 				"flushOnRunEnd":        tt.config.flushOnRunEnd(),
+				"createViews":          tt.config.createViews(),
 			}
 			for name, enabled := range got {
 				if enabled != tt.want {
@@ -1489,9 +1535,16 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			},
 			wantErr: "invalid RetryConfig",
 		},
+		{
+			name:    "invalid ViewPrefix with SQL injection characters",
+			mutate:  func(c *Config) { c.ViewPrefix = "v` OR 1=1 --" },
+			wantErr: "invalid ViewPrefix",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS",
+				filepath.Join(t.TempDir(), "missing-credentials.json"))
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
@@ -2189,7 +2242,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			config.DisableSchemaUpgrade = tt.disableUpgrade
 
@@ -2213,7 +2266,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			var patchedLabels map[string]string
 			mockTransport := &mockTransport{
 				roundTrip: func(r *http.Request) (*http.Response, error) {
-					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 						if patchCalled && tt.retryUpgraded {
 							return &http.Response{
 								StatusCode: http.StatusOK,
@@ -2225,7 +2278,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 							Body:       io.NopCloser(bytes.NewReader(getBodyBytes)),
 						}, nil
 					}
-					if (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					if (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 						patchCalled = true
 						bodyBytes, _ := io.ReadAll(r.Body)
 						var body struct {
@@ -2249,6 +2302,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+						}, nil
+					}
+					if strings.Contains(r.URL.Path, "/jobs") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 						}, nil
 					}
 					return &http.Response{
@@ -2388,9 +2447,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			config.DisableSchemaUpgrade = tt.disableUpgrade
+			// Views are created in the background once the table is ready;
+			// this test covers only the table requests.
+			config.DisableCreateViews = true
 
 			respond := func(status int, body string) *http.Response {
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
@@ -2398,7 +2460,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 			apiError := func(status int) *http.Response {
 				return respond(status, fmt.Sprintf(`{"error":{"code":%d,"message":"status %d"}}`, status, status))
 			}
-			const tablePath = "/datasets/test-dataset/tables/test-table"
+			const tablePath = "/datasets/test_dataset/tables/test-table"
 			var gets, posts, patches int
 			var patchedColumns []string
 			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -2413,7 +2475,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 						return apiError(status), nil
 					}
 					return respond(http.StatusOK, legacyTable), nil
-				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test-dataset/tables"):
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables"):
 					posts++
 					return apiError(tt.postStatus), nil
 				case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, tablePath):
@@ -2533,7 +2595,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient(t *t
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			tt.mutate(&config)
 			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -2568,7 +2630,7 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 	config.PayloadColumnDenylist = []string{columnContent, columnContentParts, columnLatencyMS}
 
@@ -2576,13 +2638,13 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	var createdLabels map[string]string
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
-			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
 				}, nil
 			}
-			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables") {
 				bodyBytes, _ := io.ReadAll(r.Body)
 				var body struct {
 					Labels map[string]string `json:"labels"`
@@ -2601,6 +2663,12 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 				}, nil
 			}
 			return &http.Response{
@@ -4000,7 +4068,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 	t.Run("rejects nil writeClient when plugin is enabled", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
-		cfg.DatasetID = "test-dataset"
+		cfg.DatasetID = "test_dataset"
 		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "writeClient must not be nil") {
 			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(writeClient=nil) error = %v, want error containing %q", err, "writeClient must not be nil")
 		}
@@ -4010,7 +4078,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 		wc := newWriteClient(t)
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
-		cfg.DatasetID = "test-dataset"
+		cfg.DatasetID = "test_dataset"
 		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc)
 		if err != nil {
 			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(bqClient=nil) error = %v, want nil", err)
@@ -4040,7 +4108,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 		wc := newWriteClient(t)
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
-		cfg.DatasetID = "test-dataset"
+		cfg.DatasetID = "test_dataset"
 
 		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, wc); err == nil {
 			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want HTTP 400 error")
@@ -4075,7 +4143,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 	httpClient := &http.Client{
 		Transport: &mockTransport{
 			roundTrip: func(r *http.Request) (*http.Response, error) {
-				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Header:     http.Header{"Etag": []string{"etag-http-1"}},
@@ -4089,7 +4157,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 						}`)),
 					}, nil
 				}
-				if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+				if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 					patchCalls++
 					patchIfMatch = r.Header.Get("If-Match")
 					b, _ := io.ReadAll(r.Body)
@@ -4097,6 +4165,12 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"etag":"etag-http-2"}`)),
+					}, nil
+				}
+				if strings.Contains(r.URL.Path, "/jobs") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 					}, nil
 				}
 				return &http.Response{
@@ -4114,7 +4188,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 	t.Cleanup(func() { _ = bqClient.Close() })
 
 	srv := &committedStreamTestServer{
-		createdStreamName: "projects/test-project/datasets/test-dataset/tables/test-table/streams/committed-http-1",
+		createdStreamName: "projects/test-project/datasets/test_dataset/tables/test-table/streams/committed-http-1",
 	}
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -4138,7 +4212,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 
 	cfg := DefaultConfig()
 	cfg.ProjectID = "test-project"
-	cfg.DatasetID = "test-dataset"
+	cfg.DatasetID = "test_dataset"
 	cfg.TableName = "test-table"
 	cfg.ExactlyOnceDelivery = true
 
@@ -4278,7 +4352,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 					_, writeClient := newTestWriteClient(t)
 					cfg := DefaultConfig()
 					cfg.ProjectID = "test-project"
-					cfg.DatasetID = "test-dataset"
+					cfg.DatasetID = "test_dataset"
 					p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, writeClient)
 					if err != nil {
 						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
@@ -4299,7 +4373,8 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 					if !ok {
 						t.Fatal("pluginRegistry missing entry before GC")
 					}
-					if gotStats := v != nil; gotStats != tc.wantStats {
+					state, _ := v.(*pluginState)
+					if gotStats := state != nil && state.counters != nil; gotStats != tc.wantStats {
 						t.Fatalf("pluginRegistry entry holds drop counters = %t, want %t", gotStats, tc.wantStats)
 					}
 					return key
@@ -4317,6 +4392,316 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 			})
 		}
 	})
+
+	t.Run("closed disabled plugins are garbage collected and cleaned from pluginRegistry", func(t *testing.T) {
+		const count = 16
+		weakKeys := make([]weak.Pointer[baseplugin.Plugin], count)
+		var cleanedCount atomic.Int32
+
+		func() {
+			for i := 0; i < count; i++ {
+				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+				if err != nil {
+					t.Fatalf("failed to create disabled plugin: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("failed to close disabled plugin: %v", err)
+				}
+				weakKeys[i] = weak.Make(p)
+				runtime.AddCleanup(p, func(_ int) {
+					cleanedCount.Add(1)
+				}, 1)
+			}
+		}()
+
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			runtime.GC()
+			runtime.Gosched()
+			if int(cleanedCount.Load()) == count {
+				allClean := true
+				for _, wk := range weakKeys {
+					if _, ok := pluginRegistry.Load(wk); ok || wk.Value() != nil {
+						allClean = false
+						break
+					}
+				}
+				if allClean {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if int(cleanedCount.Load()) != count {
+			t.Fatalf("expected all %d disabled plugins to be collected, got %d", count, cleanedCount.Load())
+		}
+		for i, wk := range weakKeys {
+			if wk.Value() != nil {
+				t.Fatalf("weakKey[%d] still valid after GC", i)
+			}
+			if _, ok := pluginRegistry.Load(wk); ok {
+				t.Fatalf("pluginRegistry still retains key for instance %d after GC", i)
+			}
+		}
+	})
+
+	t.Run("closed enabled plugins are garbage collected and cleaned from pluginRegistry", func(t *testing.T) {
+		var weakKey weak.Pointer[baseplugin.Plugin]
+		var cleaned atomic.Bool
+
+		func() {
+			mockTransport := &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			}
+			httpClient := &http.Client{Transport: mockTransport}
+			bqClient, err := bq.NewClient(ctx, "test-proj", option.WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("failed to create BQ client: %v", err)
+			}
+			defer func() { _ = bqClient.Close() }()
+
+			lis, err := net.Listen("tcp", "localhost:0")
+			if err != nil {
+				t.Fatalf("failed to listen: %v", err)
+			}
+			defer func() { _ = lis.Close() }()
+			gSrv := grpc.NewServer()
+			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)})
+			go func() { _ = gSrv.Serve(lis) }()
+			defer gSrv.Stop()
+
+			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatalf("failed to dial: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+			if err != nil {
+				t.Fatalf("failed to create write client: %v", err)
+			}
+
+			config := DefaultConfig()
+			config.Enabled = true
+			config.ProjectID = "test-proj"
+			config.DatasetID = "test_dataset"
+			config.TableName = "test-table"
+			config.DisableSchemaUpgrade = true
+			config.DisableCreateViews = true
+
+			p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+			if err != nil {
+				t.Fatalf("failed to create plugin: %v", err)
+			}
+			if err := p.Close(); err != nil {
+				t.Fatalf("p.Close() error = %v", err)
+			}
+			weakKey = weak.Make(p)
+			runtime.AddCleanup(p, func(_ int) {
+				cleaned.Store(true)
+			}, 1)
+		}()
+
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			runtime.GC()
+			runtime.Gosched()
+			if _, ok := pluginRegistry.Load(weakKey); cleaned.Load() && weakKey.Value() == nil && !ok {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if !cleaned.Load() || weakKey.Value() != nil {
+			t.Fatal("expected closed plugin to be collected and not retained by pluginRegistry")
+		}
+		if _, ok := pluginRegistry.Load(weakKey); ok {
+			t.Fatal("expected pluginRegistry entry to be deleted after GC")
+		}
+	})
+
+	// An application can hand the plugin an object that holds the plugin, such
+	// as a per-tenant struct used as the Logger. The registry holds its values
+	// for as long as the plugin lives, so a value that reached such an object
+	// would keep the plugin alive for the life of the process. That holds for
+	// a plugin that is dropped without Close too, even though its
+	// BatchProcessor goroutine then keeps running, as it does on main.
+	for _, tc := range []struct {
+		name string
+		// newPlugin returns a plugin that refers to h, and a function that
+		// closes what the caller owns once the plugin is closed.
+		newPlugin func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func())
+		// leaveOpen drops the plugin without closing it.
+		leaveOpen bool
+	}{
+		{
+			name: "closed enabled plugin with circular Logger back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{}, func(c *Config) { c.Logger = h })
+			},
+		},
+		{
+			name: "closed enabled plugin with ContentFormatter method receiver back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{}, func(c *Config) { c.ContentFormatter = h.format })
+			},
+		},
+		{
+			name: "closed disabled plugin with circular Logger back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false, Logger: h})
+				if err != nil {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+				}
+				return p, nil
+			},
+		},
+		{
+			name: "closed enabled plugin with constructor context back-reference is collected after Close cancels view creation",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				jobStarted := make(chan struct{})
+				var started atomic.Bool
+				transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						if started.CompareAndSwap(false, true) {
+							close(jobStarted)
+						}
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+				}}
+				p, closeOwned := newHolderTestPlugin(t, context.WithValue(ctx, pluginHolderKey{}, h), transport, nil)
+				select {
+				case <-jobStarted:
+				case <-time.After(3 * time.Second):
+					t.Fatal("timed out waiting for startup view creation to send a job")
+				}
+				return p, closeOwned
+			},
+		},
+		{
+			name: "closed enabled plugin with BigQuery client transport back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{roundTrip: h.roundTrip}, nil)
+			},
+		},
+		{
+			name: "unclosed enabled plugin with DisableCreateViews and BigQuery client transport back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{roundTrip: h.roundTrip}, func(c *Config) { c.DisableCreateViews = true })
+			},
+			leaveOpen: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var key weak.Pointer[baseplugin.Plugin]
+			func() {
+				h := &pluginHolder{}
+				p, closeOwned := tc.newPlugin(t, h)
+				h.plugin = p
+				if !tc.leaveOpen {
+					if err := p.Close(); err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				}
+				if closeOwned != nil {
+					closeOwned()
+				}
+				key = weak.Make(p)
+			}()
+			if !waitPluginCollected(key) {
+				_, registered := pluginRegistry.Load(key)
+				t.Fatalf("after GC: plugin collected = %v, registry entry removed = %v; want both", key.Value() == nil, !registered)
+			}
+		})
+	}
+}
+
+// pluginHolder stands for an application object that holds a plugin and is
+// also handed to it: as its Logger, as the receiver of its ContentFormatter,
+// in the context that it is constructed with, or in the transport of its
+// BigQuery client.
+type pluginHolder struct {
+	plugin *baseplugin.Plugin
+}
+
+func (h *pluginHolder) Printf(string, ...any) {}
+
+func (h *pluginHolder) Println(...any) {}
+
+func (h *pluginHolder) format(payload any, _ string) (any, error) {
+	return payload, nil
+}
+
+func (h *pluginHolder) roundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+}
+
+type pluginHolderKey struct{}
+
+// newHolderTestPlugin constructs an enabled plugin with ctx. The plugin
+// creates its views in the background through a BigQuery client whose
+// requests go to transport, and writes rows to a fake BigQuery Storage Write
+// server. mutate, if set, adjusts the config. The returned function closes
+// what the caller owns: the BigQuery client, the connection and the server.
+func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.RoundTripper, mutate func(*Config)) (*baseplugin.Plugin, func()) {
+	t.Helper()
+	bqClient, err := bq.NewClient(context.Background(), "test-project", option.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatalf("bq.NewClient: %v", err)
+	}
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test-table"
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+	}
+	return p, func() {
+		_ = bqClient.Close()
+		_ = conn.Close()
+		gSrv.Stop()
+	}
+}
+
+// waitPluginCollected runs the garbage collector until the plugin that key
+// points to has been collected and its pluginRegistry entry removed, and
+// reports whether both happened within five seconds.
+func waitPluginCollected(key weak.Pointer[baseplugin.Plugin]) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		runtime.GC()
+		if _, ok := pluginRegistry.Load(key); !ok && key.Value() == nil {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
 
 func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(t *testing.T) {
@@ -4436,6 +4821,215 @@ func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(
 		}
 		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
 			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.T) {
+	ctx := context.Background()
+
+	newMockGRPCWriteConn := func(t *testing.T) *grpc.ClientConn {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+
+	okHTTPClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			},
+		},
+	}
+
+	t.Run("closes internal bqClient when writeClient creation fails", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			_ = origClose(c)
+			return errors.New("simulated bq close failure")
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+		cfg.ClientOptions = []option.ClientOption{
+			option.WithHTTPClient(okHTTPClient),
+			option.WithCredentialsFile(filepath.Join(t.TempDir(), "missing-creds.json")),
+		}
+
+		_, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, cfg)
+		if err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithConfig() error = nil, want writeClient error")
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times, want 1", closeCount)
+		}
+		if !logger.contains("failed to close bigquery client") {
+			t.Errorf("expected close error to be logged, got:\n%s", logger.String())
+		}
+	})
+
+	t.Run("closes internal bqClient when table verification fails", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			return origClose(c)
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		failHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"bad request"}}`)),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(failHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DisableCreateViews = true
+
+		_, err = newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err == nil {
+			t.Fatal("newBigQueryAgentAnalyticsPlugin() error = nil, want table check error")
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times on table verification failure, want 1", closeCount)
+		}
+	})
+
+	t.Run("closes internal bqClient on plugin Close but does not close caller-supplied bqClient", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			return origClose(c)
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		internalBQ, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = internalBQ.Close() })
+		internalWrite, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.DisableCreateViews = true
+
+		p, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, internalBQ, internalWrite, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin(ownBQClient=true) error = %v", err)
+		}
+		if closeCount != 0 {
+			t.Fatalf("closeBQClient called %d times before Close(), want 0", closeCount)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times after Close(), want 1", closeCount)
+		}
+
+		// Public NewBigQueryAgentAnalyticsPluginWithConfig must pass ownBQClient=true
+		// so p.Close() closes the internally constructed bq.Client.
+		httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+				_, _ = io.WriteString(w, `{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, "{}")
+		}))
+		t.Cleanup(httpSrv.Close)
+
+		publicCfg := DefaultConfig()
+		publicCfg.ProjectID = "test-project"
+		publicCfg.DatasetID = "test_dataset"
+		publicCfg.DisableCreateViews = true
+		publicCfg.ClientOptions = []option.ClientOption{
+			option.WithEndpoint(httpSrv.URL),
+			option.WithoutAuthentication(),
+			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		}
+		pPublic, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, publicCfg)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+		}
+		if closeCount != 1 {
+			t.Fatalf("closeBQClient called %d times before closing WithConfig plugin, want 1", closeCount)
+		}
+		if err := pPublic.Close(); err != nil {
+			t.Fatalf("pPublic.Close() error = %v", err)
+		}
+		if closeCount != 2 {
+			t.Errorf("closeBQClient called %d times after closing WithConfig plugin, want 2", closeCount)
+		}
+
+		// Caller-supplied bqClient via NewBigQueryAgentAnalyticsPluginWithClients must NOT be closed by p.Close().
+		callerBQ, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = callerBQ.Close() })
+		callerWrite, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		p2, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, callerBQ, callerWrite)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if err := p2.Close(); err != nil {
+			t.Fatalf("p2.Close() error = %v", err)
+		}
+		if closeCount != 2 {
+			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
 		}
 	})
 }
