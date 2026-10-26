@@ -6209,6 +6209,7 @@ func TestLogEvent_EventFiltersPreserveSpansLatencyAndInvocationCleanup(t *testin
 		// must allocate a fresh invocation root span ID, proving endInvocation
 		// removed the finished invocation even though INVOCATION_COMPLETED was
 		// filtered out.
+		errs.add(p.BeforeRunCallback()(ctx))
 		errs.add(p.BeforeAgentCallback()(ctx))
 		errs.check(t)
 		nextRows := collectRows(t, requests, untilEventType(EventAgentStarting))
