@@ -15,6 +15,7 @@
 package shared
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -22,10 +23,12 @@ import (
 )
 
 func TestEnsureFunctionToolOnly(t *testing.T) {
+	fn := []*genai.FunctionDeclaration{{Name: "fn1"}}
 	tests := []struct {
 		name    string
 		tool    *genai.Tool
 		wantErr string
+		wantIs  error
 	}{
 		{
 			name:    "nil tool",
@@ -33,9 +36,52 @@ func TestEnsureFunctionToolOnly(t *testing.T) {
 			wantErr: "tool 0 is nil",
 		},
 		{
-			name:    "non-function tool",
+			name:    "GoogleSearch alone",
 			tool:    &genai.Tool{GoogleSearch: &genai.GoogleSearch{}},
 			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name:    "FileSearch alone",
+			tool:    &genai.Tool{FileSearch: &genai.FileSearch{}},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name:    "ParallelAISearch alone",
+			tool:    &genai.Tool{ParallelAISearch: &genai.ToolParallelAISearch{}},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name:    "MCPServers alone",
+			tool:    &genai.Tool{MCPServers: []*genai.MCPServer{{Name: "my-mcp"}}},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name:    "ExaAISearch alone",
+			tool:    &genai.Tool{ExaAISearch: &genai.ToolExaAISearch{}},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name: "MCPServers beside FunctionDeclarations",
+			tool: &genai.Tool{
+				FunctionDeclarations: fn,
+				MCPServers:           []*genai.MCPServer{{Name: "my-mcp"}},
+			},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
+		},
+		{
+			name: "FileSearch beside FunctionDeclarations",
+			tool: &genai.Tool{
+				FunctionDeclarations: fn,
+				FileSearch:           &genai.FileSearch{},
+			},
+			wantErr: "non-function tools",
+			wantIs:  ErrUnsupportedConfigField,
 		},
 		{
 			name:    "no functions",
@@ -44,7 +90,7 @@ func TestEnsureFunctionToolOnly(t *testing.T) {
 		},
 		{
 			name: "valid",
-			tool: &genai.Tool{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "fn1"}}},
+			tool: &genai.Tool{FunctionDeclarations: fn},
 		},
 	}
 
@@ -55,10 +101,13 @@ func TestEnsureFunctionToolOnly(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
 				}
-			} else {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
-				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("errors.Is(%v, %v) = false", err, tc.wantIs)
 			}
 		})
 	}
