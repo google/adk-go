@@ -1399,7 +1399,25 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								default:
 								}
 								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
+									// Log shape only: err may carry tool args / panic values / stacks.
+									log.Printf("Error in streaming tool %s (type %T)", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
+									errorContent := &genai.Content{
+										Role: "user",
+										Parts: []*genai.Part{
+											{
+												FunctionResponse: &genai.FunctionResponse{
+													ID:   fnCall.ID,
+													Name: streamTool.Name(),
+													Response: map[string]any{
+														"error": streamingToolInternalError(streamTool.Name()),
+													},
+												},
+											},
+										},
+									}
+									if sendErr := liveSess.Send(agent.LiveRequest{Content: errorContent}); sendErr != nil {
+										log.Printf("Failed to send streaming tool error for %s: %v", streamTool.Name(), sendErr) //nolint:forbidigo // pre-slog call site
+									}
 									return
 								}
 								updatedContent := &genai.Content{
@@ -1420,7 +1438,9 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": err.Error()}
+								// Do not forward panic values, stacks, or handler text to the model.
+								log.Printf("Error in streaming tool %s (type %T)", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
+								result = map[string]any{"error": streamingToolInternalError(streamTool.Name())}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1627,6 +1647,13 @@ func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool,
 	}
 	// If no callback returned a result/error, return the original result/error.
 	return nil, fErr
+}
+
+// streamingToolInternalError is the generic FunctionResponse error text for a
+// failed streaming tool. Panic values, handler errors and stacks stay out of
+// the model-facing payload (parity with adk-python _live_caller).
+func streamingToolInternalError(toolName string) string {
+	return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
