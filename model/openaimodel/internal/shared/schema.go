@@ -18,11 +18,36 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	"google.golang.org/genai"
 )
+
+// DefaultResponseFormatName is the structured-output format name both
+// endpoints send when the caller's schema has no title OpenAI would accept.
+const DefaultResponseFormatName = "adk_response"
+
+// responseFormatNamePattern is the rule openai-go documents on the format name
+// of both endpoints: "Must be a-z, A-Z, 0-9, or contain underscores and
+// dashes, with a maximum length of 64."
+var responseFormatNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// ResponseFormatName returns the structured-output format name for a schema:
+// its title when OpenAI accepts it as a name, and DefaultResponseFormatName
+// otherwise. genai puts no constraint on Title, so a title such as
+// "Weather Report" would otherwise fail every request. The title still reaches
+// the model unchanged in the schema body, which the API does not restrict.
+//
+// adk-python's LiteLLM path copies the title straight into the name
+// (models/lite_llm.py, _to_litellm_response_format) and fails the same way.
+func ResponseFormatName(schema *genai.Schema) string {
+	if schema != nil && responseFormatNamePattern.MatchString(schema.Title) {
+		return schema.Title
+	}
+	return DefaultResponseFormatName
+}
 
 // NormalizeSchema round-trips a JSON schema of any Go shape into a map,
 // keeping its numbers as written.
