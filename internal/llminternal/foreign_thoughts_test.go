@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -57,6 +58,22 @@ func TestContentsRequestProcessor_ForeignThoughts(t *testing.T) {
 		{
 			name: "metadata-only foreign part is omitted", author: "otherAgent",
 			parts: []*genai.Part{{PartMetadata: map[string]any{"source": "test"}}},
+		},
+		{
+			name: "video metadata-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{VideoMetadata: &genai.VideoMetadata{EndOffset: time.Second}}},
+		},
+		{
+			name: "media resolution-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{MediaResolution: &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}}},
+		},
+		{
+			name: "media processing-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{MediaProcessing: genai.MediaProcessingStatic}},
+		},
+		{
+			name: "speech metadata-only foreign part is omitted", author: "otherAgent",
+			parts: []*genai.Part{{SpeechMetadata: &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}}},
 		},
 		{
 			name: "mixed foreign event retains public parts", author: "otherAgent",
@@ -186,6 +203,22 @@ func TestContentsRequestProcessor_ForeignThoughtCurrentTurn(t *testing.T) {
 		{
 			name: "foreign metadata-only part does not start a turn", author: "otherAgent",
 			parts: []*genai.Part{{PartMetadata: map[string]any{"source": "test"}}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign video metadata-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{VideoMetadata: &genai.VideoMetadata{EndOffset: time.Second}}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign media resolution-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{MediaResolution: &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign media processing-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{MediaProcessing: genai.MediaProcessingStatic}}, keepCurrentUser: true,
+		},
+		{
+			name: "foreign speech metadata-only part does not start a turn", author: "otherAgent",
+			parts: []*genai.Part{{SpeechMetadata: &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}}}, keepCurrentUser: true,
 		},
 		{
 			name: "multiple foreign thought parts do not start a turn", author: "otherAgent",

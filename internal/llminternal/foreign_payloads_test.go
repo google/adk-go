@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -48,6 +49,10 @@ func TestConvertForeignEvent_RetainsPayloadParts(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				part := *tc.part
+				part.VideoMetadata = &genai.VideoMetadata{EndOffset: time.Second}
+				part.MediaResolution = &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}
+				part.MediaProcessing = genai.MediaProcessingStatic
+				part.SpeechMetadata = &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}
 				if signed {
 					part.ThoughtSignature = []byte{3, 4}
 				}
@@ -69,7 +74,7 @@ func TestConvertForeignEvent_RetainsPayloadParts(t *testing.T) {
 				}
 				want := []*genai.Part{{Text: "For context:"}, &part}
 				if !cmp.Equal(got.Content.Parts, want) {
-					t.Error("foreign conversion did not retain the payload and its attached signature")
+					t.Error("foreign conversion did not retain the payload and its attached metadata")
 				}
 				after, err := json.Marshal(event)
 				if err != nil {
