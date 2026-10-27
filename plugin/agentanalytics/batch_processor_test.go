@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
@@ -4387,135 +4388,128 @@ func TestBatchProcessor_FlushRunEndBoundedReDeferral(t *testing.T) {
 	}
 }
 
-type dynamicDelayBigQueryWriteServer struct {
-	storagepb.UnimplementedBigQueryWriteServer
-	delay    *atomic.Int64
-	requests chan *storagepb.AppendRowsRequest
-}
-
-func (s *dynamicDelayBigQueryWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
-	for {
-		req, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if s.delay != nil {
-			if d := time.Duration(s.delay.Load()); d > 0 {
-				select {
-				case <-time.After(d):
-				case <-stream.Context().Done():
-					return stream.Context().Err()
-				}
-			}
-		}
-		if s.requests != nil {
-			s.requests <- req
-		}
-		if err := stream.Send(&storagepb.AppendRowsResponse{}); err != nil {
-			return err
-		}
-	}
-}
-
 func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	requests := make(chan *storagepb.AppendRowsRequest, 16)
-	gSrv := grpc.NewServer()
-	var serverDelay atomic.Int64
-	serverDelay.Store(int64(50 * time.Millisecond))
+	for _, tt := range []struct {
+		name         string
+		firstWrite   time.Duration
+		skippedBatch bool
+		wantReserved int64
+		wantCalls    int
+		wantMode     string
+	}{
+		{name: "upload window below floor", firstWrite: 100 * time.Millisecond, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
+		{name: "local stop retains upload", firstWrite: 50 * time.Millisecond, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
+		{name: "locally skipped batch retains upload", firstWrite: 50 * time.Millisecond, skippedBatch: true, wantReserved: 64, wantCalls: 2, wantMode: storageModeGCSReference},
+		{name: "shared cooldown releases upload", wantCalls: 1, wantMode: storageModeInline},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+					<-ctx.Done()
+					return ctx.Err()
+				}}
+				cfg := DefaultConfig()
+				cfg.BatchSize = 1
+				cfg.ShutdownTimeout = 120 * time.Millisecond
+				cfg.RetryConfig.MaxRetries = 0
+				cfg.GCSOffloader = off
+				cfg.GCSMaxPendingUploadBytes = 64
+				if tt.skippedBatch {
+					cfg.GCSMaxPendingUploadBytes = 128
+				}
+				cfg.Logger = &recordingLogger{}
+				bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() {
+					// Keep cleanup independent of a failed assertion after a
+					// write timeout has discarded the original mock stream.
+					bp.streamWriter.stream = &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+					bp.streamWriter.streamCtx = nil
+					bp.Close()
+				}()
 
-	storagepb.RegisterBigQueryWriteServer(gSrv, &dynamicDelayBigQueryWriteServer{
-		delay:    &serverDelay,
-		requests: requests,
-	})
-	go func() { _ = gSrv.Serve(lis) }()
-	t.Cleanup(gSrv.Stop)
+				streamCtx, cancelStream := context.WithCancel(context.Background())
+				defer cancelStream()
+				writes := 0
+				stream := &mockStream{
+					onSend: func() {
+						writes++
+						if writes == 1 {
+							time.Sleep(tt.firstWrite)
+							return
+						}
+						if tt.skippedBatch && writes == 2 {
+							return
+						}
+						<-streamCtx.Done()
+					},
+					recvSeq: []mockRecv{{res: &storagepb.AppendRowsResponse{}}, {err: context.Canceled}},
+				}
+				if tt.skippedBatch {
+					stream.recvSeq = []mockRecv{{res: &storagepb.AppendRowsResponse{}}, {res: &storagepb.AppendRowsResponse{}}, {err: context.Canceled}}
+				}
+				bp.streamWriter.stream = stream
+				bp.streamWriter.streamCtx = streamCtx
+				bp.streamWriter.streamCancel = cancelStream
+				bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+				// The second batch gets 10ms, 35ms, or 60ms to upload. Only
+				// the last reaches the shared 45ms threshold. Its BigQuery
+				// write consumes the remaining budget and defers the row.
+				row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
+				row["event_type"] = EventLLMRequest
+				bp.queue <- row
+				if tt.skippedBatch {
+					// The preceding batch stops uploads locally and writes
+					// successfully; this batch skips its upload, then defers.
+					next := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
+					next["event_type"] = EventLLMRequest
+					bp.queue <- next
+				}
+				bp.flushRunEnd()
+				if got, want := bp.uploadCooldownUntil.Load() != 0, tt.wantReserved == 0; got != want {
+					t.Errorf("shared cooldown = %v, want %v", got, want)
+				}
+				if len(bp.deferredBatch) != 1 {
+					t.Fatalf("deferredBatch length = %d, want 1", len(bp.deferredBatch))
+				}
+				if got := bp.pendingUploadBytes.Load(); got != tt.wantReserved {
+					t.Fatalf("pending upload bytes = %d, want %d", got, tt.wantReserved)
+				}
 
-	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
-	if err != nil {
-		t.Fatalf("write client: %v", err)
-	}
-	t.Cleanup(func() { _ = writeClient.Close() })
-
-	var stalled atomic.Bool
-	stalled.Store(true)
-	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		if stalled.Load() {
-			<-ctx.Done()
-			return ctx.Err()
-		}
-		return nil
-	}}
-	cfg := DefaultConfig()
-	cfg.BatchSize = 1
-	cfg.BatchFlushIntv = time.Hour
-	cfg.ShutdownTimeout = 120 * time.Millisecond
-	cfg.RetryConfig.MaxRetries = 0
-	cfg.GCSOffloader = off
-	cfg.GCSMaxPendingUploadBytes = 64
-	cfg.Logger = &recordingLogger{}
-
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
-	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
-	}
-	t.Cleanup(bp.Close)
-	bp.Start()
-
-	// Batch 0: no upload; takes 50ms in AppendRows, leaving ~70ms of 120ms ShutdownTimeout (< 3/4).
-	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
-
-	// Batch 1: 64-byte upload; because budget is already depleted, pauseOnCallerDeadline is false.
-	// Upload stalls for 35ms (half remaining) and is deferred with 64 bytes retained in pendingUploadBytes.
-	// AppendRows takes 50ms, exceeding the remaining ~35ms, so flushRunEnd saves batch 1 in deferredBatch.
-	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
-	row["event_type"] = EventLLMRequest
-	bp.queue <- row
-
-	bp.flushRunEnd()
-
-	if len(bp.deferredBatch) != 1 {
-		t.Fatalf("deferredBatch length after flushRunEnd = %d, want 1", len(bp.deferredBatch))
-	}
-	if got := bp.pendingUploadBytes.Load(); got != 64 {
-		t.Fatalf("pendingUploadBytes after flushRunEnd = %d, want 64", got)
-	}
-
-	// Restore healthy storage and BigQuery writes.
-	stalled.Store(false)
-	serverDelay.Store(0)
-
-	// Background flush must write deferredBatch before draining the queue.
-	bp.flush()
-
-	if len(bp.deferredBatch) != 0 {
-		t.Fatalf("deferredBatch length after flush = %d, want 0", len(bp.deferredBatch))
-	}
-	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Fatalf("pendingUploadBytes after flush = %d, want 0", got)
-	}
-
-	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 2 })
-	if len(rows) != 2 {
-		t.Fatalf("persisted rows = %d, want 2", len(rows))
-	}
-	if got := contentPartsOf(t, rows[1])[0]["storage_mode"]; got != "GCS_REFERENCE" {
-		t.Errorf("part storage_mode = %v, want GCS_REFERENCE", got)
-	}
-	if ds := bp.DropStats(); ds.TotalDrops != 0 {
-		t.Errorf("DropStats after both rows were written = %+v, want no drops", ds)
+				// Restore storage and writes; the deferred row must go before
+				// newly queued rows, retrying uploads without a shared cooldown.
+				off.hook = nil
+				retryStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
+				bp.streamWriter.stream = retryStream
+				bp.queue <- map[string]any{"event_type": EventInvocationCompleted}
+				bp.flush()
+				if len(bp.deferredBatch) != 0 || bp.pendingUploadBytes.Load() != 0 {
+					t.Fatal("background flush retained the deferred batch or its upload bytes")
+				}
+				if got := len(off.uploads()); got != tt.wantCalls {
+					t.Errorf("upload attempts = %d, want %d", got, tt.wantCalls)
+				}
+				var rows []map[string]any
+				for _, req := range retryStream.requests() {
+					rows = append(rows, decodeArrowRows(t, req)...)
+				}
+				if len(rows) != 2 {
+					t.Fatalf("retried and queued rows = %d, want 2", len(rows))
+				}
+				if rows[0]["event_type"] != EventLLMRequest || rows[1]["event_type"] != EventInvocationCompleted {
+					t.Fatal("background flush did not write the deferred row before the queued row")
+				}
+				if got := contentPartsOf(t, rows[0])[0]["storage_mode"]; got != tt.wantMode {
+					t.Errorf("retried row storage_mode = %v, want %s", got, tt.wantMode)
+				}
+				if ds := bp.DropStats(); ds.TotalDrops != 0 {
+					t.Errorf("DropStats = %+v, want no drops", ds)
+				}
+			})
+		})
 	}
 }
 
