@@ -267,6 +267,20 @@ func TestPreloadMemoryTool_SearchQuery(t *testing.T) {
 			wantQueries: []string{"my preferences"},
 		},
 		{
+			name: "thought-only content",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+			}},
+		},
+		{
+			name: "thought before text",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+				{Text: "my preferences"},
+			}},
+			wantQueries: []string{"my preferences"},
+		},
+		{
 			name: "image before text",
 			userContent: &genai.Content{Parts: []*genai.Part{
 				{InlineData: &genai.Blob{MIMEType: "image/png"}},
