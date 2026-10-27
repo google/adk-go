@@ -71,8 +71,8 @@ type SaveRequest struct {
 	// when saving it and return the value as a string.
 	CustomMetadata map[string]any
 
-	// Version is ignored by Save: every Save creates a new version and returns
-	// it in SaveResponse.Version.
+	// Deprecated: Save ignores Version. Every Save creates a new version and
+	// returns it in SaveResponse.Version.
 	Version int64
 }
 
