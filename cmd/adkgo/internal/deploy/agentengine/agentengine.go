@@ -65,6 +65,10 @@ type agentEngineServiceFlags struct {
 	serverPort    int
 	agentEngineID string
 	memoryBank    memoryBankFlags
+	env           []string
+	defaultEnv    bool
+	envVars       []*aiplatformpb.EnvVar
+	updateEnv     bool
 }
 
 type buildFlags struct {
@@ -97,6 +101,7 @@ var agentEngineCmd = &cobra.Command{
 	Short: "Deploys the application to Agent Engine.",
 	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		flags.agentEngine.updateEnv = cmd.Flags().Changed("env") || cmd.Flags().Changed("default_env")
 		return flags.deployOnAgentEngine()
 	},
 }
@@ -118,12 +123,18 @@ func init() {
 		" A non-empty value is prefixed with projects/<project_name>/locations/<region>, so the model must be available in that region. To list models, GET"+
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+	registerEnvironmentFlags(agentEngineCmd, &flags.agentEngine)
 }
 
 // computeFlags uses command line arguments to create a full config
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
+			env, err := f.environmentVariables()
+			if err != nil {
+				return err
+			}
+			f.agentEngine.envVars = env
 			f.source.origEntryPointPath = f.source.entryPointPath
 			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
@@ -346,13 +357,14 @@ func (f *deployAgentEngineFlags) memoryBankContextSpec() *aiplatformpb.Reasoning
 }
 
 // gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
-func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
+func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine(opts ...option.ClientOption) error {
 	return util.LogStartStop("Deploying to Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
 			parent := fmt.Sprintf("projects/%s/locations/%s", f.gcloud.projectName, f.gcloud.region)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
-			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			opts = append([]option.ClientOption{option.WithEndpoint(endpoint)}, opts...)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, opts...)
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
 			}
@@ -396,12 +408,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 						},
 						AgentFramework: "google-adk",
 						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
+							Env: f.agentEngine.envVars,
 						},
 						ClassMethods: methods,
 					},
@@ -438,13 +445,14 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 }
 
 // gcloudUpdateAgentEngine invokes gcloud to update source on agentEngine
-func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
+func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine(opts ...option.ClientOption) error {
 	return util.LogStartStop("Updating Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
 			name := fmt.Sprintf("projects/%s/locations/%s/reasoningEngines/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.agentEngineID)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
-			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			opts = append([]option.ClientOption{option.WithEndpoint(endpoint)}, opts...)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, opts...)
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
 			}
@@ -491,6 +499,11 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
 			}
 
+			if f.agentEngine.updateEnv {
+				req.ReasoningEngine.Spec.DeploymentSpec = &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{Env: f.agentEngine.envVars}
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.deployment_spec.env")
+			}
+
 			if f.agentEngine.memoryBank.deploy {
 				req.ReasoningEngine.ContextSpec = f.memoryBankContextSpec()
 				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.context_spec")
@@ -521,8 +534,6 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 
 // deployOnAgentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
 func (f *deployAgentEngineFlags) deployOnAgentEngine() error {
-	fmt.Println(flags)
-
 	err := f.computeFlags()
 	if err != nil {
 		return err
