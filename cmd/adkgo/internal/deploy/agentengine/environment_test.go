@@ -132,6 +132,7 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 		update     bool
 		want       map[string]string
 		wantUpdate bool
+		wantOrder  []string
 	}{
 		{name: "create defaults", want: defaults},
 		{name: "create overrides and preserves values", args: []string{"--env=NUM_WORKERS=3", "--env=SERVICE_URL=https://example.test/?a=1,b=2", "--env=_empty="}, want: map[string]string{
@@ -140,11 +141,16 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 		}},
 		{name: "create without defaults", args: []string{"--default_env=false", "--env=lower_case=only-custom"}, want: map[string]string{"lower_case": "only-custom"}},
 		{name: "create empty environment", args: []string{"--default_env=false"}, want: map[string]string{}},
+		{name: "create preserves reference order", args: []string{"--default_env=false", "--env=Z_BASE=5", "--env=A_DERIVED=$(Z_BASE)", "--env=ESCAPED=$$(Z_BASE)", "--env=UNKNOWN=$(MISSING)"}, want: map[string]string{"Z_BASE": "5", "A_DERIVED": "$(Z_BASE)", "ESCAPED": "$$(Z_BASE)", "UNKNOWN": "$(MISSING)"}, wantOrder: []string{"Z_BASE", "A_DERIVED", "ESCAPED", "UNKNOWN"}},
+		{name: "create default override follows its reference", args: []string{"--env=Z_BASE=5", "--env=NUM_WORKERS=$(Z_BASE)"}, want: map[string]string{
+			"GOOGLE_CLOUD_REGION": "test-region", "NUM_WORKERS": "$(Z_BASE)", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true", "Z_BASE": "5",
+		}, wantOrder: []string{"GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "Z_BASE", "NUM_WORKERS"}},
 		{name: "update preserves environment by default", update: true},
 		{name: "update overrides defaults", args: []string{"--env=NUM_WORKERS=5"}, update: true, want: map[string]string{
 			"GOOGLE_CLOUD_REGION": "test-region", "NUM_WORKERS": "5", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
 		}, wantUpdate: true},
 		{name: "update custom environment", args: []string{"--default_env=false", "--env=ONLY=custom"}, update: true, want: map[string]string{"ONLY": "custom"}, wantUpdate: true},
+		{name: "update preserves reference order", args: []string{"--default_env=false", "--env=Z_BASE=5", "--env=A_DERIVED=$(Z_BASE)"}, update: true, want: map[string]string{"Z_BASE": "5", "A_DERIVED": "$(Z_BASE)"}, wantUpdate: true, wantOrder: []string{"Z_BASE", "A_DERIVED"}},
 		{name: "update explicitly enables defaults", args: []string{"--default_env=true"}, update: true, want: defaults, wantUpdate: true},
 		{name: "update clears environment", args: []string{"--default_env=false"}, update: true, want: map[string]string{}, wantUpdate: true},
 	}
@@ -209,14 +215,21 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 			}
 			if tt.want != nil {
 				got := make(map[string]string)
+				var order []string
 				for _, env := range spec.GetDeploymentSpec().GetEnv() {
 					if _, exists := got[env.GetName()]; exists {
 						t.Errorf("request contains duplicate variable %q", env.GetName())
 					}
 					got[env.GetName()] = env.GetValue()
+					order = append(order, env.GetName())
 				}
 				if diff := cmp.Diff(tt.want, got); diff != "" {
 					t.Errorf("environment mismatch (-want +got):\n%s", diff)
+				}
+				if tt.wantOrder != nil {
+					if diff := cmp.Diff(tt.wantOrder, order); diff != "" {
+						t.Errorf("environment order mismatch (-want +got):\n%s", diff)
+					}
 				}
 			}
 		})

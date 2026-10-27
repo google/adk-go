@@ -17,7 +17,6 @@ package agentengine
 import (
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
@@ -34,13 +33,7 @@ func registerEnvironmentFlags(cmd *cobra.Command, f *agentEngineServiceFlags) {
 var environmentNamePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 func (f *deployAgentEngineFlags) environmentVariables() ([]*aiplatformpb.EnvVar, error) {
-	values := make(map[string]string)
-	if f.agentEngine.defaultEnv {
-		values["GOOGLE_CLOUD_REGION"] = f.gcloud.region
-		values["NUM_WORKERS"] = "1"
-		values["GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY"] = "true"
-		values["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "true"
-	}
+	custom := make([]*aiplatformpb.EnvVar, 0, len(f.agentEngine.env))
 	seen := make(map[string]bool)
 	for i, raw := range f.agentEngine.env {
 		name, value, ok := strings.Cut(raw, "=")
@@ -53,17 +46,24 @@ func (f *deployAgentEngineFlags) environmentVariables() ([]*aiplatformpb.EnvVar,
 			return nil, fmt.Errorf("--env entry %d repeats an environment variable name", i+1)
 		}
 		seen[name] = true
-		values[name] = value
+		custom = append(custom, &aiplatformpb.EnvVar{Name: name, Value: value})
 	}
 
-	names := make([]string, 0, len(values))
-	for name := range values {
-		names = append(names, name)
+	var vars []*aiplatformpb.EnvVar
+	if f.agentEngine.defaultEnv {
+		defaults := []*aiplatformpb.EnvVar{
+			{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+			{Name: "NUM_WORKERS", Value: "1"},
+			{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+			{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+		}
+		for _, env := range defaults {
+			if !seen[env.Name] {
+				vars = append(vars, env)
+			}
+		}
 	}
-	slices.Sort(names)
-	vars := make([]*aiplatformpb.EnvVar, 0, len(names))
-	for _, name := range names {
-		vars = append(vars, &aiplatformpb.EnvVar{Name: name, Value: values[name]})
-	}
-	return vars, nil
+	// EnvVar expands references to previously defined variables. Keep custom
+	// flags in their original order, including overrides of a default.
+	return append(vars, custom...), nil
 }
