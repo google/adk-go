@@ -1,6 +1,16 @@
 name: Setup
 description: Setup the environment
 
+inputs:
+  cache-key:
+    description: >-
+      Restores and saves the Go build and module cache under a key that
+      includes this value. When empty, the job gets no cache. Jobs that write
+      different build output need different values: actions/cache skips saving
+      on an exact key hit, so jobs that share a key all reuse whichever entry
+      was saved first.
+    default: ''
+
 outputs:
   go-version:
     description: 'Go version'
@@ -17,6 +27,7 @@ runs:
         cache: false # wrapper for actions/cache that doesn't support all functionality
 
     - name: Load Go cache
+      if: inputs.cache-key != ''
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
       with:
         path: |
@@ -28,5 +39,8 @@ runs:
         # that read stdlib facts then work from stale data: staticcheck stops
         # seeing the runtime.Goexit behind t.Fatal and reports SA5011 nil
         # dereferences throughout the tests.
-        key: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
-        restore-keys: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-build-
+        #
+        # The fixed "-build-" after cache-key keeps one job's restore prefix
+        # from matching another job whose cache-key starts with the same text.
+        key: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-${{ inputs.cache-key }}-build-${{ hashFiles('**/go.mod', '**/go.sum') }}
+        restore-keys: ${{ runner.os }}-go-${{ steps.setup-go.outputs.go-version }}-${{ inputs.cache-key }}-build-
