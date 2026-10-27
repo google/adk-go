@@ -504,14 +504,10 @@ func newResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletion
 		return nil, err
 	}
 	shared.EnforceStrictOpenAISchema(schema)
-	name := "adk_response"
-	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
-		name = cfg.ResponseSchema.Title
-	}
 	return &openai.ChatCompletionNewParamsResponseFormatUnion{
 		OfJSONSchema: &oaishared.ResponseFormatJSONSchemaParam{
 			JSONSchema: oaishared.ResponseFormatJSONSchemaJSONSchemaParam{
-				Name:   name,
+				Name:   shared.ResponseFormatName(cfg.ResponseSchema),
 				Schema: schema,
 				Strict: param.NewOpt(true),
 			},

@@ -573,12 +573,8 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*oairesponses.Respon
 		return nil, err
 	}
 	shared.EnforceStrictOpenAISchema(schema)
-	name := "adk_response"
-	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
-		name = cfg.ResponseSchema.Title
-	}
 	return &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
-		Name:   name,
+		Name:   shared.ResponseFormatName(cfg.ResponseSchema),
 		Schema: schema,
 		Strict: param.NewOpt(true),
 		Type:   constant.JSONSchema("json_schema"),
