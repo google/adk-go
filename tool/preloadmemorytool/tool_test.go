@@ -17,7 +17,6 @@ package preloadmemorytool_test
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -310,8 +309,13 @@ func TestPreloadMemoryTool_SearchQuery(t *testing.T) {
 			if err := preloadmemorytool.New().ProcessRequest(ctx, &model.LLMRequest{}); err != nil {
 				t.Fatalf("ProcessRequest failed: %v", err)
 			}
-			if !slices.Equal(mem.queries, tt.wantQueries) {
-				t.Errorf("memory search queries differ from expected (got %d calls, want %d)", len(mem.queries), len(tt.wantQueries))
+			if len(mem.queries) != len(tt.wantQueries) {
+				t.Fatalf("memory search call count = %d, want %d", len(mem.queries), len(tt.wantQueries))
+			}
+			for i, want := range tt.wantQueries {
+				if got := mem.queries[i]; got != want {
+					t.Errorf("memory search query %d differs from expected (got %d bytes, want %d)", i, len(got), len(want))
+				}
 			}
 		})
 	}
