@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
@@ -421,6 +422,11 @@ func newFunctionResponse(t *shared.CallTracker, fr *genai.FunctionResponse) (*oa
 	}, nil
 }
 
+// supportedConfigFields adds StopSequences to the fields both endpoints support,
+// for the empty list alone: it asks for no stop sequences, which needs no wire
+// field, while applyGenerationConfig refuses a non-empty one by name.
+var supportedConfigFields = append(slices.Clone(shared.SupportedConfigFields), "StopSequences")
+
 // applyGenerationConfig translates our generic generation configuration into
 // OpenAI-specific parameters. We also validate and return errors for features
 // that are not supported by the OpenAI Responses API.
@@ -510,7 +516,7 @@ func applyGenerationConfig(params *oairesponses.ResponseNewParams, cfg *genai.Ge
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	return shared.RejectUnsupportedConfigFields(cfg)
+	return shared.RejectUnsupportedConfigFields(cfg, supportedConfigFields)
 }
 
 // serviceTiers maps genai's processing tiers onto the Responses equivalents.
