@@ -128,6 +128,9 @@ func New(cfg Config) (agent.Agent, error) {
 	state := agentinternal.Reveal(internalAgent)
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
+	// A before-agent callback that returns content short-circuits the run, so its
+	// event never reaches llmAgent.run. Give it the same output_key handling.
+	state.OnBeforeAgentCallbackEvent = a.maybeSaveOutputToState
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err

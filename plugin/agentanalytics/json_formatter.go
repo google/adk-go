@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"cmp"
 	"encoding"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,18 @@ var (
 	jsonNumberType    = reflect.TypeFor[json.Number]()
 )
 
+// Values of the storage_mode column of content_parts.
+const (
+	storageModeInline       = "INLINE"
+	storageModeExternalURI  = "EXTERNAL_URI"
+	storageModeGCSReference = "GCS_REFERENCE"
+)
+
+// defaultBinaryMIMEType is the MIME type that an offloaded inline blob without
+// one is recorded with and stored as. Without offloading, a missing MIME type
+// is written as it is.
+const defaultBinaryMIMEType = "application/octet-stream"
+
 // FormatContentParts formats Content parts into a map array for BigQuery logging.
 func FormatContentParts(content *genai.Content, maxLength int) []map[string]any {
 	parts, _ := formatContentParts(content, maxLength, true)
@@ -81,76 +94,535 @@ func FormatContentParts(content *genai.Content, maxLength int) []map[string]any 
 // formatContentParts is FormatContentParts that also reports whether any
 // part lost content to truncation or URI redaction.
 func formatContentParts(content *genai.Content, maxLength int, redact bool) ([]map[string]any, bool) {
-	if content == nil || len(content.Parts) == 0 {
-		return nil, false
+	c := partsCollector{opts: partsOptions{maxLen: maxLength, redact: redact}}
+	c.addContent(content, 0)
+	return c.parts, c.truncated
+}
+
+// partsOptions configures a partsCollector.
+type partsOptions struct {
+	// maxLen is the longest text, in runes, that is written inline; a
+	// negative value means no limit.
+	maxLen int
+	// redact replaces the values of sensitive keys in part_attributes.
+	redact bool
+	// offload turns on Cloud Storage offloading: inline binary data, and text
+	// longer than inlineLimit bytes or maxLen runes, are queued as
+	// pendingUploads, and gs:// files get an object_ref.
+	offload bool
+	// inlineLimit is the length in bytes above which text is offloaded. It
+	// must be positive when offload is set.
+	inlineLimit int
+	// connectionID is the authorizer of the object references.
+	connectionID string
+	// reserveBytes, if set, reserves n bytes of in-flight upload budget and
+	// reports whether the payload fits within the cap.
+	reserveBytes func(n int) bool
+}
+
+// partsCollector builds the content_parts of one row from one or more
+// messages. Everything it keeps is detached from the messages: strings are
+// immutable, and the payloads queued for upload are copies, so the row can be
+// handed to another goroutine while the caller goes on modifying the messages.
+type partsCollector struct {
+	opts partsOptions
+	// parts are the content_parts entries in order.
+	parts []map[string]any
+	// pending are the payloads to upload, each naming its entry in parts.
+	pending []pendingUpload
+	// truncated reports that a part lost content to truncation or URI
+	// redaction.
+	truncated bool
+	// nonUploadTruncated reports truncation from parts other than queued text
+	// uploads, so resolveUploads can recompute is_truncated after uploads run.
+	nonUploadTruncated bool
+}
+
+func (c *partsCollector) reserve(n int) (int64, bool) {
+	if c.opts.reserveBytes == nil {
+		return 0, true
 	}
-	parts := make([]map[string]any, 0, len(content.Parts))
-	truncated := false
-	for i, part := range content.Parts {
-		partObj := map[string]any{
-			"part_index":   i,
-			"storage_mode": "INLINE",
+	if !c.opts.reserveBytes(n) {
+		return 0, false
+	}
+	return int64(n), true
+}
+
+// hasPendingText reports whether any queued upload is a text part.
+func (c *partsCollector) hasPendingText() bool {
+	for _, u := range c.pending {
+		if u.isText {
+			return true
 		}
+	}
+	return false
+}
+
+// addContent appends the parts of content. part_index counts the parts of one
+// message, so contentOrd, the position of the message in its request, is what
+// tells apart the parts of different messages in object names.
+func (c *partsCollector) addContent(content *genai.Content, contentOrd int) {
+	if content == nil {
+		return
+	}
+	for i, part := range content.Parts {
+		entry := map[string]any{
+			"part_index":   i,
+			"storage_mode": storageModeInline,
+		}
+		if part != nil {
+			c.addPart(entry, part, contentOrd, i)
+		}
+		c.parts = append(c.parts, entry)
+	}
+}
+
+// addPart fills entry, which is about to become the next element of c.parts,
+// from part.
+func (c *partsCollector) addPart(entry map[string]any, part *genai.Part, contentOrd, index int) {
+	switch {
+	case part.Text != "":
+		c.addText(entry, part.Text, contentOrd, index)
+	case part.InlineData != nil:
+		c.addInlineData(entry, part.InlineData, contentOrd, index)
+	case part.FileData != nil:
+		c.addFileData(entry, part.FileData)
+	case part.FunctionCall != nil:
+		name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionCall.Name), c.opts.maxLen, c.opts.redact)
+		attrs, attrTrunc := formatPartAttributes(map[string]any{
+			"function_name": part.FunctionCall.Name,
+			"function_call": part.FunctionCall,
+		}, c.opts.maxLen, c.opts.redact)
+		entry["mime_type"] = "application/json"
+		entry["text"] = "Function: " + name
+		entry["part_attributes"] = attrs
+		c.truncated = c.truncated || nameTrunc || attrTrunc
+		c.nonUploadTruncated = c.nonUploadTruncated || nameTrunc || attrTrunc
+	case part.FunctionResponse != nil:
+		name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), c.opts.maxLen, c.opts.redact)
+		attrs, attrTrunc := formatPartAttributes(map[string]any{
+			"function_response": normalizeFunctionResponse(part.FunctionResponse),
+		}, c.opts.maxLen, c.opts.redact)
+		entry["mime_type"] = "application/json"
+		entry["text"] = "Function response: " + name
+		entry["part_attributes"] = attrs
+		c.truncated = c.truncated || nameTrunc || attrTrunc
+		c.nonUploadTruncated = c.nonUploadTruncated || nameTrunc || attrTrunc
+	case part.ExecutableCode != nil:
+		c.addStructured(entry, "text/plain", part.ExecutableCode.Code,
+			"executable_code", part.ExecutableCode)
+	case part.CodeExecutionResult != nil:
+		c.addStructured(entry, "text/plain", part.CodeExecutionResult.Output,
+			"code_execution_result", part.CodeExecutionResult)
+	default:
+		entry["mime_type"] = "text/plain"
+		entry["part_attributes"] = "{}"
+	}
+}
+
+// normalizeFunctionResponse converts the SDK-owned fields of r and its nested
+// media parts to the snake_case names that adk-python writes, while leaving
+// caller-defined keys inside r.Response untouched. The bytes of inline media
+// are left as []byte, so the sanitizer redacts and truncates UTF-8 data as
+// text and replaces binary data with a placeholder.
+func normalizeFunctionResponse(r *genai.FunctionResponse) map[string]any {
+	if r == nil {
+		return nil
+	}
+	out := map[string]any{}
+	if r.ID != "" {
+		out["id"] = r.ID
+	}
+	if r.Name != "" {
+		out["name"] = r.Name
+	}
+	if len(r.Response) > 0 {
+		out["response"] = r.Response
+	}
+	if r.WillContinue != nil {
+		out["will_continue"] = *r.WillContinue
+	}
+	if r.Scheduling != "" {
+		out["scheduling"] = r.Scheduling
+	}
+	if len(r.Parts) > 0 {
+		parts := make([]map[string]any, 0, len(r.Parts))
+		for _, p := range r.Parts {
+			if p == nil {
+				continue
+			}
+			partMap := map[string]any{}
+			if b := p.InlineData; b != nil {
+				blobMap := map[string]any{}
+				if b.MIMEType != "" {
+					blobMap["mime_type"] = b.MIMEType
+				}
+				if len(b.Data) > 0 {
+					// Not base64: that would hide the data from the sanitizer.
+					blobMap["data"] = b.Data
+				}
+				if b.DisplayName != "" {
+					blobMap["display_name"] = b.DisplayName
+				}
+				partMap["inline_data"] = blobMap
+			}
+			if f := p.FileData; f != nil {
+				fileMap := map[string]any{}
+				if f.FileURI != "" {
+					fileMap["file_uri"] = f.FileURI
+				}
+				if f.MIMEType != "" {
+					fileMap["mime_type"] = f.MIMEType
+				}
+				if f.DisplayName != "" {
+					fileMap["display_name"] = f.DisplayName
+				}
+				partMap["file_data"] = fileMap
+			}
+			parts = append(parts, partMap)
+		}
+		if len(parts) > 0 {
+			out["parts"] = parts
+		}
+	}
+	return out
+}
+
+// queue records a payload for upload to the entry that is about to be
+// appended to c.parts.
+func (c *partsCollector) queue(u pendingUpload) {
+	u.slot = len(c.parts)
+	c.pending = append(c.pending, u)
+}
+
+// addText writes a text part. If it is too long to keep inline and an upload
+// is possible, the entry holds the truncated text until the upload replaces
+// it with a preview and a reference.
+func (c *partsCollector) addText(entry map[string]any, text string, contentOrd, index int) {
+	var contentLost bool
+	if c.opts.redact {
+		text, contentLost = sanitizeRawText(text)
+	}
+	shown, lengthTruncated := truncateString(text, c.opts.maxLen)
+	truncated := contentLost || lengthTruncated
+	entry["mime_type"] = "text/plain"
+	entry["text"] = shown
+	if c.opts.offload && (lengthTruncated || len(text) > c.opts.inlineLimit) {
+		if reserved, ok := c.reserve(len(text)); ok {
+			c.queue(pendingUpload{
+				contentOrd:        contentOrd,
+				partIdx:           index,
+				mimeType:          "text/plain",
+				isText:            true,
+				text:              text,
+				fallbackTruncated: truncated,
+				reserved:          reserved,
+			})
+			c.truncated = c.truncated || contentLost
+			c.nonUploadTruncated = c.nonUploadTruncated || contentLost
+			return
+		}
+	}
+	c.truncated = c.truncated || truncated
+	c.nonUploadTruncated = c.nonUploadTruncated || truncated
+}
+
+// addInlineData writes a binary part. The bytes are copied if they are to be
+// uploaded; otherwise they are left out and a placeholder stands in for them.
+// The MIME type is written as the blob has it, except that offloading, which
+// needs a content type for the object, records defaultBinaryMIMEType for a
+// blob that has none.
+func (c *partsCollector) addInlineData(entry map[string]any, blob *genai.Blob, contentOrd, index int) {
+	entry["mime_type"] = blob.MIMEType
+	entry["text"] = inlineDataText
+	if c.opts.offload {
+		mimeType := cmp.Or(blob.MIMEType, defaultBinaryMIMEType)
+		entry["mime_type"] = mimeType
+		if reserved, ok := c.reserve(len(blob.Data)); ok {
+			c.queue(pendingUpload{
+				contentOrd: contentOrd,
+				partIdx:    index,
+				mimeType:   mimeType,
+				data:       bytes.Clone(blob.Data),
+				reserved:   reserved,
+			})
+		} else {
+			entry["text"] = uploadFailedText
+		}
+	}
+}
+
+// addFileData writes a part that already refers to external data. When
+// offloading is enabled, Cloud Storage gs:// files also receive an object_ref
+// (with details "{}" and ConnectionID as authorizer) so BigQuery ObjectRef
+// functions can inspect existing GCS URIs alongside offloaded ones; note that
+// adk-python leaves object_ref NULL on EXTERNAL_URI parts. A URI that had to
+// be redacted names no real object, so it gets none.
+func (c *partsCollector) addFileData(entry map[string]any, file *genai.FileData) {
+	uri := file.FileURI
+	var changed bool
+	if c.opts.redact {
+		uri, changed = sanitizeURI(uri)
+	}
+	entry["mime_type"] = file.MIMEType
+	entry["uri"] = uri
+	entry["storage_mode"] = storageModeExternalURI
+	c.truncated = c.truncated || changed
+	c.nonUploadTruncated = c.nonUploadTruncated || changed
+	if c.opts.offload && !changed && strings.HasPrefix(uri, "gs://") {
+		entry["object_ref"] = objectRef(uri, "{}", c.opts.connectionID)
+	}
+}
+
+// addStructured writes a part that stands for a structured object: a short
+// text, and the object itself under key in part_attributes.
+func (c *partsCollector) addStructured(entry map[string]any, mimeType, text, key string, value any) {
+	shown, truncated := sanitizeAndTruncateText(text, c.opts.maxLen, c.opts.redact)
+	entry["mime_type"] = mimeType
+	entry["text"] = shown
+	c.truncated = c.truncated || truncated
+	attrs, attrsTruncated := formatPartAttributes(map[string]any{key: value}, c.opts.maxLen, c.opts.redact)
+	entry["part_attributes"] = attrs
+	c.truncated = c.truncated || attrsTruncated
+	c.nonUploadTruncated = c.nonUploadTruncated || truncated || attrsTruncated
+}
+
+// summaryPiece is one part's contribution to a message summary. Text parts
+// whose Cloud Storage upload succeeds are omitted when the summary is rebuilt.
+type summaryPiece struct {
+	partIdx   int
+	isText    bool
+	text      string
+	truncated bool
+	omitted   bool
+}
+
+// messageSummary holds the per-part summary pieces of one genai.Content at
+// contentOrd so its summary string can be rendered before or after uploads.
+type messageSummary struct {
+	contentOrd int
+	role       string
+	hasRole    bool
+	isSystem   bool
+	isResponse bool
+	pieces     []summaryPiece
+}
+
+func newMessageSummary(content *genai.Content, contentOrd, maxLength int, redact bool) *messageSummary {
+	m := &messageSummary{contentOrd: contentOrd}
+	if content == nil {
+		return m
+	}
+	for i, part := range content.Parts {
+		switch {
+		case part == nil, part.FileData != nil, part.InlineData != nil, part.FunctionCall != nil:
+		case part.Text != "":
+			shown, t := sanitizeAndTruncateText(part.Text, maxLength, redact)
+			m.pieces = append(m.pieces, summaryPiece{partIdx: i, isText: true, text: shown, truncated: t})
+		case part.FunctionResponse != nil:
+			name, t := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), maxLength, redact)
+			m.pieces = append(m.pieces, summaryPiece{partIdx: i, text: "Function response: " + name, truncated: t})
+		case part.ExecutableCode != nil:
+			code, t := sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
+			m.pieces = append(m.pieces, summaryPiece{
+				partIdx: i,
+				text: fmt.Sprintf("Executable code (%s): %s",
+					orUnknown(string(part.ExecutableCode.Language)), code),
+				truncated: t,
+			})
+		case part.CodeExecutionResult != nil:
+			output, t := sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
+			m.pieces = append(m.pieces, summaryPiece{
+				partIdx: i,
+				text: fmt.Sprintf("Code execution result (%s): %s",
+					orUnknown(string(part.CodeExecutionResult.Outcome)), output),
+				truncated: t,
+			})
+		}
+	}
+	return m
+}
+
+func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int, redact bool) *messageSummary {
+	m := &messageSummary{contentOrd: contentOrd, isResponse: true}
+	if content == nil {
+		return m
+	}
+	for i, part := range content.Parts {
+		var t bool
+		piece := "other"
+		isText := false
 		switch {
 		case part == nil:
 		case part.Text != "":
-			text, t := sanitizeAndTruncateText(part.Text, maxLength, redact)
-			partObj["mime_type"] = "text/plain"
-			partObj["text"] = text
-			truncated = truncated || t
-		case part.InlineData != nil:
-			partObj["mime_type"] = part.InlineData.MIMEType
-			partObj["text"] = inlineDataText
-		case part.FileData != nil:
-			uri := part.FileData.FileURI
-			var changed bool
-			if redact {
-				uri, changed = sanitizeURI(uri)
-			}
-			partObj["mime_type"] = part.FileData.MIMEType
-			partObj["uri"] = uri
-			partObj["storage_mode"] = "EXTERNAL_URI"
-			truncated = truncated || changed
+			var text string
+			text, t = sanitizeAndTruncateText(part.Text, maxLength, redact)
+			piece = "text: '" + text + "'"
+			isText = true
 		case part.FunctionCall != nil:
-			fc := part.FunctionCall
-			name, nameTrunc := sanitizeAndTruncateText(orUnknown(fc.Name), maxLength, redact)
-			attrs, attrTrunc := formatPartAttributes(map[string]any{
-				"function_name": fc.Name,
-				"function_call": fc,
-			}, maxLength, redact)
-			partObj["mime_type"] = "application/json"
-			partObj["text"] = "Function: " + name
-			partObj["part_attributes"] = attrs
-			truncated = truncated || nameTrunc || attrTrunc
+			piece = "call: " + part.FunctionCall.Name
 		case part.FunctionResponse != nil:
-			fr := part.FunctionResponse
-			name, nameTrunc := sanitizeAndTruncateText(orUnknown(fr.Name), maxLength, redact)
-			attrs, attrTrunc := formatPartAttributes(map[string]any{"function_response": fr}, maxLength, redact)
-			partObj["mime_type"] = "application/json"
-			partObj["text"] = "Function response: " + name
-			partObj["part_attributes"] = attrs
-			truncated = truncated || nameTrunc || attrTrunc
+			piece = "resp: " + part.FunctionResponse.Name
 		case part.ExecutableCode != nil:
-			code, codeTrunc := sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
-			attrs, attrTrunc := formatPartAttributes(map[string]any{"executable_code": part.ExecutableCode}, maxLength, redact)
-			partObj["mime_type"] = "text/plain"
-			partObj["text"] = code
-			partObj["part_attributes"] = attrs
-			truncated = truncated || codeTrunc || attrTrunc
+			var code string
+			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
+			piece = fmt.Sprintf("Executable code (%s): %s", orUnknown(string(part.ExecutableCode.Language)), code)
 		case part.CodeExecutionResult != nil:
-			output, outTrunc := sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
-			attrs, attrTrunc := formatPartAttributes(map[string]any{"code_execution_result": part.CodeExecutionResult}, maxLength, redact)
-			partObj["mime_type"] = "text/plain"
-			partObj["text"] = output
-			partObj["part_attributes"] = attrs
-			truncated = truncated || outTrunc || attrTrunc
-		default:
-			partObj["mime_type"] = "text/plain"
-			partObj["part_attributes"] = "{}"
+			var output string
+			output, t = sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
+			piece = fmt.Sprintf("Code execution result (%s): %s", orUnknown(string(part.CodeExecutionResult.Outcome)), output)
 		}
-		parts = append(parts, partObj)
+		m.pieces = append(m.pieces, summaryPiece{partIdx: i, isText: isText, text: piece, truncated: t})
 	}
-	return parts, truncated
+	return m
+}
+
+func (m *messageSummary) render(maxLength int) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	if len(m.pieces) == 0 {
+		if m.isResponse {
+			return "None", false
+		}
+		return "", false
+	}
+	active := make([]string, 0, len(m.pieces))
+	truncated := false
+	for _, p := range m.pieces {
+		if p.omitted {
+			continue
+		}
+		active = append(active, p.text)
+		truncated = truncated || p.truncated
+	}
+	joined := strings.Join(active, " | ")
+	if m.isResponse {
+		return joined, truncated
+	}
+	summary, t := truncateString(joined, maxLength)
+	return summary, truncated || t
+}
+
+// contentSummaryBuilder retains the message/part ordinals of a row that has
+// pending text uploads so resolveUploads can rebuild the content column if any
+// text upload fails.
+type contentSummaryBuilder struct {
+	isLLMRequest   bool
+	isLLMResponse  bool
+	contentDenied  bool
+	maxLen         int
+	redact         bool
+	roleTruncated  bool
+	otherTruncated bool
+	needsRebuild   bool
+	usage          map[string]any
+	messages       []*messageSummary
+}
+
+func (b *contentSummaryBuilder) omitTextFromSummary(contentOrd, partIdx int) {
+	for _, m := range b.messages {
+		if m.contentOrd != contentOrd {
+			continue
+		}
+		for i := range m.pieces {
+			if m.pieces[i].partIdx == partIdx && m.pieces[i].isText {
+				if !m.pieces[i].omitted || m.pieces[i].truncated {
+					m.pieces[i].omitted = true
+					m.pieces[i].truncated = false
+					b.needsRebuild = true
+				}
+			}
+		}
+	}
+}
+
+func (b *contentSummaryBuilder) retainInlineSummary(contentOrd, partIdx int, fallbackText string, fallbackTruncated bool) {
+	for _, m := range b.messages {
+		if m.contentOrd != contentOrd {
+			continue
+		}
+		for i := range m.pieces {
+			if m.pieces[i].partIdx == partIdx && m.pieces[i].isText {
+				b.needsRebuild = true
+				m.pieces[i].omitted = false
+				if m.isResponse {
+					m.pieces[i].text = "text: '" + fallbackText + "'"
+				} else {
+					m.pieces[i].text = fallbackText
+				}
+				m.pieces[i].truncated = fallbackTruncated
+			}
+		}
+	}
+}
+
+func (b *contentSummaryBuilder) hasFailedUploadTruncated() bool {
+	for _, m := range b.messages {
+		for _, p := range m.pieces {
+			if !p.omitted && p.truncated {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *contentSummaryBuilder) buildContent() (map[string]any, bool) {
+	if b.isLLMResponse {
+		content := map[string]any{}
+		truncated := false
+		if len(b.messages) > 0 {
+			content["response"], truncated = b.messages[0].render(b.maxLen)
+		}
+		if b.usage != nil {
+			content["usage"] = b.usage
+		}
+		return content, truncated
+	}
+	if !b.isLLMRequest {
+		if len(b.messages) == 0 {
+			return map[string]any{"text_summary": ""}, false
+		}
+		summary, t := b.messages[0].render(b.maxLen)
+		return map[string]any{"text_summary": summary}, t
+	}
+	content := map[string]any{}
+	truncated := b.roleTruncated
+	var prompt []map[string]any
+	for _, m := range b.messages {
+		summary, t := m.render(b.maxLen)
+		truncated = truncated || t
+		if m.isSystem {
+			content["system_prompt"] = summary
+		} else if m.hasRole {
+			prompt = append(prompt, map[string]any{"role": m.role, "content": summary})
+		}
+	}
+	if len(prompt) > 0 {
+		content["prompt"] = prompt
+	}
+	return content, truncated
+}
+
+func (b *contentSummaryBuilder) applyToRow(row map[string]any) {
+	if !b.needsRebuild {
+		return
+	}
+	summaryTruncated := false
+	jsonTruncated := false
+	if !b.contentDenied {
+		contentVal, st := b.buildContent()
+		summaryTruncated = st
+		encoded, err := json.Marshal(contentVal)
+		if err != nil {
+			row[columnContent] = strconv.Quote(unsupportedObjPlaceholder)
+			jsonTruncated = true
+		} else {
+			row[columnContent] = string(encoded)
+		}
+	}
+	row["is_truncated"] = b.otherTruncated || summaryTruncated || jsonTruncated || b.hasFailedUploadTruncated()
 }
 
 func formatPartAttributes(v any, maxLength int, redact bool) (string, bool) {
@@ -175,74 +647,14 @@ func sanitizeAndTruncateText(raw string, maxLength int, redact bool) (string, bo
 // function responses and code parts, joined by " | " and truncated again.
 // Function calls and inline or file data are left out.
 func contentSummary(content *genai.Content, maxLength int, redact bool) (string, bool) {
-	if content == nil {
-		return "", false
-	}
-	var pieces []string
-	truncated := false
-	for _, part := range content.Parts {
-		switch {
-		case part == nil, part.FileData != nil, part.InlineData != nil:
-		case part.Text != "":
-			text, t := sanitizeAndTruncateText(part.Text, maxLength, redact)
-			pieces = append(pieces, text)
-			truncated = truncated || t
-		case part.FunctionCall != nil:
-		case part.FunctionResponse != nil:
-			name, t := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), maxLength, redact)
-			pieces = append(pieces, "Function response: "+name)
-			truncated = truncated || t
-		case part.ExecutableCode != nil:
-			code, t := sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
-			pieces = append(pieces, fmt.Sprintf("Executable code (%s): %s",
-				orUnknown(string(part.ExecutableCode.Language)), code))
-			truncated = truncated || t
-		case part.CodeExecutionResult != nil:
-			output, t := sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
-			pieces = append(pieces, fmt.Sprintf("Code execution result (%s): %s",
-				orUnknown(string(part.CodeExecutionResult.Outcome)), output))
-			truncated = truncated || t
-		}
-	}
-	summary, t := truncateString(strings.Join(pieces, " | "), maxLength)
-	return summary, truncated || t
+	return newMessageSummary(content, 0, maxLength, redact).render(maxLength)
 }
 
 // formatResponseContent renders model output the way adk-python writes
 // content.response: one entry per part joined by " | ", or "None" if there
 // are no parts.
 func formatResponseContent(content *genai.Content, maxLength int, redact bool) (string, bool) {
-	if content == nil || len(content.Parts) == 0 {
-		return "None", false
-	}
-	pieces := make([]string, 0, len(content.Parts))
-	truncated := false
-	for _, part := range content.Parts {
-		var t bool
-		piece := "other"
-		switch {
-		case part == nil:
-		case part.Text != "":
-			var text string
-			text, t = sanitizeAndTruncateText(part.Text, maxLength, redact)
-			piece = "text: '" + text + "'"
-		case part.FunctionCall != nil:
-			piece = "call: " + part.FunctionCall.Name
-		case part.FunctionResponse != nil:
-			piece = "resp: " + part.FunctionResponse.Name
-		case part.ExecutableCode != nil:
-			var code string
-			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
-			piece = fmt.Sprintf("Executable code (%s): %s", orUnknown(string(part.ExecutableCode.Language)), code)
-		case part.CodeExecutionResult != nil:
-			var output string
-			output, t = sanitizeAndTruncateText(part.CodeExecutionResult.Output, maxLength, redact)
-			piece = fmt.Sprintf("Code execution result (%s): %s", orUnknown(string(part.CodeExecutionResult.Outcome)), output)
-		}
-		pieces = append(pieces, piece)
-		truncated = truncated || t
-	}
-	return strings.Join(pieces, " | "), truncated
+	return newResponseMessageSummary(content, 0, maxLength, redact).render(maxLength)
 }
 
 func orUnknown(s string) string {
