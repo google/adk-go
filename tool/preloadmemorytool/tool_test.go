@@ -70,6 +70,7 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 		wantErr          bool
 		wantInstruction  bool
 		wantTextContains []string
+		wantTextOmits    []string
 	}{
 		{
 			name:            "nil user content",
@@ -182,6 +183,38 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			wantTextContains: []string{"user: No timestamp"},
 		},
 		{
+			name:        "thought parts are omitted",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "private reasoning", Thought: true},
+							{Text: "visible answer"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"model: visible answer"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
+			name:        "thought-only memory entry",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author:    "model",
+					Timestamp: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+					Content: &genai.Content{
+						Parts: []*genai.Part{{Text: "private reasoning", Thought: true}},
+					},
+				},
+			},
+			wantInstruction: false,
+		},
+		{
 			name:        "memory entry with empty content",
 			userContent: genai.NewContentFromText("test", genai.RoleUser),
 			memories: []memory.Entry{
@@ -221,6 +254,11 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 				for _, want := range tt.wantTextContains {
 					if !strings.Contains(instruction, want) {
 						t.Errorf("Instruction should contain %q, got: %v", want, instruction)
+					}
+				}
+				for _, omit := range tt.wantTextOmits {
+					if strings.Contains(instruction, omit) {
+						t.Errorf("Instruction should not contain %q, got: %v", omit, instruction)
 					}
 				}
 			}

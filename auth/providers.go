@@ -252,9 +252,21 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 			cur = a
 			// Detach from the caller's cancellation (keep values); initTimeout bounds it.
 			go func() {
-				dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), initTimeout)
-				defer cancel()
-				a.ts, a.err = init(dctx)
+				// The token source refreshes on ictx, so ictx must outlive init. A
+				// timer bounds init instead of a deadline because it can be stopped.
+				ictx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+				timer := time.AfterFunc(initTimeout, cancel)
+				a.ts, a.err = init(ictx)
+				if !timer.Stop() {
+					// ictx is canceled, so a source init returned is unusable.
+					bound := fmt.Errorf("auth: credential initialization exceeded %v: %w", initTimeout, context.DeadlineExceeded)
+					if a.err != nil {
+						// %v: init's error wraps context.Canceled, which callers
+						// treat as cancellation rather than failure.
+						bound = fmt.Errorf("%w: %v", bound, a.err)
+					}
+					a.err = bound
+				}
 				mu.Lock()
 				if a.err == nil {
 					ts = a.ts
