@@ -74,7 +74,11 @@ func TestDatabaseService_CreateMicrosecondPrecision(t *testing.T) {
 			wantTime := time.Date(2026, time.October, 22, 0, 0, 0, tc.wantNanos, time.UTC)
 			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
 			s := emptyService(t)
-			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+			created, err := s.Create(ctx, &session.CreateRequest{
+				AppName: "app",
+				UserID:  "user",
+				State:   map[string]any{"app:config": "enabled", "user:preference": "brief"},
+			})
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -82,10 +86,20 @@ func TestDatabaseService_CreateMicrosecondPrecision(t *testing.T) {
 			if err := s.db.Where(&storageSession{AppName: "app", UserID: "user", ID: created.Session.ID()}).First(&stored).Error; err != nil {
 				t.Fatalf("load session: %v", err)
 			}
+			var storedApp storageAppState
+			if err := s.db.Where(&storageAppState{AppName: "app"}).First(&storedApp).Error; err != nil {
+				t.Fatalf("load app state: %v", err)
+			}
+			var storedUser storageUserState
+			if err := s.db.Where(&storageUserState{AppName: "app", UserID: "user"}).First(&storedUser).Error; err != nil {
+				t.Fatalf("load user state: %v", err)
+			}
 			for name, got := range map[string]time.Time{
 				"LastUpdateTime": created.Session.LastUpdateTime(),
 				"CreateTime":     stored.CreateTime,
 				"UpdateTime":     stored.UpdateTime,
+				"AppUpdateTime":  storedApp.UpdateTime,
+				"UserUpdateTime": storedUser.UpdateTime,
 			} {
 				if !got.Equal(wantTime) {
 					t.Errorf("%s = %v, want %v", name, got, wantTime)
@@ -100,6 +114,15 @@ func TestDatabaseService_CreateMicrosecondPrecision(t *testing.T) {
 			event := &session.Event{ID: "first", Author: "user", Timestamp: fixedTime.Add(time.Second)}
 			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
 				t.Fatalf("first AppendEvent: %v", err)
+			}
+			if err := s.db.First(&stored).Error; err != nil {
+				t.Fatalf("reload session after append: %v", err)
+			}
+			if want := wantTime.Add(time.Second); !stored.UpdateTime.Equal(want) {
+				t.Errorf("UpdateTime after append = %v, want %v", stored.UpdateTime, want)
+			}
+			if got := created.Session.LastUpdateTime(); !got.Equal(stored.UpdateTime) {
+				t.Errorf("LastUpdateTime after append = %v, stored UpdateTime = %v", got, stored.UpdateTime)
 			}
 			loaded, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
 			if err != nil {
