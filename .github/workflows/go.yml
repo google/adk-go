@@ -51,6 +51,8 @@ jobs:
     
     - name: Setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ github.job }}-${{ matrix.module }}
 
     - name: Initialize workspace
       run: go work init && go work use -r .
@@ -79,6 +81,8 @@ jobs:
     
     - name: Setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: ${{ github.job }}-${{ matrix.module }}
 
     - name: Initialize workspace
       run: go work init && go work use -r .
