@@ -356,8 +356,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	return nil
 }
 
-// eventNeedsRawEvent reports whether the event carries state that has no
-// dedicated SessionEvent column and would be lost without raw_event.
+// eventNeedsRawEvent reports whether the event carries state that would be
+// lost without raw_event, because no SessionEvent column holds it or ADK does
+// not read back the one that does.
 // Gating raw_event on this keeps plain events on their legacy wire format,
 // so the recorded replay fixtures stay valid.
 func eventNeedsRawEvent(event *session.Event) bool {
@@ -366,6 +367,12 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
 		len(event.Routes) > 0 ||
+		// A finished live transcription is appended as an event with no
+		// Content, so the transcription is all it carries. EventMetadata has
+		// transcription fields, but adk-python neither writes nor reads them
+		// and keeps transcriptions in raw_event only, so this does the same.
+		event.InputTranscription != nil ||
+		event.OutputTranscription != nil ||
 		// A context-compaction summary lives entirely on Actions.Compaction:
 		// its Content is nil and it has no state or artifact delta, so without
 		// raw_event nothing about it reaches the backend. On reload the session
