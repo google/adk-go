@@ -52,6 +52,7 @@ func NewWorkflowNode(name string, edges []Edge) (*WorkflowNode, error) {
 // Mirrors adk-python's _set_ctx_output_or_interrupts.
 func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	terminals := n.subWorkflow.graph.terminalNodeNames()
+	nodesByName := buildNodesByName(n.subWorkflow.graph)
 	return func(yield func(*session.Event, error) bool) {
 		// terminalOutputs is keyed by terminal node name (last write
 		// wins), so re-running a terminal via loop-back does not inflate
@@ -92,6 +93,11 @@ func (n *WorkflowNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Even
 						terminalOutputs[name] = out
 						break
 					}
+				}
+			} else if out, delegated := completedDelegatedOutput(ev); delegated {
+				owner := ownEventNodeName(graphHistoryEvent(ev, n.subWorkflow.Name()), nodesByName)
+				if terminals[owner] && out != nil {
+					terminalOutputs[owner] = out
 				}
 			}
 

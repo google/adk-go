@@ -38,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/memory"
@@ -186,9 +187,10 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,
-		// Safety settings and output limits the application configured govern
-		// the summarization call too, rather than it silently falling back to
+		// The settings the summarizer keeps, such as safety settings, govern the
+		// summarization call too, rather than it silently falling back to
 		// provider defaults for the one call that sees the whole transcript.
+		// The summarizer ignores the rest of the config, output limits included.
 		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
 		// A bound on the one call the application did not ask for. Compaction
 		// runs inside the run loop, and the post-invocation pass runs from a
@@ -537,6 +539,12 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+	})
+}
+
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.

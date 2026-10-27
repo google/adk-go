@@ -179,6 +179,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
+		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
+			a.OnBeforeAgentCallbackEvent(event)
+		}
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
@@ -264,7 +267,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -305,7 +308,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
@@ -323,7 +326,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -368,7 +371,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
