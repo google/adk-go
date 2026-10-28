@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -463,6 +464,24 @@ func isEmptyLiveResponse(r *model.LLMResponse) bool {
 		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
 }
 
+// What happened to the pending function response's write on one connection.
+// The sender records the outcome before it reports any error, so the main loop
+// can decide from the recorded result rather than from which channel the
+// select happened to pick.
+const (
+	liveWriteNotAttempted int32 = iota
+	liveWriteSucceeded
+	liveWriteFailed
+)
+
+// keepPendingAfterError reports whether a pending function response must be
+// re-sent after a resumable connection error. Only a reported write failure is
+// provably unsent; an attempt whose outcome is not recorded yet is treated as
+// delivered, which is the at-most-once half of #1819.
+func keepPendingAfterError(sent bool, outcome int32) bool {
+	return !sent || outcome == liveWriteFailed
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -554,6 +573,20 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		// the loop top sets it. It is what makes a first-ever connect failure
 		// fatal while a failed redial is charged to the budget.
 		isReconnect := false
+
+		// pendingSend is a function response the sender goroutine has not
+		// confirmed writing yet. It lives outside the per-connection loop so a
+		// response produced while the connection is down, or whose write
+		// reported failure, is delivered on the next connection. A write that
+		// reported success is never repeated, even if the socket dies
+		// immediately afterwards, because the client cannot then prove the
+		// server did not receive it (#1819).
+		//
+		// adk-python re-sends neither case: its LiveRequestQueue drops an item
+		// once a send task dequeues it. Re-sending a provably failed write is a
+		// deliberate divergence, chosen so a dropped connection does not
+		// silently leave the model's turn unanswered.
+		var pendingSend *genai.Content
 
 		for {
 			if isReconnect {
@@ -652,11 +685,24 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}
 
+			// connDead is set by the reader before it reports a connection
+			// error. gorilla's write path checks only writeErr, not a read
+			// error, so a write onto a connection already known to be gone can
+			// return nil and lose the response; the main loop refuses to hand
+			// one over once this is set.
+			var connDead atomic.Bool
+
+			// What the sender recorded for the pending response's write attempt
+			// on this connection, and a signal that the write succeeded.
+			var writeOutcome atomic.Int32
+			writeResultCh := make(chan struct{}, 1)
+
 			// Reading from model loop
 			go func() {
 				for {
 					resp, err := liveConn.Recv(connCtx)
 					if err != nil {
+						connDead.Store(true)
 						select {
 						case errChan <- liveConnError{err: err, at: time.Now()}:
 						case <-connCtx.Done():
@@ -692,12 +738,55 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}()
 
+			// The tool response reaches the connection through the same sender
+			// goroutine as user input, so the connection still has exactly one
+			// writer. It gets its own queue because the write outcome below must
+			// be attributable to this response; sess.inputCh also carries user
+			// content, where it would be ambiguous.
+			toolResponseCh := make(chan *genai.Content)
+
 			// Sending to model loop
 			go func() {
+				// sendToolResponse writes one function response and records the
+				// outcome before reporting any error, so a connection error and
+				// a completed write racing in the main loop's select agree on
+				// what happened. Only a reported write failure is provably
+				// unsent; a write that reported success is never repeated.
+				sendToolResponse := func(content *genai.Content) bool {
+					if err := liveConn.SendContent(connCtx, content); err != nil {
+						writeOutcome.Store(liveWriteFailed)
+						connDead.Store(true)
+						select {
+						case errChan <- liveConnError{err: err, at: time.Now()}:
+						case <-connCtx.Done():
+						}
+						return false
+					}
+					writeOutcome.Store(liveWriteSucceeded)
+					select {
+					case writeResultCh <- struct{}{}:
+					default:
+					}
+					return true
+				}
 				for {
+					// A response waiting for delivery goes out before any input
+					// queued for this connection.
+					select {
+					case content := <-toolResponseCh:
+						if !sendToolResponse(content) {
+							return
+						}
+						continue
+					default:
+					}
 					select {
 					case <-connCtx.Done():
 						return
+					case content := <-toolResponseCh:
+						if !sendToolResponse(content) {
+							return
+						}
 					case req, ok := <-sess.inputCh:
 						if !ok {
 							return
@@ -727,29 +816,27 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				}
 			}()
 
-			// pendingSend holds a function response awaiting delivery to the
-			// model, queued on sess.inputCh so the sender goroutine is the
-			// connection's only writer; a direct write from this loop races
-			// it and panics (#1819). It is declared inside the per-connection
-			// loop, so a response pending when the connection drops is
-			// discarded with the socket: carrying one across needs the value
-			// to survive until the write is confirmed, which stays open on
-			// #1819.
-			var pendingSend *genai.Content
+			// sentOnConn records that this connection has already taken the
+			// pending response. It resets when that write is confirmed, so a
+			// later response on the same connection is handed over too.
+			sentOnConn := false
 
 			reconnect := false
 			for !reconnect {
-				// Arm the inputCh send only while a response is pending, and
-				// hold further events until it is delivered, so a second tool
-				// response cannot overwrite the first (nil channel cases never
-				// fire in a select).
+				// While a response is pending, hold further events so a second
+				// tool response cannot overwrite the first, and hand each
+				// response to the sender once — never to a connection that has
+				// already reported an error (nil channel cases never fire in a
+				// select).
 				eventCase := eventsChan
-				var inputCase chan agent.LiveRequest
-				var inputReq agent.LiveRequest
+				var sendCase chan *genai.Content
+				var sendVal *genai.Content
 				if pendingSend != nil {
-					inputCase = sess.inputCh
-					inputReq = agent.LiveRequest{Content: pendingSend}
 					eventCase = nil
+					if !sentOnConn && !connDead.Load() {
+						sendCase = toolResponseCh
+						sendVal = pendingSend
+					}
 				}
 				select {
 				case ev := <-eventCase:
@@ -826,17 +913,37 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								cleanup()
 								return
 							}
-							// Queue the function response for the sender
-							// goroutine, the connection's only writer.
+							// Hold the function response for the sender
+							// goroutine, the connection's only writer. It is
+							// cleared when that write is recorded as successful,
+							// not here.
 							pendingSend = respEv.LLMResponse.Content
 						}
 					}
-				case inputCase <- inputReq:
+				case sendCase <- sendVal:
+					// The sender has the response; the outcome it records
+					// decides whether the response stays pending.
+					sentOnConn = true
+				case <-writeResultCh:
+					// The write completed, so the response needs no re-send,
+					// and this connection may take the next one: the hand-over
+					// guard belongs to a single response, not to the connection.
 					pendingSend = nil
+					sentOnConn = false
 				case ce := <-errChan:
 					if isResumable(ce.err) {
 						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
 						lastErr = ce.err
+						// A resume must not repeat a response whose write was
+						// confirmed. Only a reported write failure is provably
+						// unsent; an attempt whose outcome is not recorded yet
+						// is treated as delivered, which is the at-most-once
+						// half left to the maintainer decision on #1819. With
+						// nothing handed over, the response stays pending and
+						// goes out on the next connection.
+						if !keepPendingAfterError(sentOnConn, writeOutcome.Load()) {
+							pendingSend = nil
+						}
 						// Score the connection's life from where the error was
 						// produced, not from here: this loop also runs tools
 						// and blocks on the caller, and crediting that time as
