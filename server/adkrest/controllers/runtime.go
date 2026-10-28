@@ -268,7 +268,7 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
-	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	sess, err := c.loadSession(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 		return nil, err
 	}
 
-	var opts []runner.RunOption
+	opts := []runner.RunOption{runner.WithSession(sess)}
 	if runAgentRequest.StateDelta != nil {
 		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
 	}
@@ -329,7 +329,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		}
 	}
 
-	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	sess, err := c.loadSession(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
 		return
@@ -355,7 +355,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return
 	}
 
-	opts := []runner.RunOption{}
+	opts := []runner.RunOption{runner.WithSession(sess)}
 	if runAgentRequest.StateDelta != nil {
 		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
 	}
@@ -421,16 +421,20 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 	return nil
 }
 
-func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
-	_, err := c.sessionService.Get(ctx, &session.GetRequest{
+// loadSession reads the session once. The handler needs it to answer 404
+// before any response bytes go out, and the runner needs it to run the turn;
+// handing the same object to both keeps the event history from being read
+// twice per request.
+func (c *RuntimeAPIController) loadSession(ctx context.Context, appName, userID, sessionID string) (session.Session, error) {
+	resp, err := c.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   appName,
 		UserID:    userID,
 		SessionID: sessionID,
 	})
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
+		return nil, newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
 	}
-	return nil
+	return resp.Session, nil
 }
 
 func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *agent.RunConfig, error) {

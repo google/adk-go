@@ -95,6 +95,7 @@ type RunOption func(*runOptions)
 type runOptions struct {
 	stateDelta       map[string]any
 	yieldUserMessage bool
+	session          session.Session
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -512,7 +513,28 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 	return resp.Session, nil
 }
 
-func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+// WithSession hands Run an already-loaded session so it does not read the
+// same session a second time. A serving layer that has just fetched or
+// created the session to check that it exists passes it here; without it,
+// every turn loads the whole event history twice, once in the handler and
+// once in the runner.
+//
+// The session must belong to this runner's app and to the userID and
+// sessionID passed to Run, which the runner checks and rejects otherwise.
+func WithSession(s session.Session) RunOption {
+	return func(o *runOptions) {
+		o.session = s
+	}
+}
+
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string, preloaded session.Session) (session.Session, error) {
+	if preloaded != nil {
+		if preloaded.AppName() != r.appName || preloaded.UserID() != userID || preloaded.ID() != sessionID {
+			return nil, fmt.Errorf("runner: WithSession session (%s/%s/%s) does not match the run (%s/%s/%s)",
+				preloaded.AppName(), preloaded.UserID(), preloaded.ID(), r.appName, userID, sessionID)
+		}
+		return preloaded, nil
+	}
 	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   r.appName,
 		UserID:    userID,
@@ -568,7 +590,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, options.session)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -903,7 +925,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, options.session)
 	if err != nil {
 		return nil, nil, err
 	}
