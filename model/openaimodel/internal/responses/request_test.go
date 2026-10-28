@@ -1608,6 +1608,38 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
+// A set field outside the supported lists is refused by name, whatever genai
+// adds. Dropping a name from a list stands in for a field genai adds later. It
+// swaps package variables, so it must not run in parallel with other tests.
+func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T) {
+	savedTop, savedHTTP, savedThinking := supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields
+	t.Cleanup(func() {
+		supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields = savedTop, savedHTTP, savedThinking
+	})
+	supportedConfigFields = slices.DeleteFunc(slices.Clone(savedTop), func(name string) bool { return name == "Temperature" })
+	shared.SupportedHTTPOptionFields = nil
+	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Temperature", &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(time.Second)}}},
+		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
+			if want := shared.ErrUnsupportedConfigField.Error() + ": " + tc.field; !errors.Is(err, shared.ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("applyGenerationConfig() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 // AutomaticContinuation has no effect on these APIs, which never pause a
 // generation with CONTINUATION, so a config shared with a Gemini model that
 // sets it must be accepted.
@@ -1913,6 +1945,8 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 		{"unset CandidateCount", &genai.GenerateContentConfig{}},
 		// Zero and one both mean the single candidate Responses returns.
 		{"single CandidateCount", &genai.GenerateContentConfig{CandidateCount: 1}},
+		// An empty list asks for no stop sequences, so there is nothing to refuse.
+		{"empty StopSequences", &genai.GenerateContentConfig{StopSequences: []string{}}},
 		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
 			ResponseLogprobs: true,
 			Logprobs:         genai.Ptr(int32(5)),
@@ -2157,89 +2191,6 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	}
 }
 
-// Guards against the bug returning as genai grows fields: every exported field
-// must be translated, covered by a named error, or in shared.UnsupportedConfigFields.
-// When this fails, add the new field to whichever of the three it belongs in —
-// not to this test alone, which would only re-hide the drop.
-func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
-	// Fields applyGenerationConfig, convertTools or convertToolChoice translate.
-	translated := map[string]bool{
-		"SystemInstruction":  true,
-		"Temperature":        true,
-		"TopP":               true,
-		"MaxOutputTokens":    true,
-		"ResponseLogprobs":   true,
-		"Logprobs":           true,
-		"ResponseSchema":     true,
-		"ResponseJsonSchema": true,
-		"ThinkingConfig":     true,
-		"ServiceTier":        true,
-		"HTTPOptions":        true,
-		"Tools":              true,
-		"ToolConfig":         true,
-	}
-	// Fields rejected with their own error, predating shared.ErrUnsupportedConfigField.
-	namedError := map[string]bool{
-		"TopK":             true,
-		"StopSequences":    true,
-		"CandidateCount":   true,
-		"FrequencyPenalty": true,
-		"PresencePenalty":  true,
-		"Labels":           true,
-		"SafetySettings":   true,
-		"ResponseMIMEType": true,
-	}
-	// Fields that have no effect on these APIs, so accepting them drops
-	// nothing: AutomaticContinuation resumes a generation paused with
-	// CONTINUATION, which the OpenAI APIs never do.
-	noEffect := map[string]bool{
-		"AutomaticContinuation": true,
-	}
-	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
-	for _, field := range shared.UnsupportedConfigFields {
-		rejected[field.Name] = true
-	}
-
-	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
-	for i := range cfgType.NumField() {
-		name := cfgType.Field(i).Name
-		if cfgType.Field(i).PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		if !translated[name] && !namedError[name] && !noEffect[name] && !rejected[name] {
-			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
-		}
-	}
-
-	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
-	for name := range rejected {
-		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("shared.UnsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
-		}
-	}
-}
-
-// ThinkingConfig is the one nested type this package claims to read in full, so
-// a field added to it must be translated rather than dropped like the parts of
-// Tools and the schema types that doc.go still excludes from the guarantee.
-func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
-	read := map[string]bool{
-		"IncludeThoughts": true,
-		"ThinkingBudget":  true,
-		"ThinkingLevel":   true,
-	}
-	cfgType := reflect.TypeOf(genai.ThinkingConfig{})
-	for i := range cfgType.NumField() {
-		field := cfgType.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		if !read[field.Name] {
-			t.Errorf("genai.ThinkingConfig.%s is not read by applyThinkingConfig: it would be silently ignored", field.Name)
-		}
-	}
-}
-
 func TestNormalizeRole(t *testing.T) {
 	tests := []struct {
 		role    genai.Role
@@ -2289,6 +2240,27 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 				Type:   constant.JSONSchema("json_schema"),
 				Schema: map[string]any{
 					"title":                "CustomTitle",
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			// OpenAI accepts only ^[a-zA-Z0-9_-]{1,64}$ in the name while genai puts
+			// no constraint on Title, so an illegal title falls back to the
+			// default name and the body keeps the title the caller wrote.
+			name: "response schema title that is not a legal format name",
+			cfg: &genai.GenerateContentConfig{
+				ResponseSchema: &genai.Schema{Title: "Weather Report", Type: genai.TypeObject},
+			},
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   shared.DefaultResponseFormatName,
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"title":                "Weather Report",
 					"type":                 "object",
 					"properties":           map[string]any{},
 					"additionalProperties": false,
@@ -2888,48 +2860,6 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 }
 
-// shared.IgnoredHTTPOptionFields is part of the contract, so it has to name a real
-// field, and every field has to be accounted for in exactly one of the three
-// categories the package documents.
-func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
-	honored := map[string]bool{"Timeout": true}
-	ignored := make(map[string]bool, len(shared.IgnoredHTTPOptionFields))
-	for _, name := range shared.IgnoredHTTPOptionFields {
-		ignored[name] = true
-	}
-	rejected := make(map[string]bool, len(shared.UnsupportedHTTPOptionFields))
-	for _, field := range shared.UnsupportedHTTPOptionFields {
-		rejected[field.Name] = true
-	}
-
-	optType := reflect.TypeOf(genai.HTTPOptions{})
-	for i := range optType.NumField() {
-		field := optType.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		n := 0
-		for _, in := range []bool{honored[field.Name], ignored[field.Name], rejected[field.Name]} {
-			if in {
-				n++
-			}
-		}
-		if n != 1 {
-			t.Errorf("genai.HTTPOptions.%s is in %d of {honored, ignored, rejected}, want exactly 1", field.Name, n)
-		}
-	}
-	for name := range ignored {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("shared.IgnoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
-	}
-	for name := range rejected {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("shared.UnsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
-	}
-}
-
 // redact describes a header value without reproducing it. These assertions run
 // against stub credentials, but a maintainer debugging a live problem may well
 // have swapped a real key in, and a failing test should not put it in the log.
@@ -2994,12 +2924,9 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions carries one live value per shared.UnsupportedHTTPOptionFields
-// entry, shared so the pairing test below derives from the cases that actually
-// run rather than from a second list agreeing with neither.
-//
-// Live values matter because a predicate is a closure: a reflection test over
-// the names stays green however that closure is edited.
+// geminiShapedHTTPOptions carries realistic values for HTTPOptions fields both
+// endpoints refuse. A field genai adds later is covered by
+// TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists instead.
 var geminiShapedHTTPOptions = []struct {
 	field string
 	opts  *genai.HTTPOptions
@@ -3030,31 +2957,9 @@ func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 	}
 }
 
-// Pairs the table with the cases above, reading both rather than restating
-// either, so a predicate added without a case fails here instead of shipping
-// untested. The sibling table is guarded the same way.
-func TestEveryUnsupportedHTTPOptionFieldIsDriven(t *testing.T) {
-	driven := make(map[string]bool, len(geminiShapedHTTPOptions))
-	for _, tc := range geminiShapedHTTPOptions {
-		driven[tc.field] = true
-	}
-	for _, field := range shared.UnsupportedHTTPOptionFields {
-		if !driven[field.Name] {
-			t.Errorf("shared.UnsupportedHTTPOptionFields has %q with no case in "+
-				"geminiShapedHTTPOptions, so its predicate never runs", field.Name)
-		}
-	}
-	if len(driven) != len(shared.UnsupportedHTTPOptionFields) {
-		t.Errorf("%d cases for %d predicates", len(driven), len(shared.UnsupportedHTTPOptionFields))
-	}
-}
-
-// Closes the accounting test's blind side: that one compares names against
-// three lists, so writing a new field into translated greens it while the field
-// is still dropped.
-//
-// Here every field the lists call translated has to reach the params, with the
-// ones needing a whole subsystem to be meaningful left to their own tests.
+// A name in shared.SupportedConfigFields is accepted, so a field listed there but
+// not translated would be dropped. Here every translated field has to reach the
+// params, with the ones needing a whole subsystem left to their own tests.
 func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 	tests := []struct {
 		field string

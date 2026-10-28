@@ -187,3 +187,140 @@ func TestStreamingFunctionToolStopsHandlerWhenConsumerStops(t *testing.T) {
 		t.Error("handler cleanup did not run after the consumer stopped")
 	}
 }
+
+type streamingConfirmationFailureContext struct {
+	agent.Context
+}
+
+func (streamingConfirmationFailureContext) RequestConfirmation(string, any) error {
+	return errors.New("synthetic confirmation failure")
+}
+
+func captureStreamingPanic(f func()) (got any) {
+	defer func() { got = recover() }()
+	f()
+	return got
+}
+
+func TestStreamingFunctionToolPropagatesConsumerPanic(t *testing.T) {
+	validArgs := map[string]any{"value": "request"}
+	for _, test := range []struct {
+		name                string
+		args                any
+		confirmation        *toolconfirmation.ToolConfirmation
+		requireConfirmation bool
+		confirmationFailure bool
+		handlerError        bool
+		wantError           bool
+	}{
+		{name: "chunk", args: validArgs},
+		{name: "handler error", args: validArgs, handlerError: true, wantError: true},
+		{name: "wrong argument type", args: 42, wantError: true},
+		{name: "schema error", args: map[string]any{"value": false}, wantError: true},
+		{name: "confirmation rejected", args: validArgs, confirmation: &toolconfirmation.ToolConfirmation{}, wantError: true},
+		{name: "confirmation requested", args: validArgs, requireConfirmation: true, wantError: true},
+		{name: "confirmation request failed", args: validArgs, requireConfirmation: true, confirmationFailure: true, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			streamingTool := requireStreamingTool(t, functiontool.Config{
+				Name:                "streaming_tool",
+				RequireConfirmation: test.requireConfirmation,
+			}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) {
+					var err error
+					if test.handlerError {
+						err = errors.New("synthetic handler error")
+					}
+					yield("chunk", err)
+				}
+			})
+			ctx := newStreamingToolContext(t, &session.EventActions{}, test.confirmation)
+			if test.confirmationFailure {
+				ctx = streamingConfirmationFailureContext{Context: ctx}
+			}
+			original := errors.New("synthetic consumer panic")
+			var yieldedErr error
+			got := captureStreamingPanic(func() {
+				for _, err := range streamingTool.RunStream(ctx, test.args) {
+					yieldedErr = err
+					panic(original)
+				}
+			})
+			if got != original {
+				t.Errorf("recovered panic has type %T, want the original consumer panic value", got)
+			}
+			if (yieldedErr != nil) != test.wantError {
+				t.Errorf("yielded an error = %t, want %t", yieldedErr != nil, test.wantError)
+			}
+		})
+	}
+}
+
+func TestStreamingFunctionToolPropagatesCleanupPanicAfterStop(t *testing.T) {
+	original := errors.New("synthetic cleanup panic")
+	streamingTool := requireStreamingTool(t, functiontool.Config{Name: "streaming_tool"}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			defer func() { panic(original) }()
+			yield("chunk", nil)
+		}
+	})
+	ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+	got := captureStreamingPanic(func() {
+		for range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+			break
+		}
+	})
+	if got != original {
+		t.Errorf("recovered panic has type %T, want the original cleanup panic value", got)
+	}
+}
+
+func TestStreamingFunctionToolRecoversHandlerPanic(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		panicOnCall bool
+		yieldFirst  bool
+	}{
+		{name: "calling the handler", panicOnCall: true},
+		{name: "before first yield"},
+		{name: "after a yield", yieldFirst: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			streamingTool := requireStreamingTool(t, functiontool.Config{Name: "streaming_tool"}, func(agent.Context, streamingArgs) iter.Seq2[string, error] {
+				if test.panicOnCall {
+					panic("synthetic handler panic")
+				}
+				return func(yield func(string, error) bool) {
+					if test.yieldFirst && !yield("chunk", nil) {
+						return
+					}
+					panic("synthetic handler panic")
+				}
+			})
+			ctx := newStreamingToolContext(t, &session.EventActions{}, nil)
+			var chunks, errs int
+			got := captureStreamingPanic(func() {
+				for _, err := range streamingTool.RunStream(ctx, map[string]any{"value": "request"}) {
+					if err == nil {
+						chunks++
+						continue
+					}
+					errs++
+					if !strings.Contains(err.Error(), "panic in tool") {
+						t.Error("RunStream did not report the recovered handler panic")
+					}
+				}
+			})
+			if got != nil {
+				t.Fatalf("RunStream propagated a panic of type %T, want a tool error", got)
+			}
+			wantChunks := 0
+			if test.yieldFirst {
+				wantChunks = 1
+			}
+			if chunks != wantChunks || errs != 1 {
+				t.Errorf("RunStream yielded %d chunks and %d errors, want %d chunks and one error", chunks, errs, wantChunks)
+			}
+		})
+	}
+}
