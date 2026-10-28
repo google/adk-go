@@ -38,6 +38,26 @@ func TestEnsureFunctionToolOnly(t *testing.T) {
 			wantErr: "non-function tools",
 		},
 		{
+			name:    "FileSearch alone",
+			tool:    &genai.Tool{FileSearch: &genai.FileSearch{}},
+			wantErr: "non-function tools",
+		},
+		{
+			name:    "ParallelAISearch with functions",
+			tool:    &genai.Tool{ParallelAISearch: &genai.ToolParallelAISearch{}, FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "fn1"}}},
+			wantErr: "non-function tools",
+		},
+		{
+			name:    "MCPServers alone",
+			tool:    &genai.Tool{MCPServers: []*genai.MCPServer{{Name: "srv"}}},
+			wantErr: "non-function tools",
+		},
+		{
+			name:    "ExaAISearch with functions",
+			tool:    &genai.Tool{ExaAISearch: &genai.ToolExaAISearch{}, FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "fn1"}}},
+			wantErr: "non-function tools",
+		},
+		{
 			name:    "no functions",
 			tool:    &genai.Tool{},
 			wantErr: "does not declare any functions",

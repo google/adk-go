@@ -28,7 +28,9 @@ func EnsureFunctionToolOnly(idx int, tool *genai.Tool) error {
 	}
 	if tool.Retrieval != nil || tool.GoogleSearch != nil || tool.GoogleSearchRetrieval != nil ||
 		tool.GoogleMaps != nil || tool.EnterpriseWebSearch != nil ||
-		tool.URLContext != nil || tool.ComputerUse != nil || tool.CodeExecution != nil {
+		tool.URLContext != nil || tool.ComputerUse != nil || tool.CodeExecution != nil ||
+		tool.FileSearch != nil || tool.ParallelAISearch != nil || len(tool.MCPServers) > 0 ||
+		tool.ExaAISearch != nil {
 		return fmt.Errorf("openai: non-function tools are not supported (tool %d)", idx)
 	}
 	if len(tool.FunctionDeclarations) == 0 {
