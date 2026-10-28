@@ -195,6 +195,23 @@ Body
 			},
 			wantInstruction: "\n# Long\n\nMulti-line\nMarkdown\nBody\n\n",
 		},
+		{
+			name: "unknown top-level keys are ignored",
+			input: `---
+name: shared-skill
+description: A skill shared with another agent runtime.
+user-invocable: true
+version: "1.2.3"
+---
+# Instructions
+Body
+`,
+			want: &Frontmatter{
+				Name:        "shared-skill",
+				Description: "A skill shared with another agent runtime.",
+			},
+			wantInstruction: "# Instructions\nBody\n",
+		},
 	}
 
 	for _, testcase := range tests {
@@ -257,10 +274,6 @@ func TestParse_InvalidFormat(t *testing.T) {
 		{
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
-		},
-		{
-			name:  "unknown fields",
-			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",
