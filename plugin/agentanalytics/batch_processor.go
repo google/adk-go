@@ -442,6 +442,18 @@ func (b *BatchProcessor) flush() {
 	}
 }
 
+// keepBatchOnPanic stores batch in deferredBatch when a Logger panic unwinds
+// after resolveUploads and before the caller requeued or cleared it, then
+// re-panics. Reserved upload bytes stay attached to the batch for the next
+// flush or Close. requeueDeferredUploads sets deferredBatch before it logs, so
+// a second panic there still leaves the batch tracked.
+func (b *BatchProcessor) keepBatchOnPanic(batch []map[string]any) {
+	if r := recover(); r != nil {
+		b.requeueDeferredUploads(batch)
+		panic(r)
+	}
+}
+
 // flushRunEnd drains and writes queued events synchronously under a single
 // ShutdownTimeout budget, skipping if a background flush is already running.
 // The uploads of each batch get at most half of what is left of the budget, so
@@ -496,19 +508,31 @@ func (b *BatchProcessor) flushRunEnd() {
 		// A deferred batch is counted in DropStats only if a later flush drops
 		// it, so that a batch that the next flush writes is not reported as
 		// dropped, and one that fails again is not counted twice.
-		if err := b.tryAppendBatch(flushCtx, batch); err != nil {
-			if flushCtx.Err() != nil && !retry {
-				b.requeueDeferredUploads(batch)
-				b.deferredBatch = batch
-				return
+		// keepBatchOnPanic covers Logger panics inside tryAppendBatch (e.g. the
+		// "BigQuery response" line) so reserved bytes stay on deferredBatch.
+		stop := false
+		func() {
+			defer b.keepBatchOnPanic(batch)
+			if err := b.tryAppendBatch(flushCtx, batch); err != nil {
+				if flushCtx.Err() != nil && !retry {
+					b.requeueDeferredUploads(batch)
+					b.deferredBatch = batch
+					stop = true
+					return
+				}
+				b.recordAppendFailureDrop(int64(len(batch)))
+				for _, row := range batch {
+					b.releaseRowUploads(row)
+				}
+				b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
 			}
-			b.recordAppendFailureDrop(int64(len(batch)))
-			for _, row := range batch {
-				b.releaseRowUploads(row)
+			if !stop {
+				b.clearDeferredUploads(batch)
 			}
-			b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+		}()
+		if stop {
+			return
 		}
-		b.clearDeferredUploads(batch)
 	}
 }
 
@@ -541,15 +565,16 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 			break
 		}
 		if writeLeft <= 0 || b.streamWriter.isRotationInCooldown() {
+			// Release before logging so a panicking Logger cannot strand reserved bytes.
+			for _, row := range batch {
+				b.releaseRowUploads(row)
+			}
 			if writeLeft <= 0 {
 				b.recordShutdownDrop(int64(len(batch)))
 				b.config.logf("WARNING: Failed to write batch of %d events: %v", len(batch), context.DeadlineExceeded)
 			} else {
 				b.recordAppendFailureDrop(int64(len(batch)))
 				b.config.logf("WARNING: Failed to write batch of %d events: committed write stream rotation in cooldown", len(batch))
-			}
-			for _, row := range batch {
-				b.releaseRowUploads(row)
 			}
 			continue
 		}
@@ -563,11 +588,15 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 
 		start = time.Now()
 		writeCtx, cancelWrite := context.WithTimeout(b.baseCtx, writeLeft)
-		err := b.appendBatch(writeCtx, batch)
+		var err error
+		func() {
+			defer b.keepBatchOnPanic(batch)
+			err = b.appendBatch(writeCtx, batch)
+			b.clearDeferredUploads(batch)
+		}()
 		writeExpired := writeCtx.Err() != nil
 		cancelWrite()
 		writeLeft -= time.Since(start)
-		b.clearDeferredUploads(batch)
 		if writeExpired && writeLeft > 0 {
 			writeLeft = 0
 		}
@@ -596,8 +625,12 @@ func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Cont
 		return fmt.Errorf("committed write stream rotation in cooldown")
 	}
 	b.resolveUploads(uploadCtx, pauseOnCallerDeadline, batch)
-	err := b.appendBatch(writeCtx, batch)
-	b.clearDeferredUploads(batch)
+	var err error
+	func() {
+		defer b.keepBatchOnPanic(batch)
+		err = b.appendBatch(writeCtx, batch)
+		b.clearDeferredUploads(batch)
+	}()
 	return err
 }
 

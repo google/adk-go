@@ -4499,6 +4499,94 @@ func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 	}
 }
 
+type panicOnBigQueryResponseLogger struct{}
+
+func (panicOnBigQueryResponseLogger) Printf(format string, _ ...any) {
+	if strings.Contains(format, "BigQuery response") {
+		panic("logger boom on BigQuery response")
+	}
+}
+func (panicOnBigQueryResponseLogger) Println(...any) {}
+
+// TestWriteBatchWithContexts_PanickingLoggerOnBigQueryResponseKeepsDeferredBatch
+// checks that a Logger panic on the "BigQuery response" line after
+// resolveUploads has deferred uploads leaves the batch in deferredBatch so
+// reserved bytes stay attached (issue #1970).
+func TestWriteBatchWithContexts_PanickingLoggerOnBigQueryResponseKeepsDeferredBatch(t *testing.T) {
+	ctx := context.Background()
+	off := &fakeOffloader{hook: func(c context.Context, _ GCSUploadRequest) error {
+		<-c.Done()
+		return c.Err()
+	}}
+	config := DefaultConfig()
+	config.ProjectID, config.DatasetID, config.TableName = "p", "d", "t"
+	config.BatchSize = 10
+	config.BatchFlushIntv = time.Hour
+	config.GCSOffloader = off
+	config.GCSUploadTimeout = time.Minute
+	config.GCSMaxPendingUploadBytes = 64
+	config.Logger = panicOnBigQueryResponseLogger{}
+	config.RetryConfig.MaxRetries = 0
+
+	bp, err := NewBatchProcessor(ctx, nil, "test_stream", config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor() error = %v", err)
+	}
+	t.Cleanup(func() {
+		bp.config.Logger = &recordingLogger{}
+		bp.Close()
+	})
+
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row[eventIDField] = "ev-bq-response-panic"
+	row["event_type"] = EventLLMRequest
+	batch := []map[string]any{row}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after reserve = %d, want 64", got)
+	}
+
+	bp.streamWriter.stream = &mockStream{
+		recvRes: &storagepb.AppendRowsResponse{
+			RowErrors: []*storagepb.RowError{{Index: 0, Message: "bad row"}},
+		},
+	}
+
+	uploadCtx, cancel := context.WithTimeout(ctx, 25*time.Millisecond)
+	defer cancel()
+
+	panicked := false
+	func() {
+		defer func() {
+			if recover() != nil {
+				panicked = true
+			}
+		}()
+		_ = bp.writeBatchWithContexts(uploadCtx, ctx, false, batch)
+	}()
+	if !panicked {
+		t.Fatal("writeBatchWithContexts did not panic on BigQuery response log")
+	}
+	if len(bp.deferredBatch) != 1 {
+		t.Fatalf("deferredBatch len = %d, want 1 (batch must stay tracked after Logger panic)", len(bp.deferredBatch))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after Logger panic = %d, want 64", got)
+	}
+
+	// requeueDeferredUploads put the parts back on rawPartsKey; releasing the
+	// row restores the budget and proves the reservation stayed attached.
+	saved := bp.deferredBatch
+	bp.deferredBatch = nil
+	bp.config.Logger = &recordingLogger{}
+	for _, row := range saved {
+		bp.releaseRowUploads(row)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes after releaseRowUploads = %d, want 0", got)
+	}
+}
+
 func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		<-ctx.Done()
