@@ -11,6 +11,9 @@ go get google.golang.org/adk/integrations/slack
 
 ## Packages
 
+- `slack` (the module root) receives Slack events over the Events API,
+  applies an answer policy, runs one agent turn per message through a
+  `Backend`, and posts the reply into the thread.
 - `mrkdwn` converts the Markdown that models write into Slack mrkdwn (bold,
   italic, strikethrough, headings, lists, links, code and the `& < >` escaping
   Slack requires), so a reply posted through the Slack API renders as intended
