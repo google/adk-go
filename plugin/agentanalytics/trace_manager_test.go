@@ -22102,6 +22102,82 @@ func TestCustomFanOutHandlesCanceledChild(t *testing.T) {
 	}
 }
 
+// TestCustomParentPropagatesParallelBranchError verifies #1984: a custom agent
+// that runs a ParallelAgent under context.WithCancelCause, cancels with a
+// failing branch's error, and yields that error must end with INVOCATION_ERROR
+// (and AGENT_ERROR). Climbing past the ParallelAgent to the custom parent used
+// to drop the branch cause and leave INVOCATION_COMPLETED.
+func TestCustomParentPropagatesParallelBranchError(t *testing.T) {
+	ctx := t.Context()
+
+	failer, err := agent.New(agent.Config{
+		Name: "failer",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, errors.New("errBranch"))
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(failer): %v", err)
+	}
+	ok, err := agent.New(agent.Config{
+		Name: "ok",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ic, ic.InvocationID())
+				ev.Author, ev.Branch = "ok", ic.Branch()
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(ok): %v", err)
+	}
+	par := newParallelAgent(t, "par", failer, ok)
+	root, err := agent.New(agent.Config{
+		Name:      "custom",
+		SubAgents: []agent.Agent{par},
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				gctx, cancel := context.WithCancelCause(ic)
+				defer cancel(nil)
+				for ev, runErr := range par.Run(ic.WithContext(gctx)) {
+					if runErr != nil {
+						cancel(runErr)
+						yield(nil, runErr)
+						return
+					}
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(custom): %v", err)
+	}
+	p, requests, _ := setupTestPlugin(t)
+	var sawRunErr bool
+	for _, runErr := range newTestRunner(t, root, p).Run(ctx, "u1", "s1", textContent("user", "hello"), agent.RunConfig{}) {
+		if runErr != nil {
+			sawRunErr = true
+		}
+	}
+	if !sawRunErr {
+		t.Fatal("runner.Run yielded no error, want the branch failure")
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if got := len(rowsOfType(rows, EventInvocationError)); got != 1 {
+		t.Errorf("INVOCATION_ERROR rows = %d, want 1; event types: %v", got, eventTypes(rows))
+	}
+	if got := len(rowsOfType(rows, EventInvocationCompleted)); got != 0 {
+		t.Errorf("INVOCATION_COMPLETED rows = %d, want 0; event types: %v", got, eventTypes(rows))
+	}
+}
+
 // TestCustomFanOutHandlesCanceledChildWithSecondSubAgent is a variant of
 // TestCustomFanOutHandlesCanceledChild where the custom parent also runs a
 // second sub-agent that succeeds after the first one fails, confirming that the
