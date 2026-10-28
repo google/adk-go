@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 // socketErr rebuilds the error the net package returns for a failed read or
@@ -116,7 +118,7 @@ func TestIsResumable(t *testing.T) {
 		},
 		{
 			name: "reader: policy violation 1008",
-			err:  errors.New("websocket: close 1008 (policy violation)"),
+			err:  fmt.Errorf("failed to receive message: %w", &websocket.CloseError{Code: websocket.ClosePolicyViolation}),
 			want: true,
 		},
 		{"reader: GoAway", errors.New("GoAway received"), true},
@@ -166,6 +168,19 @@ func TestIsResumable(t *testing.T) {
 		{
 			name: "protocol error 1002 is fatal",
 			err:  errors.New("websocket: close 1002 (protocol error): fatal"),
+			want: false,
+		},
+		{
+			// gorilla hides a temporary net.Error (hideTempErr) behind its own
+			// type, so only the text reaches isResumable, and the text carries
+			// the socket addresses.
+			name: "timeout with 1008 in a port is fatal",
+			err:  errors.New("failed to receive message: read tcp 127.0.0.1:41008->127.0.0.1:42207: i/o timeout"),
+			want: false,
+		},
+		{
+			name: "close frame with 1008 only in its reason is fatal",
+			err:  fmt.Errorf("failed to receive message: %w", &websocket.CloseError{Code: websocket.CloseProtocolError, Text: "error 1008"}),
 			want: false,
 		},
 		{
