@@ -574,9 +574,13 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	if strings.Contains(advertised, ToolName) {
 		t.Errorf("search_tools description advertises %q as loadable: %q", ToolName, advertised)
 	}
-	const wantContinue = "Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user."
-	if !strings.Contains(desc, wantContinue) {
-		t.Errorf("search_tools description = %q, want it to contain %q", desc, wantContinue)
+	for _, want := range []string{
+		"Do not call search_tools in the same request as a tool it has not yet returned.",
+		"Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user.",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("search_tools description = %q, want it to contain %q", desc, want)
+		}
 	}
 	if strings.Contains(desc, "finish this model response") || strings.Contains(desc, "End this response") {
 		t.Errorf("search_tools description tells the model to end the response: %q", desc)
@@ -1317,8 +1321,10 @@ func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
 		const sameStep = "call the discovered tools in that same model step"
 		const afterLoad = "call the matched tools on the model step after load_skill returns, not in the same response"
 		if tc.wantSkill {
-			if !strings.Contains(desc, afterLoad) {
-				t.Errorf("skill description = %q, want it to contain %q", desc, afterLoad)
+			for _, want := range []string{"load that skill on the model step that receives the search result", afterLoad} {
+				if !strings.Contains(desc, want) {
+					t.Errorf("skill description = %q, want it to contain %q", desc, want)
+				}
 			}
 			if strings.Contains(desc, sameStep) {
 				t.Errorf("skill description requires discovered tools in the same model step as load_skill: %q", desc)

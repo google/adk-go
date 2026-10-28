@@ -68,10 +68,11 @@ const (
 	// skill body, so the model can read it only on the following step. Asking for
 	// the matched tools in that same response runs them before the body arrives.
 	skillToolDescription = toolDescriptionLead +
-		"Once that result is in hand, this search does not answer the user. " +
+		"This search does not answer the user. " +
 		"If a result includes a relevant connected_skill and your application supports skills, " +
-		"load that skill now and call the matched tools on the model step after load_skill returns, not in the same response. " +
-		"If none is relevant, call the discovered tools on the model step that has the search result."
+		"load that skill on the model step that receives the search result, " +
+		"and call the matched tools on the model step after load_skill returns, not in the same response. " +
+		"If none is relevant, call the discovered tools on the model step that receives the search result."
 )
 
 // Config tunes the gating toolset.
