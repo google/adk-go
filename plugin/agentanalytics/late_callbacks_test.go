@@ -109,14 +109,14 @@ func TestTraceManager_LateOperationsKeepTheirSpans(t *testing.T) {
 			var started, ended rowSpan
 			switch kind {
 			case "agent":
-				started = tm.pushAgentSpan(ctx, id)
+				started, _ = tm.pushAgentSpan(ctx, id)
 				ended = tm.popAgentSpan(ctx, id)
 			case "model":
 				started = tm.pushLLMSpan(ctx, id)
 				ended = tm.popLLMSpan(ctx, id, false)
 			case "tool":
 				started = tm.pushToolSpan(ctx, id, "call")
-				ended, _ = tm.popToolSpan(ctx, id, "call", false)
+				ended, _, _ = tm.popToolSpan(ctx, id, "call", false)
 			}
 			if started.spanID != ended.spanID || started.parentSpanID != ended.parentSpanID || ended.latency == nil {
 				t.Error("late operation lost its span identity or latency")
@@ -261,7 +261,7 @@ func TestTraceManager_RepeatedEndPreservesLateCall(t *testing.T) {
 	firstEnd := tm.endInvocation(ctx, id)
 	toolStart := tm.pushToolSpan(ctx, id, "call")
 	secondEnd := tm.endInvocation(ctx, id)
-	toolEnd, _ := tm.popToolSpan(ctx, id, "call", false)
+	toolEnd, _, _ := tm.popToolSpan(ctx, id, "call", false)
 	if secondEnd.spanID != started.spanID || firstEnd.spanID != started.spanID {
 		t.Error("repeated completion changed the invocation's identity")
 	}
@@ -324,7 +324,7 @@ func TestTraceManager_OpenLateCallSurvivesCompletionPressure(t *testing.T) {
 			var started, ended rowSpan
 			switch kind {
 			case "agent":
-				started = tm.pushAgentSpan(ctx, id)
+				started, _ = tm.pushAgentSpan(ctx, id)
 			case "model":
 				started = tm.pushLLMSpan(ctx, id)
 			case "tool":
@@ -342,7 +342,7 @@ func TestTraceManager_OpenLateCallSurvivesCompletionPressure(t *testing.T) {
 			case "model":
 				ended = tm.popLLMSpan(ctx, id, false)
 			case "tool":
-				ended, _ = tm.popToolSpan(ctx, id, "call", false)
+				ended, _, _ = tm.popToolSpan(ctx, id, "call", false)
 			}
 			if ended.spanID != started.spanID || ended.parentSpanID != started.parentSpanID || ended.latency == nil {
 				t.Error("completion pressure split an in-flight late operation")
@@ -379,7 +379,8 @@ func TestTraceManager_StartingLateSpanSurvivesCompletionPressure(t *testing.T) {
 			go func() {
 				switch kind {
 				case "agent":
-					started <- tm.pushAgentSpan(ctx, id)
+					s, _ := tm.pushAgentSpan(ctx, id)
+					started <- s
 				case "model":
 					started <- tm.pushLLMSpan(ctx, id)
 				case "tool":
@@ -405,7 +406,7 @@ func TestTraceManager_StartingLateSpanSurvivesCompletionPressure(t *testing.T) {
 			case "model":
 				ended = tm.popLLMSpan(ctx, id, false)
 			case "tool":
-				ended, _ = tm.popToolSpan(ctx, id, "call", false)
+				ended, _, _ = tm.popToolSpan(ctx, id, "call", false)
 			}
 			if span.spanID != ended.spanID || ended.latency == nil {
 				t.Error("pruning between invocation lookup and span start split the late operation")
@@ -456,7 +457,7 @@ func TestTraceManager_FullOpenCompletedCacheStaysBounded(t *testing.T) {
 		t.Error("full cache retained a new idle completion beyond its capacity")
 	}
 	for i, openID := range ids {
-		ended, _ := tm.popToolSpan(ctx, openID, "call", false)
+		ended, _, _ := tm.popToolSpan(ctx, openID, "call", false)
 		if ended.spanID != spans[i].spanID || ended.latency == nil {
 			t.Errorf("open late operation %d was discarded to retain an idle completion", i)
 		}
