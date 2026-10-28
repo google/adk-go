@@ -239,7 +239,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	var contents []*genai.Content
 	for _, ev := range filtered {
-		content := clone(utils.Content(ev))
+		content := copyContentForRequest(utils.Content(ev))
 		if content == nil {
 			continue
 		}
@@ -985,4 +985,37 @@ func cloneEvent(e *session.Event) *session.Event {
 	}
 
 	return newEvent
+}
+
+// copyContentForRequest returns a copy of c that the request pipeline may
+// edit without touching the stored event: the parts slice, each part, and the
+// function call and response records whose IDs RemoveClientFunctionCallID
+// rewrites. Leaf data a later stage only reads, such as inline bytes and
+// call arguments, is shared.
+//
+// Not the reflection-based clone: that one copies a byte slice one element at
+// a time, so an inline image in the history cost about 80 ms and a million
+// allocations per megabyte on every model call.
+func copyContentForRequest(c *genai.Content) *genai.Content {
+	if c == nil {
+		return nil
+	}
+	out := *c
+	out.Parts = make([]*genai.Part, len(c.Parts))
+	for i, p := range c.Parts {
+		if p == nil {
+			continue
+		}
+		pc := *p
+		if p.FunctionCall != nil {
+			fc := *p.FunctionCall
+			pc.FunctionCall = &fc
+		}
+		if p.FunctionResponse != nil {
+			fr := *p.FunctionResponse
+			pc.FunctionResponse = &fr
+		}
+		out.Parts[i] = &pc
+	}
+	return &out
 }

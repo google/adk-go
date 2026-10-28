@@ -422,10 +422,14 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 }
 
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+	// Only existence is needed here. The runner loads the full history right
+	// after, so asking for it twice doubles the read on every turn, and on a
+	// database backend that read is the most expensive part of the request.
 	_, err := c.sessionService.Get(ctx, &session.GetRequest{
-		AppName:   appName,
-		UserID:    userID,
-		SessionID: sessionID,
+		AppName:         appName,
+		UserID:          userID,
+		SessionID:       sessionID,
+		NumRecentEvents: 1,
 	})
 	if err != nil {
 		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)

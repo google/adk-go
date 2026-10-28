@@ -71,10 +71,13 @@ func createSessionFromStorageSession(storage *storageSession) (*localSession, er
 
 // storageEvent corresponds to the 'events' table.
 type storageEvent struct {
-	ID        string `gorm:"primaryKey;"`
-	AppName   string `gorm:"primaryKey;"`
-	UserID    string `gorm:"primaryKey;"`
-	SessionID string `gorm:"primaryKey;"`
+	ID string `gorm:"primaryKey;"`
+	// The primary key leads with the event id, so a lookup by session cannot
+	// use it and would scan the whole table. This index serves Get's
+	// per-session read in session order; adk-python defines the same one.
+	AppName   string `gorm:"primaryKey;index:idx_events_app_user_session_ts,priority:1"`
+	UserID    string `gorm:"primaryKey;index:idx_events_app_user_session_ts,priority:2"`
+	SessionID string `gorm:"primaryKey;index:idx_events_app_user_session_ts,priority:3"`
 
 	InvocationID string
 	Author       string
@@ -88,7 +91,7 @@ type storageEvent struct {
 	RequestedInputJSON     dynamicJSON
 	Branch                 *string
 	IsolationScope         *string
-	Timestamp              time.Time `gorm:"precision:6"`
+	Timestamp              time.Time `gorm:"precision:6;index:idx_events_app_user_session_ts,priority:4"`
 
 	// Fields from llm_response
 	Content           dynamicJSON
