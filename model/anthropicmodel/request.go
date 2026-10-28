@@ -186,7 +186,14 @@ func (m *anthropicModel) buildMessages(
 		// Coalesce adjacent messages with the same role so conversation turns
 		// strictly alternate between user and assistant.
 		if len(messages) > 0 && messages[len(messages)-1].Role == role {
-			merged := append(messages[len(messages)-1].Content, blocks...)
+			prev := messages[len(messages)-1].Content
+			if role == anthropic.MessageParamRoleAssistant {
+				// Claude requires thinking blocks in the latest assistant
+				// message to match a single original response. Drop thinking
+				// from earlier assistant turns when merging retries.
+				prev = stripThinkingBlocks(prev)
+			}
+			merged := append(prev, blocks...)
 			if role == anthropic.MessageParamRoleAssistant {
 				merged = orderAssistantBlocks(merged)
 			}
@@ -204,6 +211,19 @@ func (m *anthropicModel) buildMessages(
 	}
 
 	return messages, nil
+}
+
+// stripThinkingBlocks removes thinking and redacted_thinking blocks so a
+// later assistant turn's thinking can stand alone after a same-role merge.
+func stripThinkingBlocks(blocks []anthropic.ContentBlockParamUnion) []anthropic.ContentBlockParamUnion {
+	out := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
+	for _, b := range blocks {
+		if b.OfThinking != nil || b.OfRedactedThinking != nil {
+			continue
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // orderAssistantBlocks places thinking and redacted_thinking blocks before
