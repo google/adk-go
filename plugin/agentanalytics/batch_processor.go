@@ -139,8 +139,9 @@ type BatchProcessor struct {
 	// uploadTimeout overrides Config.GCSUploadTimeout in tests.
 	uploadTimeout time.Duration
 	// uploadCooldownUntil holds a UnixNano deadline while uploads are paused
-	// after a batch-level GCSUploadTimeout expiration or a stalled upload
-	// timing out during a run-end flush.
+	// after a batch-level GCSUploadTimeout expiration (or a run-end deadline
+	// cutting short an upload that stalled for most of its batch's upload
+	// time, or when no upload in the batch succeeded).
 	uploadCooldownUntil atomic.Int64
 
 	// pendingUploadBytes tracks total bytes currently held in memory by
@@ -444,13 +445,23 @@ func (b *BatchProcessor) flush() {
 
 // flushRunEnd drains and writes queued events synchronously under a single
 // ShutdownTimeout budget, skipping if a background flush is already running.
-// The uploads of each batch get at most half of what is left of the budget, so
-// that a Cloud Storage problem leaves time for the BigQuery write. If an
-// upload stalls long enough under that batch's upload window, later batches
-// in this flush skip Cloud Storage. A longer stall also pauses uploads across
-// flushes (see resolveUploads). If the run-end budget expires during a batch's
-// BigQuery write, the batch (along with uploads cut short without triggering
-// the shared cooldown) is retained in deferredBatch for the next flush or Close;
+// The uploads of each fresh batch get at most half of what is left of the
+// budget, so that a Cloud Storage problem leaves time for the BigQuery write.
+// When the flush retries a deferred batch, whose write cannot be deferred
+// again, its uploads get at most a quarter of what is left of ShutdownTimeout
+// (leaving three quarters for the BigQuery write), its run-end deadline does
+// not pause the uploads, and any uploads that its deadline cuts short are not
+// kept again.
+// If the uploads of a fresh batch that started with at least a quarter of the
+// budget left stall (an upload runs for most of the upload time of the batch,
+// or no upload succeeds before that time is up), the uploads are paused for
+// GCSUploadTimeout, so that the later batches of this flush, and those of
+// other flushes in that time, skip Cloud Storage instead of each waiting for
+// it (see resolveUploadsForBatch).
+// If the run-end budget expires during a batch's BigQuery write, the batch is
+// retained in deferredBatch for the next flush or Close, along with the
+// uploads of the batch that returned an error if its upload deadline, or Close
+// canceling the uploads, had ended them, unless the batch paused the uploads;
 // as with other context expirations after a write is sent, this provides
 // at-least-once delivery if the server had already committed the batch.
 func (b *BatchProcessor) flushRunEnd() {
@@ -466,7 +477,6 @@ func (b *BatchProcessor) flushRunEnd() {
 	defer cancel()
 	// flushCtx always has a deadline: it is made by WithTimeout.
 	flushDeadline, _ := flushCtx.Deadline()
-	skipUploads := false
 
 	for !b.closed.Load() && b.hasPendingWorkLocked() && flushCtx.Err() == nil {
 		retry := len(b.deferredBatch) > 0
@@ -483,14 +493,16 @@ func (b *BatchProcessor) flushRunEnd() {
 			continue
 		}
 		remaining := time.Until(flushDeadline)
-		uploadDeadline := time.Now().Add(remaining / 2)
-		if skipUploads {
-			uploadDeadline = time.Time{}
+		pauseOnCallerDeadline := !retry && remaining >= shutdownTimeout/4
+		uploadTime := remaining / 2
+		if retry {
+			uploadTime = remaining / 4
 		}
-		uploadCtx, cancelUploads := context.WithDeadline(b.uploadCtx, uploadDeadline)
-		if b.resolveUploads(uploadCtx, true, batch) {
-			skipUploads = true
-		}
+		uploadCtx, cancelUploads := context.WithDeadline(b.uploadCtx, time.Now().Add(uploadTime))
+		b.resolveUploadsForBatch(uploadCtx, uploadResolveOptions{
+			pauseOnCallerDeadline: pauseOnCallerDeadline,
+			canDefer:              !retry,
+		}, batch)
 		cancelUploads()
 
 		// A deferred batch is counted in DropStats only if a later flush drops
@@ -522,7 +534,8 @@ func (b *BatchProcessor) flushRunEnd() {
 //     it expires are dropped and logged.
 //   - The uploads of all the batches share half a ShutdownTimeout. When it is
 //     used up, or once the uploads of one batch have timed out and paused the
-//     uploads (see resolveUploads), the remaining parts fall back at once.
+//     uploads (see resolveUploadsForBatch), the remaining parts fall back at
+//     once.
 //
 // Both budgets start once the wait is over, so the time spent waiting for the
 // in-flight flush does not reduce them. The drain can therefore take up to one
@@ -557,7 +570,7 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 		// A context whose time is up ends the uploads at once.
 		start := time.Now()
 		uploadCtx, cancelUploads := context.WithTimeout(b.baseCtx, uploadLeft)
-		b.resolveUploads(uploadCtx, false, batch)
+		b.resolveUploadsForBatch(uploadCtx, uploadResolveOptions{}, batch)
 		cancelUploads()
 		uploadLeft -= time.Since(start)
 
@@ -595,7 +608,7 @@ func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Cont
 		}
 		return fmt.Errorf("committed write stream rotation in cooldown")
 	}
-	b.resolveUploads(uploadCtx, pauseOnCallerDeadline, batch)
+	b.resolveUploadsForBatch(uploadCtx, uploadResolveOptions{pauseOnCallerDeadline: pauseOnCallerDeadline}, batch)
 	err := b.appendBatch(writeCtx, batch)
 	b.clearDeferredUploads(batch)
 	return err
