@@ -17,14 +17,24 @@ package telemetry
 
 import (
 	"context"
+	"slices"
 
 	"google.golang.org/adk/v2/cmd/launcher"
 	"google.golang.org/adk/v2/telemetry"
 )
 
 // InitAndSetGlobalOtelProviders initializes telemetry and sets the global OTel providers.
+//
+// otelToCloud is the launcher's -otel_to_cloud flag. Set, it turns export to
+// GCP on. Unset, it leaves the choice to config.TelemetryOptions, so the flag's
+// default does not override a [telemetry.WithOtelToCloud] the embedder passed.
 func InitAndSetGlobalOtelProviders(ctx context.Context, config *launcher.Config, otelToCloud bool) (*telemetry.Providers, error) {
-	opts := append(config.TelemetryOptions, telemetry.WithOtelToCloud(otelToCloud))
+	// A copy: appending to config.TelemetryOptions could write into the
+	// embedder's backing array.
+	opts := slices.Clone(config.TelemetryOptions)
+	if otelToCloud {
+		opts = append(opts, telemetry.WithOtelToCloud(true))
+	}
 	telemetryProviders, err := telemetry.New(ctx, opts...)
 	if err != nil {
 		return nil, err

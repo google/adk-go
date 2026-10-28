@@ -508,17 +508,16 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 // pending text uploads so resolveUploads can rebuild the content column if any
 // text upload fails.
 type contentSummaryBuilder struct {
-	isLLMRequest          bool
-	isLLMResponse         bool
-	contentDenied         bool
-	maxLen                int
-	redact                bool
-	roleTruncated         bool
-	otherTruncated        bool
-	failedUploadTruncated bool
-	needsRebuild          bool
-	usage                 map[string]any
-	messages              []*messageSummary
+	isLLMRequest   bool
+	isLLMResponse  bool
+	contentDenied  bool
+	maxLen         int
+	redact         bool
+	roleTruncated  bool
+	otherTruncated bool
+	needsRebuild   bool
+	usage          map[string]any
+	messages       []*messageSummary
 }
 
 func (b *contentSummaryBuilder) omitTextFromSummary(contentOrd, partIdx int) {
@@ -528,23 +527,24 @@ func (b *contentSummaryBuilder) omitTextFromSummary(contentOrd, partIdx int) {
 		}
 		for i := range m.pieces {
 			if m.pieces[i].partIdx == partIdx && m.pieces[i].isText {
-				m.pieces[i].omitted = true
+				if !m.pieces[i].omitted || m.pieces[i].truncated {
+					m.pieces[i].omitted = true
+					m.pieces[i].truncated = false
+					b.needsRebuild = true
+				}
 			}
 		}
 	}
 }
 
 func (b *contentSummaryBuilder) retainInlineSummary(contentOrd, partIdx int, fallbackText string, fallbackTruncated bool) {
-	b.needsRebuild = true
-	if fallbackTruncated {
-		b.failedUploadTruncated = true
-	}
 	for _, m := range b.messages {
 		if m.contentOrd != contentOrd {
 			continue
 		}
 		for i := range m.pieces {
 			if m.pieces[i].partIdx == partIdx && m.pieces[i].isText {
+				b.needsRebuild = true
 				m.pieces[i].omitted = false
 				if m.isResponse {
 					m.pieces[i].text = "text: '" + fallbackText + "'"
@@ -555,6 +555,17 @@ func (b *contentSummaryBuilder) retainInlineSummary(contentOrd, partIdx int, fal
 			}
 		}
 	}
+}
+
+func (b *contentSummaryBuilder) hasFailedUploadTruncated() bool {
+	for _, m := range b.messages {
+		for _, p := range m.pieces {
+			if !p.omitted && p.truncated {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (b *contentSummaryBuilder) buildContent() (map[string]any, bool) {
@@ -611,7 +622,7 @@ func (b *contentSummaryBuilder) applyToRow(row map[string]any) {
 			row[columnContent] = string(encoded)
 		}
 	}
-	row["is_truncated"] = b.otherTruncated || summaryTruncated || jsonTruncated || b.failedUploadTruncated
+	row["is_truncated"] = b.otherTruncated || summaryTruncated || jsonTruncated || b.hasFailedUploadTruncated()
 }
 
 func formatPartAttributes(v any, maxLength int, redact bool) (string, bool) {
