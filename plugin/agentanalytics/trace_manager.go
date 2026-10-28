@@ -119,8 +119,11 @@ type spanRecord struct {
 	// span was canceled with cause context.Canceled, as when a workflow or a
 	// parallel agent cancels running work after the caller stopped reading,
 	// and otherwise returns the cause with which the context ended, such as a
-	// sibling branch's error in a parallel agent's errgroup. An ended call
-	// drops it, so that the call's record does not keep the context.
+	// sibling branch's error in a parallel agent's errgroup. A call that
+	// ended, or that the run handed to the late state, drops it, ended,
+	// activation, retiredCauses and parent (see dropContexts), so that the
+	// record of a call that outlives its run keeps neither the context nor
+	// the span above it, whose record keeps the context of its own callback.
 	canceled func() (canceled bool, cause error)
 	// retiredCauses holds the openFailureCause of each activation that
 	// retireAgentLocked removed under this span while this span stayed open,
@@ -153,11 +156,11 @@ type spanRecord struct {
 	// that it would have run under.
 	//
 	// hasResponse alone does not retire an earlier activation on
-	// re-entry (see pushAgentSpan): a transfer-back chain sets it on the
-	// parent while the parent is still running, so retiring on hasResponse
-	// would end a live span. Instead, taskDelegated marks that a child
-	// task-mode sub-agent completed via finish_task, which is the only case
-	// where re-entry retirement is safe.
+	// re-entry (see popDelegatingAgentSpan): a transfer-back chain sets it on
+	// the parent while the parent is still running, so retiring on
+	// hasResponse would end a live span. Instead, taskDelegated marks that a
+	// child task-mode sub-agent completed via finish_task, which is the only
+	// case where re-entry retirement is safe.
 	hasResponse bool
 	// modelResponded reports that AfterModelCallback (popLLMSpan) set
 	// hasResponse on this activation via activationKey, so a concurrent peer on
@@ -258,9 +261,9 @@ type spanRecord struct {
 	// is open anymore (see settleFinishedLocked). Retiring a span without
 	// such a point leaves runDone unset: a finish_task function response (see
 	// popTaskAgentSpan) and the new activation of an agent that delegated to
-	// a completed task (see taskDelegated) are events that do not show that
-	// the activation's run returned, and neither does the return of a tool
-	// call for a run that the tool started on another goroutine (see
+	// a completed task (see popDelegatingAgentSpan) are events that do not
+	// show that the activation's run returned, and neither does the return of
+	// a tool call for a run that the tool started on another goroutine (see
 	// endToolRunsLocked), so that run may still end its InvocationContext.
 	runDone bool
 	// seq orders the agent activations and tool calls of an invocation by
@@ -311,6 +314,29 @@ type spanRecord struct {
 	// activation's latency and row time reflect its own work, not the retry
 	// delay that follows it (see touchAgentActivityLocked).
 	lastActivity time.Time
+	// taskMode reports that the agent runs in llmagent.ModeTask: a successful
+	// finish_task function response ends its activation, and ADK runs no
+	// AfterAgentCallback for it (see popTaskAgentSpan). An agent of another
+	// mode may have a tool of its own that is named finish_task.
+	taskMode bool
+	// callStarted reports that pushLLMSpan or pushToolSpan started the model
+	// or tool call, rather than popToolSpan making up a span for a call that
+	// this plugin did not see start.
+	callStarted bool
+	// handedOver reports, for a model or tool call, that the run left it open
+	// at AfterRun, which handed it over to the late state of its completed
+	// entry (see rememberCompletedLocked), rather than a callback starting it
+	// after the run ended. While one such call is open in the late state, the
+	// run waits for late calls (see completedTrace.waitsForLateCalls).
+	handedOver bool
+	// ownActivation reports, for a model or tool call, that parent is the
+	// agent activation that makes the call: the agent run of the context of
+	// the callback that started the call started it (see activationKey).
+	// When the agent had no open span of that run, as when an enclosing agent
+	// already retired it, the call runs under the span that the agent would
+	// run under (see ownerOf), whose run tells nothing about the call's (see
+	// endedWithRun).
+	ownActivation bool
 	// children holds the names of the sub-agents configured on this agent
 	// activation.
 	children []string
@@ -382,8 +408,18 @@ type invocationTrace struct {
 	// openCalls is the number of in-flight model and tool calls. Eviction
 	// reads it without holding mu.
 	openCalls atomic.Int64
+	// openHandedOver is the number of in-flight model and tool calls that
+	// AfterRun handed over to this late state (see spanRecord.handedOver).
+	// Pruning reads it without holding mu.
+	openHandedOver atomic.Int64
+	// openAgents reports whether agentStack holds an activation besides the
+	// invocation's own span. Pruning reads it without holding mu.
+	openAgents atomic.Bool
 	// pendingSpans protects late state between lookup and registering a span.
-	pendingSpans atomic.Int64
+	// It is a standalone allocation so that completedTrace.livePending can
+	// point to it without retaining the rest of invocationTrace after the run
+	// finishes.
+	pendingSpans *atomic.Int64
 	// rootAgentAtomic holds the latest rootAgentName string for lock-free
 	// reads during eviction.
 	rootAgentAtomic atomic.Value
@@ -409,6 +445,13 @@ type invocationTrace struct {
 	configuredRoot string
 	started        bool
 	evicted        bool
+	// finished reports that endInvocation moved the calls of the invocation to
+	// its completed entry (see rememberCompletedLocked and lockLive).
+	finished bool
+	// isLate reports that this invocationTrace is the late state of a completed
+	// run (see lateLocked). AfterRun has already run on the live trace, so
+	// popUnclosedAgentSpans will never run on a late trace.
+	isLate bool
 	// runnerAgent is the root agent of the tree that the runner runs. The
 	// agents of AGENT_STARTING rows are looked up in its tree.
 	runnerAgent     agent.Agent
@@ -464,7 +507,11 @@ type invocationTrace struct {
 	// error (see purgeActivationLocked). The end of its activation does not:
 	// once ADK has yielded the error, the invocation failed, whatever the
 	// caller does next, and ADK still ends the activations above the failed
-	// one normally when the caller keeps reading.
+	// one normally when the caller keeps reading. An error that agent code
+	// handles without yielding it, such as a custom agent that runs a failed
+	// sub-agent again or goes on without it, stays recorded as well, and the
+	// invocation is reported as failed: no callback tells it apart from an
+	// error that reached the caller.
 	unrecoveredErrors map[string]recordedError
 	// unrespondedRetired counts clean AfterAgentCallback retirements (or
 	// buffered model/tool events of retired activations) per llmKey while a
@@ -528,6 +575,7 @@ func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.T
 	inv := &invocationTrace{
 		traceID:           cmp.Or(traceID, newTraceID()),
 		rootSpanID:        root.spanID,
+		pendingSpans:      new(atomic.Int64),
 		parentAgent:       map[string]string{},
 		sequentialParent:  map[string]string{},
 		agentStack:        []*spanRecord{root},
@@ -545,14 +593,16 @@ func newInvocationTraceWithSpan(sc trace.SpanContext, traceID string, now time.T
 	// span_id of every invocation that it serves. A child invocation span
 	// keeps the span trees of those invocations apart.
 	//
-	// Only the trace ID follows OpenTelemetry (see rowSpan), so that the rows
-	// keep joining the spans that ADK records for the same run. The span_id
-	// and parent_span_id columns are the plugin's own execution tree, as in
+	// Apart from the parent_span_id of the invocation span, which is the
+	// caller's span ID when the invocation starts in a span, only the trace
+	// ID follows OpenTelemetry (see rowSpan), so that the rows keep joining
+	// the spans that ADK records for the same run. The other span_id and
+	// parent_span_id columns are the plugin's own execution tree, as in
 	// adk-python, whose rows take them from the plugin's own span stack: the
 	// spans that ADK opens are never written to the table, so parents taken
-	// from them would point at spans that no row has. The ambient span IDs
-	// are only written, to attributes.otel, when EnableOTelCorrelation is
-	// set, which it is not by default.
+	// from them would point at spans that no row has. The IDs of the spans
+	// that the callbacks run in are only written, to attributes.otel, when
+	// EnableOTelCorrelation is set, which it is not by default.
 	if sc.IsValid() {
 		inv.traceID = sc.TraceID().String()
 		root.parentSpanID = sc.SpanID().String()
@@ -568,14 +618,34 @@ func (inv *invocationTrace) hasOpenCalls() bool {
 	return inv.openCalls.Load() > 0
 }
 
+// hasOpenLateSpans reports whether a callback is starting a span, or a model
+// call, tool call or activation is open. It reads only atomic state, so it
+// never takes mu.
 func (inv *invocationTrace) hasOpenLateSpans() bool {
-	inv.mu.Lock()
-	defer inv.mu.Unlock()
-	return inv.pendingSpans.Load() > 0 || inv.hasOpenCalls() || len(inv.agentStack) > 1
+	return inv.pendingSpans.Load() > 0 || inv.hasOpenCalls() || inv.openAgents.Load()
 }
 
+// syncOpenCallsLocked publishes the number of open model and tool calls, and of
+// those that AfterRun handed over (see spanRecord.handedOver), for the readers
+// that do not hold mu. Every change to llmSpans or toolSpans is followed by a
+// call to it: a call that starts, that its completion callback or an error
+// callback ends, that completeResponse ends, that a purge removes, that a new
+// call of the same key replaces, or that AfterRun moves to the late state.
 func (inv *invocationTrace) syncOpenCallsLocked() {
 	inv.openCalls.Store(int64(len(inv.llmSpans) + len(inv.toolSpans)))
+	var handedOver int64
+	for _, calls := range []map[string]*spanRecord{inv.llmSpans, inv.toolSpans} {
+		for _, rec := range calls {
+			if rec.handedOver {
+				handedOver++
+			}
+		}
+	}
+	inv.openHandedOver.Store(handedOver)
+}
+
+func (inv *invocationTrace) syncOpenAgentsLocked() {
+	inv.openAgents.Store(len(inv.agentStack) > 1)
 }
 
 func (inv *invocationTrace) setRootAgentLocked(name string) {
@@ -648,7 +718,10 @@ func (inv *invocationTrace) rowSpan(rec *spanRecord, latency map[string]any, amb
 // trace: the rows of callbacks that run in no span, such as the session
 // events and the end of the invocation, join the trace of the spans around
 // them instead of a trace that has no other span. Rows written earlier keep
-// the trace ID of their time.
+// the trace ID of their time, so when no span is active as the invocation
+// starts, USER_MESSAGE_RECEIVED and INVOCATION_STARTING are on another trace
+// than the rows after them. adk-python keeps every row of an invocation on
+// one trace instead.
 func (inv *invocationTrace) rowTraceID(ambient string) string {
 	if ambient == "" {
 		return inv.currentTraceID()
@@ -892,18 +965,22 @@ type agentChildren struct {
 	isParallel bool
 	// isWorkflow reports that parent is ADK's built-in WorkflowAgent.
 	isWorkflow bool
+	// taskMode reports that parent is an llmagent configured with
+	// llmagent.ModeTask. Neither a placement nor the runner binds task mode
+	// for an agent that does not declare it.
+	taskMode bool
 	// names holds the names of the sub-agents.
 	names []string
 }
 
 // runningAgentChildren returns the sub-agents that are configured on the agent
-// that ctx runs, if that agent is named name. Agents that run as nodes of a
-// workflow graph need not be in the sub-agent tree of the agent that the runner
-// runs, so the agent hierarchy that the runner attaches to ctx can lack them.
-// It is the zero value if ctx does not expose its agent. The callback context
-// logs a warning from Agent, so the agent is read from the invocation context
-// that WithICDelta derives from it. SubAgents and Name are user code, so
-// callers must not hold a lock.
+// that ctx runs, and the kind of that agent, if it is named name. Agents that
+// run as nodes of a workflow graph need not be in the sub-agent tree of the
+// agent that the runner runs, so the agent hierarchy that the runner attaches
+// to ctx can lack them. It is the zero value if ctx does not expose its agent.
+// The callback context logs a warning from Agent, so the agent is read from
+// the invocation context that WithICDelta derives from it. SubAgents and Name
+// are user code, so callers must not hold a lock.
 func runningAgentChildren(ctx context.Context, name string) agentChildren {
 	return orZero(func() agentChildren {
 		c, ok := ctx.(interface {
@@ -920,13 +997,15 @@ func runningAgentChildren(ctx context.Context, name string) agentChildren {
 		if a == nil || a.Name() != name {
 			return agentChildren{}
 		}
+		cfg, isLLM := agentConfig(a).(llmagent.Config)
 		agType := orZero(func() string { return agentTypeOf(a) })
 		children := agentChildren{
 			parent:               name,
-			nonLLM:               !isLLMAgent(a),
+			nonLLM:               !isLLM,
 			propagatesChildError: isBuiltInWorkflowAgent(a),
 			isParallel:           agType == "ParallelAgent",
 			isWorkflow:           agType == "WorkflowAgent",
+			taskMode:             isLLM && cfg.Mode == llmagent.ModeTask,
 		}
 		for _, sub := range a.SubAgents() {
 			if sub == nil {
@@ -1050,7 +1129,8 @@ func (inv *invocationTrace) parentFor(id identity) *spanRecord {
 }
 
 // parentOutsideLocked returns the span that an agent starting with id would
-// run under if the spans in exclude had ended.
+// run under if the spans in exclude had ended (see parentFor). inv.mu must be
+// held.
 func (inv *invocationTrace) parentOutsideLocked(id identity, exclude map[string]bool) *spanRecord {
 	saved := inv.agentStack
 	inv.agentStack = slices.DeleteFunc(slices.Clone(saved), func(r *spanRecord) bool { return exclude[r.spanID] })
@@ -1135,6 +1215,14 @@ func withinPath(path, ancestor string, sameAgent bool) bool {
 // that fan out the same agent concurrently via workflow.RunNode can also pass
 // workflow.WithUseSubBranch when they want isolated session branch history in
 // addition to distinct node paths.
+//
+// Invocations are keyed by invocation ID alone. A run that reuses the ID of a
+// finished run, as a HITL resume reuses the ID of the paused run, starts
+// tracking state, and an invocation span, of its own; without ambient spans,
+// the rows of both runs have the trace_id that is derived from the invocation
+// ID. Two runs that overlap with one invocation ID are not supported: no
+// callback carries a handle of its run, so they share tracking state and can
+// end each other's spans.
 type traceManager struct {
 	mu              sync.Mutex
 	invocations     map[string]*invocationTrace
@@ -1161,11 +1249,50 @@ type evictedTrace struct {
 	lastActive    int64
 }
 
+// completedTrace is what the callbacks that run after a run ended need of it.
 type completedTrace struct {
 	identity evictedTrace
-	// Late calls share state without retaining the finished run's span stacks.
-	late     *invocationTrace
-	position *list.Element
+	// livePending points to the finished run's pendingSpans counter when a
+	// callback reserved a span on the live invocation before AfterRun and has
+	// not yet re-entered lookupInvocation on the late state, keeping
+	// pruneCompletedLocked from dropping the entry during the handoff.
+	livePending *atomic.Int64
+	// late holds the model and tool calls that the run left open, and those
+	// that an error callback ended, for the callbacks that end them after
+	// AfterRun. It does not retain the finished run's span stacks, and it is
+	// made only for a run that left open calls behind, or for the first
+	// callback after AfterRun.
+	late *invocationTrace
+	// endedModels and endedTools hold, until late is made, the calls that
+	// OnModelErrorCallback or OnToolErrorCallback ended, for the
+	// AfterModelCallback or AfterToolCallback that ADK may still run for them
+	// (see popLLMSpan and popToolSpan). They are nil when there are none.
+	endedModels, endedTools map[string]*spanRecord
+	position                *list.Element
+}
+
+func (c *completedTrace) hasPendingOrOpenLateSpans() bool {
+	if c.livePending != nil && c.livePending.Load() > 0 {
+		return true
+	}
+	return c.late != nil && c.late.hasOpenLateSpans()
+}
+
+func (c *completedTrace) hasPendingSpans() bool {
+	if c.livePending != nil && c.livePending.Load() > 0 {
+		return true
+	}
+	return c.late != nil && c.late.pendingSpans.Load() > 0
+}
+
+// waitsForLateCalls reports whether c is kept only for the calls that AfterRun
+// handed over to its late state (see spanRecord.handedOver) while at least one
+// of them is still open, and no callback is starting a span in it. Calls that
+// callbacks started after the run ended do not count, nor does a handed-over
+// call once its completion callback, completeResponse or a purge ended it.
+// tm.mu must be held.
+func (c *completedTrace) waitsForLateCalls() bool {
+	return !c.hasPendingSpans() && c.late != nil && c.late.openHandedOver.Load() > 0
 }
 
 func newTraceManager() *traceManager {
@@ -1250,8 +1377,12 @@ func (tm *traceManager) invocation(ctx context.Context, id identity) *invocation
 	return tm.lookupInvocation(ctx, id, false, false)
 }
 
-// lookupInvocation starts a fresh run only when start is true. Other callbacks
-// after AfterRun use the completed identity without restarting active tracking.
+// lookupInvocation starts a fresh run only when start is true, as for the
+// callbacks that begin a run, so that a run that reuses the ID of a finished
+// run, such as a HITL resume, gets tracking state, and an invocation span, of
+// its own; without ambient spans, the rows of both runs have the trace_id
+// that is derived from the invocation ID. Other callbacks after AfterRun use
+// the completed identity without restarting active tracking.
 func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start, reserveSpan bool) *invocationTrace {
 	now := tm.now()
 	sc := ambientSpanContext(ctx)
@@ -1270,17 +1401,14 @@ func (tm *traceManager) lookupInvocation(ctx context.Context, id identity, start
 	if !ok {
 		if completed := tm.completed[id.invocationID]; completed != nil {
 			if !start {
-				if completed.late == nil {
-					completed.late = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
-					completed.late.restoreEvicted(completed.identity)
-				}
-				completed.late.lastActive.Store(now.UnixNano())
+				late := tm.lateLocked(completed, sc, tm.traceIDFor(id.invocationID), now)
+				late.lastActive.Store(now.UnixNano())
 				tm.completionOrder.MoveToBack(completed.position)
 				if reserveSpan {
-					completed.late.pendingSpans.Add(1)
+					late.pendingSpans.Add(1)
 				}
 				tm.mu.Unlock()
-				return completed.late
+				return late
 			}
 			tm.completionOrder.Remove(completed.position)
 			delete(tm.completed, id.invocationID)
@@ -1388,11 +1516,60 @@ func (inv *invocationTrace) savedIdentity() evictedTrace {
 	}
 }
 
-// Completed identities have their own capacity: finishing an ordinary run must
-// never evict the saved identity of a run that is still in progress. The order
-// makes ordinary completion pruning constant-time; late open calls are skipped.
+// Completed identities have their own capacity, max(maxTracked, 64):
+// finishing an ordinary run must never evict the saved identity of a run that
+// is still in progress. The model and tool calls that the run started and that
+// may still get a callback, such as a tool call of RunLive that ends after
+// AfterRun, move to the late state, so that the callbacks end the calls' own
+// spans. Two kinds of open calls do not: an open model call that streamed a
+// partial event, and a call of an agent activation that finished running,
+// which ADK left without a completion callback, as when a BeforeModelCallback
+// of the agent or of a later plugin returned an error, or the model-call
+// budget ran out, after this plugin's own BeforeModelCallback started the call
+// (see endedWithRun, for which runner names the agent that the runner ran). A
+// caller that stops reading a stream leaves its model call open for good. When
+// the caller of runner.Run stops at a partial event, the call's activation is
+// the runner's agent or one that it waits for, so endedWithRun leaves the call
+// behind as well; the partial event alone decides for an activation that
+// nothing is known to wait for, as a sub-agent whose custom parent stops
+// reading it on a goroutine that the parent does not wait for. If such a call
+// does end after AfterRun, as when a custom agent returned while a sub-agent
+// that it did not wait for still streams, its AfterModelCallback gets a span
+// of its own. The calls that an error
+// callback ended move along with them, or, if the run left no call open, wait
+// in the completed entry until a callback after AfterRun makes the late state.
+// inv is marked finished, so that a model or tool callback that looked inv up
+// before then acts on the late state instead (see lockLive), and inv drops all
+// its calls, so that none of them is reachable from both inv and the late
+// state.
+//
+// Beyond capacity, the least recently active runs are pruned. The callbacks
+// do not show the end of every activation that no callback can end anymore,
+// as of a sub-agent that a custom agent ran on another goroutine and waited
+// for after the sub-agent stopped at an error, so while more runs than half
+// of the capacity wait for calls that AfterRun handed over to their late
+// state, the least recently active of them go first (see
+// pruneWaitingLocked): a run keeps its identity when it completes however
+// many such runs there are, and they leave at least half of the capacity to
+// the runs that complete after them. A run counts only while one of the calls
+// that AfterRun handed over is open (see waitsForLateCalls): not once those
+// calls ended, even if callbacks started other calls after AfterRun. Then come
+// the runs that have no pending span reservation and nothing open in their
+// late state, and then, if more runs than the capacity still wait for late
+// calls, the others too, except runs in which a callback is starting a span.
+// Each pass walks the runs from the least recently active one and stops once
+// the capacity is met; a run that a pass checks costs a check of atomic state
+// (see hasPendingOrOpenLateSpans and waitsForLateCalls), without taking its
+// lock. A callback of a pruned run gets a span of its own.
 // tm.mu must be held.
-func (tm *traceManager) rememberCompletedLocked(invocationID string, inv *invocationTrace) {
+//
+// Divergence from adk-python (google/adk-python@25d191710985,
+// after_run_callback lines 10102-10145): Python ADK clears the current
+// task's contextvars span stack in after_run_callback. Go needs explicit
+// shared late-call bookkeeping because goroutines do not inherit
+// task-local state and RunLive tool goroutines can outlive
+// AfterRunCallback, so open calls are handed to the late state instead.
+func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv *invocationTrace) {
 	completed := tm.completed[invocationID]
 	if completed == nil {
 		completed = &completedTrace{position: tm.completionOrder.PushBack(invocationID)}
@@ -1401,17 +1578,213 @@ func (tm *traceManager) rememberCompletedLocked(invocationID string, inv *invoca
 		tm.completionOrder.MoveToBack(completed.position)
 	}
 	completed.identity = inv.savedIdentity()
+	if inv.pendingSpans.Load() > 0 {
+		completed.livePending = inv.pendingSpans
+	} else if completed.livePending != nil && completed.livePending.Load() == 0 {
+		completed.livePending = nil
+	}
+	inv.mu.Lock()
+	inv.finished = true
+	inv.agentStack[0].dropContexts()
+	inv.runnerAgent = nil
+	lastSeq := inv.lastSeq
+	models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
+	maps.DeleteFunc(models, func(_ string, rec *spanRecord) bool { return rec.streamed || rec.endedWithRun(runner) })
+	tools, endedTools := startedCalls(inv.toolSpans), startedCalls(inv.completedTools)
+	maps.DeleteFunc(tools, func(_ string, rec *spanRecord) bool { return rec.endedWithRun(runner) })
+	// The late state keeps no context of the run's callbacks: the calls that
+	// are open drop theirs here, and those that ended did when they ended.
+	// The open ones are marked as handed over, so that the run waits for late
+	// calls only while one of them is open (see waitsForLateCalls).
+	for _, rec := range models {
+		rec.dropContexts()
+		rec.handedOver = true
+	}
+	for _, rec := range tools {
+		rec.dropContexts()
+		rec.handedOver = true
+	}
+	// The calls leave inv, so that no spanRecord is reachable from both inv,
+	// guarded by inv.mu, and the late state, guarded by its own mu.
+	clear(inv.llmSpans)
+	clear(inv.completedModels)
+	clear(inv.toolSpans)
+	clear(inv.completedTools)
+	inv.syncOpenCallsLocked()
+	inv.mu.Unlock()
+	if len(models)+len(tools) > 0 {
+		tm.lateLocked(completed, trace.SpanContext{}, completed.identity.traceID, tm.now())
+	}
+	if late := completed.late; late != nil {
+		late.mu.Lock()
+		late.lastSeq = max(late.lastSeq, lastSeq)
+		maps.Copy(late.llmSpans, models)
+		maps.Copy(late.completedModels, endedModels)
+		maps.Copy(late.toolSpans, tools)
+		maps.Copy(late.completedTools, endedTools)
+		late.syncOpenCallsLocked()
+		late.mu.Unlock()
+	} else {
+		completed.endedModels = withCalls(completed.endedModels, endedModels)
+		completed.endedTools = withCalls(completed.endedTools, endedTools)
+	}
 	limit := max(tm.maxTracked, 64)
+	tm.pruneWaitingLocked(limit, limit/2)
+	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingOrOpenLateSpans() })
+	tm.pruneCompletedLocked(limit, func(c *completedTrace) bool { return !c.hasPendingSpans() })
+}
+
+// lateLocked returns the late state of completed, and makes it, with the
+// ended calls that completed holds, if it does not exist yet. tm.mu must be
+// held.
+func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanContext, traceID string, now time.Time) *invocationTrace {
+	if completed.livePending != nil && completed.livePending.Load() == 0 {
+		completed.livePending = nil
+	}
+	if completed.late == nil {
+		late := newInvocationTraceWithSpan(sc, traceID, now)
+		late.isLate = true
+		late.restoreEvicted(completed.identity)
+		maps.Copy(late.completedModels, completed.endedModels)
+		maps.Copy(late.completedTools, completed.endedTools)
+		completed.endedModels, completed.endedTools = nil, nil
+		completed.late = late
+	}
+	return completed.late
+}
+
+// withCalls returns calls with the calls in more added, and nil if both are
+// empty.
+func withCalls(calls, more map[string]*spanRecord) map[string]*spanRecord {
+	if len(more) == 0 {
+		return calls
+	}
+	if calls == nil {
+		return maps.Clone(more)
+	}
+	maps.Copy(calls, more)
+	return calls
+}
+
+// pruneCompletedLocked drops the least recently active completed runs for
+// which drop reports true until at most limit remain. tm.mu must be held.
+func (tm *traceManager) pruneCompletedLocked(limit int, drop func(*completedTrace) bool) {
 	for candidate := tm.completionOrder.Front(); len(tm.completed) > limit && candidate != nil; {
 		next := candidate.Next()
 		id := candidate.Value.(string)
-		entry := tm.completed[id]
-		if entry.late == nil || !entry.late.hasOpenLateSpans() {
+		if drop(tm.completed[id]) {
 			delete(tm.completed, id)
 			tm.completionOrder.Remove(candidate)
 		}
 		candidate = next
 	}
+}
+
+// pruneWaitingLocked drops, while more than limit completed runs remain, the
+// least recently active runs that wait for late calls (see
+// waitsForLateCalls), as long as more than keep of them remain. tm.mu must be
+// held.
+func (tm *traceManager) pruneWaitingLocked(limit, keep int) {
+	if len(tm.completed) <= limit {
+		return
+	}
+	waiting := 0
+	for _, c := range tm.completed {
+		if c.waitsForLateCalls() {
+			waiting++
+		}
+	}
+	for candidate := tm.completionOrder.Front(); len(tm.completed) > limit && waiting > keep && candidate != nil; {
+		next := candidate.Next()
+		id := candidate.Value.(string)
+		if tm.completed[id].waitsForLateCalls() {
+			delete(tm.completed, id)
+			tm.completionOrder.Remove(candidate)
+			waiting--
+		}
+		candidate = next
+	}
+}
+
+// startedCalls returns the calls in calls that pushLLMSpan or pushToolSpan
+// started, without the spans that popToolSpan made up for calls whose start
+// this plugin did not see, or nil if there are none.
+func startedCalls(calls map[string]*spanRecord) map[string]*spanRecord {
+	var started map[string]*spanRecord
+	for key, rec := range calls {
+		if !rec.callStarted {
+			continue
+		}
+		if started == nil {
+			started = make(map[string]*spanRecord, len(calls))
+		}
+		started[key] = rec
+	}
+	return started
+}
+
+// endedWithRun reports whether no callback can end rec, a model or tool call
+// that is still open when AfterRun ends the run of runner, the agent that the
+// runner ran, because the agent activation that rec runs under finished
+// running: ADK runs the callbacks of a call within the run of the activation
+// that makes the call. The activation finished running if its run is known to
+// be over (see spanRecord.runDone), or if it ran under an activation of runner
+// right under the invocation, through activations each of which ran on the
+// goroutine of the one above it, or that the one above it waits for before
+// its own run returns (see joinsOnceReturned): runner.Run runs AfterRun only
+// once the run of runner returned. RunLive runs no agent callbacks for the
+// agent that it runs, so an activation of runner right under the invocation
+// of a RunLive run is one that a RunLive tool started under runner's name,
+// and it is taken for runner's own. Any other call may still end: a call
+// under the invocation span itself, as a tool call of RunLive; a call of an
+// agent that a RunLive tool runs, or that a custom agent, a function node of
+// a workflow agent or a tool runs on a goroutine that it does not wait for;
+// a call of an activation that its callback context did not show, as in
+// direct traceManager tests; and a call that started under the span that its
+// agent would run under rather than its own, because the agent had no open
+// span of its run then (see spanRecord.ownActivation). The mu of rec's
+// invocation must be held.
+func (rec *spanRecord) endedWithRun(runner string) bool {
+	a := rec.parent
+	if a == nil || !rec.ownActivation || a.kind != spanKindAgent || a.activation == nil || a.goroutineID == 0 {
+		return false
+	}
+	if a.runDone {
+		return true
+	}
+	for p := a.parent; p != nil; a, p = p, p.parent {
+		switch {
+		case p.kind == spanKindInvocation:
+			return a.name == runner && a.activation != nil && a.goroutineID != 0
+		case p.kind != spanKindAgent, a.goroutineID == 0,
+			a.goroutineID != p.goroutineID && !p.joinsOnceReturned(a):
+			return false
+		}
+	}
+	return false
+}
+
+// joinsOnceReturned reports whether the run of the agent activation p, once it
+// is known to have returned, has also outlasted the run of c, an activation
+// that runs right under it on another goroutine: p joins c (see joins); p is
+// a ParallelAgent that started c's goroutine for a declared sub-agent, on the
+// branch that it assigns to that sub-agent; or p is a workflow agent and c is
+// the agent of a workflow.ParallelWorker item (see attemptWorker), whose
+// node's Run returns only once the goroutine of every item ended, and whose
+// node run the scheduler of p waits for. Since ADK v2.1.0, a ParallelAgent
+// waits for every branch before its Run returns, even when its caller stops
+// reading early; with ADK v2.0.0 it waits for them only when it returns all
+// their events, so a call of a branch that an early stop left running and
+// that ends after AfterRun gets a span of its own. The callbacks do not see
+// the goroutine that runs the worker's Run, so the items of a worker that a
+// function node of p runs on a goroutine that it does not wait for are
+// taken for those of a node of p; endedWithRun reads no InvocationContext, so
+// a call of such an item that ends after AfterRun then gets a span of its
+// own.
+func (p *spanRecord) joinsOnceReturned(c *spanRecord) bool {
+	return p.joins(c, false) || (p.isParallel && p.goroutineID != 0 && c.origin.startedBy(errgroupCreator, p) &&
+		slices.Contains(p.children, c.name) && c.branch == parallelBranch(p, c.name)) ||
+		(p.isWorkflow && c.attempt == attemptWorker)
 }
 
 // invocationSpan returns the place of a row written by a callback of the
@@ -1478,7 +1851,7 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 		// Publish the final identity, including any trace adopted by rowSpan,
 		// before removing active state. Late Live callbacks may start and end
 		// an operation, so their state is shared separately from the finished run.
-		tm.rememberCompletedLocked(id.invocationID, inv)
+		tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
 		delete(tm.evicted, id.invocationID)
 		delete(tm.invocations, id.invocationID)
 		tm.mu.Unlock()
@@ -1486,34 +1859,90 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 	return row
 }
 
+// popDelegatingAgentSpan ends the activation of the agent of id that a task
+// delegation interrupted, as the agent starts again after its task-mode
+// sub-agent completed via finish_task, and returns the place of the
+// activation's AGENT_COMPLETED row. ADK's chat loop runs the task while the
+// delegating activation waits, then stops reading that activation, so ADK
+// runs no AfterAgentCallback for it, and runs the agent again. Only an
+// activation that popTaskAgentSpan marked as taskDelegated ends: an ordinary
+// transfer-back chain (planner → helper → planner) leaves the first planner
+// with hasResponse == true (its transfer call counted as a response) while it
+// is still running, so ending it on hasResponse would end a live span. The
+// agent's new activation then starts under the parent, as a sibling of the
+// ended one. ok is false if no such activation is open.
+//
+// Divergence from adk-python (google/adk-python@25d191710985): Python ADK
+// closes successful agent activations in after_agent_callback (lines
+// 10243-10263) and failed ones in on_agent_error_callback (lines 10827-10869,
+// which pops the agent span at line 10850), a callback that Go ADK does not
+// have. Go emits AGENT_COMPLETED here on task-mode delegation interruption and
+// in popTaskAgentSpan on finish_task because llmagent.ModeTask sub-agents
+// complete without firing AfterAgentCallback.
+func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity) (span rowSpan, ok bool) {
+	inv := tm.invocation(ctx, id)
+	now := tm.now()
+	ambient := ambientTraceID(ctx)
+	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
+	ended := endedFunc(ctx)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.noteRootAgentLocked(id, rootIn, true)
+	for i := len(inv.agentStack) - 1; i > 0; i-- {
+		rec := inv.agentStack[i]
+		if rec.kind == spanKindAgent && rec.name == id.agentName && rec.branch == id.branch && rec.path == id.path && rec.taskDelegated {
+			if rec.parent != nil && rec.parent.kind == spanKindAgent {
+				inv.touchAgentActivityLocked(rec.parent, now)
+			}
+			// As in pushAgentSpan, which runs in the same callback, the runs that
+			// started on this goroutine before are over only if its trace shows
+			// a node attempt (see sameGoroutineSince there).
+			since := noFrame
+			if ended != nil {
+				if _, _, attempt := currentGoroutine(); attempt != attemptNone {
+					since = 0
+				}
+			}
+			// The mark comes from the task's finish_task event and the start
+			// of a new activation of the agent, neither of which shows that
+			// the delegating activation's run returned, so its
+			// InvocationContext is not read (see popTaskAgentSpan).
+			inv.retireAgentLocked(i, false, since)
+			inv.retireLateSettledLocked()
+			span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
+			span.timestamp = now
+			return span, true
+		}
+	}
+	return rowSpan{}, false
+}
+
 // pushAgentSpan starts the span of an agent run and returns the place of
-// its AGENT_STARTING row. The sub-agents that are configured on the starting
-// agent are recorded on its activation span before they start, so that agents
-// that run under a workflow agent outside the runner's agent tree, such as a
-// graph node, are parented like those of the tree without overwriting sibling
-// graph nodes. If an agent activation of the same (name, branch, path) is
-// re-entered after a task-mode sub-agent completes via finish_task, the prior
-// activation interrupted by task dispatch is retired first so the continuation
-// turn becomes a direct sibling under the parent span. Only a direct LLM
-// parent is marked; workflow agents run their own AfterAgentCallback, so
-// nonLLM is defensively excluded. If a workflow node is re-entered on the
-// same node path under the same parent activation, below that activation's
-// node path, by a later attempt of the node (see laterAttempt below) while
-// the earlier attempt failed, as when RetryConfig runs a failed node again
-// within the same workflow run, the earlier attempt is purged: ADK handled
-// that failure without yielding it, so the attempt's failed activations are
+// its AGENT_STARTING row together with any prior failed activations purged on
+// re-entry. The sub-agents that are configured on the starting agent are
+// recorded on its activation span before they start, so that agents that run
+// under a workflow agent outside the runner's agent tree, such as a graph
+// node, are parented like those of the tree without overwriting sibling graph
+// nodes. If a workflow node is re-entered on the same node path by a later
+// attempt of the node (see laterAttempt below) while the earlier attempt
+// failed under the activation that the new one runs under, below that
+// activation's node path, as when RetryConfig runs a failed node again in one
+// run of its workflow agent, the earlier attempt is purged: ADK handled that
+// failure without yielding it, so the attempt's failed activations are
 // returned for the caller to write as AGENT_ERROR rows before the new
 // attempt's AGENT_STARTING row without failing the invocation (see
-// purgeActivationLocked). Re-entering the same node path under a new parent
-// activation — for example when a caller runs a workflow agent again after
-// receiving an error from its previous run — keeps the yielded failure. Only
-// the agent of a node attempt counts as an attempt (see attemptSite): only an
-// agent of an agent node or ParallelWorker attempt counts, not an agent that a
-// function node or a custom agent runs itself, whether the function or custom
-// agent ran it again after recovering from its error or inside its loop over
-// the events of an earlier run, or RetryConfig retried the function node after
-// the function returned the agent's error. Such an earlier run is the code's
-// own to handle. An earlier attempt that nothing shows to be one, such as one for which the
+// purgeActivationLocked). An attempt that failed under another activation, as
+// when the workflow agent itself runs again, is kept, and so is its error.
+// Re-entering the same node path under a new parent activation — for example
+// when a caller runs a workflow agent again after receiving an error from its
+// previous run — keeps the yielded failure. Only the agent of a node attempt
+// counts as an attempt (see attemptSite): only an agent of an agent node or
+// ParallelWorker attempt counts, not an agent that a function node or a custom
+// agent runs itself, whether the function or custom agent ran it again after
+// recovering from its error or inside its loop over the events of an earlier
+// run, or RetryConfig retried the function node after the function returned
+// the agent's error. Such an earlier run is the code's own to handle. An
+// earlier attempt that nothing shows to be one, such as one for which the
 // workflow reported no completion (see recordNodeCompletion), is a concurrent
 // peer: it is neither read nor purged here, and a failed earlier attempt of a
 // node that the workflow started again is purged when the workflow agent ends
@@ -1547,25 +1976,27 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	if attempt != attemptNone {
 		sameGoroutineSince = 0
 	}
-	inv.mu.Lock()
+	// As for a model or tool call, an agent that starts while AfterRun ends
+	// the run starts in the late state, where its later callbacks look for
+	// it. Once rememberCompletedLocked marked inv finished, lockLive leaves
+	// inv unlocked and reports false, and the recursive call looks id up
+	// again (see lookupInvocation), which finds the late state of the
+	// completed entry while that entry remains. The reservation of the first
+	// lookup stays held until its deferred Add, after the recursive call
+	// returns, so that completed.livePending stays set meanwhile, and the
+	// completed entry counts as one in which a callback is starting a span
+	// when completed runs are pruned (see rememberCompletedLocked). An agent
+	// that starts after AfterRun's popUnclosedAgentSpans but before
+	// rememberCompletedLocked marks inv finished still starts on the live
+	// trace, which hands over only its open model and tool calls: the
+	// agent's AfterAgentCallback then finds the late state and writes a span
+	// of its own, without latency (see popAgentSpan).
+	if !inv.lockLive() {
+		return tm.pushAgentSpan(ctx, id)
+	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	// Retire taskDelegated spans first (transfer-back chains).
-	for i := len(inv.agentStack) - 1; i > 0; i-- {
-		rec := inv.agentStack[i]
-		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch || rec.path != id.path {
-			continue
-		}
-		if rec.taskDelegated {
-			// The mark comes from the task's finish_task event and the start
-			// of a new activation of the agent, neither of which shows that
-			// the delegating activation's run returned, so its
-			// InvocationContext is not read (see popTaskAgentSpan).
-			inv.retireAgentLocked(i, false, sameGoroutineSince)
-			break
-		}
-	}
 	// Register concurrent peers before the workflow-retry completion-inference
 	// loop so the retry guard can check !rec.concurrentPeer. Only peers that
 	// are NOT earlier attempts of the node are marked (see laterAttempt).
@@ -1649,9 +2080,6 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		if rec.kind != spanKindAgent || rec.name != id.agentName || rec.branch != id.branch || rec.path != id.path {
 			continue
 		}
-		if rec.taskDelegated {
-			continue
-		}
 		// A workflow node stops reading its agent at the first error, so a
 		// failed attempt gets no AfterAgentCallback, and RetryConfig runs the
 		// node again on the same path under the same live workflow activation
@@ -1727,6 +2155,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		isParallel:           children.isParallel,
 		isWorkflow:           children.isWorkflow,
 		concurrentPeer:       concurrentPeer,
+		taskMode:             children.taskMode,
 		children:             children.names,
 		seq:                  inv.nextSeqLocked(),
 	}
@@ -1737,10 +2166,11 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		}
 		parent.nodeRuns[nodeRunKey{path: rec.path, branch: rec.branch}]++
 	}
+	inv.syncOpenAgentsLocked()
+	inv.clearLastPartialUnderLocked(rec)
 	if parent != nil && parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(parent, now)
 	}
-	inv.clearLastPartialUnderLocked(rec)
 	span := inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span, purged
@@ -1751,7 +2181,9 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 func (tm *traceManager) agentNamed(ctx context.Context, id identity) agent.Agent {
 	inv := tm.invocation(ctx, id)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
 	inv.noteRootAgentLocked(id, rootIn, true)
 	runner := inv.runnerAgent
 	inv.mu.Unlock()
@@ -1806,6 +2238,7 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	}
 	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	inv.retireAgentLocked(i, true, rec.seq)
+	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -2028,8 +2461,11 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
 // a finish_task function response (which ADK does without running
 // AfterAgentCallback), and marks its delegating agent activation as having
-// delegated to a completed task. The mark lets pushAgentSpan retire the
-// parent's prior activation safely on re-entry, without retiring a parent
+// delegated to a completed task. ok is false, and nothing changes, if the
+// agent has no open span or does not run in task mode: an agent of another
+// mode may have a tool of its own named finish_task, and ADK runs its
+// AfterAgentCallback as usual. The mark lets popDelegatingAgentSpan retire
+// the parent's prior activation safely on re-entry, without retiring a parent
 // that is still running in an ordinary transfer-back chain. Only a direct
 // LLM parent (nonLLM == false) whose configured sub-agents include the task
 // sub-agent is marked; a workflow agent (nonLLM == true) runs its own
@@ -2046,7 +2482,7 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // it runs on another goroutine and wait for that goroutine later. So the span
 // is retired without the activation's InvocationContext being read and
 // without its run being taken to be over (see retireAgentLocked).
-func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) rowSpan {
+func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -2059,11 +2495,12 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	}
 	if i < 0 {
-		span := inv.rowSpan(inv.newChild(inv.parentFor(id), spanKindAgent, now), nil, ambient)
-		span.timestamp = now
-		return span
+		return rowSpan{}, false
 	}
 	rec := inv.agentStack[i]
+	if !rec.taskMode {
+		return rowSpan{}, false
+	}
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(rec.parent, now)
 	}
@@ -2082,9 +2519,10 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 		}
 	}
 	inv.retireAgentLocked(i, false, noFrame)
-	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
+	inv.retireLateSettledLocked()
+	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
-	return span
+	return span, true
 }
 
 // finishedTaskLocked returns the index in agentStack of the open activation
@@ -2124,7 +2562,9 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 		return
 	}
 	inv := tm.invocation(ctx, id)
-	inv.mu.Lock()
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
 		inv.agentStack[i].finishedTasks = append(inv.agentStack[i].finishedTasks, callID)
@@ -2156,11 +2596,11 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 // a tool call that returned (see settleEndedInSubtreeLocked). Without it, as
 // when an event retires the span — a finish_task function response
 // (popTaskAgentSpan) or the new activation of an agent that delegated to a
-// completed task (pushAgentSpan) — or for an activation that a tool started
-// on a goroutine that the tool did not wait for, its InvocationContext is not
-// read and its run is not taken to be over. since bounds the activations
-// under it that are taken to be over because they ran on the current
-// goroutine (see canSettleInSubtreeLocked).
+// completed task (popDelegatingAgentSpan) — or for an activation that a tool
+// started on a goroutine that the tool did not wait for, its InvocationContext
+// is not read and its run is not taken to be over. since bounds the
+// activations under it that are taken to be over because they ran on the
+// current goroutine (see canSettleInSubtreeLocked).
 func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	rec := inv.agentStack[i]
 	subtree := inv.subtreeLocked(i)
@@ -2198,6 +2638,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	// earlier while launcherOpenLocked held it open), except the failed ones
 	// and what runs under them.
 	var descendantOpenCause error
+	var retired []*spanRecord
 	for idx < len(inv.agentStack) {
 		d := inv.agentStack[idx]
 		canRetire := subtree[d.spanID] && !failed[d.spanID]
@@ -2217,6 +2658,9 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 				inheritedCause = cmp.Or(inheritedCause, d.openFailureCause())
 			} else if descendantOpenCause == nil {
 				descendantOpenCause = d.openFailureCause()
+			}
+			if inv.isLate {
+				retired = append(retired, d)
 			}
 			inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
 			continue
@@ -2243,6 +2687,14 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 			}
 		}
 	}
+	if inv.isLate {
+		// Nothing can end a retired late activation anymore, so once its
+		// cause moved up, its record keeps no callback context (see
+		// dropRetiredLateContextsLocked).
+		retired = append(retired, rec)
+		inv.dropRetiredLateContextsLocked(retired...)
+	}
+	inv.syncOpenAgentsLocked()
 }
 
 // subtreeLocked returns the span IDs of agentStack[i] and of the open agent
@@ -2431,7 +2883,20 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 			timestamp: end,
 		})
 	}
+	// In the late state, nothing can end a purged activation anymore, so
+	// its record keeps no callback context once it leaves agentStack (see
+	// dropRetiredLateContextsLocked). Only the removed records qualify: the
+	// span that agentStack[i] runs under may still be open.
+	var latePurged []*spanRecord
+	if inv.isLate {
+		for _, rec := range inv.agentStack[i:] {
+			if purged[rec.spanID] {
+				latePurged = append(latePurged, rec)
+			}
+		}
+	}
 	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(rec *spanRecord) bool { return purged[rec.spanID] })
+	inv.syncOpenAgentsLocked()
 	for _, calls := range []map[string]*spanRecord{inv.llmSpans, inv.completedModels, inv.toolSpans, inv.completedTools} {
 		maps.DeleteFunc(calls, func(_ string, rec *spanRecord) bool { return purged[rec.parentSpanID] })
 	}
@@ -2445,6 +2910,9 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 		inv.lastPartialSpanID = ""
 	}
 	inv.syncOpenCallsLocked()
+	if len(latePurged) > 0 {
+		inv.dropRetiredLateContextsLocked(latePurged...)
+	}
 	return purgedSpans
 }
 
@@ -2615,26 +3083,27 @@ type unclosedAgentSpan struct {
 // work that the event says nothing about, for example another node of a
 // parallel workflow whose function node writes its events under the workflow
 // agent's name, so it stays as it is. The activation and the open activations
-// that it runs under are marked as responded, and so are the settled ones. For
-// each settled activation:
+// that it runs under are marked as responded, and so are the settled ones. Of
+// the author's own activation:
 //
-//   - The model calls still open under it end without a row: ADK runs no
+//   - The model calls that are still open end without a row: ADK runs no
 //     AfterModelCallback for a call that a BeforeModelCallback answered, so a
-//     response event of its agent, or of an agent above it, is all that ends
-//     the call.
-//   - The unrecovered errors recorded for the author's own activation end with
-//     them: it went on to respond, for example after a plugin recovered from a
-//     model error and an earlier plugin's AfterModelCallback answered the call,
-//     which stops the chain before this plugin's AfterModelCallback clears the
-//     error. Unrecovered errors of activations below it stay recorded, because
-//     a parent event does not mean that a failed sub-agent recovered.
-//   - The tool calls still open under it end without a row in the same way: an
-//     earlier plugin's AfterToolCallback that returns a result stops the chain
-//     before this plugin's, so a response event of its agent, or of an agent
-//     above it, is all that ends them. Only the open tool calls of the author
-//     itself are matched against calls, because they alone are answered by the
-//     function responses of the event: the others stay open, because they have
-//     not responded.
+//     response event of its agent is all that ends the call. The model calls
+//     of the settled activations under it stay open, because they may still
+//     be running, as when a custom agent writes an event while the model call
+//     of its sub-agent is in flight: their own callbacks end them with their
+//     spans and latency.
+//   - The unrecovered errors recorded for it end: it went on to respond, for
+//     example after a plugin recovered from a model error and an earlier
+//     plugin's AfterModelCallback answered the call, which stops the chain
+//     before this plugin's AfterModelCallback clears the error. Unrecovered
+//     errors of activations below it stay recorded, because a parent event
+//     does not mean that a failed sub-agent recovered.
+//   - The open tool calls that the function responses of the event answer
+//     end without a row in the same way: an earlier plugin's
+//     AfterToolCallback that returns a result stops the chain before this
+//     plugin's, so the response event is all that ends them. The other open
+//     tool calls stay open, because the event does not answer them.
 //
 // A sub-agent that fails later, without any callback seeing the failure, is
 // settled as well, so its failure is not reported: popUnclosedAgentSpans
@@ -2737,6 +3206,7 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	// calls made returned, so none is marked as finished here (see
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
+	inv.retireLateSettledLocked()
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed
@@ -2778,6 +3248,7 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 		}
 		return false
 	})
+	inv.syncOpenAgentsLocked()
 }
 
 // selectResponseOwnerLocked picks which open activation of agentStack[i]'s
@@ -3095,21 +3566,22 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 //     cancellation apart from that of a workflow or a parallel agent whose
 //     caller stopped reading.
 //
-// Conversely, the callbacks cannot tell a custom agent that stops iterating a
-// sub-agent before the sub-agent produced content or ended its own
-// InvocationContext (without emitting a settling final event on the same
-// branch and node path while every ancestor span between it and the sub-agent
-// is still open), or that swallows a sub-agent's silent error and recovers
-// through a fallback sub-agent, apart from a sub-agent of a workflow agent
-// that failed silently: retireAgentLocked keeps the unresponded sub-agent open
-// when its parent ends, and completeResponse follows parentSpanID through open
-// spans only (so reading an intermediate sub-agent such as a sequential agent
-// to its end after its child failed without responding retires the
-// intermediate span and leaves the child open beyond the reach of the outer
-// custom agent's subsequent final event), so the run is reported with
-// AGENT_ERROR and INVOCATION_ERROR, just as a model error that an agent
-// swallows without a plugin recovery is reported. Likewise, a
-// custom agent that handles a parallel agent's error is reported as failed
+// Conversely, a model error that agent code handles without yielding it is
+// reported, as no callback tells it apart from one that reached the caller
+// (see unrecoveredErrors). Likewise, the callbacks cannot tell a custom agent
+// that stops iterating a sub-agent before the sub-agent produced content or
+// ended its own InvocationContext (without emitting a settling final event on
+// the same branch and node path while every ancestor span between it and the
+// sub-agent is still open), or that swallows a sub-agent's silent error and
+// recovers through a fallback sub-agent, apart from a sub-agent of a workflow
+// agent that failed silently: retireAgentLocked keeps the unresponded
+// sub-agent open when its parent ends, and completeResponse follows
+// parentSpanID through open spans only (so reading an intermediate sub-agent
+// such as a sequential agent to its end after its child failed without
+// responding retires the intermediate span and leaves the child open beyond
+// the reach of the outer custom agent's subsequent final event), so the run is
+// reported with AGENT_ERROR and INVOCATION_ERROR. Likewise, a custom agent
+// that handles a parallel agent's error is reported as failed
 // (retireAgentLocked moves the parallel branches' retired causes onto the
 // enclosing agent when the parallel agent ends, or keeps the parallel agent
 // and its branches open if the custom agent broke out early), unless every
@@ -3120,7 +3592,8 @@ func (tm *traceManager) clearError(ctx context.Context, id identity, key string)
 // unresponded sub-branch or clear collateral errors recorded on a child
 // branch), from its Run or from its own AfterAgentCallback (which ADK runs
 // after this plugin's retired the custom agent, so the event clears the
-// causes that the custom agent's retirement moved up).
+// causes that the custom agent's retirement moved up). Runs that overlap with
+// one invocation ID share the spans that this ends (see traceManager).
 //
 // Three RetryConfig shapes still end INVOCATION_ERROR after the retry succeeds,
 // as they do on main. First, a function node with RetryConfig whose function
@@ -3221,10 +3694,11 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 	}
 
 	if primaryErr == nil && !invocationEnded(ctx) {
-		// AfterRunCallback runs on Runner.Run's goroutine after r.rootAgent.Run
-		// has returned, so any workflow node under wf_root whose run finished
-		// — including a BeforeAgentCallback shortcut node with Ended() == true —
-		// has runDone = true and can be settled now.
+		// When AfterRun runs on the same goroutine that started the runner's
+		// root agent, settleEndedInSubtreeLocked(i, true, 0) settles the
+		// descendants in that root's subtree that canSettleInSubtreeLocked
+		// reaches before the reverse-order loop below pops any remaining
+		// unclosed spans.
 		if len(inv.agentStack) > 1 {
 			if goid := currentGoroutineID(); goid != 0 && inv.agentStack[1].goroutineID == goid {
 				inv.settleEndedInSubtreeLocked(1, true, 0)
@@ -3276,6 +3750,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 
 	if primaryErr == nil {
 		inv.agentStack = inv.agentStack[:1]
+		inv.syncOpenAgentsLocked()
 		return nil, nil
 	}
 
@@ -3302,6 +3777,7 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 		})
 	}
 	inv.agentStack = inv.agentStack[:1]
+	inv.syncOpenAgentsLocked()
 	return popped, primaryErr
 }
 
@@ -3362,13 +3838,13 @@ const noFrame = ^uint64(0)
 // show that the run that wrote it returned: popTaskAgentSpan, through
 // retireAgentLocked, for a finish_task function response, which a custom
 // agent can forward for a sub-agent that it runs on another goroutine before
-// that sub-agent ends its InvocationContext; and pushAgentSpan, through
-// retireAgentLocked, for the earlier activation of an agent that delegated to
-// a completed task (see spanRecord.taskDelegated). So does endToolRunsLocked
-// for an activation that a tool started on another goroutine, which is not
-// known to have finished when the tool returns. A node completion event does
-// not count either: a node can write one itself while it runs (see
-// spanRecord.nodeRunEnded).
+// that sub-agent ends its InvocationContext; and popDelegatingAgentSpan,
+// through retireAgentLocked, for the earlier activation of an agent that
+// delegated to a completed task (see spanRecord.taskDelegated). So does
+// endToolRunsLocked for an activation that a tool started on another
+// goroutine, which is not known to have finished when the tool returns. A
+// node completion event does not count either: a node can write one itself
+// while it runs (see spanRecord.nodeRunEnded).
 //
 // The run of an activation under agentStack[i] is known to be over only if it
 // started on the current goroutine after the frame that since names, or if
@@ -3509,6 +3985,83 @@ func (inv *invocationTrace) settleFinishedLocked() {
 		if rec.runDone && !inv.launcherOpenLocked(rec) {
 			rec.settleEndedLocked()
 		}
+	}
+}
+
+// retireLateSettledLocked retires the activations of a late trace that
+// nothing can end anymore. An activation that its BeforeAgentCallback
+// answered never gets an AfterAgentCallback, and in the late state, where
+// AfterRun has already run, popUnclosedAgentSpans never ends it either. Such
+// an activation is retired once it is settled (its run is over and it ended
+// its InvocationContext, see settleFinishedLocked), no tool call or agent
+// that is still open may have run it (see launcherOpenLocked), and the agent
+// that it runs under is no longer open: that agent ended while such a tool
+// call or agent still held the activation open, or the activation runs right
+// under the invocation span. While that agent is open, its own end retires
+// the activation with it (see retireAgentLocked). As there, an activation
+// that failed, and those that it runs under, stay, and so does one that
+// carries a failure cause (see spanRecord.openFailureCause), which failure
+// reporting reads as a failure too (see failuresLocked). The callbacks that
+// can release such an activation (the end of an agent, of a tool call or of
+// a model call, and a function response) call it last, once they no longer
+// hold an index into agentStack and have reported the failures that they
+// found.
+func (inv *invocationTrace) retireLateSettledLocked() {
+	if !inv.isLate || len(inv.agentStack) <= 1 {
+		return
+	}
+	// The lineage of a failed activation follows parent even across an
+	// activation that already retired, as subtreeLocked does.
+	failed := inv.openCallOwnersLocked(nil)
+	markFailed := func(idx int) {
+		for cur := inv.agentStack[idx]; cur != nil && cur.kind == spanKindAgent; cur = cur.parent {
+			failed[cur.spanID] = true
+		}
+	}
+	for j := 1; j < len(inv.agentStack); j++ {
+		d := inv.agentStack[j]
+		unresponded := (d.runDone || inv.launcherOpenLocked(d)) && !d.responded()
+		if failed[d.spanID] || unresponded || d.openFailureCause() != nil {
+			markFailed(j)
+		}
+	}
+	for _, e := range inv.unrecoveredErrors {
+		if e.collateral {
+			continue
+		}
+		if j := inv.activationOfLocked(e); j > 0 {
+			markFailed(j)
+		}
+	}
+	var retired []*spanRecord
+	for {
+		openAgents := make(map[string]bool, len(inv.agentStack))
+		for _, rec := range inv.agentStack[1:] {
+			openAgents[rec.spanID] = true
+		}
+		changed := false
+		// Retiring an activation can release the activations that run under
+		// it, which come after it on agentStack, so the scan starts over.
+		for idx := len(inv.agentStack) - 1; idx >= 1; idx-- {
+			rec := inv.agentStack[idx]
+			parentOpen := rec.parent != nil && rec.parent.kind == spanKindAgent && openAgents[rec.parent.spanID]
+			if !parentOpen && rec.runDone && rec.contextEnded && !inv.launcherOpenLocked(rec) && !failed[rec.spanID] {
+				retired = append(retired, rec)
+				if rec.parent != nil && rec.parent.kind == spanKindAgent {
+					retired = append(retired, rec.parent)
+				}
+				inv.agentStack = slices.Delete(inv.agentStack, idx, idx+1)
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			break
+		}
+	}
+	if len(retired) > 0 {
+		inv.dropRetiredLateContextsLocked(retired...)
+		inv.syncOpenAgentsLocked()
 	}
 }
 
@@ -3677,6 +4230,12 @@ func activationKey(ctx context.Context) any {
 		}
 		return key
 	})
+}
+
+// isActivationOf reports whether rec is the span of the agent activation
+// whose run ctx belongs to (see activationKey).
+func (rec *spanRecord) isActivationOf(ctx context.Context) bool {
+	return rec.kind == spanKindAgent && rec.activation != nil && rec.activation == activationKey(ctx)
 }
 
 // findAgentForContext returns the index in agentStack of the open span of the
@@ -4020,7 +4579,9 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
+	if !inv.lockLive() {
+		return tm.pushLLMSpan(ctx, id)
+	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
@@ -4038,6 +4599,8 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 	}
 	rec := inv.newChild(owner, spanKindLLM, now)
 	rec.canceled = canceledFunc(ctx)
+	rec.callStarted = true
+	rec.ownActivation = owner.isActivationOf(ctx)
 	inv.llmSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedModels, key)
@@ -4054,7 +4617,9 @@ func (tm *traceManager) pushLLMSpan(ctx context.Context, id identity) rowSpan {
 func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
-	inv.mu.Lock()
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
 	defer inv.mu.Unlock()
 	if rec := inv.llmSpans[callKey(ctx, llmKey(id))]; rec != nil && rec.firstToken.IsZero() {
 		rec.firstToken = now
@@ -4070,7 +4635,10 @@ func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 // it marks that lineage as having responded. It sets lastSessionEventPartial
 // and lastEventPartial. A partial event without content, such as a progress
 // event, is not a response: it only keeps a caller that stops reading on it
-// from being taken for a failure.
+// from being taken for a failure. The node path of the event can differ from
+// the path of the context of the model callbacks, as for the agent that
+// runner.Run runs, so the call is also found as one that the author's
+// activation owns.
 func (tm *traceManager) recordStreamed(ctx context.Context, id identity, author, branch string, withContent bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -4124,7 +4692,9 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
+	if !inv.lockLive() {
+		return tm.popLLMSpan(ctx, id, responded)
+	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	key := callKey(ctx, llmKey(id))
@@ -4149,7 +4719,7 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	}
 	delete(inv.llmSpans, key)
 	inv.syncOpenCallsLocked()
-	rec.canceled = nil
+	rec.dropContexts()
 	if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(owner, now)
 	}
@@ -4157,10 +4727,10 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 		// A model call that did not respond leaves no pending model-event
 		// credit: clear stale credits so a peer's response cannot claim
 		// this activation's events (see selectResponseOwnerLocked).
+		inv.completedModels[key] = rec
 		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
 			owner.awaitingModelEvent = 0
 		}
-		inv.completedModels[key] = rec
 	} else {
 		if owner := inv.ownerOf(ctx, id); owner.kind == spanKindAgent {
 			owner.hasResponse = true
@@ -4171,6 +4741,10 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 			rec.firstToken = now
 		}
 	}
+	// The ended call no longer keeps its agent, or the agents that its agent
+	// runs under, from retiring in the late state (see
+	// retireLateSettledLocked).
+	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -4179,16 +4753,18 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
-	key = callKey(ctx, key)
 	inv := tm.lookupInvocation(ctx, id, false, true)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
+	if !inv.lockLive() {
+		return tm.pushToolSpan(ctx, id, key)
+	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
+	key = callKey(ctx, key)
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
@@ -4205,6 +4781,8 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	rec := inv.newChild(owner, spanKindTool, now)
 	rec.canceled = canceledFunc(ctx)
 	rec.seq = inv.nextSeqLocked()
+	rec.callStarted = true
+	rec.ownActivation = owner.isActivationOf(ctx)
 	inv.toolSpans[key] = rec
 	inv.syncOpenCallsLocked()
 	delete(inv.completedTools, key)
@@ -4225,14 +4803,16 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // activations that its tool calls ran and that never ended are ended—purged
 // if they failed, or retired quietly otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
-	key = callKey(ctx, key)
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
+	if !inv.lockLive() {
+		return tm.popToolSpan(ctx, id, key, fromError)
+	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
+	key = callKey(ctx, key)
 	open := inv.toolSpans[key]
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
@@ -4254,8 +4834,9 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	purged = inv.endToolRunsLocked(ctx, id, inv.lastSessionEventPartial, now, ambient, since)
 	// The ended tool call may have run open activations under other spans.
 	inv.settleFinishedLocked()
+	inv.retireLateSettledLocked()
 	if open != nil {
-		open.canceled = nil
+		open.dropContexts()
 		if fromError {
 			inv.completedTools[key] = open
 		}
@@ -4273,6 +4854,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	}
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
 	if fromError {
+		rec.dropContexts()
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -4313,6 +4895,20 @@ func (inv *invocationTrace) newChild(parent *spanRecord, kind spanKind, now time
 		parent:       parent,
 		stopPoint:    parent.kind == spanKindInvocation,
 	}
+}
+
+// lockLive locks inv for a callback that looked inv up and reports true,
+// unless the run of inv finished in between: the run's calls then are in the
+// late state of its completed entry, where the callbacks that follow look for
+// them, so lockLive leaves inv unlocked and reports false, and the callback
+// looks the invocation up again.
+func (inv *invocationTrace) lockLive() bool {
+	inv.mu.Lock()
+	if inv.finished {
+		inv.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 // canceledFunc returns the spanRecord.canceled function of a span that a
@@ -4498,6 +5094,51 @@ func callKey(ctx context.Context, key string) string {
 		return fmt.Sprintf("%p\x00%s", act, key)
 	}
 	return key
+}
+
+// dropContexts drops what rec keeps of the callbacks of its run: the context
+// of the callback that started it, the InvocationContext of its activation
+// (see ended and activation), any retired causes, and the span that it started
+// under, whose record keeps the context of its own callback. It is for a call
+// that ended, or that the run handed to the late state: its record outlives
+// the run, so it must keep no context of it. wasCanceled and canceledByStop
+// report false, contextFailureCause and openFailureCause report nil, and
+// collateralFailureCause reports (nil, false) for such a record.
+func (rec *spanRecord) dropContexts() {
+	rec.canceled, rec.ended, rec.activation, rec.parent = nil, nil, nil, nil
+	rec.retiredCauses = nil
+}
+
+// dropRetiredLateContextsLocked clears the callback contexts of agent spans
+// retired from a late trace, and clears parent on any retired ancestor that
+// is no longer reachable from the remaining open spans or calls. It avoids
+// clearing parent on a retired span that a remaining open span or call still
+// reaches through its parent chain (see subtreeLocked and
+// launcherOpenLocked).
+func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord) {
+	for _, r := range retired {
+		r.canceled, r.ended, r.activation, r.retiredCauses = nil, nil, nil, nil
+	}
+	keepParent := make(map[*spanRecord]bool)
+	markChain := func(s *spanRecord) {
+		for p := s.parent; p != nil && p.kind == spanKindAgent && !keepParent[p]; p = p.parent {
+			keepParent[p] = true
+		}
+	}
+	for _, s := range inv.agentStack[1:] {
+		markChain(s)
+	}
+	for _, s := range inv.llmSpans {
+		markChain(s)
+	}
+	for _, s := range inv.toolSpans {
+		markChain(s)
+	}
+	for _, r := range retired {
+		if !keepParent[r] {
+			r.parent = nil
+		}
+	}
 }
 
 // llmKey identifies the model call of an agent activation: an agent makes
