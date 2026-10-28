@@ -107,56 +107,124 @@ func (f *fileSystemSource) LoadInstructions(ctx context.Context, name string) (s
 	return string(instructions), nil
 }
 
-// rejectSymlinkPath walks every path component of p, from the filesystem
-// root down, and refuses the whole path if any component is a symbolic
-// link.
+// resolveWithinSkill follows every symlink encountered while walking p (a
+// path within the source's filesystem, e.g. "evilskill/assets/link") and
+// returns the fully resolved, symlink-free path, or an error if resolution
+// fails or the result lands outside the skill directory named by name.
 //
-// Checking each component -- rather than only the final target -- closes
-// the gap path.Clean leaves open: a resourcePath that is syntactically
-// inside references/, assets/, or scripts/ can still resolve, through a
-// symlink shipped inside the skill itself, to a file outside the skill's
-// own directory. fs.Open ultimately reaches the operating system's open(2),
-// which dereferences symlinks transparently, so the string-level prefix
-// check alone never sees the real target.
+// Unlike a check that refuses any symlink component outright, this allows a
+// skill to ship a symlink that stays inside its own directory -- for
+// example assets/shared.md -> ../references/shared.md, so a skill can share
+// one file between its resource directories -- while still refusing one
+// that points at a sibling skill or anywhere else on disk, such as
+// assets/link -> /home/user/.ssh or assets/link -> ../../other-skill.
+// A symlink whose target is itself an absolute path (a leading "/", or on
+// Windows a drive letter or UNC prefix) is always rejected outright, since
+// such a target cannot be reinterpreted as a path inside this filesystem.
 //
-// This requires the underlying filesystem to implement fs.ReadLinkFS
-// (added in Go 1.25; os.DirFS and os.Root.FS satisfy it, and so does
-// testing/fstest.MapFS since the same release). A filesystem that predates
-// that interface, or simply never implements it, has no way to report a
-// symlink without following it, so it is treated as having none to escape
-// through; this follows the same convention as fs.Lstat itself, which
-// falls back to the ordinary, symlink-following Stat when ReadLinkFS is
-// unavailable.
-func (f *fileSystemSource) rejectSymlinkPath(p string) error {
+// This requires the underlying filesystem to implement fs.ReadLinkFS with
+// an Lstat that reports a symlink without following it. A filesystem whose
+// Lstat falls back to the ordinary, link-following Stat -- which includes
+// one that wraps a ReadLinkFS-capable filesystem behind a plain fs.FS and
+// so hides the interface, not only one that predates it -- has no way to
+// report a symlink, so its symlinks are followed without being checked.
+//
+// Two gaps are not closed here. On Windows, a directory junction is
+// reported by Go's os package as fs.ModeIrregular rather than
+// fs.ModeSymlink and so passes through this check unexamined; closing that
+// needs Windows-specific reparse-point handling this change does not add.
+// And this check and the Open that follows it are two separate filesystem
+// operations, so a process that can write into the skill's own directory
+// while it is being served could, in principle, swap a checked path for a
+// symlink in the gap between them; closing that would need the two to
+// happen as one atomic operation, which a generic fs.FS does not offer.
+func (f *fileSystemSource) resolveWithinSkill(name, p string) (string, error) {
 	rlfs, ok := f.filesystem.(fs.ReadLinkFS)
 	if !ok {
-		return nil
+		return path.Clean(p), nil
 	}
 
-	clean := path.Clean(p)
-	if clean == "." {
-		return nil
-	}
+	const maxLinks = 40 // matches the ELOOP convention most OSes use.
+	links := 0
 
-	var cur string
-	for _, part := range strings.Split(clean, "/") {
-		if cur == "" {
-			cur = part
-		} else {
-			cur = cur + "/" + part
+	pending := strings.Split(path.Clean(p), "/")
+	var resolved []string
+
+	for len(pending) > 0 {
+		seg := pending[0]
+		pending = pending[1:]
+
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if len(resolved) == 0 {
+				return "", fmt.Errorf("%w: %q escapes the filesystem root", ErrInvalidResourcePath, p)
+			}
+			resolved = resolved[:len(resolved)-1]
+			continue
 		}
+
+		resolved = append(resolved, seg)
+		cur := strings.Join(resolved, "/")
+
 		info, err := rlfs.Lstat(cur)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("%w: %q", ErrResourceNotFound, p)
+				return "", fmt.Errorf("%w: %q", ErrResourceNotFound, strings.TrimPrefix(p, name+"/"))
 			}
-			return fmt.Errorf("lstat %q: %w", cur, err)
+			return "", fmt.Errorf("lstat %q: %w", cur, err)
 		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("%w: %q contains a symbolic link (%q); a skill resource path must not pass through a symlink", ErrInvalidResourcePath, p, cur)
+		if info.Mode()&fs.ModeSymlink == 0 {
+			continue // Ordinary file or directory component; keep walking.
 		}
+
+		links++
+		if links > maxLinks {
+			return "", fmt.Errorf("%w: %q: too many levels of symbolic links", ErrInvalidResourcePath, p)
+		}
+
+		target, err := rlfs.ReadLink(cur)
+		if err != nil {
+			return "", fmt.Errorf("readlink %q: %w", cur, err)
+		}
+		// A target read back from the filesystem may use OS-native
+		// separators -- a Windows symlink created via filepath.Join, for
+		// instance, stores a target like "..\references\shared.md". fs.FS
+		// paths are always slash-separated (io/fs's own convention), so
+		// normalize before treating the target as one; this also turns a
+		// UNC target such as "\\host\share\x" into "//host/share/x",
+		// which path.IsAbs below already recognizes as absolute.
+		target = strings.ReplaceAll(target, `\`, "/")
+		if path.IsAbs(target) || isWindowsDriveAbsolutePath(target) {
+			return "", fmt.Errorf("%w: %q: %q is an absolute symlink target", ErrInvalidResourcePath, p, cur)
+		}
+
+		// Drop the symlink itself, splice its target's components in
+		// (resolved relative to the symlink's own directory, which is
+		// what every POSIX symlink target is relative to) ahead of
+		// whatever of the original path still remains to process.
+		resolved = resolved[:len(resolved)-1]
+		pending = append(strings.Split(path.Clean(target), "/"), pending...)
 	}
-	return nil
+
+	resolvedPath := strings.Join(resolved, "/")
+	if resolvedPath != name && !strings.HasPrefix(resolvedPath, name+"/") {
+		return "", fmt.Errorf("%w: %q resolves to %q, outside skill %q's own directory", ErrInvalidResourcePath, p, resolvedPath, name)
+	}
+	return resolvedPath, nil
+}
+
+// isWindowsDriveAbsolutePath reports whether target -- already normalized
+// to forward slashes -- starts with a Windows drive letter, such as
+// "C:/Users", which path.IsAbs does not recognize since it only knows the
+// slash-separated paths fs.FS uses.
+func isWindowsDriveAbsolutePath(target string) bool {
+	if len(target) < 2 || target[1] != ':' {
+		return false
+	}
+	c := target[0]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // LoadResource reads a specific file from the skill's directory.
@@ -164,9 +232,11 @@ func (f *fileSystemSource) rejectSymlinkPath(p string) error {
 // For security, the resourcePath is sanitized using path.Clean, access is
 // strictly limited to files within the 'references/', 'assets/', or
 // 'scripts/' subdirectories, and -- on a filesystem that supports symlinks
-// -- every path component the resolved path walks through is required to
-// be a real directory or file rather than a symbolic link, which together
-// prevent path traversal and symlink-escape attacks.
+// -- every symlink the resolved path passes through is followed and
+// checked rather than trusted, so a resource may still be reached through
+// a symlink that stays inside the skill's own directory, but not through
+// one that resolves anywhere else. See resolveWithinSkill's own doc for
+// what this does and does not protect against.
 func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath string) (io.ReadCloser, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
@@ -178,11 +248,12 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 	}
 
 	fullPath := path.Join(name, cleanPath)
-	if err := f.rejectSymlinkPath(fullPath); err != nil {
+	resolvedPath, err := f.resolveWithinSkill(name, fullPath)
+	if err != nil {
 		return nil, err
 	}
 
-	file, err := f.filesystem.Open(fullPath)
+	file, err := f.filesystem.Open(resolvedPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %q", ErrResourceNotFound, cleanPath)
@@ -198,11 +269,16 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 // 'assets/', and 'scripts/' directories. It restricts traversal to these
 // approved directories and returns sanitized paths relative to the skill root.
 //
-// Note: fs.WalkDir lists a symlinked entry by name but does not follow it
-// to walk its target's contents, so this method does not leak file content
-// across the same symlink LoadResource is hardened against above; it can
-// only reveal that a symlink with a given name exists. LoadResource is the
-// path that actually opens file content and is the one this change fixes.
+// Note: fs.WalkDir skips a symlink it finds inside a directory without
+// following it, but it does follow one if the walk's own root is a
+// symlink, and the fs.Stat this method runs before the walk follows links
+// too. So if resourceDirectoryPath (or, when it is empty, assets/,
+// references/, or scripts/ itself) is a symlink, this method walks and
+// lists whatever it points at, by name, the same way LoadResource used to
+// before this change. That behavior is unchanged by this change and is not
+// this method's to fix here -- see the symlink-escape issue's follow-up
+// notes -- but it means this method is not a safe source of truth for
+// which paths stay inside the skill the way LoadResource now is.
 func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDirectoryPath string) ([]string, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
