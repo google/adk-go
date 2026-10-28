@@ -35,6 +35,12 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if ModeFor(ctx, ctx.Agent().Name(), llmAgent.internal()) == ModeSingleTurn {
 			return
 		}
+		// Leaf workers with every transfer direction disabled do not need the
+		// framework identity paragraph; different internal names would otherwise
+		// produce different system instructions for otherwise identical agents.
+		if !shouldUseAutoFlow(ctx.Agent()) {
+			return
+		}
 
 		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
 		if description := ctx.Agent().Description(); description != "" {

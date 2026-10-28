@@ -142,6 +142,36 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				"Your internal name is \"task_agent\".",
 			},
 		},
+		{
+			name: "NoOpWhenAllTransfersDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "leaf_worker",
+					Description: "Identical worker whose name should not leak into SI",
+				})),
+				s: &State{
+					Mode:                     ModeChat,
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			wantNoSI: true,
+		},
+		{
+			name: "StillEmittedWhenPeerTransferAllowed",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "peer_enabled"})),
+				s: &State{
+					Mode:                     ModeChat,
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  false,
+				},
+			},
+			wantContains: []string{
+				"You are an agent.",
+				"Your internal name is \"peer_enabled\".",
+			},
+		},
 	}
 
 	for _, tt := range tests {
