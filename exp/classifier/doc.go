@@ -27,4 +27,8 @@
 // included in the input passed to [Classifier.Classify], as text or as plain
 // JSON values such as a slice of role and text maps. A []*genai.Content
 // history is rejected with [ErrInvalidInput]; see [ValidateInput].
+//
+// To route a [google.golang.org/adk/v2/workflow.Workflow] graph on a
+// classifier's answer to a [Choice] or [Binary] question, construct a [Node]
+// with [NewNode].
 package classifier
