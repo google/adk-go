@@ -198,6 +198,11 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
 				completedContent = genaiResp.Candidates[0].Content
+				// Prefer a complete snapshot before adoption can pair an
+				// additional terminal call with a streamed call of the same name.
+				if shared.CompletedContentSupersedes(final.Content, completedContent) {
+					final.Content = completedContent
+				}
 			}
 		}
 		if final == nil {
@@ -208,8 +213,8 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			yield(nil, err)
 			return
 		}
-		// Compare after adopting terminal calls so item-ID fallbacks do not
-		// prevent recovery of text that only the completed response carries.
+		// Retry after adoption: when the snapshot restates the call's ID and
+		// arguments, correcting an item-ID fallback can make it supersede.
 		if shared.CompletedContentSupersedes(final.Content, completedContent) {
 			final.Content = completedContent
 		}
