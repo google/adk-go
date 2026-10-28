@@ -28,6 +28,8 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"google.golang.org/genai"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
@@ -44,7 +46,8 @@ import (
 //
 // Run with:
 //
-//	go test ./server/adkrest/controllers/ -run '^$' -bench 'BenchmarkRun(SSE|)Handler' -benchtime=10x -count=3
+//	go test ./server/adkrest/controllers/ -run '^$' -bench 'BenchmarkRun(SSE|)Handler/inmemory' -benchtime=300x -count=6
+//	go test ./server/adkrest/controllers/ -run '^$' -bench 'BenchmarkRun(SSE|)Handler/sqlite' -benchtime=10x -count=6
 func benchSessionService(b *testing.B, backend string) session.Service {
 	b.Helper()
 	switch backend {
@@ -52,7 +55,9 @@ func benchSessionService(b *testing.B, backend string) session.Service {
 		return session.InMemoryService()
 	case "sqlite":
 		path := filepath.Join(b.TempDir(), "sessions.db")
-		svc, err := database.NewSessionService(sqlite.Open(path))
+		// gorm logs every "record not found" on the app/user state lookups,
+		// which splits the benchmark result lines and breaks benchstat.
+		svc, err := database.NewSessionService(sqlite.Open(path), &gorm.Config{Logger: logger.Discard})
 		if err != nil {
 			b.Fatalf("open sqlite: %v", err)
 		}
