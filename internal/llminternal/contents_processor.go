@@ -1007,6 +1007,16 @@ func copyContentForRequest(c *genai.Content) *genai.Content {
 			continue
 		}
 		pc := *p
+		// removeDisplayNameIfExists clears DisplayName on these two in place,
+		// so they get their own headers; the bytes behind them stay shared.
+		if p.InlineData != nil {
+			blob := *p.InlineData
+			pc.InlineData = &blob
+		}
+		if p.FileData != nil {
+			fd := *p.FileData
+			pc.FileData = &fd
+		}
 		if p.FunctionCall != nil {
 			fc := *p.FunctionCall
 			pc.FunctionCall = &fc
