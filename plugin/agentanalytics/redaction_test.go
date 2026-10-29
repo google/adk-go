@@ -433,3 +433,161 @@ func TestIsCompoundSensitiveKey_LongKey(t *testing.T) {
 		}
 	})
 }
+
+func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
+	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"state-prefixed user child", "credentials:\n user:DB_PASSWORD: SYNTHETIC_SECRET"},
+		{"state-prefixed app child", "credentials:\n app:OPENAI_API_KEY: SYNTHETIC_SECRET"},
+		{"state-prefixed camel case child", "credentials:\n user:dbPassword: SYNTHETIC_SECRET"},
+		{"quoted state-prefixed child", "credentials:\n \"user:DB_PASSWORD\": SYNTHETIC_SECRET"},
+		{"state-prefixed child on the same line", "credentials: user:DB_PASSWORD: SYNTHETIC_SECRET"},
+		{"upper-case state prefix", "credentials:\n USER:DB_PASSWORD: SYNTHETIC_SECRET"},
+		{"oversized child", "credentials:\n " + longKey + ": SYNTHETIC_SECRET"},
+		{"oversized child with a delimiter before its value", "credentials:\n " + longKey + " = SYNTHETIC_SECRET"},
+		{"oversized child on the same line", "credentials: " + longKey + ": SYNTHETIC_SECRET"},
+		{"quoted oversized child", "credentials:\n \"" + longKey + "\": SYNTHETIC_SECRET"},
+		{"oversized state-prefixed child", "credentials:\n user:" + longKey + ": SYNTHETIC_SECRET"},
+		{"oversized child after another", "credentials:\n a_PASSWORD: " + longKey + ": SYNTHETIC_SECRET"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			check := func(path, got string) {
+				t.Helper()
+				if strings.Contains(got, "SYNTHETIC_SECRET") {
+					t.Errorf("%s of %q = %q, which still holds the secret", path, tt.in, got)
+				}
+			}
+			got := scrubTextPatterns(tt.in)
+			check("scrubTextPatterns", got)
+			if again := scrubTextPatterns(got); again != got {
+				t.Errorf("scrubbing %q again gave %q, want it unchanged", got, again)
+			}
+			raw, _ := sanitizeRawText(tt.in)
+			check("sanitizeRawText", raw)
+			for path, in := range map[string]any{
+				"error":             errors.New(tt.in),
+				"stringer":          testStringerText{tt.in},
+				"error in a map":    map[string]any{"err": errors.New(tt.in)},
+				"error in a struct": struct{ Err error }{errors.New(tt.in)},
+				"wrapped error":     fmt.Errorf("outer: %w", errors.New(tt.in)),
+			} {
+				b, _, err := SmartTruncate(in, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(%s) error: %v", path, err)
+				}
+				check("SmartTruncate "+path, string(b))
+			}
+		})
+	}
+}
+
+func TestNestedKeyName_StatePrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		in       string
+		lineBeg  bool
+		wantKind nestedKeyKind
+		wantAt   int
+	}{
+		{"user prefix on a line", "user:DB_PASSWORD", true, nestedKey, 5},
+		{"app prefix on a line", "app:OPENAI_API_KEY", true, nestedKey, 4},
+		{"user prefix after the key's line", "user:dbPassword", false, valueEndingInKeyName, 5},
+		{"upper-case prefix", "APP:dbPassword", true, nestedKey, 4},
+		{"prefix of a name that is not a credential", "user:name", true, notNestedKey, 0},
+		{"fixed name with prefix", "user:password", true, nestedKey, 5},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kind, at := nestedKeyName(tt.in, 0, tt.lineBeg)
+			if kind != tt.wantKind || at != tt.wantAt {
+				t.Errorf("nestedKeyName(%q) = (%v, %d), want (%v, %d)", tt.in, kind, at, tt.wantKind, tt.wantAt)
+			}
+		})
+	}
+}
+
+// scrubTime returns how long scrubbing takes.
+func scrubTime(f func()) time.Duration {
+	start := time.Now()
+	f()
+	return time.Since(start)
+}
+
+// TestScrubTextPatterns_CamelCaseScanIsLinear checks that the search for
+// camelCase keys does not rescan the text for each key or boundary in it: a
+// run of n repeats must take about n times as long as one of n/4, not n^2.
+func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
+	tests := []struct {
+		name string
+		gen  func(n int) string
+		run  func(in string)
+		n    int
+	}{
+		{
+			"repeated camel case pairs through an error", func(n int) string { return strings.Repeat("x dbPassword=synthetic ", n) },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+		},
+		{
+			"repeated camel case pairs", func(n int) string { return strings.Repeat("x dbPassword=synthetic ", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one long run of oauth boundaries", func(n int) string { return strings.Repeat("aOauth", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"long run of oauth boundaries after a word", func(n int) string { return "x " + strings.Repeat("xOauth", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"long run of oauth boundaries before a delimiter", func(n int) string { return strings.Repeat("aOauth", n) + "=x" },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"long run of oauth boundaries before a delimiter without a value", func(n int) string { return strings.Repeat("aOauth", n) + ".code=" },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"oversized key chain", func(n int) string { return "password=SECRET123-" + strings.Repeat("token:", n) + " x" },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"oversized children of an envelope", func(n int) string {
+				return "credentials:\n" + strings.Repeat(" "+strings.Repeat("x_", 70)+"PASSWORD: s\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 500,
+		},
+		{
+			"repeated nested camel case envelopes", func(n int) string { return strings.Repeat("credentials:\n user:dbPassword: s\n", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			small, large := tt.gen(tt.n/4), tt.gen(tt.n)
+			tt.run(small) // warm up
+			// The best of three runs of each size, so that a pause of the
+			// scheduler is not read as growth.
+			best := func(in string) time.Duration {
+				d := scrubTime(func() { tt.run(in) })
+				for range 2 {
+					d = min(d, scrubTime(func() { tt.run(in) }))
+				}
+				return d
+			}
+			ds, dl := best(small), best(large)
+			// Linear growth gives 4x; quadratic 16x. Allow generous noise
+			// and a floor for timer resolution.
+			if dl > 10*ds && dl > 100*time.Millisecond {
+				t.Errorf("scrubbing %d repeats took %v and %d repeats took %v, which is more than linear", tt.n/4, ds, tt.n, dl)
+			}
+			if dl > 2*time.Second {
+				t.Errorf("scrubbing %d repeats took %v, want well under 2s", tt.n, dl)
+			}
+		})
+	}
+}

@@ -290,10 +290,12 @@ func textKeyNameRegex() string {
 
 // bareTextKeyNameRegex returns textKeyNameRegex without the prefix. A search
 // with textKeyNameRegex is markedly slower on long text than one that finds a
-// bare name, so findKeyValToken searches with this pattern, after a word
+// bare name, so keyValFinder searches with this pattern, after a word
 // boundary or a "_", and extends the key back over the prefix itself. A name
-// that continues a word without a separator, as in dbPassword, is therefore
-// found only as a map key or struct field, not in text.
+// that continues a word without a separator, as in dbPassword, has no such
+// boundary; findCamelKeyValToken finds it in a name that is followed by "="
+// or ":" instead, at a camelCase boundary: a capital after a lower-case letter
+// or a digit, or the last capital of an acronym, as in the "P" of DBPassword.
 func bareTextKeyNameRegex() string {
 	return bareSensitiveKeyRegex() + `|oauth[a-z0-9_-]*[.]code`
 }
@@ -1491,33 +1493,67 @@ func scrubTextPatterns(s string) string {
 	s = replaceMatches(s, basicTokenRe, redactBasicCredential)
 	s = replaceMatches(s, jsonKeyValTokenRe, redactJSONKeyValue)
 	var brackets openBrackets
-	return replaceMatchesFunc(s, findKeyValToken, func(s string, loc []int) (string, int) {
+	finder := keyValFinder{whole: s}
+	return replaceMatchesFunc(s, finder.find, func(s string, loc []int) (string, int) {
 		return redactTextKeyValue(s, loc, &brackets)
 	})
 }
 
-// findKeyValToken returns the submatch indexes of the first key-value pair
-// with a sensitive key in s, or nil.
-func findKeyValToken(s string) []int {
-	if loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s); loc != nil {
+// keyValFinder finds the key-value pairs with a sensitive key in whole, one
+// after the other, for replaceMatchesFunc, which calls find with the text
+// that is left. It keeps the next match of textKeyValTokenRe from one call to
+// the next, so that the text between the matches is searched once, however
+// many pairs that textKeyValTokenRe does not find (see findCamelKeyValToken)
+// the text holds.
+type keyValFinder struct {
+	whole string
+	// next is the submatch indexes in whole of the first match of
+	// textKeyValTokenRe at or after the offset of the last search, if
+	// searched and not nil. Once a search has found nothing, none is run
+	// again.
+	next     []int
+	searched bool
+}
+
+// find returns the submatch indexes in rest, the end of f.whole, of the first
+// key-value pair with a sensitive key in it, or nil.
+func (f *keyValFinder) find(rest string) []int {
+	if loc := textKeyValTokenAtRe.FindStringSubmatchIndex(rest); loc != nil {
 		return loc
 	}
-	loc := textKeyValTokenRe.FindStringSubmatchIndex(s)
-	limit := len(s)
-	if loc != nil {
+	pos := len(f.whole) - len(rest)
+	if !f.searched || f.next != nil && f.next[0] < pos {
+		f.searched = true
+		f.next = textKeyValTokenRe.FindStringSubmatchIndex(rest)
+		for i, v := range f.next {
+			if v >= 0 {
+				f.next[i] = v + pos
+			}
+		}
+	}
+	var loc []int
+	limit := len(rest)
+	if f.next != nil {
+		loc = make([]int, len(f.next))
+		for i, v := range f.next {
+			loc[i] = -1
+			if v >= 0 {
+				loc[i] = v - pos
+			}
+		}
 		limit = loc[2]
 	}
 	// A key joined to its prefix at a camelCase boundary, as in dbPassword,
 	// has no word boundary before its credential name; it starts before the
 	// match at a word boundary, if there is one.
-	if camel := findCamelKeyValToken(s[:limit], s); camel != nil {
+	if camel := findCamelKeyValToken(rest, limit); camel != nil {
 		loc = camel
 	}
 	if loc != nil {
 		// Extend the key back over the prefix of a compound name. The match
 		// starts at the key.
 		start := loc[2]
-		for start > 0 && isTextKeyByte(s[start-1]) {
+		for start > 0 && isTextKeyByte(rest[start-1]) {
 			start--
 		}
 		loc[0], loc[2] = start, start
@@ -1530,28 +1566,96 @@ func findKeyValToken(s string) []int {
 // boundary before it.
 var textKeyValCamelAtRe = regexp.MustCompile(`(?i)^(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 
+// maxFixedKeyNameLen is the length of the longest name in sensitiveKeys.
+var maxFixedKeyNameLen = func() int {
+	most := 0
+	for k := range sensitiveKeys {
+		most = max(most, len(k))
+	}
+	return most
+}()
+
+// isCamelTokenByte reports whether c may be in a name that a camelCase
+// boundary splits: a letter, a digit, "_", "-" and "." (see
+// bareTextKeyNameRegex).
+func isCamelTokenByte(c byte) bool {
+	return isTextKeyByte(c) || c == '.'
+}
+
 // findCamelKeyValToken returns the submatch indexes in s of the first
 // key-value pair whose credential name starts before s[:limit] ends, at a
 // camelCase boundary inside a longer name, such as the "Password" of
 // dbPassword, or nil. A boundary is a capital after a lower-case letter or a
 // digit, or the last capital of an acronym, as in the "P" of DBPassword.
-func findCamelKeyValToken(head, s string) []int {
-	for i := 1; i < len(head); i++ {
-		if !isCamelBoundary(s, i) {
+//
+// A credential name ends the token (the run of name bytes) that it is in, as
+// the delimiter of the pair follows it, so only a token that is followed by
+// a delimiter, possibly after a quote and whitespace, is read at its
+// boundaries. Of its boundaries, only those that leave room for a name of
+// sensitiveKeys are tried, and only the first one of an OAuth name, so the
+// work for a token is linear in its length.
+func findCamelKeyValToken(s string, limit int) []int {
+	for t := 0; t < limit; {
+		if !isCamelTokenByte(s[t]) {
+			t++
 			continue
 		}
-		loc := textKeyValCamelAtRe.FindStringSubmatchIndex(s[i:])
-		if loc == nil {
-			continue
+		e := t + 1
+		for e < len(s) && isCamelTokenByte(s[e]) {
+			e++
 		}
-		for j, v := range loc {
-			if v >= 0 {
-				loc[j] = v + i
+		if tokenEndsPair(s, e) {
+			oauthTried := false
+			for i := t + 1; i < min(e, limit); i++ {
+				if !isCamelBoundary(s, i) {
+					continue
+				}
+				if e-i > maxFixedKeyNameLen {
+					// Only an OAuth name is longer, and it ends in
+					// ".code" with no other dot after "oauth".
+					if oauthTried || !oauthNameAt(s, i, e) {
+						continue
+					}
+					oauthTried = true
+				}
+				loc := textKeyValCamelAtRe.FindStringSubmatchIndex(s[i:])
+				if loc == nil {
+					continue
+				}
+				for j, v := range loc {
+					if v >= 0 {
+						loc[j] = v + i
+					}
+				}
+				return loc
 			}
 		}
-		return loc
+		t = e
 	}
 	return nil
+}
+
+// tokenEndsPair reports whether a key-value delimiter follows the name that
+// ends at s[:i], possibly after a quote, which may be escaped, and
+// whitespace.
+func tokenEndsPair(s string, i int) bool {
+	if i < len(s) && s[i] == '\\' {
+		i++
+	}
+	if i < len(s) && (s[i] == '"' || s[i] == '\'') {
+		i++
+	}
+	return followedByDelimiter(s, i)
+}
+
+// oauthNameAt reports whether s[i:e] looks like an OAuth name: "oauth", words
+// and ".code", with no other dot.
+func oauthNameAt(s string, i, e int) bool {
+	const oauth, code = "oauth", ".code"
+	return e-i >= len(oauth)+len(code) &&
+		strings.EqualFold(s[i:i+len(oauth)], oauth) &&
+		strings.EqualFold(s[e-len(code):e], code) &&
+		!strings.Contains(s[i+len(oauth):e-len(code)], ".")
 }
 
 // isCamelBoundary reports whether s[i] starts a word of a camelCase name.
@@ -1779,8 +1883,11 @@ const (
 // returns valueEndingInKeyName, and where the key name in it starts, so that
 // the value is redacted together with the value of the pair it starts.
 func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind, int) {
-	if end-start > maxNestedKeyLen || s[start] == '{' || s[start] == '[' {
+	if s[start] == '{' || s[start] == '[' {
 		return notNestedKey, 0
+	}
+	if end-start > maxNestedKeyLen {
+		return oversizedNestedKey(s, start, end, lineStart)
 	}
 	v := s[start:end]
 	if inner, quote := unquoteValue(v); quote != "" {
@@ -1822,6 +1929,63 @@ func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind,
 	return nestedKeyName(v[:i], start, lineStart)
 }
 
+// oversizedNestedKey classifies a value longer than maxNestedKeyLen that
+// nestsSensitiveKey has read at s[start:end]. Its name is not read, but a
+// sensitive key and a value that follow a delimiter are redacted together
+// rather than the key only, which would leave the value in place: the value
+// is a key when it ends with a delimiter or is followed by one, or is a
+// quoted name followed by one, or a name and a delimiter and a redacted
+// value, and a pair with a sensitive key starts at its name. A key that starts a line is left in place, so that its pair is
+// matched on its own (nestedKey); any other is redacted with the value of its
+// pair (valueEndingInKeyName). Only the delimiter and the value that follow
+// it are read besides the pair that the regular expressions match, which are
+// matched once, as the pair is redacted whole.
+func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind, int) {
+	name := start
+	v := s[start:end]
+	if _, quote := unquoteValue(v); quote != "" {
+		if !valueFollowsDelimiter(s, end) {
+			return notNestedKey, 0
+		}
+		name += len(quote)
+	} else if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
+		if !valueStartsAt(s, end) {
+			return notNestedKey, 0
+		}
+	} else if !valueFollowsDelimiter(s, end) {
+		// A pair that an earlier pass redacted, as in "name:[REDACTED]".
+		i := strings.LastIndexAny(v, ":=")
+		if i <= 0 {
+			return notNestedKey, 0
+		}
+		if inner, _ := unquoteValue(trimTrailingPunctuation(v[i+1:])); !isRedactedValue(inner) {
+			return notNestedKey, 0
+		}
+	}
+	if _, n := cutStatePrefix(s[name:]); n > 0 {
+		name += n
+	}
+	loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[name:])
+	if loc == nil || !textKeyAllowed(s[name+loc[2]:name+loc[3]]) {
+		return notNestedKey, 0
+	}
+	if lineStart {
+		return nestedKey, name
+	}
+	return valueEndingInKeyName, name
+}
+
+// cutStatePrefix returns name without a "user:" or "app:" state prefix, as
+// isSensitiveKey reads one, and the length of the prefix, or name and 0.
+func cutStatePrefix(name string) (string, int) {
+	for _, prefix := range []string{session.KeyPrefixUser, session.KeyPrefixApp} {
+		if len(name) >= len(prefix) && strings.EqualFold(name[:len(prefix)], prefix) {
+			return name[len(prefix):], len(prefix)
+		}
+	}
+	return name, 0
+}
+
 // nestedKeyName classifies a value that may start a nested pair (see
 // nestsSensitiveKey): name is the name of that pair, which begins at offset
 // at of the text, and lineStart reports whether the value starts a line.
@@ -1829,6 +1993,13 @@ func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind,
 // sensitive key name in name, and so the pair that it starts, begins in the
 // text.
 func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
+	// A child of a state key, such as user:DB_PASSWORD, is the key without
+	// its prefix, which the pair is read from.
+	if rest, n := cutStatePrefix(name); n > 0 {
+		if kind, pair := nestedKeyName(rest, at+n, lineStart); kind != notNestedKey {
+			return kind, pair
+		}
+	}
 	if _, ok := sensitiveKeys[name]; ok {
 		return nestedKey, at
 	}
@@ -1865,6 +2036,11 @@ func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
 // x", at the end of the value of that pair, and so on. open is the number of
 // brackets opened before the key of the value.
 func nestedPairEnd(s string, pair, open int) int {
+	// A value longer than maxNestedKeyLen may still be read as a key once
+	// (see oversizedNestedKey), but not again after it, or a run of such
+	// keys, as in token:token:token:..., would be matched again from each
+	// one of them.
+	oversizedRead := false
 	for {
 		loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[pair:])
 		if loc == nil {
@@ -1873,6 +2049,12 @@ func nestedPairEnd(s string, pair, open int) int {
 			return pair
 		}
 		start, end := pair+loc[8], pair+loc[9]
+		if end-start > maxNestedKeyLen {
+			if oversizedRead {
+				return textValueEnd(s, start, end, open)
+			}
+			oversizedRead = true
+		}
 		kind, next := nestsSensitiveKey(s, start, end, startsLine(s, pair+loc[7], start))
 		if kind == notNestedKey {
 			return textValueEnd(s, start, end, open)

@@ -4241,6 +4241,138 @@ func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
 	}
 }
 
+// testSecretError writes a bare credential, which no text pattern can find.
+type testSecretError struct{ secret string }
+
+func (e testSecretError) Error() string { return e.secret }
+
+type testSecretStringer struct{ apiKey string }
+
+func (e testSecretStringer) String() string { return "key " + e.apiKey }
+
+type testSecretBytesError struct{ password []byte }
+
+func (e testSecretBytesError) Error() string { return "login failed with " + string(e.password) }
+
+type testSecretOpaqueError struct{ token []string }
+
+func (e testSecretOpaqueError) Error() string { return strings.Join(e.token, ",") }
+
+// testToken has a sensitive type name.
+type testToken struct{ raw string }
+
+func (e testToken) Error() string { return e.raw }
+
+type testWrappedSecretError struct {
+	msg string
+	err error
+}
+
+func (e testWrappedSecretError) Error() string { return e.msg + ": " + e.err.Error() }
+
+// testPlainFieldError has fields that are not named for credentials.
+type testPlainFieldError struct {
+	op   string
+	code int
+}
+
+func (e testPlainFieldError) Error() string { return fmt.Sprintf("%s failed (%d)", e.op, e.code) }
+
+type testHidden struct{ msg string }
+
+type testEmbeddedHiddenError struct{ testHidden }
+
+func (e testEmbeddedHiddenError) Error() string { return "embedded " + e.msg }
+
+type testEmbeddedHiddenStringer struct{ *testHidden }
+
+func (e testEmbeddedHiddenStringer) String() string { return "stringer " + e.msg }
+
+type testEmbeddedVisible struct{ testHidden }
+
+func (e testEmbeddedVisible) Error() string { return "visible " + e.msg }
+
+type testEmbeddedVisibleError struct {
+	testEmbeddedHidden2
+}
+
+type testEmbeddedHidden2 struct{ Exported string }
+
+func (e testEmbeddedVisibleError) Error() string { return "never used" }
+
+func TestSmartTruncate_OpaqueMethodsDoNotWriteCredentials(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	tests := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"error holding a bare credential", testSecretError{secret}, `"[REDACTED]"`},
+		{"pointer to it", &testSecretError{secret}, `"[REDACTED]"`},
+		{"stringer holding a bare credential", testSecretStringer{secret}, `"key [REDACTED]"`},
+		{"credential held as bytes", testSecretBytesError{[]byte(secret)}, `"login failed with [REDACTED]"`},
+		{"credential that is not text", testSecretOpaqueError{[]string{secret}}, `"[REDACTED]"`},
+		{"type with a sensitive name", testToken{secret}, `"[REDACTED]"`},
+		{"wrapped error holding a credential", testWrappedSecretError{"outer", testSecretError{secret}}, `"outer: [REDACTED]"`},
+		{"error holding a credential in a map", map[string]any{"err": testSecretError{secret}}, `{"err":"[REDACTED]"}`},
+		{"error holding a credential in a slice", []error{testSecretError{secret}}, `["[REDACTED]"]`},
+		{"error holding a credential in a struct field", struct{ Err error }{testSecretError{secret}}, `{"Err":"[REDACTED]"}`},
+		{"error without fields named for credentials", testPlainFieldError{"dial", 7}, `"dial failed (7)"`},
+		{"empty credential field", testSecretError{}, `""`},
+		{"zero value of a type with a sensitive name", testToken{}, `""`},
+		{"embedded struct with unexported fields in an error", testEmbeddedHiddenError{testHidden{"x"}}, `"embedded x"`},
+		{"embedded pointer to such a struct in a stringer", testEmbeddedHiddenStringer{&testHidden{"y"}}, `"stringer y"`},
+		{"embedded struct that is shown as an empty object", testEmbeddedVisible{testHidden{"v"}}, `"visible v"`},
+		{"embedded struct with an exported field keeps its fields", testEmbeddedVisibleError{testEmbeddedHidden2{"e"}}, `{"Exported":"e"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%v) error: %v", tt.in, err)
+			}
+			if strings.Contains(string(got), secret) {
+				t.Errorf("SmartTruncate(%v) = %s, which holds the secret", tt.in, got)
+			}
+			if string(got) != tt.want {
+				t.Errorf("SmartTruncate(%v) = %s, want %s", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	t.Run("a credential is written when redaction is off", func(t *testing.T) {
+		got, _, err := smartTruncate(testSecretError{secret}, 1<<20, false)
+		if err != nil || string(got) != `"`+secret+`"` {
+			t.Errorf("smartTruncate(testSecretError, redact off) = (%s, %v), want %q", got, err, secret)
+		}
+	})
+}
+
+func TestShowsExportedFields_Embedded(t *testing.T) {
+	type cyclic struct{ *cyclic }
+	tests := []struct {
+		name string
+		in   any
+		want bool
+	}{
+		{"exported field", struct{ A int }{}, true},
+		{"unexported field only", testHidden{}, false},
+		{"embedded struct with unexported fields only", testEmbeddedVisible{}, false},
+		{"embedded pointer to such a struct", testEmbeddedHiddenStringer{}, false},
+		{"embedded struct with an exported field", testEmbeddedVisibleError{}, true},
+		{"exported field tagged out", struct {
+			A int `json:"-"`
+		}{}, false},
+		{"embedded cycle", cyclic{}, false},
+		{"not a struct", 3, false},
+	}
+	for _, tt := range tests {
+		if got := showsExportedFields(reflect.ValueOf(tt.in)); got != tt.want {
+			t.Errorf("%s: showsExportedFields(%T) = %v, want %v", tt.name, tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestFormatResponseContent_SanitizesAndBoundsSummary(t *testing.T) {
 	t.Run("function names are sanitized", func(t *testing.T) {
 		content := &genai.Content{Parts: []*genai.Part{
