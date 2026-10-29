@@ -18,7 +18,6 @@ import (
 	"context"
 	"iter"
 	"maps"
-	"reflect"
 	"strings"
 
 	"google.golang.org/genai"
@@ -39,7 +38,7 @@ type streamingResponseAggregator struct {
 	currentThoughtSignature []byte
 
 	sequence             []*genai.Part
-	currentTextBuffer    string
+	currentTextBuffer    strings.Builder
 	currentTextIsThought bool
 	finishReason         genai.FinishReason
 
@@ -47,6 +46,10 @@ type streamingResponseAggregator struct {
 	currentFunctionID               string
 	currentFunctionArgs             map[string]any
 	currentFunctionThoughtSignature []byte
+	// streamedString assembles the string argument being streamed. The value
+	// stored at its path aliases this buffer, so appending a chunk neither
+	// copies what came before nor allocates until the buffer grows.
+	streamedString strings.Builder
 }
 
 // NewStreamingResponseAggregator creates a new, initialized streamingResponseAggregator.
@@ -99,20 +102,20 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 
 	for _, part := range llmResponse.Content.Parts {
 		// gemini 3 in streaming returns a last response with an empty part. We will filter it out.
-		if reflect.ValueOf(*part).IsZero() {
+		if isZeroPart(*part) {
 			continue
 		}
 		if len(part.ThoughtSignature) > 0 {
 			s.currentThoughtSignature = part.ThoughtSignature
 		}
 		if part.Text != "" {
-			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
+			if s.currentTextBuffer.Len() > 0 && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
 			}
-			if s.currentTextBuffer == "" {
+			if s.currentTextBuffer.Len() == 0 {
 				s.currentTextIsThought = part.Thought
 			}
-			s.currentTextBuffer += part.Text
+			s.currentTextBuffer.WriteString(part.Text)
 		} else if part.FunctionCall != nil {
 			// Process function call (handles both streaming Args and non-streaming Args
 			s.processFunctionCallPart(part)
@@ -178,19 +181,22 @@ func (s *streamingResponseAggregator) getValueFromPartialArg(partialArg *genai.P
 	var hasValue bool
 
 	if partialArg.StringValue != "" {
-		stringChunk := partialArg.StringValue
 		hasValue = true
 
 		// A string is streamed in chunks that all carry the same path, so
 		// append this one to whatever of it has already been assembled.
 		existingValue, _ := valueByPath(s.currentFunctionArgs, segments)
+		existing, isString := existingValue.(string)
 
-		// Append to existing string or set new value
-		if str, ok := existingValue.(string); ok {
-			value = str + stringChunk
-		} else {
-			value = stringChunk
+		// While one argument streams, the string at its path is the buffer's
+		// own content and this comparison is a pointer check. It copies only
+		// when the chunk belongs to a different argument than the last one.
+		if !isString || existing != s.streamedString.String() {
+			s.streamedString.Reset()
+			s.streamedString.WriteString(existing)
 		}
+		s.streamedString.WriteString(partialArg.StringValue)
+		value = s.streamedString.String()
 
 	} else if partialArg.NumberValue != nil {
 		value = *partialArg.NumberValue
@@ -406,14 +412,13 @@ func valueByPath(args map[string]any, segments []pathSegment) (any, bool) {
 }
 
 func (s *streamingResponseAggregator) flushTextBufferToSequence() {
-	// Check if buffer has content (strings.Builder.Len() is efficient)
-	if s.currentTextBuffer != "" {
+	if s.currentTextBuffer.Len() > 0 {
 		s.sequence = append(s.sequence, &genai.Part{
-			Text:    s.currentTextBuffer,
+			Text:    s.currentTextBuffer.String(),
 			Thought: s.currentTextIsThought,
 		})
 		// Reset the buffer and the state
-		s.currentTextBuffer = ""
+		s.currentTextBuffer.Reset()
 		s.currentTextIsThought = false
 	}
 }
@@ -439,6 +444,7 @@ func (s *streamingResponseAggregator) flushFunctionCallToSequence() {
 		s.currentFunctionID = ""
 		s.currentFunctionThoughtSignature = nil
 		s.currentFunctionArgs = make(map[string]any)
+		s.streamedString.Reset()
 	}
 }
 
