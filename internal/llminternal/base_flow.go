@@ -82,6 +82,25 @@ type Flow struct {
 	// reconnect bounds RunLive's reconnect attempts. Nil means the defaults;
 	// only tests set it, to shrink the delays.
 	reconnect *liveReconnectPolicy
+
+	// toolsets holds each Toolset's tools as resolved for the current
+	// invocation, so a tool loop resolves a toolset once per invocation
+	// rather than before every model call.
+	toolsets toolsetCache
+}
+
+// toolsetCache memoizes the agent's toolsets for one invocation, in
+// Toolsets order. A toolset that implements
+// toolinternal.InvocationCacheDisabler is never stored and is resolved anew
+// on every step.
+type toolsetCache struct {
+	invocationID string
+	entries      []toolsetCacheEntry
+}
+
+type toolsetCacheEntry struct {
+	tools    []tool.Tool
+	resolved bool
 }
 
 var (

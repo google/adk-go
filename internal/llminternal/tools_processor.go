@@ -21,14 +21,16 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
-// toolProcessor populates f.Tools on every step by re-evaluating each
-// Toolset. Toolsets may return different tools based on session state that
-// was modified by an earlier step in the same Run(), so the tool list must
-// be rebuilt before each model call rather than being cached across steps.
+// toolProcessor populates f.Tools on every step. A Toolset is resolved once
+// per invocation and its tools reused for the invocation's later steps,
+// unless it opts out through toolinternal.InvocationCacheDisabler because
+// its tools depend on state that an earlier step of the same Run() may have
+// changed; such a toolset is re-evaluated before each model call.
 func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmAgent, ok := ctx.Agent().(Agent)
@@ -36,15 +38,23 @@ func toolProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) 
 			yield(nil, fmt.Errorf("agent %v is not an LLMAgent", ctx.Agent().Name()))
 			return
 		}
+		toolsets := Reveal(llmAgent).Toolsets
+		if f.toolsets.invocationID != ctx.InvocationID() || len(f.toolsets.entries) != len(toolsets) {
+			f.toolsets = toolsetCache{invocationID: ctx.InvocationID(), entries: make([]toolsetCacheEntry, len(toolsets))}
+		}
 		tools := slices.Clip(Reveal(llmAgent).Tools)
-		for _, toolSet := range Reveal(llmAgent).Toolsets {
-			tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
-			if err != nil {
-				yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
-				return
+		for i, toolSet := range toolsets {
+			entry := &f.toolsets.entries[i]
+			if !entry.resolved {
+				tsTools, err := toolSet.Tools(icontext.NewReadonlyContext(ctx))
+				if err != nil {
+					yield(nil, fmt.Errorf("failed to extract tools from the tool set %q: %w", toolSet.Name(), err))
+					return
+				}
+				entry.tools = tsTools
+				entry.resolved = !toolinternal.DisablesInvocationCache(toolSet)
 			}
-
-			tools = append(tools, tsTools...)
+			tools = append(tools, entry.tools...)
 		}
 		f.Tools = tools
 	}

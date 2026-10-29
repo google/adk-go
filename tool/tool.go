@@ -48,6 +48,12 @@ type Tool interface {
 
 // Toolset is an interface for a collection of tools. It allows grouping
 // related tools together and providing them to an agent.
+//
+// The flow resolves a Toolset once per invocation and reuses its tools for
+// the remaining model calls of that invocation. A Toolset whose tools depend
+// on state that changes within an invocation opts out by also implementing
+// DisableInvocationCache() bool and returning true; it is then resolved before
+// every model call.
 type Toolset interface {
 	// Name returns the name of the toolset.
 	Name() string
@@ -55,6 +61,13 @@ type Toolset interface {
 	// ReadonlyContext can be used to dynamically determine which tools
 	// to return based on the current invocation state.
 	Tools(ctx agent.ReadonlyContext) ([]Tool, error)
+}
+
+// disablesInvocationCache reports whether ts opts out of the flow's
+// per-invocation tool cache, so a wrapper can pass the choice on.
+func disablesInvocationCache(ts Toolset) bool {
+	d, ok := ts.(interface{ DisableInvocationCache() bool })
+	return ok && d.DisableInvocationCache()
 }
 
 // Predicate is a function which decides whether a tool should be exposed to LLM.
@@ -101,6 +114,11 @@ type filteredToolset struct {
 
 func (f *filteredToolset) Name() string {
 	return f.toolset.Name()
+}
+
+// DisableInvocationCache passes the wrapped toolset's choice on.
+func (f *filteredToolset) DisableInvocationCache() bool {
+	return disablesInvocationCache(f.toolset)
 }
 
 func (f *filteredToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
@@ -151,6 +169,11 @@ type confirmationToolset struct {
 }
 
 func (c *confirmationToolset) Name() string { return c.toolset.Name() }
+
+// DisableInvocationCache passes the wrapped toolset's choice on.
+func (c *confirmationToolset) DisableInvocationCache() bool {
+	return disablesInvocationCache(c.toolset)
+}
 
 func (c *confirmationToolset) Tools(ctx agent.ReadonlyContext) ([]Tool, error) {
 	tools, err := c.toolset.Tools(ctx)

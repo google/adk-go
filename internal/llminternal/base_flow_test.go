@@ -1297,12 +1297,14 @@ func captureLog(t *testing.T, fn func()) string {
 
 // dynamicToolset returns different tools on each call to simulate a toolset
 // whose output depends on session state written by an earlier tool in the run.
+// It opts out of the per-invocation tool cache, as such a toolset must.
 type dynamicToolset struct {
 	callCount   int
 	toolsByCall map[int][]tool.Tool
 }
 
-func (d *dynamicToolset) Name() string { return "dynamic" }
+func (d *dynamicToolset) Name() string                 { return "dynamic" }
+func (d *dynamicToolset) DisableInvocationCache() bool { return true }
 func (d *dynamicToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 	tools := d.toolsByCall[d.callCount]
 	d.callCount++
@@ -1310,9 +1312,10 @@ func (d *dynamicToolset) Tools(_ agent.ReadonlyContext) ([]tool.Tool, error) {
 }
 
 // TestToolProcessorReEvaluatesToolsetsEachStep verifies that toolProcessor
-// calls Toolset.Tools() on every step, not just the first. This ensures that
-// tools activated by session-state changes in an earlier step are visible to
-// subsequent model calls within the same Runner.Run().
+// calls Toolset.Tools() on every step for a toolset that opts out of the
+// per-invocation cache, not just the first. This ensures that tools activated
+// by session-state changes in an earlier step are visible to subsequent model
+// calls within the same Runner.Run().
 func TestToolProcessorReEvaluatesToolsetsEachStep(t *testing.T) {
 	extraTool := &mockFunctionTool{name: "extra_tool"}
 

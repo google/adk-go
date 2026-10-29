@@ -121,3 +121,84 @@ func TestToolProcessor_SpareCapacityNotCorrupted(t *testing.T) {
 		t.Errorf("unexpected flow2 tools: %v, %v", flow2.Tools[0].Name(), flow2.Tools[1].Name())
 	}
 }
+
+// countingTestToolset counts its resolutions and opts out of the
+// per-invocation cache when uncached is set.
+type countingTestToolset struct {
+	tools    []tool.Tool
+	uncached bool
+	calls    int
+}
+
+func (c *countingTestToolset) Name() string                 { return "counting_toolset" }
+func (c *countingTestToolset) DisableInvocationCache() bool { return c.uncached }
+func (c *countingTestToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	c.calls++
+	return c.tools, nil
+}
+
+func TestToolProcessor_ResolvesToolsetOncePerInvocation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		uncached  bool
+		wantCalls int
+	}{
+		{name: "cached", uncached: false, wantCalls: 1},
+		{name: "opted out", uncached: true, wantCalls: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			toolset := &countingTestToolset{tools: []tool.Tool{&toolsProcessorMockTool{name: "tool_a"}}, uncached: tc.uncached}
+			mockAgent := &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "test_agent"})),
+				s:     &State{Toolsets: []tool.Toolset{toolset}},
+			}
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent, InvocationID: "inv-1"})
+			flow := &Flow{}
+			for range 3 {
+				for _, err := range toolProcessor(ctx, &model.LLMRequest{}, flow) {
+					if err != nil {
+						t.Fatalf("toolProcessor error: %v", err)
+					}
+				}
+				if len(flow.Tools) != 1 || flow.Tools[0].Name() != "tool_a" {
+					t.Fatalf("unexpected tools: %v", flow.Tools)
+				}
+			}
+			if toolset.calls != tc.wantCalls {
+				t.Errorf("Tools() calls within one invocation = %d, want %d", toolset.calls, tc.wantCalls)
+			}
+
+			// A new invocation on the same flow resolves again.
+			ctx2 := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent, InvocationID: "inv-2"})
+			for _, err := range toolProcessor(ctx2, &model.LLMRequest{}, flow) {
+				if err != nil {
+					t.Fatalf("toolProcessor error: %v", err)
+				}
+			}
+			if toolset.calls != tc.wantCalls+1 {
+				t.Errorf("Tools() calls after a second invocation = %d, want %d", toolset.calls, tc.wantCalls+1)
+			}
+		})
+	}
+}
+
+func TestToolProcessor_WrappersPassOptOutOn(t *testing.T) {
+	inner := &countingTestToolset{tools: []tool.Tool{&toolsProcessorMockTool{name: "tool_a"}}, uncached: true}
+	wrapped := tool.WithConfirmation(tool.FilterToolset(inner, func(agent.ReadonlyContext, tool.Tool) bool { return true }), true, nil)
+	mockAgent := &mockLLMAgent{
+		Agent: utils.Must(agent.New(agent.Config{Name: "test_agent"})),
+		s:     &State{Toolsets: []tool.Toolset{wrapped}},
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: mockAgent, InvocationID: "inv-1"})
+	flow := &Flow{}
+	for range 2 {
+		for _, err := range toolProcessor(ctx, &model.LLMRequest{}, flow) {
+			if err != nil {
+				t.Fatalf("toolProcessor error: %v", err)
+			}
+		}
+	}
+	if inner.calls != 2 {
+		t.Errorf("Tools() calls through opted-out wrappers = %d, want 2", inner.calls)
+	}
+}

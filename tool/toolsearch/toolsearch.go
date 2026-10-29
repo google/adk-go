@@ -413,6 +413,11 @@ type gatingToolset struct {
 
 func (g *gatingToolset) Name() string { return "SearchGatedToolset" }
 
+// DisableInvocationCache opts out of the flow's per-invocation tool cache:
+// Tools reads the discovered-tool state that search_tools writes mid-turn,
+// so it must be re-evaluated before every model call.
+func (g *gatingToolset) DisableInvocationCache() bool { return true }
+
 // requestProcessor matches the per-tool hook ADK uses to pack a tool's
 // declaration into the outgoing LLM request. functiontool and the other ADK
 // tools implement it; we type-assert to it structurally to avoid importing

@@ -41,6 +41,23 @@ type RequestProcessor interface {
 	ProcessRequest(ctx agent.Context, req *model.LLMRequest) error
 }
 
+// InvocationCacheDisabler is implemented by toolsets whose Tools result
+// depends on state that changes within an invocation, such as a toolset that
+// exposes tools discovered by an earlier step of the same turn. The flow
+// resolves such a toolset before every model call. Every other toolset is
+// resolved once per invocation and the result is reused for the remaining
+// model calls of that invocation.
+type InvocationCacheDisabler interface {
+	DisableInvocationCache() bool
+}
+
+// DisablesInvocationCache reports whether ts opts out of per-invocation
+// caching of its Tools result.
+func DisablesInvocationCache(ts tool.Toolset) bool {
+	d, ok := ts.(InvocationCacheDisabler)
+	return ok && d.DisableInvocationCache()
+}
+
 // ResponseDeferrer allows to skip generation of the FR by the tool.
 // Used in the cases when FR is generated externally (e.g. TaskAgentTool)
 type ResponseDeferrer interface {
