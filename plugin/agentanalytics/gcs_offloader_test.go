@@ -38,6 +38,7 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	bq "cloud.google.com/go/bigquery"
@@ -6080,15 +6081,23 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 
 		// A name that fits is hashed too if its extension is not safe, and
 		// the extension that the hashed name ends in makes another name
-		// again.
-		for _, ext := range []string{".a~b", "~", pathSegmentHashSuffix(base), ".a b", "png", ".png/..", "."} {
-			rawOut := base + ext
-			got := pathWith(ext)
-			if want := rawOut + pathSegmentHashSuffix(rawOut); got != want {
-				t.Errorf("name with extension %q = %q, want %q", ext, got, want)
+		// again. '~' and '/' in the extension read as '_' in the name, and
+		// the hash is that of the extension as it was.
+		for _, tc := range []struct{ ext, readable string }{
+			{".a~b", ".a_b"},
+			{"~", "_"},
+			{pathSegmentHashSuffix(base), "_" + strings.TrimPrefix(pathSegmentHashSuffix(base), "~")},
+			{".a b", ".a b"},
+			{"png", "png"},
+			{".png/..", ".png_.."},
+			{".", "."},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("name with extension %q = %q, want %q", tc.ext, got, want)
 			}
 			if again := pathWith(strings.TrimPrefix(got, base)); again == got {
-				t.Errorf("names with extensions %q and %q both = %q", ext, strings.TrimPrefix(got, base), got)
+				t.Errorf("names with extensions %q and %q both = %q", tc.ext, strings.TrimPrefix(got, base), got)
 			}
 		}
 		// An empty or safe extension is kept as is.
@@ -6166,6 +6175,110 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		} {
 			check(tc.name, pathWith(tc.ext))
 		}
+	})
+
+	t.Run("an unsafe extension cannot put a line break or control character in the name", func(t *testing.T) {
+		// Cloud Storage rejects CR and LF in an object name. The prefix and the
+		// ids never hold a control character, so the extension of a direct
+		// call is the one part that can. The readable part of the name has
+		// each such rune, each other rune that cleanGCSPrefix replaces, and
+		// each '/', replaced with '_', and the hash is that of the name with
+		// the extension as it was, so extensions that read the same are told
+		// apart by the hash.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		names := map[string]string{}
+		check := func(desc, name string) {
+			t.Helper()
+			if !utf8.ValidString(name) {
+				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
+			}
+			if len(name) > maxGCSObjectNameBytes {
+				t.Errorf("%s: len(name) = %d, exceeds maxGCSObjectNameBytes (%d)", desc, len(name), maxGCSObjectNameBytes)
+			}
+			for i, r := range name {
+				if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\\' {
+					t.Errorf("%s: name has %U at byte %d, want no control character, line or paragraph separator or backslash", desc, r, i)
+					break
+				}
+			}
+			if prev, ok := names[name]; ok {
+				t.Errorf("%s and %s both give the name %q", prev, desc, name)
+			}
+			names[name] = desc
+		}
+
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is what follows base ahead of the hash suffix.
+			readable string
+		}{
+			{"a carriage return", ".png\r", ".png_"},
+			{"a line feed", ".png\n", ".png_"},
+			{"a carriage return and a line feed", ".png\r\n", ".png__"},
+			{"a line feed and a carriage return", ".png\n\r", ".png__"},
+			{"a line feed alone", "\n", "_"},
+			{"a line feed in the middle", ".p\nng", ".p_ng"},
+			{"NUL", ".png\x00", ".png_"},
+			{"a tab", ".png\t", ".png_"},
+			{"the last C0 control character", ".png\x1f", ".png_"},
+			{"DEL", ".png\x7f", ".png_"},
+			{"the first C1 control character", ".png\u0080", ".png_"},
+			{"next line", ".png\u0085", ".png_"},
+			{"the last C1 control character", ".png\u009f", ".png_"},
+			{"line separator", ".png\u2028", ".png_"},
+			{"paragraph separator", ".png\u2029", ".png_"},
+			{"a backslash", `.png\`, ".png_"},
+			{"a tilde", ".png~", ".png_"},
+			{"a slash", ".png/", ".png_"},
+			{"a slash before a dot-dot", ".png/..", ".png_.."},
+			{"a slash alone", "/", "_"},
+			{"line breaks around an invalid byte", ".png\r\xff\n", ".png___"},
+			{"the replacement as it is", ".png_", ".png_"},
+			{"two replacements as they are", ".png__", ".png__"},
+			{"a literal U+FFFD", ".png\uFFFD", ".png\uFFFD"},
+			{"spaces and Unicode", ".a b日本é", ".a b日本é"},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("%s: name = %q, want %q", tc.name, got, want)
+			}
+			check(tc.name, got)
+		}
+
+		// An oversized extension is cut in the readable part, after the
+		// replacements, and the hash is still that of the whole raw name.
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is the name before the cut: the base name and the
+			// extension as the name shows it.
+			readable string
+		}{
+			{"line breaks", "." + strings.Repeat("\r\n", 600), base + "." + strings.Repeat("__", 600)},
+			{"line separators between letters", "." + strings.Repeat("\u2028a", 500), base + "." + strings.Repeat("_a", 500)},
+		} {
+			want := tc.readable[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(base+tc.ext)
+			got := pathWith(tc.ext)
+			if got != want {
+				t.Errorf("name with an oversized extension of %s = %q, want %q", tc.name, got, want)
+			}
+			check("an oversized extension of "+tc.name, got)
+		}
+
+		// The cut backs up to a rune boundary of the readable part: 959 bytes
+		// fall inside the 231st three-byte rune, so the name keeps 230 of them.
+		multi := strings.Repeat("日\r", 400)
+		wantMulti := base + strings.Repeat("日_", 230) + pathSegmentHashSuffix(base+multi)
+		gotMulti := pathWith(multi)
+		if gotMulti != wantMulti {
+			t.Errorf("name with an oversized extension of three-byte runes and carriage returns = %q, want %q", gotMulti, wantMulti)
+		}
+		check("an oversized extension of three-byte runes and carriage returns", gotMulti)
 	})
 
 	t.Run("prefix sanitization and reserved paths", func(t *testing.T) {

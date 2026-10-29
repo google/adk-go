@@ -385,6 +385,23 @@ func cleanGCSPrefix(prefix string) string {
 	return truncateWithHash(joined, trimmed, maxGCSPrefixBytes)
 }
 
+// sanitizeExtension returns ext as the readable part of a name that ends in a
+// hash because ext is not one that isSafeExtension accepts. Each run of bytes
+// that is not valid UTF-8 is replaced with one '_', and so is each rune for
+// which isUnsafeGCSPrefixRune reports true, and each '/', which would make
+// part of the extension a path segment of its own. Other runes are kept,
+// including a literal U+FFFD, as cleanGCSPrefix keeps them. The result is valid
+// UTF-8 and no longer than ext, but replacements are not injective, so the name
+// must end in the hash of the extension as it was.
+func sanitizeExtension(ext string) string {
+	return strings.Map(func(r rune) rune {
+		if isUnsafeGCSPrefixRune(r) || r == '/' {
+			return '_'
+		}
+		return r
+	}, strings.ToValidUTF8(ext, "_"))
+}
+
 // gcsObjectPath returns the name of the object that holds a part:
 //
 //	[prefix/]<UTC date>/<trace id>/<span id>_<event id>_c<content>_p<part><ext>
@@ -406,11 +423,13 @@ func cleanGCSPrefix(prefix string) string {
 // rewritten name in the extension too, and an extension that carries the
 // suffix of a rewritten name cannot make a name equal to that one.
 //
-// Such an extension may also be invalid UTF-8, which the prefix and the ids
-// never are. The name is then valid UTF-8 too: its readable part has each run
-// of invalid bytes replaced with '_', while the hash still covers the name
-// with the extension as it was, so extensions that differ only in those bytes
-// give distinct names.
+// Such an extension may also be invalid UTF-8, or hold a line break or another
+// control character, which the prefix and the ids never do. The name is then
+// valid UTF-8 and free of such characters too: its readable part is the name up
+// to the extension followed by sanitizeExtension of the extension, which
+// replaces each run of invalid bytes and each such rune with '_', while the
+// hash still covers the name with the extension as it was, so extensions that
+// differ only in those bytes or runes give distinct names.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
 	if p := cleanGCSPrefix(prefix); p != "" {
@@ -443,11 +462,14 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 	if isSafeExtension(ext) && len(ext) < maxGCSObjectNameBytes-pathSegmentHashSuffixLen {
 		return truncateWithHash(out[:len(out)-len(ext)], out, maxGCSObjectNameBytes-len(ext)) + ext
 	}
-	// Only an unsafe extension can make out invalid UTF-8: cleanGCSPrefix and
-	// pathSegment return valid UTF-8, and a safe extension is ASCII. The
-	// readable part of the name is made valid, and the hash is still that of
-	// the raw out.
-	return truncateWithHash(strings.ToValidUTF8(out, "_"), out, maxGCSObjectNameBytes)
+	// Only an unsafe extension can make out invalid UTF-8 or put a control
+	// character in it: cleanGCSPrefix and pathSegment return valid UTF-8 without
+	// control characters, and a safe extension is ASCII letters and digits. Out
+	// ends with ext, so only the extension is sanitized for the readable part:
+	// the '/' that separate the parts and the '~' of their own hash suffixes
+	// stay. The hash is still that of the raw out.
+	readable := out[:len(out)-len(ext)] + sanitizeExtension(ext)
+	return truncateWithHash(readable, out, maxGCSObjectNameBytes)
 }
 
 // uploadTask is one payload to upload and the content_parts entry that is
