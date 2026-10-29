@@ -20,6 +20,9 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/exec"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -6452,4 +6455,259 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	if got := bp.DropStats().AppendFailureDrops; got != 3 {
 		t.Errorf("AppendFailureDrops = %d, want 3 (the whole batch, as an upper bound)", got)
 	}
+}
+
+func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
+	if os.Getenv("REVIEW_CYCLIC_METADATA_SUBPROCESS") == "1" {
+		debug.SetMaxStack(64 * 1024)
+		requests := make(chan *storagepb.AppendRowsRequest, 4)
+		srv := &scriptedWriteServer{
+			script:   func(int32) (time.Duration, error) { return 0, nil },
+			requests: requests,
+		}
+		writeClient := newScriptedWriteClient(t, srv)
+		cfg := DefaultConfig()
+		cfg.BatchSize = 10
+		cfg.BatchFlushIntv = time.Hour
+		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor: %v", err)
+		}
+		bp.Start()
+
+		row := map[string]any{"event_type": "X"}
+		row["ignored_metadata"] = row
+		objRef := map[string]any{"uri": "gs://bucket/obj"}
+		objRef["ignored_ref_cycle"] = objRef
+		part := map[string]any{"text": "part-text", "object_ref": objRef}
+		part["ignored_part_cycle"] = part
+		row["content_parts"] = []map[string]any{part}
+
+		bp.Append(row)
+		bp.Append(map[string]any{"event_type": "Y"})
+		bp.Close()
+		close(requests)
+
+		var rows []map[string]any
+		for req := range requests {
+			rows = append(rows, decodeArrowRows(t, req)...)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("received %d rows, want 2", len(rows))
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestReviewIgnoredCyclicMetadataDoesNotCrash$")
+	cmd.Env = append(os.Environ(), "REVIEW_CYCLIC_METADATA_SUBPROCESS=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed (%v):\n%s", err, out)
+	}
+}
+
+func TestStreamWriter_InBandRejectionDoesNotIntroduceAmbiguity(t *testing.T) {
+	t.Run("in_band_rejection_then_already_exists_recognizes_unconfirmed_offset_conflict", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				if attempt == 1 {
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{Code: int32(codes.Internal), Message: "definite in-band rejection"},
+						},
+					}, nil
+				}
+				return &storagepb.AppendRowsResponse{
+					Response: &storagepb.AppendRowsResponse_Error{
+						Error: &statuspb.Status{Code: int32(codes.AlreadyExists), Message: "offset 0 already occupied"},
+					},
+				}, nil
+			},
+		}
+		bp := newErrorClassificationProcessor(t, srv, true)
+
+		err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}, {"event_type": "Y"}})
+		if err == nil {
+			t.Fatal("writeBatch() error = nil, want unconfirmed offset conflict failure")
+		}
+		if got := bp.streamWriter.streamOffset.Load(); got != 0 {
+			t.Errorf("streamOffset = %d, want 0 (neither request accepted the batch)", got)
+		}
+		if got := bp.DropStats().AppendFailureDrops; got != 2 {
+			t.Errorf("AppendFailureDrops = %d, want 2", got)
+		}
+		srv.mu.Lock()
+		created := len(srv.createReqs)
+		srv.mu.Unlock()
+		if created != 2 {
+			t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + rotation after unconfirmed AlreadyExists)", created)
+		}
+	})
+
+	t.Run("not_found_rotation_followed_by_in_band_rejections_does_not_desync_or_arm_cooldown", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				switch attempt {
+				case 1:
+					return nil, status.Error(codes.NotFound, "stream expired")
+				case 2, 3, 4, 5:
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{Code: int32(codes.Internal), Message: "definite in-band rejection on fresh stream"},
+						},
+					}, nil
+				default:
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+		bp := newErrorClassificationProcessor(t, srv, true)
+
+		err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "BATCH_1"}})
+		if err == nil {
+			t.Fatal("first writeBatch() error = nil, want failure after retries exhausted")
+		}
+		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops after first batch = %d, want 1", got)
+		}
+		bp.streamWriter.mu.Lock()
+		desynced := bp.streamWriter.offsetDesynced
+		retryAt := bp.streamWriter.rotateRetryAt
+		bp.streamWriter.mu.Unlock()
+		if desynced {
+			t.Error("offsetDesynced = true after definite in-band rejections, want false")
+		}
+		if !retryAt.IsZero() {
+			t.Errorf("rotateRetryAt = %v, want zero (no cooldown after definite in-band rejections)", retryAt)
+		}
+
+		if err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "BATCH_2"}}); err != nil {
+			t.Fatalf("second writeBatch() error = %v, want nil on healthy rotated stream", err)
+		}
+		if got := bp.streamWriter.streamOffset.Load(); got != 1 {
+			t.Errorf("streamOffset after second batch = %d, want 1", got)
+		}
+		srv.mu.Lock()
+		created := len(srv.createReqs)
+		srv.mu.Unlock()
+		if created != 2 {
+			t.Errorf("CreateWriteStream calls = %d, want 2 (no extra rotation for second batch)", created)
+		}
+	})
+}
+
+func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *testing.T) {
+	const (
+		numRows              = 60
+		partsPerRow          = 10000
+		bigQueryRequestLimit = 10 * 1024 * 1024
+	)
+
+	sparseParts := make([]map[string]any, partsPerRow)
+	for i := range sparseParts {
+		sparseParts[i] = map[string]any{}
+	}
+
+	t.Run("writeBatch_splits_sparse_content_parts_under_10MiB", func(t *testing.T) {
+		requests := make(chan *storagepb.AppendRowsRequest, numRows)
+		srv := &scriptedWriteServer{
+			script:   func(int32) (time.Duration, error) { return 0, nil },
+			requests: requests,
+		}
+		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
+		cfg := DefaultConfig()
+		cfg.RetryConfig.MaxRetries = 0
+		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor: %v", err)
+		}
+		t.Cleanup(bp.Close)
+
+		batch := make([]map[string]any, numRows)
+		for i := range batch {
+			batch[i] = map[string]any{
+				"event_id":      fmt.Sprintf("sparse-%03d", i),
+				"event_type":    "X",
+				"content_parts": sparseParts,
+			}
+		}
+
+		if err := bp.writeBatch(context.Background(), batch); err != nil {
+			t.Fatalf("writeBatch() error = %v", err)
+		}
+		close(requests)
+
+		var gotIDs []string
+		numRequests := 0
+		for req := range requests {
+			numRequests++
+			if size := proto.Size(req); size > bigQueryRequestLimit {
+				t.Errorf("request %d is %d bytes, exceeds %d", numRequests, size, bigQueryRequestLimit)
+			}
+			for _, row := range decodeArrowRows(t, req) {
+				gotIDs = append(gotIDs, row["event_id"].(string))
+			}
+		}
+		if numRequests < 3 {
+			t.Errorf("requests = %d, want sparse batch split across at least 3 requests", numRequests)
+		}
+		if len(gotIDs) != numRows {
+			t.Fatalf("rows received = %d, want %d", len(gotIDs), numRows)
+		}
+		for i, id := range gotIDs {
+			if want := fmt.Sprintf("sparse-%03d", i); id != want {
+				t.Fatalf("row %d = %q, want %q", i, id, want)
+			}
+		}
+	})
+
+	t.Run("appendChunk_enforces_serialized_request_cap_directly", func(t *testing.T) {
+		requests := make(chan *storagepb.AppendRowsRequest, numRows)
+		srv := &scriptedWriteServer{
+			script:   func(int32) (time.Duration, error) { return 0, nil },
+			requests: requests,
+		}
+		writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
+		cfg := DefaultConfig()
+		cfg.RetryConfig.MaxRetries = 0
+		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor: %v", err)
+		}
+		t.Cleanup(bp.Close)
+
+		batch := make([]map[string]any, numRows)
+		for i := range batch {
+			batch[i] = map[string]any{
+				"event_id":      fmt.Sprintf("direct-%03d", i),
+				"event_type":    "X",
+				"content_parts": sparseParts,
+			}
+		}
+
+		// Calling appendChunk directly bypasses splitBatchByEstimatedBytes and
+		// exercises the post-serialization halving fallback.
+		if err := bp.appendChunk(context.Background(), batch); err != nil {
+			t.Fatalf("appendChunk() error = %v", err)
+		}
+		close(requests)
+
+		var gotIDs []string
+		numRequests := 0
+		for req := range requests {
+			numRequests++
+			if size := proto.Size(req); size > bigQueryRequestLimit {
+				t.Errorf("request %d is %d bytes, exceeds %d", numRequests, size, bigQueryRequestLimit)
+			}
+			for _, row := range decodeArrowRows(t, req) {
+				gotIDs = append(gotIDs, row["event_id"].(string))
+			}
+		}
+		if numRequests < 3 {
+			t.Errorf("requests = %d, want appendChunk fallback to split across at least 3 requests", numRequests)
+		}
+		if len(gotIDs) != numRows {
+			t.Fatalf("rows received = %d, want %d", len(gotIDs), numRows)
+		}
+	})
 }

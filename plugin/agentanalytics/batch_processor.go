@@ -35,6 +35,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -686,9 +687,49 @@ func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[st
 	return nil
 }
 
-// appendChunk builds one Arrow record batch from batch, which
-// splitBatchByEstimatedBytes has sized to fit one request, and appends it.
+// appendChunk builds an Arrow record batch from batch and appends it. If a
+// multi-row batch serializes to an AppendRowsRequest larger than
+// b.serializedAppendRequestByteLimit(), appendChunk halves the batch and
+// appends each half in order; a singleton row is sent as-is so splitting
+// always terminates.
 func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[string]any) error {
+	record := b.buildRecordBatch(batch)
+	if len(batch) > 1 {
+		batchBytes := serializeRecord(record, b.config.Logger)
+		if batchBytes != nil && b.streamWriter.serializedRequestSize(batchBytes, record.NumRows()) > b.serializedAppendRequestByteLimit() {
+			record.Release()
+			mid := len(batch) / 2
+			if err := b.appendChunk(writeCtx, batch[:mid]); err != nil {
+				return err
+			}
+			return b.appendChunk(writeCtx, batch[mid:])
+		}
+	}
+	defer record.Release()
+
+	res, err := b.streamWriter.append(writeCtx, record)
+	if err != nil {
+		return fmt.Errorf("streamWriter append error: %w", err)
+	}
+
+	if res.GetError() != nil || len(res.GetRowErrors()) > 0 {
+		if b.config.Logger != nil {
+			b.config.Logger.Printf("BigQuery response: %s", res.String())
+		}
+	}
+
+	if res.GetError() != nil {
+		return fmt.Errorf("batch append error from BigQuery: %v", res.GetError().GetMessage())
+	}
+
+	if len(res.GetRowErrors()) > 0 {
+		return fmt.Errorf("batch append error from BigQuery: %d row errors found", len(res.GetRowErrors()))
+	}
+
+	return nil
+}
+
+func (b *BatchProcessor) buildRecordBatch(batch []map[string]any) arrow.RecordBatch {
 	builder := array.NewRecordBuilder(b.allocator, b.arrowSchema)
 	defer builder.Release()
 
@@ -840,29 +881,7 @@ func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[strin
 		}
 	}
 
-	record := builder.NewRecordBatch()
-	defer record.Release()
-
-	res, err := b.streamWriter.append(writeCtx, record)
-	if err != nil {
-		return fmt.Errorf("streamWriter append error: %w", err)
-	}
-
-	if res.GetError() != nil || len(res.GetRowErrors()) > 0 {
-		if b.config.Logger != nil {
-			b.config.Logger.Printf("BigQuery response: %s", res.String())
-		}
-	}
-
-	if res.GetError() != nil {
-		return fmt.Errorf("batch append error from BigQuery: %v", res.GetError().GetMessage())
-	}
-
-	if len(res.GetRowErrors()) > 0 {
-		return fmt.Errorf("batch append error from BigQuery: %d row errors found", len(res.GetRowErrors()))
-	}
-
-	return nil
+	return builder.NewRecordBatch()
 }
 
 // maxAppendRequestBytes is the default size above which a batch is split into
@@ -871,9 +890,52 @@ func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[strin
 // schema that each request carries beyond the estimated payload.
 const maxAppendRequestBytes = 8 * 1024 * 1024
 
+// maxSerializedAppendRequestBytes is the hard ceiling on the serialized
+// protobuf size of a multi-row AppendRowsRequest; any multi-row chunk whose
+// serialized request exceeds this limit is halved before sending.
+const maxSerializedAppendRequestBytes = 9 * 1024 * 1024
+
 // perRowOverheadBytes covers the validity bits, offsets, and fixed-width
 // columns that a row adds to a record batch beyond the length of its strings.
 const perRowOverheadBytes = 256
+
+// perContentPartOverheadBytes covers the Arrow offset slots, validity bits,
+// and fixed-width part_index slot that Arrow allocates for every element of
+// content_parts (including its nested object_ref child builders) even when all
+// fields of the element map are nil or omitted.
+const perContentPartOverheadBytes = 64
+
+var projectedRowStringColumns = [...]string{
+	eventIDField,
+	"event_type",
+	"agent",
+	"session_id",
+	"invocation_id",
+	"user_id",
+	"trace_id",
+	"span_id",
+	"parent_span_id",
+	"status",
+	"error_message",
+	"content",
+	"attributes",
+	"latency_ms",
+}
+
+var projectedContentPartStringFields = [...]string{
+	"mime_type",
+	"uri",
+	"text",
+	"part_attributes",
+	"storage_mode",
+}
+
+var projectedObjectRefStringFields = [...]string{
+	"uri",
+	"version",
+	"authorizer",
+	"details",
+}
 
 // appendRequestByteLimit returns the estimated payload size above which a batch
 // is split.
@@ -884,41 +946,59 @@ func (b *BatchProcessor) appendRequestByteLimit() int {
 	return maxAppendRequestBytes
 }
 
-// estimateValueBytes approximates the bytes that v adds to a record batch. It
-// counts string lengths exactly and every other scalar as a word, which is
-// close enough to bound a request because the payload is dominated by strings.
-func estimateValueBytes(v any) int {
-	switch x := v.(type) {
-	case nil:
-		return 0
-	case string:
-		return len(x)
-	case []map[string]any:
-		n := 0
-		for _, part := range x {
-			n += estimateValueBytes(part)
-		}
-		return n
-	case map[string]any:
-		n := 0
-		for _, e := range x {
-			n += estimateValueBytes(e) + 8
-		}
-		return n
-	default:
-		return 8
+// serializedAppendRequestByteLimit returns the serialized protobuf request
+// size above which a multi-row chunk is halved before sending.
+func (b *BatchProcessor) serializedAppendRequestByteLimit() int {
+	if b.maxAppendBytes > 0 && b.maxAppendBytes < maxSerializedAppendRequestBytes {
+		return b.maxAppendBytes
 	}
+	return maxSerializedAppendRequestBytes
 }
 
+// estimateRowBytes approximates the bytes that row adds to a serialized Arrow
+// record batch by inspecting only the projected schema fields and concrete
+// value types that buildRecordBatch serializes. Unknown keys and unsupported
+// value types are ignored without recursion so arbitrary or cyclic caller
+// metadata cannot cause unbounded traversal.
 func estimateRowBytes(row map[string]any) int {
-	return perRowOverheadBytes + estimateValueBytes(row)
+	n := perRowOverheadBytes
+	if row == nil {
+		return n
+	}
+	for _, col := range projectedRowStringColumns {
+		if s, ok := row[col].(string); ok {
+			n += len(s)
+		}
+	}
+	if parts, ok := row["content_parts"].([]map[string]any); ok {
+		for _, part := range parts {
+			n += perContentPartOverheadBytes
+			if part == nil {
+				continue
+			}
+			for _, field := range projectedContentPartStringFields {
+				if s, ok := part[field].(string); ok {
+					n += len(s)
+				}
+			}
+			if objRef, ok := part["object_ref"].(map[string]any); ok {
+				for _, field := range projectedObjectRefStringFields {
+					if s, ok := objRef[field].(string); ok {
+						n += len(s)
+					}
+				}
+			}
+		}
+	}
+	return n
 }
 
 // splitBatchByEstimatedBytes cuts batch into consecutive chunks whose estimated
 // payload is at most limit bytes, keeping the order of the rows. A row whose
-// estimate alone exceeds limit becomes a chunk of its own, so one oversized row
-// cannot take the rows around it down with it. A batch that fits is returned as
-// the only chunk, without copying.
+// estimate alone exceeds limit is placed in a singleton chunk of its own so
+// earlier chunks can still be sent before it; if the server rejects that
+// singleton chunk, tryAppendBatch stops at that failure. A batch that fits is
+// returned as the only chunk, without copying.
 func splitBatchByEstimatedBytes(batch []map[string]any, limit int) [][]map[string]any {
 	if len(batch) <= 1 || limit <= 0 {
 		return [][]map[string]any{batch}
@@ -1235,6 +1315,35 @@ func (s *streamWriter) handleExactlyOnceError(
 	}
 }
 
+func (s *streamWriter) newAppendRowsRequestLocked(batchBytes []byte, numRows int64) *storagepb.AppendRowsRequest {
+	req := &storagepb.AppendRowsRequest{
+		WriteStream: s.streamName,
+		TraceId:     streamWriterTraceID(),
+		Rows: &storagepb.AppendRowsRequest_ArrowRows{
+			ArrowRows: &storagepb.AppendRowsRequest_ArrowData{
+				WriterSchema: &storagepb.ArrowSchema{
+					SerializedSchema: s.schemaBytes,
+				},
+				Rows: &storagepb.ArrowRecordBatch{
+					SerializedRecordBatch: batchBytes,
+					RowCount:              numRows,
+				},
+			},
+		},
+	}
+	if s.config.ExactlyOnceDelivery {
+		req.Offset = wrapperspb.Int64(s.streamOffset.Load())
+	}
+	return req
+}
+
+func (s *streamWriter) serializedRequestSize(batchBytes []byte, numRows int64) int {
+	s.mu.Lock()
+	req := s.newAppendRowsRequestLocked(batchBytes, numRows)
+	s.mu.Unlock()
+	return proto.Size(req)
+}
+
 func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch) (res *storagepb.AppendRowsResponse, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1326,24 +1435,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			continue
 		}
 
-		req := &storagepb.AppendRowsRequest{
-			WriteStream: s.streamName,
-			TraceId:     streamWriterTraceID(),
-			Rows: &storagepb.AppendRowsRequest_ArrowRows{
-				ArrowRows: &storagepb.AppendRowsRequest_ArrowData{
-					WriterSchema: &storagepb.ArrowSchema{
-						SerializedSchema: s.schemaBytes,
-					},
-					Rows: &storagepb.ArrowRecordBatch{
-						SerializedRecordBatch: batchBytes,
-						RowCount:              recordBatch.NumRows(),
-					},
-				},
-			},
-		}
-		if s.config.ExactlyOnceDelivery {
-			req.Offset = wrapperspb.Int64(s.streamOffset.Load())
-		}
+		req := s.newAppendRowsRequestLocked(batchBytes, recordBatch.NumRows())
 
 		var stopCall func() bool
 		if s.streamCancel != nil {
@@ -1418,9 +1510,11 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 
 		if s.config.ExactlyOnceDelivery && recvRes.GetError() != nil {
 			code := codes.Code(recvRes.GetError().GetCode())
-			// The request reached the server, so a status that does not rule out a
-			// commit leaves the outcome ambiguous, as it does for a failed Recv.
-			done, okRes, rotateErr := s.handleExactlyOnceError(ctx, code, recordBatch.NumRows(), &hadAmbiguousSend, &rotatedInBatch, true)
+			// An in-band response error means the server rejected the batch, so
+			// this attempt did not commit rows and does not itself make the
+			// outcome ambiguous (any ambiguity from an earlier failed Recv is
+			// preserved in hadAmbiguousSend).
+			done, okRes, rotateErr := s.handleExactlyOnceError(ctx, code, recordBatch.NumRows(), &hadAmbiguousSend, &rotatedInBatch, false)
 			if rotateErr != nil {
 				return nil, rotateErr
 			}
