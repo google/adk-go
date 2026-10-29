@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"sync"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/genai"
@@ -32,10 +34,21 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
+const artifactCacheSlots = 64
+
+type artifactCacheEntry struct {
+	invocationID string
+	deltaCount   uint64
+	instructions string
+	valid        bool
+}
+
 // artifactsTool is a tool that loads artifacts and adds them to the session.
 type artifactsTool struct {
 	name        string
 	description string
+	mu          sync.Mutex
+	cache       [artifactCacheSlots]artifactCacheEntry
 }
 
 // New creates a new loadArtifactsTool.
@@ -131,27 +144,79 @@ func (t *artifactsTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest)
 }
 
 func (t *artifactsTool) appendInitialInstructions(ctx agent.Context, req *model.LLMRequest) error {
+	invID := ctx.InvocationID()
+	deltaCount := countArtifactDeltas(ctx)
+	slot := hashInvocationID(invID)
+	if invID != "" {
+		t.mu.Lock()
+		entry := t.cache[slot]
+		t.mu.Unlock()
+		if entry.valid && entry.invocationID == invID && entry.deltaCount == deltaCount {
+			if entry.instructions != "" {
+				utils.AppendInstructions(req, entry.instructions)
+			}
+			return nil
+		}
+	}
+
 	resp, err := ctx.Artifacts().List(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list artifacts: %w", err)
 	}
-	if len(resp.FileNames) == 0 {
-		return nil
+	var instructions string
+	if len(resp.FileNames) > 0 {
+		artifactNamesJSON, err := json.Marshal(resp.FileNames)
+		if err != nil {
+			return fmt.Errorf("failed to marshal artifact names: %w", err)
+		}
+		instructions = fmt.Sprintf(
+			"You have a list of artifacts:\n  %s\n\nWhen the user asks questions about"+
+				" any of the artifacts, you should call the `load_artifacts` function"+
+				" to load the artifact. Do not generate any text other than the"+
+				" function call. Whenever you are asked about artifacts, you"+
+				" should first load it. You must always load an artifact to access its"+
+				" content, even if it has been loaded before.", string(artifactNamesJSON))
 	}
-	artifactNamesJSON, err := json.Marshal(resp.FileNames)
-	if err != nil {
-		return fmt.Errorf("failed to marshal artifact names: %w", err)
+	if invID != "" {
+		t.mu.Lock()
+		t.cache[slot] = artifactCacheEntry{
+			invocationID: invID,
+			deltaCount:   deltaCount,
+			instructions: instructions,
+			valid:        true,
+		}
+		t.mu.Unlock()
 	}
-	instructions := fmt.Sprintf(
-		"You have a list of artifacts:\n  %s\n\nWhen the user asks questions about"+
-			" any of the artifacts, you should call the `load_artifacts` function"+
-			" to load the artifact. Do not generate any text other than the"+
-			" function call. Whenever you are asked about artifacts, you"+
-			" should first load it. You must always load an artifact to access its"+
-			" content, even if it has been loaded before.", string(artifactNamesJSON))
-
-	utils.AppendInstructions(req, instructions)
+	if instructions != "" {
+		utils.AppendInstructions(req, instructions)
+	}
 	return nil
+}
+
+func countArtifactDeltas(ctx agent.Context) uint64 {
+	var count uint64
+	if actions := ctx.Actions(); actions != nil {
+		count += uint64(len(actions.ArtifactDelta))
+	}
+	a := ctx.Artifacts()
+	for a != nil {
+		if sc, ok := a.(interface{ SaveCount() uint64 }); ok {
+			count += sc.SaveCount()
+			break
+		}
+		u, ok := a.(interface{ Unwrap() agent.Artifacts })
+		if !ok {
+			break
+		}
+		a = u.Unwrap()
+	}
+	return count
+}
+
+func hashInvocationID(invID string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(invID))
+	return h.Sum32() % artifactCacheSlots
 }
 
 func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req *model.LLMRequest) error {

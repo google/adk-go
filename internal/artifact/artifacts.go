@@ -16,6 +16,7 @@ package artifact
 
 import (
 	"context"
+	"sync/atomic"
 
 	"google.golang.org/genai"
 
@@ -29,16 +30,26 @@ type Artifacts struct {
 	AppName   string
 	UserID    string
 	SessionID string
+	saves     atomic.Uint64
 }
 
 func (a *Artifacts) Save(ctx context.Context, name string, data *genai.Part) (*artifact.SaveResponse, error) {
-	return a.Service.Save(ctx, &artifact.SaveRequest{
+	resp, err := a.Service.Save(ctx, &artifact.SaveRequest{
 		AppName:   a.AppName,
 		UserID:    a.UserID,
 		SessionID: a.SessionID,
 		FileName:  name,
 		Part:      data,
 	})
+	if err == nil {
+		a.saves.Add(1)
+	}
+	return resp, err
+}
+
+// SaveCount returns the number of successful Save calls through this handle.
+func (a *Artifacts) SaveCount() uint64 {
+	return a.saves.Load()
 }
 
 func (a *Artifacts) Load(ctx context.Context, name string) (*artifact.LoadResponse, error) {

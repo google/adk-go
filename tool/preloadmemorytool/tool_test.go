@@ -276,3 +276,36 @@ func createToolContext(t *testing.T, mem *mockMemory, userContent *genai.Content
 
 	return agent.NewToolContext(ctx, "", nil, nil)
 }
+
+func TestPreloadMemoryTool_ProcessRequest_CachesPerInvocation(t *testing.T) {
+	mem := &countingMemory{
+		entries: []memory.Entry{
+			{
+				Author:  "user",
+				Content: genai.NewContentFromText("remembered item", genai.RoleUser),
+			},
+		},
+	}
+	tc := createToolContext(t, &mockMemory{}, nil)
+	_ = tc
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Memory:       mem,
+		UserContent:  genai.NewContentFromText("hello", genai.RoleUser),
+		InvocationID: "inv-mem-cache",
+	})
+	toolCtx := agent.NewToolContext(invCtx, "", nil, nil)
+	pmt := preloadmemorytool.New()
+
+	for range 3 {
+		req := &model.LLMRequest{}
+		if err := pmt.ProcessRequest(toolCtx, req); err != nil {
+			t.Fatalf("ProcessRequest failed: %v", err)
+		}
+		if req.Config == nil || req.Config.SystemInstruction == nil {
+			t.Fatal("expected SystemInstruction to be populated")
+		}
+	}
+	if got := mem.searchCalls.Load(); got != 1 {
+		t.Fatalf("SearchMemory calls = %d, want 1 within same invocation", got)
+	}
+}

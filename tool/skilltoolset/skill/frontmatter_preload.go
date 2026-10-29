@@ -35,6 +35,12 @@ type frontmatterPreloadSource struct {
 // Additionally, 'reload' callback is returned: calling it actualizes
 // data by loading frontmatters anew.
 func WithFrontmatterPreloadSource(ctx context.Context, source Source) (Source, func(context.Context) error, error) {
+	switch s := source.(type) {
+	case *frontmatterPreloadSource:
+		return s, s.reload, nil
+	case *completePreloadSource:
+		return s, s.reload, nil
+	}
 	s := &frontmatterPreloadSource{Source: source}
 	if err := s.reload(ctx); err != nil {
 		return nil, nil, err

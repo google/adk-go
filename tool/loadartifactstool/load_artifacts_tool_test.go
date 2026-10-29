@@ -570,3 +570,52 @@ func createToolContext(t *testing.T) agent.Context {
 
 	return agent.NewToolContext(ctx, "", nil, nil)
 }
+
+func TestLoadArtifactsTool_ProcessRequest_CachesPerInvocationAndInvalidatesOnDelta(t *testing.T) {
+	ctx := t.Context()
+	svc := &countingArtifactService{Service: artifact.InMemoryService()}
+	artifacts := &artifactinternal.Artifacts{
+		Service:   svc,
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "session",
+	}
+	if _, err := artifacts.Save(ctx, "file1.txt", genai.NewPartFromText("v1")); err != nil {
+		t.Fatalf("Save(file1.txt) failed: %v", err)
+	}
+
+	lat := loadartifactstool.New()
+	rp := lat.(toolinternal.RequestProcessor)
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Artifacts:    artifacts,
+		InvocationID: "inv-cache-test",
+	})
+	tc := agent.NewToolContext(invCtx, "", nil, nil)
+
+	for range 3 {
+		req := &model.LLMRequest{}
+		if err := rp.ProcessRequest(tc, req); err != nil {
+			t.Fatalf("ProcessRequest failed: %v", err)
+		}
+	}
+	if got := svc.listCalls.Load(); got != 1 {
+		t.Fatalf("Artifacts().List calls = %d, want 1 within same invocation", got)
+	}
+
+	// Saving an artifact via ToolContext records an ArtifactDelta and invalidates the cache.
+	if _, err := tc.Artifacts().Save(ctx, "file2.txt", genai.NewPartFromText("v2")); err != nil {
+		t.Fatalf("tc.Artifacts().Save(file2.txt) failed: %v", err)
+	}
+	req := &model.LLMRequest{}
+	if err := rp.ProcessRequest(tc, req); err != nil {
+		t.Fatalf("ProcessRequest after Save failed: %v", err)
+	}
+	if got := svc.listCalls.Load(); got != 2 {
+		t.Fatalf("Artifacts().List calls after delta = %d, want 2", got)
+	}
+	instruction := req.Config.SystemInstruction.Parts[0].Text
+	if !strings.Contains(instruction, `"file2.txt"`) {
+		t.Errorf("instruction after Save missing file2.txt: %s", instruction)
+	}
+}

@@ -77,22 +77,26 @@ func New(ctx context.Context, cfg Config) (*SkillToolset, error) {
 	if cfg.SystemInstruction != "" {
 		instruction = cfg.SystemInstruction
 	}
-	listTool, err := skilltool.ListSkills(cfg.Source)
+	source, _, err := skill.WithFrontmatterPreloadSource(ctx, cfg.Source)
+	if err != nil {
+		return nil, fmt.Errorf("preload skill frontmatters: %w", err)
+	}
+	listTool, err := skilltool.ListSkills(source)
 	if err != nil {
 		return nil, fmt.Errorf("create list skills tool: %w", err)
 	}
-	loadTool, err := skilltool.LoadSkill(cfg.Source)
+	loadTool, err := skilltool.LoadSkill(source)
 	if err != nil {
 		return nil, fmt.Errorf("create load skill tool: %w", err)
 	}
-	loadResourceTool, err := skilltool.LoadSkillResource(cfg.Source)
+	loadResourceTool, err := skilltool.LoadSkillResource(source)
 	if err != nil {
 		return nil, fmt.Errorf("create load skill resource tool: %w", err)
 	}
 	return &SkillToolset{
 		name:              name,
 		tools:             []tool.Tool{listTool, loadTool, loadResourceTool},
-		source:            cfg.Source,
+		source:            source,
 		systemInstruction: instruction,
 	}, nil
 }

@@ -22,7 +22,9 @@ package preloadmemorytool
 
 import (
 	"fmt"
+	"hash/fnv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -30,6 +32,15 @@ import (
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
 )
+
+const memoryCacheSlots = 64
+
+type memoryCacheEntry struct {
+	invocationID string
+	query        string
+	instruction  string
+	valid        bool
+}
 
 const preloadInstructions = `The following content is from your previous conversations with the user.
 They may be useful for answering the user's current query.
@@ -43,6 +54,8 @@ They may be useful for answering the user's current query.
 type preloadMemoryTool struct {
 	name        string
 	description string
+	mu          sync.Mutex
+	cache       [memoryCacheSlots]memoryCacheEntry
 }
 
 // New creates a new preloadMemoryTool.
@@ -78,22 +91,51 @@ func (t *preloadMemoryTool) ProcessRequest(ctx agent.Context, req *model.LLMRequ
 	}
 	userQuery := userContent.Parts[0].Text
 
+	invID := ctx.InvocationID()
+	slot := hashMemoryInvocationID(invID)
+	if invID != "" {
+		t.mu.Lock()
+		entry := t.cache[slot]
+		t.mu.Unlock()
+		if entry.valid && entry.invocationID == invID && entry.query == userQuery {
+			if entry.instruction != "" {
+				utils.AppendInstructions(req, entry.instruction)
+			}
+			return nil
+		}
+	}
+
 	searchResponse, err := ctx.SearchMemory(ctx, userQuery)
 	if err != nil {
 		return fmt.Errorf("preload memory search failed: %w", err)
 	}
 
-	if searchResponse == nil || len(searchResponse.Memories) == 0 {
-		return nil
+	var instruction string
+	if searchResponse != nil && len(searchResponse.Memories) > 0 {
+		if memoryText := formatMemories(searchResponse.Memories); memoryText != "" {
+			instruction = fmt.Sprintf(preloadInstructions, memoryText)
+		}
 	}
-
-	memoryText := formatMemories(searchResponse.Memories)
-	if memoryText == "" {
-		return nil
+	if invID != "" {
+		t.mu.Lock()
+		t.cache[slot] = memoryCacheEntry{
+			invocationID: invID,
+			query:        userQuery,
+			instruction:  instruction,
+			valid:        true,
+		}
+		t.mu.Unlock()
 	}
-
-	utils.AppendInstructions(req, fmt.Sprintf(preloadInstructions, memoryText))
+	if instruction != "" {
+		utils.AppendInstructions(req, instruction)
+	}
 	return nil
+}
+
+func hashMemoryInvocationID(invID string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(invID))
+	return h.Sum32() % memoryCacheSlots
 }
 
 func formatMemories(memories []memory.Entry) string {
