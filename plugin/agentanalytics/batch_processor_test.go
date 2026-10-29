@@ -37,6 +37,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	wrapperspb "google.golang.org/protobuf/types/known/wrapperspb"
 )
 
@@ -1023,13 +1024,13 @@ func (s *scriptedCommittedStreamServer) createCount() int {
 // newScriptedWriteClient serves srv on a local port and returns a write
 // client connected to it. The server, the connection and the client are
 // closed when the test ends.
-func newScriptedWriteClient(t *testing.T, srv storagepb.BigQueryWriteServer) *bqstorage.BigQueryWriteClient {
+func newScriptedWriteClient(t *testing.T, srv storagepb.BigQueryWriteServer, serverOpts ...grpc.ServerOption) *bqstorage.BigQueryWriteClient {
 	t.Helper()
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	gSrv := grpc.NewServer()
+	gSrv := grpc.NewServer(serverOpts...)
 	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
@@ -6163,4 +6164,292 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 			t.Errorf("row session_id = %v, want %q", got, userSessionID)
 		}
 	})
+}
+
+// newErrorClassificationProcessor returns a processor for srv, a scripted
+// write server, that retries four times in all (three retries) with
+// millisecond backoff. With exactlyOnce it writes to a committed stream.
+func newErrorClassificationProcessor(t *testing.T, srv *scriptedCommittedStreamServer, exactlyOnce bool) *BatchProcessor {
+	t.Helper()
+	config := exactlyOnceTestConfig()
+	config.ExactlyOnceDelivery = exactlyOnce
+	config.RetryConfig = RetryConfig{MaxRetries: 3, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
+	streamName := ""
+	if !exactlyOnce {
+		streamName = "projects/test-proj/datasets/test-ds/tables/agent_events/_default"
+	}
+	bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), streamName, config)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor() error = %v", err)
+	}
+	t.Cleanup(bp.Close)
+	return bp
+}
+
+func (s *scriptedCommittedStreamServer) attempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.appendAttempts
+}
+
+func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, tc := range []struct {
+			code         codes.Code
+			wantAttempts int
+		}{
+			{codes.PermissionDenied, 1},
+			{codes.InvalidArgument, 1},
+			{codes.Unauthenticated, 1},
+			{codes.FailedPrecondition, 1},
+			{codes.Unimplemented, 1},
+			// NotFound is permanent without ExactlyOnceDelivery. With it, the
+			// stream is replaced and the batch is resent once, as before.
+			{codes.NotFound, map[bool]int{false: 1, true: 2}[exactlyOnce]},
+			// Transient statuses still use up the retries.
+			{codes.Unavailable, 4},
+		} {
+			t.Run(fmt.Sprintf("%s/exactlyOnce=%v", tc.code, exactlyOnce), func(t *testing.T) {
+				srv := &scriptedCommittedStreamServer{
+					onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+						return nil, status.Error(tc.code, "scripted")
+					},
+				}
+				bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+
+				err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}})
+				if err == nil {
+					t.Fatal("writeBatch() error = nil, want error")
+				}
+				if got := status.Code(err); got != tc.code && !(exactlyOnce && tc.code == codes.NotFound) {
+					t.Errorf("status.Code(writeBatch() error) = %v, want %v (error: %v)", got, tc.code, err)
+				}
+				if got := srv.attempts(); got != tc.wantAttempts {
+					t.Errorf("AppendRows attempts = %d, want %d (error: %v)", got, tc.wantAttempts, err)
+				}
+				if got := bp.DropStats().AppendFailureDrops; got != 1 {
+					t.Errorf("AppendFailureDrops = %d, want 1", got)
+				}
+			})
+		}
+	}
+}
+
+func TestStreamWriter_TransientInBandErrorIsRetried(t *testing.T) {
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, code := range []codes.Code{codes.Unavailable, codes.ResourceExhausted, codes.Internal, codes.DeadlineExceeded, codes.Aborted} {
+			t.Run(fmt.Sprintf("%s/exactlyOnce=%v", code, exactlyOnce), func(t *testing.T) {
+				srv := &scriptedCommittedStreamServer{
+					onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+						if attempt <= 2 {
+							return &storagepb.AppendRowsResponse{
+								Response: &storagepb.AppendRowsResponse_Error{Error: &statuspb.Status{Code: int32(code), Message: "scripted"}},
+							}, nil
+						}
+						return &storagepb.AppendRowsResponse{}, nil
+					},
+				}
+				bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+
+				if err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}, {"event_type": "Y"}}); err != nil {
+					t.Fatalf("writeBatch() error = %v, want nil after the retries", err)
+				}
+				if got := srv.attempts(); got != 3 {
+					t.Errorf("AppendRows attempts = %d, want 3", got)
+				}
+				if got := bp.DropStats().AppendFailureDrops; got != 0 {
+					t.Errorf("AppendFailureDrops = %d, want 0", got)
+				}
+				if exactlyOnce {
+					// Every resend of the batch carries the offset of the first send.
+					srv.mu.Lock()
+					defer srv.mu.Unlock()
+					if diff := cmp.Diff([]int64{0, 0, 0}, srv.appendOffsets); diff != "" {
+						t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStreamWriter_InBandErrorRetriesAreBounded(t *testing.T) {
+	for _, tc := range []struct {
+		code         codes.Code
+		wantAttempts int
+	}{
+		{codes.Unavailable, 4},
+		{codes.ResourceExhausted, 4},
+		{codes.PermissionDenied, 1},
+		{codes.InvalidArgument, 1},
+	} {
+		t.Run(tc.code.String(), func(t *testing.T) {
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{Error: &statuspb.Status{Code: int32(tc.code), Message: "scripted message"}},
+					}, nil
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, false)
+
+			err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}})
+			if err == nil || !strings.Contains(err.Error(), "scripted message") {
+				t.Fatalf("writeBatch() error = %v, want BigQuery's message", err)
+			}
+			if got := srv.attempts(); got != tc.wantAttempts {
+				t.Errorf("AppendRows attempts = %d, want %d", got, tc.wantAttempts)
+			}
+			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				t.Errorf("AppendFailureDrops = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestSplitBatchByEstimatedBytes(t *testing.T) {
+	row := func(n int) map[string]any { return map[string]any{"content": strings.Repeat("x", n)} }
+	rowCost := estimateRowBytes(row(1000))
+	for _, tc := range []struct {
+		name  string
+		batch []map[string]any
+		limit int
+		want  []int // rows per chunk
+	}{
+		{name: "empty", batch: nil, limit: 10, want: []int{0}},
+		{name: "fits", batch: []map[string]any{row(1000), row(1000)}, limit: 2 * rowCost, want: []int{2}},
+		{name: "one byte over", batch: []map[string]any{row(1000), row(1000)}, limit: 2*rowCost - 1, want: []int{1, 1}},
+		{name: "packs greedily", batch: []map[string]any{row(1000), row(1000), row(1000), row(1000), row(1000)}, limit: 2 * rowCost, want: []int{2, 2, 1}},
+		{name: "oversized row stands alone", batch: []map[string]any{row(1000), row(50000), row(1000)}, limit: 2 * rowCost, want: []int{1, 1, 1}},
+		{name: "leading oversized row", batch: []map[string]any{row(50000), row(1000), row(1000)}, limit: 2 * rowCost, want: []int{1, 2}},
+		{name: "no limit", batch: []map[string]any{row(1000), row(1000)}, limit: 0, want: []int{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []int
+			var flat []map[string]any
+			for _, chunk := range splitBatchByEstimatedBytes(tc.batch, tc.limit) {
+				got = append(got, len(chunk))
+				flat = append(flat, chunk...)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("chunk sizes mismatch (-want +got):\n%s", diff)
+			}
+			if len(flat) != len(tc.batch) {
+				t.Fatalf("chunks hold %d rows, want %d", len(flat), len(tc.batch))
+			}
+			for i := range flat {
+				if len(tc.batch) > 0 && fmt.Sprintf("%p", flat[i]) != fmt.Sprintf("%p", tc.batch[i]) {
+					t.Errorf("row %d moved: chunks must keep the order of the batch", i)
+				}
+			}
+		})
+	}
+}
+
+func TestEstimateRowBytes_CountsNestedContentParts(t *testing.T) {
+	row := map[string]any{
+		"content": strings.Repeat("a", 100),
+		"content_parts": []map[string]any{
+			{"text": strings.Repeat("b", 200), "object_ref": map[string]any{"uri": strings.Repeat("c", 300)}},
+		},
+		"is_truncated": true,
+		"timestamp":    time.Unix(0, 0),
+	}
+	if got := estimateRowBytes(row); got < perRowOverheadBytes+600 {
+		t.Errorf("estimateRowBytes() = %d, want at least %d to cover the strings", got, perRowOverheadBytes+600)
+	}
+}
+
+// TestBatchProcessor_SplitsOversizedBatchAcrossRequests writes 100 rows of
+// about 500 KiB each, which build a request of about 50 MB without a cap, and
+// checks that every row arrives, in order, in requests that stay under the
+// Write API's limit on the size of a request.
+func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
+	const (
+		numRows    = 100
+		contentLen = 500 * 1024
+		// The limit that BigQuery documents for the size of one request.
+		bigQueryRequestLimit = 10 * 1024 * 1024
+	)
+	requests := make(chan *storagepb.AppendRowsRequest, numRows)
+	srv := &scriptedWriteServer{
+		script:   func(int32) (time.Duration, error) { return 0, nil },
+		requests: requests,
+	}
+	writeClient := newScriptedWriteClient(t, srv, grpc.MaxRecvMsgSize(64*1024*1024))
+	cfg := DefaultConfig()
+	cfg.RetryConfig.MaxRetries = 0
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(bp.Close)
+
+	content := strings.Repeat("x", contentLen)
+	batch := make([]map[string]any, numRows)
+	for i := range batch {
+		batch[i] = map[string]any{"event_id": fmt.Sprintf("row-%03d", i), "event_type": "X", "content": content}
+	}
+	if err := bp.writeBatch(context.Background(), batch); err != nil {
+		t.Fatalf("writeBatch() error = %v", err)
+	}
+	close(requests)
+
+	var gotIDs []string
+	numRequests := 0
+	for req := range requests {
+		numRequests++
+		size := proto.Size(req)
+		if size > bigQueryRequestLimit {
+			t.Errorf("request %d is %d bytes, want at most %d", numRequests, size, bigQueryRequestLimit)
+		}
+		for _, row := range decodeArrowRows(t, req) {
+			gotIDs = append(gotIDs, row["event_id"].(string))
+		}
+	}
+	if numRequests < 2 {
+		t.Errorf("requests = %d, want the batch split across several", numRequests)
+	}
+	if len(gotIDs) != numRows {
+		t.Fatalf("rows received = %d, want %d", len(gotIDs), numRows)
+	}
+	for i, id := range gotIDs {
+		if want := fmt.Sprintf("row-%03d", i); id != want {
+			t.Fatalf("row %d = %q, want %q: rows must arrive in order", i, id, want)
+		}
+	}
+	if got := bp.DropStats().AppendFailureDrops; got != 0 {
+		t.Errorf("AppendFailureDrops = %d, want 0", got)
+	}
+}
+
+// TestBatchProcessor_SplitStopsAtFailedRequest checks that once a request of a
+// split batch fails permanently, the later requests are not sent, and the whole
+// batch is counted as dropped.
+func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
+	srv := &scriptedCommittedStreamServer{
+		onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+			if attempt == 2 {
+				return nil, status.Error(codes.PermissionDenied, "scripted")
+			}
+			return &storagepb.AppendRowsResponse{}, nil
+		},
+	}
+	bp := newErrorClassificationProcessor(t, srv, false)
+	row := func(id string) map[string]any {
+		return map[string]any{"event_id": id, "content": strings.Repeat("x", 1000)}
+	}
+	// Each row is a request of its own under this limit.
+	bp.maxAppendBytes = estimateRowBytes(row("a"))
+
+	err := bp.writeBatch(context.Background(), []map[string]any{row("a"), row("b"), row("c")})
+	if err == nil {
+		t.Fatal("writeBatch() error = nil, want the failure of the second request")
+	}
+	if got := srv.attempts(); got != 2 {
+		t.Errorf("AppendRows attempts = %d, want 2: the third request must not be sent", got)
+	}
+	if got := bp.DropStats().AppendFailureDrops; got != 3 {
+		t.Errorf("AppendFailureDrops = %d, want 3 (the whole batch, as an upper bound)", got)
+	}
 }

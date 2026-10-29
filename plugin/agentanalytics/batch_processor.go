@@ -150,6 +150,9 @@ type BatchProcessor struct {
 	pendingUploadBytes    atomic.Int64
 	maxPendingUploadBytes int64
 	uploadBudgetWarned    atomic.Bool
+
+	// maxAppendBytes overrides maxAppendRequestBytes in tests.
+	maxAppendBytes int
 }
 
 // NewBatchProcessor creates a new BatchProcessor instance. If config.GCSOffloader
@@ -670,6 +673,22 @@ func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[st
 		return err
 	}
 
+	// A batch is cut into requests that stay under the Write API's request size
+	// limit. The requests are sent in order; if one fails, the rest are not
+	// sent. A caller that keeps the batch to retry it later therefore resends
+	// the requests that were already committed, which at-least-once delivery
+	// allows.
+	for _, chunk := range splitBatchByEstimatedBytes(batch, b.appendRequestByteLimit()) {
+		if err := b.appendChunk(writeCtx, chunk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// appendChunk builds one Arrow record batch from batch, which
+// splitBatchByEstimatedBytes has sized to fit one request, and appends it.
+func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[string]any) error {
 	builder := array.NewRecordBuilder(b.allocator, b.arrowSchema)
 	defer builder.Release()
 
@@ -846,6 +865,80 @@ func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[st
 	return nil
 }
 
+// maxAppendRequestBytes is the default size above which a batch is split into
+// several AppendRows requests. It stays well below the Write API's limit on the
+// size of a request, which leaves room for the Arrow framing and the writer
+// schema that each request carries beyond the estimated payload.
+const maxAppendRequestBytes = 8 * 1024 * 1024
+
+// perRowOverheadBytes covers the validity bits, offsets, and fixed-width
+// columns that a row adds to a record batch beyond the length of its strings.
+const perRowOverheadBytes = 256
+
+// appendRequestByteLimit returns the estimated payload size above which a batch
+// is split.
+func (b *BatchProcessor) appendRequestByteLimit() int {
+	if b.maxAppendBytes > 0 {
+		return b.maxAppendBytes
+	}
+	return maxAppendRequestBytes
+}
+
+// estimateValueBytes approximates the bytes that v adds to a record batch. It
+// counts string lengths exactly and every other scalar as a word, which is
+// close enough to bound a request because the payload is dominated by strings.
+func estimateValueBytes(v any) int {
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case string:
+		return len(x)
+	case []map[string]any:
+		n := 0
+		for _, part := range x {
+			n += estimateValueBytes(part)
+		}
+		return n
+	case map[string]any:
+		n := 0
+		for _, e := range x {
+			n += estimateValueBytes(e) + 8
+		}
+		return n
+	default:
+		return 8
+	}
+}
+
+func estimateRowBytes(row map[string]any) int {
+	return perRowOverheadBytes + estimateValueBytes(row)
+}
+
+// splitBatchByEstimatedBytes cuts batch into consecutive chunks whose estimated
+// payload is at most limit bytes, keeping the order of the rows. A row whose
+// estimate alone exceeds limit becomes a chunk of its own, so one oversized row
+// cannot take the rows around it down with it. A batch that fits is returned as
+// the only chunk, without copying.
+func splitBatchByEstimatedBytes(batch []map[string]any, limit int) [][]map[string]any {
+	if len(batch) <= 1 || limit <= 0 {
+		return [][]map[string]any{batch}
+	}
+	var chunks [][]map[string]any
+	start, size := 0, 0
+	for i, row := range batch {
+		n := estimateRowBytes(row)
+		if i > start && size+n > limit {
+			chunks = append(chunks, batch[start:i])
+			start, size = i, 0
+		}
+		size += n
+	}
+	if start == 0 {
+		return [][]map[string]any{batch}
+	}
+	return append(chunks, batch[start:])
+}
+
 const defaultRotateTimeout = 30 * time.Second
 
 // streamWriter is a wrapper that maintains a persistent BigQuery write stream.
@@ -926,6 +1019,41 @@ func (s *streamWriter) resetStream() {
 		s.streamCancel = nil
 	}
 	s.streamCtx = nil
+}
+
+// isPermanentWriteError reports whether code is a status that a retry of the
+// same request cannot fix, such as a missing permission or table, or a request
+// that BigQuery rejects as malformed. Retrying it only burns the backoff budget
+// while the caller holds flushMu. With ExactlyOnceDelivery, NotFound is not
+// permanent: it signals a stale stream, which handleExactlyOnceError replaces.
+func (s *streamWriter) isPermanentWriteError(code codes.Code) bool {
+	switch code {
+	case codes.PermissionDenied,
+		codes.InvalidArgument,
+		codes.Unauthenticated,
+		codes.FailedPrecondition,
+		codes.Unimplemented:
+		return true
+	case codes.NotFound:
+		return !s.config.ExactlyOnceDelivery
+	default:
+		return false
+	}
+}
+
+// isTransientInBandError reports whether an AppendRowsResponse.Error with code
+// is worth resending, as it is for the same status on the stream itself.
+func isTransientInBandError(code codes.Code) bool {
+	switch code {
+	case codes.Unavailable,
+		codes.ResourceExhausted,
+		codes.Internal,
+		codes.DeadlineExceeded,
+		codes.Aborted:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAmbiguousSendError(code codes.Code) bool {
@@ -1182,6 +1310,9 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			if streamErr != nil {
 				streamCancel()
 				lastErr = fmt.Errorf("failed to open append rows stream: %w", streamErr)
+				if s.isPermanentWriteError(status.Code(streamErr)) {
+					return nil, lastErr
+				}
 				continue
 			}
 			s.stream = stream
@@ -1254,6 +1385,9 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				}
 			}
 			lastErr = fmt.Errorf("failed to send row batch: %w", sendErr)
+			if s.isPermanentWriteError(status.Code(sendErr)) {
+				return nil, lastErr
+			}
 			continue
 		}
 
@@ -1276,12 +1410,17 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				}
 			}
 			lastErr = fmt.Errorf("failed to receive response for row batch: %w", recvErr)
+			if s.isPermanentWriteError(status.Code(recvErr)) {
+				return nil, lastErr
+			}
 			continue
 		}
 
 		if s.config.ExactlyOnceDelivery && recvRes.GetError() != nil {
 			code := codes.Code(recvRes.GetError().GetCode())
-			done, okRes, rotateErr := s.handleExactlyOnceError(ctx, code, recordBatch.NumRows(), &hadAmbiguousSend, &rotatedInBatch, false)
+			// The request reached the server, so a status that does not rule out a
+			// commit leaves the outcome ambiguous, as it does for a failed Recv.
+			done, okRes, rotateErr := s.handleExactlyOnceError(ctx, code, recordBatch.NumRows(), &hadAmbiguousSend, &rotatedInBatch, true)
 			if rotateErr != nil {
 				return nil, rotateErr
 			}
@@ -1295,6 +1434,14 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				lastErr = fmt.Errorf("batch append error from BigQuery: %s", recvRes.GetError().GetMessage())
 				continue
 			}
+		}
+
+		// A transient status in the response is resent like the same status on
+		// the stream. Once the retries are used up, the response is returned
+		// as it is, so that the caller reports BigQuery's message.
+		if inBand := recvRes.GetError(); inBand != nil && attempt < maxRetries && isTransientInBandError(codes.Code(inBand.GetCode())) {
+			lastErr = fmt.Errorf("batch append error from BigQuery: %s", inBand.GetMessage())
+			continue
 		}
 
 		if s.config.ExactlyOnceDelivery && recvRes.GetError() == nil && len(recvRes.GetRowErrors()) == 0 {
