@@ -519,8 +519,8 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 // read the old row and the later write drops the earlier one's keys. SQLite
 // serializes writers and drops the FOR UPDATE clause, so this test checks the
 // statements AppendEvent issues rather than reproducing the race: only the
-// scopes the event changes are inserted and locked, and the app row is locked
-// before the user row is touched, the order Create writes them in.
+// scopes the event changes are inserted, locked and read, and the app row is
+// locked before the user row is touched, the order Create writes them in.
 func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -529,12 +529,10 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 	}{
 		{
 			name: "no delta",
-			want: []string{"select app_states", "select user_states"},
 		},
 		{
 			name:  "session only",
 			delta: map[string]any{"s": 1},
-			want:  []string{"select app_states", "select user_states"},
 		},
 		{
 			name:  "app only",
@@ -542,14 +540,12 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 			want: []string{
 				"insert app_states on conflict do nothing",
 				"select app_states for update",
-				"select user_states",
 			},
 		},
 		{
 			name:  "user only",
 			delta: map[string]any{"user:u": 2},
 			want: []string{
-				"select app_states",
 				"insert user_states on conflict do nothing",
 				"select user_states for update",
 			},

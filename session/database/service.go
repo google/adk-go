@@ -406,71 +406,34 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	return nil
 }
 
-// applyEvent fetches the session, validates it, applies state changes from an
-// event, and saves the event atomically.
+// applyEvent applies the state changes of an event, saves the event and
+// advances the session's update time, atomically, refusing a session handle
+// that is older than the stored row.
 func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, event *session.Event) error {
 	// Wrap database operations in a single transaction.
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Fetch the session object from storage.
-		var storageSess storageSession
-		err := tx.Where(&storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}).
-			First(&storageSess).Error
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
-			}
-			return fmt.Errorf("failed to get session: %w", err)
-		}
-
-		// Ensure the session object is not stale.
-		// We use UnixMicro() for microsecond-level precision, matching the Python code.
-		storageUpdateTime := storageSess.UpdateTime.UnixMicro()
-		sessionUpdateTime := sess.updatedAt.UnixMicro()
-		if storageUpdateTime > sessionUpdateTime {
-			return fmt.Errorf(
-				"stale session error: last update time from request (%s) is older than in database (%s)",
-				time.UnixMicro(sessionUpdateTime).Format(time.RFC3339Nano),
-				time.UnixMicro(storageUpdateTime).Format(time.RFC3339Nano),
-			)
-		}
-
 		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
 
 		// App and user state are shared with other sessions and written back
 		// whole, so lock their rows before reading them when this event changes
 		// them. Otherwise a concurrent append from another session reads the
 		// same row and the later write drops the earlier one's keys. This
-		// matches adk-python, which locks these rows FOR UPDATE.
+		// matches adk-python, which locks these rows FOR UPDATE. An event
+		// that changes neither reads neither.
 		//
 		// Lock and read the app row before touching the user row. Create
 		// writes app then user, and inserting the user row first would hold
 		// it while waiting for an app row lock that Create holds, so the two
 		// could deadlock.
-		appTx := tx
 		if len(appDelta) > 0 {
-			if appTx, err = lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+			appTx, err := lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp})
+			if err != nil {
 				return fmt.Errorf("failed to lock app state: %w", err)
 			}
-		}
-		storageApp, err := fetchStorageAppState(appTx, sess.AppName())
-		if err != nil {
-			return err
-		}
-
-		userTx := tx
-		if len(userDelta) > 0 {
-			if userTx, err = lockStateRow(tx, &storageUserState{AppName: sess.AppName(), UserID: sess.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
-				return fmt.Errorf("failed to lock user state: %w", err)
+			storageApp, err := fetchStorageAppState(appTx, sess.AppName())
+			if err != nil {
+				return err
 			}
-		}
-		storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
-		if err != nil {
-			return err
-		}
-
-		// Merge state deltas and update the storage objects.
-		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
-		if len(appDelta) > 0 {
 			maps.Copy(storageApp.State, appDelta)
 			// Maintain UpdateTime explicitly (see Create): an unset time.Time
 			// serializes to a zero datetime that MySQL rejects under strict mode.
@@ -480,15 +443,71 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			}
 		}
 		if len(userDelta) > 0 {
+			userTx, err := lockStateRow(tx, &storageUserState{AppName: sess.AppName(), UserID: sess.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp})
+			if err != nil {
+				return fmt.Errorf("failed to lock user state: %w", err)
+			}
+			storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
+			if err != nil {
+				return err
+			}
 			maps.Copy(storageUser.State, userDelta)
 			storageUser.UpdateTime = event.Timestamp
 			if err := tx.Save(&storageUser).Error; err != nil {
 				return fmt.Errorf("failed to save user state: %w", err)
 			}
 		}
+
+		// The session row is written with the staleness check folded into the
+		// UPDATE: it matches only while the stored update time is not past the
+		// handle's. The row is read first only when the event changes session
+		// state, since that state is stored as one document and merged here.
+		pk := &storageSession{AppName: sess.AppName(), UserID: sess.UserID(), ID: sess.ID()}
+		handleUpdateTime := sess.updatedAt
+		columns := map[string]any{"update_time": event.Timestamp}
+		// readChecked reads the session row and rejects a handle older than it.
+		readChecked := func() (*storageSession, error) {
+			var storageSess storageSession
+			if err := tx.Where(pk).First(&storageSess).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, fmt.Errorf("%w: %q, cannot apply event: %w", session.ErrNotFound, sess.ID(), err)
+				}
+				return nil, fmt.Errorf("failed to get session: %w", err)
+			}
+			return &storageSess, checkNotStale(storageSess.UpdateTime, handleUpdateTime)
+		}
+		write := func(db *gorm.DB) *gorm.DB {
+			return db.Model(&storageSession{}).Where(pk).Updates(columns)
+		}
 		if len(sessionDelta) > 0 {
+			storageSess, err := readChecked()
+			if err != nil {
+				return err
+			}
 			maps.Copy(storageSess.State, sessionDelta)
-			// The session state update will be saved along with the event timestamp update.
+			columns["state"] = storageSess.State
+			if err := write(tx).Error; err != nil {
+				return fmt.Errorf("failed to save session state: %w", err)
+			}
+		} else {
+			res := write(tx.Where("update_time <= ?", handleUpdateTime))
+			if res.Error != nil {
+				return fmt.Errorf("failed to save session state: %w", res.Error)
+			}
+			if res.RowsAffected == 0 {
+				// The row is missing or stale, or the guard missed for another
+				// reason: MySQL reports changed rather than matched rows, and
+				// SQLite stores times as text, which compares wrongly across
+				// differing UTC offsets. Read the row to tell these apart,
+				// then write it unguarded, checked against this transaction's
+				// view of it.
+				if _, err := readChecked(); err != nil {
+					return err
+				}
+				if err := write(tx).Error; err != nil {
+					return fmt.Errorf("failed to save session state: %w", err)
+				}
+			}
 		}
 
 		// Create the new event record in the database.
@@ -500,18 +519,27 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			return fmt.Errorf("failed to save event: %w", err)
 		}
 
-		storageSess.UpdateTime = event.Timestamp
-		// Save the session to update its state and UpdateTime.
-		if err := tx.Save(&storageSess).Error; err != nil {
-			return fmt.Errorf("failed to save session state: %w", err)
-		}
-
-		sess.updatedAt = storageSess.UpdateTime
+		sess.updatedAt = event.Timestamp
 
 		return nil // Returning nil commits the transaction.
 	})
 
 	return err
+}
+
+// checkNotStale reports a session handle whose update time is older than the
+// stored row's, compared at microsecond precision.
+func checkNotStale(stored, handle time.Time) error {
+	storedUpdateTime := stored.UnixMicro()
+	handleUpdateTime := handle.UnixMicro()
+	if storedUpdateTime > handleUpdateTime {
+		return fmt.Errorf(
+			"stale session error: last update time from request (%s) is older than in database (%s)",
+			time.UnixMicro(handleUpdateTime).Format(time.RFC3339Nano),
+			time.UnixMicro(storedUpdateTime).Format(time.RFC3339Nano),
+		)
+	}
+	return nil
 }
 
 // lockStateRow makes sure the state row exists and returns tx set to read it
