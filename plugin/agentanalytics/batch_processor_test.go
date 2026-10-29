@@ -6452,8 +6452,8 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	if got := srv.attempts(); got != 2 {
 		t.Errorf("AppendRows attempts = %d, want 2: the third request must not be sent", got)
 	}
-	if got := bp.DropStats().AppendFailureDrops; got != 3 {
-		t.Errorf("AppendFailureDrops = %d, want 3 (the whole batch, as an upper bound)", got)
+	if got := bp.DropStats().AppendFailureDrops; got != 2 {
+		t.Errorf("AppendFailureDrops = %d, want 2 (the rows after the confirmed first request)", got)
 	}
 }
 
@@ -6712,77 +6712,311 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 	})
 }
 
+// TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget checks that all
+// requests of one logical batch share a single ExactlyOnceDelivery rotation,
+// whether the batch is cut by estimated size (through writeBatch) or halved by
+// serialized size (appendChunk calling itself on both halves).
 func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) {
 	row := func(id string) map[string]any {
 		return map[string]any{"event_id": id, "content": strings.Repeat("x", 1000)}
 	}
-
-	t.Run("second_chunk_offset_error_after_first_chunk_rotated_does_not_rotate_again", func(t *testing.T) {
-		srv := &scriptedCommittedStreamServer{
-			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
-				switch attempt {
-				case 1:
-					// Chunk 1, attempt 1 on committed-1: triggers the batch's one allowed rotation.
-					return nil, status.Error(codes.NotFound, "stream 1 expired")
-				case 2:
-					// Chunk 1, attempt 2 on committed-2: succeeds at offset 0.
-					return &storagepb.AppendRowsResponse{}, nil
-				case 3:
-					// Chunk 2, attempt 1 on committed-2: returns NotFound after chunk 1 already rotated.
-					return nil, status.Error(codes.NotFound, "stream 2 expired")
-				default:
-					return &storagepb.AppendRowsResponse{}, nil
-				}
+	for _, path := range []struct {
+		name  string
+		setup func(bp *BatchProcessor)
+		write func(bp *BatchProcessor, batch []map[string]any) error
+		// countsDrops reports whether the entry point records
+		// DropStats.AppendFailureDrops.
+		countsDrops bool
+	}{
+		{
+			// Each row is a request of its own under this estimated limit.
+			name:  "estimated_split_via_writeBatch",
+			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = estimateRowBytes(row("a")) },
+			write: func(bp *BatchProcessor, batch []map[string]any) error {
+				return bp.writeBatch(context.Background(), batch)
 			},
-		}
-		bp := newErrorClassificationProcessor(t, srv, true)
-		bp.maxAppendBytes = estimateRowBytes(row("a"))
-
-		err := bp.writeBatch(context.Background(), []map[string]any{row("a"), row("b"), row("c")})
-		if err == nil || !strings.Contains(err.Error(), "committed write stream already rotated") {
-			t.Fatalf("writeBatch() error = %v, want already-rotated error on second chunk", err)
-		}
-		if got := srv.attempts(); got != 3 {
-			t.Errorf("AppendRows attempts = %d, want 3 (third chunk must not be sent)", got)
-		}
-		srv.mu.Lock()
-		created := len(srv.createReqs)
-		srv.mu.Unlock()
-		if created != 2 {
-			t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + at most 1 rotation per batch)", created)
-		}
-		if got := bp.DropStats().AppendFailureDrops; got != 3 {
-			t.Errorf("AppendFailureDrops = %d, want 3", got)
-		}
-	})
-
-	t.Run("single_rotation_on_first_chunk_allows_remaining_chunks_on_replacement_stream", func(t *testing.T) {
-		srv := &scriptedCommittedStreamServer{
-			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
-				if attempt == 1 {
-					return nil, status.Error(codes.NotFound, "stream 1 expired")
-				}
-				return &storagepb.AppendRowsResponse{}, nil
+			countsDrops: true,
+		},
+		{
+			// Every multi-row request exceeds this serialized limit, so the
+			// 3-row chunk is halved into [a] and [b c], and [b c] into [b]
+			// and [c].
+			name:  "recursive_halving_via_appendChunk",
+			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+			write: func(bp *BatchProcessor, batch []map[string]any) error {
+				return bp.appendChunk(context.Background(), batch)
 			},
-		}
-		bp := newErrorClassificationProcessor(t, srv, true)
-		bp.maxAppendBytes = estimateRowBytes(row("a"))
+		},
+	} {
+		t.Run(path.name+"/second_chunk_offset_error_after_first_chunk_rotated_does_not_rotate_again", func(t *testing.T) {
+			var mu sync.Mutex
+			var rowsPerRequest []int64
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					mu.Lock()
+					rowsPerRequest = append(rowsPerRequest, req.GetArrowRows().GetRows().GetRowCount())
+					mu.Unlock()
+					switch attempt {
+					case 1:
+						// Chunk 1, attempt 1 on committed-1: triggers the batch's one allowed rotation.
+						return nil, status.Error(codes.NotFound, "stream 1 expired")
+					case 2:
+						// Chunk 1, attempt 2 on committed-2: succeeds at offset 0.
+						return &storagepb.AppendRowsResponse{}, nil
+					case 3:
+						// Chunk 2, attempt 1 on committed-2: returns NotFound after chunk 1 already rotated.
+						return nil, status.Error(codes.NotFound, "stream 2 expired")
+					default:
+						return &storagepb.AppendRowsResponse{}, nil
+					}
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, true)
+			path.setup(bp)
 
-		if err := bp.writeBatch(context.Background(), []map[string]any{row("a"), row("b"), row("c")}); err != nil {
-			t.Fatalf("writeBatch() error = %v, want nil", err)
-		}
-		if got := srv.attempts(); got != 4 {
-			t.Errorf("AppendRows attempts = %d, want 4 (1 failed on stream 1 + 3 chunks on stream 2)", got)
-		}
-		srv.mu.Lock()
-		created := len(srv.createReqs)
-		offsets := slices.Clone(srv.appendOffsets)
-		srv.mu.Unlock()
-		if created != 2 {
-			t.Errorf("CreateWriteStream calls = %d, want 2", created)
-		}
-		if diff := cmp.Diff([]int64{0, 0, 1, 2}, offsets); diff != "" {
-			t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
-		}
-	})
+			err := path.write(bp, []map[string]any{row("a"), row("b"), row("c")})
+			if err == nil || !strings.Contains(err.Error(), "committed write stream already rotated") {
+				t.Fatalf("write error = %v, want already-rotated error on second chunk", err)
+			}
+			if got := srv.attempts(); got != 3 {
+				t.Errorf("AppendRows attempts = %d, want 3 (third chunk must not be sent)", got)
+			}
+			srv.mu.Lock()
+			created := len(srv.createReqs)
+			offsets := slices.Clone(srv.appendOffsets)
+			srv.mu.Unlock()
+			if created != 2 {
+				t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + at most 1 rotation per batch)", created)
+			}
+			if diff := cmp.Diff([]int64{0, 0, 1}, offsets); diff != "" {
+				t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+			}
+			mu.Lock()
+			gotRows := slices.Clone(rowsPerRequest)
+			mu.Unlock()
+			if diff := cmp.Diff([]int64{1, 1, 1}, gotRows); diff != "" {
+				t.Errorf("rows per AppendRows request mismatch (-want +got):\n%s", diff)
+			}
+			// The first chunk was confirmed, so only the two rows after it
+			// are dropped.
+			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+				t.Errorf("AppendFailureDrops = %d, want 2", got)
+			}
+		})
+
+		t.Run(path.name+"/single_rotation_on_first_chunk_allows_remaining_chunks_on_replacement_stream", func(t *testing.T) {
+			var mu sync.Mutex
+			var rowsPerRequest []int64
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					mu.Lock()
+					rowsPerRequest = append(rowsPerRequest, req.GetArrowRows().GetRows().GetRowCount())
+					mu.Unlock()
+					if attempt == 1 {
+						return nil, status.Error(codes.NotFound, "stream 1 expired")
+					}
+					return &storagepb.AppendRowsResponse{}, nil
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, true)
+			path.setup(bp)
+
+			if err := path.write(bp, []map[string]any{row("a"), row("b"), row("c")}); err != nil {
+				t.Fatalf("write error = %v, want nil", err)
+			}
+			if got := srv.attempts(); got != 4 {
+				t.Errorf("AppendRows attempts = %d, want 4 (1 failed on stream 1 + 3 chunks on stream 2)", got)
+			}
+			srv.mu.Lock()
+			created := len(srv.createReqs)
+			offsets := slices.Clone(srv.appendOffsets)
+			srv.mu.Unlock()
+			if created != 2 {
+				t.Errorf("CreateWriteStream calls = %d, want 2", created)
+			}
+			if diff := cmp.Diff([]int64{0, 0, 1, 2}, offsets); diff != "" {
+				t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+			}
+			mu.Lock()
+			gotRows := slices.Clone(rowsPerRequest)
+			mu.Unlock()
+			if diff := cmp.Diff([]int64{1, 1, 1, 1}, gotRows); diff != "" {
+				t.Errorf("rows per AppendRows request mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix runs a batch of
+// two rows, split into one request per row, through two run-end flushes under
+// ExactlyOnceDelivery. BigQuery confirms the request of row a, and the request
+// of row b runs past the run-end budget without being committed, so the first
+// flush keeps only row b for the retry: the second flush must resend row b
+// and not row a, whether the batch was cut by estimated size or halved by
+// serialized size. The first flush releases the deferred upload of row a,
+// which was written, and keeps the deferred upload of row b for the retry,
+// which releases it.
+func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(bp *BatchProcessor)
+	}{
+		{
+			// Each row is a request of its own under this estimated limit.
+			name:  "estimated_split",
+			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = 1 },
+		},
+		{
+			// The batch is a single estimated chunk, which serializes to
+			// more than this limit, so it is halved into [a] and [b].
+			name:  "recursive_serialized_halving",
+			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
+
+			var mu sync.Mutex
+			var acked []*storagepb.AppendRowsRequest
+			var rowsPerRequest []int64
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					mu.Lock()
+					rowsPerRequest = append(rowsPerRequest, req.GetArrowRows().GetRows().GetRowCount())
+					mu.Unlock()
+					if attempt == 2 {
+						// The request of row b outlasts the run-end budget
+						// and is not committed.
+						select {
+						case <-release:
+						case <-time.After(30 * time.Second):
+						}
+						return nil, status.Error(codes.Unavailable, "scripted: not committed")
+					}
+					mu.Lock()
+					acked = append(acked, req)
+					mu.Unlock()
+					return &storagepb.AppendRowsResponse{}, nil
+				},
+			}
+
+			// In the first flush, the first upload of row a holds the only
+			// slot for 400ms of the ~1s that the uploads get and succeeds, so
+			// that the uploads are not paused; the second upload of row a and
+			// the upload of row b are cut short by the deadline and kept.
+			var retrying atomic.Bool
+			off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+				if retrying.Load() {
+					return nil
+				}
+				if strings.Contains(req.Path, "_ev-a_") && strings.Contains(req.Path, "_c0_") {
+					select {
+					case <-time.After(400 * time.Millisecond):
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			}}
+			cfg := exactlyOnceTestConfig()
+			cfg.BatchFlushIntv = time.Hour
+			cfg.ShutdownTimeout = 2 * time.Second
+			cfg.RetryConfig.MaxRetries = 0
+			cfg.GCSOffloader = off
+			cfg.GCSMaxConcurrentUploads = 1
+			cfg.Logger = &recordingLogger{}
+			bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), "", cfg)
+			if err != nil {
+				t.Fatalf("NewBatchProcessor: %v", err)
+			}
+			t.Cleanup(bp.Close)
+			// Cleanups run last-in first-out: the blocked server request is
+			// released before Close and the server stop.
+			t.Cleanup(releaseServer)
+			tc.setup(bp)
+
+			// The rows are queued directly, so that no background flush takes
+			// flushMu before flushRunEnd does. Row a has a 3-byte and a 5-byte
+			// upload, and row b a 7-byte upload.
+			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+			rowA := queuedRow(opts, imageContent(1, 2, 3), imageContent(4, 5, 6, 7, 8))
+			rowA["event_type"] = EventLLMRequest
+			rowA[eventIDField] = "ev-a"
+			rowB := queuedRow(opts, imageContent(1, 2, 3, 4, 5, 6, 7))
+			rowB["event_type"] = EventLLMRequest
+			rowB[eventIDField] = "ev-b"
+			bp.queue <- rowA
+			bp.queue <- rowB
+
+			bp.flushRunEnd()
+
+			if got := len(bp.deferredBatch); got != 1 {
+				t.Fatalf("deferredBatch length after the first flushRunEnd = %d, want 1 (only the unconfirmed row b)", got)
+			}
+			if got := bp.deferredBatch[0][eventIDField]; got != "ev-b" {
+				t.Fatalf("deferredBatch[0] event_id = %v, want ev-b", got)
+			}
+			if got := bp.uploadCooldownUntil.Load(); got != 0 {
+				t.Fatalf("uploadCooldownUntil after the first flushRunEnd = %d, want 0 (uploads not paused)", got)
+			}
+			if got := bp.pendingUploadBytes.Load(); got != 7 {
+				t.Errorf("pendingUploadBytes after the first flushRunEnd = %d, want 7 (row a's 5-byte upload released, row b's 7-byte upload kept)", got)
+			}
+			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+				t.Errorf("DropStats after the first flushRunEnd = %+v, want no drops", ds)
+			}
+
+			releaseServer()
+			retrying.Store(true)
+			callsBefore := len(off.uploads())
+			bp.flushRunEnd()
+
+			if got := len(bp.deferredBatch); got != 0 {
+				t.Errorf("deferredBatch length after the retry flushRunEnd = %d, want 0", got)
+			}
+			if got := bp.pendingUploadBytes.Load(); got != 0 {
+				t.Errorf("pendingUploadBytes after the retry flushRunEnd = %d, want 0", got)
+			}
+			if got := len(off.uploads()) - callsBefore; got != 1 {
+				t.Errorf("retry flushRunEnd offloader calls = %d, want 1 (only row b's kept upload)", got)
+			}
+			if ds := bp.DropStats(); ds.TotalDrops != 0 {
+				t.Errorf("DropStats after the retry flushRunEnd = %+v, want no drops", ds)
+			}
+
+			mu.Lock()
+			ackedReqs := slices.Clone(acked)
+			gotRows := slices.Clone(rowsPerRequest)
+			mu.Unlock()
+			var committed []string
+			for _, req := range ackedReqs {
+				for _, r := range decodeArrowRows(t, req) {
+					committed = append(committed, r[eventIDField].(string))
+				}
+			}
+			if diff := cmp.Diff([]string{"ev-a", "ev-b"}, committed); diff != "" {
+				t.Errorf("committed rows mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff([]int64{1, 1, 1}, gotRows); diff != "" {
+				t.Errorf("rows per AppendRows request mismatch (-want +got):\n%s", diff)
+			}
+			srv.mu.Lock()
+			created := len(srv.createReqs)
+			offsets := slices.Clone(srv.appendOffsets)
+			srv.mu.Unlock()
+			// The retry replaces the stream, whose offset the request that
+			// the budget cut short left unknown, and resends row b at
+			// offset 0 of the new stream.
+			if created != 2 {
+				t.Errorf("CreateWriteStream calls = %d, want 2", created)
+			}
+			if diff := cmp.Diff([]int64{0, 1, 0}, offsets); diff != "" {
+				t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }

@@ -56,8 +56,10 @@ type Logger interface {
 // between them, ends when ShutdownTimeout expires, while the writes made by a
 // run-end flush, and those made while Close drains the queue, share a single
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
-// in-flight batch is deferred for at most one retry in the next flush
-// (background, run-end, or Close). This provides at-least-once delivery; if
+// rows of the in-flight batch that BigQuery has not confirmed are deferred for
+// at most one retry in the next flush (background, run-end, or Close); the
+// rows of the split requests that it confirmed before then are not resent.
+// This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
 // succeed on retry; queries deduplicating by event_id should prefer rows where
