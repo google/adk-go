@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
@@ -131,3 +133,30 @@ func (c *CountingSessionService) Reset() {
 	c.Appends.Store(0)
 	c.EventsLoaded.Store(0)
 }
+
+// CountingSpanExporter is an OpenTelemetry span exporter that counts the spans
+// it is given and keeps none, so a benchmark can report how many spans a
+// request path records when an SDK TracerProvider is installed.
+type CountingSpanExporter struct {
+	Spans atomic.Int64
+}
+
+func (e *CountingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.Spans.Add(int64(len(spans)))
+	return nil
+}
+
+func (e *CountingSpanExporter) Shutdown(context.Context) error { return nil }
+
+// CountingLogExporter is the log-record counterpart of [CountingSpanExporter].
+type CountingLogExporter struct {
+	Records atomic.Int64
+}
+
+func (e *CountingLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.Records.Add(int64(len(records)))
+	return nil
+}
+
+func (e *CountingLogExporter) Shutdown(context.Context) error   { return nil }
+func (e *CountingLogExporter) ForceFlush(context.Context) error { return nil }

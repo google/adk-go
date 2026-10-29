@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/glebarez/sqlite"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/benchutil"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -87,44 +90,84 @@ func sqliteService(b *testing.B) session.Service {
 func benchRunTurn(b *testing.B, backend string, newService func(*testing.B) session.Service) {
 	for _, n := range []int{0, 100, 1000} {
 		b.Run(fmt.Sprintf("%s/events=%d", backend, n), func(b *testing.B) {
-			m := &echoModel{}
-			msg := genai.NewContentFromText("hello", genai.RoleUser)
-			var gets, appends, loaded int64
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				b.StopTimer()
-				svc := &benchutil.CountingSessionService{Service: newService(b)}
-				if _, err := benchutil.SeedSession(b.Context(), svc, "app", "user", "s", "agent", n); err != nil {
-					b.Fatal(err)
-				}
-				r, err := runner.New(runner.Config{AppName: "app", Agent: benchAgent(b, m), SessionService: svc})
-				if err != nil {
-					b.Fatal(err)
-				}
-				svc.Reset()
-				b.StartTimer()
-				for _, err := range r.Run(b.Context(), "user", "s", msg, agent.RunConfig{}) {
-					if err != nil {
-						b.Fatal(err)
-					}
-				}
-				b.StopTimer()
-				gets += svc.Gets.Load()
-				appends += svc.Appends.Load()
-				loaded += svc.EventsLoaded.Load()
-				b.StartTimer()
-			}
-			b.ReportMetric(float64(gets)/float64(b.N), "gets/turn")
-			b.ReportMetric(float64(appends)/float64(b.N), "appends/turn")
-			b.ReportMetric(float64(loaded)/float64(b.N), "events-loaded/turn")
-			b.ReportMetric(float64(m.lastContents), "contents-in-prompt")
+			benchRunTurnN(b, n, newService)
 		})
 	}
+}
+
+func benchRunTurnN(b *testing.B, n int, newService func(*testing.B) session.Service) {
+	m := &echoModel{}
+	msg := genai.NewContentFromText("hello", genai.RoleUser)
+	var gets, appends, loaded int64
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		svc := &benchutil.CountingSessionService{Service: newService(b)}
+		if _, err := benchutil.SeedSession(b.Context(), svc, "app", "user", "s", "agent", n); err != nil {
+			b.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{AppName: "app", Agent: benchAgent(b, m), SessionService: svc})
+		if err != nil {
+			b.Fatal(err)
+		}
+		svc.Reset()
+		b.StartTimer()
+		for _, err := range r.Run(b.Context(), "user", "s", msg, agent.RunConfig{}) {
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StopTimer()
+		gets += svc.Gets.Load()
+		appends += svc.Appends.Load()
+		loaded += svc.EventsLoaded.Load()
+		b.StartTimer()
+	}
+	b.ReportMetric(float64(gets)/float64(b.N), "gets/turn")
+	b.ReportMetric(float64(appends)/float64(b.N), "appends/turn")
+	b.ReportMetric(float64(loaded)/float64(b.N), "events-loaded/turn")
+	b.ReportMetric(float64(m.lastContents), "contents-in-prompt")
 }
 
 func BenchmarkRunTurn(b *testing.B) {
 	benchRunTurn(b, "inmemory", func(*testing.B) session.Service { return session.InMemoryService() })
 	benchRunTurn(b, "sqlite", sqliteService)
+}
+
+// BenchmarkRunTurnCapture is BenchmarkRunTurn/inmemory/events=1000 under
+// message-content capture: off; EVENT_ONLY with no LoggerProvider, which is
+// what `adkgo deploy agentengine` configures when no OTLP endpoint is set;
+// and EVENT_ONLY and SPAN_AND_EVENT consumed by SDK providers over counting
+// exporters. It reports the spans and log records those providers received.
+func BenchmarkRunTurnCapture(b *testing.B) {
+	for _, tc := range []struct {
+		name           string
+		capture        string
+		tracer, logger bool
+	}{
+		{name: "off"},
+		{name: "event/no-provider", capture: "EVENT_ONLY"},
+		{name: "event/sdk-logger", capture: "EVENT_ONLY", logger: true},
+		{name: "span_and_event/sdk-both", capture: "SPAN_AND_EVENT", tracer: true, logger: true},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			// Runs after b.Setenv restores the environment.
+			b.Cleanup(telemetry.ApplyEnv)
+			b.Setenv("OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", tc.capture)
+			telemetry.ApplyEnv()
+			spans := &benchutil.CountingSpanExporter{}
+			records := &benchutil.CountingLogExporter{}
+			if tc.tracer {
+				telemetry.OverrideTracerForTesting(b, sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(spans))))
+			}
+			if tc.logger {
+				telemetry.OverrideLoggerForTesting(b, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(records))))
+			}
+			benchRunTurnN(b, 1000, func(*testing.B) session.Service { return session.InMemoryService() })
+			b.ReportMetric(float64(spans.Spans.Load())/float64(b.N), "spans/turn")
+			b.ReportMetric(float64(records.Records.Load())/float64(b.N), "records/turn")
+		})
+	}
 }
 
 // BenchmarkRunnerNew measures constructing a Runner, which the REST server
