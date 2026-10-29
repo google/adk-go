@@ -18,6 +18,7 @@ package benchutil
 import (
 	"context"
 	"fmt"
+	"iter"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -93,15 +94,28 @@ func SeedSession(ctx context.Context, svc session.Service, appName, userID, sess
 // benchmark can report how many times a request path hits the store.
 type CountingSessionService struct {
 	session.Service
+	// CountHistory wraps returned sessions so HistoryPasses and EventsIterated
+	// record in-memory event scans on the loaded session.
+	CountHistory                 bool
 	Gets, Creates, Lists, Appends atomic.Int64
 	// EventsLoaded sums the events returned by Get, the bytes a backend would
 	// have to deserialize.
 	EventsLoaded atomic.Int64
+	// HistoryPasses counts Session.Events() handles that iterate at least one
+	// event via All() or At().
+	HistoryPasses atomic.Int64
+	// EventsIterated sums individual event reads across all All() and At()
+	// calls on a loaded session.
+	EventsIterated atomic.Int64
 }
 
 func (c *CountingSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
 	c.Creates.Add(1)
-	return c.Service.Create(ctx, req)
+	resp, err := c.Service.Create(ctx, req)
+	if err == nil && c.CountHistory && resp != nil && resp.Session != nil {
+		resp.Session = &countingSession{Session: resp.Session, svc: c}
+	}
+	return resp, err
 }
 
 func (c *CountingSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
@@ -109,6 +123,9 @@ func (c *CountingSessionService) Get(ctx context.Context, req *session.GetReques
 	resp, err := c.Service.Get(ctx, req)
 	if err == nil && resp != nil && resp.Session != nil {
 		c.EventsLoaded.Add(int64(resp.Session.Events().Len()))
+		if c.CountHistory {
+			resp.Session = &countingSession{Session: resp.Session, svc: c}
+		}
 	}
 	return resp, err
 }
@@ -120,6 +137,9 @@ func (c *CountingSessionService) List(ctx context.Context, req *session.ListRequ
 
 func (c *CountingSessionService) AppendEvent(ctx context.Context, s session.Session, ev *session.Event) error {
 	c.Appends.Add(1)
+	if cs, ok := s.(*countingSession); ok {
+		s = cs.Session
+	}
 	return c.Service.AppendEvent(ctx, s, ev)
 }
 
@@ -130,4 +150,50 @@ func (c *CountingSessionService) Reset() {
 	c.Lists.Store(0)
 	c.Appends.Store(0)
 	c.EventsLoaded.Store(0)
+	c.HistoryPasses.Store(0)
+	c.EventsIterated.Store(0)
+}
+
+type countingSession struct {
+	session.Session
+	svc *CountingSessionService
+	ce  countingEvents
+}
+
+func (s *countingSession) Events() session.Events {
+	s.ce.Events = s.Session.Events()
+	s.ce.svc = s.svc
+	s.ce.counted = false
+	return &s.ce
+}
+
+type countingEvents struct {
+	session.Events
+	svc     *CountingSessionService
+	counted bool
+}
+
+func (e *countingEvents) markPass() {
+	if !e.counted {
+		e.counted = true
+		e.svc.HistoryPasses.Add(1)
+	}
+}
+
+func (e *countingEvents) All() iter.Seq[*session.Event] {
+	return func(yield func(*session.Event) bool) {
+		e.markPass()
+		for ev := range e.Events.All() {
+			e.svc.EventsIterated.Add(1)
+			if !yield(ev) {
+				return
+			}
+		}
+	}
+}
+
+func (e *countingEvents) At(i int) *session.Event {
+	e.markPass()
+	e.svc.EventsIterated.Add(1)
+	return e.Events.At(i)
 }

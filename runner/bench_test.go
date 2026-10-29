@@ -88,17 +88,19 @@ func benchRunTurn(b *testing.B, backend string, newService func(*testing.B) sess
 	for _, n := range []int{0, 100, 1000} {
 		b.Run(fmt.Sprintf("%s/events=%d", backend, n), func(b *testing.B) {
 			m := &echoModel{}
+			a := benchAgent(b, m)
+			svc := &benchutil.CountingSessionService{CountHistory: true}
+			r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: svc})
+			if err != nil {
+				b.Fatal(err)
+			}
 			msg := genai.NewContentFromText("hello", genai.RoleUser)
-			var gets, appends, loaded int64
+			var gets, appends, loaded, passes, iterated int64
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				svc := &benchutil.CountingSessionService{Service: newService(b)}
+				svc.Service = newService(b)
 				if _, err := benchutil.SeedSession(b.Context(), svc, "app", "user", "s", "agent", n); err != nil {
-					b.Fatal(err)
-				}
-				r, err := runner.New(runner.Config{AppName: "app", Agent: benchAgent(b, m), SessionService: svc})
-				if err != nil {
 					b.Fatal(err)
 				}
 				svc.Reset()
@@ -112,11 +114,15 @@ func benchRunTurn(b *testing.B, backend string, newService func(*testing.B) sess
 				gets += svc.Gets.Load()
 				appends += svc.Appends.Load()
 				loaded += svc.EventsLoaded.Load()
+				passes += svc.HistoryPasses.Load()
+				iterated += svc.EventsIterated.Load()
 				b.StartTimer()
 			}
 			b.ReportMetric(float64(gets)/float64(b.N), "gets/turn")
 			b.ReportMetric(float64(appends)/float64(b.N), "appends/turn")
 			b.ReportMetric(float64(loaded)/float64(b.N), "events-loaded/turn")
+			b.ReportMetric(float64(passes)/float64(b.N), "history-passes/turn")
+			b.ReportMetric(float64(iterated)/float64(b.N), "events-iterated/turn")
 			b.ReportMetric(float64(m.lastContents), "contents-in-prompt")
 		})
 	}
