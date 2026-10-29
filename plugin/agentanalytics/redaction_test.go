@@ -452,6 +452,14 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"quoted oversized child", "credentials:\n \"" + longKey + "\": SYNTHETIC_SECRET"},
 		{"oversized state-prefixed child", "credentials:\n user:" + longKey + ": SYNTHETIC_SECRET"},
 		{"oversized child after another", "credentials:\n a_PASSWORD: " + longKey + ": SYNTHETIC_SECRET"},
+		{"oversized key, quoted multiword value after =", longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized key, quoted multiword value after :", longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized key, single-quoted multiword value", longKey + `='prefix SYNTHETIC_SECRET suffix'`},
+		{"oversized key, single-quoted multiword value after :", longKey + `: 'prefix SYNTHETIC_SECRET suffix'`},
+		{"oversized user key, quoted multiword value", "user:" + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized app key, quoted multiword value", "app:" + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized child, quoted multiword value", "credentials:\n " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized key, quoted multiword value after a word", "call failed " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -469,11 +477,11 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 			raw, _ := sanitizeRawText(tt.in)
 			check("sanitizeRawText", raw)
 			for path, in := range map[string]any{
-				"error":             errors.New(tt.in),
-				"stringer":          testStringerText{tt.in},
-				"error in a map":    map[string]any{"err": errors.New(tt.in)},
-				"error in a struct": struct{ Err error }{errors.New(tt.in)},
-				"wrapped error":     fmt.Errorf("outer: %w", errors.New(tt.in)),
+				"error":                    errors.New(tt.in),
+				"struct with a text field": struct{ Text string }{tt.in},
+				"error in a map":           map[string]any{"err": errors.New(tt.in)},
+				"error in a struct":        struct{ Err error }{errors.New(tt.in)},
+				"wrapped error":            fmt.Errorf("outer: %w", errors.New(tt.in)),
 			} {
 				b, _, err := SmartTruncate(in, 1<<20)
 				if err != nil {
@@ -542,6 +550,14 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"long run of oauth boundaries after a word", func(n int) string { return "x " + strings.Repeat("xOauth", n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"long run of oauth boundaries with an inner dot", func(n int) string { return "x " + strings.Repeat("xOauth", n) + ".x.code=x" },
+			func(in string) { _ = scrubTextPatterns(in) }, 40000,
+		},
+		{
+			"long run of oauth boundaries with an inner dot through an error", func(n int) string { return "x " + strings.Repeat("xOauth", n) + ".x.code=x" },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 40000,
 		},
 		{
 			"long run of oauth boundaries before a delimiter", func(n int) string { return strings.Repeat("aOauth", n) + "=x" },

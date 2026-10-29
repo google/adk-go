@@ -21,9 +21,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -4204,29 +4206,43 @@ type testPanickingStringer struct{ p *int }
 func (s testPanickingStringer) String() string { return strconv.Itoa(*s.p) }
 
 func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
+	// Under redaction the method of an error or Stringer is called only for
+	// errors.New, whose text is the message it was made with; any other
+	// value without exported fields keeps the structural form that
+	// reflection gives it. With redaction off, the text of all of them is
+	// written.
 	tests := []struct {
-		name      string
-		in        any
-		want      string
-		wantTrunc bool
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string // the result with redaction off; want if empty
+		wantOffTrunc bool
 	}{
-		{"errors.New", errors.New("boom"), `"boom"`, false},
-		{"wrapped error", fmt.Errorf("outer: %w", errors.New("inner")), `"outer: inner"`, false},
-		{"pointer error type", &testErrorNoFields{"custom"}, `"custom"`, false},
-		{"value error type", testErrorValue{"value"}, `"value"`, false},
-		{"error of a string kind", testErrorCode("E42"), `"code E42"`, false},
-		{"error in a map", map[string]any{"err": errors.New("x")}, `{"err":"x"}`, false},
-		{"error in a slice", []error{errors.New("a"), errors.New("b")}, `["a","b"]`, false},
-		{"credential in the error text", errors.New("dial failed: api_key=SECRET"), `"dial failed: api_key=[REDACTED]"`, true},
-		{"stringer without exported fields", testStringerNoFields{7}, `"stringer n=7"`, false},
-		{"pointer to stringer", &testStringerNoFields{8}, `"stringer n=8"`, false},
-		{"error with exported fields keeps its fields", testErrorWithFields{Code: 7, Message: "m"}, `{"Code":7,"Message":"m"}`, false},
-		{"stringer with exported fields keeps its fields", testStringerWithFields{Name: "n"}, `{"Name":"n"}`, false},
-		{"duration stays a number", time.Second, `1000000000`, false},
-		{"struct with no fields at all", struct{ a int }{3}, `{}`, false},
-		{"panicking error", testPanickingError{}, `"[UNSUPPORTED_OBJECT]"`, true},
-		{"panicking stringer", testPanickingStringer{}, `"[UNSUPPORTED_OBJECT]"`, true},
-		{"nil error pointer", (*testErrorNoFields)(nil), `null`, false},
+		{name: "errors.New", in: errors.New("boom"), want: `"boom"`},
+		{name: "wrapped error", in: fmt.Errorf("outer: %w", errors.New("inner")), want: `{}`, wantOff: `"outer: inner"`},
+		{name: "pointer error type", in: &testErrorNoFields{"custom"}, want: `{}`, wantOff: `"custom"`},
+		{name: "value error type", in: testErrorValue{"value"}, want: `{}`, wantOff: `"value"`},
+		{name: "error of a string kind", in: testErrorCode("E42"), want: `"E42"`, wantOff: `"code E42"`},
+		{name: "error in a map", in: map[string]any{"err": errors.New("x")}, want: `{"err":"x"}`},
+		{name: "error in a slice", in: []error{errors.New("a"), errors.New("b")}, want: `["a","b"]`},
+		{
+			name: "credential in the error text", in: errors.New("dial failed: api_key=SECRET"), want: `"dial failed: api_key=[REDACTED]"`, wantTrunc: true,
+			wantOff: `"dial failed: api_key=SECRET"`,
+		},
+		{name: "stringer without exported fields", in: testStringerNoFields{7}, want: `{}`, wantOff: `"stringer n=7"`},
+		{name: "pointer to stringer", in: &testStringerNoFields{8}, want: `{}`, wantOff: `"stringer n=8"`},
+		{name: "error with exported fields keeps its fields", in: testErrorWithFields{Code: 7, Message: "m"}, want: `{"Code":7,"Message":"m"}`},
+		{name: "stringer with exported fields keeps its fields", in: testStringerWithFields{Name: "n"}, want: `{"Name":"n"}`},
+		{name: "duration stays a number", in: time.Second, want: `1000000000`},
+		{name: "struct with no fields at all", in: struct{ a int }{3}, want: `{}`},
+		{name: "panicking error", in: testPanickingError{}, want: `{}`, wantOff: `"[UNSUPPORTED_OBJECT]"`, wantOffTrunc: true},
+		{name: "panicking stringer", in: testPanickingStringer{}, want: `{}`, wantOff: `"[UNSUPPORTED_OBJECT]"`, wantOffTrunc: true},
+		{name: "nil error pointer", in: (*testErrorNoFields)(nil), want: `null`},
+		{name: "embedded struct that is shown as an empty object", in: testEmbeddedHiddenError{testHidden{"x"}}, want: `{}`, wantOff: `"embedded x"`},
+		{name: "embedded pointer in a stringer", in: testEmbeddedHiddenStringer{&testHidden{"y"}}, want: `{}`, wantOff: `"stringer y"`},
+		{name: "embedded struct with an exported field keeps its fields", in: testEmbeddedVisibleError{testEmbeddedHidden2{"e"}}, want: `{"Exported":"e"}`},
+		{name: "embedded hidden struct without a method", in: testEmbeddedVisible{testHidden{"v"}}, want: `{}`, wantOff: `"visible v"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -4236,6 +4252,21 @@ func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
 			}
 			if string(got) != tt.want || truncated != tt.wantTrunc {
 				t.Errorf("SmartTruncate(%v) = (%s, %v), want (%s, %v)", tt.in, got, truncated, tt.want, tt.wantTrunc)
+			}
+			wantOff := tt.wantOff
+			if wantOff == "" {
+				wantOff = tt.want
+			}
+			wantOffTrunc := tt.wantOffTrunc
+			if tt.wantOff == "" {
+				wantOffTrunc = false
+			}
+			got, truncated, err = smartTruncate(tt.in, 1<<20, false)
+			if err != nil {
+				t.Fatalf("smartTruncate(%v, redact off) error: %v", tt.in, err)
+			}
+			if string(got) != wantOff || truncated != wantOffTrunc {
+				t.Errorf("smartTruncate(%v, redact off) = (%s, %v), want (%s, %v)", tt.in, got, truncated, wantOff, wantOffTrunc)
 			}
 		})
 	}
@@ -4250,33 +4281,74 @@ type testSecretStringer struct{ apiKey string }
 
 func (e testSecretStringer) String() string { return "key " + e.apiKey }
 
-type testSecretBytesError struct{ password []byte }
+// Fields that are not named for credentials.
+type testNeutralError struct{ value string }
 
-func (e testSecretBytesError) Error() string { return "login failed with " + string(e.password) }
+func (e testNeutralError) Error() string { return e.value }
 
-type testSecretOpaqueError struct{ token []string }
+type testNeutralStringer struct{ text string }
 
-func (e testSecretOpaqueError) Error() string { return strings.Join(e.token, ",") }
+func (e testNeutralStringer) String() string { return e.text }
 
-// testToken has a sensitive type name.
-type testToken struct{ raw string }
+// testMapStringer writes a value that a private map holds.
+type testMapStringer struct{ data map[string]string }
 
-func (e testToken) Error() string { return e.raw }
+func (r testMapStringer) String() string { return r.data["password"] }
 
-type testWrappedSecretError struct {
-	msg string
-	err error
+// testEncodedError writes the password in another form.
+type testEncodedError struct{ password string }
+
+func (e testEncodedError) Error() string { return url.QueryEscape(e.password) }
+
+// testListError writes the text of the last item that it holds.
+type testListError struct{ items []any }
+
+func (e testListError) Error() string {
+	if err, ok := e.items[len(e.items)-1].(error); ok {
+		return err.Error()
+	}
+	return "list"
 }
 
-func (e testWrappedSecretError) Error() string { return e.msg + ": " + e.err.Error() }
-
-// testPlainFieldError has fields that are not named for credentials.
-type testPlainFieldError struct {
-	op   string
-	code int
+// testChainError writes the password at the end of a chain of pointers.
+type testChainError struct {
+	next     *testChainError
+	password string
 }
 
-func (e testPlainFieldError) Error() string { return fmt.Sprintf("%s failed (%d)", e.op, e.code) }
+func (e *testChainError) Error() string {
+	for ; e.next != nil; e = e.next {
+	}
+	return e.password
+}
+
+// testKimiToken is an error of a numeric kind with a sensitive type name.
+type testKimiToken int
+
+func (k testKimiToken) Error() string { return strconv.Itoa(int(k)) }
+
+type testKimiPassword []byte
+
+type testHoldsPassword struct{ pw testKimiPassword }
+
+func (e testHoldsPassword) Error() string { return string(e.pw) }
+
+// testMarshaledToken writes a credential through MarshalJSON.
+type testMarshaledToken struct{ raw string }
+
+func (k testMarshaledToken) MarshalJSON() ([]byte, error) { return json.Marshal(k.raw) }
+
+// testLockedError guards a field that its method does not use.
+type testLockedError struct {
+	mu       sync.Mutex
+	password string
+}
+
+func (e *testLockedError) Error() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return "authentication failed"
+}
 
 type testHidden struct{ msg string }
 
@@ -4302,40 +4374,61 @@ func (e testEmbeddedVisibleError) Error() string { return "never used" }
 
 func TestSmartTruncate_OpaqueMethodsDoNotWriteCredentials(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET"
+	wrapped := error(testSecretError{secret})
+	for range 80 {
+		wrapped = fmt.Errorf("w: %w", wrapped)
+	}
+	deep := &testChainError{password: secret}
+	for range 61 {
+		deep = &testChainError{next: deep}
+	}
+	items := make([]any, 300)
+	for i := range items {
+		items[i] = testNeutralError{"item"}
+	}
+	items[299] = testSecretError{secret}
+	children := make([]testSecretError, 300)
+	for i := range children {
+		children[i] = testSecretError{secret + "_" + strconv.Itoa(i)}
+	}
 	tests := []struct {
 		name string
 		in   any
 		want string
 	}{
-		{"error holding a bare credential", testSecretError{secret}, `"[REDACTED]"`},
-		{"pointer to it", &testSecretError{secret}, `"[REDACTED]"`},
-		{"stringer holding a bare credential", testSecretStringer{secret}, `"key [REDACTED]"`},
-		{"credential held as bytes", testSecretBytesError{[]byte(secret)}, `"login failed with [REDACTED]"`},
-		{"credential that is not text", testSecretOpaqueError{[]string{secret}}, `"[REDACTED]"`},
-		{"type with a sensitive name", testToken{secret}, `"[REDACTED]"`},
-		{"wrapped error holding a credential", testWrappedSecretError{"outer", testSecretError{secret}}, `"outer: [REDACTED]"`},
-		{"error holding a credential in a map", map[string]any{"err": testSecretError{secret}}, `{"err":"[REDACTED]"}`},
-		{"error holding a credential in a slice", []error{testSecretError{secret}}, `["[REDACTED]"]`},
-		{"error holding a credential in a struct field", struct{ Err error }{testSecretError{secret}}, `{"Err":"[REDACTED]"}`},
-		{"error without fields named for credentials", testPlainFieldError{"dial", 7}, `"dial failed (7)"`},
-		{"empty credential field", testSecretError{}, `""`},
-		{"zero value of a type with a sensitive name", testToken{}, `""`},
-		{"embedded struct with unexported fields in an error", testEmbeddedHiddenError{testHidden{"x"}}, `"embedded x"`},
-		{"embedded pointer to such a struct in a stringer", testEmbeddedHiddenStringer{&testHidden{"y"}}, `"stringer y"`},
-		{"embedded struct that is shown as an empty object", testEmbeddedVisible{testHidden{"v"}}, `"visible v"`},
-		{"embedded struct with an exported field keeps its fields", testEmbeddedVisibleError{testEmbeddedHidden2{"e"}}, `{"Exported":"e"}`},
+		{"error with a credential field", testSecretError{secret}, `{}`},
+		{"pointer to it", &testSecretError{secret}, `{}`},
+		{"stringer with a credential field", testSecretStringer{secret}, `{}`},
+		{"error with a field of a neutral name", testNeutralError{secret}, `{}`},
+		{"stringer with a field of a neutral name", testNeutralStringer{secret}, `{}`},
+		{"stringer that reads a private map", testMapStringer{map[string]string{"password": secret}}, `{}`},
+		{"error that writes the password in another form", testEncodedError{secret}, `{}`},
+		{"error that holds a long list", testListError{items}, `{}`},
+		{"error that holds many children", struct{ children []testSecretError }{children}, `{}`},
+		{"error that holds children", testListError{[]any{children}}, `{}`},
+		{"eighty wrappers of an error", wrapped, `{}`},
+		{"chain of pointers beyond the depth limit", deep, `{}`},
+		{"error of a numeric kind with a sensitive type name", testKimiToken(918273645), `"[REDACTED]"`},
+		{"error that holds a value of a sensitive type name", testHoldsPassword{testKimiPassword(secret)}, `{}`},
+		{"value of a bytes type with a sensitive name", testKimiPassword(secret), `"[REDACTED]"`},
+		{"field of a bytes type with a sensitive name", struct{ P testKimiPassword }{testKimiPassword(secret)}, `{"P":"[REDACTED]"}`},
+		{"struct with a sensitive type name that marshals itself", testMarshaledToken{secret}, `"[REDACTED]"`},
+		{"error with a credential field in a map", map[string]any{"err": testSecretError{secret}}, `{"err":{}}`},
+		{"error with a credential field in a slice", []error{testSecretError{secret}}, `[{}]`},
+		{"error with a credential field in a struct field", struct{ Err error }{testSecretError{secret}}, `{"Err":{}}`},
+		{"error of a string kind keeps its value only", testErrorCode(secret + "x"), `"` + secret + `x"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _, err := SmartTruncate(tt.in, 1<<20)
 			if err != nil {
-				t.Fatalf("SmartTruncate(%v) error: %v", tt.in, err)
+				t.Fatalf("SmartTruncate error: %v", err)
 			}
-			if strings.Contains(string(got), secret) {
-				t.Errorf("SmartTruncate(%v) = %s, which holds the secret", tt.in, got)
+			if tt.name != "error of a string kind keeps its value only" && strings.Contains(string(got), secret) {
+				t.Errorf("SmartTruncate = %s, which holds the secret", got)
 			}
 			if string(got) != tt.want {
-				t.Errorf("SmartTruncate(%v) = %s, want %s", tt.in, got, tt.want)
+				t.Errorf("SmartTruncate = %s, want %s", got, tt.want)
 			}
 		})
 	}
@@ -4346,6 +4439,34 @@ func TestSmartTruncate_OpaqueMethodsDoNotWriteCredentials(t *testing.T) {
 			t.Errorf("smartTruncate(testSecretError, redact off) = (%s, %v), want %q", got, err, secret)
 		}
 	})
+
+	t.Run("a zero value of a sensitive type name holds none", func(t *testing.T) {
+		got, _, _ := SmartTruncate(testKimiToken(0), 1<<20)
+		if string(got) != `0` {
+			t.Errorf("SmartTruncate(testKimiToken(0)) = %s, want 0", got)
+		}
+	})
+}
+
+// TestSmartTruncate_DoesNotReadPrivateFields checks that serializing a value
+// under redaction does not read what its type guards: run with -race.
+func TestSmartTruncate_DoesNotReadPrivateFields(t *testing.T) {
+	v := &testLockedError{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 2000 {
+			v.mu.Lock()
+			v.password = "pw" + strconv.Itoa(i)
+			v.mu.Unlock()
+		}
+	}()
+	for range 200 {
+		if got, _, err := SmartTruncate(v, 1000); err != nil || strings.Contains(string(got), "pw") {
+			t.Fatalf("SmartTruncate = (%s, %v)", got, err)
+		}
+	}
+	<-done
 }
 
 func TestShowsExportedFields_Embedded(t *testing.T) {
@@ -4370,6 +4491,295 @@ func TestShowsExportedFields_Embedded(t *testing.T) {
 		if got := showsExportedFields(reflect.ValueOf(tt.in)); got != tt.want {
 			t.Errorf("%s: showsExportedFields(%T) = %v, want %v", tt.name, tt.in, got, tt.want)
 		}
+	}
+}
+
+// Types that share embedded types: 2^22 paths from the top to a leaf.
+type (
+	testDiamondA0 struct{ x int }
+	testDiamondB0 struct{ y int }
+	testDiamondA1 struct {
+		*testDiamondA0
+		*testDiamondB0
+	}
+)
+
+type testDiamondB1 struct {
+	*testDiamondA0
+	*testDiamondB0
+}
+type testDiamondA2 struct {
+	*testDiamondA1
+	*testDiamondB1
+}
+type testDiamondB2 struct {
+	*testDiamondA1
+	*testDiamondB1
+}
+type testDiamondA3 struct {
+	*testDiamondA2
+	*testDiamondB2
+}
+type testDiamondB3 struct {
+	*testDiamondA2
+	*testDiamondB2
+}
+type testDiamondA4 struct {
+	*testDiamondA3
+	*testDiamondB3
+}
+type testDiamondB4 struct {
+	*testDiamondA3
+	*testDiamondB3
+}
+type testDiamondA5 struct {
+	*testDiamondA4
+	*testDiamondB4
+}
+type testDiamondB5 struct {
+	*testDiamondA4
+	*testDiamondB4
+}
+type testDiamondA6 struct {
+	*testDiamondA5
+	*testDiamondB5
+}
+type testDiamondB6 struct {
+	*testDiamondA5
+	*testDiamondB5
+}
+type testDiamondA7 struct {
+	*testDiamondA6
+	*testDiamondB6
+}
+type testDiamondB7 struct {
+	*testDiamondA6
+	*testDiamondB6
+}
+type testDiamondA8 struct {
+	*testDiamondA7
+	*testDiamondB7
+}
+type testDiamondB8 struct {
+	*testDiamondA7
+	*testDiamondB7
+}
+type testDiamondA9 struct {
+	*testDiamondA8
+	*testDiamondB8
+}
+type testDiamondB9 struct {
+	*testDiamondA8
+	*testDiamondB8
+}
+type testDiamondA10 struct {
+	*testDiamondA9
+	*testDiamondB9
+}
+type testDiamondB10 struct {
+	*testDiamondA9
+	*testDiamondB9
+}
+type testDiamondA11 struct {
+	*testDiamondA10
+	*testDiamondB10
+}
+type testDiamondB11 struct {
+	*testDiamondA10
+	*testDiamondB10
+}
+type testDiamondA12 struct {
+	*testDiamondA11
+	*testDiamondB11
+}
+type testDiamondB12 struct {
+	*testDiamondA11
+	*testDiamondB11
+}
+type testDiamondA13 struct {
+	*testDiamondA12
+	*testDiamondB12
+}
+type testDiamondB13 struct {
+	*testDiamondA12
+	*testDiamondB12
+}
+type testDiamondA14 struct {
+	*testDiamondA13
+	*testDiamondB13
+}
+type testDiamondB14 struct {
+	*testDiamondA13
+	*testDiamondB13
+}
+type testDiamondA15 struct {
+	*testDiamondA14
+	*testDiamondB14
+}
+type testDiamondB15 struct {
+	*testDiamondA14
+	*testDiamondB14
+}
+type testDiamondA16 struct {
+	*testDiamondA15
+	*testDiamondB15
+}
+type testDiamondB16 struct {
+	*testDiamondA15
+	*testDiamondB15
+}
+type testDiamondA17 struct {
+	*testDiamondA16
+	*testDiamondB16
+}
+type testDiamondB17 struct {
+	*testDiamondA16
+	*testDiamondB16
+}
+type testDiamondA18 struct {
+	*testDiamondA17
+	*testDiamondB17
+}
+type testDiamondB18 struct {
+	*testDiamondA17
+	*testDiamondB17
+}
+type testDiamondA19 struct {
+	*testDiamondA18
+	*testDiamondB18
+}
+type testDiamondB19 struct {
+	*testDiamondA18
+	*testDiamondB18
+}
+type testDiamondA20 struct {
+	*testDiamondA19
+	*testDiamondB19
+}
+type testDiamondB20 struct {
+	*testDiamondA19
+	*testDiamondB19
+}
+type testDiamondA21 struct {
+	*testDiamondA20
+	*testDiamondB20
+}
+type testDiamondB21 struct {
+	*testDiamondA20
+	*testDiamondB20
+}
+type testDiamondA22 struct {
+	*testDiamondA21
+	*testDiamondB21
+}
+type testDiamondB22 struct {
+	*testDiamondA21
+	*testDiamondB21
+}
+
+// readDiamondFields reads every embedded field, which only reflection does
+// otherwise.
+func readDiamondFields() {
+	_, _ = testDiamondA0{}.x, testDiamondB0{}.y
+	_ = testDiamondA1{}.testDiamondA0
+	_ = testDiamondA1{}.testDiamondB0
+	_ = testDiamondB1{}.testDiamondA0
+	_ = testDiamondB1{}.testDiamondB0
+	_ = testDiamondA2{}.testDiamondA1
+	_ = testDiamondA2{}.testDiamondB1
+	_ = testDiamondB2{}.testDiamondA1
+	_ = testDiamondB2{}.testDiamondB1
+	_ = testDiamondA3{}.testDiamondA2
+	_ = testDiamondA3{}.testDiamondB2
+	_ = testDiamondB3{}.testDiamondA2
+	_ = testDiamondB3{}.testDiamondB2
+	_ = testDiamondA4{}.testDiamondA3
+	_ = testDiamondA4{}.testDiamondB3
+	_ = testDiamondB4{}.testDiamondA3
+	_ = testDiamondB4{}.testDiamondB3
+	_ = testDiamondA5{}.testDiamondA4
+	_ = testDiamondA5{}.testDiamondB4
+	_ = testDiamondB5{}.testDiamondA4
+	_ = testDiamondB5{}.testDiamondB4
+	_ = testDiamondA6{}.testDiamondA5
+	_ = testDiamondA6{}.testDiamondB5
+	_ = testDiamondB6{}.testDiamondA5
+	_ = testDiamondB6{}.testDiamondB5
+	_ = testDiamondA7{}.testDiamondA6
+	_ = testDiamondA7{}.testDiamondB6
+	_ = testDiamondB7{}.testDiamondA6
+	_ = testDiamondB7{}.testDiamondB6
+	_ = testDiamondA8{}.testDiamondA7
+	_ = testDiamondA8{}.testDiamondB7
+	_ = testDiamondB8{}.testDiamondA7
+	_ = testDiamondB8{}.testDiamondB7
+	_ = testDiamondA9{}.testDiamondA8
+	_ = testDiamondA9{}.testDiamondB8
+	_ = testDiamondB9{}.testDiamondA8
+	_ = testDiamondB9{}.testDiamondB8
+	_ = testDiamondA10{}.testDiamondA9
+	_ = testDiamondA10{}.testDiamondB9
+	_ = testDiamondB10{}.testDiamondA9
+	_ = testDiamondB10{}.testDiamondB9
+	_ = testDiamondA11{}.testDiamondA10
+	_ = testDiamondA11{}.testDiamondB10
+	_ = testDiamondB11{}.testDiamondA10
+	_ = testDiamondB11{}.testDiamondB10
+	_ = testDiamondA12{}.testDiamondA11
+	_ = testDiamondA12{}.testDiamondB11
+	_ = testDiamondB12{}.testDiamondA11
+	_ = testDiamondB12{}.testDiamondB11
+	_ = testDiamondA13{}.testDiamondA12
+	_ = testDiamondA13{}.testDiamondB12
+	_ = testDiamondB13{}.testDiamondA12
+	_ = testDiamondB13{}.testDiamondB12
+	_ = testDiamondA14{}.testDiamondA13
+	_ = testDiamondA14{}.testDiamondB13
+	_ = testDiamondB14{}.testDiamondA13
+	_ = testDiamondB14{}.testDiamondB13
+	_ = testDiamondA15{}.testDiamondA14
+	_ = testDiamondA15{}.testDiamondB14
+	_ = testDiamondB15{}.testDiamondA14
+	_ = testDiamondB15{}.testDiamondB14
+	_ = testDiamondA16{}.testDiamondA15
+	_ = testDiamondA16{}.testDiamondB15
+	_ = testDiamondB16{}.testDiamondA15
+	_ = testDiamondB16{}.testDiamondB15
+	_ = testDiamondA17{}.testDiamondA16
+	_ = testDiamondA17{}.testDiamondB16
+	_ = testDiamondB17{}.testDiamondA16
+	_ = testDiamondB17{}.testDiamondB16
+	_ = testDiamondA18{}.testDiamondA17
+	_ = testDiamondA18{}.testDiamondB17
+	_ = testDiamondB18{}.testDiamondA17
+	_ = testDiamondB18{}.testDiamondB17
+	_ = testDiamondA19{}.testDiamondA18
+	_ = testDiamondA19{}.testDiamondB18
+	_ = testDiamondB19{}.testDiamondA18
+	_ = testDiamondB19{}.testDiamondB18
+	_ = testDiamondA20{}.testDiamondA19
+	_ = testDiamondA20{}.testDiamondB19
+	_ = testDiamondB20{}.testDiamondA19
+	_ = testDiamondB20{}.testDiamondB19
+	_ = testDiamondA21{}.testDiamondA20
+	_ = testDiamondA21{}.testDiamondB20
+	_ = testDiamondB21{}.testDiamondA20
+	_ = testDiamondB21{}.testDiamondB20
+	_ = testDiamondA22{}.testDiamondA21
+	_ = testDiamondA22{}.testDiamondB21
+	_ = testDiamondB22{}.testDiamondA21
+	_ = testDiamondB22{}.testDiamondB21
+}
+
+func TestShowsExportedFields_SharedEmbeddedTypes(t *testing.T) {
+	readDiamondFields()
+	v := reflect.ValueOf(testDiamondA22{})
+	start := time.Now()
+	if showsExportedFields(v) {
+		t.Error("showsExportedFields(testDiamondA22) = true, want false")
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("showsExportedFields took %v for a graph of 46 types, want it linear in the types", d)
 	}
 }
 

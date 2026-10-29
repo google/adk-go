@@ -1605,15 +1605,26 @@ func findCamelKeyValToken(s string, limit int) []int {
 			e++
 		}
 		if tokenEndsPair(s, e) {
+			// An OAuth name is "oauth", words and ".code", with no other
+			// dot: it starts after the last dot before ".code", if the
+			// token ends in ".code". That is read once for the token, so
+			// that the test at each boundary takes constant time.
+			const oauth, code = "oauth", ".code"
+			minOauth := e
+			if e-t >= len(oauth)+len(code) && strings.EqualFold(s[e-len(code):e], code) {
+				// With no dot before ".code" the index is -1, and a name
+				// may start anywhere in the token.
+				minOauth = t + strings.LastIndexByte(s[t:e-len(code)], '.') + 1
+			}
 			oauthTried := false
 			for i := t + 1; i < min(e, limit); i++ {
 				if !isCamelBoundary(s, i) {
 					continue
 				}
 				if e-i > maxFixedKeyNameLen {
-					// Only an OAuth name is longer, and it ends in
-					// ".code" with no other dot after "oauth".
-					if oauthTried || !oauthNameAt(s, i, e) {
+					// Only an OAuth name is longer.
+					if oauthTried || i < minOauth || i > e-len(oauth)-len(code) ||
+						!strings.EqualFold(s[i:i+len(oauth)], oauth) {
 						continue
 					}
 					oauthTried = true
@@ -1646,16 +1657,6 @@ func tokenEndsPair(s string, i int) bool {
 		i++
 	}
 	return followedByDelimiter(s, i)
-}
-
-// oauthNameAt reports whether s[i:e] looks like an OAuth name: "oauth", words
-// and ".code", with no other dot.
-func oauthNameAt(s string, i, e int) bool {
-	const oauth, code = "oauth", ".code"
-	return e-i >= len(oauth)+len(code) &&
-		strings.EqualFold(s[i:i+len(oauth)], oauth) &&
-		strings.EqualFold(s[e-len(code):e], code) &&
-		!strings.Contains(s[i+len(oauth):e-len(code)], ".")
 }
 
 // isCamelBoundary reports whether s[i] starts a word of a camelCase name.
@@ -1935,7 +1936,7 @@ func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind,
 // rather than the key only, which would leave the value in place: the value
 // is a key when it ends with a delimiter or is followed by one, or is a
 // quoted name followed by one, or a name and a delimiter and a redacted
-// value, and a pair with a sensitive key starts at its name. A key that starts a line is left in place, so that its pair is
+// value or the start of a quoted value that runs on past it, and a pair with a sensitive key starts at its name. A key that starts a line is left in place, so that its pair is
 // matched on its own (nestedKey); any other is redacted with the value of its
 // pair (valueEndingInKeyName). Only the delimiter and the value that follow
 // it are read besides the pair that the regular expressions match, which are
@@ -1953,13 +1954,21 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 			return notNestedKey, 0
 		}
 	} else if !valueFollowsDelimiter(s, end) {
-		// A pair that an earlier pass redacted, as in "name:[REDACTED]".
-		i := strings.LastIndexAny(v, ":=")
-		if i <= 0 {
-			return notNestedKey, 0
-		}
-		if inner, _ := unquoteValue(trimTrailingPunctuation(v[i+1:])); !isRedactedValue(inner) {
-			return notNestedKey, 0
+		// A name and a delimiter followed by a quoted value that holds
+		// whitespace, ",", ";" or "&", as in name="a b", where the value
+		// matched ends inside the quoted value.
+		if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') &&
+			len(quotedValueRe.FindString(s[start+q:])) > end-start-q && valueStartsAt(s, start+q) {
+			// The pair that starts at the name is read below.
+		} else {
+			// A pair that an earlier pass redacted, as in "name:[REDACTED]".
+			i := strings.LastIndexAny(v, ":=")
+			if i <= 0 {
+				return notNestedKey, 0
+			}
+			if inner, _ := unquoteValue(trimTrailingPunctuation(v[i+1:])); !isRedactedValue(inner) {
+				return notNestedKey, 0
+			}
 		}
 	}
 	if _, n := cutStatePrefix(s[name:]); n > 0 {

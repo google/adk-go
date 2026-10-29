@@ -25,7 +25,6 @@ import (
 	"math"
 	"net/url"
 	"reflect"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -768,6 +767,9 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	if v.Type() == jsonNumberType {
 		return s.number(v.String())
 	}
+	if s.redact && hasSensitiveTypeName(v) {
+		return redactedValue, true
+	}
 	if out, truncated, ok := s.marshaled(v, depth); ok {
 		return out, truncated
 	}
@@ -817,6 +819,27 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 		// JSON form.
 		return unsupportedObjPlaceholder, true
 	}
+}
+
+// hasSensitiveTypeName reports whether v is a value of a named type that
+// is named for a credential, such as a Token or a type ending in Password,
+// and may write it: whatever its kind, a value of such a type may be a
+// credential in a form that nothing else would tell, such as the digits of an
+// int or the bytes of a slice. A zero value holds none. A struct is shown by
+// its exported fields, which are redacted by name, so it is redacted whole only
+// if a method (MarshalJSON or MarshalText) writes it; it is not read
+// otherwise, because a type may guard its fields.
+func hasSensitiveTypeName(v reflect.Value) bool {
+	name := v.Type().Name()
+	if name == "" || !isSensitiveKey(name) {
+		return false
+	}
+	if v.Kind() == reflect.Struct {
+		_, isJSON := implementer(v, jsonMarshalerType)
+		_, isText := implementer(v, textMarshalerType)
+		return isJSON || isText
+	}
+	return !v.IsZero()
 }
 
 func (s *sanitizer) enter(key visitKey) bool {
@@ -918,26 +941,52 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		out, truncated = s.stringValue(string(b), depth)
 		return out, truncated, true
 	}
-	// A value that reflection would show as an empty object, because its
-	// fields are unexported, writes the text it has for itself instead. Maps,
-	// slices and arrays are never intercepted here, even if they implement
-	// error or fmt.Stringer, because their structural traversal (walkMap,
-	// walkSlice) already produces a safely redacted representation that the
-	// String() or Error() text would discard.
-	if m, found := implementer(v, errorType); found && !showsExportedFields(v) && !isContainerKind(v.Kind()) {
-		return s.opaqueText(v, func() (string, error) { return errorText(m.(error)) }, depth)
-	}
 	// url.Userinfo implements fmt.Stringer and publishes its password via
-	// String(); redact it before the generic Stringer fallback.
-	if v.Kind() == reflect.Struct && !showsExportedFields(v) {
-		if v.Type() == userinfoType {
-			return s.redactUserinfo(v, depth)
+	// String(); redact it before any generic Stringer fallback.
+	if v.Kind() == reflect.Struct && v.Type() == userinfoType {
+		return s.redactUserinfo(v, depth)
+	}
+	// A value that reflection would show as an empty object, because its
+	// fields are unexported, writes the text it has for itself instead, but
+	// only when redaction is off, or the value is of a standard library
+	// error type whose text is the message it was made with. Under redaction
+	// the method of any other type is not called: it can write a credential
+	// that no pattern can tell from prose (a bare value, a transformed
+	// password, a field of any name), and the sanitizer cannot read the
+	// private fields of a type to find it, which also bypasses the locks that
+	// protect them. Such a value keeps the structural form that reflection
+	// gives it, as in adk-python's fallback for unknown types, which does not
+	// call str or repr either. Maps, slices and arrays are never intercepted
+	// here, even if they implement error or fmt.Stringer, because their
+	// structural traversal (walkMap, walkSlice) already produces a safely
+	// redacted representation that the String() or Error() text would
+	// discard.
+	if !isContainerKind(v.Kind()) {
+		if m, found := implementer(v, errorType); found && (!s.redact || isPlainErrorType(v.Type())) && !showsExportedFields(v) {
+			return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
 		}
-		if m, found := implementer(v, stringerType); found {
-			return s.opaqueText(v, func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
+		if m, found := implementer(v, stringerType); found && !s.redact && v.Kind() == reflect.Struct && !showsExportedFields(v) {
+			return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
 		}
 	}
 	return nil, false, false
+}
+
+// plainErrorType is the standard library error type whose text is the
+// message it was made with, and whose method calls nothing else: the type of
+// errors.New, which fmt.Errorf also returns without %w. The text of such an
+// error is a string like any other, scrubbed for credential patterns. The
+// type of fmt.Errorf with %w is not plain: its message holds the text that
+// the Error method of the error it wraps wrote when it was made, which is the
+// output of an arbitrary method.
+var plainErrorType = reflect.TypeOf(errors.New("x")).Elem()
+
+// isPlainErrorType reports whether t is plainErrorType, or a pointer to it.
+func isPlainErrorType(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t == plainErrorType
 }
 
 // textOf sanitizes the text that get returns, or stands in for it with a
@@ -949,106 +998,6 @@ func (s *sanitizer) textOf(get func() (string, error), depth int) (out any, trun
 	}
 	out, truncated = s.stringValue(text, depth)
 	return out, truncated, true
-}
-
-// opaqueText is textOf for the text of the Error or String method of v, a
-// value whose fields reflection does not show. The method may write a
-// credential that the value holds in a field, as a bare value that no pattern
-// can tell from prose, so when redacting, opaqueText first replaces each such
-// credential in the text (see opaqueSecrets), or, if the value holds one that
-// it cannot read as text, stands in for the whole text with the redaction
-// placeholder.
-func (s *sanitizer) opaqueText(v reflect.Value, get func() (string, error), depth int) (out any, truncated, ok bool) {
-	if !s.redact {
-		return s.textOf(get, depth)
-	}
-	secrets, opaque := opaqueSecrets(v)
-	if opaque {
-		return redactedValue, true, true
-	}
-	replaced := false
-	out, truncated, ok = s.textOf(func() (string, error) {
-		text, err := get()
-		if err != nil {
-			return "", err
-		}
-		for _, secret := range secrets {
-			if strings.Contains(text, secret) {
-				text = strings.ReplaceAll(text, secret, redactedValue)
-				replaced = true
-			}
-		}
-		return text, nil
-	}, depth)
-	return out, truncated || replaced, ok
-}
-
-// maxOpaqueSecretNodes bounds the values that opaqueSecrets visits.
-const maxOpaqueSecretNodes = 256
-
-// opaqueSecrets returns the credentials that v, a value that writes its own
-// text, holds: the text of each non-empty field with a sensitive name (see
-// isSensitiveKey) in v and in the structs, pointers, interfaces, slices and
-// arrays that it holds, longest first, which a method of v may write into its
-// text. opaque is true if v holds a credential that is not text, such as a
-// non-zero field of a sensitive name that is not a string or bytes, or is a
-// value of a type with a sensitive name, such as a Token, that the text may
-// show; the text of such a value is not safe to write.
-//
-// This is a policy for the credentials that the names of the fields and
-// types give away. The method of a value whose fields are not named for what
-// they hold can write a credential that is not found here.
-func opaqueSecrets(v reflect.Value) (secrets []string, opaque bool) {
-	nodes := 0
-	var visit func(v reflect.Value, depth int)
-	visit = func(v reflect.Value, depth int) {
-		if opaque || depth > maxSanitizeDepth || nodes >= maxOpaqueSecretNodes {
-			return
-		}
-		nodes++
-		switch v.Kind() {
-		case reflect.Pointer, reflect.Interface:
-			if !v.IsNil() {
-				visit(v.Elem(), depth+1)
-			}
-		case reflect.Slice, reflect.Array:
-			if k := v.Type().Elem().Kind(); k == reflect.Struct || k == reflect.Pointer || k == reflect.Interface {
-				for i := range v.Len() {
-					visit(v.Index(i), depth+1)
-				}
-			}
-		case reflect.String:
-			if name := v.Type().Name(); name != "" && isSensitiveKey(name) && !v.IsZero() {
-				opaque = true
-			}
-		case reflect.Struct:
-			t := v.Type()
-			if isSensitiveKey(t.Name()) && !v.IsZero() {
-				opaque = true
-				return
-			}
-			for i := range t.NumField() {
-				f, fv := t.Field(i), v.Field(i)
-				if !isSensitiveKey(f.Name) {
-					visit(fv, depth+1)
-					continue
-				}
-				switch {
-				case fv.IsZero():
-				case fv.Kind() == reflect.String:
-					secrets = append(secrets, fv.String())
-				case fv.Kind() == reflect.Slice && fv.Type().Elem().Kind() == reflect.Uint8:
-					secrets = append(secrets, string(fv.Bytes()))
-				default:
-					opaque = true
-				}
-			}
-		}
-	}
-	visit(v, 0)
-	secrets = slices.DeleteFunc(secrets, func(secret string) bool { return secret == "" })
-	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
-	return secrets, opaque
 }
 
 // errorText returns err.Error(), turning a panic of the method into an error.
@@ -1085,14 +1034,17 @@ func showsExportedFields(v reflect.Value) bool {
 }
 
 // typeShowsFields reports whether the struct type t has a field that walkStruct
-// writes (see showsExportedFields); ancestors holds the struct types being
-// read, which an embedded pointer may hold again.
-func typeShowsFields(t reflect.Type, depth int, ancestors map[reflect.Type]bool) bool {
-	if depth > maxSanitizeDepth || ancestors[t] {
+// writes (see showsExportedFields); seen holds the struct types already
+// entered.
+func typeShowsFields(t reflect.Type, depth int, seen map[reflect.Type]bool) bool {
+	if depth > maxSanitizeDepth || seen[t] {
 		return false
 	}
-	ancestors[t] = true
-	defer delete(ancestors, t)
+	// A type is entered once: one that has been read and has no field
+	// written would have none again by another path, and one still being
+	// read is a cycle, so a graph of types that share embedded types is read
+	// in the time of its distinct types, not of its paths.
+	seen[t] = true
 	for i := range t.NumField() {
 		f := t.Field(i)
 		name, _, skip := parseJSONTag(f)
@@ -1104,7 +1056,7 @@ func typeShowsFields(t reflect.Type, depth int, ancestors map[reflect.Type]bool)
 			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
-			if typeShowsFields(ft, depth+1, ancestors) {
+			if typeShowsFields(ft, depth+1, seen) {
 				return true
 			}
 			continue
