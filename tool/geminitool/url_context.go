@@ -42,10 +42,10 @@ func (u UrlContext) Description() string {
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (u UrlContext) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	if !isGeminiModel(req.Model) {
-		return fmt.Errorf("Url context tool is not supported for model %v", req.Model)
+		return fmt.Errorf("cannot process: Url context tool is not supported for model %v", req.Model)
 	}
 	if isGemini1Model(req.Model) {
-		return fmt.Errorf("Url context tool cannot be used in Gemini 1.x")
+		return fmt.Errorf("cannot process: Url context tool cannot be used in Gemini 1.x")
 	}
 	return setTool(req, &genai.Tool{
 		URLContext: &genai.URLContext{},

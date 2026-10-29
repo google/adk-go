@@ -42,10 +42,10 @@ func (m GoogleMaps) Description() string {
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (m GoogleMaps) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
 	if !isGeminiModel(req.Model) {
-		return fmt.Errorf("Google maps tool is not supported for model %v", req.Model)
+		return fmt.Errorf("cannot process: Google maps tool is not supported for model %v", req.Model)
 	}
 	if isGemini1Model(req.Model) {
-		return fmt.Errorf("Google maps tool cannot be used with other tools in Gemini 1.x.")
+		return fmt.Errorf("cannot process: Google maps tool cannot be used with other tools in Gemini 1.x")
 	}
 	return setTool(req, &genai.Tool{
 		GoogleMaps: &genai.GoogleMaps{},
