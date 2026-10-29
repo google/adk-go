@@ -22556,3 +22556,319 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
 	}
 }
+
+// TestLateCancelThroughRetiredParent verifies that a context.Canceled error
+// that a sub-agent records after the agent whose context it runs on ended,
+// once another cause canceled that context, is collateral in the late state
+// as in the live state: the open model call of the sub-agent keeps the
+// retired record of that agent as its parent, and that record keeps the
+// context of its callback for the cancellation checks to read until the
+// sub-agent retires too (see dropRetiredLateContextsLocked).
+func TestLateCancelThroughRetiredParent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		late bool
+	}{
+		{name: "live", late: false},
+		{name: "late", late: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-cancel-retired-parent"
+			if tc.late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, identity{invocationID: invID, agentName: "live_agent"}, nil)
+			}
+			o := identity{invocationID: invID, agentName: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			x := identity{invocationID: invID, agentName: "x", path: "g", branch: "g"}
+			gErr := errors.New("g canceled")
+			tm.pushAgentSpan(ctx, o)
+			gctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(gctx, g)
+			tm.pushAgentSpan(gctx, x)
+			tm.pushLLMSpan(gctx, x)
+			var gRec *spanRecord
+			if tc.late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+			}
+			cancel(gErr)
+			tm.popAgentSpan(gctx, g) // x's open model call keeps x open.
+			tm.recordError(gctx, x, llmKey(x), context.Canceled)
+			var inv *invocationTrace
+			if tc.late {
+				inv = lateReviewTrace(t, tm, invID)
+			} else {
+				tm.mu.Lock()
+				inv = tm.invocations[invID]
+				tm.mu.Unlock()
+			}
+			inv.mu.Lock()
+			e, ok := inv.unrecoveredErrors[llmKey(x)]
+			inv.mu.Unlock()
+			if !ok || !e.collateral || !errors.Is(e.err, gErr) {
+				t.Errorf("recorded model error of x = {err: %v, collateral: %v}, want collateral, wrapping %v", e.err, e.collateral, gErr)
+			}
+			if !tc.late {
+				return
+			}
+			tm.popLLMSpan(gctx, x, false)
+			tm.popAgentSpan(gctx, x)
+			checkLateRecordDropped(t, inv, gRec)
+		})
+	}
+}
+
+// TestLateCollateralErrorRetiresActivation verifies that a late activation
+// that ended its InvocationContext, and that records a context.Canceled model
+// error after its parent, a parallel branch whose context a failing sibling
+// canceled, ended, leaves the late state with the agent above it: the error
+// is collateral, as when it is recorded before the parent ends or in the live
+// state, so it does not keep the activation as failed. The retired record of
+// the parent, which the activation kept reachable, then drops the context of
+// its callback too.
+func TestLateCollateralErrorRetiresActivation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		late      bool
+		errAfterP bool
+	}{
+		{name: "late, error after p ended", late: true, errAfterP: true},
+		{name: "late, error before p ended", late: true, errAfterP: false},
+		{name: "live, error after p ended", late: false, errAfterP: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-collateral-retired-parent"
+			o := identity{invocationID: invID, agentName: "o"}
+			if tc.late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, o, nil)
+			}
+			// p is a parallel branch below o (see isParallelBranch), so a
+			// stop point; x runs under p on p's branch and node path, so x is
+			// not one.
+			p := identity{invocationID: invID, agentName: "p", branch: "o.p"}
+			x := identity{invocationID: invID, agentName: "x", branch: "o.p"}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushAgentSpan(ctx, o)
+			pctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(pctx, p)
+			// x ends its own InvocationContext, so it gets no
+			// AfterAgentCallback.
+			xctx := &endedContext{Context: pctx, end: true}
+			tm.pushAgentSpan(xctx, x)
+			tm.pushLLMSpan(xctx, x)
+			cancel(siblingErr)
+			if !tc.errAfterP {
+				tm.recordError(xctx, x, llmKey(x), context.Canceled)
+			}
+			var pRec *spanRecord
+			if tc.late {
+				pRec = lateReviewAgent(t, tm, invID, "p")
+			}
+			tm.popAgentSpan(pctx, p) // x's open model call keeps x open.
+			if tc.errAfterP {
+				tm.recordError(xctx, x, llmKey(x), context.Canceled)
+			}
+			var inv *invocationTrace
+			if tc.late {
+				inv = lateReviewTrace(t, tm, invID)
+			} else {
+				tm.mu.Lock()
+				inv = tm.invocations[invID]
+				tm.mu.Unlock()
+			}
+			inv.mu.Lock()
+			e, ok := inv.unrecoveredErrors[llmKey(x)]
+			inv.mu.Unlock()
+			if !ok || !e.collateral || !errors.Is(e.err, siblingErr) {
+				t.Errorf("recorded model error of x = {err: %v, collateral: %v}, want collateral, wrapping %v", e.err, e.collateral, siblingErr)
+			}
+			if !tc.late {
+				return
+			}
+			xRec := lateReviewAgent(t, tm, invID, "x")
+			tm.popLLMSpan(xctx, x, false)
+			tm.popAgentSpan(ctx, o)
+			if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+				t.Errorf("late agents after o ended = %v, want none: x's run is over and it ended its InvocationContext", got)
+			}
+			if inv.openAgents.Load() {
+				t.Error("late.openAgents = true after o ended, want false")
+			}
+			checkLateRecordDropped(t, inv, xRec)
+			checkLateRecordDropped(t, inv, pRec)
+		})
+	}
+}
+
+// TestLateRecoveryEventRetiresSettledActivation verifies that a response
+// event of an author that has no open span, here the recovery content that
+// c's own AfterAgentCallback returns after this plugin retired c, retires a
+// late activation that only the cause that the event clears kept: nothing
+// else can end the activation anymore (see retireLateSettledLocked).
+func TestLateRecoveryEventRetiresSettledActivation(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-recovery"
+	lateReviewEnded(tm, invID)
+	p := identity{invocationID: invID, agentName: "p", path: "p"}
+	x := identity{invocationID: invID, agentName: "x", path: "p/x"}
+	c := identity{invocationID: invID, agentName: "c", path: "p/x/c"}
+	// b is a parallel branch below c, as in TestLateReviewToolRunFailedGrandchild.
+	b := identity{invocationID: invID, agentName: "b", path: "p/x/c/b", branch: "c.b"}
+	branchErr := errors.New("branch failed")
+	tm.pushAgentSpan(ctx, p)
+	xctx := &endedContext{Context: ctx, end: true}
+	tm.pushAgentSpan(xctx, x)
+	tm.pushAgentSpan(ctx, c)
+	bctx, cancel := context.WithCancelCause(ctx)
+	tm.pushAgentSpan(bctx, b)
+	cancel(branchErr)
+	tm.popAgentSpan(bctx, b)
+	tm.popAgentSpan(ctx, c)
+	// x's open model call keeps it open when p ends.
+	tm.pushLLMSpan(xctx, x)
+	tm.popAgentSpan(ctx, p)
+	tm.popLLMSpan(xctx, x, true)
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"x"}) {
+		t.Fatalf("late agents before c's recovery event = %v, want [x]", got)
+	}
+	xRec := lateReviewAgent(t, tm, invID, "x")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	settled := xRec.runDone && xRec.contextEnded
+	cause := xRec.openFailureCause()
+	swallowable := len(xRec.retiredCauses) == 1 && xRec.retiredCauses[0].swallowableBySelf && xRec.retiredCauses[0].name == "c"
+	late.mu.Unlock()
+	if !settled || !errors.Is(cause, branchErr) || !swallowable {
+		t.Fatalf("x settled = %v, cause = %v, swallowable by c = %v; want true, %v, true", settled, cause, swallowable, branchErr)
+	}
+
+	tm.completeResponse(ctx, identity{invocationID: invID, agentName: "live_agent"}, "c", "", nil)
+	late.mu.Lock()
+	cleared := len(xRec.retiredCauses) == 0
+	late.mu.Unlock()
+	if !cleared {
+		t.Fatal("c's recovery event did not clear the cause that x carries")
+	}
+	if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+		t.Errorf("late agents after c's recovery event = %v, want none: nothing can end x anymore", got)
+	}
+	if late.openAgents.Load() {
+		t.Error("late.openAgents = true after c's recovery event, want false")
+	}
+	checkLateRecordDropped(t, late, xRec)
+}
+
+// liveInvocation is the InvocationContext of an agent activation that has not
+// marked it as ended.
+type liveInvocation struct{ agent.InvocationContext }
+
+func (*liveInvocation) Ended() bool { return false }
+
+// TestLateRetiredActivationDropsInvocationContext verifies that a late
+// activation whose record still holds its InvocationContext when it retires,
+// because the activation did not mark it as ended, keeps none of it (see
+// dropRetiredLateContextsLocked). The other callers of checkLateRecordDropped
+// retire records that never held one, or that dropped it when they settled.
+func TestLateRetiredActivationDropsInvocationContext(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-ic"
+	lateReviewEnded(tm, invID)
+	o := identity{invocationID: invID, agentName: "o"}
+	a := identity{invocationID: invID, agentName: "a", path: "a"}
+	tm.pushAgentSpan(ctx, o)
+	ic := &liveInvocation{}
+	actx := deltaContext{Context: ctx, derive: func() agent.InvocationContext { return ic }}
+	tm.pushAgentSpan(actx, a)
+	aRec := lateReviewAgent(t, tm, invID, "a")
+	late := lateReviewTrace(t, tm, invID)
+	late.mu.Lock()
+	ended, activation := aRec.ended != nil, aRec.activation != nil
+	late.mu.Unlock()
+	if !ended || !activation {
+		t.Fatalf("late activation a holds ended = %t and activation = %t before it ends, want both", ended, activation)
+	}
+	tm.popAgentSpan(actx, a)
+	checkLateRecordDropped(t, late, aRec)
+}
+
+// TestLateRetiredChainDropsWithLastReachingSpan verifies that the records of
+// late agents that ended while an activation under them still ran keep the
+// context of their callbacks and the spans that they ran under only while an
+// open span reaches them: once the last such span retires, they drop both,
+// however far above it they are, while a record that another open span still
+// reaches, and an agent that is still open, keep both (see
+// dropRetiredLateContextsLocked).
+func TestLateRetiredChainDropsWithLastReachingSpan(t *testing.T) {
+	ctx := context.Background()
+	tm := newTraceManager()
+	const invID = "inv-late-retired-chain"
+	lateReviewEnded(tm, invID)
+	// a runs under o, b under a, m under b and c under m, and d under a.
+	ids := map[string]identity{
+		"o": {invocationID: invID, agentName: "o"},
+		"a": {invocationID: invID, agentName: "a", path: "a"},
+		"b": {invocationID: invID, agentName: "b", path: "a/b"},
+		"m": {invocationID: invID, agentName: "m", path: "a/b/m"},
+		"c": {invocationID: invID, agentName: "c", path: "a/b/m/c"},
+		"d": {invocationID: invID, agentName: "d", path: "a/d"},
+	}
+	recs := map[string]*spanRecord{}
+	for _, name := range []string{"o", "a", "b", "m", "c", "d"} {
+		tm.pushAgentSpan(ctx, ids[name])
+		recs[name] = lateReviewAgent(t, tm, invID, name)
+	}
+	late := lateReviewTrace(t, tm, invID)
+	// keeps reports whether the record of name keeps the context of its
+	// callback and the record of parent, or the invocation span if parent
+	// is empty, as the span that it ran under.
+	keeps := func(name, parent string) bool {
+		late.mu.Lock()
+		defer late.mu.Unlock()
+		want := late.agentStack[0]
+		if parent != "" {
+			want = recs[parent]
+		}
+		return recs[name].canceled != nil && recs[name].parent == want
+	}
+	// The open model calls of c and d keep them open when the agents above
+	// them end, and keep the records of those agents for their cancellation
+	// checks.
+	tm.pushLLMSpan(ctx, ids["c"])
+	tm.pushLLMSpan(ctx, ids["d"])
+	for _, name := range []string{"m", "b", "a"} {
+		tm.popAgentSpan(ctx, ids[name])
+	}
+	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "c", "d"}) {
+		t.Fatalf("late agents after m, b and a ended = %v, want [o c d]", got)
+	}
+	if !keeps("m", "b") || !keeps("b", "a") || !keeps("a", "o") {
+		t.Fatal("the retired records above c do not keep the chain above its open model call")
+	}
+
+	tm.popLLMSpan(ctx, ids["c"], true)
+	tm.popAgentSpan(ctx, ids["c"])
+	for _, name := range []string{"c", "m", "b"} {
+		checkLateRecordDropped(t, late, recs[name])
+	}
+	if !keeps("a", "o") {
+		t.Error("retired a dropped the context of its callback or o after c ended, want both kept: d still runs under it")
+	}
+
+	tm.popLLMSpan(ctx, ids["d"], true)
+	tm.popAgentSpan(ctx, ids["d"])
+	for _, name := range []string{"d", "a"} {
+		checkLateRecordDropped(t, late, recs[name])
+	}
+	if !keeps("o", "") {
+		t.Error("open agent o dropped the context of its callback or the invocation span after d ended")
+	}
+}
