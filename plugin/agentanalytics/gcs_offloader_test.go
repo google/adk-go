@@ -400,12 +400,32 @@ func TestGCSObjectPath(t *testing.T) {
 			want: "2026-03-04/trace/span_event_c12_p345.jpg",
 		},
 		{
-			// The three runes of "é?*" each become one underscore. Between
-			// "x_y" and "c0" are the separator, those three and the
-			// underscore that introduces the content ordinal.
+			// Unsafe runes are replaced with underscores and disambiguated with
+			// a deterministic SHA-256 suffix of the raw identifier.
 			name: "unsafe characters are replaced", ts: ts, traceID: "a/b c", spanID: "x\ny", eventID: "é?*",
+			ext: ".txt",
+			want: fmt.Sprintf("2026-03-04/a_b_c%s/x_y%s____%s_c0_p0.txt",
+				pathSegmentHashSuffix("a/b c"),
+				pathSegmentHashSuffix("x\ny"),
+				pathSegmentHashSuffix("é?*")),
+		},
+		{
+			name:   "dot-relative and empty prefix segments are cleaned",
+			prefix: "../a/../b/./c//", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: "2026-03-04/a_b_c/x_y_____c0_p0.txt",
+			want: "a/b/c/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "dot-only prefix becomes empty",
+			prefix: "./../...", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "reserved acme-challenge prefix is rewritten",
+			prefix: ".well-known/acme-challenge/x", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: fmt.Sprintf("_well-known%s/acme-challenge/x/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix(".well-known")),
 		},
 	}
 	for _, tt := range tests {
@@ -1677,23 +1697,28 @@ func TestPathSegment(t *testing.T) {
 		{"a trace id", "4bf92f3577b34da6a3ce929d0e0e4736", "4bf92f3577b34da6a3ce929d0e0e4736"},
 		{"all the safe characters", "aZ09-_.x", "aZ09-_.x"},
 		{"empty", "", "fallback"},
-		{"a slash", "a/b", "a_b"},
-		{"a path", "../x", ".._x"},
-		{"blanks and control characters", "a b\tc\nd", "a_b_c_d"},
-		{"one underscore per rune", "é?*", "___"},
-		{"only unsafe characters", "///", "___"},
-		{"the current directory", ".", "fallback"},
-		{"the parent directory", "..", "fallback"},
-		{"only dots", "....", "fallback"},
+		{"a slash", "a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+		{"a path", "../x", ".._x" + pathSegmentHashSuffix("../x")},
+		{"blanks and control characters", "a b\tc\nd", "a_b_c_d" + pathSegmentHashSuffix("a b\tc\nd")},
+		{"one underscore per rune", "é?*", "___" + pathSegmentHashSuffix("é?*")},
+		{"only unsafe characters", "///", "___" + pathSegmentHashSuffix("///")},
+		{"the current directory", ".", "fallback" + pathSegmentHashSuffix(".")},
+		{"the parent directory", "..", "fallback" + pathSegmentHashSuffix("..")},
+		{"only dots", "....", "fallback" + pathSegmentHashSuffix("....")},
 		{"dots next to a name", "a..", "a.."},
 		{"a dot name that is not a path element", ".x", ".x"},
 		{"the edges of the character classes", "azAZ09", "azAZ09"},
-		{"just outside the character classes", "`{@[/:", "______"},
+		{"just outside the character classes", "`{@[/: ", "_______" + pathSegmentHashSuffix("`{@[/: ")},
+		{"exactly 128 safe ASCII bytes", strings.Repeat("a", 128), strings.Repeat("a", 128)},
+		{"129 safe ASCII bytes is truncated with hash", strings.Repeat("a", 129), strings.Repeat("a", 119) + pathSegmentHashSuffix(strings.Repeat("a", 129))},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := pathSegment(tt.id, "fallback"); got != tt.want {
 				t.Errorf("pathSegment(%q, \"fallback\") = %q, want %q", tt.id, got, tt.want)
+			}
+			if len(tt.id) > 0 && len(pathSegment(tt.id, "fallback")) > maxPathSegmentBytes {
+				t.Errorf("len(pathSegment(%q, \"fallback\")) = %d, exceeds %d", tt.id, len(pathSegment(tt.id, "fallback")), maxPathSegmentBytes)
 			}
 		})
 	}
@@ -5812,4 +5837,142 @@ func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Errorf("pendingUploadBytes after the append panicked = %d, want 0", got)
 	}
+}
+
+func TestProbe_T8_GCSObjectPath(t *testing.T) {
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	t.Run("G3_non_ascii_and_sanitized_ids_do_not_collide", func(t *testing.T) {
+		pairs := [][2]string{
+			{"é", "ü"},
+			{"session-日本", "session-韓国"},
+			{"日本", "韓国"},
+			{"日本", "__"},
+			{".", ".."},
+			{".", ""},
+			{"..", ""},
+			{"é?*", "///"},
+			{"é?*", "___"},
+			{"a/b", "a_b"},
+		}
+		for _, pair := range pairs {
+			p0 := gcsObjectPath("logs", ts, "trace-1", "span-1", pair[0], 0, 0, ".txt")
+			p1 := gcsObjectPath("logs", ts, "trace-1", "span-1", pair[1], 0, 0, ".txt")
+			if p0 == p1 {
+				t.Errorf("eventID %q and %q collided on GCS object path %q", pair[0], pair[1], p0)
+			}
+		}
+	})
+
+	t.Run("G3_batch_upload_with_distinct_non_ascii_event_ids_uploads_both_payloads", func(t *testing.T) {
+		var mu sync.Mutex
+		seenPaths := map[string][]byte{}
+		offloader := &fakeOffloader{
+			hook: func(_ context.Context, req GCSUploadRequest) error {
+				mu.Lock()
+				defer mu.Unlock()
+				if _, exists := seenPaths[req.Path]; exists {
+					return &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "DoesNotExist precondition failed"}
+				}
+				seenPaths[req.Path] = append([]byte(nil), req.Data...)
+				return nil
+			},
+		}
+		bp := &BatchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
+		rowJP := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-jp-123456"}}})
+		rowJP[timestampField] = ts
+		rowJP["trace_id"] = "trace-1"
+		rowJP["span_id"] = "span-1"
+		rowJP[eventIDField] = "session-日本"
+
+		rowKR := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-kr-654321"}}})
+		rowKR[timestampField] = ts
+		rowKR["trace_id"] = "trace-1"
+		rowKR["span_id"] = "span-1"
+		rowKR[eventIDField] = "session-韓国"
+
+		bp.resolveUploads(context.Background(), false, []map[string]any{rowJP, rowKR})
+
+		if len(seenPaths) != 2 {
+			t.Fatalf("uploaded %d distinct objects, want 2 (seen: %v)", len(seenPaths), seenPaths)
+		}
+		uriJP, _ := rowJP[columnContentParts].([]map[string]any)[0]["uri"].(string)
+		uriKR, _ := rowKR[columnContentParts].([]map[string]any)[0]["uri"].(string)
+		if uriJP == "" || uriKR == "" || uriJP == uriKR {
+			t.Errorf("got URIs %q and %q, want two distinct non-empty gs:// URIs", uriJP, uriKR)
+		}
+	})
+
+	t.Run("G2_long_ids_and_prefixes_stay_within_1024_bytes_without_colliding", func(t *testing.T) {
+		longA := strings.Repeat("a", 1100)
+		longB := strings.Repeat("a", 1000) + "-b-" + strings.Repeat("z", 100)
+		longMultiSegPrefix := strings.Repeat("segment123/", 120)
+		longUTF8 := strings.Repeat("日本", 600)
+
+		cases := []struct {
+			name                     string
+			prefix                   string
+			traceID, spanID, eventID string
+			ext                      string
+		}{
+			{"long_event_id", "logs", "trace", "span", longA, ".txt"},
+			{"long_trace_id", "logs", longA, "span", "event", ".txt"},
+			{"long_span_id", "logs", "trace", longA, "event", ".txt"},
+			{"long_single_segment_prefix", longA, "trace", "span", "event", ".txt"},
+			{"long_multi_segment_prefix", longMultiSegPrefix, "trace", "span", "event", ".txt"},
+			{"all_long_ascii", longMultiSegPrefix, longA, longA, longA, ".json"},
+			{"all_long_utf8", longUTF8, longUTF8, longUTF8, longUTF8, ".bin"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := gcsObjectPath(tc.prefix, ts, tc.traceID, tc.spanID, tc.eventID, 0, 0, tc.ext)
+				if len(got) > maxGCSObjectNameBytes {
+					t.Errorf("len(gcsObjectPath) = %d, exceeds maxGCSObjectNameBytes (%d): %q", len(got), maxGCSObjectNameBytes, got)
+				}
+				if !strings.HasSuffix(got, tc.ext) {
+					t.Errorf("gcsObjectPath = %q, want suffix %q", got, tc.ext)
+				}
+			})
+		}
+
+		pA := gcsObjectPath("logs", ts, "trace", "span", longA, 0, 0, ".txt")
+		pB := gcsObjectPath("logs", ts, "trace", "span", longB, 0, 0, ".txt")
+		if pA == pB {
+			t.Errorf("distinct 1100-byte event IDs sharing 1000-byte prefix collided on %q", pA)
+		}
+	})
+
+	t.Run("G1_prefix_sanitization_and_reserved_paths", func(t *testing.T) {
+		prefixes := []struct {
+			prefix   string
+			wantLead string
+		}{
+			{"../x", "x/2026-03-04/"},
+			{"a/../b", "a/b/2026-03-04/"},
+			{"a//b", "a/b/2026-03-04/"},
+			{".", "2026-03-04/"},
+			{"..", "2026-03-04/"},
+			{"a/./b", "a/b/2026-03-04/"},
+			{".well-known/acme-challenge/x", "_well-known" + pathSegmentHashSuffix(".well-known") + "/acme-challenge/x/2026-03-04/"},
+			{"/.well-known/ACME-CHALLENGE/x", "_well-known" + pathSegmentHashSuffix(".well-known") + "/ACME-CHALLENGE/x/2026-03-04/"},
+			{"logs\ninjected/part\r\n2\x00", ""},
+		}
+		for _, tc := range prefixes {
+			got := gcsObjectPath(tc.prefix, ts, "trace", "span", "event", 0, 0, ".txt")
+			if tc.wantLead != "" && !strings.HasPrefix(got, tc.wantLead) {
+				t.Errorf("gcsObjectPath(prefix=%q) = %q, want prefix %q", tc.prefix, got, tc.wantLead)
+			}
+			if strings.Contains(got, "//") || strings.Contains(got, "/./") || strings.Contains(got, "/../") ||
+				strings.HasPrefix(got, "./") || strings.HasPrefix(got, "../") ||
+				strings.HasPrefix(strings.ToLower(got), ".well-known/acme-challenge/") {
+				t.Errorf("gcsObjectPath(prefix=%q) = %q contains unsafe or reserved path segments", tc.prefix, got)
+			}
+			for _, r := range got {
+				if r < 0x20 || r == 0x7f {
+					t.Errorf("gcsObjectPath(prefix=%q) = %q contains control rune %U", tc.prefix, got, r)
+				}
+			}
+		}
+	})
 }

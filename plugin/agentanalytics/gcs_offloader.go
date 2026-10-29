@@ -17,6 +17,7 @@ package agentanalytics
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -91,6 +92,15 @@ const (
 
 	// fallbackExtension is the extension of objects whose MIME type has none.
 	fallbackExtension = ".bin"
+
+	// maxGCSObjectNameBytes is Cloud Storage's 1,024-byte UTF-8 object name
+	// limit. maxGCSPrefixBytes and maxPathSegmentBytes bound the prefix and
+	// individual identifier segments so assembled object names stay within
+	// maxGCSObjectNameBytes.
+	maxGCSObjectNameBytes    = 1024
+	maxGCSPrefixBytes        = 512
+	maxPathSegmentBytes      = 128
+	pathSegmentHashSuffixLen = 9 // "_" + 8 lowercase hex digits
 
 	// defaultMaxPendingUploadBytes caps total bytes held in memory by pending
 	// uploads across queued rows (256 MiB).
@@ -239,22 +249,101 @@ func isSafeExtension(ext string) bool {
 	return true
 }
 
-// pathSegment returns id for use as a part of an object name: id with
-// anything but letters, digits, '-', '_' and '.' replaced, or fallback if id
-// is empty or is nothing but dots, which would make it a relative path
-// element such as "..".
+// pathSegmentHashSuffix returns a deterministic 9-byte "_<8 hex digits>"
+// suffix derived from the first 4 bytes of the SHA-256 digest of s.
+func pathSegmentHashSuffix(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("_%08x", sum[:4])
+}
+
+// truncateWithHash caps base at maxBytes-pathSegmentHashSuffixLen bytes and
+// appends the deterministic SHA-256 suffix of raw so inputs that sanitize or
+// truncate to the same base remain distinct and within maxBytes.
+func truncateWithHash(base, raw string, maxBytes int) string {
+	suffix := pathSegmentHashSuffix(raw)
+	if maxBytes <= len(suffix) {
+		return suffix[:maxBytes]
+	}
+	limit := maxBytes - len(suffix)
+	if len(base) > limit {
+		base = base[:limit]
+	}
+	return base + suffix
+}
+
+// pathSegment returns id for use as a part of an object name: pure ASCII ids
+// consisting of letters, digits, '-', '_' and '.' (not all dots) and at most
+// maxPathSegmentBytes bytes are returned unchanged; empty id returns fallback;
+// any id that is all dots, contains other characters, or exceeds
+// maxPathSegmentBytes is sanitized, bounded to maxPathSegmentBytes, and given
+// a deterministic SHA-256 hex suffix of the raw id so distinct inputs do not
+// collide on the same object name.
 func pathSegment(id, fallback string) string {
-	if strings.Trim(id, ".") == "" {
+	if id == "" {
 		return fallback
 	}
-	return strings.Map(func(r rune) rune {
+	if strings.Trim(id, ".") == "" {
+		if fallback == "" {
+			return ""
+		}
+		return truncateWithHash(fallback, id, maxPathSegmentBytes)
+	}
+	var sb strings.Builder
+	sb.Grow(min(len(id), maxPathSegmentBytes))
+	altered := false
+	for _, r := range id {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
-			return r
+			sb.WriteRune(r)
 		default:
-			return '_'
+			sb.WriteByte('_')
+			altered = true
 		}
-	}, id)
+	}
+	sanitized := sb.String()
+	if !altered && len(sanitized) <= maxPathSegmentBytes {
+		return sanitized
+	}
+	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
+}
+
+// cleanGCSPrefix normalizes a configured GCSPathPrefix into slash-separated
+// safe path segments: empty and dot-only ("." and "..") segments are dropped,
+// each remaining segment is sanitized and bounded with pathSegment, the
+// Cloud Storage reserved leading ".well-known/acme-challenge" prefix is
+// rewritten, and the joined prefix is capped at maxGCSPrefixBytes.
+func cleanGCSPrefix(prefix string) string {
+	if prefix == "" {
+		return ""
+	}
+	parts := strings.Split(prefix, "/")
+	segs := make([]string, 0, len(parts))
+	var firstRaw string
+	for _, rawSeg := range parts {
+		if rawSeg == "" || strings.Trim(rawSeg, ".") == "" {
+			continue
+		}
+		if len(segs) == 0 {
+			firstRaw = rawSeg
+		}
+		segs = append(segs, pathSegment(rawSeg, ""))
+	}
+	if len(segs) == 0 {
+		return ""
+	}
+	if len(segs) >= 2 && strings.EqualFold(segs[0], ".well-known") && strings.EqualFold(segs[1], "acme-challenge") {
+		segs[0] = truncateWithHash("_well-known", firstRaw, maxPathSegmentBytes)
+	}
+	joined := strings.Join(segs, "/")
+	if len(joined) <= maxGCSPrefixBytes {
+		return joined
+	}
+	limit := maxGCSPrefixBytes - pathSegmentHashSuffixLen
+	trimmed := strings.TrimRight(joined[:limit], "/.")
+	if trimmed == "" {
+		trimmed = "prefix"
+	}
+	return trimmed + pathSegmentHashSuffix(prefix)
 }
 
 // gcsObjectPath returns the name of the object that holds a part:
@@ -271,7 +360,7 @@ func pathSegment(id, fallback string) string {
 // the same object.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
-	if p := strings.Trim(prefix, "/"); p != "" {
+	if p := cleanGCSPrefix(prefix); p != "" {
 		sb.WriteString(p)
 		sb.WriteByte('/')
 	}
@@ -281,7 +370,14 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 		pathSegment(spanID, missingSpanID),
 		pathSegment(eventID, missingEventID),
 		contentOrd, partIdx, ext)
-	return sb.String()
+	out := sb.String()
+	if len(out) <= maxGCSObjectNameBytes {
+		return out
+	}
+	if isSafeExtension(ext) && len(ext) < maxGCSObjectNameBytes-pathSegmentHashSuffixLen {
+		return truncateWithHash(out[:len(out)-len(ext)], out, maxGCSObjectNameBytes-len(ext)) + ext
+	}
+	return truncateWithHash(out, out, maxGCSObjectNameBytes)
 }
 
 // uploadTask is one payload to upload and the content_parts entry that is
