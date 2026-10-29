@@ -755,14 +755,31 @@ func (o *fakeObject) delete(ctx context.Context) error {
 }
 
 // newReader returns a reader for the in-memory data.
-func (o *fakeObject) newReader(ctx context.Context) (io.ReadCloser, error) {
+func (o *fakeObject) newReader(ctx context.Context) (gcsReader, error) {
+	if o.bucket != nil {
+		o.bucket.mu.Lock()
+		forced := o.bucket.attrsErr
+		o.bucket.mu.Unlock()
+		if forced != nil {
+			return nil, forced
+		}
+	}
 	b := o.blob
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !b.exists {
-		return nil, fs.ErrNotExist
+		return nil, storage.ErrObjectNotExist
 	}
-	return io.NopCloser(bytes.NewReader(b.data)), nil
+	return &fakeReader{ReadCloser: io.NopCloser(bytes.NewReader(b.data)), ct: b.contentType}, nil
+}
+
+type fakeReader struct {
+	io.ReadCloser
+	ct string
+}
+
+func (r *fakeReader) contentType() string {
+	return r.ct
 }
 
 // fakeWriter is a helper type to simulate an *storage.Writer.

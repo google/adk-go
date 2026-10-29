@@ -306,18 +306,12 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 	blobName := buildBlobName(appName, userID, sessionID, fileName, version)
 	blob := s.bucket.object(blobName)
 
-	// Check if the blob exists before trying to read it
-	attrs, err := blob.attrs(ctx)
+	// Create a reader to stream the blob's content
+	reader, err := blob.newReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, fmt.Errorf("artifact '%s' not found: %w", blobName, fs.ErrNotExist)
 		}
-		return nil, fmt.Errorf("could not get blob attributes: %w", err)
-	}
-
-	// Create a reader to stream the blob's content
-	reader, err := blob.newReader(ctx)
-	if err != nil {
 		return nil, fmt.Errorf("could not create reader for blob '%s': %w", blobName, err)
 	}
 	defer func() {
@@ -333,7 +327,7 @@ func (s *gcsService) Load(ctx context.Context, req *artifact.LoadRequest) (_ *ar
 	}
 
 	// Create the genai.Part and return the response.
-	part := genai.NewPartFromBytes(data, attrs.ContentType)
+	part := genai.NewPartFromBytes(data, reader.contentType())
 
 	return &artifact.LoadResponse{Part: part}, nil
 }
@@ -413,6 +407,9 @@ func (s *gcsService) versions(ctx context.Context, req *artifact.VersionsRequest
 	prefix := buildBlobNamePrefix(appName, userID, sessionID, fileName)
 	query := &storage.Query{
 		Prefix: prefix,
+	}
+	if err := query.SetAttrSelection([]string{"Name"}); err != nil {
+		return nil, fmt.Errorf("error setting query attribute selection: %w", err)
 	}
 	blobsIterator := s.bucket.objects(ctx, query)
 

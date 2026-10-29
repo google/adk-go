@@ -36,12 +36,19 @@ type gcsBucket interface {
 // gcsObject is an interface that a gcs object handle must satisfy.
 type gcsObject interface {
 	newWriter(ctx context.Context) gcsWriter
-	newReader(ctx context.Context) (io.ReadCloser, error)
+	newReader(ctx context.Context) (gcsReader, error)
 	delete(ctx context.Context) error
 	attrs(ctx context.Context) (*storage.ObjectAttrs, error)
 	// ifNotExist returns a handle whose write succeeds only if the object does
 	// not already exist; writing over an existing object fails with HTTP 412.
 	ifNotExist() gcsObject
+}
+
+// gcsReader streams an object's media and exposes the Content-Type returned on
+// the download response headers.
+type gcsReader interface {
+	io.ReadCloser
+	contentType() string
 }
 
 // gcsObjectIterator
@@ -107,8 +114,20 @@ func (w *gcsObjectWrapper) ifNotExist() gcsObject {
 }
 
 // NewReader implements the gcsObject interface for gcsObjectWrapper.
-func (w *gcsObjectWrapper) newReader(ctx context.Context) (io.ReadCloser, error) {
-	return w.object.NewReader(ctx)
+func (w *gcsObjectWrapper) newReader(ctx context.Context) (gcsReader, error) {
+	r, err := w.object.NewReader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return gcsReaderWrapper{Reader: r}, nil
+}
+
+type gcsReaderWrapper struct {
+	*storage.Reader
+}
+
+func (r gcsReaderWrapper) contentType() string {
+	return r.Attrs.ContentType
 }
 
 // Delete implements the gcsObject interface for gcsObjectWrapper.

@@ -17,7 +17,6 @@ package gcsartifact
 import (
 	"context"
 	"fmt"
-	"io"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -84,7 +83,7 @@ func (o *countingObject) newWriter(ctx context.Context) gcsWriter {
 	return &countingWriter{gcsWriter: o.gcsObject.newWriter(ctx), c: o.c}
 }
 
-func (o *countingObject) newReader(ctx context.Context) (io.ReadCloser, error) {
+func (o *countingObject) newReader(ctx context.Context) (gcsReader, error) {
 	o.c.rpc()
 	return o.gcsObject.newReader(ctx)
 }
