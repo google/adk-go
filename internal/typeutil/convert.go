@@ -39,13 +39,20 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		if err := json.Unmarshal(rawArgs, &decoded); err != nil {
 			return zero, err
 		}
+		validated := decoded
 		// An absent input (e.g. a tool invoked with no arguments)
 		// should satisfy an object schema.
-		if decoded == nil && schemaExpectsObject(resolvedSchema) {
-			decoded = map[string]any{}
+		if validated == nil && schemaExpectsObject(resolvedSchema) {
+			validated = map[string]any{}
 		}
-		if err := resolvedSchema.Validate(decoded); err != nil {
+		if err := resolvedSchema.Validate(validated); err != nil {
 			return zero, err
+		}
+		if decoded == nil {
+			return zero, nil
+		}
+		if typed, ok := decoded.(To); ok {
+			return typed, nil
 		}
 	}
 	var typed To
@@ -53,6 +60,78 @@ func ConvertToWithJSONSchema[From, To any](v From, resolvedSchema *jsonschema.Re
 		return zero, err
 	}
 	return typed, nil
+}
+
+// ConvertArgsWithJSONSchema validates a decoded JSON object map against resolvedSchema
+// and unmarshals it once into To.
+func ConvertArgsWithJSONSchema[To any](m map[string]any, resolvedSchema *jsonschema.Resolved) (To, error) {
+	var zero To
+	if resolvedSchema != nil {
+		var validated any = m
+		if m == nil && schemaExpectsObject(resolvedSchema) {
+			validated = map[string]any{}
+		}
+		if err := resolvedSchema.Validate(validated); err != nil {
+			return zero, err
+		}
+	}
+	rawArgs, err := json.Marshal(m)
+	if err != nil {
+		return zero, err
+	}
+	var typed To
+	if err := json.Unmarshal(rawArgs, &typed); err != nil {
+		return zero, err
+	}
+	return typed, nil
+}
+
+// ConvertResultWithJSONSchema marshals output once, unmarshals it once into any,
+// returns the decoded map when it satisfies resolvedSchema, or wraps non-map
+// outputs as {"result": output} (validating the decoded value only when
+// validateWrapped is true).
+func ConvertResultWithJSONSchema[From any](output From, resolvedSchema *jsonschema.Resolved, validateWrapped bool) (map[string]any, error) {
+	rawOutput, err := json.Marshal(output)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(rawOutput, &decoded); err != nil {
+		return nil, err
+	}
+	switch m := decoded.(type) {
+	case map[string]any:
+		if resolvedSchema != nil {
+			if err := resolvedSchema.Validate(m); err != nil {
+				if validateWrapped {
+					return nil, err
+				}
+				return map[string]any{"result": output}, nil
+			}
+		}
+		return m, nil
+	case nil:
+		if resolvedSchema != nil {
+			var validated any
+			if schemaExpectsObject(resolvedSchema) {
+				validated = map[string]any{}
+			}
+			if err := resolvedSchema.Validate(validated); err != nil {
+				if validateWrapped {
+					return nil, err
+				}
+				return map[string]any{"result": output}, nil
+			}
+		}
+		return nil, nil
+	default:
+		if validateWrapped && resolvedSchema != nil {
+			if err := resolvedSchema.Validate(decoded); err != nil {
+				return nil, err
+			}
+		}
+		return map[string]any{"result": output}, nil
+	}
 }
 
 // ValidateWithJSONSchema validates a Go value against a resolved schema by

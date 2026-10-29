@@ -150,7 +150,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			yield("", fmt.Errorf("unexpected args type, got: %T", args))
 			return
 		}
-		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+		input, err := typeutil.ConvertArgsWithJSONSchema[TArgs](m, f.inputSchema)
 		if err != nil {
 			yield("", err)
 			return

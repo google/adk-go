@@ -16,7 +16,6 @@
 package functiontool
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -195,7 +194,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 	if !ok {
 		return nil, fmt.Errorf("unexpected args type, got: %T", args)
 	}
-	input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+	input, err := typeutil.ConvertArgsWithJSONSchema[TArgs](m, f.inputSchema)
 	if err != nil {
 		return nil, err
 	}
@@ -229,29 +228,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 	if err != nil {
 		return nil, err
 	}
-	resp, err := typeutil.ConvertToWithJSONSchema[TResults, map[string]any](output, f.outputSchema)
-	if err == nil { // all good
-		return resp, nil
-	}
-
-	// Specs requires the result to be a map (dict in python). python impl allows basic types when building response event
-	// functions.py __build_response_event does the following
-	// if not isinstance(function_result, dict):
-	// 		function_result = {'result': function_result}
-	// Diverges from the python impl above: a result encoding/json cannot represent
-	// must not be wrapped, because it cannot be sent.
-	if _, mErr := json.Marshal(output); mErr != nil {
-		return nil, mErr
-	}
-	// A schema inferred from TResults describes the type, not what encoding/json
-	// emits for it.
-	if f.cfg.OutputSchema != nil {
-		if err1 := typeutil.ValidateWithJSONSchema(output, f.outputSchema); err1 != nil {
-			return resp, err // if it fails propagate original err.
-		}
-	}
-	wrappedOutput := map[string]any{"result": output}
-	return wrappedOutput, nil
+	return typeutil.ConvertResultWithJSONSchema(output, f.outputSchema, f.cfg.OutputSchema != nil)
 }
 
 // ** NOTE FOR REVIEWERS **
