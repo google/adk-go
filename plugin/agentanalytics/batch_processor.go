@@ -274,19 +274,32 @@ func (b *BatchProcessor) releaseUploadBytes(n int64) {
 	b.uploadBudgetWarned.Store(false)
 }
 
+// releaseRowUploads releases the uploads of row, which is dropped without
+// being written, as releaseBatchUploads does for a batch.
 func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
-	b.clearDeferredRowUploads(row)
-	delete(row, summaryBuilderKey)
-	pending, ok := row[rawPartsKey].([]pendingUpload)
-	if !ok {
-		return
-	}
-	delete(row, rawPartsKey)
+	b.releaseBatchUploads([]map[string]any{row})
+}
+
+// releaseBatchUploads releases the uploads of the rows of batch, which is
+// dropped without being written: the payloads still queued for upload, and the
+// deferred uploads that clearDeferredUploads drops. The reservations of the
+// queued payloads of all the rows are released before clearDeferredUploads
+// logs anything, so that a panicking Logger cannot leak any of them.
+func (b *BatchProcessor) releaseBatchUploads(batch []map[string]any) {
 	var total int64
-	for _, u := range pending {
-		total += u.reserved
+	for _, row := range batch {
+		delete(row, summaryBuilderKey)
+		pending, ok := row[rawPartsKey].([]pendingUpload)
+		if !ok {
+			continue
+		}
+		delete(row, rawPartsKey)
+		for _, u := range pending {
+			total += u.reserved
+		}
 	}
 	b.releaseUploadBytes(total)
+	b.clearDeferredUploads(batch)
 }
 
 func (b *BatchProcessor) hasPendingWorkLocked() bool {
@@ -504,24 +517,39 @@ func (b *BatchProcessor) flushRunEnd() {
 			canDefer:              !retry,
 		}, batch)
 		cancelUploads()
-
-		// A deferred batch is counted in DropStats only if a later flush drops
-		// it, so that a batch that the next flush writes is not reported as
-		// dropped, and one that fails again is not counted twice.
-		if err := b.tryAppendBatch(flushCtx, batch); err != nil {
-			if flushCtx.Err() != nil && !retry {
-				b.requeueDeferredUploads(batch)
-				b.deferredBatch = batch
-				return
-			}
-			b.recordAppendFailureDrop(int64(len(batch)))
-			for _, row := range batch {
-				b.releaseRowUploads(row)
-			}
-			b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+		if b.writeRunEndBatchLocked(flushCtx, retry, batch) {
+			return
 		}
-		b.clearDeferredUploads(batch)
 	}
+}
+
+// writeRunEndBatchLocked appends batch, whose uploads flushRunEnd resolved,
+// under flushCtx and settles its deferred uploads. Caller must hold
+// b.flushMu. If the append runs out of flushCtx and batch is not already a
+// retry, batch is kept in deferredBatch with its deferred uploads requeued,
+// and writeRunEndBatchLocked reports true. Otherwise a batch whose append
+// failed is dropped, and the deferred uploads are dropped either way. If the
+// append panics, as a panicking Logger makes it do, the deferred uploads are
+// dropped without being logged, so that their reservations are not leaked.
+func (b *BatchProcessor) writeRunEndBatchLocked(flushCtx context.Context, retry bool, batch []map[string]any) (kept bool) {
+	defer b.dropDeferredUploadsQuietly(batch)
+	// A deferred batch is counted in DropStats only if a later flush drops
+	// it, so that a batch that the next flush writes is not reported as
+	// dropped, and one that fails again is not counted twice.
+	if err := b.tryAppendBatch(flushCtx, batch); err != nil {
+		if flushCtx.Err() != nil && !retry {
+			// Kept before requeueDeferredUploads logs, so that a
+			// panicking Logger cannot lose the batch.
+			b.deferredBatch = batch
+			b.requeueDeferredUploads(batch)
+			return true
+		}
+		b.recordAppendFailureDrop(int64(len(batch)))
+		b.releaseBatchUploads(batch)
+		b.config.logf("ERROR: Failed to write batch to BigQuery: %v", err)
+	}
+	b.clearDeferredUploads(batch)
+	return false
 }
 
 // flushAndWaitForInflightBatch waits for any in-flight background flush to
@@ -556,13 +584,17 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 		if writeLeft <= 0 || b.streamWriter.isRotationInCooldown() {
 			if writeLeft <= 0 {
 				b.recordShutdownDrop(int64(len(batch)))
-				b.config.logf("WARNING: Failed to write batch of %d events: %v", len(batch), context.DeadlineExceeded)
 			} else {
 				b.recordAppendFailureDrop(int64(len(batch)))
-				b.config.logf("WARNING: Failed to write batch of %d events: committed write stream rotation in cooldown", len(batch))
 			}
-			for _, row := range batch {
-				b.releaseRowUploads(row)
+			// Release the uploads before logging the warning, so that a
+			// Logger that panics on the warning cannot leak the reservations
+			// of the rows' still-queued payloads.
+			b.releaseBatchUploads(batch)
+			if writeLeft <= 0 {
+				b.config.logf("WARNING: Failed to write batch of %d events: %v", len(batch), context.DeadlineExceeded)
+			} else {
+				b.config.logf("WARNING: Failed to write batch of %d events: committed write stream rotation in cooldown", len(batch))
 			}
 			continue
 		}
