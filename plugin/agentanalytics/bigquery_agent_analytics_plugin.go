@@ -852,7 +852,7 @@ func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	}
 
 	if p.config.flushOnRunEnd() {
-		p.processor.flushRunEnd() // flush queue synchronously under ShutdownTimeout
+		go p.processor.flushRunEnd() // flush queue asynchronously under ShutdownTimeout
 	}
 }
 
@@ -930,7 +930,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if workflowName, failed, ok := nodeCompletion(ev); ok {
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
-		p.emitSessionEventSignals(ctx, ev)
+		p.emitSessionEventSignals(ctx, evID, ev)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
 			taskID := evID
 			taskID.agentName = ev.Author
@@ -1069,14 +1069,13 @@ func (p *analyticsPlugin) beforeModel(ctx agent.Context, req *model.LLMRequest) 
 		return p.traces.pushLLMSpan(ctx, id)
 	}, func(d *eventData) {
 		d.content = req
-		d.attributes = llmRequestAttributes(req)
+		d.attributes = p.llmRequestAttributes(req)
 	})
 	return nil, nil
 }
 
 func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
 	defer p.recoverCallback(EventLLMResponse)
-	id := identityOf(ctx)
 	if res != nil && res.Partial {
 		// A streamed chunk times the first token when it carries generated
 		// content: a leading chunk of usage or role metadata is not the first
@@ -1087,10 +1086,11 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 		// final response alone is written here so that token usage is counted
 		// once.
 		if hasGeneratedContent(res) {
-			p.traces.recordFirstToken(ctx, id)
+			p.traces.recordFirstToken(ctx, identityOf(ctx))
 		}
 		return nil, nil
 	}
+	id := identityOf(ctx)
 	key := llmKey(id)
 	if err != nil {
 		p.traces.recordError(ctx, id, key, err)
@@ -1298,6 +1298,17 @@ func toolContent(name, payloadKey string, payload map[string]any, origin string)
 // llmRequestAttributes returns the model, generation settings, labels and
 // tool declarations of req.
 func llmRequestAttributes(req *model.LLMRequest) map[string]any {
+	return llmRequestAttributesWithTools(req, nil)
+}
+
+func (p *analyticsPlugin) llmRequestAttributes(req *model.LLMRequest) map[string]any {
+	if req == nil || p.denied(columnAttributes) {
+		return nil
+	}
+	return llmRequestAttributesWithTools(req, p.cachedToolDeclarations(req))
+}
+
+func llmRequestAttributesWithTools(req *model.LLMRequest, cachedTools any) map[string]any {
 	attrs := map[string]any{}
 	if req == nil {
 		return attrs
@@ -1313,10 +1324,136 @@ func llmRequestAttributes(req *model.LLMRequest) map[string]any {
 			attrs["labels"] = cfg.Labels
 		}
 	}
-	if tools := toolDeclarations(req); len(tools) > 0 {
+	if cachedTools != nil {
+		attrs["tools"] = cachedTools
+	} else if tools := toolDeclarations(req); len(tools) > 0 {
 		attrs["tools"] = tools
 	}
 	return attrs
+}
+
+type toolDeclCacheKey struct {
+	key      string
+	toolPtr  uintptr
+	name     string
+	desc     string
+	paramPtr uintptr
+	maxLen   int
+	redact   bool
+}
+
+var sanitizedToolDeclCache sync.Map // map[toolDeclCacheKey]preSanitizedValue
+
+func pointerOf(v any) (uintptr, bool) {
+	if v == nil {
+		return 0, true
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return 0, true
+		}
+		return rv.Pointer(), true
+	}
+	return 0, false
+}
+
+func (p *analyticsPlugin) cachedToolDeclarations(req *model.LLMRequest) any {
+	if len(req.Tools) == 0 {
+		return nil
+	}
+	maxLen := p.config.maxContentLength()
+	redact := p.config.redactSensitiveKeys()
+	type declarer interface {
+		Declaration() *genai.FunctionDeclaration
+	}
+	var configDecls map[string]*genai.FunctionDeclaration
+	loadConfigDecls := func() map[string]*genai.FunctionDeclaration {
+		if configDecls != nil {
+			return configDecls
+		}
+		configDecls = map[string]*genai.FunctionDeclaration{}
+		if req.Config != nil {
+			for _, t := range req.Config.Tools {
+				if t == nil {
+					continue
+				}
+				for _, fd := range t.FunctionDeclarations {
+					if fd != nil && fd.Name != "" {
+						configDecls[fd.Name] = fd
+					}
+				}
+			}
+		}
+		return configDecls
+	}
+	decls := make([]any, 0, len(req.Tools))
+	for _, key := range slices.Sorted(maps.Keys(req.Tools)) {
+		t := req.Tools[key]
+		name := key
+		var desc string
+		if tt, ok := t.(tool.Tool); ok {
+			name = cmp.Or(tt.Name(), key)
+			desc = tt.Description()
+		}
+		var fd *genai.FunctionDeclaration
+		if d, ok := t.(declarer); ok {
+			fd = orZero(d.Declaration)
+		}
+		if fd == nil {
+			fd = loadConfigDecls()[key]
+		}
+		var params any
+		if fd != nil {
+			if desc == "" && fd.Description != "" {
+				desc = fd.Description
+			}
+			switch {
+			case fd.ParametersJsonSchema != nil:
+				params = fd.ParametersJsonSchema
+			case fd.Parameters != nil:
+				params = fd.Parameters
+			}
+		}
+		tPtr, tOK := pointerOf(t)
+		pPtr, pOK := pointerOf(params)
+		if tOK && tPtr != 0 && pOK {
+			ck := toolDeclCacheKey{
+				key:      key,
+				toolPtr:  tPtr,
+				name:     name,
+				desc:     desc,
+				paramPtr: pPtr,
+				maxLen:   maxLen,
+				redact:   redact,
+			}
+			if cached, ok := sanitizedToolDeclCache.Load(ck); ok {
+				decls = append(decls, cached)
+				continue
+			}
+			entry := map[string]any{"name": name}
+			if desc != "" {
+				entry["description"] = desc
+			}
+			if params != nil {
+				entry["parameters"] = params
+			}
+			if ps, ok := sanitizeToPreSanitized(entry, maxLen, redact); ok {
+				sanitizedToolDeclCache.Store(ck, ps)
+				decls = append(decls, ps)
+				continue
+			}
+		}
+		entry := map[string]any{"name": name}
+		if desc != "" {
+			entry["description"] = desc
+		}
+		if params != nil {
+			entry["parameters"] = params
+		}
+		decls = append(decls, entry)
+	}
+	return decls
 }
 
 // llmConfig returns the generation settings that adk-python records, plus
@@ -1417,7 +1554,156 @@ func toolDeclarations(req *model.LLMRequest) []map[string]any {
 	return decls
 }
 
-// llmRequestContent builds the LLM_REQUEST content the way adk-python does:
+type textMsgCacheKey struct {
+	role   string
+	text   string
+	maxLen int
+	redact bool
+}
+
+type cachedTextMsg struct {
+	promptJSON []byte
+	sysJSON    []byte
+	partEntry  map[string]any
+	promptTr   bool
+	sysTr      bool
+	partTr     bool
+}
+
+type promptItemJSON struct {
+	Content string `json:"content"`
+	Role    string `json:"role"`
+}
+
+var sanitizedTextMsgCache sync.Map // map[textMsgCacheKey]*cachedTextMsg
+
+func isSingleTextContent(c *genai.Content) bool {
+	if c == nil || len(c.Parts) != 1 {
+		return false
+	}
+	p := c.Parts[0]
+	return p != nil && p.Text != "" && p.FileData == nil && p.InlineData == nil &&
+		p.FunctionCall == nil && p.FunctionResponse == nil &&
+		p.ExecutableCode == nil && p.CodeExecutionResult == nil
+}
+
+func getCachedTextMsg(role, text string, maxLen int, redact bool) *cachedTextMsg {
+	key := textMsgCacheKey{role: role, text: text, maxLen: maxLen, redact: redact}
+	if len(text) <= 4096 {
+		if v, ok := sanitizedTextMsgCache.Load(key); ok {
+			return v.(*cachedTextMsg)
+		}
+	}
+	roleShown, roleTrunc := sanitizeAndTruncateText(cmp.Or(role, "unknown"), maxLen, redact)
+	textShown, textTrunc := sanitizeAndTruncateText(text, maxLen, redact)
+	summary, sumTrunc := truncateString(textShown, maxLen)
+	pJSON, _ := json.Marshal(promptItemJSON{Content: summary, Role: roleShown})
+	sJSON, _ := json.Marshal(summary)
+	cm := &cachedTextMsg{
+		promptJSON: pJSON,
+		sysJSON:    sJSON,
+		partEntry: map[string]any{
+			"part_index":   0,
+			"storage_mode": storageModeInline,
+			"mime_type":    "text/plain",
+			"text":         textShown,
+		},
+		promptTr: roleTrunc || textTrunc || sumTrunc,
+		sysTr:    textTrunc || sumTrunc,
+		partTr:   textTrunc,
+	}
+	if len(text) <= 4096 {
+		sanitizedTextMsgCache.Store(key, cm)
+	}
+	return cm
+}
+
+func encodeLLMRequestFast(req *model.LLMRequest, maxLen int, redact, contentDenied bool, parts *partsCollector) (jsonStr string, contentTruncated, ok bool) {
+	if parts != nil && parts.opts.offload {
+		return "", false, false
+	}
+	for _, c := range req.Contents {
+		if c != nil && !isSingleTextContent(c) {
+			return "", false, false
+		}
+	}
+	var sys *genai.Content
+	if req.Config != nil && req.Config.SystemInstruction != nil {
+		sys = req.Config.SystemInstruction
+		if len(sys.Parts) > 0 && !isSingleTextContent(sys) {
+			return "", false, false
+		}
+	}
+
+	if parts != nil && cap(parts.parts) == 0 {
+		capHint := len(req.Contents)
+		if sys != nil {
+			capHint++
+		}
+		if capHint > 0 {
+			parts.parts = make([]map[string]any, 0, capHint)
+		}
+	}
+
+	var buf strings.Builder
+	if !contentDenied {
+		buf.Grow(len(req.Contents)*96 + 64)
+		buf.WriteByte('{')
+	}
+	wrotePrompt := false
+	for _, c := range req.Contents {
+		if c == nil {
+			continue
+		}
+		cm := getCachedTextMsg(c.Role, c.Parts[0].Text, maxLen, redact)
+		contentTruncated = contentTruncated || cm.promptTr
+		if !contentDenied {
+			if !wrotePrompt {
+				buf.WriteString(`"prompt":[`)
+				wrotePrompt = true
+			} else {
+				buf.WriteByte(',')
+			}
+			buf.Write(cm.promptJSON)
+		}
+		if parts != nil {
+			parts.parts = append(parts.parts, cm.partEntry)
+			parts.truncated = parts.truncated || cm.partTr
+			parts.nonUploadTruncated = parts.nonUploadTruncated || cm.partTr
+		}
+	}
+	if !contentDenied && wrotePrompt {
+		buf.WriteByte(']')
+	}
+	if sys != nil {
+		var sysJSON []byte
+		if len(sys.Parts) == 0 {
+			sysJSON = []byte(`""`)
+		} else {
+			cm := getCachedTextMsg("", sys.Parts[0].Text, maxLen, redact)
+			contentTruncated = contentTruncated || cm.sysTr
+			sysJSON = cm.sysJSON
+			if parts != nil {
+				parts.parts = append(parts.parts, cm.partEntry)
+				parts.truncated = parts.truncated || cm.partTr
+				parts.nonUploadTruncated = parts.nonUploadTruncated || cm.partTr
+			}
+		}
+		if !contentDenied {
+			if wrotePrompt {
+				buf.WriteByte(',')
+			}
+			buf.WriteString(`"system_prompt":`)
+			buf.Write(sysJSON)
+		}
+	}
+	if !contentDenied {
+		buf.WriteByte('}')
+		jsonStr = buf.String()
+	}
+	return jsonStr, contentTruncated, true
+}
+
 // the role and text summary of each request message, and the summary of the
 // system instruction. Credentials in the summaries are redacted if redact is
 // set; the caller always says so, so that no call can leave them unredacted by
@@ -1680,14 +1966,14 @@ func identityOf(ctx context.Context) identity {
 			userID:       orZero(c.UserID),
 			appName:      orZero(c.AppName),
 			branch:       orZero(c.Branch),
-			path:         orZero(func() string { return contextPath(ctx) }),
+			path:         contextPath(ctx),
 			state:        orZero(c.ReadonlyState),
 		}
 	case agent.InvocationContext:
 		id := identity{
 			invocationID: orZero(c.InvocationID),
 			branch:       orZero(c.Branch),
-			path:         orZero(func() string { return contextPath(ctx) }),
+			path:         contextPath(ctx),
 		}
 		if a := orZero(c.Agent); a != nil {
 			id.agentName = orZero(a.Name)
@@ -1709,22 +1995,78 @@ type visitedContextStruct struct {
 	typ reflect.Type
 }
 
+type contextStructInfo struct {
+	pathIndex      []int
+	paramsIndex    []int
+	capPathIndex   []int
+	childIndices   [4][]int
+	numChildren    int
+	isCallbackWrap bool
+}
+
+var contextStructCache sync.Map // map[reflect.Type]*contextStructInfo
+
+func getContextStructInfo(t reflect.Type) *contextStructInfo {
+	if v, ok := contextStructCache.Load(t); ok {
+		return v.(*contextStructInfo)
+	}
+	info := &contextStructInfo{
+		isCallbackWrap: strings.HasSuffix(t.String(), "callbackContextWrapper"),
+	}
+	if t.Kind() == reflect.Struct {
+		if sf, ok := t.FieldByName("path"); ok && sf.Type.Kind() == reflect.String {
+			info.pathIndex = sf.Index
+		}
+		if sf, ok := t.FieldByName("params"); ok {
+			info.paramsIndex = sf.Index
+		}
+		if sf, ok := t.FieldByName("Path"); ok && sf.Type.Kind() == reflect.String {
+			info.capPathIndex = sf.Index
+		}
+		for _, name := range [4]string{"context", "Context", "ctx", "invocationContext"} {
+			if sf, ok := t.FieldByName(name); ok {
+				info.childIndices[info.numChildren] = sf.Index
+				info.numChildren++
+			}
+		}
+	}
+	contextStructCache.Store(t, info)
+	return info
+}
+
+func fieldByIndexFast(v reflect.Value, idx []int) reflect.Value {
+	if len(idx) == 1 {
+		return v.Field(idx[0])
+	}
+	return v.FieldByIndex(idx)
+}
+
 // contextPath returns the execution node path carried by ctx, or "".
 // ADK's callbackContextWrapper.Path logs an error and returns "", and
 // NewCallbackContext wraps the inner InvocationContext without copying its
 // path onto the outer commonContext, so contextPath inspects the wrapped
 // context chain directly before falling back to Path() on non-wrapper types.
 func contextPath(ctx context.Context) (path string) {
+	if ctx == nil {
+		return ""
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			path = ""
 		}
 	}()
-	queue := []reflect.Value{reflect.ValueOf(ctx)}
-	seen := map[visitedContextStruct]bool{}
-	for steps := 0; len(queue) > 0 && steps < 512; steps++ {
-		v := queue[0]
-		queue = queue[1:]
+	var queueBuf [16]reflect.Value
+	queue := queueBuf[:1]
+	queue[0] = reflect.ValueOf(ctx)
+	head := 0
+
+	var seenBuf [16]visitedContextStruct
+	seenCount := 0
+	var seenOverflow map[visitedContextStruct]bool
+
+	for steps := 0; head < len(queue) && steps < 512; steps++ {
+		v := queue[head]
+		head++
 		var ptr uintptr
 		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
 			if v.IsNil() {
@@ -1739,19 +2081,40 @@ func contextPath(ctx context.Context) (path string) {
 		if v.Kind() != reflect.Struct {
 			continue
 		}
+		vt := v.Type()
 		if ptr != 0 {
-			key := visitedContextStruct{ptr: ptr, typ: v.Type()}
-			if seen[key] {
+			key := visitedContextStruct{ptr: ptr, typ: vt}
+			alreadySeen := false
+			for i := range seenCount {
+				if seenBuf[i] == key {
+					alreadySeen = true
+					break
+				}
+			}
+			if !alreadySeen && seenOverflow != nil && seenOverflow[key] {
+				alreadySeen = true
+			}
+			if alreadySeen {
 				continue
 			}
-			seen[key] = true
+			if seenCount < len(seenBuf) {
+				seenBuf[seenCount] = key
+				seenCount++
+			} else {
+				if seenOverflow == nil {
+					seenOverflow = make(map[visitedContextStruct]bool, 8)
+				}
+				seenOverflow[key] = true
+			}
 		}
-		if f := v.FieldByName("path"); f.IsValid() && f.Kind() == reflect.String {
-			if s := f.String(); s != "" {
+		info := getContextStructInfo(vt)
+		if info.pathIndex != nil {
+			if s := fieldByIndexFast(v, info.pathIndex).String(); s != "" {
 				return s
 			}
 		}
-		if f := v.FieldByName("params"); f.IsValid() {
+		if info.paramsIndex != nil {
+			f := fieldByIndexFast(v, info.paramsIndex)
 			for f.Kind() == reflect.Pointer || f.Kind() == reflect.Interface {
 				if f.IsNil() {
 					f = reflect.Value{}
@@ -1760,23 +2123,27 @@ func contextPath(ctx context.Context) (path string) {
 				f = f.Elem()
 			}
 			if f.Kind() == reflect.Struct {
-				if p := f.FieldByName("Path"); p.IsValid() && p.Kind() == reflect.String {
-					if s := p.String(); s != "" {
+				pInfo := getContextStructInfo(f.Type())
+				if pInfo.capPathIndex != nil {
+					if s := fieldByIndexFast(f, pInfo.capPathIndex).String(); s != "" {
 						return s
 					}
 				}
 			}
 		}
-		for _, name := range []string{"context", "Context", "ctx", "invocationContext"} {
-			if f := v.FieldByName(name); f.IsValid() {
-				queue = append(queue, f)
+		for i := range info.numChildren {
+			if len(queue) == cap(queue) && head > 0 {
+				n := copy(queue[:cap(queue)], queue[head:])
+				queue = queue[:n]
+				head = 0
 			}
+			queue = append(queue, fieldByIndexFast(v, info.childIndices[i]))
 		}
 	}
 	type pathCarrier interface {
 		Path() string
 	}
-	if p, ok := ctx.(pathCarrier); ok && !strings.HasSuffix(reflect.TypeOf(ctx).String(), "callbackContextWrapper") {
+	if p, ok := ctx.(pathCarrier); ok && !getContextStructInfo(reflect.TypeOf(ctx)).isCallbackWrap {
 		return orZero(p.Path)
 	}
 	return ""
@@ -1960,8 +2327,17 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 		builder.needsRebuild = false
 		preFormatted = true
 	case *model.LLMRequest:
-		content, contentTruncated, builder = buildLLMRequestContent(v, maxLen, redact, contentDenied, parts)
-		preFormatted = true
+		if jsonStr, ct, ok := encodeLLMRequestFast(v, maxLen, redact, contentDenied, parts); ok {
+			if !contentDenied {
+				row[columnContent] = jsonStr
+			}
+			content = nil
+			contentTruncated = ct
+			preFormatted = true
+		} else {
+			content, contentTruncated, builder = buildLLMRequestContent(v, maxLen, redact, contentDenied, parts)
+			preFormatted = true
+		}
 	case *model.LLMResponse:
 		content, contentTruncated, builder = buildLLMResponseContent(v, maxLen, redact, contentDenied, parts)
 		preFormatted = true
@@ -1974,20 +2350,24 @@ func (p *analyticsPlugin) addContent(row map[string]any, eventType string, d *ev
 	}
 
 	truncated := false
-	if !contentDenied && !isNil(content) {
-		if preFormatted {
-			b, err := json.Marshal(content)
-			if err != nil {
-				row[columnContent] = strconv.Quote(unsupportedObjPlaceholder)
-				truncated = true
+	if !contentDenied {
+		if !isNil(content) {
+			if preFormatted {
+				b, err := json.Marshal(content)
+				if err != nil {
+					row[columnContent] = strconv.Quote(unsupportedObjPlaceholder)
+					truncated = true
+				} else {
+					row[columnContent] = string(b)
+					truncated = contentTruncated
+				}
 			} else {
-				row[columnContent] = string(b)
-				truncated = contentTruncated
+				s, t := p.jsonColumn(content)
+				row[columnContent] = s
+				truncated = t || contentTruncated
 			}
-		} else {
-			s, t := p.jsonColumn(content)
-			row[columnContent] = s
-			truncated = t || contentTruncated
+		} else if preFormatted {
+			truncated = contentTruncated
 		}
 	}
 	if parts != nil && len(parts.parts) > 0 {

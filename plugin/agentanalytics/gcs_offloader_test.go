@@ -2620,6 +2620,7 @@ func TestGCSOffloading_RunEndsStopWaitingOnceStorageTimesOut(t *testing.T) {
 
 	const runs = 4
 	var waited [runs]time.Duration
+	var rows []map[string]any
 	for i := range runs {
 		mCtx := &mockInvocationContext{
 			ctx:          context.Background(),
@@ -2633,6 +2634,7 @@ func TestGCSOffloading_RunEndsStopWaitingOnceStorageTimesOut(t *testing.T) {
 		}
 		start := time.Now()
 		p.AfterRunCallback()(mCtx)
+		rows = append(rows, collectRows(t, requests, untilEventType(EventInvocationCompleted))...)
 		waited[i] = time.Since(start)
 	}
 
@@ -2648,9 +2650,6 @@ func TestGCSOffloading_RunEndsStopWaitingOnceStorageTimesOut(t *testing.T) {
 		t.Errorf("the offloader was called %d times, want once, by the first run end", got)
 	}
 
-	rows := collectRows(t, requests, func(rows []map[string]any) bool {
-		return len(rowsOfType(rows, EventInvocationCompleted)) == runs
-	})
 	llmRows := rowsOfType(rows, EventLLMRequest)
 	if len(llmRows) != runs {
 		t.Fatalf("got %d LLM_REQUEST rows, want %d: no run end may lose rows", len(llmRows), runs)

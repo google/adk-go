@@ -68,10 +68,45 @@ func (b *nodeBudget) take() bool {
 }
 
 var (
-	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
-	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
-	jsonNumberType    = reflect.TypeFor[json.Number]()
+	jsonMarshalerType     = reflect.TypeFor[json.Marshaler]()
+	textMarshalerType     = reflect.TypeFor[encoding.TextMarshaler]()
+	jsonNumberType        = reflect.TypeFor[json.Number]()
+	preSanitizedValueType = reflect.TypeFor[preSanitizedValue]()
 )
+
+// preSanitizedValue holds a map entry whose sanitized JSON representation and
+// sanitizer node cost have already been computed for a given (maxLength, redact).
+type preSanitizedValue struct {
+	raw       json.RawMessage
+	rawEntry  map[string]any
+	truncated bool
+	nodes     int
+}
+
+func sanitizeToPreSanitized(entry map[string]any, maxLength int, redact bool) (preSanitizedValue, bool) {
+	budget := &nodeBudget{remaining: maxSanitizeNodes}
+	s := sanitizer{
+		maxLength: maxLength,
+		redact:    redact,
+		budget:    budget,
+		visiting:  make(map[visitKey]struct{}),
+	}
+	v, truncated := s.walk(reflect.ValueOf(entry), 0)
+	nodesUsed := maxSanitizeNodes - budget.remaining
+	if nodesUsed >= maxSanitizeNodes {
+		return preSanitizedValue{}, false
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return preSanitizedValue{}, false
+	}
+	return preSanitizedValue{
+		raw:       json.RawMessage(b),
+		rawEntry:  entry,
+		truncated: truncated,
+		nodes:     nodesUsed,
+	}, true
+}
 
 // Values of the storage_mode column of content_parts.
 const (
@@ -722,6 +757,14 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 		}
 		v = v.Elem()
 	}
+	if v.IsValid() && v.Type() == preSanitizedValueType {
+		ps := v.Interface().(preSanitizedValue)
+		if depth < maxSanitizeDepth && s.budget.remaining > ps.nodes {
+			s.budget.remaining -= ps.nodes
+			return ps.raw, ps.truncated
+		}
+		return s.walk(reflect.ValueOf(ps.rawEntry), depth)
+	}
 	if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
 		if !s.budget.take() {
 			return sanitizeBudgetPlaceholder, true
@@ -1177,7 +1220,7 @@ func isEmptyValue(v reflect.Value) bool {
 // truncateString shortens s to maxLength runes followed by truncationSuffix.
 // A negative maxLength means no limit.
 func truncateString(s string, maxLength int) (string, bool) {
-	if maxLength < 0 {
+	if maxLength < 0 || len(s) <= maxLength {
 		return s, false
 	}
 	r := []rune(s)
