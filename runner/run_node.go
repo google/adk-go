@@ -56,6 +56,35 @@ func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
 	return newAgentNode(a), nil
 }
 
+// nodeWorkflow returns the cached single-node root wrapper workflow for a,
+// building it on first use.
+func (r *Runner) nodeWorkflow(a agent.Agent) (*workflow.Workflow, error) {
+	if a == nil {
+		return nil, fmt.Errorf("node runtime: agent cannot be nil")
+	}
+	if cached, ok := r.nodeWorkflows.Load(a.Name()); ok {
+		return cached.(*workflow.Workflow), nil
+	}
+	node, err := buildRunnerNode(a)
+	if err != nil {
+		return nil, err
+	}
+	// Architectural note: Unlike Go, Python ADK executes standalone agents
+	// directly via agent.run_async. Go wraps top-level agents in a synthetic
+	// single-node workflow (START -> node) so all execution rides through
+	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
+	// this synthetic workflow from stamping an unwanted namespace prefix
+	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
+	wf, err := workflow.New(rootWorkflowName(r.appName, a), []workflow.Edge{
+		{From: workflow.Start, To: node},
+	}, workflow.WithRootWrapper())
+	if err != nil {
+		return nil, fmt.Errorf("failed to build node workflow: %w", err)
+	}
+	actual, _ := r.nodeWorkflows.LoadOrStore(a.Name(), wf)
+	return actual.(*workflow.Workflow), nil
+}
+
 // runNode drives an agent through the workflow engine by wrapping it
 // in a single-node workflow (START -> node), reusing the agent path's
 // session/plugin/persist pipeline. The wrapping node bridges the agent's
@@ -91,7 +120,7 @@ func (r *Runner) runNode(
 		return emit(ev, err)
 	}
 
-	node, err := buildRunnerNode(agentToRun)
+	wf, err := r.nodeWorkflow(agentToRun)
 	if err != nil {
 		yield(nil, err)
 		return
@@ -122,20 +151,6 @@ func (r *Runner) runNode(
 			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
-
-	// Architectural note: Unlike Go, Python ADK executes standalone agents
-	// directly via agent.run_async. Go wraps top-level agents in a synthetic
-	// single-node workflow (START -> node) so all execution rides through
-	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
-	// this synthetic workflow from stamping an unwanted namespace prefix
-	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
-	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
-		{From: workflow.Start, To: node},
-	}, workflow.WithRootWrapper())
-	if err != nil {
-		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
-		return
-	}
 
 	frs := utils.FunctionResponses(msg)
 

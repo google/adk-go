@@ -23,6 +23,7 @@ import (
 	"log"
 	"maps"
 	"slices"
+	"sync"
 	"time"
 
 	"google.golang.org/genai"
@@ -247,6 +248,7 @@ type Runner struct {
 	parents           parentmap.Map
 	pluginManager     *plugininternal.PluginManager
 	autoCreateSession bool
+	nodeWorkflows     sync.Map
 
 	// compactionConfig is nil when compaction is disabled. Otherwise it is a
 	// validated copy of Config.Compaction with the summarizer
