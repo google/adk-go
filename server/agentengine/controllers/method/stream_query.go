@@ -98,7 +98,6 @@ func (s *streamQueryHandler) streamJSONL(ctx context.Context, rw http.ResponseWr
 	// from this moment on we must not return error. Instead, it should be handled by using helper.EmitJSONError
 
 	for event, err := range events {
-		log.Printf("Processing event: %+v err: %+v\n", event, err) //nolint:forbidigo // pre-slog call site
 		if err != nil {
 			// A compaction failure is bookkeeping, not the turn. The events are
 			// already persisted and the agent has already answered, so emitting
