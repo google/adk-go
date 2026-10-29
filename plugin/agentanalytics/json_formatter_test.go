@@ -4898,3 +4898,344 @@ func TestSmartTruncate_RedactsCredentialTextOfOpaqueValues(t *testing.T) {
 type testStringerText struct{ text string }
 
 func (s testStringerText) String() string { return s.text }
+
+// testPwLocked guards its fields with a mutex.
+type testPwLocked struct {
+	mu       sync.Mutex
+	password string
+}
+
+// testGuardedArrayPassword is an array of a type that guards its fields; its
+// method reads them under the lock.
+type testGuardedArrayPassword [1]testPwLocked
+
+func (v *testGuardedArrayPassword) MarshalJSON() ([]byte, error) {
+	v[0].mu.Lock()
+	defer v[0].mu.Unlock()
+	return []byte(`"guarded"`), nil
+}
+
+// testGuardedStructPassword is a struct that guards its fields.
+type testGuardedStructPassword struct {
+	mu       sync.Mutex
+	password string
+}
+
+func (v *testGuardedStructPassword) MarshalJSON() ([]byte, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return []byte(`"guarded"`), nil
+}
+
+func TestSmartTruncate_DoesNotReadGuardedFieldsOfSensitiveTypes(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"array of a struct with a mutex", &testGuardedArrayPassword{}},
+		{"struct with a mutex", &testGuardedStructPassword{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var lock func() func()
+			var set func(string)
+			switch v := tt.in.(type) {
+			case *testGuardedArrayPassword:
+				lock = func() func() { v[0].mu.Lock(); return v[0].mu.Unlock }
+				set = func(p string) { v[0].password = p }
+			case *testGuardedStructPassword:
+				lock = func() func() { v.mu.Lock(); return v.mu.Unlock }
+				set = func(p string) { v.password = p }
+			}
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for i := 0; ; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					unlock := lock()
+					set(strconv.Itoa(i))
+					unlock()
+				}
+			}()
+			for range 200 {
+				if got, _, err := SmartTruncate(tt.in, 1000); err != nil || len(got) == 0 {
+					t.Fatalf("SmartTruncate = (%s, %v)", got, err)
+				}
+			}
+			close(stop)
+			<-done
+		})
+	}
+}
+
+// testTextMarshaledToken writes a credential through MarshalText.
+type testTextMarshaledToken struct{ raw string }
+
+func (k testTextMarshaledToken) MarshalText() ([]byte, error) { return []byte(k.raw), nil }
+
+// testEmptyAPIToken has no field.
+type testEmptyAPIToken struct{}
+
+func (testEmptyAPIToken) MarshalJSON() ([]byte, error) { return []byte(`"empty"`), nil }
+
+func TestSmartTruncate_ZeroMarshalersOfSensitiveTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"zero struct with MarshalJSON", testMarshaledToken{}, `""`},
+		{"struct with MarshalJSON", testMarshaledToken{secret}, `"[REDACTED]"`},
+		{"zero struct with MarshalText", testTextMarshaledToken{}, `""`},
+		{"struct with MarshalText", testTextMarshaledToken{secret}, `"[REDACTED]"`},
+		{"struct without a field", testEmptyAPIToken{}, `"empty"`},
+		{"zero value in a field", struct{ T testMarshaledToken }{}, `{"T":""}`},
+		{"value in a field", struct{ T testMarshaledToken }{testMarshaledToken{secret}}, `{"T":"[REDACTED]"}`},
+		{"struct with a mutex", &testGuardedStructPassword{}, `"[REDACTED]"`},
+		{"array of a struct with a mutex", &testGuardedArrayPassword{}, `"[REDACTED]"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestZeroIsSafe(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   any
+		want bool
+	}{
+		{"int", 3, true},
+		{"empty struct", struct{}{}, true},
+		{"struct with an unexported field", testMarshaledToken{}, true},
+		{"mutex", sync.Mutex{}, false},
+		{"struct with a mutex", testPwLocked{}, false},
+		{"array of ints", [4]int{}, true},
+		{"array of a struct with an unexported field", [1]testMarshaledToken{}, false},
+		{"array of a struct with exported fields", [1]struct{ A int }{}, true},
+		{"array of a struct with a mutex", testGuardedArrayPassword{}, false},
+		{"struct with an array of a struct with a mutex", struct{ A [1]testPwLocked }{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := zeroIsSafe(reflect.TypeOf(tt.in), false); got != tt.want {
+				t.Errorf("zeroIsSafe(%T) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// Types of a chain 49 deep that reaches testDeepS at depth 50, whose fields
+// are beyond the depth that is read, and a type that embeds testDeepS
+// directly, after the chain.
+type testDeepT struct{ Exported string }
+
+type testDeepS struct{ *testDeepT }
+
+type testDeepRoot struct {
+	*testDeepC0
+	*testDeepS
+}
+
+func (testDeepRoot) String() string { return "never used" }
+
+type testDeepC0 struct{ *testDeepC1 }
+
+type testDeepC1 struct{ *testDeepC2 }
+
+type testDeepC2 struct{ *testDeepC3 }
+
+type testDeepC3 struct{ *testDeepC4 }
+
+type testDeepC4 struct{ *testDeepC5 }
+
+type testDeepC5 struct{ *testDeepC6 }
+
+type testDeepC6 struct{ *testDeepC7 }
+
+type testDeepC7 struct{ *testDeepC8 }
+
+type testDeepC8 struct{ *testDeepC9 }
+
+type testDeepC9 struct{ *testDeepC10 }
+
+type testDeepC10 struct{ *testDeepC11 }
+
+type testDeepC11 struct{ *testDeepC12 }
+
+type testDeepC12 struct{ *testDeepC13 }
+
+type testDeepC13 struct{ *testDeepC14 }
+
+type testDeepC14 struct{ *testDeepC15 }
+
+type testDeepC15 struct{ *testDeepC16 }
+
+type testDeepC16 struct{ *testDeepC17 }
+
+type testDeepC17 struct{ *testDeepC18 }
+
+type testDeepC18 struct{ *testDeepC19 }
+
+type testDeepC19 struct{ *testDeepC20 }
+
+type testDeepC20 struct{ *testDeepC21 }
+
+type testDeepC21 struct{ *testDeepC22 }
+
+type testDeepC22 struct{ *testDeepC23 }
+
+type testDeepC23 struct{ *testDeepC24 }
+
+type testDeepC24 struct{ *testDeepC25 }
+
+type testDeepC25 struct{ *testDeepC26 }
+
+type testDeepC26 struct{ *testDeepC27 }
+
+type testDeepC27 struct{ *testDeepC28 }
+
+type testDeepC28 struct{ *testDeepC29 }
+
+type testDeepC29 struct{ *testDeepC30 }
+
+type testDeepC30 struct{ *testDeepC31 }
+
+type testDeepC31 struct{ *testDeepC32 }
+
+type testDeepC32 struct{ *testDeepC33 }
+
+type testDeepC33 struct{ *testDeepC34 }
+
+type testDeepC34 struct{ *testDeepC35 }
+
+type testDeepC35 struct{ *testDeepC36 }
+
+type testDeepC36 struct{ *testDeepC37 }
+
+type testDeepC37 struct{ *testDeepC38 }
+
+type testDeepC38 struct{ *testDeepC39 }
+
+type testDeepC39 struct{ *testDeepC40 }
+
+type testDeepC40 struct{ *testDeepC41 }
+
+type testDeepC41 struct{ *testDeepC42 }
+
+type testDeepC42 struct{ *testDeepC43 }
+
+type testDeepC43 struct{ *testDeepC44 }
+
+type testDeepC44 struct{ *testDeepC45 }
+
+type testDeepC45 struct{ *testDeepC46 }
+
+type testDeepC46 struct{ *testDeepC47 }
+
+type testDeepC47 struct{ *testDeepC48 }
+
+type testDeepC48 struct{ *testDeepS }
+
+// readDeepFields reads the embedded fields, which only reflection does
+// otherwise.
+func readDeepFields() {
+	_ = testDeepC0{}.testDeepC1
+	_ = testDeepC1{}.testDeepC2
+	_ = testDeepC2{}.testDeepC3
+	_ = testDeepC3{}.testDeepC4
+	_ = testDeepC4{}.testDeepC5
+	_ = testDeepC5{}.testDeepC6
+	_ = testDeepC6{}.testDeepC7
+	_ = testDeepC7{}.testDeepC8
+	_ = testDeepC8{}.testDeepC9
+	_ = testDeepC9{}.testDeepC10
+	_ = testDeepC10{}.testDeepC11
+	_ = testDeepC11{}.testDeepC12
+	_ = testDeepC12{}.testDeepC13
+	_ = testDeepC13{}.testDeepC14
+	_ = testDeepC14{}.testDeepC15
+	_ = testDeepC15{}.testDeepC16
+	_ = testDeepC16{}.testDeepC17
+	_ = testDeepC17{}.testDeepC18
+	_ = testDeepC18{}.testDeepC19
+	_ = testDeepC19{}.testDeepC20
+	_ = testDeepC20{}.testDeepC21
+	_ = testDeepC21{}.testDeepC22
+	_ = testDeepC22{}.testDeepC23
+	_ = testDeepC23{}.testDeepC24
+	_ = testDeepC24{}.testDeepC25
+	_ = testDeepC25{}.testDeepC26
+	_ = testDeepC26{}.testDeepC27
+	_ = testDeepC27{}.testDeepC28
+	_ = testDeepC28{}.testDeepC29
+	_ = testDeepC29{}.testDeepC30
+	_ = testDeepC30{}.testDeepC31
+	_ = testDeepC31{}.testDeepC32
+	_ = testDeepC32{}.testDeepC33
+	_ = testDeepC33{}.testDeepC34
+	_ = testDeepC34{}.testDeepC35
+	_ = testDeepC35{}.testDeepC36
+	_ = testDeepC36{}.testDeepC37
+	_ = testDeepC37{}.testDeepC38
+	_ = testDeepC38{}.testDeepC39
+	_ = testDeepC39{}.testDeepC40
+	_ = testDeepC40{}.testDeepC41
+	_ = testDeepC41{}.testDeepC42
+	_ = testDeepC42{}.testDeepC43
+	_ = testDeepC43{}.testDeepC44
+	_ = testDeepC44{}.testDeepC45
+	_ = testDeepC45{}.testDeepC46
+	_ = testDeepC46{}.testDeepC47
+	_ = testDeepC47{}.testDeepC48
+	_ = testDeepC48{}.testDeepS
+	_ = testDeepS{}.testDeepT
+	_ = testDeepRoot{}.testDeepC0
+}
+
+func TestShowsExportedFields_DepthLimitDoesNotHideShallowFields(t *testing.T) {
+	readDeepFields()
+	v := testDeepRoot{testDeepS: &testDeepS{&testDeepT{"kept"}}}
+	if !showsExportedFields(reflect.ValueOf(v)) {
+		t.Error("showsExportedFields(testDeepRoot) = false, want true")
+	}
+	for _, redact := range []bool{true, false} {
+		got, _, err := smartTruncate(v, 1000, redact)
+		if want := `{"Exported":"kept"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(testDeepRoot, redact=%v) = (%s, %v), want %s", redact, got, err, want)
+		}
+	}
+}
+
+// testCycleA and testCycleB embed each other, and testCycleA has a field.
+type testCycleA struct {
+	*testCycleB
+	Exported string
+}
+
+type testCycleB struct{ *testCycleA }
+
+func (testCycleB) String() string { return "never used" }
+
+func TestShowsExportedFields_CycleDoesNotHideFields(t *testing.T) {
+	// testCycleB is read from testCycleA first, where it has no field of its
+	// own to write, and again from the root.
+	type root struct {
+		*testCycleA
+		*testCycleB
+	}
+	if !showsExportedFields(reflect.ValueOf(root{})) {
+		t.Error("showsExportedFields(root) = false, want true")
+	}
+	if !showsExportedFields(reflect.ValueOf(testCycleB{})) {
+		t.Error("showsExportedFields(testCycleB) = false, want true")
+	}
+}

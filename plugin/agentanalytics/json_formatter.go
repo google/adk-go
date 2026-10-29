@@ -827,8 +827,9 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 // credential in a form that nothing else would tell, such as the digits of an
 // int or the bytes of a slice. A zero value holds none. A struct is shown by
 // its exported fields, which are redacted by name, so it is redacted whole only
-// if a method (MarshalJSON or MarshalText) writes it; it is not read
-// otherwise, because a type may guard its fields.
+// if a method (MarshalJSON or MarshalText) writes it. The value is read only
+// to tell whether it is zero, and not if the type may guard its fields (see
+// zeroIsSafe), in which case it is taken to hold a credential.
 func hasSensitiveTypeName(v reflect.Value) bool {
 	name := v.Type().Name()
 	if name == "" || !isSensitiveKey(name) {
@@ -837,9 +838,37 @@ func hasSensitiveTypeName(v reflect.Value) bool {
 	if v.Kind() == reflect.Struct {
 		_, isJSON := implementer(v, jsonMarshalerType)
 		_, isText := implementer(v, textMarshalerType)
-		return isJSON || isText
+		if !isJSON && !isText {
+			return false
+		}
 	}
-	return !v.IsZero()
+	return !zeroIsSafe(v.Type(), false) || !v.IsZero()
+}
+
+// zeroIsSafe reports whether a value of type t can be read to tell whether it
+// is zero without reading state that the type may guard: it holds no
+// synchronization primitive (the types of sync and sync/atomic), and, in an
+// array, no struct with an unexported field, which only the type's own methods
+// may read. inArray is true within an array.
+func zeroIsSafe(t reflect.Type, inArray bool) bool {
+	if pkg := t.PkgPath(); pkg == "sync" || pkg == "sync/atomic" {
+		return false
+	}
+	switch t.Kind() {
+	case reflect.Array:
+		return zeroIsSafe(t.Elem(), true)
+	case reflect.Struct:
+		for i := range t.NumField() {
+			f := t.Field(i)
+			if inArray && !f.IsExported() {
+				return false
+			}
+			if !zeroIsSafe(f.Type, inArray) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *sanitizer) enter(key visitKey) bool {
@@ -1030,21 +1059,44 @@ func showsExportedFields(v reflect.Value) bool {
 	if v.Kind() != reflect.Struct {
 		return false
 	}
-	return typeShowsFields(v.Type(), 0, map[reflect.Type]bool{})
+	sc := fieldScan{visiting: map[reflect.Type]bool{}, noFieldsAt: map[reflect.Type]int{}}
+	return sc.shows(v.Type(), 0)
 }
 
-// typeShowsFields reports whether the struct type t has a field that walkStruct
-// writes (see showsExportedFields); seen holds the struct types already
-// entered.
-func typeShowsFields(t reflect.Type, depth int, seen map[reflect.Type]bool) bool {
-	if depth > maxSanitizeDepth || seen[t] {
+// maxFieldScanTypes bounds the struct types that showsExportedFields enters.
+// A scan that reaches it reports that the struct shows fields, which only
+// keeps the structural form of the value.
+const maxFieldScanTypes = 1 << 14
+
+// fieldScan reads the struct types that a struct embeds, for showsExportedFields.
+type fieldScan struct {
+	// visiting holds the types that are being read, so that a type that
+	// embeds itself is read once.
+	visiting map[reflect.Type]bool
+	// noFieldsAt holds the least depth at which a type was read and had no
+	// field written. It is read again at a lesser depth, where fewer of its
+	// embedded types are beyond maxSanitizeDepth, but not at a greater one,
+	// so a graph of types that share embedded types is read in the time of
+	// its distinct types, not of its paths. A type cut short only by one that
+	// is being read has none either way, since the scan ends at the first
+	// field written.
+	noFieldsAt map[reflect.Type]int
+	types      int
+}
+
+// shows reports whether the struct type t has a field that walkStruct writes.
+func (sc *fieldScan) shows(t reflect.Type, depth int) bool {
+	if depth > maxSanitizeDepth || sc.visiting[t] {
 		return false
 	}
-	// A type is entered once: one that has been read and has no field
-	// written would have none again by another path, and one still being
-	// read is a cycle, so a graph of types that share embedded types is read
-	// in the time of its distinct types, not of its paths.
-	seen[t] = true
+	if d, ok := sc.noFieldsAt[t]; ok && depth >= d {
+		return false
+	}
+	if sc.types++; sc.types > maxFieldScanTypes {
+		return true
+	}
+	sc.visiting[t] = true
+	defer delete(sc.visiting, t)
 	for i := range t.NumField() {
 		f := t.Field(i)
 		name, _, skip := parseJSONTag(f)
@@ -1056,7 +1108,7 @@ func typeShowsFields(t reflect.Type, depth int, seen map[reflect.Type]bool) bool
 			if ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
-			if typeShowsFields(ft, depth+1, seen) {
+			if sc.shows(ft, depth+1) {
 				return true
 			}
 			continue
@@ -1065,6 +1117,7 @@ func typeShowsFields(t reflect.Type, depth int, seen map[reflect.Type]bool) bool
 			return true
 		}
 	}
+	sc.noFieldsAt[t] = depth
 	return false
 }
 

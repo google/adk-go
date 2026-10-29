@@ -2045,11 +2045,12 @@ func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
 // x", at the end of the value of that pair, and so on. open is the number of
 // brackets opened before the key of the value.
 func nestedPairEnd(s string, pair, open int) int {
-	// A value longer than maxNestedKeyLen may still be read as a key once
-	// (see oversizedNestedKey), but not again after it, or a run of such
-	// keys, as in token:token:token:..., would be matched again from each
-	// one of them.
-	oversizedRead := false
+	// A value longer than maxNestedKeyLen is read as a key only while each
+	// one ends further right than the one before it: keys apart from each
+	// other, as in a: KEY: KEY: KEY="x y", are read once each, but a run of
+	// them in one word, as in token:token:token:..., would be matched again
+	// from each one of them, and is stopped at the second.
+	prevEnd := -1
 	for {
 		loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[pair:])
 		if loc == nil {
@@ -2058,18 +2059,41 @@ func nestedPairEnd(s string, pair, open int) int {
 			return pair
 		}
 		start, end := pair+loc[8], pair+loc[9]
-		if end-start > maxNestedKeyLen {
-			if oversizedRead {
-				return textValueEnd(s, start, end, open)
-			}
-			oversizedRead = true
+		if end-start > maxNestedKeyLen && end <= prevEnd {
+			return oversizedValueEnd(s, start, end, open)
 		}
+		prevEnd = end
 		kind, next := nestsSensitiveKey(s, start, end, startsLine(s, pair+loc[7], start))
 		if kind == notNestedKey {
 			return textValueEnd(s, start, end, open)
 		}
 		pair = next
 	}
+}
+
+// oversizedValueEnd returns the end of the value of the last key of a word
+// longer than maxNestedKeyLen that holds a run of keys, s[start:end]: the
+// quoted value that the word opens (or that follows it, if it ends in a
+// delimiter), which is longer than the word when it holds whitespace.
+func oversizedValueEnd(s string, start, end, open int) int {
+	v := s[start:end]
+	if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') {
+		if qv := quotedValueRe.FindString(s[start+q:]); len(qv) > end-start-q {
+			return start + q + len(qv)
+		}
+	}
+	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
+		rest := strings.TrimLeft(s[end:], delimSpace)
+		at := len(s) - len(rest)
+		if qv := quotedValueRe.FindString(rest); qv != "" {
+			return at + len(qv)
+		}
+		if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
+			return at + n
+		}
+		return len(s)
+	}
+	return textValueEnd(s, start, end, open)
 }
 
 // regexpSpace holds the bytes that \s matches in a regular expression such

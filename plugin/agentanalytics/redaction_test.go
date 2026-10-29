@@ -460,6 +460,14 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"oversized app key, quoted multiword value", "app:" + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized child, quoted multiword value", "credentials:\n " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized key, quoted multiword value after a word", "call failed " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"two oversized children, then a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"three oversized children, then a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children, then a delimiter and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a delimiter and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a single-quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `='prefix SYNTHETIC_SECRET suffix'`},
+		{"oversized children in one word, then a bare value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: SYNTHETIC_SECRET`},
+		{"oversized children with state prefixes", "credentials:\n user:" + longKey + ": app:" + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -570,6 +578,18 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"oversized key chain", func(n int) string { return "password=SECRET123-" + strings.Repeat("token:", n) + " x" },
 			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"spaced oversized keys", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat(strings.Repeat("x_", 70)+"PASSWORD: ", n) + `x_PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 400,
+		},
+		{
+			"spaced oversized keys through an error", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat(strings.Repeat("x_", 70)+"PASSWORD=", n) + " x"
+			},
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 400,
 		},
 		{
 			"oversized children of an envelope", func(n int) string {
