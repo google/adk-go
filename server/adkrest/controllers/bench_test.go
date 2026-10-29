@@ -169,6 +169,55 @@ func BenchmarkRunSSEHandler(b *testing.B) {
 	benchHandler(b, "/run_sse", benchSQLite, "sqlite")
 }
 
+// BenchmarkRunSSEChunks streams 100 partial model events through /run_sse to
+// isolate per-event DTO mapping, JSON marshalling, and SSE frame writes.
+func BenchmarkRunSSEChunks(b *testing.B) {
+	b.Run("inmemory/chunks=100", func(b *testing.B) {
+		const chunks = 100
+		events := make([]*session.Event, chunks)
+		for i := range events {
+			ev := session.NewEvent(b.Context(), fmt.Sprintf("inv-%d", i))
+			ev.Author = "app"
+			ev.Partial = true
+			ev.LLMResponse.Partial = true
+			ev.LLMResponse.Content = genai.NewContentFromText(benchutil.BenchText, genai.RoleModel)
+			events[i] = ev
+		}
+		streamAgent, err := agent.New(agent.Config{
+			Name: "app",
+			Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, ev := range events {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		body := runBody(b, true)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			rt := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService:    session.InMemoryService(),
+				AgentLoader:       agent.NewSingleLoader(streamAgent),
+				AutoCreateSession: true,
+			})
+			req := httptest.NewRequest(http.MethodPost, "/run_sse", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := &recorderWithDeadline{httptest.NewRecorder()}
+			rt.RunSSEHandler(rec, req)
+			if rec.Code != http.StatusOK {
+				b.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+		}
+	})
+}
+
 // BenchmarkGetSessionHandler is what the web UI calls when a conversation is
 // opened: one Get plus the JSON encoding of every event.
 func BenchmarkGetSessionHandler(b *testing.B) {
