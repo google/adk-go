@@ -15,6 +15,8 @@
 package geminitool
 
 import (
+	"fmt"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -39,6 +41,14 @@ func (s GoogleSearch) Description() string {
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (s GoogleSearch) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	if !isGeminiModel(req.Model) {
+		return fmt.Errorf("Google search tool is not supported for model %v", req.Model)
+	}
+	if isGemini1Model(req.Model) {
+		if len(req.Tools) > 0 {
+			return fmt.Errorf("Google search tool cannot be used with other tools in Gemini 1.x.")
+		}
+	}
 	return setTool(req, &genai.Tool{
 		GoogleSearch: &genai.GoogleSearch{},
 	})
