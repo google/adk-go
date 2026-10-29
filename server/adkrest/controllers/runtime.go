@@ -393,7 +393,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 			log.Printf("failed to marshal event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
 		}
-		err = flashEvent(rc, rw, string(marshalledData))
+		err = flashEvent(rc, rw, marshalledData)
 		if err != nil {
 			log.Printf("failed to flash event: %v", err) //nolint:forbidigo // pre-slog call site
 			return
@@ -401,8 +401,14 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 	}
 }
 
+var (
+	sseErrorPrefix = []byte("event: error\n")
+	sseDataPrefix  = []byte("data: ")
+	sseDataSuffix  = []byte("\n\n")
+)
+
 func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, origError error) error {
-	_, err := fmt.Fprintf(rw, "event: error\n")
+	_, err := rw.Write(sseErrorPrefix)
 	if err != nil {
 		return fmt.Errorf("write error event: %w", err)
 	}
@@ -411,15 +417,20 @@ func flashErrorEvent(rc *http.ResponseController, rw http.ResponseWriter, origEr
 		// Skip reporting error if it fails to marshal to the client (to avoid recursive error reporting).
 		return fmt.Errorf("marshal error event: %w", err)
 	}
-	return flashEvent(rc, rw, string(safeErrorJSON))
+	return flashEvent(rc, rw, safeErrorJSON)
 }
 
-func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string) error {
-	_, err := fmt.Fprintf(rw, "data: %s\n\n", data)
-	if err != nil {
+func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data []byte) error {
+	if _, err := rw.Write(sseDataPrefix); err != nil {
 		return fmt.Errorf("write response: %w", err)
 	}
-	err = rc.Flush()
+	if _, err := rw.Write(data); err != nil {
+		return fmt.Errorf("write response: %w", err)
+	}
+	if _, err := rw.Write(sseDataSuffix); err != nil {
+		return fmt.Errorf("write response: %w", err)
+	}
+	err := rc.Flush()
 	if err != nil {
 		return fmt.Errorf("flush event: %w", err)
 	}
