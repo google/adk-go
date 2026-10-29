@@ -17,6 +17,7 @@ package runner_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -28,6 +29,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/internal/benchutil"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/model/gemini"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 )
@@ -187,6 +189,50 @@ func BenchmarkToolTurnParallel(b *testing.B) {
 			if got, want := m.Calls.Load(), 2*int64(b.N); got != want {
 				b.Fatalf("model calls = %d, want %d", got, want)
 			}
+		})
+	}
+}
+
+// BenchmarkToolTurnGemini is BenchmarkToolTurnSteady through the real Gemini
+// model over a transport that answers without a connection, so each turn
+// also pays the client side of its two model calls: building and encoding
+// the request with the whole history, decoding the response. Comparing it
+// with BenchmarkToolTurnSteady shows the share of a served turn that is the
+// model client rather than ADK.
+func BenchmarkToolTurnGemini(b *testing.B) {
+	for _, n := range toolTurnSizes {
+		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
+			m, err := gemini.NewModel(b.Context(), "gemini-2.5-flash", &genai.ClientConfig{
+				APIKey:     "bench-key",
+				Backend:    genai.BackendGeminiAPI,
+				HTTPClient: &http.Client{Transport: &benchutil.GeminiTransport{Bodies: benchutil.GeminiToolTurn}},
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+			svc := presetSessions(b, b.N, n)
+			r, err := runner.New(runner.Config{AppName: "app", Agent: toolAgent(b, m), SessionService: svc})
+			if err != nil {
+				b.Fatal(err)
+			}
+			msg := genai.NewContentFromText("What is the weather in Paris?", genai.RoleUser)
+			b.ReportAllocs()
+			runtime.GC()
+			b.ResetTimer()
+			start := benchutil.SampleRuntime()
+			for i := 0; i < b.N; i++ {
+				events := 0
+				for _, err := range r.Run(b.Context(), "user", fmt.Sprintf("s%d", i), msg, agent.RunConfig{}) {
+					if err != nil {
+						b.Fatal(err)
+					}
+					events++
+				}
+				if events != 3 {
+					b.Fatalf("turn %d yielded %d events, want 3 (call, response, answer)", i, events)
+				}
+			}
+			benchutil.ReportRuntime(b, start)
 		})
 	}
 }
