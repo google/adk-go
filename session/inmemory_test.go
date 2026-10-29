@@ -160,9 +160,9 @@ func TestInMemorySession_AppendEvent_WorkflowFieldsRoundTrip(t *testing.T) {
 // (maps.Clone) before iterating, so this no longer reaches the panic.
 //
 // This does not exercise concurrent Set() calls — state.Set() is never on the
-// hot path here, since AppendEvent applies its StateDelta via maps.Copy and
-// holds the service mutex for its whole body, so the "writers" below serialize
-// against each other and only race against the reader. It also does not pin
+// hot path here, since AppendEvent applies its StateDelta via maps.Copy while
+// holding the session's lock, so the "writers" below, which share one session,
+// serialize against each other and only race against the reader. It also does not pin
 // down the snapshot semantics #530 introduced (see
 // TestInMemoryState_All_IsSnapshot for that). What it does catch: if All() is
 // ever changed back to range the live map without cloning it first — for
@@ -191,9 +191,9 @@ func TestInMemoryState_All_ConcurrentSet(t *testing.T) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 
-	// These calls serialize against each other (AppendEvent holds the service
-	// mutex for its whole body); what races is each of them against the reader
-	// goroutine's All() below.
+	// These calls serialize against each other (AppendEvent holds the shared
+	// session's lock while it applies the delta); what races is each of them
+	// against the reader goroutine's All() below.
 	wg.Add(writers)
 	for w := range writers {
 		go func(w int) {

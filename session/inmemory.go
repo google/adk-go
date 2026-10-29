@@ -36,6 +36,12 @@ type stateMap map[string]any
 
 // inMemoryService is an in-memory implementation of sessionService.Service.
 // Thread-safe.
+//
+// mu guards the session map and the app and user state. Each stored
+// session's own mu guards its events, state and update time. An append that
+// changes no app or user state holds mu only for reading, so such appends to
+// different sessions run in parallel. Locks are taken in the order mu, then
+// the caller's session, then the stored session.
 type inMemoryService struct {
 	mu        sync.RWMutex
 	sessions  omap.Map[string, *session] // session.ID) -> storedSession
@@ -98,19 +104,21 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	id := id{
+	key := id{
 		appName:   appName,
 		userID:    userID,
 		sessionID: sessionID,
-	}
+	}.Encode()
 
-	res, ok := s.sessions.Get(id.Encode())
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	res, ok := s.sessions.Get(key)
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, req.SessionID)
 	}
+	res.mu.RLock()
+	defer res.mu.RUnlock()
 
 	copiedSession := copySessionWithoutStateAndEvents(res)
 	copiedSession.state = s.mergeStates(res.state, appName, userID)
@@ -166,8 +174,10 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		if key.appName != appName && key.userID != userID {
 			break
 		}
+		storedSession.mu.RLock()
 		copiedSession := copySessionWithoutStateAndEvents(storedSession)
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
+		storedSession.mu.RUnlock()
 		sessions = append(sessions, copiedSession)
 	}
 	return &ListResponse{
@@ -218,19 +228,32 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 		return fmt.Errorf("unexpected session type %T for session ID %s", curSession, curSession.ID())
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	key := sess.id.Encode()
+	// Trim and split the delta here, before sess.appendEvent publishes its own
+	// trimmed event into the live session's event list: the maps built below
+	// are then ones no other goroutine can reach. The database backend trims
+	// twice for the same reason, once for the live session and once for what
+	// it persists.
+	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
+	var appDelta, userDelta, sessionDelta stateMap
+	if len(event.Actions.StateDelta) > 0 {
+		appDelta, userDelta, sessionDelta = sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
+	}
 
-	stored_session, ok := s.sessions.Get(sess.id.Encode())
+	// App and user state are shared between sessions, so only an event that
+	// changes them excludes every other append.
+	if len(appDelta) > 0 || len(userDelta) > 0 {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	} else {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	}
+
+	stored_session, ok := s.sessions.Get(key)
 	if !ok {
 		return fmt.Errorf("%w: %q, cannot apply event", ErrNotFound, sess.id.sessionID)
 	}
-
-	// Trim here, before sess.appendEvent publishes its own trimmed event into
-	// the live session's event list: the map cloned below is then one no other
-	// goroutine can reach. The database backend trims twice for the same
-	// reason, once for the live session and once for what it persists.
-	trimmedDelta := maps.Clone(trimTempDeltaState(event).Actions.StateDelta)
 
 	// update the in-memory session
 	// Keep the session locked until AppendEvent finishes all reads of event.
@@ -271,13 +294,14 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 
 	// update the in-memory session service
+	stored_session.mu.Lock()
 	stored_session.events = append(stored_session.events, eventCopy)
 	stored_session.updatedAt = event.Timestamp
-	if len(event.Actions.StateDelta) > 0 {
-		appDelta, userDelta, sessionDelta := sessionutils.ExtractStateDeltas(event.Actions.StateDelta)
+	maps.Copy(stored_session.state, sessionDelta)
+	stored_session.mu.Unlock()
+	if len(appDelta) > 0 || len(userDelta) > 0 {
 		s.updateAppState(appDelta, curSession.AppName())
 		s.updateUserState(userDelta, curSession.AppName(), curSession.UserID())
-		maps.Copy(stored_session.state, sessionDelta)
 	}
 	return nil
 }
