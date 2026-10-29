@@ -64,7 +64,7 @@ func TestSessionWaitCancellation(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					transport := &gatedSessionTransport{gate: make(chan struct{}), entered: make(chan struct{}, 16), server: mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)}
-					c := newConnectionRefresher(nil, transport)
+					c := newConnectionRefresher(nil, transport, nil)
 					acquire := c.getSession
 					if refresh {
 						acquire = c.refreshConnection
@@ -154,7 +154,7 @@ func TestSessionWaitCancellation(t *testing.T) {
 
 func TestSessionInitializationFailureRecovery(t *testing.T) {
 	transport := &gatedSessionTransport{gate: make(chan struct{}), entered: make(chan struct{}, 16), server: mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)}
-	c := newConnectionRefresher(nil, transport)
+	c := newConnectionRefresher(nil, transport, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	firstDone := make(chan error, 1)
 	go func() { _, err := c.getSession(ctx); firstDone <- err }()
@@ -206,7 +206,7 @@ func TestSessionInitializationFailureRecovery(t *testing.T) {
 // closed.
 func TestCloseWaitsForConnectionInProgress(t *testing.T) {
 	transport := &gatedSessionTransport{gate: make(chan struct{}), entered: make(chan struct{}, 16), server: mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)}
-	c := newConnectionRefresher(nil, transport)
+	c := newConnectionRefresher(nil, transport, nil)
 
 	ownerDone := make(chan *mcp.ClientSession, 1)
 	go func() {
@@ -248,7 +248,7 @@ func TestCloseWaitsForConnectionInProgress(t *testing.T) {
 // mu is free. select picks at random between the free mu and the done ctx, so
 // the loop makes a missing check fail every run rather than by chance.
 func TestLockFailsOnDoneContext(t *testing.T) {
-	c := newConnectionRefresher(nil, nil)
+	c := newConnectionRefresher(nil, nil, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	for range 100 {
