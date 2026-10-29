@@ -396,6 +396,14 @@ func cleanGCSPrefix(prefix string) string {
 // the rows that share a span. The name is a function of its inputs, so retries
 // of the same deterministic row/part path by the storage Writer itself target
 // the same object.
+//
+// The extension is part of the name as is only if it is empty or
+// isSafeExtension accepts it, as every extension that extensionForMIME returns
+// is. For any other extension, which only a direct call can pass, the name is
+// never returned as is, however short: it gets the "~<sha256>" suffix of the
+// whole name, as a name over maxGCSObjectNameBytes does. So '~' marks a
+// rewritten name in the extension too, and an extension that carries the
+// suffix of a rewritten name cannot make a name equal to that one.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
 	if p := cleanGCSPrefix(prefix); p != "" {
@@ -412,10 +420,17 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 	// cleanGCSPrefix and pathSegment bound their results, so even with the
 	// longest int ordinals (20 bytes each) and an extension that
 	// isSafeExtension accepts (at most 17 bytes), out is at most 971 bytes.
-	// extensionForMIME returns only such extensions, so the cap below is a
-	// backstop for an extension passed in directly, and the branch that keeps
-	// a safe extension only matters if those bounds ever grow.
-	if len(out) <= maxGCSObjectNameBytes {
+	// extensionForMIME returns only such extensions, so the rest of this
+	// function is a backstop for an extension passed in directly, and the
+	// branch that keeps a safe extension only matters if those bounds ever
+	// grow.
+	//
+	// A name is returned as is only if its extension is empty or safe. The
+	// name of any other extension ends in the hash of out, however short it
+	// is, so that '~' marks a rewritten name in the extension as it does in
+	// the ids and the prefix: an extension that holds the "~<sha256>" suffix
+	// of a rewritten name cannot make a name equal to that one.
+	if len(out) <= maxGCSObjectNameBytes && (ext == "" || isSafeExtension(ext)) {
 		return out
 	}
 	if isSafeExtension(ext) && len(ext) < maxGCSObjectNameBytes-pathSegmentHashSuffixLen {

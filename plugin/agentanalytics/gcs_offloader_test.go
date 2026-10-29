@@ -6046,6 +6046,59 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		}
 	})
 
+	t.Run("an extension cannot make a name equal to a hashed one", func(t *testing.T) {
+		// '~' marks a name that was rewritten to end in the hash of the
+		// whole name, so an extension passed in directly must not be able
+		// to make a name equal to a rewritten one.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		// An oversized extension makes p1, which ends in the hash of the
+		// whole uncapped name. What follows base in p1 is an extension of
+		// its own, and the name that it makes is as long as p1: if a name
+		// that fits were returned as is, that would be p1 itself.
+		p1 := pathWith("." + strings.Repeat("x", 1100))
+		if !strings.HasPrefix(p1, base) || len(p1) != maxGCSObjectNameBytes {
+			t.Fatalf("name with an oversized extension = %q (%d bytes), want %d bytes starting with %q", p1, len(p1), maxGCSObjectNameBytes, base)
+		}
+		ext2 := strings.TrimPrefix(p1, base)
+		p2 := pathWith(ext2)
+		if p2 == p1 {
+			t.Errorf("name with extension %q = %q, the name that an oversized extension makes", ext2, p2)
+		}
+		if len(p2) > maxGCSObjectNameBytes {
+			t.Errorf("len(name with extension %q) = %d, exceeds maxGCSObjectNameBytes (%d)", ext2, len(p2), maxGCSObjectNameBytes)
+		}
+		if !utf8.ValidString(p2) {
+			t.Errorf("name with extension %q = %q, want valid UTF-8", ext2, p2)
+		}
+		if want := p1[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(p1); p2 != want {
+			t.Errorf("name with extension %q = %q, want %q: the hash of the whole name p1", ext2, p2, want)
+		}
+
+		// A name that fits is hashed too if its extension is not safe, and
+		// the extension that the hashed name ends in makes another name
+		// again.
+		for _, ext := range []string{".a~b", "~", pathSegmentHashSuffix(base), ".a b", "png", ".png/..", "."} {
+			rawOut := base + ext
+			got := pathWith(ext)
+			if want := rawOut + pathSegmentHashSuffix(rawOut); got != want {
+				t.Errorf("name with extension %q = %q, want %q", ext, got, want)
+			}
+			if again := pathWith(strings.TrimPrefix(got, base)); again == got {
+				t.Errorf("names with extensions %q and %q both = %q", ext, strings.TrimPrefix(got, base), got)
+			}
+		}
+		// An empty or safe extension is kept as is.
+		for _, ext := range []string{"", ".txt", ".abcdefghijklmnop"} {
+			if got, want := pathWith(ext), base+ext; got != want {
+				t.Errorf("name with extension %q = %q, want %q", ext, got, want)
+			}
+		}
+	})
+
 	t.Run("prefix sanitization and reserved paths", func(t *testing.T) {
 		prefixes := []struct {
 			prefix   string
