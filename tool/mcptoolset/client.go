@@ -20,7 +20,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -37,18 +40,41 @@ type MCPClient interface {
 // It implements MCPClient and transparently retries operations after reconnecting
 // when the underlying session fails.
 type connectionRefresher struct {
-	client    *mcp.Client
-	transport mcp.Transport
+	client       *mcp.Client
+	transport    mcp.Transport
+	onInvalidate func()
 
 	// mu is a one-slot channel rather than a mutex: session initialization and
 	// refresh perform network I/O, and waiters must be able to leave when their
 	// own context ends without interrupting the owner. See lock.
 	mu      chan struct{}
 	session *mcp.ClientSession
-	closed  bool
+	closed  atomic.Bool
+
+	listenMu      sync.Mutex
+	listenCancel  context.CancelFunc
+	listenRetired <-chan struct{}
 
 	closeOnce sync.Once
 	closeErr  error
+}
+
+// listenTrackerCtx wraps the context passed to subscriptions/listen so Close
+// can wait for go-sdk's asynchronous cancelCall goroutine to send
+// notifications/cancelled before closing the underlying connection.
+type listenTrackerCtx struct {
+	context.Context
+	errCalls atomic.Int32
+	retired  chan struct{}
+	once     sync.Once
+}
+
+func (l *listenTrackerCtx) Err() error {
+	err := l.Context.Err()
+	if err != nil && l.errCalls.Add(1) >= 2 {
+		l.once.Do(func() { close(l.retired) })
+	}
+	return err
 }
 
 // refreshableErrors is a list of errors that should trigger a connection refresh.
@@ -61,15 +87,89 @@ var refreshableErrors = []error{
 
 // newConnectionRefresher creates a new connectionRefresher with the given client and transport.
 // If client is nil, a default MCP client will be created.
-func newConnectionRefresher(client *mcp.Client, transport mcp.Transport) *connectionRefresher {
-	if client == nil {
-		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, nil)
-	}
-	return &connectionRefresher{
-		client:    client,
+func newConnectionRefresher(client *mcp.Client, transport mcp.Transport, onInvalidate ...func()) *connectionRefresher {
+	c := &connectionRefresher{
 		transport: transport,
 		mu:        make(chan struct{}, 1),
 	}
+	if len(onInvalidate) > 0 {
+		c.onInvalidate = onInvalidate[0]
+	}
+	if client == nil {
+		client = mcp.NewClient(&mcp.Implementation{Name: "adk-mcp-client", Version: version.Version}, &mcp.ClientOptions{
+			ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+				c.invalidate()
+			},
+		})
+		client.AddSendingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+				if method == "subscriptions/listen" {
+					childCtx, cancel := context.WithCancel(ctx)
+					retired := make(chan struct{})
+					tracked := &listenTrackerCtx{
+						Context: childCtx,
+						retired: retired,
+					}
+					c.listenMu.Lock()
+					c.listenCancel = cancel
+					c.listenRetired = retired
+					c.listenMu.Unlock()
+					ctx = tracked
+				}
+				return next(ctx, method, req)
+			}
+		})
+	}
+	c.client = client
+	return c
+}
+
+func (c *connectionRefresher) invalidate() {
+	if c.onInvalidate != nil {
+		c.onInvalidate()
+	}
+}
+
+func (c *connectionRefresher) isClosed() bool {
+	return c.closed.Load()
+}
+
+func (c *connectionRefresher) pingCurrentSession(ctx context.Context) error {
+	if err := c.lock(ctx); err != nil {
+		return err
+	}
+	session := c.session
+	c.unlock()
+	if session == nil {
+		return mcp.ErrConnectionClosed
+	}
+	return session.Ping(ctx, &mcp.PingParams{})
+}
+
+func (c *connectionRefresher) stopListen() {
+	c.listenMu.Lock()
+	cancel := c.listenCancel
+	retired := c.listenRetired
+	c.listenCancel = nil
+	c.listenRetired = nil
+	c.listenMu.Unlock()
+	if cancel != nil {
+		cancel()
+		if retired != nil {
+			select {
+			case <-retired:
+				runtime.Gosched()
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+}
+
+func (c *connectionRefresher) watchSession(session *mcp.ClientSession) {
+	go func() {
+		_ = session.Wait()
+		c.invalidate()
+	}()
 }
 
 func (c *connectionRefresher) Close() error {
@@ -78,12 +178,14 @@ func (c *connectionRefresher) Close() error {
 		// in progress.
 		c.mu <- struct{}{}
 		// Closing is final so failed in-flight calls cannot reconnect.
-		c.closed = true
+		c.closed.Store(true)
 		session := c.session
 		c.session = nil
 		c.unlock()
 
+		c.invalidate()
 		if session != nil {
+			c.stopListen()
 			c.closeErr = session.Close()
 		}
 	})
@@ -198,7 +300,7 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 	}
 	defer c.unlock()
 
-	if c.closed {
+	if c.closed.Load() {
 		return nil, mcp.ErrConnectionClosed
 	}
 	if c.session != nil {
@@ -211,6 +313,7 @@ func (c *connectionRefresher) getSession(ctx context.Context) (*mcp.ClientSessio
 	}
 
 	c.session = session
+	c.watchSession(session)
 	return c.session, nil
 }
 
@@ -220,7 +323,7 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 	}
 	defer c.unlock()
 
-	if c.closed {
+	if c.closed.Load() {
 		return nil, mcp.ErrConnectionClosed
 	}
 
@@ -230,11 +333,13 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 		if err := c.session.Ping(ctx, &mcp.PingParams{}); err == nil {
 			return c.session, nil
 		}
+		c.stopListen()
 		if err := c.session.Close(); err != nil {
 			log.Printf("failed to close MCP session: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 		c.session = nil
 	}
+	c.invalidate()
 
 	session, err := c.client.Connect(ctx, c.transport, nil)
 	if err != nil {
@@ -242,6 +347,7 @@ func (c *connectionRefresher) refreshConnection(ctx context.Context) (*mcp.Clien
 	}
 
 	c.session = session
+	c.watchSession(session)
 	return c.session, nil
 }
 

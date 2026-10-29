@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -84,13 +86,15 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+	s := &set{
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 		metadataProvider:            cfg.MetadataProvider,
-	}, nil
+		cacheTools:                  cfg.Auth == nil,
+	}
+	s.mcpClient = newConnectionRefresher(cfg.Client, transport, s.invalidateToolCache)
+	return s, nil
 }
 
 // buildTransport resolves the MCP transport from cfg. When Transport is nil and
@@ -223,9 +227,26 @@ type set struct {
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
 	metadataProvider            MetadataProvider
+
+	cacheTools       bool
+	toolsMu          sync.Mutex
+	cachedTools      []tool.Tool
+	toolsCached      bool
+	cacheGen         uint64
+	lastInvocationID string
+}
+
+func (s *set) invalidateToolCache() {
+	s.toolsMu.Lock()
+	s.cachedTools = nil
+	s.toolsCached = false
+	s.lastInvocationID = ""
+	s.cacheGen++
+	s.toolsMu.Unlock()
 }
 
 func (s *set) Close() error {
+	s.invalidateToolCache()
 	return s.mcpClient.Close()
 }
 
@@ -245,24 +266,74 @@ func (*set) IsLongRunning() bool {
 
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	if s.cacheTools {
+		if s.mcpClient.isClosed() {
+			return nil, mcp.ErrConnectionClosed
+		}
+		invID := ctx.InvocationID()
+		s.toolsMu.Lock()
+		if s.toolsCached {
+			cached := s.cachedTools
+			sameInv := invID == "" || invID == s.lastInvocationID
+			s.lastInvocationID = invID
+			s.toolsMu.Unlock()
+			if !sameInv || s.mcpClient.pingCurrentSession(ctx) == nil {
+				return s.filterTools(ctx, cached), nil
+			}
+			s.invalidateToolCache()
+			s.toolsMu.Lock()
+		}
+		gen := s.cacheGen
+		s.toolsMu.Unlock()
+
+		converted, err := s.fetchAndConvertTools(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		s.toolsMu.Lock()
+		if s.cacheGen == gen && !s.mcpClient.isClosed() {
+			s.cachedTools = converted
+			s.toolsCached = true
+			s.lastInvocationID = invID
+		}
+		s.toolsMu.Unlock()
+		return s.filterTools(ctx, converted), nil
+	}
+
+	converted, err := s.fetchAndConvertTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.filterTools(ctx, converted), nil
+}
+
+func (s *set) fetchAndConvertTools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	mcpTools, err := s.mcpClient.ListTools(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var adkTools []tool.Tool
+	adkTools := make([]tool.Tool, 0, len(mcpTools))
 	for _, mcpTool := range mcpTools {
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
-
-		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
-			continue
-		}
-
 		adkTools = append(adkTools, t)
 	}
-
 	return adkTools, nil
+}
+
+func (s *set) filterTools(ctx agent.ReadonlyContext, tools []tool.Tool) []tool.Tool {
+	if s.toolFilter == nil {
+		return slices.Clone(tools)
+	}
+	var filtered []tool.Tool
+	for _, t := range tools {
+		if s.toolFilter(ctx, t) {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
 }

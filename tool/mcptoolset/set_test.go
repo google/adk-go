@@ -1416,3 +1416,67 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 		})
 	}
 }
+
+func TestToolsCacheAcrossInvocationsAndListChanged(t *testing.T) {
+	server := mcp.NewServer(&mcp.Implementation{Name: "cache_server", Version: "v1.0.0"}, nil)
+	for i := range 2 {
+		mcp.AddTool(server, &mcp.Tool{Name: fmt.Sprintf("tool%d", i), Description: "returns weather in the given city"}, weatherFunc)
+	}
+	listCalls := 0
+	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" {
+				listCalls++
+			}
+			return next(ctx, method, req)
+		}
+	})
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(t.Context(), serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = serverSession.Close() })
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientTransport})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() err = %v", err)
+	}
+	t.Cleanup(func() { _ = ts.(io.Closer).Close() })
+
+	for i := range 3 {
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: fmt.Sprintf("inv-%d", i),
+		})
+		tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+		if err != nil {
+			t.Fatalf("Tools() call %d err = %v", i, err)
+		}
+		if len(tools) != 2 {
+			t.Fatalf("Tools() call %d returned %d tools, want 2", i, len(tools))
+		}
+	}
+	if listCalls != 1 {
+		t.Fatalf("tools/list RPC count across 3 invocations = %d, want 1", listCalls)
+	}
+
+	// Adding a tool triggers notifications/tools/list_changed, invalidating the cache.
+	mcp.AddTool(server, &mcp.Tool{Name: "tool2", Description: "returns weather in the given city"}, weatherFunc)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			InvocationID: "inv-after-change",
+		})
+		tools, err := ts.Tools(icontext.NewReadonlyContext(invCtx))
+		if err != nil {
+			t.Fatalf("Tools() after AddTool err = %v", err)
+		}
+		if len(tools) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Tools() after AddTool returned %d tools, want 3", len(tools))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
