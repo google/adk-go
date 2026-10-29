@@ -267,7 +267,8 @@ func pathSegmentHashSuffix(s string) string {
 // must be at least pathSegmentHashSuffixLen: callers pass
 // maxPathSegmentBytes, maxGCSPrefixBytes, maxGCSObjectNameBytes, or
 // maxGCSObjectNameBytes less the length of an extension that gcsObjectPath
-// has checked is short enough.
+// has checked is short enough. base must be valid UTF-8: the cut keeps it
+// valid but does not make it so, while raw may be any bytes.
 func truncateWithHash(base, raw string, maxBytes int) string {
 	suffix := pathSegmentHashSuffix(raw)
 	limit := maxBytes - len(suffix)
@@ -404,6 +405,12 @@ func cleanGCSPrefix(prefix string) string {
 // whole name, as a name over maxGCSObjectNameBytes does. So '~' marks a
 // rewritten name in the extension too, and an extension that carries the
 // suffix of a rewritten name cannot make a name equal to that one.
+//
+// Such an extension may also be invalid UTF-8, which the prefix and the ids
+// never are. The name is then valid UTF-8 too: its readable part has each run
+// of invalid bytes replaced with '_', while the hash still covers the name
+// with the extension as it was, so extensions that differ only in those bytes
+// give distinct names.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
 	if p := cleanGCSPrefix(prefix); p != "" {
@@ -436,7 +443,11 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 	if isSafeExtension(ext) && len(ext) < maxGCSObjectNameBytes-pathSegmentHashSuffixLen {
 		return truncateWithHash(out[:len(out)-len(ext)], out, maxGCSObjectNameBytes-len(ext)) + ext
 	}
-	return truncateWithHash(out, out, maxGCSObjectNameBytes)
+	// Only an unsafe extension can make out invalid UTF-8: cleanGCSPrefix and
+	// pathSegment return valid UTF-8, and a safe extension is ASCII. The
+	// readable part of the name is made valid, and the hash is still that of
+	// the raw out.
+	return truncateWithHash(strings.ToValidUTF8(out, "_"), out, maxGCSObjectNameBytes)
 }
 
 // uploadTask is one payload to upload and the content_parts entry that is

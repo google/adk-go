@@ -6099,6 +6099,75 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		}
 	})
 
+	t.Run("an invalid UTF-8 extension gives a valid name", func(t *testing.T) {
+		// The prefix and the ids are valid UTF-8, so the extension is the one
+		// part of a direct call that can make a name invalid. The readable
+		// part of the name has each run of invalid bytes replaced with '_',
+		// and the hash is that of the name with the extension as it was, so
+		// extensions that share a readable part are told apart by the hash.
+		pathWith := func(ext string) string {
+			return gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext)
+		}
+		base := pathWith("")
+
+		names := map[string]string{}
+		check := func(desc, name string) {
+			t.Helper()
+			if !utf8.ValidString(name) {
+				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
+			}
+			if len(name) > maxGCSObjectNameBytes {
+				t.Errorf("%s: len(name) = %d, exceeds maxGCSObjectNameBytes (%d)", desc, len(name), maxGCSObjectNameBytes)
+			}
+			if prev, ok := names[name]; ok {
+				t.Errorf("%s and %s both give the name %q", prev, desc, name)
+			}
+			names[name] = desc
+		}
+
+		for _, tc := range []struct {
+			name string
+			ext  string
+			// readable is what follows base ahead of the hash suffix.
+			readable string
+		}{
+			{"0xff after the dot", string([]byte{'.', 0xff}), "._"},
+			{"0xfe after the dot", string([]byte{'.', 0xfe}), "._"},
+			{"the replacement as it is", "._", "._"},
+			{"0xff alone", string([]byte{0xff}), "_"},
+			{"the start of a two-byte rune", ".\xc3", "._"},
+			{"two bytes of a three-byte rune", ".\xe6\x97", "._"},
+			{"three bytes of a four-byte rune", ".\xf0\x9f\x98", "._"},
+			{"valid runes and an invalid byte", ".日本語\xff", ".日本語_"},
+			{"a long run of invalid bytes", "." + strings.Repeat("\xff", 1100), "._"},
+		} {
+			got := pathWith(tc.ext)
+			if want := base + tc.readable + pathSegmentHashSuffix(base+tc.ext); got != want {
+				t.Errorf("%s: name = %q, want %q", tc.name, got, want)
+			}
+			check(tc.name, got)
+		}
+
+		// An oversized extension is cut in the readable part, which is ASCII
+		// here, and the hash is still that of the whole raw name.
+		long := "." + strings.Repeat("\xffa", 600)
+		readable := base + "." + strings.Repeat("_a", 600)
+		want := readable[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(base+long)
+		got := pathWith(long)
+		if got != want {
+			t.Errorf("name with an oversized extension of ASCII and invalid bytes = %q, want %q", got, want)
+		}
+		check("an oversized extension of ASCII and invalid bytes", got)
+
+		// Multi-byte runes between invalid bytes, cut by the byte limit.
+		for _, tc := range []struct{ name, ext string }{
+			{"three-byte runes between invalid bytes", "." + strings.Repeat("日\xff", 400)},
+			{"four-byte runes between invalid bytes", "." + strings.Repeat("😀\xff", 300)},
+		} {
+			check(tc.name, pathWith(tc.ext))
+		}
+	})
+
 	t.Run("prefix sanitization and reserved paths", func(t *testing.T) {
 		prefixes := []struct {
 			prefix   string
