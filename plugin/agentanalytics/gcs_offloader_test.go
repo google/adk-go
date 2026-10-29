@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -1734,6 +1735,62 @@ func TestPathSegment(t *testing.T) {
 				t.Errorf("len(pathSegment(%q, \"fallback\")) = %d, exceeds %d", tt.id, len(pathSegment(tt.id, "fallback")), maxPathSegmentBytes)
 			}
 		})
+	}
+}
+
+func TestCleanGCSPrefix(t *testing.T) {
+	// "a" and 200 three-byte runes: the cut at 447 bytes falls inside a rune
+	// and backs up to 445 bytes.
+	cjk := "a" + strings.Repeat("日", 200)
+	tests := []struct {
+		name, prefix, want string
+	}{
+		{"empty", "", ""},
+		{"only slashes", "///", ""},
+		{"leading and trailing slashes are trimmed", "/logs/tenant/", "logs/tenant"},
+		{"spaces, equals signs and Unicode are kept", "tenant=acme/logs v1/テナント", "tenant=acme/logs v1/テナント"},
+		{"three dots are a name", "a/.../b", "a/.../b"},
+		{"an ACME path that does not lead is kept", "logs/.well-known/acme-challenge", "logs/.well-known/acme-challenge"},
+		{"a .well-known without acme-challenge is kept", ".well-known/x", ".well-known/x"},
+		{"exactly 512 bytes", strings.Repeat("a", 512), strings.Repeat("a", 512)},
+		{"513 bytes", strings.Repeat("a", 513), strings.Repeat("a", 447) + pathSegmentHashSuffix(strings.Repeat("a", 513))},
+		{"600 bytes", strings.Repeat("a", 600), strings.Repeat("a", 447) + pathSegmentHashSuffix(strings.Repeat("a", 600))},
+		{"the cut backs up to a rune boundary", cjk, "a" + strings.Repeat("日", 148) + pathSegmentHashSuffix(cjk)},
+		{"an empty segment", "logs//tenant", "logs/tenant" + pathSegmentHashSuffix("logs//tenant")},
+		{"a dot segment", "a/./b", "a/b" + pathSegmentHashSuffix("a/./b")},
+		{"a dot-dot segment", "logs/../tenant", "logs/tenant" + pathSegmentHashSuffix("logs/../tenant")},
+		{"only dot segments", "/./../", "_" + pathSegmentHashSuffix("./..")},
+		{"a tab", "logs\tx", "logs_x" + pathSegmentHashSuffix("logs\tx")},
+		{"DEL", "logs\x7fx", "logs_x" + pathSegmentHashSuffix("logs\x7fx")},
+		{"a C1 control character", "logs\u009bx", "logs_x" + pathSegmentHashSuffix("logs\u009bx")},
+		{"next line", "logs\u0085x", "logs_x" + pathSegmentHashSuffix("logs\u0085x")},
+		{"line separator", "logs\u2028x", "logs_x" + pathSegmentHashSuffix("logs\u2028x")},
+		{"paragraph separator", "logs\u2029x", "logs_x" + pathSegmentHashSuffix("logs\u2029x")},
+		{"a backslash", `logs\prod`, "logs_prod" + pathSegmentHashSuffix(`logs\prod`)},
+		{"a tilde", "~team/logs", "_team/logs" + pathSegmentHashSuffix("~team/logs")},
+		{"a byte that is not UTF-8", "logs/\xff", "logs/_" + pathSegmentHashSuffix("logs/\xff")},
+		{"the reserved ACME path", ".well-known/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-known/acme-challenge/x")},
+		{"the reserved ACME path in upper case", ".WELL-KNOWN/ACME-CHALLENGE", "_well-known/ACME-CHALLENGE" + pathSegmentHashSuffix(".WELL-KNOWN/ACME-CHALLENGE")},
+		{"the reserved ACME path behind dropped segments", "./.well-known//acme-challenge", "_well-known/acme-challenge" + pathSegmentHashSuffix("./.well-known//acme-challenge")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cleanGCSPrefix(tt.prefix)
+			if got != tt.want {
+				t.Errorf("cleanGCSPrefix(%q) = %q, want %q", tt.prefix, got, tt.want)
+			}
+			if len(got) > maxGCSPrefixBytes || !utf8.ValidString(got) {
+				t.Errorf("cleanGCSPrefix(%q) = %q (%d bytes), want valid UTF-8 of at most %d bytes", tt.prefix, got, len(got), maxGCSPrefixBytes)
+			}
+			if trimmed := strings.Trim(tt.prefix, "/"); got != trimmed && !strings.HasSuffix(got, pathSegmentHashSuffix(trimmed)) {
+				t.Errorf("cleanGCSPrefix(%q) = %q, rewritten without the hash suffix of %q", tt.prefix, got, trimmed)
+			}
+		})
+	}
+	// Every byte that is not UTF-8 becomes '_', so only the hash tells such
+	// prefixes apart.
+	if a, b := cleanGCSPrefix("\xff"), cleanGCSPrefix("\xfe"); a == b {
+		t.Errorf("cleanGCSPrefix(%q) and cleanGCSPrefix(%q) are both %q", "\xff", "\xfe", a)
 	}
 }
 
@@ -5852,10 +5909,10 @@ func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *
 	}
 }
 
-func TestProbe_T8_GCSObjectPath(t *testing.T) {
+func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 
-	t.Run("G3_non_ascii_and_sanitized_ids_do_not_collide", func(t *testing.T) {
+	t.Run("non-ASCII and sanitized ids do not collide", func(t *testing.T) {
 		pairs := [][2]string{
 			{"é", "ü"},
 			{"é", "__4a99557e"},
@@ -5883,7 +5940,7 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("G3_batch_upload_with_distinct_non_ascii_event_ids_uploads_both_payloads", func(t *testing.T) {
+	t.Run("distinct non-ASCII event ids upload both payloads", func(t *testing.T) {
 		ctx := context.Background()
 		pairs := [][2]string{
 			{"session-日本", "session-韓国"},
@@ -5932,7 +5989,7 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 		}
 	})
 
-	t.Run("G2_long_ids_and_prefixes_stay_within_1024_bytes_without_colliding", func(t *testing.T) {
+	t.Run("long ids and prefixes stay within 1024 bytes without colliding", func(t *testing.T) {
 		longA := strings.Repeat("a", 1100)
 		longB := strings.Repeat("a", 1000) + "-b-" + strings.Repeat("z", 100)
 		longMultiSegPrefix := strings.Repeat("segment123/", 120)
@@ -5969,9 +6026,27 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 		if pA == pB {
 			t.Errorf("distinct 1100-byte event IDs sharing 1000-byte prefix collided on %q", pA)
 		}
+
+		// extensionForMIME returns only extensions that isSafeExtension
+		// accepts, of at most 17 bytes, so even the longest prefix, ids and
+		// ordinals give names of at most 971 bytes.
+		safeExt := ".abcdefghijklmnop"
+		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) > 971 || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with the longest parts and a safe extension = %q (%d bytes), want at most 971 bytes ending in %q", got, len(got), safeExt)
+		}
+		// Only an oversized extension passed in directly reaches the cap on the
+		// whole name. The capped name ends in the hash of the whole uncapped
+		// name, so names that differ only after the cut stay apart.
+		for _, ext := range []string{"." + strings.Repeat("x", 1100), "." + strings.Repeat("x", 1099) + "y"} {
+			uncapped := "logs/2026-03-04/trace/span_event_c0_p0" + ext
+			want := uncapped[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(uncapped)
+			if got := gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext); got != want {
+				t.Errorf("gcsObjectPath with a %d-byte extension = %q, want %q", len(ext), got, want)
+			}
+		}
 	})
 
-	t.Run("G1_prefix_sanitization_and_reserved_paths", func(t *testing.T) {
+	t.Run("prefix sanitization and reserved paths", func(t *testing.T) {
 		prefixes := []struct {
 			prefix   string
 			wantLead string

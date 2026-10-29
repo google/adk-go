@@ -259,15 +259,17 @@ func pathSegmentHashSuffix(s string) string {
 	return fmt.Sprintf("~%x", sum)
 }
 
-// truncateWithHash caps base at maxBytes-pathSegmentHashSuffixLen bytes on a
-// valid UTF-8 rune boundary and appends the deterministic 256-bit SHA-256
-// suffix of raw so inputs that sanitize or truncate to the same base stay
-// within maxBytes with 256-bit collision resistance.
+// truncateWithHash cuts base to at most maxBytes-pathSegmentHashSuffixLen
+// bytes on a UTF-8 rune boundary and appends pathSegmentHashSuffix(raw), so
+// raw inputs that sanitize or truncate to the same base still get distinct
+// results of at most maxBytes bytes. The suffix holds the full 256-bit
+// SHA-256 digest, which gives about 128-bit collision resistance. maxBytes
+// must be at least pathSegmentHashSuffixLen: callers pass
+// maxPathSegmentBytes, maxGCSPrefixBytes, maxGCSObjectNameBytes, or
+// maxGCSObjectNameBytes less the length of an extension that gcsObjectPath
+// has checked is short enough.
 func truncateWithHash(base, raw string, maxBytes int) string {
 	suffix := pathSegmentHashSuffix(raw)
-	if maxBytes <= len(suffix) {
-		return suffix[:maxBytes]
-	}
 	limit := maxBytes - len(suffix)
 	if len(base) > limit {
 		for limit > 0 && !utf8.RuneStart(base[limit]) {
@@ -278,20 +280,19 @@ func truncateWithHash(base, raw string, maxBytes int) string {
 	return base + suffix
 }
 
-// pathSegment returns id for use as a part of an object name: pure ASCII ids
-// consisting of letters, digits, '-', '_' and '.' (not all dots) and at most
-// maxPathSegmentBytes bytes are returned unchanged; empty id returns fallback;
-// any id that is all dots, contains other characters (including '~'), or
-// exceeds maxPathSegmentBytes is sanitized, bounded to maxPathSegmentBytes,
-// and given a deterministic "~<sha256>" suffix of the raw id.
+// pathSegment returns id for use as a part of an object name. An id that is
+// at most maxPathSegmentBytes bytes of ASCII letters, digits, '-', '_' and
+// '.', and is not only dots, is returned unchanged. An empty id returns
+// fallback, which must not be empty, and an id of only dots returns fallback
+// followed by the "~<sha256>" suffix of id. Any other id has each rune
+// outside that set (including '~') and each byte that is not valid UTF-8
+// replaced with '_', and is cut to fit maxPathSegmentBytes with the
+// "~<sha256>" suffix of the raw id appended.
 func pathSegment(id, fallback string) string {
 	if id == "" {
 		return fallback
 	}
 	if strings.Trim(id, ".") == "" {
-		if fallback == "" {
-			return ""
-		}
 		return truncateWithHash(fallback, id, maxPathSegmentBytes)
 	}
 	var sb strings.Builder
@@ -313,26 +314,35 @@ func pathSegment(id, fallback string) string {
 	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
 }
 
-// isUnsafeGCSPrefixRune reports whether r must be replaced in a GCSPathPrefix
-// segment. Cloud Storage permits general UTF-8 characters (including spaces,
-// '=', and non-ASCII Unicode) in object names, but rejects or discourages
-// C0/C1 control characters, CR/LF and Unicode line separators, and
-// backslashes; '~' is reserved as the hash suffix delimiter so unchanged
-// prefixes never collide with hashed prefixes.
+// isUnsafeGCSPrefixRune reports whether r is replaced in a GCSPathPrefix
+// segment. Of these runes Cloud Storage only rejects CR and LF in object
+// names, and it recommends avoiding the control characters that XML 1.0 does
+// not allow; the rest is a portability choice. Control characters (U+0000
+// to U+001F and U+007F to U+009F) and the Unicode line and paragraph
+// separators are replaced so names stay printable on one line, '\' because
+// some tools and hosts treat it as a path separator, and '~' because it
+// marks the hash suffix, so a prefix kept verbatim never looks like a
+// rewritten one. Spaces, '=' and other Unicode characters are kept.
 func isUnsafeGCSPrefixRune(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
 		r == '\u0085' || r == '\u2028' || r == '\u2029' ||
 		r == '\\' || r == '~'
 }
 
-// cleanGCSPrefix normalizes a configured GCSPathPrefix while preserving valid
-// prefixes verbatim (after trimming leading and trailing slashes). A prefix is
-// modified only when it contains empty ("//") or dot-relative ("." or "..")
-// segments, invalid UTF-8, control or line-break characters, '\', '~', the
-// Cloud Storage reserved leading ".well-known/acme-challenge" prefix, or
-// exceeds maxGCSPrefixBytes. Whenever a prefix is modified, a deterministic
-// "~<sha256>" suffix of the raw trimmed prefix is appended so distinct
-// configured prefixes do not collapse onto the same object prefix.
+// cleanGCSPrefix returns the object name prefix for a configured
+// GCSPathPrefix, following the contract documented on Config.GCSPathPrefix.
+// Leading and trailing slashes are trimmed first, so "/logs/" and "logs"
+// share a prefix. The trimmed prefix is returned verbatim unless it is
+// longer than maxGCSPrefixBytes; has an empty ("//"), "." or ".." segment, a
+// byte that is not valid UTF-8, or a rune for which isUnsafeGCSPrefixRune
+// reports true; or starts with ".well-known/acme-challenge", which Cloud
+// Storage reserves. That last check is positional and case-insensitive: it
+// looks at the first two segments left once empty, "." and ".." segments are
+// dropped. Any other prefix has those segments dropped, those bytes and runes
+// replaced with '_', and a leading ".well-known" before "acme-challenge"
+// renamed "_well-known", and is cut to fit maxGCSPrefixBytes with the
+// "~<sha256>" suffix of the trimmed prefix appended, so distinct trimmed
+// prefixes do not collapse onto the same object prefix.
 func cleanGCSPrefix(prefix string) string {
 	trimmed := strings.Trim(prefix, "/")
 	if trimmed == "" {
@@ -399,6 +409,12 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 		pathSegment(eventID, missingEventID),
 		contentOrd, partIdx, ext)
 	out := sb.String()
+	// cleanGCSPrefix and pathSegment bound their results, so even with the
+	// longest int ordinals (20 bytes each) and an extension that
+	// isSafeExtension accepts (at most 17 bytes), out is at most 971 bytes.
+	// extensionForMIME returns only such extensions, so the cap below is a
+	// backstop for an extension passed in directly, and the branch that keeps
+	// a safe extension only matters if those bounds ever grow.
 	if len(out) <= maxGCSObjectNameBytes {
 		return out
 	}

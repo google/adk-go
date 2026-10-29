@@ -345,7 +345,26 @@ type Config struct {
 	// GCSClientOptions configures the Cloud Storage client created for
 	// GCSBucketName. When empty, ClientOptions is used.
 	GCSClientOptions []option.ClientOption
-	// GCSPathPrefix is prepended to the names of offloaded objects.
+	// GCSPathPrefix is prepended, followed by "/", to the names of offloaded
+	// objects. Leading and trailing slashes are trimmed, so "/logs/" and
+	// "logs" are the same prefix and a prefix of only slashes adds nothing.
+	// The trimmed prefix is used verbatim when it is valid UTF-8 of at most
+	// 512 bytes; has no empty ("//"), "." or ".." segment; has no '\', no
+	// '~', no control character (U+0000 to U+001F and U+007F to U+009F, which
+	// include CR, LF and U+0085), and no U+2028 or U+2029; and does not start
+	// with ".well-known/acme-challenge", which Cloud Storage reserves (matched
+	// case-insensitively after empty, "." and ".." segments are dropped).
+	//
+	// Any other prefix is rewritten: those segments are dropped, each byte
+	// that is not valid UTF-8 and each of those characters is replaced with
+	// '_', a leading ".well-known" before "acme-challenge" becomes
+	// "_well-known", the result is cut to at most 447 bytes on a rune
+	// boundary, and "~" followed by the 64 hex digits of the SHA-256 digest of
+	// the trimmed prefix is appended, so distinct trimmed prefixes keep
+	// distinct destinations. A prefix of only ".", ".." and empty segments
+	// becomes "_~<digest>". For example, "logs//tenant", "a/./b",
+	// "~team/logs" and `logs\prod` are written as "logs/tenant~<digest>",
+	// "a/b~<digest>", "_team/logs~<digest>" and "logs_prod~<digest>".
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example
