@@ -25,9 +25,10 @@ import (
 	"strings"
 )
 
-// StatusOverloaded is the HTTP status code TypeSafe returns when the service is
-// overloaded and asks callers to back off and retry.
-const StatusOverloaded = 529
+// statusOverloaded is the HTTP status code TypeSafe returns when the service is
+// overloaded and asks callers to back off and retry. Callers observe it through
+// [ErrOverloaded] and [APIError.StatusCode].
+const statusOverloaded = 529
 
 var (
 	// ErrInvalidConfig is returned when [Config] or TYPESAFE_BASE_URL is invalid,
@@ -91,7 +92,7 @@ func newAPIError(resp *http.Response) *APIError {
 		sentinel = ErrAuthentication
 	case http.StatusTooManyRequests:
 		sentinel = ErrRateLimited
-	case StatusOverloaded:
+	case statusOverloaded:
 		sentinel = ErrOverloaded
 	default:
 		sentinel = ErrAPIStatus
@@ -126,9 +127,10 @@ func sanitizeHeaderID(raw string) string {
 }
 
 // sanitizeTransportError strips all *url.Error layers (http.Client.Do can wrap
-// an inner *url.Error inside an outer *url.Error) so request URLs—which may
-// carry query tokens or internal hostnames—are never included in returned
-// error strings.
+// an inner *url.Error inside an outer *url.Error) so the full request URL, with
+// its path and any query string, is not included in returned error strings. The
+// underlying network error is kept as is; it may still name the host, as in
+// "dial tcp: lookup api.example.com: no such host".
 func sanitizeTransportError(err error) error {
 	var op string
 	for {

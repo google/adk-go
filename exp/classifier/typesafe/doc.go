@@ -21,8 +21,10 @@
 // Jev returns calibrated probability distributions from a single forward pass
 // rather than generating text. Every question passed to [Classifier.Classify]
 // must set Instructions, and [classifier.Binary] questions are sent as Jev
-// "noul" questions. Only text and JSON inputs are accepted; a [genai.Content]
-// containing non-text parts is rejected before any network call.
+// "noul" questions. Only text and JSON inputs are accepted. A [genai.Content]
+// containing non-text parts is rejected before any network call, as is any
+// other google.golang.org/genai struct value, such as a []*genai.Content
+// history.
 //
 //	clf, err := typesafe.New(typesafe.Config{}) // reads TYPESAFE_API_KEY on Classify
 //	if err != nil {

@@ -367,6 +367,44 @@ func TestContentInputHandling(t *testing.T) {
 			}
 		})
 	}
+
+	// genai values outside a single top-level Content marshal as plain JSON and
+	// would otherwise be sent as "state" with their inline data and thought parts.
+	imageContent := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("png-bytes"), "image/png")}}
+	thoughtContent := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "secret reasoning", Thought: true}}}
+	nestedGenaiInputs := []struct {
+		name  string
+		input any
+	}{
+		{name: "content_history", input: []*genai.Content{imageContent, thoughtContent}},
+		{name: "content_value_history", input: []genai.Content{*imageContent, *thoughtContent}},
+		{name: "genai_text_helper", input: genai.Text("secret reasoning")},
+		{name: "empty_content_history", input: []*genai.Content{}},
+		{name: "part_value", input: genai.Part{Text: "secret reasoning", Thought: true}},
+		{name: "part_pointer", input: &genai.Part{InlineData: &genai.Blob{Data: []byte("png-bytes"), MIMEType: "image/png"}}},
+		{name: "history_in_map", input: map[string]any{"ticket": "hi", "history": []*genai.Content{imageContent, thoughtContent}}},
+		{name: "content_in_struct_field", input: struct {
+			Ticket  string
+			Context *genai.Content
+		}{Ticket: "hi", Context: thoughtContent}},
+	}
+	for _, tc := range nestedGenaiInputs {
+		t.Run("rejects_nested_"+tc.name, func(t *testing.T) {
+			tr := newMockTransport()
+			_, err := newTestClassifier(t, tr, Config{}).Classify(t.Context(), tc.input, map[string]classifier.Question{
+				"urgent": urgentQuestion,
+			})
+			if !errors.Is(err, classifier.ErrInvalidInput) {
+				t.Fatalf("Classify(%T) error = %v, want errors.Is(ErrInvalidInput)", tc.input, err)
+			}
+			if msg := err.Error(); strings.Contains(msg, "secret reasoning") || strings.Contains(msg, "png-bytes") {
+				t.Errorf("Classify(%T) error leaked input content: %q", tc.input, msg)
+			}
+			if tr.count() != 0 {
+				t.Errorf("request count = %d, want 0", tr.count())
+			}
+		})
+	}
 }
 
 func TestPreRequestValidationErrorsSendNoRequest(t *testing.T) {
@@ -640,6 +678,14 @@ func TestSecretAndPayloadHygiene(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() unexpected error: %v", err)
 	}
+	// A Classifier value, not only a *Classifier, must redact: fmt only uses
+	// String and GoString on a value when they have value receivers.
+	type holder struct {
+		Config     Config
+		Classifier Classifier
+		Ptr        *Classifier
+	}
+	held := holder{Config: cfg, Classifier: *clf, Ptr: clf}
 	for _, formatted := range []string{
 		fmt.Sprint(cfg),
 		fmt.Sprintf("%+v", cfg),
@@ -647,10 +693,21 @@ func TestSecretAndPayloadHygiene(t *testing.T) {
 		fmt.Sprint(clf),
 		fmt.Sprintf("%+v", clf),
 		fmt.Sprintf("%#v", clf),
+		fmt.Sprint(*clf),
+		fmt.Sprintf("%+v", *clf),
+		fmt.Sprintf("%#v", *clf),
+		fmt.Sprint(held),
+		fmt.Sprintf("%+v", held),
+		fmt.Sprintf("%#v", held),
+		fmt.Sprintf("%+v", []Classifier{*clf}),
+		fmt.Sprintf("%+v", map[string]Classifier{"clf": *clf}),
 	} {
 		if strings.Contains(formatted, "super-secret-key") {
 			t.Errorf("formatted representation leaked API key: %s", formatted)
 		}
+	}
+	if got, want := fmt.Sprint(*clf), `typesafe.Classifier{Model:"jev-latest"}`; got != want {
+		t.Errorf("fmt.Sprint(Classifier value) = %q, want %q", got, want)
 	}
 
 	// Non-2xx response body and transport URL must never appear in error strings.
@@ -711,7 +768,7 @@ func TestSecretAndPayloadHygiene(t *testing.T) {
 
 func TestRetriesAndFailureClassification(t *testing.T) {
 	t.Run("retries_429_and_529_then_succeeds", func(t *testing.T) {
-		for _, status := range []int{http.StatusTooManyRequests, StatusOverloaded} {
+		for _, status := range []int{http.StatusTooManyRequests, statusOverloaded} {
 			t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
 				tr := newMockTransport(
 					textReply(status, `{"detail":"slow down"}`, nil),
@@ -739,7 +796,7 @@ func TestRetriesAndFailureClassification(t *testing.T) {
 			wantErr error
 		}{
 			{status: http.StatusTooManyRequests, wantErr: ErrRateLimited},
-			{status: StatusOverloaded, wantErr: ErrOverloaded},
+			{status: statusOverloaded, wantErr: ErrOverloaded},
 		}
 		for _, tc := range cases {
 			t.Run(fmt.Sprintf("status_%d", tc.status), func(t *testing.T) {
@@ -940,20 +997,65 @@ func TestRetriesAndFailureClassification(t *testing.T) {
 			t.Errorf("mid-flight request count = %d, want 1", got)
 		}
 
-		// Canceled during retry sleep stops retries.
-		sleepCtx, sleepCancel := context.WithCancel(t.Context())
-		trSleep := newMockTransport(textReply(http.StatusTooManyRequests, "rate limited", nil))
-		clf := newTestClassifier(t, trSleep, Config{MaxAttempts: 3})
-		clf.sleep = func(ctx context.Context, _ time.Duration) error {
-			sleepCancel()
-			return ctx.Err()
-		}
-		_, err = clf.Classify(sleepCtx, "hi", map[string]classifier.Question{"urgent": urgentQuestion})
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("sleep-canceled Classify() error = %v, want context.Canceled", err)
-		}
-		if got := trSleep.count(); got != 1 {
-			t.Errorf("sleep-canceled request count = %d, want 1", got)
+		// Canceled during retry sleep stops retries and keeps the error that
+		// triggered the retry, whether the sleep reports the cancellation itself
+		// or returns nil because its timer fired in the same instant.
+		dialErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+		for _, tc := range []struct {
+			name     string
+			sleepErr func(ctx context.Context) error
+			reply    queuedReply
+			wantErr  error
+			check    func(error) bool
+		}{
+			{
+				name:     "sleep_reports_cancellation",
+				sleepErr: func(ctx context.Context) error { return ctx.Err() },
+				reply:    textReply(http.StatusTooManyRequests, "busy", nil),
+				wantErr:  ErrRateLimited,
+				check: func(err error) bool {
+					var apiErr *APIError
+					return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests
+				},
+			},
+			{
+				name:     "sleep_returns_nil_after_cancellation",
+				sleepErr: func(context.Context) error { return nil },
+				reply:    textReply(statusOverloaded, "busy", nil),
+				wantErr:  ErrOverloaded,
+				check: func(err error) bool {
+					var apiErr *APIError
+					return errors.As(err, &apiErr) && apiErr.StatusCode == statusOverloaded
+				},
+			},
+			{
+				name:     "transport_error_kept",
+				sleepErr: func(ctx context.Context) error { return ctx.Err() },
+				reply:    queuedReply{err: dialErr},
+				wantErr:  dialErr,
+				check: func(err error) bool {
+					var opErr *net.OpError
+					return errors.As(err, &opErr) && opErr.Op == "dial"
+				},
+			},
+		} {
+			sleepCtx, sleepCancel := context.WithCancel(t.Context())
+			trSleep := newMockTransport(tc.reply)
+			clf := newTestClassifier(t, trSleep, Config{MaxAttempts: 3})
+			clf.sleep = func(ctx context.Context, _ time.Duration) error {
+				sleepCancel()
+				return tc.sleepErr(ctx)
+			}
+			_, err = clf.Classify(sleepCtx, "hi", map[string]classifier.Question{"urgent": urgentQuestion})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("%s: Classify() error = %v, want context.Canceled", tc.name, err)
+			}
+			if !errors.Is(err, tc.wantErr) || !tc.check(err) {
+				t.Errorf("%s: Classify() error = %v, want it to also wrap the error that triggered the retry (%v)", tc.name, err, tc.wantErr)
+			}
+			if got := trSleep.count(); got != 1 {
+				t.Errorf("%s: request count = %d, want 1", tc.name, got)
+			}
 		}
 	})
 
@@ -969,8 +1071,8 @@ func TestRetriesAndFailureClassification(t *testing.T) {
 		// Verify sendWithRetry passes advancing attempt indices (0, 1) to sleep.
 		var sleeps []time.Duration
 		tr := newMockTransport(
-			textReply(StatusOverloaded, "busy", nil),
-			textReply(StatusOverloaded, "busy", nil),
+			textReply(statusOverloaded, "busy", nil),
+			textReply(statusOverloaded, "busy", nil),
 			okReply(t, map[string]any{"urgent": map[string]any{"type": "noul", "noul": 0.5}}, "jev-1.13.0"),
 		)
 		clf := newTestClassifier(t, tr, Config{MaxAttempts: 3})
@@ -1200,17 +1302,29 @@ func TestDefaultHTTPClientTimeoutRedirectsAndPointerQuestions(t *testing.T) {
 }
 
 func TestSleepWithContextAndHeaderSanitization(t *testing.T) {
-	if err := sleepWithContext(t.Context(), time.Millisecond); err != nil {
-		t.Fatalf("sleepWithContext(1ms) error = %v", err)
+	const wait = 20 * time.Millisecond
+	start := time.Now()
+	if err := sleepWithContext(t.Context(), wait); err != nil {
+		t.Fatalf("sleepWithContext(%v) error = %v", wait, err)
 	}
+	if elapsed := time.Since(start); elapsed < wait {
+		t.Fatalf("sleepWithContext(%v) returned after %v, want at least %v", wait, elapsed, wait)
+	}
+	start = time.Now()
 	if err := sleepWithContext(t.Context(), 0); err != nil {
 		t.Fatalf("sleepWithContext(0) error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("sleepWithContext(0) took %v, want an immediate return", elapsed)
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	if err := sleepWithContext(ctx, time.Hour); !errors.Is(err, context.Canceled) {
 		t.Fatalf("sleepWithContext(canceled) error = %v, want context.Canceled", err)
+	}
+	if err := sleepWithContext(ctx, 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sleepWithContext(canceled, 0) error = %v, want context.Canceled", err)
 	}
 
 	// Unsafe characters or overlong (>128-byte) X-Request-Id values are dropped.

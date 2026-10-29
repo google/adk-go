@@ -17,11 +17,13 @@ package classifier
 import (
 	"bytes"
 	"context"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 
 	"google.golang.org/genai"
 )
@@ -32,8 +34,10 @@ var (
 	// ErrInvalidAnswer is returned when an [Answer] or [Response] fails validation.
 	ErrInvalidAnswer = errors.New("classifier: invalid answer")
 	// ErrInvalidInput is returned when an input passed to [Classifier.Classify]
-	// is nil, is not JSON-serializable as a string, object, or array, or is
-	// unsupported by the classifier implementation.
+	// is nil, is not JSON-serializable as a string, object, or array, contains
+	// google.golang.org/genai struct values other than a single top-level
+	// [genai.Content] or [*genai.Content], or is unsupported by the classifier
+	// implementation.
 	ErrInvalidInput = errors.New("classifier: invalid input")
 )
 
@@ -44,7 +48,10 @@ var (
 // implementation accepts strings and JSON-serializable maps, structs, slices,
 // and arrays; [genai.Content] and [*genai.Content] carry multimodal parts for
 // implementations whose underlying model supports them, and fail with
-// [ErrInvalidInput] otherwise. Invalid questions fail with [ErrInvalidQuestion].
+// [ErrInvalidInput] otherwise. Other google.golang.org/genai struct values,
+// such as a []*genai.Content history or a bare [genai.Part], are rejected
+// wherever they appear in JSON input (see [ValidateInput]). Invalid questions
+// fail with [ErrInvalidQuestion].
 //
 // Implementations must be safe for concurrent use. Name mirrors adk-python's
 // BaseClassifier.model attribute using ADK Go's Name() method convention
@@ -310,7 +317,8 @@ func (a *ChoiceAnswer) UnmarshalJSON(data []byte) error {
 	probs := make(map[string]float64, len(wire.Probabilities))
 	for label, p := range wire.Probabilities {
 		if p == nil {
-			return fmt.Errorf("%w: probabilities[%q] must not be null", ErrInvalidAnswer, label)
+			// The label comes from the decoded payload, so it stays out of the error.
+			return fmt.Errorf("%w: choice probability must not be null", ErrInvalidAnswer)
 		}
 		probs[label] = *p
 	}
@@ -464,7 +472,8 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	for name, ans := range r.Answers {
 		b, err := marshalAnswer(ans)
 		if err != nil {
-			return nil, fmt.Errorf("answer %q: %w", name, err)
+			// Names may come from a decoded Response, so they stay out of the error.
+			return nil, err
 		}
 		raw[name] = b
 	}
@@ -492,7 +501,8 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 	for name, raw := range wire.Answers {
 		ans, err := unmarshalAnswer(raw)
 		if err != nil {
-			return fmt.Errorf("answer %q: %w", name, err)
+			// The name comes from the decoded payload, so it stays out of the error.
+			return err
 		}
 		answers[name] = ans
 	}
@@ -572,6 +582,16 @@ func ValidateAnswer(a Answer) error {
 // ValidateInput checks that input is a valid classifier input: a
 // [*genai.Content] or [genai.Content], a string, or a JSON-serializable map,
 // struct, slice, or array.
+//
+// google.golang.org/genai struct values are accepted only as a single
+// top-level Content. Anywhere inside JSON input they fail with
+// [ErrInvalidInput], whether as a []*genai.Content history (including the
+// result of [genai.Text]), a bare [genai.Part], or a field or element of a map,
+// slice, or struct. Their JSON form carries inline data and thought parts that
+// implementations do not inspect, and adk-python rejects them because
+// json.dumps cannot serialize them. String constants such as [genai.RoleUser]
+// are plain JSON and remain accepted. Pass earlier turns as text or plain Go
+// values instead.
 func ValidateInput(input any) error {
 	switch v := input.(type) {
 	case nil:
@@ -647,7 +667,8 @@ func validateScore(q Score) error {
 
 // validateJSONContent enforces adk-python's JSONContent contract: a JSON
 // string, object, or array (rejecting nil, bare booleans, bare numbers, raw
-// []byte slices, and values that encoding/json cannot marshal).
+// []byte slices, values that encoding/json cannot marshal, and
+// google.golang.org/genai struct values at any depth).
 func validateJSONContent(v any) error {
 	if _, isBytes := v.([]byte); isBytes {
 		return errors.New("[]byte is not valid JSON content; use string or json.RawMessage")
@@ -658,9 +679,198 @@ func validateJSONContent(v any) error {
 	}
 	switch b[0] {
 	case '"', '{', '[':
-		return nil
 	default:
 		return fmt.Errorf("expected string, object, or array JSON content, got %T", v)
+	}
+	// json.Marshal has succeeded, so the value is acyclic and the walk below
+	// terminates.
+	return rejectGenaiValues(reflect.ValueOf(v), 0)
+}
+
+var (
+	genaiPkgPath      = reflect.TypeFor[genai.Content]().PkgPath()
+	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
+	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+)
+
+// maxJSONContentDepth bounds rejectGenaiValues as a safeguard; it is far deeper
+// than any JSON input a classifier is expected to receive.
+const maxJSONContentDepth = 1000
+
+// rejectGenaiValues walks the values encoding/json would serialize by
+// reflection and fails on any struct type from google.golang.org/genai, whether
+// held by value, by pointer (nil or not), or as the static element type of an
+// empty map or slice. In adk-python these are Pydantic models that json.dumps
+// rejects, so a []*genai.Content history or a bare genai.Part never reaches a
+// provider. The Go SDK's structs marshal cleanly, so without this check their
+// JSON form (including inline data and thought parts) would be sent as
+// classifier input. Types with their own MarshalJSON or MarshalText are not
+// entered, matching encoding/json, unless the method is promoted from an
+// embedded genai struct, which it would serialize.
+func rejectGenaiValues(v reflect.Value, depth int) error {
+	if depth > maxJSONContentDepth {
+		return fmt.Errorf("JSON content is nested more than %d levels deep", maxJSONContentDepth)
+	}
+	if !v.IsValid() {
+		return nil
+	}
+	// Look through interfaces first: encoding/json serializes the dynamic
+	// value, and a static interface type such as json.Marshaler says nothing
+	// about what that value is.
+	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return nil
+		}
+		return rejectGenaiValues(v.Elem(), depth)
+	}
+	t := v.Type()
+	if err := rejectGenaiType(t); err != nil {
+		return err
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil
+		}
+		return rejectGenaiValues(v.Elem(), depth)
+	}
+	if usesCustomMarshaler(v) {
+		if v.Kind() == reflect.Struct {
+			return rejectEmbeddedGenaiTypes(t, nil)
+		}
+		return nil
+	}
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array:
+		if err := rejectGenaiType(t.Elem()); err != nil {
+			return err
+		}
+		if isScalarKind(t.Elem().Kind()) {
+			return nil
+		}
+		for i := range v.Len() {
+			if err := rejectGenaiValues(v.Index(i), depth+1); err != nil {
+				return err
+			}
+		}
+	case reflect.Map:
+		if err := rejectGenaiType(t.Elem()); err != nil {
+			return err
+		}
+		if isScalarKind(t.Elem().Kind()) {
+			return nil
+		}
+		for iter := v.MapRange(); iter.Next(); {
+			if err := rejectGenaiValues(iter.Value(), depth+1); err != nil {
+				return err
+			}
+		}
+	case reflect.Struct:
+		for i := range t.NumField() {
+			if !jsonVisibleField(t.Field(i)) {
+				continue
+			}
+			if err := rejectGenaiValues(v.Field(i), depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// rejectGenaiType fails when t, after dereferencing any pointers, is a struct
+// type declared in google.golang.org/genai.
+func rejectGenaiType(t reflect.Type) error {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Struct && t.PkgPath() == genaiPkgPath {
+		return fmt.Errorf(
+			"%s is not JSON content; pass google.golang.org/genai values only as a single top-level genai.Content, or render them as text or plain Go values",
+			t,
+		)
+	}
+	return nil
+}
+
+// rejectEmbeddedGenaiTypes fails when struct type t embeds a genai struct,
+// directly or through further embedding. A MarshalJSON or MarshalText promoted
+// from such a field serializes the genai value, so the field must be checked
+// before the marshaler is trusted. The check is type-only; seen guards against
+// recursive embedding such as type T struct{ *T }.
+func rejectEmbeddedGenaiTypes(t reflect.Type, seen map[reflect.Type]bool) error {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || seen[t] {
+		return nil
+	}
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		if !sf.Anonymous || !jsonVisibleField(sf) {
+			continue
+		}
+		if err := rejectGenaiType(sf.Type); err != nil {
+			return err
+		}
+		if seen == nil {
+			seen = map[reflect.Type]bool{}
+		}
+		seen[t] = true
+		if err := rejectEmbeddedGenaiTypes(sf.Type, seen); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// usesCustomMarshaler reports whether encoding/json would serialize v through
+// its own MarshalJSON or MarshalText rather than by reflection.
+// Pointer-receiver methods count only when v is addressable, as in
+// encoding/json.
+func usesCustomMarshaler(v reflect.Value) bool {
+	t := v.Type()
+	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+		return true
+	}
+	if !v.CanAddr() {
+		return false
+	}
+	pt := reflect.PointerTo(t)
+	return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+}
+
+// jsonVisibleField mirrors encoding/json's field selection: exported fields and
+// embedded structs are serialized; other unexported fields and fields tagged
+// `json:"-"` are not.
+func jsonVisibleField(sf reflect.StructField) bool {
+	if sf.Tag.Get("json") == "-" {
+		return false
+	}
+	if sf.IsExported() {
+		return true
+	}
+	if !sf.Anonymous {
+		return false
+	}
+	ft := sf.Type
+	if ft.Kind() == reflect.Pointer {
+		ft = ft.Elem()
+	}
+	return ft.Kind() == reflect.Struct
+}
+
+// isScalarKind reports whether values of kind k cannot contain a struct, so
+// large []byte, []string, or map[string]float64 values are not walked.
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128,
+		reflect.String:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -682,8 +892,9 @@ func validateChoiceAnswer(a ChoiceAnswer) error {
 	if len(a.Probabilities) == 0 {
 		return fmt.Errorf("%w: choice probabilities must not be empty", ErrInvalidAnswer)
 	}
-	for label, p := range a.Probabilities {
-		if err := validateProbability(fmt.Sprintf("probabilities[%q]", label), p); err != nil {
+	// Labels may come from a decoded payload, so they stay out of the error.
+	for _, p := range a.Probabilities {
+		if err := validateProbability("choice probability", p); err != nil {
 			return err
 		}
 	}

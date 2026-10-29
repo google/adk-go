@@ -173,13 +173,15 @@ func (c *Classifier) Name() string {
 	return c.model
 }
 
-// String formats Classifier without exposing unexported credentials.
-func (c *Classifier) String() string {
+// String formats Classifier without exposing unexported credentials. It has a
+// value receiver so fmt also uses it for a Classifier value, as when a struct
+// holding one is printed with %+v.
+func (c Classifier) String() string {
 	return fmt.Sprintf("typesafe.Classifier{Model:%q}", c.model)
 }
 
 // GoString formats Classifier for %#v without exposing unexported credentials.
-func (c *Classifier) GoString() string {
+func (c Classifier) GoString() string {
 	return c.String()
 }
 
@@ -293,6 +295,10 @@ func (c *Classifier) endpointURL() (string, error) {
 //     is never concatenated into classified text. Non-thought parts carrying a
 //     ThoughtSignature (including trailing empty-text streamed signature parts)
 //     are accepted.
+//
+// Only a single top-level Content is converted; classifier.ValidateInput
+// rejects genai struct values nested in JSON input, such as a []*genai.Content
+// history or a bare genai.Part, before they could be sent as "state".
 func inputToState(input any) (any, error) {
 	if err := classifier.ValidateInput(input); err != nil {
 		return nil, err
@@ -401,13 +407,12 @@ func (c *Classifier) clientForAttempt() (*http.Client, time.Duration) {
 }
 
 func (c *Classifier) sendWithRetry(ctx context.Context, endpoint, apiKey string, bodyBytes []byte) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	client, perAttemptTimeout := c.clientForAttempt()
 
 	for attempt := 0; ; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
 		respBytes, retry, err := c.doAttempt(ctx, client, perAttemptTimeout, endpoint, apiKey, bodyBytes)
 		if err == nil {
 			return respBytes, nil
@@ -415,8 +420,15 @@ func (c *Classifier) sendWithRetry(ctx context.Context, endpoint, apiKey string,
 		if !retry || attempt >= c.maxAttempts-1 {
 			return nil, err
 		}
+		// When the context ends during backoff, keep the error that triggered
+		// the retry alongside the context error so callers can still see the
+		// 429, 529, or transport failure. The second check covers the sleep's
+		// select picking the elapsed timer over the done context.
 		if sleepErr := c.sleep(ctx, retryBackoff(attempt)); sleepErr != nil {
-			return nil, sleepErr
+			return nil, errors.Join(err, sleepErr)
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, errors.Join(err, ctxErr)
 		}
 	}
 }
@@ -455,7 +467,7 @@ func (c *Classifier) doAttempt(
 		// Drain a small prefix before closing so keep-alive connections can be
 		// reused across retry attempts.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == StatusOverloaded
+		retry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == statusOverloaded
 		return nil, retry, newAPIError(resp)
 	}
 

@@ -24,5 +24,7 @@
 // estimated probability distribution over each question's possible answers.
 //
 // Classifiers are stateless: context from earlier conversation turns must be
-// included in the input passed to [Classifier.Classify].
+// included in the input passed to [Classifier.Classify], as text or as plain
+// JSON values such as a slice of role and text maps. A []*genai.Content
+// history is rejected with [ErrInvalidInput]; see [ValidateInput].
 package classifier

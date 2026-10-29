@@ -19,7 +19,9 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -335,7 +337,75 @@ func TestQuestionJSONRoundTripAndValidation(t *testing.T) {
 	}
 }
 
+// redactingWrapper holds a genai.Content but serializes to a fixed string, so
+// its own MarshalJSON, not reflection, decides what encoding/json emits.
+type redactingWrapper struct {
+	Content *genai.Content
+}
+
+func (redactingWrapper) MarshalJSON() ([]byte, error) { return []byte(`"redacted"`), nil }
+
+// textWrapper is the MarshalText equivalent of redactingWrapper.
+type textWrapper struct {
+	Part genai.Part
+}
+
+func (textWrapper) MarshalText() ([]byte, error) { return []byte("redacted"), nil }
+
+// ptrRedactingWrapper has a pointer-receiver MarshalJSON, which encoding/json
+// only calls on addressable values; a non-addressable value is serialized by
+// reflection, Content included.
+type ptrRedactingWrapper struct {
+	Content *genai.Content
+}
+
+func (*ptrRedactingWrapper) MarshalJSON() ([]byte, error) { return []byte(`"redacted"`), nil }
+
+type ticketWithEmbeddedContent struct {
+	genai.Content
+	ID string
+}
+
+type ticketWithEmbeddedContentPtr struct {
+	*genai.Content
+	ID string
+}
+
+// ticketWithEmbeddedResponse gains the promoted MarshalJSON of
+// *genai.GenerateContentResponse, which serializes the response.
+type ticketWithEmbeddedResponse struct {
+	*genai.GenerateContentResponse
+	ID string
+}
+
+// ticketWithEmbeddedTime gains time.Time's MarshalJSON, which serializes only
+// the timestamp, so the genai field never reaches the JSON output.
+type ticketWithEmbeddedTime struct {
+	time.Time
+	Context *genai.Content
+}
+
+// selfEmbedding exercises the recursion guard in the embedded-type check.
+type selfEmbedding struct {
+	*selfEmbedding
+	Text string
+}
+
+func (selfEmbedding) MarshalJSON() ([]byte, error) { return []byte(`"self"`), nil }
+
+type ticketWithHiddenContent struct {
+	Text    string
+	Ignored *genai.Content `json:"-"`
+	hidden  *genai.Content
+}
+
 func TestValidateInput(t *testing.T) {
+	imageContent := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("png"), "image/png")}}
+	thoughtContent := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "secret reasoning", Thought: true}}}
+	hidden := &genai.Content{Parts: []*genai.Part{{Text: "secret reasoning", Thought: true}}}
+	// A genai struct with its own (pointer-receiver) MarshalJSON.
+	thoughtResponse := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{Content: thoughtContent}}}
+
 	tests := []struct {
 		name    string
 		input   any
@@ -346,8 +416,19 @@ func TestValidateInput(t *testing.T) {
 		{name: "map", input: map[string]any{"tool": "sql", "args": map[string]any{"q": "SELECT 1"}}},
 		{name: "slice", input: []any{"turn 1", "turn 2"}},
 		{name: "struct", input: struct{ Text string }{Text: "ticket"}},
+		{name: "history_as_plain_maps", input: []map[string]any{{"role": genai.RoleUser, "text": "hi"}, {"role": genai.RoleModel, "text": "hello"}}},
 		{name: "genai_content_ptr", input: genai.NewContentFromText("hi", genai.RoleUser)},
 		{name: "genai_content_val", input: genai.Content{Parts: []*genai.Part{{Text: "hi"}}}},
+		{name: "genai_string_enum_in_map", input: map[string]any{"role": genai.RoleUser, "reason": genai.FinishReasonStop}},
+		{name: "nested_byte_slice_ok", input: map[string]any{"blob": []byte("raw")}},
+		{name: "custom_marshal_json_wrapping_content", input: redactingWrapper{Content: imageContent}},
+		{name: "custom_marshal_text_wrapping_part", input: map[string]any{"w": textWrapper{Part: genai.Part{Thought: true, Text: "secret"}}}},
+		{name: "ptr_marshaler_wrapper_addressable", input: []ptrRedactingWrapper{{Content: imageContent}}},
+		{name: "ptr_marshaler_wrapper_in_struct_field", input: &struct{ W ptrRedactingWrapper }{W: ptrRedactingWrapper{Content: imageContent}}},
+		{name: "marshaler_interface_holding_plain_value", input: map[string]json.Marshaler{"t": json.RawMessage(`"x"`)}},
+		{name: "embedded_time_marshaler_hides_genai_field", input: ticketWithEmbeddedTime{Time: time.Unix(0, 0), Context: thoughtContent}},
+		{name: "self_embedding_marshaler", input: selfEmbedding{selfEmbedding: &selfEmbedding{Text: "inner"}, Text: "x"}},
+		{name: "content_in_ignored_or_unexported_fields", input: ticketWithHiddenContent{Text: "ticket", Ignored: imageContent, hidden: hidden}},
 		{name: "nil", input: nil, wantErr: true},
 		{name: "typed_nil_content", input: (*genai.Content)(nil), wantErr: true},
 		{name: "typed_nil_slice", input: ([]string)(nil), wantErr: true},
@@ -355,6 +436,34 @@ func TestValidateInput(t *testing.T) {
 		{name: "bare_bool", input: true, wantErr: true},
 		{name: "byte_slice", input: []byte("raw"), wantErr: true},
 		{name: "nan_in_map", input: map[string]float64{"x": math.NaN()}, wantErr: true},
+		// google.golang.org/genai values are only accepted as a single top-level Content.
+		{name: "content_history_ptr_slice", input: []*genai.Content{imageContent, thoughtContent}, wantErr: true},
+		{name: "content_history_val_slice", input: []genai.Content{*thoughtContent}, wantErr: true},
+		{name: "genai_text_helper", input: genai.Text("hi"), wantErr: true},
+		{name: "empty_content_history", input: []*genai.Content{}, wantErr: true},
+		{name: "content_history_array", input: [1]*genai.Content{thoughtContent}, wantErr: true},
+		{name: "part_val", input: genai.Part{Text: "secret reasoning", Thought: true}, wantErr: true},
+		{name: "part_ptr", input: &genai.Part{InlineData: &genai.Blob{Data: []byte("png"), MIMEType: "image/png"}}, wantErr: true},
+		{name: "part_ptr_slice", input: []*genai.Part{{Text: "hi"}}, wantErr: true},
+		{name: "blob_val", input: genai.Blob{Data: []byte("png"), MIMEType: "image/png"}, wantErr: true},
+		{name: "genai_struct_with_custom_marshaler", input: &genai.VideoMetadata{}, wantErr: true},
+		{name: "history_nested_in_map", input: map[string]any{"ticket": "hi", "history": []*genai.Content{imageContent, thoughtContent}}, wantErr: true},
+		{name: "history_nested_in_any_slice", input: []any{"turn 1", thoughtContent}, wantErr: true},
+		{name: "content_map_values", input: map[string]*genai.Content{}, wantErr: true},
+		{name: "part_in_exported_struct_field", input: &struct{ Part *genai.Part }{Part: &genai.Part{Thought: true, Text: "secret"}}, wantErr: true},
+		{name: "nil_part_in_exported_struct_field", input: struct{ Part *genai.Part }{}, wantErr: true},
+		{name: "embedded_content_struct", input: ticketWithEmbeddedContent{Content: *thoughtContent, ID: "t-1"}, wantErr: true},
+		{name: "embedded_content_ptr", input: ticketWithEmbeddedContentPtr{Content: thoughtContent, ID: "t-1"}, wantErr: true},
+		{name: "content_behind_double_pointer", input: map[string]any{"c": func() **genai.Content { c := thoughtContent; return &c }()}, wantErr: true},
+		// genai structs with their own MarshalJSON, reached through a promoted
+		// method or a json.Marshaler-typed interface, serialize themselves.
+		{name: "embedded_response_ptr_promotes_marshaler", input: ticketWithEmbeddedResponse{GenerateContentResponse: thoughtResponse, ID: "t-1"}, wantErr: true},
+		{name: "embedded_response_val_addressable", input: []struct{ genai.GenerateContentResponse }{{GenerateContentResponse: *thoughtResponse}}, wantErr: true},
+		{name: "response_in_marshaler_interface_field", input: struct{ M json.Marshaler }{M: thoughtResponse}, wantErr: true},
+		{name: "response_in_marshaler_map", input: map[string]json.Marshaler{"r": thoughtResponse}, wantErr: true},
+		{name: "response_in_marshaler_slice", input: []json.Marshaler{thoughtResponse}, wantErr: true},
+		{name: "ptr_marshaler_wrapper_by_value_serializes_by_reflection", input: ptrRedactingWrapper{Content: imageContent}, wantErr: true},
+		{name: "ptr_marshaler_wrapper_in_map_value", input: map[string]ptrRedactingWrapper{"w": {Content: imageContent}}, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -364,6 +473,9 @@ func TestValidateInput(t *testing.T) {
 				if !errors.Is(err, classifier.ErrInvalidInput) {
 					t.Fatalf("ValidateInput() error = %v, want errors.Is(ErrInvalidInput)", err)
 				}
+				if msg := err.Error(); strings.Contains(msg, "secret") || strings.Contains(msg, "png") {
+					t.Errorf("ValidateInput() error leaked input content: %q", msg)
+				}
 				return
 			}
 			if err != nil {
@@ -371,6 +483,19 @@ func TestValidateInput(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("genai_values_rejected_in_question_fields", func(t *testing.T) {
+		for _, q := range []classifier.Question{
+			classifier.Choice{Instructions: thoughtContent, Criteria: map[string]any{"a": nil, "b": nil}},
+			classifier.Choice{Criteria: map[string]any{"a": genai.Part{Text: "x"}, "b": nil}},
+			classifier.Binary{Criteria: []*genai.Content{thoughtContent}},
+			classifier.Score{Criteria: []any{"calm", &genai.Part{Text: "x"}}},
+		} {
+			if err := classifier.ValidateQuestion(q); !errors.Is(err, classifier.ErrInvalidQuestion) {
+				t.Errorf("ValidateQuestion(%T) error = %v, want ErrInvalidQuestion", q, err)
+			}
+		}
+	})
 }
 
 func TestValidateAnswer(t *testing.T) {
@@ -556,6 +681,24 @@ func TestResponseUnmarshalRejectsInvalidJSON(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("decoded_payload_keys_stay_out_of_errors", func(t *testing.T) {
+		const marker = "payload-key-marker"
+		for _, raw := range []string{
+			`{"answers": {"` + marker + `": {"type": "binary", "probability": 1.5}}}`,
+			`{"answers": {"q": {"type": "choice", "choice": "a", "probabilities": {"` + marker + `": null}}}}`,
+			`{"answers": {"q": {"type": "choice", "choice": "a", "probabilities": {"` + marker + `": 1.5}}}}`,
+		} {
+			var resp classifier.Response
+			err := json.Unmarshal([]byte(raw), &resp)
+			if !errors.Is(err, classifier.ErrInvalidAnswer) {
+				t.Fatalf("json.Unmarshal(%s) error = %v, want errors.Is(ErrInvalidAnswer)", raw, err)
+			}
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("json.Unmarshal(%s) error echoed a payload key: %v", raw, err)
+			}
+		}
+	})
 
 	t.Run("direct_unmarshal_rejects_trailing_tokens_and_null_type", func(t *testing.T) {
 		var resp classifier.Response
