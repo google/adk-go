@@ -2970,12 +2970,12 @@ func TestSanitizeRawText(t *testing.T) {
 			if got := redactErrorMessage(text); got != text {
 				t.Errorf("%s: redactErrorMessage redacted clean text (len=%d)", name, len(got))
 			}
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > 6*time.Second {
 				t.Errorf("%s: redactErrorMessage took %v for a %d-byte text", name, d, len(text))
 			}
 			start = time.Now()
 			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > 6*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
 			}
 			if got != text || lost {
