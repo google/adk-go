@@ -221,6 +221,18 @@ func (pm *PluginManager) RunOnToolErrorCallback(ctx agent.Context, tool tool.Too
 	return nil, nil
 }
 
+// HasModelCallbacks reports whether any registered plugin has a before-model,
+// after-model or on-model-error callback. The LLM flow consults it per model
+// response, so a manager without them costs no callback context per chunk.
+func (pm *PluginManager) HasModelCallbacks() bool {
+	for _, plugin := range pm.plugins {
+		if plugin.BeforeModelCallback() != nil || plugin.AfterModelCallback() != nil || plugin.OnModelErrorCallback() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // RunBeforeModelCallback runs the BeforeModelCallback for all plugins.
 func (pm *PluginManager) RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error) {
 	for _, plugin := range pm.plugins {

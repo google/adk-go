@@ -811,6 +811,9 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		// Create event to pass to callback state delta
 		stateDelta := make(map[string]any)
 		artifactDelta := make(map[string]int64)
+		// The tools of one model call do not change between its responses, so
+		// the map the responses dispatch on is built once, on the first one.
+		var tools map[string]tool.Tool
 		// Calls the LLM.
 		for resp, err := range f.callLLM(ctx, req, stateDelta, artifactDelta) {
 			if err != nil {
@@ -828,17 +831,19 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				continue
 			}
 
-			// TODO: temporarily convert
-			tools := make(map[string]tool.Tool)
-			for k, v := range req.Tools {
-				tool, ok := v.(tool.Tool)
-				if !ok {
-					if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
-						return
+			if tools == nil {
+				// TODO: temporarily convert
+				tools = make(map[string]tool.Tool, len(req.Tools))
+				for k, v := range req.Tools {
+					tool, ok := v.(tool.Tool)
+					if !ok {
+						if !yield(nil, fmt.Errorf("unexpected tool type %T for tool %v", v, k)) {
+							return
+						}
+						continue
 					}
-					continue
+					tools[k] = tool
 				}
-				tools[k] = tool
 			}
 
 			// Build the event and yield.
@@ -988,7 +993,7 @@ func newResponseWithEventID(ctx context.Context, resp *model.LLMResponse) *respo
 func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64) iter.Seq2[*responseWithEventID, error] {
 	return func(yield func(*responseWithEventID, error) bool) {
 		pluginManager := pluginManagerFromContext(ctx)
-		if pluginManager != nil {
+		if pluginManager != nil && pluginManager.HasModelCallbacks() {
 			cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 			callbackResponse, callbackErr := pluginManager.RunBeforeModelCallback(cctx, req)
 			if callbackResponse != nil || callbackErr != nil {
@@ -1114,7 +1119,7 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
-	if pluginManager != nil {
+	if pluginManager != nil && pluginManager.HasModelCallbacks() {
 		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := pluginManager.RunAfterModelCallback(cctx, llmResp, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
@@ -1136,7 +1141,7 @@ func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *mode
 
 func (f *Flow) runOnModelErrorCallbacks(ctx agent.InvocationContext, llmReq *model.LLMRequest, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
 	pluginManager := pluginManagerFromContext(ctx)
-	if pluginManager != nil {
+	if pluginManager != nil && pluginManager.HasModelCallbacks() {
 		cctx := icontext.NewCallbackContextWithDelta(ctx, stateDelta, artifactDelta)
 		callbackResponse, callbackErr := pluginManager.RunOnModelErrorCallback(cctx, llmReq, llmErr)
 		if callbackResponse != nil || callbackErr != nil {
@@ -1186,13 +1191,17 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
 	utils.PopulateClientFunctionCallID(ctx, resp.Content)
 
-	ev := session.NewEvent(ctx, ctx.InvocationID())
-	ev.ID = resp.eventID // TODO change NewEvent to accept event id
-	ev.Author = ctx.Agent().Name()
-	ev.Branch = ctx.Branch()
-	ev.LLMResponse = *resp.LLMResponse
-	ev.Actions.StateDelta = stateDelta
-	ev.Actions.ArtifactDelta = artifactDelta
+	// Built directly rather than through session.NewEvent, which would mint
+	// an ID and two delta maps only for them to be replaced here.
+	ev := &session.Event{
+		ID:           resp.eventID,
+		InvocationID: ctx.InvocationID(),
+		Timestamp:    platform.Now(ctx),
+		Author:       ctx.Agent().Name(),
+		Branch:       ctx.Branch(),
+		LLMResponse:  *resp.LLMResponse,
+		Actions:      session.EventActions{StateDelta: stateDelta, ArtifactDelta: artifactDelta},
+	}
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -1203,15 +1212,18 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 // findLongRunningFunctionCallIDs iterates over the FunctionCalls and
 // returns the callIDs of the long running functions
 func findLongRunningFunctionCallIDs(c *genai.Content, tools map[string]tool.Tool) []string {
-	set := make(map[string]struct{})
+	var set map[string]struct{}
 	// Iterate over function calls.
 	for _, fc := range utils.FunctionCalls(c) {
 		if tool, ok := tools[fc.Name]; ok && fc.ID != "" && tool.IsLongRunning() {
 			// If the tool exists and is long-running, add its ID to the set.
+			if set == nil {
+				set = make(map[string]struct{})
+			}
 			set[fc.ID] = struct{}{}
 		}
 	}
-	// Transform the set (map keys) into a slice.
+	// Transform the set (map keys) into a slice; nil when the set stayed empty.
 	return slices.Collect(maps.Keys(set))
 }
 
@@ -1742,6 +1754,10 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 }
 
 type pluginManager interface {
+	// HasModelCallbacks reports whether any plugin registered a model
+	// callback; when none did, the callback context for a model response is
+	// not built.
+	HasModelCallbacks() bool
 	RunBeforeModelCallback(cctx agent.Context, llmRequest *model.LLMRequest) (*model.LLMResponse, error)
 	RunAfterModelCallback(cctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 	RunOnModelErrorCallback(ctx agent.Context, llmRequest *model.LLMRequest, llmResponseError error) (*model.LLMResponse, error)
