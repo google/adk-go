@@ -124,12 +124,56 @@ func (d *DebugTelemetry) GetSpansBySessionID(sessionID string) []DebugSpan {
 	return d.store.getSpansBySessionID(sessionID)
 }
 
-func convertAttrs(in []attribute.KeyValue) map[string]string {
-	out := make(map[string]string, len(in))
+func convertAttrs(in []attribute.KeyValue) map[string]any {
+	out := make(map[string]any, len(in))
 	for _, attr := range in {
-		out[string(attr.Key)] = attr.Value.Emit()
+		out[string(attr.Key)] = convertAttrValue(attr.Value)
 	}
 	return out
+}
+
+// convertAttrValue keeps an attribute's type instead of emitting every value as a
+// string. The ADK web UI validates typed fields against its schema and discards the
+// whole span array when one fails: gen_ai.usage.input_tokens has to be a number and
+// gen_ai.response.finish_reasons an array, so emitting "1" and "[\"stop\"]" as strings
+// left the Request and Traces panels empty even though the spans were captured.
+func convertAttrValue(v attribute.Value) any {
+	switch v.Type() {
+	case attribute.BOOL:
+		return v.AsBool()
+	case attribute.INT64:
+		return v.AsInt64()
+	case attribute.FLOAT64:
+		return v.AsFloat64()
+	case attribute.STRING:
+		return v.AsString()
+	// A nil slice would marshal to JSON null, which the UI's array schema rejects,
+	// so each slice is returned as an empty slice of its own type instead.
+	case attribute.BOOLSLICE:
+		if out := v.AsBoolSlice(); out != nil {
+			return out
+		}
+		return []bool{}
+	case attribute.INT64SLICE:
+		if out := v.AsInt64Slice(); out != nil {
+			return out
+		}
+		return []int64{}
+	case attribute.FLOAT64SLICE:
+		if out := v.AsFloat64Slice(); out != nil {
+			return out
+		}
+		return []float64{}
+	case attribute.STRINGSLICE:
+		if out := v.AsStringSlice(); out != nil {
+			return out
+		}
+		return []string{}
+	default:
+		// Bytes and any future type stay representable rather than becoming a Go
+		// formatting artifact.
+		return v.Emit()
+	}
 }
 
 // DebugSpan represents a span in the trace.
@@ -137,14 +181,14 @@ func convertAttrs(in []attribute.KeyValue) map[string]string {
 // Attributes and Logs are never nil in a span returned by [DebugTelemetry], so
 // they marshal as {} and [] instead of JSON null.
 type DebugSpan struct {
-	Name         string            `json:"name"`
-	StartTime    int64             `json:"start_time"`
-	EndTime      int64             `json:"end_time"`
-	SpanID       string            `json:"span_id"`
-	TraceID      string            `json:"trace_id"`
-	ParentSpanID string            `json:"parent_span_id"`
-	Attributes   map[string]string `json:"attributes"`
-	Logs         []DebugLog        `json:"logs"`
+	Name         string         `json:"name"`
+	StartTime    int64          `json:"start_time"`
+	EndTime      int64          `json:"end_time"`
+	SpanID       string         `json:"span_id"`
+	TraceID      string         `json:"trace_id"`
+	ParentSpanID string         `json:"parent_span_id"`
+	Attributes   map[string]any `json:"attributes"`
+	Logs         []DebugLog     `json:"logs"`
 }
 
 // DebugLog represents a log in the span.
@@ -318,7 +362,7 @@ type spanRecord struct {
 	EndTime      time.Time
 	Context      trace.SpanContext
 	ParentSpanID trace.SpanID
-	Attributes   map[string]string
+	Attributes   map[string]any
 	Logs         []DebugLog
 }
 
@@ -434,10 +478,10 @@ func convertRecords(records []*spanRecord) []DebugSpan {
 // The result is always a fresh map. The records are shared with the store, so
 // writing the attribute into r.Attributes would both race with a concurrent
 // reader and leave the synthesized value behind in stored telemetry.
-func eventIDAttributes(r *spanRecord) map[string]string {
+func eventIDAttributes(r *spanRecord) map[string]any {
 	// Empty rather than nil: a nil map marshals to JSON null, which the UI's
 	// object schema rejects.
-	attributes := make(map[string]string, len(r.Attributes)+1)
+	attributes := make(map[string]any, len(r.Attributes)+1)
 	maps.Copy(attributes, r.Attributes)
 	if _, ok := attributes[eventIDAttribute]; !ok && strings.HasPrefix(r.Name, generateContentSpanPrefix) {
 		attributes[eventIDAttribute] = r.Context.SpanID().String()
@@ -521,7 +565,7 @@ func (s *spanStore) updateSpanIndexes(span *spanRecord) {
 	traceIDStr := span.Context.TraceID().String()
 	// Update session id -> trace id mapping.
 	sessionIDKey := string(semconv.GenAIConversationIDKey)
-	if sessionID, ok := span.Attributes[sessionIDKey]; ok {
+	if sessionID, ok := span.Attributes[sessionIDKey].(string); ok {
 		traces, ok := s.traceIDsBySessionID[sessionID]
 		if !ok {
 			traces = make(map[string]struct{})
@@ -530,7 +574,7 @@ func (s *spanStore) updateSpanIndexes(span *spanRecord) {
 		traces[traceIDStr] = struct{}{}
 	}
 	// Update event id -> span id mapping.
-	if eventID, ok := span.Attributes[eventIDKey]; ok {
+	if eventID, ok := span.Attributes[eventIDKey].(string); ok {
 		s.recordsByEventID[eventID] = append(s.recordsByEventID[eventID], span)
 	}
 
@@ -544,11 +588,11 @@ func (s *spanStore) evict(traceID string, spans []*spanRecord) {
 		if span.Context.TraceID().IsValid() {
 			delete(s.recordsBySpanID, span.Context.SpanID().String())
 
-			if eventID, ok := span.Attributes[eventIDKey]; ok {
+			if eventID, ok := span.Attributes[eventIDKey].(string); ok {
 				s.evictRecordsByEventID(eventID, span)
 			}
 
-			if sessionID, ok := span.Attributes[string(semconv.GenAIConversationIDKey)]; ok {
+			if sessionID, ok := span.Attributes[string(semconv.GenAIConversationIDKey)].(string); ok {
 				s.evictTraceIDsBySessionID(sessionID, traceID)
 			}
 		}

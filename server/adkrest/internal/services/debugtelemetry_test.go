@@ -17,6 +17,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"math"
 	"strings"
@@ -79,7 +80,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				{
 					Name:         "root-span",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						string(semconv.GenAIConversationIDKey): "session-1",
 					},
 					Logs: []DebugLog{
@@ -93,7 +94,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				{
 					Name:         "child-span",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes:   map[string]string{},
+					Attributes:   map[string]any{},
 					Logs: []DebugLog{
 						{
 							Body:      "child-log-body",
@@ -126,10 +127,10 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "test-session-id",
 			wantSessionSpans: []DebugSpan{
-				{Name: "root", Attributes: map[string]string{}},
-				{Name: "child", Attributes: map[string]string{}},
-				{Name: "child-2", Attributes: map[string]string{}},
-				{Name: "grandchild", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "test-session-id"}},
+				{Name: "root", Attributes: map[string]any{}},
+				{Name: "child", Attributes: map[string]any{}},
+				{Name: "child-2", Attributes: map[string]any{}},
+				{Name: "grandchild", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "test-session-id"}},
 			},
 		},
 		{
@@ -154,10 +155,10 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-1",
 			wantSessionSpans: []DebugSpan{
-				{Name: "root-1", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "child-1", Attributes: map[string]string{}},
-				{Name: "root-2", Attributes: map[string]string{}},
-				{Name: "child-2", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "root-1", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "child-1", Attributes: map[string]any{}},
+				{Name: "root-2", Attributes: map[string]any{}},
+				{Name: "child-2", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
 			},
 		},
 		{
@@ -174,8 +175,8 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-1",
 			wantSessionSpans: []DebugSpan{
-				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+				{Name: "mixed-root", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-2"}},
 			},
 		},
 		{
@@ -192,8 +193,8 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-2",
 			wantSessionSpans: []DebugSpan{
-				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+				{Name: "mixed-root", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-2"}},
 			},
 		},
 		{
@@ -286,7 +287,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-1",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "generate_content",
 					},
@@ -319,7 +320,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-1",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "generate_content",
 					},
@@ -327,7 +328,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-2",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "execute_tool",
 					},
@@ -488,6 +489,8 @@ func setup(t *testing.T) (*DebugTelemetry, *sdktrace.TracerProvider, *sdklog.Log
 	return setupWithConfig(t, nil)
 }
 
+// compareDebugSpans orders spans for test comparisons. Attribute values are typed
+// now, so they are compared through their string form.
 func compareDebugSpans(a, b DebugSpan) bool {
 	if a.Name != b.Name {
 		return a.Name < b.Name
@@ -495,13 +498,17 @@ func compareDebugSpans(a, b DebugSpan) bool {
 	if a.ParentSpanID != b.ParentSpanID {
 		return a.ParentSpanID < b.ParentSpanID
 	}
-	if a.Attributes[string(semconv.GenAIConversationIDKey)] != b.Attributes[string(semconv.GenAIConversationIDKey)] {
-		return a.Attributes[string(semconv.GenAIConversationIDKey)] < b.Attributes[string(semconv.GenAIConversationIDKey)]
+	for _, key := range []string{
+		string(semconv.GenAIConversationIDKey),
+		eventIDKey,
+		"genai.operation.name",
+	} {
+		av, bv := fmt.Sprint(a.Attributes[key]), fmt.Sprint(b.Attributes[key])
+		if av != bv {
+			return av < bv
+		}
 	}
-	if a.Attributes[eventIDKey] != b.Attributes[eventIDKey] {
-		return a.Attributes[eventIDKey] < b.Attributes[eventIDKey]
-	}
-	return a.Attributes["genai.operation.name"] < b.Attributes["genai.operation.name"]
+	return false
 }
 
 // TestConvertRecordsBuildsEmptyContainersNotNil asserts on the raw serialized bytes.
@@ -733,7 +740,7 @@ func TestConvertRecordsSynthesizesEventIDForFailedGenerateContent(t *testing.T) 
 		records := []*spanRecord{{
 			Name:       "generate_content gemini",
 			Context:    spanContext(0x03),
-			Attributes: map[string]string{eventIDAttribute: "event-1"},
+			Attributes: map[string]any{eventIDAttribute: "event-1"},
 		}}
 		got := convertRecords(records)
 		if id := got[0].Attributes[eventIDAttribute]; id != "event-1" {
@@ -836,5 +843,56 @@ func TestUnrepresentableLogAttributesAreDropped(t *testing.T) {
 	}
 	if got := spans[0].Logs[0].Attributes; got != nil {
 		t.Errorf("attributes = %v, want none", got)
+	}
+}
+
+// TestConvertAttrsKeepsAttributeTypes pins the JSON types the web UI validates.
+//
+// Every attribute used to be emitted as a string, so gen_ai.usage.input_tokens
+// arrived as "1" and gen_ai.response.finish_reasons as "[\"stop\"]". The UI validates
+// typed fields against its schema and discards the whole span array when one fails,
+// which left the Request and Traces panels empty. This asserts on the serialized
+// JSON, because decoding into Go values would hide number-versus-string.
+func TestConvertAttrsKeepsAttributeTypes(t *testing.T) {
+	attrs := convertAttrs([]attribute.KeyValue{
+		attribute.Int64(string(semconv.GenAIUsageInputTokensKey), 1),
+		attribute.StringSlice(string(semconv.GenAIResponseFinishReasonsKey), []string{"stop"}),
+		attribute.Float64("score", 0.5),
+		attribute.Bool("cached", true),
+		attribute.String(string(semconv.GenAIOperationNameKey), "generate_content"),
+		attribute.StringSlice("empty", nil),
+	})
+
+	encoded, err := json.Marshal(attrs)
+	if err != nil {
+		t.Fatalf("marshal attributes: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("unmarshal attributes: %v", err)
+	}
+
+	if got := decoded[string(semconv.GenAIUsageInputTokensKey)]; got != float64(1) {
+		t.Errorf("input_tokens = %#v (%T), want the number 1", got, got)
+	}
+	reasons, ok := decoded[string(semconv.GenAIResponseFinishReasonsKey)].([]any)
+	if !ok {
+		t.Fatalf("finish_reasons = %#v (%T), want a JSON array", decoded[string(semconv.GenAIResponseFinishReasonsKey)], decoded[string(semconv.GenAIResponseFinishReasonsKey)])
+	}
+	if len(reasons) != 1 || reasons[0] != "stop" {
+		t.Errorf("finish_reasons = %#v, want [\"stop\"]", reasons)
+	}
+	if got := decoded["score"]; got != 0.5 {
+		t.Errorf("score = %#v (%T), want 0.5", got, got)
+	}
+	if got := decoded["cached"]; got != true {
+		t.Errorf("cached = %#v (%T), want true", got, got)
+	}
+	if got := decoded[string(semconv.GenAIOperationNameKey)]; got != "generate_content" {
+		t.Errorf("operation name = %#v, want the string", got)
+	}
+	// An empty slice must stay an array rather than becoming null.
+	if _, ok := decoded["empty"].([]any); !ok {
+		t.Errorf("empty = %#v (%T), want a JSON array", decoded["empty"], decoded["empty"])
 	}
 }
