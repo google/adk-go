@@ -49,17 +49,23 @@ func GenerateFunctionCallID(ctx context.Context) string {
 	return afFunctionCallIDPrefix + platform.NewUUID(ctx)
 }
 
+// HasClientFunctionCallID reports whether id was minted by
+// PopulateClientFunctionCallID.
+func HasClientFunctionCallID(id string) bool {
+	return strings.HasPrefix(id, afFunctionCallIDPrefix)
+}
+
 // RemoveClientFunctionCallID removes the function call ID field that was set
 // by populateClientFunctionCallID. This is necessary when FunctionCall or
 // FunctionResponse are sent back to the model.
 func RemoveClientFunctionCallID(c *genai.Content) {
 	for _, fn := range FunctionCalls(c) {
-		if strings.HasPrefix(fn.ID, afFunctionCallIDPrefix) {
+		if HasClientFunctionCallID(fn.ID) {
 			fn.ID = ""
 		}
 	}
 	for _, fn := range FunctionResponses(c) {
-		if strings.HasPrefix(fn.ID, afFunctionCallIDPrefix) {
+		if HasClientFunctionCallID(fn.ID) {
 			fn.ID = ""
 		}
 	}

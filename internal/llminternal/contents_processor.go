@@ -215,16 +215,6 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		if content == nil {
 			continue
 		}
-
-		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
-		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
-			return p == nil || isZeroPart(*p)
-		})
-		if len(content.Parts) == 0 {
-			continue
-		}
-
-		utils.RemoveClientFunctionCallID(content)
 		contents = append(contents, content)
 	}
 
@@ -1111,47 +1101,83 @@ func cloneEvent(e *session.Event) *session.Event {
 	return newEvent
 }
 
-// copyContentForRequest returns a copy of c that the request pipeline may
-// edit without touching the stored event: the parts slice, each part, and the
-// function call and response records whose IDs RemoveClientFunctionCallID
-// rewrites. Leaf data a later stage only reads, such as inline bytes and
-// call arguments, is shared.
-//
-// Not the reflection-based clone: that one copies a byte slice one element at
-// a time, so an inline image in the history cost about 80 ms and a million
-// allocations per megabyte on every model call.
+// copyContentForRequest returns c ready for the request pipeline without
+// touching the stored event: empty parts dropped, client-generated function
+// call and response IDs cleared on copied records, and non-empty DisplayName
+// headers copied so removeDisplayNameIfExists can clear them in place. When no
+// part needs any of those edits, c and its parts are returned as is.
 func copyContentForRequest(c *genai.Content) *genai.Content {
-	if c == nil {
+	if c == nil || len(c.Parts) == 0 {
 		return nil
 	}
-	out := *c
-	out.Parts = make([]*genai.Part, len(c.Parts))
+	firstCopy := -1
 	for i, p := range c.Parts {
-		if p == nil {
+		if partNeedsRequestCopy(p) {
+			firstCopy = i
+			break
+		}
+	}
+	if firstCopy == -1 {
+		return c
+	}
+	parts := make([]*genai.Part, firstCopy, len(c.Parts))
+	copy(parts, c.Parts[:firstCopy])
+	for _, p := range c.Parts[firstCopy:] {
+		if p == nil || isZeroPart(*p) {
+			continue
+		}
+		if !partNeedsRequestCopy(p) {
+			parts = append(parts, p)
 			continue
 		}
 		pc := *p
 		// removeDisplayNameIfExists clears DisplayName on these two in place,
 		// so they get their own headers; the bytes behind them stay shared.
-		if p.InlineData != nil {
+		if p.InlineData != nil && p.InlineData.DisplayName != "" {
 			blob := *p.InlineData
 			pc.InlineData = &blob
 		}
-		if p.FileData != nil {
+		if p.FileData != nil && p.FileData.DisplayName != "" {
 			fd := *p.FileData
 			pc.FileData = &fd
 		}
-		if p.FunctionCall != nil {
+		if p.FunctionCall != nil && utils.HasClientFunctionCallID(p.FunctionCall.ID) {
 			fc := *p.FunctionCall
+			fc.ID = ""
 			pc.FunctionCall = &fc
 		}
-		if p.FunctionResponse != nil {
+		if p.FunctionResponse != nil && utils.HasClientFunctionCallID(p.FunctionResponse.ID) {
 			fr := *p.FunctionResponse
+			fr.ID = ""
 			pc.FunctionResponse = &fr
 		}
-		out.Parts[i] = &pc
+		parts = append(parts, &pc)
 	}
+	if len(parts) == 0 {
+		return nil
+	}
+	out := *c
+	out.Parts = parts
 	return &out
+}
+
+func partNeedsRequestCopy(p *genai.Part) bool {
+	if p == nil || isZeroPart(*p) {
+		return true
+	}
+	if p.InlineData != nil && p.InlineData.DisplayName != "" {
+		return true
+	}
+	if p.FileData != nil && p.FileData.DisplayName != "" {
+		return true
+	}
+	if p.FunctionCall != nil && utils.HasClientFunctionCallID(p.FunctionCall.ID) {
+		return true
+	}
+	if p.FunctionResponse != nil && utils.HasClientFunctionCallID(p.FunctionResponse.ID) {
+		return true
+	}
+	return false
 }
 
 // isZeroPart reports whether p carries nothing. A field-by-field test rather

@@ -45,10 +45,10 @@ func removeDisplayNameIfExists(ctx agent.InvocationContext, req *model.LLMReques
 				continue
 			}
 			for _, part := range content.Parts {
-				if part.InlineData != nil {
+				if part.InlineData != nil && part.InlineData.DisplayName != "" {
 					part.InlineData.DisplayName = ""
 				}
-				if part.FileData != nil {
+				if part.FileData != nil && part.FileData.DisplayName != "" {
 					part.FileData.DisplayName = ""
 				}
 			}
