@@ -16,7 +16,6 @@ package telemetry
 
 import (
 	"context"
-	"reflect"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
@@ -38,7 +37,6 @@ type operationDetails struct {
 	// conversation for it buys nothing.
 	logger       log.Logger
 	eventEnabled bool
-	request      []contentAttr
 	eventRequest []attribute.KeyValue
 }
 
@@ -57,9 +55,12 @@ func newOperationDetails(ctx context.Context, span trace.Span) operationDetails 
 }
 
 // noteLLMRequest records the messages of req, where content capture asks for
-// them. A model may edit the request it is given, so call it again once the
-// call has ended: the span and the event then describe the request as the
-// model left it. Messages that did not change are not encoded again.
+// them. Called once the call has ended, not before it: a model may edit the
+// request it is given (gemini appends a turn-alternation placeholder), and the
+// span and the event describe the request as the model left it. Nothing reads
+// the span's attributes before it ends, so recording them late loses nothing,
+// and converting a conversation costs milliseconds, so it is done once. What
+// the request held before an edit is not recorded.
 func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 	if useLegacySchema() {
 		return
@@ -72,13 +73,7 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 		return
 	}
 	content := requestContent(req)
-	if reflect.DeepEqual(content, d.request) {
-		return
-	}
-	d.request = content
 	if onSpan {
-		// ponytail: span attributes cannot be removed, so an edit that drops a
-		// message key, or grows it past the size limit, leaves the earlier value.
 		d.span.SetAttributes(spanContentAttributes(content)...)
 	}
 	if onEvent {

@@ -15,42 +15,64 @@
 package telemetry
 
 import (
+	"context"
+	"iter"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 )
 
-func TestOperationDetailsNoteLLMRequest(t *testing.T) {
+// A model may edit the request it is given, as gemini does when it appends a
+// turn-alternation placeholder: the span and the event describe the request as
+// the model left it.
+func TestInstrumentGenerateContent_RecordsRequestAsTheModelLeftIt(t *testing.T) {
 	setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: "otel_semconv_1_44", captureMessageContentEnvVar: "SPAN_AND_EVENT"})
-	setupTestTracer(t)
-	OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(&inMemoryExporter{}))))
-	_, span := tracer().Start(t.Context(), "generate_content")
-	defer span.End()
+	spans := setupTestTracer(t)
+	logs := &inMemoryExporter{}
+	OverrideLoggerForTesting(t, sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(logs))))
 	req := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("original", genai.RoleUser)}}
-	d := newOperationDetails(t.Context(), span)
-	d.noteLLMRequest(req)
-	first := d.eventRequest
-
-	d.noteLLMRequest(req)
-	if &d.eventRequest[0] != &first[0] {
-		t.Error("noting an unchanged request encoded its messages again")
+	call := func(context.Context) iter.Seq2[*model.LLMResponse, error] {
+		return func(yield func(*model.LLMResponse, error) bool) {
+			req.Contents = append(req.Contents, genai.NewContentFromText("appended by the model", genai.RoleUser))
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel), FinishReason: genai.FinishReasonStop}, nil)
+		}
+	}
+	params := GenerateContentParams{ModelName: "m", Request: req}
+	for range InstrumentGenerateContent(t.Context(), params, func(r *model.LLMResponse) (*model.LLMResponse, string) { return r, "" }, call) {
 	}
 
-	req.Contents[0].Parts[0].Text = "edited by the model"
-	d.noteLLMRequest(req)
-	want := []goKeyValue{{Key: "gen_ai.input.messages", Value: []any{map[string]any{
-		"role":  "user",
-		"parts": []any{map[string]any{"type": "text", "content": "edited by the model"}},
-	}}}}
-	if diff := cmp.Diff(want, toGoKeyValues(d.eventRequest)); diff != "" {
-		t.Errorf("event messages after an in-place edit (-want +got):\n%s", diff)
+	message := func(text string) any {
+		return map[string]any{"role": "user", "parts": []any{map[string]any{"type": "text", "content": text}}}
 	}
-	if diff := cmp.Diff(want, toGoKeyValues(span.(sdktrace.ReadOnlySpan).Attributes())); diff != "" {
-		t.Errorf("span messages after an in-place edit (-want +got):\n%s", diff)
+	want := []goKeyValue{{Key: string(genAIInputMessages), Value: []any{message("original"), message("appended by the model")}}}
+	only := func(kvs []attribute.KeyValue) []goKeyValue {
+		var out []goKeyValue
+		for _, kv := range toGoKeyValues(kvs) {
+			if kv.Key == string(genAIInputMessages) {
+				out = append(out, kv)
+			}
+		}
+		return out
+	}
+	if got := spans.GetSpans(); len(got) != 1 {
+		t.Fatalf("got %d spans, want 1", len(got))
+	} else if diff := cmp.Diff(want, only(got[0].Attributes)); diff != "" {
+		t.Errorf("span messages (-want +got):\n%s", diff)
+	}
+	if len(logs.records) != 1 {
+		t.Fatalf("got %d log records, want 1", len(logs.records))
+	}
+	var recorded []attribute.KeyValue
+	logs.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+		recorded = append(recorded, kv)
+		return true
+	})
+	if diff := cmp.Diff(want, only(recorded)); diff != "" {
+		t.Errorf("event messages (-want +got):\n%s", diff)
 	}
 }

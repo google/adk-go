@@ -58,7 +58,6 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 		ctx, span := startGenerateContentSpan(ctx, params)
 		logRequest(ctx, params.Request, params.Backend)
 		details := newOperationDetails(ctx, span)
-		details.noteLLMRequest(params.Request)
 
 		var result generateContentResult
 		ended := false
