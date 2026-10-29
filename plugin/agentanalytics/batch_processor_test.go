@@ -4475,7 +4475,8 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.GCSMaxPendingUploadBytes = 64
-	cfg.Logger = &recordingLogger{}
+	logger := &recordingLogger{}
+	cfg.Logger = logger
 
 	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
@@ -4518,6 +4519,19 @@ func TestBatchProcessor_BackgroundFlushRetriesDeferredBatch(t *testing.T) {
 	}
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after flushRunEnd = %d, want 64", got)
+	}
+	// The failure of the deferred upload is logged once, as pending a retry,
+	// and not as final.
+	retryLines, plainLines := 0, 0
+	for _, line := range uploadFailureLines(logger) {
+		if strings.Contains(line, "pending retry on next flush") {
+			retryLines++
+		} else {
+			plainLines++
+		}
+	}
+	if retryLines != 1 || plainLines != 0 {
+		t.Errorf("upload failure retry lines = %d, plain lines = %d, want 1 and 0:\n%s", retryLines, plainLines, logger)
 	}
 
 	// Restore healthy storage and fast BigQuery writes.
@@ -4607,7 +4621,7 @@ func TestBatchProcessor_FlushRunEndDeferredBatchRetriesCutShortUploads(t *testin
 		},
 		{
 			// The second batch starts with about 1400ms of the 2s budget left,
-			// less than three quarters of it, so its uploads get about 700ms.
+			// so its uploads get about 700ms.
 			// Its second upload starts after 280ms of them, leaving ~420ms
 			// against the 525ms three-quarters stall threshold.
 			name:            "the first batch with uploads",
