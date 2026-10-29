@@ -150,6 +150,15 @@ var (
 	// {APIKey:...}.
 	textKeyValTokenRe   = regexp.MustCompile(`(?i)(?:\b|_)(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	textKeyValTokenAtRe = regexp.MustCompile(`(?i)^(` + textKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	// textKeyNameAtRe matches the start of textKeyValTokenAtRe, up to and
+	// including the delimiter, so that the name of a key can be read without
+	// reading its value, which may be long (see allowedKeyAt).
+	textKeyNameAtRe = regexp.MustCompile(`(?i)^(` + textKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])`)
+	// textValueStartRe matches the start of the value that
+	// textKeyValTokenAtRe reads after the delimiter: a quoted value starts
+	// with a byte that a bare value may start with, so whitespace and one
+	// such byte are enough.
+	textValueStartRe = regexp.MustCompile(`^[\s[:cntrl:]]*[^\s,;&]`)
 	// nestedKeyNameRe matches a value that is itself a fixed sensitive key
 	// name (see nestsSensitiveKey): the name, possibly after a quote,
 	// which may be escaped, and a "user:" or "app:" state prefix, as
@@ -1815,14 +1824,65 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, in
 // object or array is extended as in sensitiveValueEnd, and a bare value ends
 // before the "}" and "]" at its end that close a bracket opened before the
 // key, and the punctuation after them (see trimEnclosingClosers). open is the
-// number of brackets opened before the key.
+// number of brackets opened before the key. A bare value that holds a
+// delimiter followed by a quoted value, an object or an array that runs on
+// past it, as in a:b="c d" or a={"b": "c", "d": "e"}, is extended to the end
+// of that value (see openedValueEnd), so that no part of it is left after
+// the redacted value without a key.
 func textValueEnd(s string, start, end, open int) int {
 	if _, quote := unquoteValue(s[start:end]); quote != "" {
 		return end
 	}
 	// rest is where the text after a JSON object or array value starts.
 	rest := sensitiveValueEnd(s, start, start)
+	if rest < end {
+		if opened := openedValueEnd(s, rest, end, false); opened > end {
+			return opened
+		}
+	}
 	return rest + len(trimEnclosingClosers(s[rest:max(end, rest)], open))
+}
+
+// openedValueEnd returns the end of the value that a delimiter, ":" or "=",
+// in the bare value s[start:end] opens, if it runs on past end: a quoted
+// value (see quotedValueRegex), or a JSON object or array, which runs on to
+// the end of s if it is not closed (see sensitiveValueEnd). Otherwise it
+// returns end. A value opened and closed inside s[start:end] is skipped, so
+// that the text is read once, and the reading stops at a quote that does not
+// start a quoted value. Unless trailingQuoteOpens is set, a quote that ends
+// the bare value, so that what it quotes starts with the whitespace, "," or
+// ";" that ended the bare value, opens a value only if the quoted value ends
+// where a value may end (see quotedValueEnds): otherwise it more likely
+// closes a string that the bare value is in and opens the next, as the
+// quotes around ", want " do in the text got "password=abc-token=", want "x".
+func openedValueEnd(s string, start, end int, trailingQuoteOpens bool) int {
+	for i := start; i+1 < end; i++ {
+		if s[i] != ':' && s[i] != '=' {
+			continue
+		}
+		at := i + 1
+		var e int
+		switch c := s[at]; {
+		case c == '{' || c == '[':
+			e = sensitiveValueEnd(s, at, at)
+		case c == '"' || c == '\'' || c == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\''):
+			q := quotedValueRe.FindString(s[at:])
+			if q == "" {
+				return end
+			}
+			if _, quote := unquoteValue(q); !trailingQuoteOpens && at+len(quote) >= end && !quotedValueEnds(s[at:], len(q)) {
+				return end
+			}
+			e = at + len(q)
+		default:
+			continue
+		}
+		if e > end {
+			return e
+		}
+		i = e - 1
+	}
+	return end
 }
 
 // startsLine reports whether the value at s[start:] starts a line, that is,
@@ -1981,23 +2041,25 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 		name += n
 		keyText = keyText[min(n, len(keyText)):]
 	}
-	loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[name:])
-	if loc == nil || !textKeyAllowed(s[name+loc[2]:name+loc[3]]) {
+	if !allowedKeyAt(s, name) {
 		// A name with a dot before its credential name, as in x.y_PASSWORD,
 		// is read from after the dot: the name is the part that
-		// textKeyValTokenAtRe reads.
+		// textKeyValTokenAtRe reads. Only the name after each dot is read
+		// until one is allowed (see allowedKeyAt), so that a run of names
+		// that are not, as in x.next_page_token:x.next_page_token:..., is
+		// read once rather than to its end from each dot.
 		found := false
-		for d := strings.IndexByte(keyText, '.'); d >= 0 && !found; {
-			if l := textKeyValTokenAtRe.FindStringSubmatchIndex(s[name+d+1:]); l != nil &&
-				textKeyAllowed(s[name+d+1+l[2]:name+d+1+l[3]]) {
+		for d := strings.IndexByte(keyText, '.'); d >= 0; {
+			if allowedKeyAt(s, name+d+1) {
 				name += d + 1
 				found = true
-			}
-			if next := strings.IndexByte(keyText[d+1:], '.'); next >= 0 {
-				d += 1 + next
-			} else {
 				break
 			}
+			next := strings.IndexByte(keyText[d+1:], '.')
+			if next < 0 {
+				break
+			}
+			d += 1 + next
 		}
 		if !found {
 			return notNestedKey, 0
@@ -2007,6 +2069,18 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 		return nestedKey, name
 	}
 	return valueEndingInKeyName, name
+}
+
+// allowedKeyAt reports whether a pair whose key textKeyAllowed accepts starts
+// at s[i:], as textKeyValTokenAtRe matches it, reading only the name of the
+// key, the delimiter and the start of the value, which may run on to the end
+// of s. textKeyValTokenAtRe matches where textKeyNameAtRe does and a value
+// starts after the delimiter, and with the same name: none of the other names
+// that it may read at s[i:] ends before a delimiter, since a name holds no
+// delimiter but the colon of a "temp:" prefix, and no name ends in "temp".
+func allowedKeyAt(s string, i int) bool {
+	loc := textKeyNameAtRe.FindStringSubmatchIndex(s[i:])
+	return loc != nil && textKeyAllowed(s[i+loc[2]:i+loc[3]]) && textValueStartRe.MatchString(s[i+loc[1]:])
 }
 
 // cutStatePrefix returns name without a "user:" or "app:" state prefix, as
@@ -2098,16 +2172,18 @@ func nestedPairEnd(s string, pair, open int) int {
 
 // oversizedValueEnd returns the end of the value of the last key of a word
 // longer than maxNestedKeyLen that holds a run of keys, s[start:end]: the
-// quoted value that the word opens, or that follows the word and a delimiter
-// (adjacent to it or after whitespace), which is longer than the word when it
-// holds whitespace.
+// quoted value, object or array that a delimiter in the word opens and that
+// runs on past it (see openedValueEnd), even if a quote ends the word, or
+// else the value that follows the word and a delimiter (adjacent to it or
+// after whitespace): a quoted value, an object or an array, which is read to
+// its closing bracket or to the end of s as in sensitiveValueEnd, or a bare
+// value. Without a delimiter after it, the word is read as a bare value (see
+// textValueEnd).
 func oversizedValueEnd(s string, start, end, open int) int {
-	v := s[start:end]
-	if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') {
-		if qv := quotedValueRe.FindString(s[start+q:]); len(qv) > end-start-q {
-			return start + q + len(qv)
-		}
+	if opened := openedValueEnd(s, start, end, true); opened > end {
+		return opened
 	}
+	v := s[start:end]
 	at := end
 	if !strings.HasSuffix(v, ":") && !strings.HasSuffix(v, "=") {
 		rest := strings.TrimLeft(s[end:], delimSpace)
@@ -2118,6 +2194,9 @@ func oversizedValueEnd(s string, start, end, open int) int {
 	}
 	rest := strings.TrimLeft(s[at:], delimSpace)
 	at = len(s) - len(rest)
+	if rest != "" && (rest[0] == '{' || rest[0] == '[') {
+		return sensitiveValueEnd(s, at, at)
+	}
 	if qv := quotedValueRe.FindString(rest); qv != "" {
 		return at + len(qv)
 	}

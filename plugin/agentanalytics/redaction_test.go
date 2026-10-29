@@ -481,6 +481,25 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"oversized dotted child after another", "credentials:\n a_PASSWORD: " + longKey + ": " + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized dotted key on its own", dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized children with state prefixes", "credentials:\n user:" + longKey + ": app:" + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a spaced = and an object", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = {"value": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then a spaced : and an object", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` : {"value": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then a delimiter and an object", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: {"value": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then an object of two fields", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `={"value": "x", "other": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then an object without spaces", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `={"value":"x","other":"SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then a nested object", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = {"a": {"b": "x"}, "c": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then a spaced = and an array", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = ["x", "SYNTHETIC_SECRET"]`},
+		{"oversized children in one word, then an object that is not closed", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = {"value": "SYNTHETIC_SECRET"`},
+		{"oversized children, then a delimiter and an object", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + `: {"value": "SYNTHETIC_SECRET"}`},
+		{"oversized key, then a spaced = and an object", longKey + ` = {"value": "x", "other": "SYNTHETIC_SECRET"}`},
+		{"short children in one word, then a quoted multiword value", "credentials:\n a_PASSWORD: x_TOKEN:y_PASSWORD=\"prefix SYNTHETIC_SECRET suffix\""},
+		{"short child in one word, then an object of two fields", "credentials:\n a_PASSWORD: x_PASSWORD:{\"value\":\"x\", \"other\":\"SYNTHETIC_SECRET\"}"},
+		{"bare value that opens a quoted multiword value", `password=a="prefix SYNTHETIC_SECRET suffix"`},
+		{"bare value that opens an object", `token=a:{"value": "x", "other": "SYNTHETIC_SECRET"}`},
+		{"bare value that opens an escaped quoted multiword value", `password=a=\"prefix SYNTHETIC_SECRET suffix\"`},
+		{"dotted names that are not credentials, then an oversized key", "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", 3) + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"dotted names that are not credentials, then a dotted key", "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", 3) + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"dotted name that is not a credential, then a short key", "credentials:\n a_PASSWORD: x.next_page_token:x_PASSWORD=\"prefix SYNTHETIC_SECRET suffix\""},
+		{"name that is not a credential, then an oversized key", "a_PASSWORD: next_page_token:" + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -511,6 +530,78 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 				check("SmartTruncate "+path, string(b))
 			}
 		})
+	}
+}
+
+// TestScrubTextPatterns_OpenedValueEnds checks where the redaction of a value
+// that opens a quoted value, an object or an array after a delimiter ends: at
+// the closing quote or bracket, not before it, which would leave the rest of
+// the value without a key, and not after it, which would drop the text that
+// follows. A value that is opened and closed in the bare value is redacted
+// with it, and an object that is not closed is redacted to the end.
+func TestScrubTextPatterns_OpenedValueEnds(t *testing.T) {
+	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	run := longKey + ":" + longKey + ":" + longKey
+	tests := []struct {
+		name, in, want string
+	}{
+		{"quoted value", `password=a="b c" kept`, `password=[REDACTED] kept`},
+		{"object", `token=a:{"b": "c", "d": "e"}, kept=1`, `token=[REDACTED], kept=1`},
+		{"array", `token=a=["b", "c"] kept`, `token=[REDACTED] kept`},
+		{"quoted value closed in the bare value", `password=a:"b",kept=1`, `password=[REDACTED],kept=1`},
+		{"object closed in the bare value", `password=a:{"b":"c"},kept=1`, `password=[REDACTED],kept=1`},
+		{"oversized run, then a spaced = and an object", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c"} kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
+		{"oversized run, then an object in the word", "credentials:\n a_PASSWORD: " + run + `={"b": "c"} kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
+		{"oversized run, then an array after a delimiter", "credentials:\n a_PASSWORD: " + run + `: ["b", "c"] kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
+		{"oversized run, then an object that is not closed", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c" kept`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		// A quote at the end of an oversized run whose last key is followed
+		// by a spaced delimiter opens a value, even when a letter follows
+		// the quoted value; read from the delimiter instead, the value
+		// would end at its first space.
+		{"oversized run, then a quote that ends the word", "credentials:\n a_PASSWORD: " + run + `=" = b c"x`, "credentials:\n a_PASSWORD:[REDACTED]x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scrubTextPatterns(tt.in); got != tt.want {
+				t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe checks that allowedKeyAt,
+// which reads only the name of a key, the delimiter and the start of the
+// value, tells what textKeyValTokenAtRe and textKeyAllowed tell from the
+// whole pair, for names, quotes, whitespace, delimiters and value starts of
+// every kind that they read.
+func TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe(t *testing.T) {
+	names := []string{"token", "TOKEN", "next_page_token", "x_PASSWORD", "dbPassword", "temp:a", "temp:a:b", "user:token", "oauth2.code", "oauth2.x.code", "xtoken", "temptoken", "a.b", "label"}
+	quotes := []string{"", `"`, `\"`, `'`}
+	spaces := []string{"", " ", "\t", "\n", "\x01", " \x0b "}
+	delims := []string{"=", ":", ""}
+	values := []string{"v", "", " ", ",", ";", "&x", " ,x", `"a b"`, "'a", "\x01", "\t\x02y"}
+	allowed := 0
+	for _, name := range names {
+		for _, q := range quotes {
+			for _, sp := range spaces {
+				for _, d := range delims {
+					for _, v := range values {
+						s := name + q + sp + d + v
+						loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s)
+						want := loc != nil && textKeyAllowed(s[loc[2]:loc[3]])
+						if got := allowedKeyAt("x "+s, 2); got != want {
+							t.Errorf("allowedKeyAt(%q) = %v, want %v", s, got, want)
+						}
+						if want {
+							allowed++
+						}
+					}
+				}
+			}
+		}
+	}
+	if allowed == 0 {
+		t.Error("no pair was allowed, so nothing was compared")
 	}
 }
 
@@ -632,6 +723,40 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"repeated nested camel case envelopes", func(n int) string { return strings.Repeat("credentials:\n user:dbPassword: s\n", n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
+			// Each dot starts a name that is not a credential and whose
+			// value runs to the end of the text.
+			"oversized run of dotted names that are not credentials", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"oversized run of dotted names that are not credentials through an error", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 1600,
+		},
+		{
+			"oversized run of dotted names, then a dotted key", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", n) + "x.y_" + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"repeated values that open quoted values", func(n int) string { return strings.Repeat(`password=a="b c" `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated values that open objects", func(n int) string { return strings.Repeat(`token=a:{"b": "c"} `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated values with delimiters before an unclosed quote", func(n int) string {
+				return `password=a:'b ` + strings.Repeat(`token=a:b:c:d `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
 	}
 	for _, tt := range tests {

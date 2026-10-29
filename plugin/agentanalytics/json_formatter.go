@@ -739,6 +739,12 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 			}
 			return nil, false
 		}
+		// A value of a defined interface type is read by its type name
+		// before the value that it holds, which has a name of its own, as
+		// for a pointer below.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
+		}
 		v = v.Elem()
 	}
 	if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
@@ -750,6 +756,13 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	if v.Kind() == reflect.Pointer {
 		if depth >= maxSanitizeDepth {
 			return maxDepthPlaceholder, true
+		}
+		// A defined pointer type, such as type APIKey *string, may be the
+		// only part of a value that is named for a credential: what it
+		// points to, here a plain string, is not. Its name is read before
+		// the pointer is followed, which loses it.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
 		}
 		key := visitKey{ptr: v.Pointer(), typ: v.Type()}
 		if !s.enter(key) {
@@ -825,28 +838,45 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 // is named for a credential, such as a Token or a type ending in Password,
 // and may write it: whatever its kind, a value of such a type may be a
 // credential in a form that nothing else would tell, such as the digits of an
-// int or the bytes of a slice. A struct is shown by its exported fields, which
-// are redacted by name, so it is redacted whole only if a method (MarshalJSON
-// or MarshalText) writes it, whatever its value: what a method writes is not
-// limited by the value it is called on. A map, slice or array of such a type
-// is redacted whole too. These values are not read, because a type may guard
+// int or the bytes of a slice. A value whose type has a method that writes
+// it (MarshalJSON or MarshalText), of any kind, is redacted whole, whatever
+// its value: what a method writes is not limited by the value it is called
+// on, and a zero int may write a credential as well as any other. A struct
+// without such a method is shown by its exported fields, which are redacted
+// by name. A map, slice, array, pointer or interface of such a type is
+// redacted whole too. These values are not read, because a type may guard
 // its fields in a way that nothing here can see (a mutex, an atomic value, a
-// channel, a lock held elsewhere). A value of a scalar kind is redacted when
-// it is not zero, since a zero one holds none.
+// channel, a lock held elsewhere). A value of a scalar kind without such a
+// method is redacted when it is not zero, since a zero one holds none; it is
+// read for that only then, as encoding/json would read it, while the method
+// of a scalar that has one may read it under a lock or atomically.
 func hasSensitiveTypeName(v reflect.Value) bool {
 	name := v.Type().Name()
 	if name == "" || !isSensitiveKey(name) {
 		return false
 	}
+	if _, isJSON := implementer(v, jsonMarshalerType); isJSON {
+		return true
+	}
+	if _, isText := implementer(v, textMarshalerType); isText {
+		return true
+	}
 	switch v.Kind() {
 	case reflect.Struct:
-		_, isJSON := implementer(v, jsonMarshalerType)
-		_, isText := implementer(v, textMarshalerType)
-		return isJSON || isText
-	case reflect.Map, reflect.Slice, reflect.Array:
+		return false
+	case reflect.Map, reflect.Slice, reflect.Array, reflect.Pointer, reflect.Interface:
 		return true
 	}
 	return !v.IsZero()
+}
+
+// redacted stands in for a value that is redacted whole, as one node of the
+// budget.
+func (s *sanitizer) redacted() (any, bool) {
+	if !s.budget.take() {
+		return sanitizeBudgetPlaceholder, true
+	}
+	return redactedValue, true
 }
 
 func (s *sanitizer) enter(key visitKey) bool {

@@ -1872,9 +1872,14 @@ func TestRedactErrorMessage(t *testing.T) {
 			want: `got "password=[REDACTED], want "abc"`,
 		},
 		{
-			name: "name that is not a key name glued to a quoted value with spaces is redacted",
+			name: "name that is not a key name glued to a quoted value with spaces is redacted with the whole quoted value",
 			msg:  `credentials: user="SECRET123 token=SECRET456"`,
-			want: `credentials:[REDACTED] token=[REDACTED]`,
+			want: `credentials:[REDACTED]`,
+		},
+		{
+			name: "name that is not a key name glued to a quoted value of several words is redacted with all of them",
+			msg:  `credentials: user="SECRET123 SECRET456" more`,
+			want: `credentials:[REDACTED] more`,
 		},
 		{
 			name: "key name glued to a quoted value with spaces by a character other than a delimiter is redacted",
@@ -2747,7 +2752,8 @@ func TestSanitizeRawText(t *testing.T) {
 			{`credentials: token=SECRET123`, `credentials:[REDACTED]`},
 			{`credentials: token="SECRET123"`, `credentials:[REDACTED]`},
 			{`got "password=SECRETP-token=", want "abc"`, `got "password=[REDACTED], want "abc"`},
-			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED] token=[REDACTED]`},
+			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED]`},
+			{`credentials: user="SECRET123 SECRET456" more`, `credentials:[REDACTED] more`},
 			{`credentials: token("SECRET123 token=SECRET456")`, `credentials:[REDACTED] token=[REDACTED]`},
 			{`password="SECRETQ-token" :`, `password="[REDACTED]" :`},
 			{"password=SECRETQ-token :", "password=[REDACTED] :"},
@@ -5010,6 +5016,26 @@ type testEmptyAPIToken struct{}
 
 func (testEmptyAPIToken) MarshalJSON() ([]byte, error) { return []byte(`"empty"`), nil }
 
+// testZeroScalarToken is a scalar that writes a credential whatever its
+// value, zero included.
+type testZeroScalarToken int
+
+func (testZeroScalarToken) MarshalJSON() ([]byte, error) { return []byte(`"SYNTHETIC_SECRET"`), nil }
+
+// testZeroTextPassword is a string that writes a credential whatever its
+// value, the empty string included.
+type testZeroTextPassword string
+
+func (testZeroTextPassword) MarshalText() ([]byte, error) { return []byte("SYNTHETIC_SECRET"), nil }
+
+// testAtomicScalarToken is a scalar that is read and written atomically; its
+// method reads it so.
+type testAtomicScalarToken uint64
+
+func (v *testAtomicScalarToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(atomic.LoadUint64((*uint64)(v)), 10)), nil
+}
+
 func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET"
 	for _, tt := range []struct {
@@ -5031,6 +5057,14 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 		{"zero scalar", testKimiToken(0), `0`},
 		{"nil slice", testKimiPassword(nil), `"[REDACTED]"`},
 		{"map", testMapPassword{"k": "v"}, `"[REDACTED]"`},
+		{"zero scalar with MarshalJSON", testZeroScalarToken(0), `"[REDACTED]"`},
+		{"scalar with MarshalJSON", testZeroScalarToken(7), `"[REDACTED]"`},
+		{"zero scalar with MarshalJSON in a field", struct{ T testZeroScalarToken }{}, `{"T":"[REDACTED]"}`},
+		{"zero scalar with MarshalJSON in a map", map[string]testZeroScalarToken{"k": 0}, `{"k":"[REDACTED]"}`},
+		{"empty string with MarshalText", testZeroTextPassword(""), `"[REDACTED]"`},
+		{"empty string with MarshalText in a field", struct{ P testZeroTextPassword }{}, `{"P":"[REDACTED]"}`},
+		{"zero scalar with a pointer method", new(testAtomicScalarToken), `"[REDACTED]"`},
+		{"zero scalar with a pointer method in a field", &struct{ T testAtomicScalarToken }{}, `{"T":"[REDACTED]"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _, err := SmartTruncate(tt.in, 1000)
@@ -5039,6 +5073,136 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 			}
 		})
 	}
+}
+
+// TestSmartTruncate_DoesNotReadAtomicScalarsOfSensitiveTypes checks that a
+// credential-named scalar whose method reads it atomically is redacted
+// without being read while another goroutine writes it atomically: run with
+// -race. The zero value rows of
+// TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole check the
+// output without it.
+func TestSmartTruncate_DoesNotReadAtomicScalarsOfSensitiveTypes(t *testing.T) {
+	type holder struct{ T testAtomicScalarToken }
+	v := new(testAtomicScalarToken)
+	h := new(holder)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			atomic.AddUint64((*uint64)(v), 1)
+			atomic.AddUint64((*uint64)(&h.T), 1)
+		}
+	}()
+	for range 200 {
+		if got, _, err := SmartTruncate(v, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*testAtomicScalarToken) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != `{"T":"[REDACTED]"}` {
+			t.Fatalf(`SmartTruncate(holder) = (%s, %v), want {"T":"[REDACTED]"}`, got, err)
+		}
+	}
+}
+
+// testPointerPassword is a defined pointer type named for a credential, whose
+// target is a plain string.
+type testPointerPassword *string
+
+// testPointerLabel is a defined pointer type with a neutral name.
+type testPointerLabel *string
+
+// testAPIKey is a defined interface type named for a credential.
+type testAPIKey any
+
+// testLabelValue is a defined interface type with a neutral name.
+type testLabelValue any
+
+// testLinkToken and testLinkLabel are defined pointer types to a struct that
+// holds one of them, to build cycles.
+type (
+	testLinkToken *testTokenLink
+	testTokenLink struct{ Next testLinkToken }
+	testLinkLabel *testLabelLink
+	testLabelLink struct{ Next testLinkLabel }
+)
+
+func TestSmartTruncate_RedactsSensitivePointerAndInterfaceTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	s, label := secret, "kept"
+	ptr := testPointerPassword(&s)
+	tokenLink := &testTokenLink{}
+	tokenLink.Next = tokenLink
+	labelLink := &testLabelLink{}
+	labelLink.Next = labelLink
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"pointer", testPointerPassword(&s), `"[REDACTED]"`},
+		{"pointer in a field", struct{ P testPointerPassword }{&s}, `{"P":"[REDACTED]"}`},
+		{"pointer in a map", map[string]testPointerPassword{"p": &s}, `{"p":"[REDACTED]"}`},
+		{"pointer in a slice", []testPointerPassword{&s}, `["[REDACTED]"]`},
+		{"pointer to it", &ptr, `"[REDACTED]"`},
+		{"pointer in an interface in a map", map[string]any{"p": testPointerPassword(&s)}, `{"p":"[REDACTED]"}`},
+		{"nil pointer", testPointerPassword(nil), `null`},
+		{"nil pointer in a field", struct{ P testPointerPassword }{}, `{"P":null}`},
+		{"pointer in a cycle", tokenLink, `{"Next":"[REDACTED]"}`},
+		{"interface in a field", struct{ K testAPIKey }{secret}, `{"K":"[REDACTED]"}`},
+		{"interface in a map", map[string]testAPIKey{"k": secret}, `{"k":"[REDACTED]"}`},
+		{"interface in a slice", []testAPIKey{secret}, `["[REDACTED]"]`},
+		{"nil interface in a field", struct{ K testAPIKey }{}, `{"K":null}`},
+		{"pointer with a neutral name", testPointerLabel(&label), `"kept"`},
+		{"pointer with a neutral name in a field", struct{ P testPointerLabel }{&label}, `{"P":"kept"}`},
+		{"pointer with a neutral name in a cycle", labelLink, `{"Next":{"Next":"[CIRCULAR_REFERENCE]"}}`},
+		{"interface with a neutral name in a field", struct{ V testLabelValue }{label}, `{"V":"kept"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+
+	t.Run("redaction off follows the pointer and the interface", func(t *testing.T) {
+		for _, in := range []any{testPointerPassword(&s), struct{ K testAPIKey }{secret}} {
+			got, _, err := smartTruncate(in, 1000, false)
+			if err != nil || !strings.Contains(string(got), secret) {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v), want the value", in, got, err)
+			}
+		}
+	})
+
+	t.Run("each redacted pointer charges the budget", func(t *testing.T) {
+		items := make([]testPointerPassword, maxSanitizeNodes*2)
+		for i := range items {
+			items[i] = &s
+		}
+		got, truncated, err := SmartTruncate(items, 100)
+		if err != nil || !truncated {
+			t.Fatalf("SmartTruncate(%d pointers) = (truncated %v, %v), want truncated", len(items), truncated, err)
+		}
+		var parsed []any
+		if err := json.Unmarshal(got, &parsed); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if len(parsed) > maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
+			t.Errorf("SmartTruncate(%d pointers) wrote %d items ending in %v, want at most %d ending in %s", len(items), len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+		}
+		if bytes.Contains(got, []byte(secret)) {
+			t.Error("SmartTruncate(pointers) holds the secret")
+		}
+	})
 }
 
 // Types of a chain 49 deep that reaches testDeepS at depth 50, whose fields
