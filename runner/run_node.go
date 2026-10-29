@@ -137,8 +137,10 @@ func (r *Runner) runNode(
 		return
 	}
 
+	frs := utils.FunctionResponses(msg)
+
 	// UserContent is read by Workflow.Run as the workflow's seed input.
-	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg)
+	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, frs, cfg)
 	invocationCtx = ictx
 
 	// Append the user message to history (also runs the on_user_message
@@ -168,17 +170,21 @@ func (r *Runner) runNode(
 	// Resume (HITL continuation) vs Run (fresh): a resume is a turn whose
 	// function response answers a node waiting on an open interrupt. The
 	// paused state comes from session history, not a persisted blob.
-	state, err := wf.ReconstructRunState(storedSession, ictx.InvocationID())
-	if err != nil {
-		yield(nil, fmt.Errorf("failed to reconstruct workflow run state: %w", err))
-		return
+	if ictx.UserContent() != msg {
+		frs = utils.FunctionResponses(ictx.UserContent())
 	}
-
 	var events iter.Seq2[*session.Event, error]
-	responses := buildResumeResponses(msg, state, storedSession)
-	if len(responses) > 0 {
-		events = wf.Resume(ictx, state, responses)
-	} else {
+	if len(frs) > 0 {
+		state, err := wf.ReconstructRunState(storedSession, ictx.InvocationID())
+		if err != nil {
+			yield(nil, fmt.Errorf("failed to reconstruct workflow run state: %w", err))
+			return
+		}
+		if responses := buildResumeResponses(ictx.UserContent(), state, storedSession); len(responses) > 0 {
+			events = wf.Resume(ictx, state, responses)
+		}
+	}
+	if events == nil {
 		events = wf.Run(ictx)
 	}
 
@@ -261,6 +267,7 @@ func (r *Runner) newNodeInvocationContext(
 	storedSession session.Session,
 	agentToRun agent.Agent,
 	msg *genai.Content,
+	frs []*genai.FunctionResponse,
 	cfg agent.RunConfig,
 ) agent.Context {
 	ctx = parentmap.ToContext(ctx, r.parents)
@@ -297,7 +304,7 @@ func (r *Runner) newNodeInvocationContext(
 		Agent:        agentToRun,
 		UserContent:  msg,
 		RunConfig:    &cfg,
-		InvocationID: resolveInvocationID(storedSession, msg),
+		InvocationID: resolveInvocationIDFromFRs(storedSession, frs),
 	})
 	resCtx := agent.NewContext(ic)
 	return resCtx
@@ -314,7 +321,8 @@ func (r *Runner) newNodeInvocationContext(
 // waiting, but the human may answer the others; matching open history
 // calls lets each answer drive a resume until all are resolved.
 func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess session.Session) map[string]any {
-	if msg == nil {
+	frs := utils.FunctionResponses(msg)
+	if len(frs) == 0 {
 		return nil
 	}
 	pending := map[string]struct{}{}
@@ -331,7 +339,7 @@ func buildResumeResponses(msg *genai.Content, state *workflow.RunState, sess ses
 	}
 
 	var out map[string]any
-	for _, fr := range utils.FunctionResponses(msg) {
+	for _, fr := range frs {
 		if fr == nil || fr.ID == "" {
 			continue
 		}
@@ -424,7 +432,14 @@ func resolveInvocationID(sess session.Session, msg *genai.Content) string {
 	if sess == nil || msg == nil {
 		return ""
 	}
-	for _, fr := range utils.FunctionResponses(msg) {
+	return resolveInvocationIDFromFRs(sess, utils.FunctionResponses(msg))
+}
+
+func resolveInvocationIDFromFRs(sess session.Session, frs []*genai.FunctionResponse) string {
+	if sess == nil || len(frs) == 0 {
+		return ""
+	}
+	for _, fr := range frs {
 		if fr == nil || fr.ID == "" {
 			continue
 		}
