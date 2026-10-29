@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/schemacache"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -48,6 +49,7 @@ func NewStreaming[TArgs any](cfg Config, handler StreamingFunc[TArgs]) (tool.Too
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer input schema: %w", err)
 	}
+	schemacache.Remember(ischema.Schema())
 
 	var confirmWrapper func(TArgs) bool
 

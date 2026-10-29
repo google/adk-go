@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/schemacache"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -98,6 +99,8 @@ func New[TArgs, TResults any](cfg Config, handler Func[TArgs, TResults]) (tool.T
 	if err != nil {
 		return nil, fmt.Errorf("failed to infer output schema: %w", err)
 	}
+	schemacache.Remember(ischema.Schema())
+	schemacache.Remember(oschema.Schema())
 
 	var confirmWrapper func(TArgs) bool
 
