@@ -39,6 +39,13 @@ type runnableTool interface {
 	Run(ctx agent.Context, args any) (map[string]any, error)
 }
 
+// validatedRunner is implemented by a node whose Run validates its own input.
+// The scheduler, which validates before Run, calls runValidated instead so
+// the input is validated once per activation.
+type validatedRunner interface {
+	runValidated(ctx agent.Context, validatedInput any) iter.Seq2[*session.Event, error]
+}
+
 // newToolNodeWithSchemasTyped creates a new node wrapping a tool with explicitly provided schemas.
 // If a schema is nil, it will be inferred from the corresponding generic type Input or Output.
 func newToolNodeWithSchemasTyped[Input, Output any](name string, t tool.Tool, inputSchema, outputSchema *jsonschema.Schema, cfg NodeConfig) (*ToolNode, error) {
@@ -96,8 +103,10 @@ func NewNamedToolNode(name string, t tool.Tool, cfg NodeConfig) (*ToolNode, erro
 	return newToolNodeWithSchemasTyped[any, any](name, t, nil, nil, cfg)
 }
 
-func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
-	runnable := n.tool.(runnableTool)
+// validateToolInput coerces and validates a tool node's input. Run calls it
+// for callers that hand the node raw input; the scheduler validates before Run
+// and skips it through runValidated.
+func (n *ToolNode) validateToolInput(input any) (any, error) {
 	// Upstream nodes (like LLM Agents) frequently produce serialized JSON strings representing
 	// structured tool call arguments. Since ToolNodes expect structured key-value mappings (maps)
 	// to conform to their input validation schemas, receiving a raw JSON string would cause a crash.
@@ -114,7 +123,11 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("converting input for tool %q: %w", n.tool.Name(), err)
 	}
+	return toolInput, nil
+}
 
+func (n *ToolNode) runTool(toolCtx agent.Context, toolInput any) (any, error) {
+	runnable := n.tool.(runnableTool)
 	output, err := runnable.Run(toolCtx, toolInput)
 	if err != nil {
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
@@ -155,13 +168,26 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 	return defaultValidateOutput(out, schema)
 }
 
-// Run implements the Node interface and executes the tool.
+// Run implements the Node interface and executes the tool. It validates the
+// input itself, for callers that do not go through the scheduler.
 func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		toolInput, err := n.validateToolInput(input)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		n.runValidated(ctx, toolInput)(yield)
+	}
+}
+
+// runValidated executes the tool on input the scheduler has already validated.
+func (n *ToolNode) runValidated(ctx agent.Context, toolInput any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
 		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
 
-		toolOutput, err := n.runTool(toolCtx, input)
+		toolOutput, err := n.runTool(toolCtx, toolInput)
 		if err != nil {
 			yield(nil, err)
 			return

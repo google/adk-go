@@ -466,7 +466,15 @@ func runNode(
 	}
 	ctx, inventoryRecorder := withFailureInventory(ctx, n)
 
-	for ev, err := range n.Run(ctx, validated) {
+	// A node that validates inside Run, for callers that reach it without a
+	// scheduler, takes the validated input through runValidated instead so the
+	// work is not repeated.
+	run := n.Run
+	if vr, ok := n.(validatedRunner); ok {
+		run = vr.runValidated
+	}
+
+	for ev, err := range run(ctx, validated) {
 		if err != nil {
 			completion.err = err
 			completion.inventory = inventoryRecorder.snapshot()
