@@ -339,7 +339,9 @@ func (a *apiLauncher) SetupSubrouters(router *mux.Router, config *launcher.Confi
 		return fmt.Errorf("failed to create REST server: %w", err)
 	}
 
-	config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
+	if a.config.includeDebugAPI {
+		config.TelemetryOptions = append(config.TelemetryOptions, telemetry.WithSpanProcessors(restServer.SpanProcessor()), telemetry.WithLogRecordProcessors(restServer.LogProcessor()))
+	}
 
 	// Wrap it with CORS middleware, over the same origins the REST server was
 	// given.

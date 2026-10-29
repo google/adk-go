@@ -958,3 +958,35 @@ func TestSetupSubroutersDoesNotOverwriteCallerAllowedOrigins(t *testing.T) {
 		t.Errorf("caller backing array = %q, want %q", backing, want)
 	}
 }
+
+func TestSetupSubroutersTelemetryOptionsFollowIncludeDebugAPI(t *testing.T) {
+	agnt, err := agent.New(agent.Config{Name: "HelloWorldAgent"})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantOpts int
+	}{
+		{name: "default omits debug processors", args: nil, wantOpts: 0},
+		{name: "include_debug_api registers span and log processors", args: []string{"-include_debug_api"}, wantOpts: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			l := NewLauncher()
+			if _, err := l.Parse(tc.args); err != nil {
+				t.Fatalf("Parse(%v) error = %v", tc.args, err)
+			}
+			cfg := &launcher.Config{
+				AgentLoader:    agent.NewSingleLoader(agnt),
+				SessionService: session.InMemoryService(),
+			}
+			if err := l.SetupSubrouters(weblauncher.BuildBaseRouter(), cfg); err != nil {
+				t.Fatalf("SetupSubrouters() error = %v", err)
+			}
+			if got := len(cfg.TelemetryOptions); got != tc.wantOpts {
+				t.Errorf("len(TelemetryOptions) = %d, want %d", got, tc.wantOpts)
+			}
+		})
+	}
+}
