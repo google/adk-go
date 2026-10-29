@@ -89,7 +89,7 @@ func TestEvent(t *testing.T) {
 			"2",
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Errorf("convertSnake() failed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestEventLogProbs(t *testing.T) {
 			},
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Errorf("convertSnake() failed: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestByteSlice(t *testing.T) {
 			},
 		},
 	}
-	o, err := convertSnake("", "", event)
+	o, err := convertSnake("", event)
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestByteSliceOmitEmpty(t *testing.T) {
 	type A struct {
 		Sig []byte `json:"sig,omitempty"`
 	}
-	got, err := convertSnake("", "", A{})
+	got, err := convertSnake("", A{})
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRawMessage(t *testing.T) {
 		Default json.RawMessage `json:"default,omitempty"`
 	}
 	a := A{Default: json.RawMessage(`{"approved":false}`)}
-	got, err := convertSnake("", "", a)
+	got, err := convertSnake("", a)
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestRawMessageOmitEmpty(t *testing.T) {
 	type A struct {
 		Default json.RawMessage `json:"default,omitempty"`
 	}
-	got, err := convertSnake("", "", A{})
+	got, err := convertSnake("", A{})
 	if err != nil {
 		t.Fatalf("convertSnake() failed: %v", err)
 	}
@@ -259,9 +259,8 @@ func TestRawMessageOmitEmpty(t *testing.T) {
 	}
 }
 
-// TestEmitJSONSchemaSnakeCase drives public EmitJSON with a real session.Event
-// carrying a jsonschema.Schema, so a json.RawMessage field can no longer make
-// ConvertSnake fall back to its camelCase input unnoticed.
+// TestEmitJSONSchemaSnakeCase verifies that EmitJSON serializes a session.Event
+// carrying a jsonschema.Schema with snake_case keys.
 func TestEmitJSONSchemaSnakeCase(t *testing.T) {
 	event := session.Event{
 		ID: "1",
@@ -331,7 +330,7 @@ func TestEmbedded(t *testing.T) {
 		},
 		anotherString: "b",
 	}
-	got, err := convertSnake("", "", b)
+	got, err := convertSnake("", b)
 	if err != nil {
 		t.Errorf("convertSnake() failed: %v", err)
 	}
@@ -392,7 +391,7 @@ func TestOmitEmpty(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		got, err := convertSnake("", "", tc.a)
+		got, err := convertSnake("", tc.a)
 		if err != nil {
 			t.Errorf("convertSnake() failed: %v", err)
 		}
