@@ -268,7 +268,7 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 
 // RunAgent executes a non-streaming agent run for a given session and message.
 func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest models.RunAgentRequest) ([]*session.Event, error) {
-	err := c.validateSessionExists(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	sess, err := c.loadSession(ctx, runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
 		return nil, err
 	}
@@ -278,7 +278,7 @@ func (c *RuntimeAPIController) runAgent(ctx context.Context, runAgentRequest mod
 		return nil, err
 	}
 
-	var opts []runner.RunOption
+	opts := []runner.RunOption{runner.WithSession(sess)}
 	if runAgentRequest.StateDelta != nil {
 		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
 	}
@@ -329,9 +329,14 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		}
 	}
 
-	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
+	sess, err := c.loadSession(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
+		status := http.StatusInternalServerError
+		var se statusError
+		if errors.As(err, &se) {
+			status = se.Status()
+		}
+		http.Error(rw, "failed to find the session: "+err.Error(), status)
 		return
 	}
 
@@ -355,7 +360,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 		return
 	}
 
-	opts := []runner.RunOption{}
+	opts := []runner.RunOption{runner.WithSession(sess)}
 	if runAgentRequest.StateDelta != nil {
 		opts = append(opts, runner.WithStateDelta(*runAgentRequest.StateDelta))
 	}
@@ -421,20 +426,34 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 	return nil
 }
 
-func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
-	// Only existence is needed here. The runner loads the full history right
-	// after, so asking for it twice doubles the read on every turn, and on a
-	// database backend that read is the most expensive part of the request.
-	_, err := c.sessionService.Get(ctx, &session.GetRequest{
-		AppName:         appName,
-		UserID:          userID,
-		SessionID:       sessionID,
-		NumRecentEvents: 1,
+// loadSession is the one session read a turn pays. The session it returns
+// goes to the runner through runner.WithSession, so the runner does not read
+// it again. A session the store does not have is created when the controller
+// auto-creates sessions and is a 404 otherwise; any other failure is a 500.
+func (c *RuntimeAPIController) loadSession(ctx context.Context, appName, userID, sessionID string) (session.Session, error) {
+	resp, err := c.sessionService.Get(ctx, &session.GetRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
+	})
+	if err == nil {
+		return resp.Session, nil
+	}
+	if !errors.Is(err, session.ErrNotFound) {
+		return nil, newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusInternalServerError)
+	}
+	if !c.autoCreateSession {
+		return nil, newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
+	}
+	created, err := c.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   appName,
+		UserID:    userID,
+		SessionID: sessionID,
 	})
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
+		return nil, newStatusError(fmt.Errorf("failed to create session: %w", err), http.StatusInternalServerError)
 	}
-	return nil
+	return created.Session, nil
 }
 
 func (c *RuntimeAPIController) getRunner(req models.RunAgentRequest) (*runner.Runner, *agent.RunConfig, error) {

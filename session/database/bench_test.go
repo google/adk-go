@@ -145,7 +145,7 @@ func BenchmarkSQLiteEventDecode(b *testing.B) {
 // event id, so a lookup by session cannot use it and the cost tracks the size
 // of the whole table rather than the session.
 func BenchmarkSQLiteGetCrowded(b *testing.B) {
-	for _, others := range []int{0, 10, 100} {
+	for _, others := range []int{0, 100, 1000} {
 		b.Run(fmt.Sprintf("other-sessions=%d", others), func(b *testing.B) {
 			svc := benchService(b)
 			for i := range others {
@@ -156,13 +156,16 @@ func BenchmarkSQLiteGetCrowded(b *testing.B) {
 			if _, err := benchutil.SeedSession(b.Context(), svc, "app", "user", "s", "agent", 100); err != nil {
 				b.Fatal(err)
 			}
-			req := &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for b.Loop() {
-				if _, err := svc.Get(b.Context(), req); err != nil {
-					b.Fatal(err)
-				}
+			for _, recent := range []int{0, 20} {
+				b.Run(fmt.Sprintf("recent=%d", recent), func(b *testing.B) {
+					req := &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s", NumRecentEvents: recent}
+					b.ReportAllocs()
+					for b.Loop() {
+						if _, err := svc.Get(b.Context(), req); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
 			}
 		})
 	}

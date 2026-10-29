@@ -95,6 +95,7 @@ type RunOption func(*runOptions)
 type runOptions struct {
 	stateDelta       map[string]any
 	yieldUserMessage bool
+	session          session.Session
 }
 
 // WithStateDelta sets a state delta for the run invocation.
@@ -110,6 +111,16 @@ func WithStateDelta(delta map[string]any) RunOption {
 func WithYieldUserMessage() RunOption {
 	return func(o *runOptions) {
 		o.yieldUserMessage = true
+	}
+}
+
+// WithSession hands Run a session the caller has already loaded or created,
+// so the runner does not read it from the session service a second time. The
+// session must belong to the runner's app and to the user and session ID the
+// call names; a mismatch fails the run.
+func WithSession(s session.Session) RunOption {
+	return func(o *runOptions) {
+		o.session = s
 	}
 }
 
@@ -512,7 +523,14 @@ func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.
 	return resp.Session, nil
 }
 
-func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string) (session.Session, error) {
+func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID string, preloaded session.Session) (session.Session, error) {
+	if preloaded != nil {
+		if preloaded.AppName() != r.appName || preloaded.UserID() != userID || preloaded.ID() != sessionID {
+			return nil, fmt.Errorf("adk: WithSession names session %s/%s/%s, but the run is for %s/%s/%s",
+				preloaded.AppName(), preloaded.UserID(), preloaded.ID(), r.appName, userID, sessionID)
+		}
+		return preloaded, nil
+	}
 	getResp, err := r.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   r.appName,
 		UserID:    userID,
@@ -568,7 +586,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
-		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, options.session)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -903,7 +921,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		opt(&options)
 	}
 
-	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
+	storedSession, err := r.getOrCreateSession(ctx, userID, sessionID, options.session)
 	if err != nil {
 		return nil, nil, err
 	}
