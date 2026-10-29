@@ -1243,7 +1243,8 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
 func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
-	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
+	events := session.Events()
+	if event := handleUserFunctionCallResponse(events, msg); event != nil {
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
 			return subAgent, nil
@@ -1251,7 +1252,6 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 		log.Printf("Function call from an unknown agent: %s, event id: %s", event.Author, event.ID) //nolint:forbidigo // pre-slog call site
 	}
 
-	events := session.Events()
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
 
@@ -1278,12 +1278,8 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 // handleUserFunctionCallResponse finds the function call event that matches the function response id
 // delivered by the user in the latest event.
 func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *session.Event {
-	if events.Len() == 0 {
-		return nil
-	}
-
 	functionResponses := utils.FunctionResponses(msg)
-	if len(functionResponses) == 0 {
+	if len(functionResponses) == 0 || events.Len() == 0 {
 		return nil
 	}
 

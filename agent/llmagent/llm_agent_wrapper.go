@@ -379,7 +379,7 @@ func extractTaskDelegationFCs(ev *session.Event, toolsDict map[string]tool.Tool)
 // hide the coordinator's own FC from a prior turn. Author + tool-name
 // filtering is sufficient.
 func findUnresolvedTaskDelegations(sess session.Session, owner string, toolsDict map[string]tool.Tool) []*genai.FunctionCall {
-	if sess == nil {
+	if sess == nil || !hasTaskDelegationTool(toolsDict) {
 		return nil
 	}
 	// pendingFCs preserves discovery order (the order the LLM emitted
@@ -422,6 +422,28 @@ func findUnresolvedTaskDelegations(sess session.Session, owner string, toolsDict
 	return out
 }
 
+func hasTaskAgentTool(a agent.Agent) bool {
+	llmA, ok := a.(llminternal.Agent)
+	if !ok || llmA == nil {
+		return false
+	}
+	for _, t := range llminternal.Reveal(llmA).Tools {
+		if _, ok := t.(*workflowinternal.TaskAgentTool); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTaskDelegationTool(toolsDict map[string]tool.Tool) bool {
+	for _, t := range toolsDict {
+		if _, ok := t.(*workflowinternal.TaskAgentTool); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func isTaskDelegationTool(toolsDict map[string]tool.Tool, name string) bool {
 	t, ok := toolsDict[name]
 	if !ok {
@@ -447,9 +469,12 @@ func findFinishTaskTool(a agent.Agent) *workflowinternal.FinishTaskTool {
 func safeCanonicalToolsDict(a agent.Agent) map[string]tool.Tool {
 	llmA, ok := a.(llminternal.Agent)
 	if !ok || llmA == nil {
-		return map[string]tool.Tool{}
+		return nil
 	}
 	tools := llminternal.Reveal(llmA).Tools
+	if len(tools) == 0 {
+		return nil
+	}
 	out := make(map[string]tool.Tool, len(tools))
 	for _, t := range tools {
 		if t == nil {
@@ -563,7 +588,11 @@ func runSingleTurn(a agent.Agent, ic agent.InvocationContext, yield func(*sessio
 //  3. Re-enter Agent.Run after each dispatch round; the loop ends when
 //     the LLM finishes without delegating.
 func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error) bool) {
-	toolsDict := safeCanonicalToolsDict(a)
+	hasTaskTools := hasTaskAgentTool(a)
+	var toolsDict map[string]tool.Tool
+	if hasTaskTools {
+		toolsDict = safeCanonicalToolsDict(a)
+	}
 
 	dispatchAndYield := func(fc *genai.FunctionCall) (ok bool) {
 		out, err := dispatchTaskFC(a, fc, ctx)
@@ -621,10 +650,12 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 	}
 
 	// Step 1: pre-LLM scan for unresolved task FCs from prior turns.
-	unresolved := findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict)
-	for _, fc := range unresolved {
-		if !dispatchAndYield(fc) {
-			return
+	if hasTaskTools {
+		unresolved := findUnresolvedTaskDelegations(ctx.Session(), a.Name(), toolsDict)
+		for _, fc := range unresolved {
+			if !dispatchAndYield(fc) {
+				return
+			}
 		}
 	}
 
@@ -646,7 +677,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 			// persisted to the session, so dispatching off a partial
 			// would synthesize an FR whose matching FC is absent from
 			// history, breaking the next LLM turn's content rearrange.
-			if ev == nil || ev.LLMResponse.Partial {
+			if !hasTaskTools || ev == nil || ev.LLMResponse.Partial {
 				continue
 			}
 			taskFCs := extractTaskDelegationFCs(ev, toolsDict)
