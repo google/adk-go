@@ -6427,8 +6427,9 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 }
 
 // TestBatchProcessor_SplitStopsAtFailedRequest checks that once a request of a
-// split batch fails permanently, the later requests are not sent, and the whole
-// batch is counted as dropped.
+// split batch fails permanently, the later requests are not sent, and only the
+// rows that BigQuery did not confirm are counted as dropped: those of the failed
+// request and of the requests after it.
 func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	srv := &scriptedCommittedStreamServer{
 		onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
@@ -6847,33 +6848,58 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 	}
 }
 
-// TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix runs a batch of
-// two rows, split into one request per row, through two run-end flushes under
-// ExactlyOnceDelivery. BigQuery confirms the request of row a, and the request
-// of row b runs past the run-end budget without being committed, so the first
-// flush keeps only row b for the retry: the second flush must resend row b
-// and not row a, whether the batch was cut by estimated size or halved by
-// serialized size. The first flush releases the deferred upload of row a,
-// which was written, and keeps the deferred upload of row b for the retry,
-// which releases it.
+// TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix runs a batch
+// through two run-end flushes under ExactlyOnceDelivery, split into one
+// request per row. BigQuery confirms the request of the first row, and the
+// request of the second row runs past the run-end budget without being
+// committed, so the first flush keeps only the rows from the second one on
+// for the retry: the second flush must resend those rows and not the first,
+// whether the batch was cut by estimated size or halved by serialized size.
+// The first flush releases the deferred upload of the first row, which was
+// written, and keeps the deferred uploads of the other rows for the retry,
+// which releases them.
+//
+// With five rows, halving cuts the batch into [ev-0 ev-1] and [ev-2 ev-3
+// ev-4], and the request of ev-1 fails inside the first half: the call that
+// halved the batch must report ev-0, which that half confirmed, along with
+// the error, or else the first flush keeps all five rows and the retry
+// writes ev-0 twice.
 func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
+		rows  int
 		setup func(bp *BatchProcessor)
 	}{
 		{
 			// Each row is a request of its own under this estimated limit.
 			name:  "estimated_split",
+			rows:  2,
 			setup: func(bp *BatchProcessor) { bp.maxAppendBytes = 1 },
 		},
 		{
 			// The batch is a single estimated chunk, which serializes to
-			// more than this limit, so it is halved into [a] and [b].
+			// more than this limit, so it is halved into [ev-0] and [ev-1].
 			name:  "recursive_serialized_halving",
+			rows:  2,
+			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
+		},
+		{
+			// The batch is halved into [ev-0 ev-1] and [ev-2 ev-3 ev-4],
+			// and the first half into [ev-0] and [ev-1], whose request is
+			// the one that fails.
+			name:  "recursive_serialized_halving_progress_in_first_half",
+			rows:  5,
 			setup: func(bp *BatchProcessor) { bp.maxSerializedAppendBytes = 1 },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ids := make([]string, tc.rows)
+			for i := range ids {
+				ids[i] = fmt.Sprintf("ev-%d", i)
+			}
+			// Only the first row is confirmed in the first flush.
+			kept := ids[1:]
+
 			release := make(chan struct{})
 			var releaseOnce sync.Once
 			releaseServer := func() { releaseOnce.Do(func() { close(release) }) }
@@ -6887,8 +6913,8 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 					rowsPerRequest = append(rowsPerRequest, req.GetArrowRows().GetRows().GetRowCount())
 					mu.Unlock()
 					if attempt == 2 {
-						// The request of row b outlasts the run-end budget
-						// and is not committed.
+						// The request of the second row outlasts the
+						// run-end budget and is not committed.
 						select {
 						case <-release:
 						case <-time.After(30 * time.Second):
@@ -6902,16 +6928,17 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 				},
 			}
 
-			// In the first flush, the first upload of row a holds the only
-			// slot for 400ms of the ~1s that the uploads get and succeeds, so
-			// that the uploads are not paused; the second upload of row a and
-			// the upload of row b are cut short by the deadline and kept.
+			// In the first flush, the first upload of ev-0 holds the only
+			// slot for 400ms of the ~1s that the uploads get and succeeds,
+			// so that the uploads are not paused; the second upload of ev-0
+			// and the uploads of the other rows are cut short by the
+			// deadline and kept.
 			var retrying atomic.Bool
 			off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
 				if retrying.Load() {
 					return nil
 				}
-				if strings.Contains(req.Path, "_ev-a_") && strings.Contains(req.Path, "_c0_") {
+				if strings.Contains(req.Path, "_ev-0_") && strings.Contains(req.Path, "_c0_") {
 					select {
 					case <-time.After(400 * time.Millisecond):
 						return nil
@@ -6940,31 +6967,35 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			tc.setup(bp)
 
 			// The rows are queued directly, so that no background flush takes
-			// flushMu before flushRunEnd does. Row a has a 3-byte and a 5-byte
-			// upload, and row b a 7-byte upload.
+			// flushMu before flushRunEnd does. ev-0 has a 3-byte and a 5-byte
+			// upload, and each other row a 7-byte upload.
 			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
-			rowA := queuedRow(opts, imageContent(1, 2, 3), imageContent(4, 5, 6, 7, 8))
-			rowA["event_type"] = EventLLMRequest
-			rowA[eventIDField] = "ev-a"
-			rowB := queuedRow(opts, imageContent(1, 2, 3, 4, 5, 6, 7))
-			rowB["event_type"] = EventLLMRequest
-			rowB[eventIDField] = "ev-b"
-			bp.queue <- rowA
-			bp.queue <- rowB
+			for i, id := range ids {
+				var row map[string]any
+				if i == 0 {
+					row = queuedRow(opts, imageContent(1, 2, 3), imageContent(4, 5, 6, 7, 8))
+				} else {
+					row = queuedRow(opts, imageContent(1, 2, 3, 4, 5, 6, 7))
+				}
+				row["event_type"] = EventLLMRequest
+				row[eventIDField] = id
+				bp.queue <- row
+			}
 
 			bp.flushRunEnd()
 
-			if got := len(bp.deferredBatch); got != 1 {
-				t.Fatalf("deferredBatch length after the first flushRunEnd = %d, want 1 (only the unconfirmed row b)", got)
+			var gotKept []string
+			for _, row := range bp.deferredBatch {
+				gotKept = append(gotKept, fmt.Sprint(row[eventIDField]))
 			}
-			if got := bp.deferredBatch[0][eventIDField]; got != "ev-b" {
-				t.Fatalf("deferredBatch[0] event_id = %v, want ev-b", got)
+			if diff := cmp.Diff(kept, gotKept); diff != "" {
+				t.Fatalf("deferredBatch event_ids after the first flushRunEnd mismatch (-want +got; only the rows that BigQuery did not confirm are kept):\n%s", diff)
 			}
 			if got := bp.uploadCooldownUntil.Load(); got != 0 {
 				t.Fatalf("uploadCooldownUntil after the first flushRunEnd = %d, want 0 (uploads not paused)", got)
 			}
-			if got := bp.pendingUploadBytes.Load(); got != 7 {
-				t.Errorf("pendingUploadBytes after the first flushRunEnd = %d, want 7 (row a's 5-byte upload released, row b's 7-byte upload kept)", got)
+			if got, want := bp.pendingUploadBytes.Load(), int64(7*len(kept)); got != want {
+				t.Errorf("pendingUploadBytes after the first flushRunEnd = %d, want %d (ev-0's 5-byte upload released, the 7-byte upload of each other row kept)", got, want)
 			}
 			if ds := bp.DropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the first flushRunEnd = %+v, want no drops", ds)
@@ -6981,8 +7012,8 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			if got := bp.pendingUploadBytes.Load(); got != 0 {
 				t.Errorf("pendingUploadBytes after the retry flushRunEnd = %d, want 0", got)
 			}
-			if got := len(off.uploads()) - callsBefore; got != 1 {
-				t.Errorf("retry flushRunEnd offloader calls = %d, want 1 (only row b's kept upload)", got)
+			if got := len(off.uploads()) - callsBefore; got != len(kept) {
+				t.Errorf("retry flushRunEnd offloader calls = %d, want %d (only the kept uploads of the rows that BigQuery had not confirmed)", got, len(kept))
 			}
 			if ds := bp.DropStats(); ds.TotalDrops != 0 {
 				t.Errorf("DropStats after the retry flushRunEnd = %+v, want no drops", ds)
@@ -6998,10 +7029,12 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 					committed = append(committed, r[eventIDField].(string))
 				}
 			}
-			if diff := cmp.Diff([]string{"ev-a", "ev-b"}, committed); diff != "" {
+			if diff := cmp.Diff(ids, committed); diff != "" {
 				t.Errorf("committed rows mismatch (-want +got):\n%s", diff)
 			}
-			if diff := cmp.Diff([]int64{1, 1, 1}, gotRows); diff != "" {
+			// The two requests of the first flush, the second of which was
+			// not committed, and one request for each kept row.
+			if diff := cmp.Diff(slices.Repeat([]int64{1}, 2+len(kept)), gotRows); diff != "" {
 				t.Errorf("rows per AppendRows request mismatch (-want +got):\n%s", diff)
 			}
 			srv.mu.Lock()
@@ -7009,12 +7042,16 @@ func TestBatchProcessor_DeferredRetrySkipsConfirmedSplitPrefix(t *testing.T) {
 			offsets := slices.Clone(srv.appendOffsets)
 			srv.mu.Unlock()
 			// The retry replaces the stream, whose offset the request that
-			// the budget cut short left unknown, and resends row b at
-			// offset 0 of the new stream.
+			// the budget cut short left unknown, and resends the kept rows
+			// from offset 0 of the new stream.
 			if created != 2 {
 				t.Errorf("CreateWriteStream calls = %d, want 2", created)
 			}
-			if diff := cmp.Diff([]int64{0, 1, 0}, offsets); diff != "" {
+			wantOffsets := []int64{0, 1}
+			for i := range kept {
+				wantOffsets = append(wantOffsets, int64(i))
+			}
+			if diff := cmp.Diff(wantOffsets, offsets); diff != "" {
 				t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
 			}
 		})
