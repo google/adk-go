@@ -4310,3 +4310,49 @@ func TestFormatResponseContent_SanitizesAndBoundsSummary(t *testing.T) {
 		}
 	})
 }
+
+func TestFormatResponseContent_RedactsCredentialAfterAnyUnicodeSpace(t *testing.T) {
+	for _, sep := range []string{"\v", "\u2028", "\u2029", "\u0085", "\u00a0"} {
+		t.Run(fmt.Sprintf("U+%04X", []rune(sep)[0]), func(t *testing.T) {
+			content := &genai.Content{Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{Name: "Bearer" + sep + "SECRET"}},
+				{FunctionResponse: &genai.FunctionResponse{Name: "Basic" + sep + "dXNlcjpwYXNz"}},
+			}}
+			got, _ := formatResponseContent(content, 1000, true)
+			if strings.Contains(got, "SECRET") || strings.Contains(got, "dXNlcjpwYXNz") {
+				t.Errorf("formatResponseContent = %q, which holds the credential", got)
+			}
+		})
+	}
+}
+
+func TestSmartTruncate_RedactsCredentialTextOfOpaqueValues(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"error, vertical tab", errors.New("Bearer\vSECRET")},
+		{"error, line separator", errors.New("Bearer\u2028SECRET")},
+		{"error, paragraph separator", errors.New("Basic\u2029dXNlcjpwYXNz")},
+		{"error, camel case key", errors.New("call failed dbPassword=SECRET")},
+		{"error, envelope", errors.New("credentials:\n DB_PASSWORD: SECRET")},
+		{"stringer, envelope", testStringerText{"credentials:\n OPENAI_API_KEY: SECRET"}},
+		{"stringer, oauth code", testStringerText{"oauth2Config:\n oauth2Config.code: SECRET"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate() error = %v", err)
+			}
+			if strings.Contains(string(got), "SECRET") || strings.Contains(string(got), "dXNlcjpwYXNz") {
+				t.Errorf("SmartTruncate() = %s, which holds the credential", got)
+			}
+		})
+	}
+}
+
+// testStringerText is a struct without exported fields whose String is its
+// text.
+type testStringerText struct{ text string }
+
+func (s testStringerText) String() string { return s.text }

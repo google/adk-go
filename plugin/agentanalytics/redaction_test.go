@@ -15,8 +15,14 @@
 package agentanalytics
 
 import (
+	"errors"
+	"fmt"
+	"net/url"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
 )
 
 func TestScrubTextPatterns_BearerAndBasicWithUnicodeWhitespace(t *testing.T) {
@@ -35,6 +41,18 @@ func TestScrubTextPatterns_BearerAndBasicWithUnicodeWhitespace(t *testing.T) {
 		{"basic ideographic space", "Basic\u3000dXNlcjpwYXNz", "Basic [REDACTED]"},
 		{"bearer of is still prose", "the bearer\u00a0of bad news", "the bearer\u00a0of bad news"},
 		{"basic prose is kept", "a basic\u00a0HTTP server", "a basic\u00a0HTTP server"},
+		{"bearer vertical tab", "Bearer\vSYNTHETIC_SECRET", "Bearer [REDACTED]"},
+		{"bearer line separator", "Bearer\u2028SYNTHETIC_SECRET", "Bearer [REDACTED]"},
+		{"bearer paragraph separator", "Bearer\u2029SYNTHETIC_SECRET", "Bearer [REDACTED]"},
+		{"basic vertical tab", "Basic\vdXNlcjpwYXNz", "Basic [REDACTED]"},
+		{"basic line separator", "Basic\u2028dXNlcjpwYXNz", "Basic [REDACTED]"},
+		{"basic paragraph separator", "Basic\u2029dXNlcjpwYXNz", "Basic [REDACTED]"},
+		{"bearer token stops at a vertical tab", "x Bearer SYNTHETIC_SECRET\vy", "x Bearer [REDACTED]\vy"},
+		{"bearer token stops at a line separator", "x Bearer SYNTHETIC_SECRET\u2028y", "x Bearer [REDACTED]\u2028y"},
+		// Bearer token after NBSP must not swallow trailing Unicode whitespace.
+		{"bearer token stops at trailing nbsp", "x Bearer\u00a0sk-live-SECRET\u00a0y", "x Bearer [REDACTED]\u00a0y"},
+		// "bearer of" prose with NBSP must not swallow a following real Bearer token.
+		{"bearer of prose then real bearer token", "the bearer\u00a0of\u00a0Bearer\u00a0sk-live-SECRET", "the bearer\u00a0of\u00a0Bearer [REDACTED]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -132,6 +150,25 @@ func TestScrubTextPatterns_CompoundKeyNames(t *testing.T) {
 		{"pagination tokens are kept", "next_page_token=abc page_token: def", "next_page_token=abc page_token: def"},
 		{"ordinary words are kept", "method_signature=abc mypassword=abc", "method_signature=abc mypassword=abc"},
 		{"credential after a kept name", "page_token=abc DB_PASSWORD=SECRET", "page_token=abc DB_PASSWORD=[REDACTED]"},
+		// CamelCase compound keys at non-zero offset (P1-2 fix).
+		{"camel case after prefix", "ENV: dbPassword=supersecret", "ENV: dbPassword=[REDACTED]"},
+		{"camel case after another pair", "x=1 myClientSecret=supersecret", "x=1 myClientSecret=[REDACTED]"},
+		{"camel case in truncated json", `err: {"dbPassword": "supersecret"`, `err: {"dbPassword":"[REDACTED]"`},
+		// Non-boundary substrings must NOT be redacted (false-positive guard).
+		{"non-boundary mypassword", "mypassword=abc", "mypassword=abc"},
+		{"non-boundary token count", "not_a_token_count=5", "not_a_token_count=5"},
+		{"non-boundary prompt tokens", "prompt_tokens=100", "prompt_tokens=100"},
+		{"camel case acronym prefix", "x DBPassword=supersecret", "x DBPassword=[REDACTED]"},
+		{"camel case before a bare credential", "dbPassword=a token=b", "dbPassword=[REDACTED] token=[REDACTED]"},
+		{"camel case before a compound credential", "see dbPassword=a DB_PASSWORD=b", "see dbPassword=[REDACTED] DB_PASSWORD=[REDACTED]"},
+		{"camel case page token is kept", "x nextPageToken=abc", "x nextPageToken=abc"},
+		{"camel case name that is not a credential", "x myLabel=abc", "x myLabel=abc"},
+		{"hyphenated page token is kept", "page-token=cursor-2", "page-token=cursor-2"},
+		{"hyphenated next page token is kept", "next-page-token=cursor-3", "next-page-token=cursor-3"},
+		{"hyphenated previous page token is kept", "x previous-page-token: cursor-4", "x previous-page-token: cursor-4"},
+		{"hyphenated signature is redacted", "foo-signature=SECRET", "foo-signature=[REDACTED]"},
+		{"bare token is redacted", "token=SECRET", "token=[REDACTED]"},
+		{"hyphenated credential after a page token", "page-token=cursor-2 foo-signature=SECRET", "page-token=cursor-2 foo-signature=[REDACTED]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -202,4 +239,197 @@ func TestSanitizeValue_CompoundStructFieldNames(t *testing.T) {
 	if m["NextPageToken"] != "p2" {
 		t.Errorf("NextPageToken = %v, want p2", m["NextPageToken"])
 	}
+}
+
+func TestSmartTruncate_RedactsUserinfoPassword(t *testing.T) {
+	// url.Userinfo implements fmt.Stringer and publishes its password via
+	// String(); the formatter must redact it instead.
+	got, truncated, err := SmartTruncate(url.UserPassword("alice", "SYNTHETIC_SECRET"), 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate() error = %v", err)
+	}
+	if truncated {
+		t.Errorf("SmartTruncate() truncated = true, want false")
+	}
+	s := string(got)
+	if strings.Contains(s, "SYNTHETIC_SECRET") {
+		t.Errorf("SmartTruncate() = %q, password leaked", s)
+	}
+	if !strings.Contains(s, "alice") {
+		t.Errorf("SmartTruncate() = %q, username lost", s)
+	}
+	if !strings.Contains(s, redactedValue) {
+		t.Errorf("SmartTruncate() = %q, want [REDACTED]", s)
+	}
+}
+
+func TestSmartTruncate_RedactsUserinfoPasswordNestedMap(t *testing.T) {
+	type holder struct {
+		Auth *url.Userinfo
+		Val  url.Userinfo
+	}
+	pw := url.UserPassword("alice", "SYNTHETIC_SECRET")
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"map", map[string]any{"userinfo": pw}},
+		{"slice", []any{pw}},
+		{"url", &url.URL{Scheme: "https", Host: "example.com", User: pw}},
+		{"struct field", holder{Auth: pw, Val: *pw}},
+		{"value", *pw},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate() error = %v", err)
+			}
+			s := string(got)
+			if strings.Contains(s, "SYNTHETIC_SECRET") {
+				t.Errorf("SmartTruncate() = %s, password leaked", s)
+			}
+			if !strings.Contains(s, "alice") {
+				t.Errorf("SmartTruncate() = %s, user name lost", s)
+			}
+		})
+	}
+	t.Run("user name only", func(t *testing.T) {
+		got, _, err := SmartTruncate(url.User("alice"), 1000)
+		if err != nil || string(got) != `"alice"` {
+			t.Errorf("SmartTruncate(url.User) = (%s, %v), want \"alice\"", got, err)
+		}
+	})
+}
+
+type credentialError map[string]string
+
+func (e credentialError) Error() string {
+	return "operation failed: " + e["password"]
+}
+
+type credentialStringerSlice []string
+
+func (s credentialStringerSlice) String() string { return "joined: " + strings.Join(s, ",") }
+
+func TestSmartTruncate_ErrorImplementingMapStaysStructural(t *testing.T) {
+	// A map, slice or array that implements error or fmt.Stringer keeps its
+	// structural traversal, which redacts by key, instead of its text, which
+	// has lost the key.
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"map error", credentialError{"password": "SYNTHETIC_SECRET"}, `{"password":"[REDACTED]"}`},
+		{"nested map error", map[string]any{"e": credentialError{"password": "SYNTHETIC_SECRET"}}, `{"e":{"password":"[REDACTED]"}}`},
+		{"slice stringer", credentialStringerSlice{"a", "b"}, `["a","b"]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate() error = %v", err)
+			}
+			if string(got) != tt.want {
+				t.Errorf("SmartTruncate() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRedactsCompoundCredentialsNestedUnderEnvelope(t *testing.T) {
+	envelopes := []struct{ name, in string }{
+		{"DB_PASSWORD", "credentials:\n DB_PASSWORD: SYNTHETIC_SECRET"},
+		{"OPENAI_API_KEY", "credentials:\n OPENAI_API_KEY: SYNTHETIC_SECRET"},
+		{"GITHUB_TOKEN", "credentials:\n GITHUB_TOKEN: SYNTHETIC_SECRET"},
+		{"dbPassword", "credentials:\n dbPassword: SYNTHETIC_SECRET"},
+		{"oauth2Config.code", "oauth2Config:\n oauth2Config.code: SYNTHETIC_SECRET"},
+		{"oauth2Config block", "credentials:\n oauth2Config.code: SYNTHETIC_SECRET"},
+		{"same line", "credentials: DB_PASSWORD: SYNTHETIC_SECRET"},
+	}
+	for _, tt := range envelopes {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := scrubTextPatterns(tt.in); strings.Contains(got, "SYNTHETIC_SECRET") {
+				t.Errorf("scrubTextPatterns(%q) = %q, which holds the secret", tt.in, got)
+			}
+			if got, _ := sanitizeRawText(tt.in); strings.Contains(got, "SYNTHETIC_SECRET") {
+				t.Errorf("sanitizeRawText(%q) = %q, which holds the secret", tt.in, got)
+			}
+			got, _, err := SmartTruncate(errors.New(tt.in), 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate(error) error = %v", err)
+			}
+			if strings.Contains(string(got), "SYNTHETIC_SECRET") {
+				t.Errorf("SmartTruncate(error %q) = %s, which holds the secret", tt.in, got)
+			}
+		})
+	}
+	t.Run("a child that is not a credential is kept", func(t *testing.T) {
+		in := "credentials:\n DB_PASSWORD: SYNTHETIC_SECRET\n region: us-east1"
+		if got := scrubTextPatterns(in); !strings.Contains(got, "region: us-east1") {
+			t.Errorf("scrubTextPatterns(%q) = %q, want the region kept", in, got)
+		}
+	})
+}
+
+func TestScrubsEveryUnicodeSpaceAfterScheme(t *testing.T) {
+	var separators []rune
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r != '\n' && r != '\r' && unicode.IsSpace(r) {
+			separators = append(separators, r)
+		}
+	}
+	separators = append(separators, '\n', '\r')
+	for _, sep := range separators {
+		t.Run(fmt.Sprintf("U+%04X", sep), func(t *testing.T) {
+			for _, in := range []string{
+				"Bearer" + string(sep) + "SYNTHETIC_SECRET",
+				"Basic" + string(sep) + "dXNlcjpwYXNz",
+			} {
+				if got := scrubTextPatterns(in); strings.Contains(got, "SYNTHETIC_SECRET") || strings.Contains(got, "dXNlcjpwYXNz") {
+					t.Errorf("scrubTextPatterns(%q) = %q, which holds the credential", in, got)
+				}
+				if got, _ := sanitizeRawText(in); strings.Contains(got, "SYNTHETIC_SECRET") || strings.Contains(got, "dXNlcjpwYXNz") {
+					t.Errorf("sanitizeRawText(%q) = %q, which holds the credential", in, got)
+				}
+			}
+		})
+	}
+}
+
+func TestIsCompoundSensitiveKey_LongKey(t *testing.T) {
+	prefix := strings.Repeat("a_", 16000)
+	for _, tt := range []struct {
+		name, key string
+		want      bool
+	}{
+		{"credential suffix", prefix + "password", true},
+		{"camel credential suffix", prefix + "Password", true},
+		{"low precision suffix", prefix + "signature", false},
+		{"page token suffix", prefix + "page_token", false},
+		{"no credential suffix", prefix + "label", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isCompoundSensitiveKey(tt.key); got != tt.want {
+				t.Errorf("isCompoundSensitiveKey(long key) = %v, want %v", got, tt.want)
+			}
+			// Only the last maxSensitiveKeyWords suffixes are joined, so the
+			// bytes allocated grow with the key, not with its square (137 MB
+			// for this key when every suffix was joined).
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			isCompoundSensitiveKey(tt.key)
+			runtime.ReadMemStats(&after)
+			if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 16<<20 {
+				t.Errorf("isCompoundSensitiveKey(long key) allocated %d bytes, want a small multiple of the key", allocated)
+			}
+		})
+	}
+	t.Run("time", func(t *testing.T) {
+		start := time.Now()
+		isCompoundSensitiveKey(prefix + "password")
+		isCompoundSensitiveKey(prefix + "signature")
+		if d := time.Since(start); d > 200*time.Millisecond {
+			t.Errorf("isCompoundSensitiveKey(long key) took %v, want well under the quadratic cost", d)
+		}
+	})
 }

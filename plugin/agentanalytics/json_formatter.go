@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -917,11 +918,20 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		return out, truncated, true
 	}
 	// A value that reflection would show as an empty object, because its
-	// fields are unexported, writes the text it has for itself instead.
-	if m, found := implementer(v, errorType); found && !showsExportedFields(v) {
+	// fields are unexported, writes the text it has for itself instead. Maps,
+	// slices and arrays are never intercepted here, even if they implement
+	// error or fmt.Stringer, because their structural traversal (walkMap,
+	// walkSlice) already produces a safely redacted representation that the
+	// String() or Error() text would discard.
+	if m, found := implementer(v, errorType); found && !showsExportedFields(v) && !isContainerKind(v.Kind()) {
 		return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
 	}
+	// url.Userinfo implements fmt.Stringer and publishes its password via
+	// String(); redact it before the generic Stringer fallback.
 	if v.Kind() == reflect.Struct && !showsExportedFields(v) {
+		if v.Type() == userinfoType {
+			return s.redactUserinfo(v, depth)
+		}
 		if m, found := implementer(v, stringerType); found {
 			return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
 		}
@@ -974,6 +984,32 @@ func showsExportedFields(v reflect.Value) bool {
 		}
 	}
 	return false
+}
+
+// isContainerKind reports whether k is a kind whose structural traversal
+// (walkMap, walkSlice) produces a safely redacted representation, so the
+// error/Stringer text fallback must not intercept it.
+func isContainerKind(k reflect.Kind) bool {
+	return k == reflect.Map || k == reflect.Slice || k == reflect.Array
+}
+
+// userinfoType is the type of the password-bearing URL userinfo.
+var userinfoType = reflect.TypeFor[url.Userinfo]()
+
+// redactUserinfo returns a representation of the url.Userinfo v that keeps
+// the user name and replaces the password, if any, with the redaction
+// placeholder.
+func (s *sanitizer) redactUserinfo(v reflect.Value, depth int) (any, bool, bool) {
+	if !v.CanInterface() {
+		return redactedValue, false, true
+	}
+	u := v.Interface().(url.Userinfo)
+	text := u.String()
+	if _, hasPassword := u.Password(); hasPassword && s.redact {
+		text = u.Username() + ":" + redactedValue
+	}
+	out, truncated := s.stringValue(text, depth)
+	return out, truncated, true
 }
 
 // implementer returns v, or its address when only the pointer type has the
