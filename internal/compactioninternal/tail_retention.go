@@ -93,21 +93,28 @@ type ProgressGate interface {
 // turn to end. Callers must run it before assembling contents so the fresh
 // summary is reflected in the request.
 func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Session, scope TurnScope, estimate TokenCounter, progress ProgressGate) (*session.Event, Finish, error) {
+	summary, _, finish, err := TailRetentionWithSnapshot(ctx, cfg, sess, scope, estimate, progress)
+	return summary, finish, err
+}
+
+// TailRetentionWithSnapshot is [TailRetention] plus the event-identity snapshot
+// captured immediately before summarization, after the threshold, progress-gate,
+// and window checks have all passed.
+func TailRetentionWithSnapshot(ctx context.Context, cfg *compaction.Config, sess session.Session, scope TurnScope, estimate TokenCounter, progress ProgressGate) (*session.Event, map[EventRefKey]struct{}, Finish, error) {
 	noop := func(error, string) {}
 	if !HasTailRetention(cfg) {
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 	if cfg.Summarizer == nil {
-		return nil, noop, fmt.Errorf("no Summarizer configured")
+		return nil, nil, noop, fmt.Errorf("no Summarizer configured")
 	}
 	if sess == nil {
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 
-	events := collect(sess)
-	tokens, ok := promptTokenCount(events, scope, estimate)
+	tokens, events, ok := promptTokenCountFromSession(sess, scope, estimate)
 	if !ok {
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 	if tokens < cfg.TokenThreshold {
 		// Under the threshold, so any earlier compaction in this turn did its
@@ -115,7 +122,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		if progress != nil {
 			progress.Recovered()
 		}
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 
 	// Stop here when the last compaction in this turn has not yet brought the
@@ -124,9 +131,12 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 	// call each time.
 	if progress != nil && !progress.AllowAt() {
 		traceDeclined(ctx, cfg, sess, telemetry.CompactionTriggerTokenThreshold, "the previous compaction did not bring the prompt back under the threshold")
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 
+	if events == nil {
+		events = collect(sess)
+	}
 	window := selectTailRetentionWindow(events, cfg.EventRetentionSize, scope)
 	if len(window) == 0 {
 		// The threshold is crossed and nothing can be summarized: the retained
@@ -144,9 +154,10 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		// the summarizer had been asked anything.
 		//
 		// It costs nothing to re-check: no model call is made on this path.
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 
+	before := knownEventIDs(events)
 	summary, finish, err := summarizeTraced(ctx, cfg, sess, scope.InvocationID, telemetry.CompactionTriggerTokenThreshold, window)
 	if err != nil {
 		// The gate is closed here rather than on the Finish callback, because
@@ -158,7 +169,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		if progress != nil {
 			progress.Failed()
 		}
-		return nil, noop, fmt.Errorf("tail-retention summarization failed: %w", err)
+		return nil, nil, noop, fmt.Errorf("tail-retention summarization failed: %w", err)
 	}
 	if summary == nil {
 		// A decline. The caller returns without calling Finish, so the gate has
@@ -166,7 +177,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		if progress != nil {
 			progress.Failed()
 		}
-		return nil, noop, nil
+		return nil, nil, noop, nil
 	}
 	// Recorded when the summary is actually stored, which only the caller
 	// knows, so it rides on the same callback that closes the span.
@@ -210,7 +221,7 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 		}
 		finish(err, discardReason)
 	}
-	return summary, recordOnSuccess, nil
+	return summary, before, recordOnSuccess, nil
 }
 
 // charsPerToken is the crude characters-to-tokens ratio used when no model has
@@ -231,6 +242,42 @@ func jsonChars(v map[string]any) int {
 		return 0
 	}
 	return utf8.RuneCount(b)
+}
+
+// promptTokenCountFromSession reads the most recently observed prompt token
+// count by scanning sess.Events() in reverse without copying the full event
+// slice until no observed count is found.
+func promptTokenCountFromSession(sess session.Session, scope TurnScope, estimate TokenCounter) (int, []*session.Event, bool) {
+	evs := sess.Events()
+	if evs == nil {
+		return 0, nil, false
+	}
+	n := evs.Len()
+	for i := n - 1; i >= 0; i-- {
+		ev := evs.At(i)
+		if !scope.visible(ev) || hasCompaction(ev) {
+			continue
+		}
+		if usage := ev.UsageMetadata; usage != nil && usage.PromptTokenCount > 0 {
+			tokens := int(usage.PromptTokenCount)
+			if estimate != nil && i < n-1 {
+				tail := make([]*session.Event, n-1-i)
+				for j := i + 1; j < n; j++ {
+					tail[j-(i+1)] = evs.At(j)
+				}
+				tokens += estimate(tail)
+			}
+			return tokens, nil, true
+		}
+	}
+	if estimate == nil {
+		return 0, nil, false
+	}
+	events := collect(sess)
+	if tokens := estimate(events); tokens > 0 {
+		return tokens, events, true
+	}
+	return 0, events, false
 }
 
 // promptTokenCount returns the most recently observed prompt token count in

@@ -16,7 +16,6 @@ package compactioninternal
 
 import (
 	"fmt"
-	"time"
 
 	"google.golang.org/genai"
 
@@ -184,7 +183,7 @@ func newSummaryEvent(events, all []*session.Event, summary *genai.Content, usage
 	}
 
 	var excluded []session.EventRef
-	seen := make(map[string]struct{})
+	seen := make(map[EventRefKey]struct{})
 	for _, ev := range all {
 		if ev == nil || hasCompaction(ev) {
 			continue
@@ -274,10 +273,16 @@ func SanitizeSummary(ev *session.Event) bool {
 	return true
 }
 
+// EventRefKey is the comparable form of an event's reference.
+type EventRefKey struct {
+	invocationID string
+	timestamp    int64
+}
+
 // refKey is the comparable form of an event's reference.
-func refKey(ev *session.Event) string {
+func refKey(ev *session.Event) EventRefKey {
 	if ev == nil {
-		return ""
+		return EventRefKey{}
 	}
 	// Truncated to refResolution, like excludes, namesHole and coversAllOf.
 	// Comparing at full nanoseconds here while they compare at microseconds is
@@ -285,5 +290,8 @@ func refKey(ev *session.Event) string {
 	// that restamps on read: a snapshot at full precision against a re-read
 	// truncated to microseconds makes every pre-existing event look like a
 	// racer, so every mid-turn summary is discarded.
-	return ev.InvocationID + "@" + ev.Timestamp.UTC().Truncate(refResolution).Format(time.RFC3339Nano)
+	return EventRefKey{
+		invocationID: ev.InvocationID,
+		timestamp:    ev.Timestamp.UTC().Truncate(refResolution).UnixNano(),
+	}
 }

@@ -52,7 +52,8 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 	if req.Config == nil {
 		req.Config = &genai.GenerateContentConfig{}
 	}
-	if decl := t.Declaration(); decl == nil {
+	decl := t.Declaration()
+	if decl == nil {
 		return nil
 	}
 	// Find an existing genai.Tool with FunctionDeclarations
@@ -65,10 +66,10 @@ func PackTool(req *model.LLMRequest, t Tool) error {
 	}
 	if funcTool == nil {
 		req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-			FunctionDeclarations: []*genai.FunctionDeclaration{t.Declaration()},
+			FunctionDeclarations: []*genai.FunctionDeclaration{decl},
 		})
 	} else {
-		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, t.Declaration())
+		funcTool.FunctionDeclarations = append(funcTool.FunctionDeclarations, decl)
 	}
 	return nil
 }

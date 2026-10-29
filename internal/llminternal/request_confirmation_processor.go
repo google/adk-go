@@ -37,33 +37,26 @@ type confirmedCall struct {
 func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		llmAgent := asLLMAgent(ctx.Agent())
-		if llmAgent == nil {
+		if llmAgent == nil || ctx.Session() == nil {
 			return // In python, no error is yielded.
 		}
 
-		toolsmap := make(map[string]tool.Tool)
-		for _, tool := range f.Tools {
-			toolsmap[tool.Name()] = tool
+		evs := ctx.Session().Events()
+		if evs == nil {
+			return
 		}
-
-		var events []*session.Event
-		if ctx.Session() != nil {
-			for e := range ctx.Session().Events().All() {
-				events = append(events, e)
-			}
-		}
-		confirmationResponses := make(map[string]toolconfirmation.ToolConfirmation)
+		var confirmationResponses map[string]toolconfirmation.ToolConfirmation
 		confirmationEventIndex := -1
-		for k := len(events) - 1; k >= 0; k-- {
-			event := events[k]
+		for k := evs.Len() - 1; k >= 0; k-- {
+			event := evs.At(k)
 			// Find the first event authored by user
 			if event.Author != "user" {
 				continue
 			}
-			responses := utils.FunctionResponses(event.Content)
-			if len(responses) == 0 {
+			if !hasFunctionResponses(event.Content) {
 				return
 			}
+			responses := utils.FunctionResponses(event.Content)
 			for _, funcResp := range responses {
 				if funcResp.Name != toolconfirmation.FunctionCallName {
 					continue
@@ -96,6 +89,9 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 						}
 					}
 				}
+				if confirmationResponses == nil {
+					confirmationResponses = make(map[string]toolconfirmation.ToolConfirmation)
+				}
 				confirmationResponses[funcResp.ID] = tc
 			}
 			confirmationEventIndex = k
@@ -104,6 +100,15 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 
 		if len(confirmationResponses) == 0 {
 			return
+		}
+
+		toolsmap := make(map[string]tool.Tool, len(f.Tools))
+		for _, tool := range f.Tools {
+			toolsmap[tool.Name()] = tool
+		}
+		events := make([]*session.Event, 0, evs.Len())
+		for e := range evs.All() {
+			events = append(events, e)
 		}
 
 		agentName := ctx.Agent().Name()

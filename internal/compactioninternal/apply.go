@@ -368,12 +368,16 @@ func RangeRaced(latest, selectedFrom session.Session, summary *session.Event) bo
 // compared it already contains whatever arrived during it, and the comparison
 // finds no difference. A caller that cannot re-read a separate snapshot must
 // capture this before it starts.
-func KnownEventIDs(sess session.Session) map[string]struct{} {
-	known := make(map[string]struct{})
+func KnownEventIDs(sess session.Session) map[EventRefKey]struct{} {
 	if sess == nil {
-		return known
+		return make(map[EventRefKey]struct{})
 	}
-	for _, ev := range collect(sess) {
+	return knownEventIDs(collect(sess))
+}
+
+func knownEventIDs(events []*session.Event) map[EventRefKey]struct{} {
+	known := make(map[EventRefKey]struct{}, len(events))
+	for _, ev := range events {
 		known[refKey(ev)] = struct{}{}
 	}
 	return known
@@ -381,7 +385,7 @@ func KnownEventIDs(sess session.Session) map[string]struct{} {
 
 // RangeRacedSince is [RangeRaced] against identities captured earlier rather
 // than against a second session handle.
-func RangeRacedSince(latest session.Session, known map[string]struct{}, summary *session.Event) bool {
+func RangeRacedSince(latest session.Session, known map[EventRefKey]struct{}, summary *session.Event) bool {
 	if latest == nil || summary == nil {
 		return false
 	}
@@ -768,7 +772,7 @@ func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 // already the narrow one.
 //
 // Run the corrective write on the context from RepairContext.
-func RepairAfterAppend(stored *session.Event, known map[string]struct{}, latest session.Session) *session.Event {
+func RepairAfterAppend(stored *session.Event, known map[EventRefKey]struct{}, latest session.Session) *session.Event {
 	if stored == nil || latest == nil {
 		return nil
 	}
@@ -778,7 +782,7 @@ func RepairAfterAppend(stored *session.Event, known map[string]struct{}, latest 
 	}
 
 	var stragglers []session.EventRef
-	seen := make(map[string]struct{})
+	seen := make(map[EventRefKey]struct{})
 	for _, ev := range collect(latest) {
 		if ev == nil || hasCompaction(ev) {
 			continue

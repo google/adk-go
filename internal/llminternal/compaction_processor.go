@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -60,23 +61,12 @@ func CompactionRequestProcessor(ctx agent.InvocationContext, _ *model.LLMRequest
 		// session would be a different object and the summary would miss it.
 		sess := compactioninternal.UnwrapSession(ctx.Session())
 
-		// Which events exist before the model call, captured now rather than
-		// read back later. sess is the live handle and every backend mutates
-		// it in place, so passing it as the "before" state to the race check
-		// below compares the session against itself: anything a sibling
-		// appended during the call is already in it, the check finds no
-		// difference, and the record is stored claiming to cover an event no
-		// summary describes. Sub-agents make that ordinary rather than
-		// theoretical, because parallel and workflow nodes hand this very
-		// session down to each child.
-		before := compactioninternal.KnownEventIDs(sess)
-
 		// Compaction is an optimisation, so a canceled or expired turn should
 		// not spend a model call on it.
 		if ctx.Err() != nil {
 			return
 		}
-		summary, finish, err := compactioninternal.TailRetention(ctx, rt.Config(), sess, compactioninternal.TurnScope{
+		summary, before, finish, err := compactioninternal.TailRetentionWithSnapshot(ctx, rt.Config(), sess, compactioninternal.TurnScope{
 			InvocationID:   ctx.InvocationID(),
 			Branch:         ctx.Branch(),
 			IsolationScope: ctx.IsolationScope(),
@@ -241,7 +231,9 @@ func promptTokenEstimator(ctx agent.InvocationContext) compactioninternal.TokenC
 		// reached it the same way — and a placement is now a second route in.
 		// A suffix may omit a response's call without making that response stale.
 		allEvents := events
-		if ctx.Session() != nil {
+		if ctx.Session() != nil && !historyIsWellFormed(events) && slices.ContainsFunc(events, func(ev *session.Event) bool {
+			return hasFunctionResponses(utils.Content(ev))
+		}) {
 			allEvents = slices.Collect(ctx.Session().Events().All())
 		}
 		contents, err := buildContentsDefaultWithCallSource(
