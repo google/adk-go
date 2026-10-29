@@ -1944,15 +1944,19 @@ func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind,
 func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind, int) {
 	name := start
 	v := s[start:end]
-	if _, quote := unquoteValue(v); quote != "" {
+	// keyText is the text of the key, which starts at s[name:].
+	keyText := v
+	if inner, quote := unquoteValue(v); quote != "" {
 		if !valueFollowsDelimiter(s, end) {
 			return notNestedKey, 0
 		}
 		name += len(quote)
+		keyText = inner
 	} else if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
 		if !valueStartsAt(s, end) {
 			return notNestedKey, 0
 		}
+		keyText = v[:len(v)-1]
 	} else if !valueFollowsDelimiter(s, end) {
 		// A name and a delimiter followed by a quoted value that holds
 		// whitespace, ",", ";" or "&", as in name="a b", where the value
@@ -1960,6 +1964,7 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 		if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') &&
 			len(quotedValueRe.FindString(s[start+q:])) > end-start-q && valueStartsAt(s, start+q) {
 			// The pair that starts at the name is read below.
+			keyText = v[:q-1]
 		} else {
 			// A pair that an earlier pass redacted, as in "name:[REDACTED]".
 			i := strings.LastIndexAny(v, ":=")
@@ -1969,14 +1974,34 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 			if inner, _ := unquoteValue(trimTrailingPunctuation(v[i+1:])); !isRedactedValue(inner) {
 				return notNestedKey, 0
 			}
+			keyText = v[:i]
 		}
 	}
 	if _, n := cutStatePrefix(s[name:]); n > 0 {
 		name += n
+		keyText = keyText[min(n, len(keyText)):]
 	}
 	loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[name:])
 	if loc == nil || !textKeyAllowed(s[name+loc[2]:name+loc[3]]) {
-		return notNestedKey, 0
+		// A name with a dot before its credential name, as in x.y_PASSWORD,
+		// is read from after the dot: the name is the part that
+		// textKeyValTokenAtRe reads.
+		found := false
+		for d := strings.IndexByte(keyText, '.'); d >= 0 && !found; {
+			if l := textKeyValTokenAtRe.FindStringSubmatchIndex(s[name+d+1:]); l != nil &&
+				textKeyAllowed(s[name+d+1+l[2]:name+d+1+l[3]]) {
+				name += d + 1
+				found = true
+			}
+			if next := strings.IndexByte(keyText[d+1:], '.'); next >= 0 {
+				d += 1 + next
+			} else {
+				break
+			}
+		}
+		if !found {
+			return notNestedKey, 0
+		}
 	}
 	if lineStart {
 		return nestedKey, name
@@ -2073,8 +2098,9 @@ func nestedPairEnd(s string, pair, open int) int {
 
 // oversizedValueEnd returns the end of the value of the last key of a word
 // longer than maxNestedKeyLen that holds a run of keys, s[start:end]: the
-// quoted value that the word opens (or that follows it, if it ends in a
-// delimiter), which is longer than the word when it holds whitespace.
+// quoted value that the word opens, or that follows the word and a delimiter
+// (adjacent to it or after whitespace), which is longer than the word when it
+// holds whitespace.
 func oversizedValueEnd(s string, start, end, open int) int {
 	v := s[start:end]
 	if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') {
@@ -2082,18 +2108,23 @@ func oversizedValueEnd(s string, start, end, open int) int {
 			return start + q + len(qv)
 		}
 	}
-	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
+	at := end
+	if !strings.HasSuffix(v, ":") && !strings.HasSuffix(v, "=") {
 		rest := strings.TrimLeft(s[end:], delimSpace)
-		at := len(s) - len(rest)
-		if qv := quotedValueRe.FindString(rest); qv != "" {
-			return at + len(qv)
+		if rest == "" || (rest[0] != ':' && rest[0] != '=') {
+			return textValueEnd(s, start, end, open)
 		}
-		if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
-			return at + n
-		}
-		return len(s)
+		at = len(s) - len(rest) + 1
 	}
-	return textValueEnd(s, start, end, open)
+	rest := strings.TrimLeft(s[at:], delimSpace)
+	at = len(s) - len(rest)
+	if qv := quotedValueRe.FindString(rest); qv != "" {
+		return at + len(qv)
+	}
+	if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
+		return at + n
+	}
+	return len(s)
 }
 
 // regexpSpace holds the bytes that \s matches in a regular expression such

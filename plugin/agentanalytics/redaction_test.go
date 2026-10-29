@@ -436,6 +436,7 @@ func TestIsCompoundSensitiveKey_LongKey(t *testing.T) {
 
 func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	dottedKey := "x.y_" + longKey
 	tests := []struct {
 		name string
 		in   string
@@ -467,6 +468,18 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"oversized children in one word, then a delimiter and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized children in one word, then a single-quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `='prefix SYNTHETIC_SECRET suffix'`},
 		{"oversized children in one word, then a bare value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: SYNTHETIC_SECRET`},
+		{"oversized children in one word, then a spaced = and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a spaced : and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` : "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a spaced = and a single-quoted value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` =  'prefix SYNTHETIC_SECRET suffix'`},
+		{"oversized children in one word, then a delimiter and a spaced quoted value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `= "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized children in one word, then a spaced = and a bare value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = SYNTHETIC_SECRET`},
+		{"oversized dotted child, quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized dotted child, delimiter and quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `: "prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized dotted child, single-quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `='prefix SYNTHETIC_SECRET suffix'`},
+		{"oversized dotted child with several dots", "credentials:\n a_PASSWORD: a.b.c." + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized dotted child with a state prefix", "credentials:\n a_PASSWORD: user:" + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized dotted child after another", "credentials:\n a_PASSWORD: " + longKey + ": " + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized dotted key on its own", dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized children with state prefixes", "credentials:\n user:" + longKey + ": app:" + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 	}
 	for _, tt := range tests {
@@ -590,6 +603,25 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat(strings.Repeat("x_", 70)+"PASSWORD=", n) + " x"
 			},
 			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 400,
+		},
+		{
+			"oversized key with many dots", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("a.", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"repeated oversized dotted children", func(n int) string {
+				return strings.Repeat("credentials:\n a_PASSWORD: x.y_"+strings.Repeat("x_", 70)+`PASSWORD="a b" `+"\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 150,
+		},
+		{
+			"repeated runs of oversized keys with a spaced delimiter", func(n int) string {
+				key := strings.Repeat("x_", 70) + "PASSWORD"
+				return strings.Repeat("credentials:\n a_PASSWORD: "+key+":"+key+" = \"a b\"\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 150,
 		},
 		{
 			"oversized children of an envelope", func(n int) string {

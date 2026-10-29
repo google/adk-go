@@ -825,50 +825,28 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 // is named for a credential, such as a Token or a type ending in Password,
 // and may write it: whatever its kind, a value of such a type may be a
 // credential in a form that nothing else would tell, such as the digits of an
-// int or the bytes of a slice. A zero value holds none. A struct is shown by
-// its exported fields, which are redacted by name, so it is redacted whole only
-// if a method (MarshalJSON or MarshalText) writes it. The value is read only
-// to tell whether it is zero, and not if the type may guard its fields (see
-// zeroIsSafe), in which case it is taken to hold a credential.
+// int or the bytes of a slice. A struct is shown by its exported fields, which
+// are redacted by name, so it is redacted whole only if a method (MarshalJSON
+// or MarshalText) writes it, whatever its value: what a method writes is not
+// limited by the value it is called on. A map, slice or array of such a type
+// is redacted whole too. These values are not read, because a type may guard
+// its fields in a way that nothing here can see (a mutex, an atomic value, a
+// channel, a lock held elsewhere). A value of a scalar kind is redacted when
+// it is not zero, since a zero one holds none.
 func hasSensitiveTypeName(v reflect.Value) bool {
 	name := v.Type().Name()
 	if name == "" || !isSensitiveKey(name) {
 		return false
 	}
-	if v.Kind() == reflect.Struct {
+	switch v.Kind() {
+	case reflect.Struct:
 		_, isJSON := implementer(v, jsonMarshalerType)
 		_, isText := implementer(v, textMarshalerType)
-		if !isJSON && !isText {
-			return false
-		}
+		return isJSON || isText
+	case reflect.Map, reflect.Slice, reflect.Array:
+		return true
 	}
-	return !zeroIsSafe(v.Type(), false) || !v.IsZero()
-}
-
-// zeroIsSafe reports whether a value of type t can be read to tell whether it
-// is zero without reading state that the type may guard: it holds no
-// synchronization primitive (the types of sync and sync/atomic), and, in an
-// array, no struct with an unexported field, which only the type's own methods
-// may read. inArray is true within an array.
-func zeroIsSafe(t reflect.Type, inArray bool) bool {
-	if pkg := t.PkgPath(); pkg == "sync" || pkg == "sync/atomic" {
-		return false
-	}
-	switch t.Kind() {
-	case reflect.Array:
-		return zeroIsSafe(t.Elem(), true)
-	case reflect.Struct:
-		for i := range t.NumField() {
-			f := t.Field(i)
-			if inArray && !f.IsExported() {
-				return false
-			}
-			if !zeroIsSafe(f.Type, inArray) {
-				return false
-			}
-		}
-	}
-	return true
+	return !v.IsZero()
 }
 
 func (s *sanitizer) enter(key visitKey) bool {

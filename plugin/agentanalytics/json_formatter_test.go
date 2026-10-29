@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -4924,7 +4925,7 @@ type testGuardedStructPassword struct {
 func (v *testGuardedStructPassword) MarshalJSON() ([]byte, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return []byte(`"guarded"`), nil
+	return []byte(`"guarded ` + v.password + `"`), nil
 }
 
 func TestSmartTruncate_DoesNotReadGuardedFieldsOfSensitiveTypes(t *testing.T) {
@@ -4977,57 +4978,64 @@ type testTextMarshaledToken struct{ raw string }
 
 func (k testTextMarshaledToken) MarshalText() ([]byte, error) { return []byte(k.raw), nil }
 
+// testZeroPassword writes a credential whatever its value.
+type testZeroPassword struct{}
+
+func (testZeroPassword) MarshalJSON() ([]byte, error) { return []byte(`"SYNTHETIC_SECRET"`), nil }
+
+// testPointerGuardedPassword guards its fields with a mutex that it points to.
+type testPointerGuardedPassword struct {
+	mu       *sync.Mutex
+	password string
+}
+
+func (v *testPointerGuardedPassword) MarshalJSON() ([]byte, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return []byte(`"guarded ` + v.password + `"`), nil
+}
+
+// testAtomicPassword holds an atomic value.
+type testAtomicPassword struct{ password atomic.Value }
+
+func (v *testAtomicPassword) MarshalJSON() ([]byte, error) {
+	s, _ := v.password.Load().(string)
+	return []byte(`"atomic ` + s + `"`), nil
+}
+
+type testMapPassword map[string]string
+
 // testEmptyAPIToken has no field.
 type testEmptyAPIToken struct{}
 
 func (testEmptyAPIToken) MarshalJSON() ([]byte, error) { return []byte(`"empty"`), nil }
 
-func TestSmartTruncate_ZeroMarshalersOfSensitiveTypes(t *testing.T) {
+func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET"
 	for _, tt := range []struct {
 		name string
 		in   any
 		want string
 	}{
-		{"zero struct with MarshalJSON", testMarshaledToken{}, `""`},
+		{"zero struct with MarshalJSON", testMarshaledToken{}, `"[REDACTED]"`},
 		{"struct with MarshalJSON", testMarshaledToken{secret}, `"[REDACTED]"`},
-		{"zero struct with MarshalText", testTextMarshaledToken{}, `""`},
+		{"zero struct with MarshalText", testTextMarshaledToken{}, `"[REDACTED]"`},
 		{"struct with MarshalText", testTextMarshaledToken{secret}, `"[REDACTED]"`},
-		{"struct without a field", testEmptyAPIToken{}, `"empty"`},
-		{"zero value in a field", struct{ T testMarshaledToken }{}, `{"T":""}`},
-		{"value in a field", struct{ T testMarshaledToken }{testMarshaledToken{secret}}, `{"T":"[REDACTED]"}`},
+		{"zero struct whose method writes a credential", testZeroPassword{}, `"[REDACTED]"`},
+		{"struct without a field", testEmptyAPIToken{}, `"[REDACTED]"`},
+		{"zero value in a field", struct{ T testMarshaledToken }{}, `{"T":"[REDACTED]"}`},
 		{"struct with a mutex", &testGuardedStructPassword{}, `"[REDACTED]"`},
+		{"struct with a mutex behind a pointer", &testPointerGuardedPassword{mu: new(sync.Mutex)}, `"[REDACTED]"`},
+		{"struct with an atomic value", &testAtomicPassword{}, `"[REDACTED]"`},
 		{"array of a struct with a mutex", &testGuardedArrayPassword{}, `"[REDACTED]"`},
+		{"zero scalar", testKimiToken(0), `0`},
+		{"nil slice", testKimiPassword(nil), `"[REDACTED]"`},
+		{"map", testMapPassword{"k": "v"}, `"[REDACTED]"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _, err := SmartTruncate(tt.in, 1000)
 			if err != nil || string(got) != tt.want {
 				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
-			}
-		})
-	}
-}
-
-func TestZeroIsSafe(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		in   any
-		want bool
-	}{
-		{"int", 3, true},
-		{"empty struct", struct{}{}, true},
-		{"struct with an unexported field", testMarshaledToken{}, true},
-		{"mutex", sync.Mutex{}, false},
-		{"struct with a mutex", testPwLocked{}, false},
-		{"array of ints", [4]int{}, true},
-		{"array of a struct with an unexported field", [1]testMarshaledToken{}, false},
-		{"array of a struct with exported fields", [1]struct{ A int }{}, true},
-		{"array of a struct with a mutex", testGuardedArrayPassword{}, false},
-		{"struct with an array of a struct with a mutex", struct{ A [1]testPwLocked }{}, false},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := zeroIsSafe(reflect.TypeOf(tt.in), false); got != tt.want {
-				t.Errorf("zeroIsSafe(%T) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}
