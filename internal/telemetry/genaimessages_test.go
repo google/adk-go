@@ -19,8 +19,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -717,6 +719,51 @@ func TestOversizedAttributeIsDropped(t *testing.T) {
 				t.Errorf("attribute is %d bytes, over the %d the backend accepts", len(got), cloudTraceAttributeValueLimit)
 			}
 		})
+	}
+}
+
+// TestOversizedAttributeSizeIsBounded pins the two halves of the size check:
+// a conversation whose payload alone is over the limit is dropped without
+// being encoded, so a long history costs no more than a short one; and one
+// whose payload fits but whose encoding does not is still measured exactly and
+// dropped, since the backend counts the encoding.
+func TestOversizedAttributeSizeIsBounded(t *testing.T) {
+	captureContent(t)
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(io.Discard)
+
+	var long []*genai.Content
+	for range 2000 {
+		long = append(long, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: strings.Repeat("x", 1000)}}})
+	}
+	content := requestContent(&model.LLMRequest{Contents: long})
+	const runs = 5
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range runs {
+		if attrs := spanContentAttributes(content); len(attrs) != 0 {
+			t.Errorf("recorded %d attributes, want the oversized one dropped", len(attrs))
+		}
+	}
+	runtime.ReadMemStats(&after)
+	// Encoding the conversation would allocate its 2 MB encoding at least once per run.
+	if perRun := (after.TotalAlloc - before.TotalAlloc) / runs; perRun > 64<<10 {
+		t.Errorf("dropping a 2 MB conversation allocated %d bytes, want it dropped before it is encoded", perRun)
+	}
+
+	// 61 440 bytes of payload in 1024 parts: under the limit by itself, over
+	// it with the structure around each part.
+	var dense []*genai.Content
+	for range 1024 {
+		dense = append(dense, &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: strings.Repeat("x", maxContentAttributeBytes/1024)}}})
+	}
+	content = requestContent(&model.LLMRequest{Contents: dense})
+	if got := content[0].value.bytes(); got > maxContentAttributeBytes {
+		t.Fatalf("payload bound = %d, want at most %d for this case to test the exact check", got, maxContentAttributeBytes)
+	}
+	if attrs := spanContentAttributes(content); len(attrs) != 0 {
+		t.Errorf("recorded %d attributes, want the one over the limit once encoded dropped", len(attrs))
 	}
 }
 

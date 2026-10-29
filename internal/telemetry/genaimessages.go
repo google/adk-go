@@ -75,6 +75,11 @@ const maxInlineDataBytes = 16 << 10
 // contentValue is recorded as its JSON encoding in the legacy schema, and as value() otherwise.
 type contentValue interface {
 	value() attribute.Value
+	// bytes is a lower bound on the length of the JSON encoding: the payload
+	// strings and tool payloads alone, without the structure around them.
+	// Encoding never shrinks them, and a value far over the span attribute
+	// limit is dropped by this bound without being encoded.
+	bytes() int
 }
 
 type contentAttr struct {
@@ -90,6 +95,14 @@ func (l messageList) value() attribute.Value {
 		values[i] = m.value()
 	}
 	return attribute.SliceValue(values...)
+}
+
+func (l messageList) bytes() int {
+	n := 0
+	for _, m := range l {
+		n += m.Parts.bytes()
+	}
+	return n
 }
 
 // chatMessage is one turn. FinishReason is required on an output message and
@@ -122,6 +135,14 @@ func (l partList) value() attribute.Value {
 	return attribute.SliceValue(values...)
 }
 
+func (l partList) bytes() int {
+	n := 0
+	for _, p := range l {
+		n += p.bytes()
+	}
+	return n
+}
+
 type textPart struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
@@ -130,6 +151,8 @@ type textPart struct {
 func (p textPart) value() attribute.Value {
 	return attribute.MapValue(str("type", p.Type), str("content", p.Content))
 }
+
+func (p textPart) bytes() int { return len(p.Content) }
 
 type toolCallPart struct {
 	Type      string  `json:"type"`
@@ -149,6 +172,8 @@ func (p toolCallPart) value() attribute.Value {
 	}
 	return attribute.MapValue(kvs...)
 }
+
+func (p toolCallPart) bytes() int { return len(p.Arguments) }
 
 type blobPart struct {
 	Type      string `json:"type"`
@@ -170,6 +195,8 @@ func (p blobPart) value() attribute.Value {
 	return attribute.MapValue(kvs...)
 }
 
+func (p blobPart) bytes() int { return len(p.Content) }
+
 type uriPart struct {
 	Type     string `json:"type"`
 	MIMEType string `json:"mime_type,omitempty"`
@@ -185,6 +212,8 @@ func (p uriPart) value() attribute.Value {
 	kvs = append(kvs, str("modality", p.Modality), str("uri", p.URI))
 	return attribute.MapValue(kvs...)
 }
+
+func (p uriPart) bytes() int { return len(p.URI) }
 
 type toolResponsePart struct {
 	Type     string  `json:"type"`
@@ -204,6 +233,8 @@ func (p toolResponsePart) value() attribute.Value {
 	kvs = append(kvs, attribute.KeyValue{Key: "response", Value: p.Response.value()})
 	return attribute.MapValue(kvs...)
 }
+
+func (p toolResponsePart) bytes() int { return len(p.Response) }
 
 // str replaces invalid UTF-8 as encoding/json does, since OTLP exporters reject it.
 func str(k, v string) attribute.KeyValue {
@@ -238,6 +269,8 @@ func (r rawJSON) value() attribute.Value {
 	}
 	return toLogValue(decoded)
 }
+
+func (r rawJSON) bytes() int { return len(r) }
 
 // requestContent is user content, so callers gate it on content capture.
 func requestContent(req *model.LLMRequest) []contentAttr {
@@ -306,13 +339,21 @@ func spanContentAttributes(content []contentAttr) []attribute.KeyValue {
 	legacy := useLegacySchema()
 	var attrs []attribute.KeyValue
 	for _, c := range content {
-		encoded, err := json.Marshal(c.value)
-		if err != nil {
-			// Unreachable.
-			continue
+		// Encoding a long conversation is most of the cost here, so one the
+		// payload bytes alone put over the limit is dropped unencoded; only
+		// one that may fit is encoded, to measure it exactly.
+		size := c.value.bytes()
+		var encoded []byte
+		if size <= maxContentAttributeBytes {
+			var err error
+			if encoded, err = json.Marshal(c.value); err != nil {
+				// Unreachable.
+				continue
+			}
+			size = len(encoded)
 		}
-		if len(encoded) > maxContentAttributeBytes {
-			otel.Handle(fmt.Errorf("adk: telemetry: leaving %s off the span: its JSON encoding is %d bytes, over the %d-byte limit", c.key, len(encoded), maxContentAttributeBytes))
+		if size > maxContentAttributeBytes {
+			otel.Handle(fmt.Errorf("adk: telemetry: leaving %s off the span: its JSON encoding is %d bytes or more, over the %d-byte limit", c.key, size, maxContentAttributeBytes))
 			continue
 		}
 		if legacy {
