@@ -70,14 +70,64 @@ func BenchEvents(n int, agentName string, start time.Time) []*session.Event {
 	return events
 }
 
+// BenchEventsWellFormed returns n synthetic events in the order the runner
+// records them: user text, model text, and every fourth model turn a function
+// call immediately followed by its function response. Unlike BenchEvents, no
+// user turn separates a call from its response, so prompt assembly finds the
+// history already in the shape its rearrangement produces. Every tenth event
+// carries a small state delta and every model event reports a prompt token
+// count, as a stored session would.
+func BenchEventsWellFormed(n int, agentName string, start time.Time) []*session.Event {
+	events := make([]*session.Event, 0, n)
+	for i := 0; i < n; i++ {
+		ev := &session.Event{
+			ID:           fmt.Sprintf("ev-%06d", i),
+			InvocationID: fmt.Sprintf("inv-%06d", i/2),
+			Timestamp:    start.Add(time.Duration(i) * time.Second),
+		}
+		switch i % 8 {
+		case 0, 2, 4:
+			ev.Author = "user"
+			ev.LLMResponse = model.LLMResponse{Content: genai.NewContentFromText(BenchText, genai.RoleUser)}
+		case 5:
+			ev.Author = agentName
+			ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: fmt.Sprintf("call-%06d", i), Name: "lookup", Args: map[string]any{"q": "weather"}},
+			}}}}
+		case 6:
+			ev.Author = agentName
+			ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: fmt.Sprintf("call-%06d", i-1), Name: "lookup", Response: map[string]any{"result": BenchText}},
+			}}}}
+		default:
+			ev.Author = agentName
+			ev.LLMResponse = model.LLMResponse{Content: genai.NewContentFromText(BenchText, genai.RoleModel)}
+		}
+		if ev.Author == agentName && ev.Content.Role == genai.RoleModel {
+			ev.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: int32(100 * (i + 1))}
+		}
+		if i%10 == 9 {
+			ev.Actions.StateDelta = map[string]any{"turn": i, "temp:scratch": i}
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
 // SeedSession creates a session holding n synthetic events in svc and returns
 // it as read back from the service.
 func SeedSession(ctx context.Context, svc session.Service, appName, userID, sessionID, agentName string, n int) (session.Session, error) {
+	return SeedSessionEvents(ctx, svc, appName, userID, sessionID, BenchEvents(n, agentName, time.Unix(1_700_000_000, 0)))
+}
+
+// SeedSessionEvents creates a session holding events in svc and returns it as
+// read back from the service.
+func SeedSessionEvents(ctx context.Context, svc session.Service, appName, userID, sessionID string, events []*session.Event) (session.Session, error) {
 	created, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID})
 	if err != nil {
 		return nil, err
 	}
-	for _, ev := range BenchEvents(n, agentName, time.Unix(1_700_000_000, 0)) {
+	for _, ev := range events {
 		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
 			return nil, err
 		}

@@ -41,6 +41,17 @@ func BenchmarkBuildContentsDefault(b *testing.B) {
 				}
 			}
 		})
+		b.Run(fmt.Sprintf("well-formed/events=%d", n), func(b *testing.B) {
+			events := benchutil.BenchEventsWellFormed(n, "agent", time.Unix(1_700_000_000, 0))
+			user := genai.NewContentFromText("hello", genai.RoleUser)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, err := buildContentsDefault("agent", "", "", events, false, user); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
