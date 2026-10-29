@@ -57,7 +57,7 @@ func InstrumentGenerateContent[T any](ctx context.Context, params GenerateConten
 	return func(yield func(T, error) bool) {
 		ctx, span := startGenerateContentSpan(ctx, params)
 		logRequest(ctx, params.Request, params.Backend)
-		details := operationDetails{span: span}
+		details := newOperationDetails(ctx, span)
 		details.noteLLMRequest(params.Request)
 
 		var result generateContentResult

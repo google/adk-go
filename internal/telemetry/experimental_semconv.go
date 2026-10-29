@@ -31,9 +31,29 @@ import (
 // event, so that both describe the same request. span must be set; the legacy
 // schema records nothing through it.
 type operationDetails struct {
-	span         trace.Span
+	span trace.Span
+	// logger is the logger the event goes to, and eventEnabled whether it
+	// will take the event at all. Resolved once per call: with no
+	// LoggerProvider installed the logger is a no-op, and converting a
+	// conversation for it buys nothing.
+	logger       log.Logger
+	eventEnabled bool
 	request      []contentAttr
 	eventRequest []attribute.KeyValue
+}
+
+// newOperationDetails resolves where the details of the call on span go.
+func newOperationDetails(ctx context.Context, span trace.Span) operationDetails {
+	d := operationDetails{span: span}
+	if useLegacySchema() {
+		return d
+	}
+	d.logger = otelLogger()
+	d.eventEnabled = d.logger.Enabled(ctx, log.EnabledParameters{
+		Severity:  log.SeverityDebug,
+		EventName: inferenceOperationDetailsEventName,
+	})
+	return d
 }
 
 // noteLLMRequest records the messages of req, where content capture asks for
@@ -47,7 +67,7 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 	// After the sampling decision, not before: converting a whole conversation
 	// costs milliseconds, and on a span the sampler drops it buys nothing.
 	onSpan := d.span.IsRecording() && captureContentOnSpans()
-	onEvent := getGenAICaptureMessageContent()
+	onEvent := d.eventEnabled && getGenAICaptureMessageContent()
 	if !onSpan && !onEvent {
 		return
 	}
@@ -66,9 +86,10 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 	}
 }
 
-// emit emits the event, with messages only when capture is on.
+// emit emits the event, with messages only when capture is on, and not at
+// all when no logger takes it.
 func (d *operationDetails) emit(ctx context.Context, params GenerateContentParams, result generateContentResult) {
-	if useLegacySchema() {
+	if useLegacySchema() || !d.eventEnabled {
 		return
 	}
 	attrs := []attribute.KeyValue{
@@ -92,5 +113,5 @@ func (d *operationDetails) emit(ctx context.Context, params GenerateContentParam
 	// The spec makes this event opt-in; DEBUG lets consumers filter it out.
 	record.SetSeverity(log.SeverityDebug)
 	record.AddAttributes(attrs...)
-	otelLogger().Emit(ctx, record)
+	d.logger.Emit(ctx, record)
 }

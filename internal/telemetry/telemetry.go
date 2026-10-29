@@ -168,7 +168,7 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 func traceGenerateContentResult(span trace.Span, params generateContentResult) {
 	RecordError(span, params.Error)
 	span.SetAttributes(generateContentResultAttributes(params)...)
-	if captureContentOnSpans() {
+	if span.IsRecording() && captureContentOnSpans() {
 		span.SetAttributes(spanContentAttributes(responseContent(params))...)
 	}
 }
@@ -266,7 +266,7 @@ func TraceToolResult(span trace.Span, params TraceToolResultParams) {
 			if functionResponse.ID != "" {
 				attributes = append(attributes, semconv.GenAIToolCallID(functionResponse.ID))
 			}
-			if captureContentOnSpans() && functionResponse.Response != nil && params.Error == nil {
+			if span.IsRecording() && captureContentOnSpans() && functionResponse.Response != nil && params.Error == nil {
 				attributes = append(attributes, spanContentAttributes([]contentAttr{{genAIToolCallResult, toolPayload(functionResponse.Response)}})...)
 			}
 		}
