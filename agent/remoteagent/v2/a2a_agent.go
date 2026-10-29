@@ -211,7 +211,16 @@ func isLoopbackHost(hostname string) bool {
 // The source can be an http(s) URL or a local file path. A source carrying any
 // other scheme, such as "file://", is rejected rather than read as a path.
 func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentCardProvider {
+	var (
+		mu     sync.Mutex
+		cached *a2a.AgentCard
+	)
 	return func(ctx context.Context) (*a2a.AgentCard, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if cached != nil {
+			return cached, nil
+		}
 		isFile, err := classifyCardSource(source)
 		if err != nil {
 			return nil, err
@@ -234,6 +243,7 @@ func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentC
 			if err := validateCardInterfaceOrigins(card, source); err != nil {
 				return nil, err
 			}
+			cached = card
 			return card, nil
 		}
 
@@ -246,7 +256,8 @@ func NewAgentCardProvider(source string, opts ...agentcard.ResolveOption) AgentC
 		if err := json.Unmarshal(fileBytes, &card); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal an agent card: %w", err)
 		}
-		return &card, nil
+		cached = &card
+		return cached, nil
 	}
 }
 
@@ -441,7 +452,8 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 		return nil, fmt.Errorf("A2AConfig.Auth cannot be combined with a custom ClientProvider; wire the credential into your ClientProvider instead. When this agent runs, the context the provider receives is the ADK invocation context: compute remoteagent.CredentialScope(ctx.Session(), name) there and have the client it returns attach it with a2aclient.AttachSessionID on every call, the cleanup CancelTask included. An adka2a server cancelling an abandoned child task calls the provider with its own request context instead, which is not an agent.InvocationContext, so check the assertion. See A2AConfig.ClientProvider")
 	}
 	var authClient, cardClient *http.Client
-	if cfg.ClientProvider == nil {
+	reuseClient := cfg.ClientProvider == nil
+	if reuseClient {
 		var opts []a2aclient.FactoryOption
 		if cfg.Auth != nil {
 			authClient = authHTTPClient(cfg.Auth)
@@ -455,7 +467,8 @@ func NewA2A(cfg A2AConfig) (agent.Agent, error) {
 	}
 
 	remoteAgent := &a2aAgent{
-		cardClient: cardClient,
+		cardClient:  cardClient,
+		reuseClient: reuseClient,
 		serverConfig: &iremoteagent.A2AServerConfig{
 			AgentCard:         cfg.AgentCard,
 			AgentCardProvider: cfg.AgentCardProvider,
@@ -496,6 +509,28 @@ type a2aAgent struct {
 	// is reported once per agent rather than once per invocation, and a card
 	// that later names a different one is reported again.
 	warnedCleartext sync.Map
+
+	reuseClient  bool
+	clientMu     sync.Mutex
+	cachedClient A2AClient
+}
+
+func (a *a2aAgent) acquireClient(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard) (A2AClient, bool, error) {
+	if !a.reuseClient {
+		sender, err := cfg.ClientProvider(ctx, card)
+		return sender, true, err
+	}
+	a.clientMu.Lock()
+	defer a.clientMu.Unlock()
+	if a.cachedClient != nil {
+		return a.cachedClient, false, nil
+	}
+	sender, err := cfg.ClientProvider(ctx, card)
+	if err != nil {
+		return nil, false, err
+	}
+	a.cachedClient = sender
+	return sender, false, nil
 }
 
 func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*session.Event, error] {
@@ -524,12 +559,14 @@ func (a *a2aAgent) run(ctx agent.InvocationContext, cfg A2AConfig) iter.Seq2[*se
 			}
 		}
 
-		sender, err := cfg.ClientProvider(sendCtx, card)
+		sender, shouldDestroy, err := a.acquireClient(sendCtx, cfg, card)
 		if err != nil {
 			yield(toErrorEvent(ctx, fmt.Errorf("sender creation failed: %w", err)), nil)
 			return
 		}
-		defer destroy(ctx, sender)
+		if shouldDestroy {
+			defer destroy(ctx, sender)
+		}
 
 		msg, err := newMessage(ctx, cfg)
 		if err != nil {

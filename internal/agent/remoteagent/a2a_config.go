@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"sync"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
@@ -65,6 +66,9 @@ type A2AServerConfig struct {
 	// credential, so a card fetched on this agent's behalf is authenticated
 	// too. Set together with OwnsAuthScope.
 	CardFetchClient *http.Client
+
+	cardMu       sync.Mutex
+	resolvedCard *a2a.AgentCard
 }
 
 func CreateA2AClient(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard, A2AClient, error) {
@@ -90,7 +94,17 @@ func ResolveAgentCard(ctx context.Context, cfg *A2AServerConfig) (*a2a.AgentCard
 		return cfg.AgentCard, nil
 	}
 	if cfg.AgentCardProvider != nil {
-		return cfg.AgentCardProvider(ctx)
+		cfg.cardMu.Lock()
+		defer cfg.cardMu.Unlock()
+		if cfg.resolvedCard != nil {
+			return cfg.resolvedCard, nil
+		}
+		card, err := cfg.AgentCardProvider(ctx)
+		if err != nil {
+			return nil, err
+		}
+		cfg.resolvedCard = card
+		return card, nil
 	}
 	return nil, fmt.Errorf("either AgentCard or AgentCardProvider must be set")
 }
