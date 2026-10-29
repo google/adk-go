@@ -35,7 +35,8 @@ import (
 )
 
 // fakeHarness is an ACP agent served over pipes. A prompt "use <kind>" asks
-// permission for a tool of that kind and replies with the chosen option; "wait"
+// permission for a tool of that kind and replies with the chosen option, and
+// "ask <kind>" does the same after streaming some text first; "wait"
 // reports progress and never finishes, recording the session/cancel it gets;
 // any other prompt is echoed back in two chunks, prefixed with the session ID.
 type fakeHarness struct {
@@ -142,29 +143,31 @@ func (f *fakeHarness) prompt(id int, params json.RawMessage) {
 
 	if text == "wait" {
 		// Report progress, then work until canceled.
-		f.send(rpcMessage{Method: "session/update", Params: mustJSON(map[string]any{
-			"sessionId": req.SessionID,
-			"update": map[string]any{
-				"sessionUpdate": "agent_message_chunk",
-				"content":       map[string]any{"type": "text", "text": "working"},
-			},
-		})})
+		f.chunk(req.SessionID, "working")
 		return
 	}
 	reply := []string{req.SessionID + " echo: ", text}
 	if kind, ok := strings.CutPrefix(text, "use "); ok {
 		reply = []string{"permission: " + f.askPermission(req.SessionID, kind)}
 	}
+	if kind, ok := strings.CutPrefix(text, "ask "); ok {
+		f.chunk(req.SessionID, "checking. ")
+		reply = []string{"permission: " + f.askPermission(req.SessionID, kind)}
+	}
 	for _, chunk := range reply {
-		f.send(rpcMessage{Method: "session/update", Params: mustJSON(map[string]any{
-			"sessionId": req.SessionID,
-			"update": map[string]any{
-				"sessionUpdate": "agent_message_chunk",
-				"content":       map[string]any{"type": "text", "text": chunk},
-			},
-		})})
+		f.chunk(req.SessionID, chunk)
 	}
 	f.send(rpcMessage{ID: &id, Result: map[string]any{"stopReason": "end_turn"}})
+}
+
+func (f *fakeHarness) chunk(sessionID, text string) {
+	f.send(rpcMessage{Method: "session/update", Params: mustJSON(map[string]any{
+		"sessionId": sessionID,
+		"update": map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": text},
+		},
+	})})
 }
 
 func (f *fakeHarness) askPermission(sessionID, kind string) string {
@@ -252,8 +255,12 @@ func newRunner(t *testing.T, cfg acpagent.Config) *runner.Runner {
 // reply runs one turn and returns the final text of the agent.
 func reply(t *testing.T, r *runner.Runner, sessionID, text string, mode agent.StreamingMode) string {
 	t.Helper()
+	// A turn which waits for the harness, for example a message queued behind
+	// a pending question, fails here instead of hanging the test.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	var final string
-	for ev, err := range r.Run(t.Context(), "user", sessionID, genai.NewContentFromText(text, genai.RoleUser), agent.RunConfig{StreamingMode: mode}) {
+	for ev, err := range r.Run(ctx, "user", sessionID, genai.NewContentFromText(text, genai.RoleUser), agent.RunConfig{StreamingMode: mode}) {
 		if err != nil {
 			t.Fatalf("Run() error = %v", err)
 		}
@@ -321,7 +328,6 @@ func TestAgent_Permissions(t *testing.T) {
 	}{
 		{kind: "read", want: "permission: yes"},
 		{kind: "edit", want: "permission: yes"},
-		{kind: "execute", want: "permission: no"},
 		{kind: "delete", want: "permission: no"},
 	}
 	_, start := startFake(t)
@@ -332,6 +338,40 @@ func TestAgent_Permissions(t *testing.T) {
 				t.Errorf("reply = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAgent_AnswerInLaterInvocation(t *testing.T) {
+	tests := []struct {
+		answer string
+		want   string
+	}{
+		{answer: "once", want: "permission: yes"},
+		{answer: "no", want: "permission: no"},
+	}
+	for _, mode := range []agent.StreamingMode{agent.StreamingModeSSE, agent.StreamingModeNone} {
+		for _, tc := range tests {
+			t.Run(string(mode)+"/"+tc.answer, func(t *testing.T) {
+				fake, start := startFake(t)
+				r := newRunner(t, acpagent.Config{Start: start, AllowTools: []string{"read"}})
+
+				question := reply(t, r, "s1", "ask execute", mode)
+				if !strings.Contains(question, "run execute") {
+					t.Fatalf("first reply = %q, want the permission question", question)
+				}
+				if got := reply(t, r, "s1", tc.answer, mode); got != tc.want {
+					t.Errorf("reply to the answer = %q, want %q", got, tc.want)
+				}
+				// The answer continues the pending prompt rather than starting one.
+				if diff := cmp.Diff([]string{"ask execute"}, fake.recordedPrompts()); diff != "" {
+					t.Errorf("prompts mismatch (-want +got):\n%s", diff)
+				}
+				// The task is finished, so the next message is a new prompt.
+				if got, want := reply(t, r, "s1", "next", mode), "sess-1 echo: next"; got != want {
+					t.Errorf("reply after the answer = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }
 

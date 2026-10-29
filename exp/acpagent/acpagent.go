@@ -36,9 +36,13 @@
 // # Permissions
 //
 // Harnesses ask before running some tools. The agent answers those requests
-// itself from [Config.AllowTools] and [Config.DenyTools] and never pauses the
-// invocation: a tool which is not allowed is rejected, and form elicitations
-// are declined.
+// itself from [Config.AllowTools] and [Config.DenyTools]. Any other request,
+// including a form the harness asks the user to fill in, ends the invocation
+// with the question, and the user's next message to the agent answers it: an
+// option such as "once" or "reject", "yes" or "no", or for a form a JSON
+// object of its fields. A message which is not an answer interrupts the
+// harness and becomes its next instruction. The question is held by the
+// harness process, so it can be answered only while that process runs.
 package acpagent
 
 import (
@@ -46,14 +50,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aevent"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/a2aproject/a2a-go/v2/integrations/executor/a2aacp"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/remoteagent/v2"
+	"google.golang.org/adk/v2/server/adka2a/v2"
+	"google.golang.org/adk/v2/session"
 )
 
 // Config configures an ACP harness agent.
@@ -80,7 +89,7 @@ type Config struct {
 	// AllowTools lists the ACP tool kinds the harness may run when it asks for
 	// permission: read, edit, delete, move, search, execute, think, fetch or
 	// other. In patterns, * matches any run of characters. DenyTools takes
-	// precedence. Requests for any other tool are rejected.
+	// precedence. Requests for any other tool are asked of the user.
 	AllowTools []string
 	DenyTools  []string
 
@@ -120,7 +129,7 @@ func New(ctx context.Context, cfg Config) (agent.Agent, io.Closer, error) {
 	}
 
 	exec, err := a2aacp.NewExecutor(ctx, starter, &a2aacp.Config{
-		AutoAnswer: permissionPolicy{rules: a2aacp.ToolRules{Allow: cfg.AllowTools, Deny: cfg.DenyTools}},
+		AutoAnswer: a2aacp.ToolRules{Allow: cfg.AllowTools, Deny: cfg.DenyTools},
 		Session:    sessionCfg,
 	})
 	if err != nil {
@@ -139,8 +148,8 @@ func New(ctx context.Context, cfg Config) (agent.Agent, io.Closer, error) {
 			Description:  cfg.Description,
 			Capabilities: a2a.AgentCapabilities{Streaming: true},
 		},
-		ClientProvider: func(context.Context, *a2a.AgentCard) (remoteagent.A2AClient, error) {
-			return handlerClient{a2asrv.NewHandler(exec)}, nil
+		ClientProvider: func(ctx context.Context, _ *a2a.AgentCard) (remoteagent.A2AClient, error) {
+			return newHandlerClient(ctx, exec)
 		},
 		BeforeAgentCallbacks: cfg.BeforeAgentCallbacks,
 		AfterAgentCallbacks:  cfg.AfterAgentCallbacks,
@@ -151,30 +160,127 @@ func New(ctx context.Context, cfg Config) (agent.Agent, io.Closer, error) {
 	return ag, exec, nil
 }
 
+// responseKey is the custom metadata key under which remoteagent records the
+// A2A event a session event was converted from.
+var responseKey = adka2a.ToADKMetaKey("response")
+
+// responseState returns the task state in the A2A event ev was converted from,
+// or "" if ev records none.
+func responseState(ev *session.Event) a2a.TaskState {
+	resp, _ := ev.CustomMetadata[responseKey].(map[string]any)
+	status, _ := resp["status"].(map[string]any)
+	state, _ := status["state"].(string)
+	return a2a.TaskState(state)
+}
+
+// pendingTask returns the task the agent's last turn in the invocation's
+// isolation scope left waiting for an answer, or nil if there is none.
+func pendingTask(ctx agent.InvocationContext) *a2a.Task {
+	events := ctx.Session().Events()
+	name := ctx.Agent().Name()
+	inLastTurn := false
+	for i := events.Len() - 1; i >= 0; i-- {
+		ev := events.At(i)
+		if ev.IsolationScope != ctx.IsolationScope() {
+			continue
+		}
+		if ev.Author != name {
+			if inLastTurn {
+				break
+			}
+			continue
+		}
+		inLastTurn = true
+		if responseState(ev) != a2a.TaskStateInputRequired {
+			continue
+		}
+		taskID, contextID := adka2a.GetA2ATaskInfo(ev)
+		if taskID == "" {
+			return nil
+		}
+		return &a2a.Task{
+			ID:        taskID,
+			ContextID: contextID,
+			Status:    a2a.TaskStatus{State: a2a.TaskStateInputRequired},
+		}
+	}
+	return nil
+}
+
 // handlerClient sends requests straight to an in-process request handler.
 type handlerClient struct {
-	a2asrv.RequestHandler
+	handler a2asrv.RequestHandler
+	// pending is the ID of the task waiting for an answer when the invocation
+	// started, or "".
+	pending a2a.TaskID
+}
+
+// newHandlerClient returns a client with a handler and task store of its own.
+// The store starts with the task waiting for an answer, if there is one.
+//
+// This is done here rather than in a request callback because a callback
+// context does not expose the session.
+func newHandlerClient(ctx context.Context, exec a2asrv.AgentExecutor) (*handlerClient, error) {
+	c := &handlerClient{}
+	store := taskstore.NewInMemory(nil)
+	// The context is the invocation's, except when an adka2a server cancels
+	// an abandoned task, which needs no pending task.
+	if ic, ok := ctx.(agent.InvocationContext); ok {
+		if t := pendingTask(ic); t != nil {
+			if _, err := store.Create(ctx, t); err != nil {
+				return nil, fmt.Errorf("restoring task %s: %w", t.ID, err)
+			}
+			c.pending = t.ID
+		}
+	}
+	c.handler = a2asrv.NewHandler(exec,
+		a2asrv.WithTaskStore(store),
+		a2asrv.WithUpdateMaterializer(resumeMaterializer),
+	)
+	return c, nil
+}
+
+// route sends the user's message to the task waiting for an answer, if there
+// is one. remoteagent continues a task only with a function response, while
+// the harness takes a typed answer.
+func (c *handlerClient) route(req *a2a.SendMessageRequest) *a2a.SendMessageRequest {
+	if c.pending == "" || req.Message == nil || req.Message.TaskID != "" {
+		return req
+	}
+	msg := *req.Message
+	msg.TaskID = c.pending
+	routed := *req
+	routed.Message = &msg
+	return &routed
+}
+
+func (c *handlerClient) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
+	return c.handler.SendMessage(ctx, c.route(req))
+}
+
+func (c *handlerClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
+	return c.handler.SendStreamingMessage(ctx, c.route(req))
+}
+
+func (c *handlerClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
+	return c.handler.CancelTask(ctx, req)
 }
 
 // Destroy is a no-op: the handler starts no work of its own, and the
 // executor behind it is stopped by the closer [New] returns.
-func (handlerClient) Destroy() error { return nil }
+func (*handlerClient) Destroy() error { return nil }
 
-// permissionPolicy answers every question the harness asks, so that an
-// invocation never waits on input-required: remoteagent only resumes such a
-// task with a function response, which the harness would not understand.
-type permissionPolicy struct {
-	rules a2aacp.ToolRules
-}
-
-func (p permissionPolicy) AutoAnswer(ctx context.Context, execCtx *a2asrv.ExecutorContext, q a2aacp.Question) (a2aacp.Answer, bool) {
-	if ans, ok := p.rules.AutoAnswer(ctx, execCtx, q); ok {
-		return ans, true
+// resumeMaterializer is the handler's default materializer, except that an
+// append to an artifact the task lacks creates the artifact. The executor
+// keeps streaming a resumed task's reply into the artifact it created before
+// the question, which only the previous invocation's store had. The text
+// streamed before the question was already delivered with that invocation.
+var resumeMaterializer = taskstore.NewFullUpdateMaterializer(func(task *a2a.Task, ev a2a.Event) (*a2a.Task, error) {
+	if au, ok := ev.(*a2a.TaskArtifactUpdateEvent); ok && au.Append && task != nil &&
+		!slices.ContainsFunc(task.Artifacts, func(a *a2a.Artifact) bool { return a.ID == au.Artifact.ID }) {
+		created := *au
+		created.Append = false
+		ev = &created
 	}
-	for _, opt := range []string{a2aacp.OptionReject, a2aacp.OptionRejectAlways, a2aacp.OptionDecline} {
-		if slices.Contains(q.Options, opt) {
-			return a2aacp.Answer{Option: opt}, true
-		}
-	}
-	return a2aacp.Answer{Option: a2aacp.OptionCancel}, true
-}
+	return a2aevent.ApplyShallowUpdate(task, ev)
+})
