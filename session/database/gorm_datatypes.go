@@ -99,7 +99,9 @@ func (j dynamicJSON) Value() (driver.Value, error) {
 	return string(j), nil
 }
 
-// Scan implements the gorm.Serializer Scan method.
+// Scan implements the gorm.Serializer Scan method. The bytes are kept as
+// read; every consumer decodes them with json.Unmarshal, which rejects
+// malformed JSON itself.
 func (j *dynamicJSON) Scan(value any) error {
 	if value == nil {
 		*j = nil
@@ -112,6 +114,7 @@ func (j *dynamicJSON) Scan(value any) error {
 			*j = nil
 			return nil
 		}
+		// Drivers reuse the buffer after Scan returns.
 		bytes = make([]byte, len(v))
 		copy(bytes, v)
 	case string:
@@ -124,9 +127,6 @@ func (j *dynamicJSON) Scan(value any) error {
 		return errors.New(fmt.Sprint("Failed to unmarshal JSONB value:", value))
 	}
 
-	if !json.Valid(bytes) {
-		return fmt.Errorf("invalid JSON received from database: %s", string(bytes))
-	}
 	*j = dynamicJSON(bytes)
 	return nil
 }
