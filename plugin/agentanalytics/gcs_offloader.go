@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
@@ -100,7 +101,7 @@ const (
 	maxGCSObjectNameBytes    = 1024
 	maxGCSPrefixBytes        = 512
 	maxPathSegmentBytes      = 128
-	pathSegmentHashSuffixLen = 9 // "_" + 8 lowercase hex digits
+	pathSegmentHashSuffixLen = 65 // "~" + 64 lowercase hex digits (256-bit SHA-256)
 
 	// defaultMaxPendingUploadBytes caps total bytes held in memory by pending
 	// uploads across queued rows (256 MiB).
@@ -249,16 +250,19 @@ func isSafeExtension(ext string) bool {
 	return true
 }
 
-// pathSegmentHashSuffix returns a deterministic 9-byte "_<8 hex digits>"
-// suffix derived from the first 4 bytes of the SHA-256 digest of s.
+// pathSegmentHashSuffix returns a deterministic 65-byte "~<64 hex digits>"
+// suffix containing the full 256-bit SHA-256 digest of s. The leading "~"
+// lies outside the unchanged safe identifier alphabet ([A-Za-z0-9._-]), so
+// hashed outputs occupy a separate namespace from unchanged identifiers.
 func pathSegmentHashSuffix(s string) string {
 	sum := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("_%08x", sum[:4])
+	return fmt.Sprintf("~%x", sum)
 }
 
-// truncateWithHash caps base at maxBytes-pathSegmentHashSuffixLen bytes and
-// appends the deterministic SHA-256 suffix of raw so inputs that sanitize or
-// truncate to the same base remain distinct and within maxBytes.
+// truncateWithHash caps base at maxBytes-pathSegmentHashSuffixLen bytes on a
+// valid UTF-8 rune boundary and appends the deterministic 256-bit SHA-256
+// suffix of raw so inputs that sanitize or truncate to the same base stay
+// within maxBytes with 256-bit collision resistance.
 func truncateWithHash(base, raw string, maxBytes int) string {
 	suffix := pathSegmentHashSuffix(raw)
 	if maxBytes <= len(suffix) {
@@ -266,6 +270,9 @@ func truncateWithHash(base, raw string, maxBytes int) string {
 	}
 	limit := maxBytes - len(suffix)
 	if len(base) > limit {
+		for limit > 0 && !utf8.RuneStart(base[limit]) {
+			limit--
+		}
 		base = base[:limit]
 	}
 	return base + suffix
@@ -274,10 +281,9 @@ func truncateWithHash(base, raw string, maxBytes int) string {
 // pathSegment returns id for use as a part of an object name: pure ASCII ids
 // consisting of letters, digits, '-', '_' and '.' (not all dots) and at most
 // maxPathSegmentBytes bytes are returned unchanged; empty id returns fallback;
-// any id that is all dots, contains other characters, or exceeds
-// maxPathSegmentBytes is sanitized, bounded to maxPathSegmentBytes, and given
-// a deterministic SHA-256 hex suffix of the raw id so distinct inputs do not
-// collide on the same object name.
+// any id that is all dots, contains other characters (including '~'), or
+// exceeds maxPathSegmentBytes is sanitized, bounded to maxPathSegmentBytes,
+// and given a deterministic "~<sha256>" suffix of the raw id.
 func pathSegment(id, fallback string) string {
 	if id == "" {
 		return fallback
@@ -307,43 +313,65 @@ func pathSegment(id, fallback string) string {
 	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
 }
 
-// cleanGCSPrefix normalizes a configured GCSPathPrefix into slash-separated
-// safe path segments: empty and dot-only ("." and "..") segments are dropped,
-// each remaining segment is sanitized and bounded with pathSegment, the
-// Cloud Storage reserved leading ".well-known/acme-challenge" prefix is
-// rewritten, and the joined prefix is capped at maxGCSPrefixBytes.
+// isUnsafeGCSPrefixRune reports whether r must be replaced in a GCSPathPrefix
+// segment. Cloud Storage permits general UTF-8 characters (including spaces,
+// '=', and non-ASCII Unicode) in object names, but rejects or discourages
+// C0/C1 control characters, CR/LF and Unicode line separators, and
+// backslashes; '~' is reserved as the hash suffix delimiter so unchanged
+// prefixes never collide with hashed prefixes.
+func isUnsafeGCSPrefixRune(r rune) bool {
+	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
+		r == '\u0085' || r == '\u2028' || r == '\u2029' ||
+		r == '\\' || r == '~'
+}
+
+// cleanGCSPrefix normalizes a configured GCSPathPrefix while preserving valid
+// prefixes verbatim (after trimming leading and trailing slashes). A prefix is
+// modified only when it contains empty ("//") or dot-relative ("." or "..")
+// segments, invalid UTF-8, control or line-break characters, '\', '~', the
+// Cloud Storage reserved leading ".well-known/acme-challenge" prefix, or
+// exceeds maxGCSPrefixBytes. Whenever a prefix is modified, a deterministic
+// "~<sha256>" suffix of the raw trimmed prefix is appended so distinct
+// configured prefixes do not collapse onto the same object prefix.
 func cleanGCSPrefix(prefix string) string {
-	if prefix == "" {
+	trimmed := strings.Trim(prefix, "/")
+	if trimmed == "" {
 		return ""
 	}
-	parts := strings.Split(prefix, "/")
+	parts := strings.Split(trimmed, "/")
 	segs := make([]string, 0, len(parts))
-	var firstRaw string
+	altered := false
 	for _, rawSeg := range parts {
-		if rawSeg == "" || strings.Trim(rawSeg, ".") == "" {
+		if rawSeg == "" || rawSeg == "." || rawSeg == ".." {
+			altered = true
 			continue
 		}
-		if len(segs) == 0 {
-			firstRaw = rawSeg
+		var segSB strings.Builder
+		segSB.Grow(len(rawSeg))
+		for i := 0; i < len(rawSeg); {
+			r, width := utf8.DecodeRuneInString(rawSeg[i:])
+			if (r == utf8.RuneError && width == 1) || isUnsafeGCSPrefixRune(r) {
+				segSB.WriteByte('_')
+				altered = true
+			} else {
+				segSB.WriteRune(r)
+			}
+			i += width
 		}
-		segs = append(segs, pathSegment(rawSeg, ""))
-	}
-	if len(segs) == 0 {
-		return ""
+		segs = append(segs, segSB.String())
 	}
 	if len(segs) >= 2 && strings.EqualFold(segs[0], ".well-known") && strings.EqualFold(segs[1], "acme-challenge") {
-		segs[0] = truncateWithHash("_well-known", firstRaw, maxPathSegmentBytes)
+		segs[0] = "_well-known"
+		altered = true
+	}
+	if len(segs) == 0 {
+		return truncateWithHash("_", trimmed, maxGCSPrefixBytes)
 	}
 	joined := strings.Join(segs, "/")
-	if len(joined) <= maxGCSPrefixBytes {
+	if !altered && len(joined) <= maxGCSPrefixBytes {
 		return joined
 	}
-	limit := maxGCSPrefixBytes - pathSegmentHashSuffixLen
-	trimmed := strings.TrimRight(joined[:limit], "/.")
-	if trimmed == "" {
-		trimmed = "prefix"
-	}
-	return trimmed + pathSegmentHashSuffix(prefix)
+	return truncateWithHash(joined, trimmed, maxGCSPrefixBytes)
 }
 
 // gcsObjectPath returns the name of the object that holds a part:

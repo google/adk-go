@@ -413,19 +413,31 @@ func TestGCSObjectPath(t *testing.T) {
 			name:   "dot-relative and empty prefix segments are cleaned",
 			prefix: "../a/../b/./c//", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: "a/b/c/2026-03-04/trace/span_event_c0_p0.txt",
+			want: fmt.Sprintf("a/b/c%s/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix("../a/../b/./c")),
 		},
 		{
-			name:   "dot-only prefix becomes empty",
-			prefix: "./../...", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			name:   "dot-only prefix is replaced with hashed placeholder",
+			prefix: "./..", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: "2026-03-04/trace/span_event_c0_p0.txt",
+			want: fmt.Sprintf("_%s/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix("./..")),
+		},
+		{
+			name:   "triple-dot prefix segment is preserved",
+			prefix: "a/.../b", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "a/.../b/2026-03-04/trace/span_event_c0_p0.txt",
+		},
+		{
+			name:   "valid prefixes with spaces, equals, and unicode are preserved",
+			prefix: "tenant=acme/logs v1/テナント", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: "tenant=acme/logs v1/テナント/2026-03-04/trace/span_event_c0_p0.txt",
 		},
 		{
 			name:   "reserved acme-challenge prefix is rewritten",
 			prefix: ".well-known/acme-challenge/x", ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: fmt.Sprintf("_well-known%s/acme-challenge/x/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix(".well-known")),
+			want: fmt.Sprintf("_well-known/acme-challenge/x%s/2026-03-04/trace/span_event_c0_p0.txt", pathSegmentHashSuffix(".well-known/acme-challenge/x")),
 		},
 	}
 	for _, tt := range tests {
@@ -1710,7 +1722,8 @@ func TestPathSegment(t *testing.T) {
 		{"the edges of the character classes", "azAZ09", "azAZ09"},
 		{"just outside the character classes", "`{@[/: ", "_______" + pathSegmentHashSuffix("`{@[/: ")},
 		{"exactly 128 safe ASCII bytes", strings.Repeat("a", 128), strings.Repeat("a", 128)},
-		{"129 safe ASCII bytes is truncated with hash", strings.Repeat("a", 129), strings.Repeat("a", 119) + pathSegmentHashSuffix(strings.Repeat("a", 129))},
+		{"129 safe ASCII bytes is truncated with hash", strings.Repeat("a", 129), strings.Repeat("a", maxPathSegmentBytes-pathSegmentHashSuffixLen) + pathSegmentHashSuffix(strings.Repeat("a", 129))},
+		{"tilde is outside the unchanged safe alphabet", "a~b", "a_b" + pathSegmentHashSuffix("a~b")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5845,6 +5858,8 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 	t.Run("G3_non_ascii_and_sanitized_ids_do_not_collide", func(t *testing.T) {
 		pairs := [][2]string{
 			{"é", "ü"},
+			{"é", "__4a99557e"},
+			{"é", "_" + pathSegmentHashSuffix("é")},
 			{"session-日本", "session-韓国"},
 			{"日本", "韓国"},
 			{"日本", "__"},
@@ -5854,6 +5869,10 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 			{"é?*", "///"},
 			{"é?*", "___"},
 			{"a/b", "a_b"},
+			{"a/b", "a_b_c14cddc0"},
+			{"a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+			{strings.Repeat("a", 128) + "5606", strings.Repeat("a", 128) + "91879"},
+			{"\uac01\uac01\uac02\uac05\uac09", "\uac01\uac05\uac0f\uac08\uac07"},
 		}
 		for _, pair := range pairs {
 			p0 := gcsObjectPath("logs", ts, "trace-1", "span-1", pair[0], 0, 0, ".txt")
@@ -5865,42 +5884,51 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 	})
 
 	t.Run("G3_batch_upload_with_distinct_non_ascii_event_ids_uploads_both_payloads", func(t *testing.T) {
-		var mu sync.Mutex
-		seenPaths := map[string][]byte{}
-		offloader := &fakeOffloader{
-			hook: func(_ context.Context, req GCSUploadRequest) error {
-				mu.Lock()
-				defer mu.Unlock()
-				if _, exists := seenPaths[req.Path]; exists {
-					return &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "DoesNotExist precondition failed"}
-				}
-				seenPaths[req.Path] = append([]byte(nil), req.Data...)
-				return nil
-			},
+		ctx := context.Background()
+		pairs := [][2]string{
+			{"session-日本", "session-韓国"},
+			{"é", "__4a99557e"},
+			{"é", "_" + pathSegmentHashSuffix("é")},
+			{"a/b", "a_b_c14cddc0"},
+			{"a/b", "a_b" + pathSegmentHashSuffix("a/b")},
+			{strings.Repeat("a", 128) + "5606", strings.Repeat("a", 128) + "91879"},
+			{"\uac01\uac01\uac02\uac05\uac09", "\uac01\uac05\uac0f\uac08\uac07"},
 		}
-		bp := &BatchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
-		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
-		rowJP := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-jp-123456"}}})
-		rowJP[timestampField] = ts
-		rowJP["trace_id"] = "trace-1"
-		rowJP["span_id"] = "span-1"
-		rowJP[eventIDField] = "session-日本"
+		for _, pair := range pairs {
+			fs := newFakeStorage(t)
+			offloader, err := newGCSOffloader(ctx, "test-bucket", fs.clientOptions()...)
+			if err != nil {
+				t.Fatalf("newGCSOffloader() error: %v", err)
+			}
+			t.Cleanup(func() { _ = offloader.Close() })
 
-		rowKR := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-kr-654321"}}})
-		rowKR[timestampField] = ts
-		rowKR["trace_id"] = "trace-1"
-		rowKR["span_id"] = "span-1"
-		rowKR[eventIDField] = "session-韓国"
+			bp := &BatchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
+			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
+			row0 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-first-123456"}}})
+			row0[timestampField] = ts
+			row0["trace_id"] = "trace-1"
+			row0["span_id"] = "span-1"
+			row0[eventIDField] = pair[0]
 
-		bp.resolveUploads(context.Background(), false, []map[string]any{rowJP, rowKR})
+			row1 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "payload-second-654321"}}})
+			row1[timestampField] = ts
+			row1["trace_id"] = "trace-1"
+			row1["span_id"] = "span-1"
+			row1[eventIDField] = pair[1]
 
-		if len(seenPaths) != 2 {
-			t.Fatalf("uploaded %d distinct objects, want 2 (seen: %v)", len(seenPaths), seenPaths)
-		}
-		uriJP, _ := rowJP[columnContentParts].([]map[string]any)[0]["uri"].(string)
-		uriKR, _ := rowKR[columnContentParts].([]map[string]any)[0]["uri"].(string)
-		if uriJP == "" || uriKR == "" || uriJP == uriKR {
-			t.Errorf("got URIs %q and %q, want two distinct non-empty gs:// URIs", uriJP, uriKR)
+			bp.resolveUploads(ctx, false, []map[string]any{row0, row1})
+
+			uri0, _ := row0[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			uri1, _ := row1[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			if uri0 == "" || uri1 == "" || uri0 == uri1 {
+				t.Fatalf("pair %q vs %q got URIs %q and %q, want two distinct non-empty gs:// URIs", pair[0], pair[1], uri0, uri1)
+			}
+			obj0, ok0 := fs.object("test-bucket", strings.TrimPrefix(uri0, "gs://test-bucket/"))
+			obj1, ok1 := fs.object("test-bucket", strings.TrimPrefix(uri1, "gs://test-bucket/"))
+			if !ok0 || !ok1 || string(obj0.data) != "payload-first-123456" || string(obj1.data) != "payload-second-654321" {
+				t.Errorf("pair %q vs %q stored (%v:%q, %v:%q), want both payloads stored distinctly",
+					pair[0], pair[1], ok0, obj0.data, ok1, obj1.data)
+			}
 		}
 	})
 
@@ -5948,15 +5976,20 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 			prefix   string
 			wantLead string
 		}{
-			{"../x", "x/2026-03-04/"},
-			{"a/../b", "a/b/2026-03-04/"},
-			{"a//b", "a/b/2026-03-04/"},
-			{".", "2026-03-04/"},
-			{"..", "2026-03-04/"},
-			{"a/./b", "a/b/2026-03-04/"},
-			{".well-known/acme-challenge/x", "_well-known" + pathSegmentHashSuffix(".well-known") + "/acme-challenge/x/2026-03-04/"},
-			{"/.well-known/ACME-CHALLENGE/x", "_well-known" + pathSegmentHashSuffix(".well-known") + "/ACME-CHALLENGE/x/2026-03-04/"},
-			{"logs\ninjected/part\r\n2\x00", ""},
+			{"tenant=acme", "tenant=acme/2026-03-04/"},
+			{"logs v1", "logs v1/2026-03-04/"},
+			{"logs/テナント", "logs/テナント/2026-03-04/"},
+			{"logs/.../tenant", "logs/.../tenant/2026-03-04/"},
+			{"a/.../b", "a/.../b/2026-03-04/"},
+			{"../x", "x" + pathSegmentHashSuffix("../x") + "/2026-03-04/"},
+			{"a/../b", "a/b" + pathSegmentHashSuffix("a/../b") + "/2026-03-04/"},
+			{"a//b", "a/b" + pathSegmentHashSuffix("a//b") + "/2026-03-04/"},
+			{".", "_" + pathSegmentHashSuffix(".") + "/2026-03-04/"},
+			{"..", "_" + pathSegmentHashSuffix("..") + "/2026-03-04/"},
+			{"a/./b", "a/b" + pathSegmentHashSuffix("a/./b") + "/2026-03-04/"},
+			{".well-known/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-known/acme-challenge/x") + "/2026-03-04/"},
+			{"/.well-known/ACME-CHALLENGE/x", "_well-known/ACME-CHALLENGE/x" + pathSegmentHashSuffix(".well-known/ACME-CHALLENGE/x") + "/2026-03-04/"},
+			{"logs\ninjected/part\r\n2\x00", "logs_injected/part__2_" + pathSegmentHashSuffix("logs\ninjected/part\r\n2\x00") + "/2026-03-04/"},
 		}
 		for _, tc := range prefixes {
 			got := gcsObjectPath(tc.prefix, ts, "trace", "span", "event", 0, 0, ".txt")
@@ -5972,6 +6005,52 @@ func TestProbe_T8_GCSObjectPath(t *testing.T) {
 				if r < 0x20 || r == 0x7f {
 					t.Errorf("gcsObjectPath(prefix=%q) = %q contains control rune %U", tc.prefix, got, r)
 				}
+			}
+		}
+
+		// Distinct configured prefixes must never collapse onto the same object path.
+		distinctPrefixes := []string{
+			"",
+			".",
+			"..",
+			"./..",
+			"...",
+			"logs/tenant",
+			"logs/.../tenant",
+			"logs/../tenant",
+			"logs/./tenant",
+			"logs//tenant",
+			"logs/tenant" + pathSegmentHashSuffix("logs/../tenant"),
+		}
+		seenPrefixPaths := make(map[string]string, len(distinctPrefixes))
+		fs := newFakeStorage(t)
+		offloader, err := newGCSOffloader(context.Background(), "test-bucket", fs.clientOptions()...)
+		if err != nil {
+			t.Fatalf("newGCSOffloader() error: %v", err)
+		}
+		t.Cleanup(func() { _ = offloader.Close() })
+
+		for i, p := range distinctPrefixes {
+			got := gcsObjectPath(p, ts, "trace", "span", "event", 0, 0, ".txt")
+			if prev, exists := seenPrefixPaths[got]; exists {
+				t.Errorf("distinct prefixes %q and %q collided on GCS object path %q", prev, p, got)
+			}
+			seenPrefixPaths[got] = p
+
+			wantPayload := fmt.Sprintf("prefix-payload-%d-%s", i, p)
+			bp := &BatchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: p, ConnectionID: "us.conn"}}
+			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
+			row := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: wantPayload}}})
+			row[timestampField] = ts
+			row["trace_id"] = "trace"
+			row["span_id"] = "span"
+			row[eventIDField] = "event"
+			bp.resolveUploads(context.Background(), false, []map[string]any{row})
+
+			uri, _ := row[columnContentParts].([]map[string]any)[0]["uri"].(string)
+			obj, ok := fs.object("test-bucket", strings.TrimPrefix(uri, "gs://test-bucket/"))
+			if !ok || string(obj.data) != wantPayload {
+				t.Errorf("prefix %q stored (%v, %q), want %q at %q", p, ok, obj.data, wantPayload, uri)
 			}
 		}
 	})
