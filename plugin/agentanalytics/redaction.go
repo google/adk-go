@@ -109,16 +109,22 @@ var sensitiveKeyNames = func() map[string]struct{} {
 	return names
 }()
 
+// unicodeSpaceRun matches the whitespace between a Bearer or Basic scheme and
+// its credential: ASCII whitespace, any Unicode space separator (such as the
+// no-break space U+00A0 or the ideographic space U+3000) and the next line
+// character U+0085.
+const unicodeSpaceRun = `[\s\p{Zs}\x{0085}]+`
+
 var (
 	uriTokenRe   = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
 	authHeaderRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
-	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)` + unicodeSpaceRun + `("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
 	// basicTokenRe matches a candidate basic credential, which
 	// redactBasicCredential redacts only if it is valid base64.
-	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)\s+([A-Za-z0-9+/]+={0,2})`)
+	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)` + unicodeSpaceRun + `([A-Za-z0-9+/]+={0,2})`)
 	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
 	// textKeyValTokenRe matches key=value and key: value pairs. As in
 	// adk-python, the key may be quoted (Python dict reprs use single
@@ -128,8 +134,8 @@ var (
 	// redactTextKeyValue leaves out the "}" and "]" that end the value and
 	// close a bracket opened before the key, as in the %+v output
 	// {APIKey:...}.
-	textKeyValTokenRe   = regexp.MustCompile(`(?i)\b(` + bareSensitiveKeyRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
-	textKeyValTokenAtRe = regexp.MustCompile(`(?i)^(` + bareSensitiveKeyRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	textKeyValTokenRe   = regexp.MustCompile(`(?i)(?:\b|_)(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	textKeyValTokenAtRe = regexp.MustCompile(`(?i)^(` + textKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	// nestedKeyNameRe matches a value that is itself a fixed sensitive key
 	// name (see nestsSensitiveKey): the name, possibly after a quote,
 	// which may be escaped, and a "user:" or "app:" state prefix, as
@@ -161,7 +167,7 @@ var (
 // scheme. A name that contains another, such as "accesstoken", which contains
 // "token", is left out, since the text then contains the shorter name too.
 var patternWords = func() []string {
-	words := append([]string{"basic", session.KeyPrefixTemp}, slices.Collect(maps.Keys(sensitiveKeyNames))...)
+	words := append([]string{"basic", "oauth", session.KeyPrefixTemp}, slices.Collect(maps.Keys(sensitiveKeyNames))...)
 	minimal := slices.DeleteFunc(slices.Clone(words), func(w string) bool {
 		return slices.ContainsFunc(words, func(other string) bool {
 			return other != w && strings.Contains(w, other)
@@ -256,6 +262,28 @@ func sensitiveKeyRegex() string {
 	return `temp:[^"'\s\r\n,}]+|` + fixedSensitiveKeyRegex()
 }
 
+// textKeyNameRegex returns the pattern for the name of a key in key=value and
+// key: value text: a sensitive key name (see bareSensitiveKeyRegex), possibly
+// after a run of letters, digits, "_" and "-", so that an environment variable
+// or a compound key that ends in one, such as DB_PASSWORD, OPENAI_API_KEY or
+// dbPassword, is matched whole, and the oauth*.code key of an OAuth
+// configuration. redactTextKeyValue keeps only the compound names that
+// isSensitiveKey accepts, so that a name such as next_page_token or
+// mypassword is left alone.
+func textKeyNameRegex() string {
+	return `[a-z0-9_-]*(?:` + bareTextKeyNameRegex() + `)`
+}
+
+// bareTextKeyNameRegex returns textKeyNameRegex without the prefix. A search
+// with textKeyNameRegex is markedly slower on long text than one that finds a
+// bare name, so findKeyValToken searches with this pattern, after a word
+// boundary or a "_", and extends the key back over the prefix itself. A name
+// that continues a word without a separator, as in dbPassword, is therefore
+// found only as a map key or struct field, not in text.
+func bareTextKeyNameRegex() string {
+	return bareSensitiveKeyRegex() + `|oauth[a-z0-9_-]*[.]code`
+}
+
 // bareSensitiveKeyRegex returns an alternation of the sensitive key names for
 // unquoted key=value and key: value text. A "temp:" key name ends before the
 // first "=" or ":", so neither the assignment delimiter nor an "=" or ":"
@@ -296,19 +324,155 @@ func removeKeySeparators(k string) string {
 // invocation-scoped scratch data. Credential names are compared ignoring
 // case, the "_" and "-" separators, and a "user:" or "app:" state prefix, so
 // that api_key, api-key, apiKey, the Go field name APIKey and the state key
-// user:api_key all match.
+// user:api_key all match. A compound key that ends in a credential name, as an
+// environment variable or a prefixed field does, such as DB_PASSWORD,
+// GITHUB_TOKEN, OPENAI_API_KEY, dbPassword or x-amz-security-token, is
+// sensitive too (see isCompoundSensitiveKey).
 func isSensitiveKey(k string) bool {
 	n := strings.ToLower(strings.TrimSpace(k))
 	if strings.HasPrefix(n, session.KeyPrefixTemp) {
 		return true
 	}
+	orig := strings.TrimSpace(k)
 	if rest, ok := strings.CutPrefix(n, session.KeyPrefixUser); ok {
 		n = rest
-	} else {
-		n = strings.TrimPrefix(n, session.KeyPrefixApp)
+		orig = orig[len(session.KeyPrefixUser):]
+	} else if rest, ok := strings.CutPrefix(n, session.KeyPrefixApp); ok {
+		n = rest
+		orig = orig[len(session.KeyPrefixApp):]
 	}
-	_, ok := sensitiveKeyNames[removeKeySeparators(strings.TrimSpace(n))]
-	return ok
+	if _, ok := sensitiveKeyNames[removeKeySeparators(strings.TrimSpace(n))]; ok {
+		return true
+	}
+	return isCompoundSensitiveKey(strings.TrimSpace(orig))
+}
+
+// lowPrecisionKeySuffixes are the credential names that are not taken as the
+// last word of a compound key, because they are ordinary words in a payload:
+// a "method_signature" or a "bearer" is not a credential.
+//
+// Neither are "credential" and "credentials" taken as the last word: a key such
+// as exchangedAuthCredential names a structure whose fields are redacted one
+// by one, not a value to redact whole.
+var lowPrecisionKeySuffixes = map[string]struct{}{
+	"bearer":      {},
+	"credential":  {},
+	"credentials": {},
+	"sig":         {},
+	"signature":   {},
+}
+
+// isCompoundSensitiveKey reports whether k, a name made of ASCII letters,
+// digits, "_", "-" and ".", split into words at those separators and at
+// camelCase boundaries, ends in the words of a sensitive
+// key name: DB_PASSWORD, dbPassword and spring.datasource.password end in
+// "password", and OPENAI_API_KEY ends in "api_key". Names that merely contain a
+// credential name, such as token_count, prompt_tokens or max_output_tokens, and
+// the pagination tokens (page_token, next_page_token), are not sensitive. As an
+// OAuth configuration does, a key such as oauth2Config.code, whose last
+// dotted segment is "code" after a segment that starts with "oauth", is
+// sensitive too.
+func isCompoundSensitiveKey(k string) bool {
+	if k == "" || strings.ContainsFunc(k, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' || r == '.')
+	}) {
+		// Not a key name: a URI path segment such as api_key=value, or prose.
+		return false
+	}
+	lower := strings.ToLower(k)
+	if i := strings.LastIndexByte(lower, '.'); i > 0 && lower[i+1:] == "code" {
+		for _, seg := range strings.Split(lower[:i], ".") {
+			if strings.HasPrefix(seg, "oauth") {
+				return true
+			}
+		}
+	}
+	compact := removeKeySeparators(lower)
+	if strings.HasSuffix(compact, "pagetoken") {
+		return false
+	}
+	// A cheap test before the allocation of the words: some credential
+	// name must end the key.
+	matched := false
+	for name := range sensitiveKeyNames {
+		if len(compact) > len(name) && strings.HasSuffix(compact, name) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	words := splitKeyWords(k)
+	for i := 1; i < len(words); i++ {
+		name := strings.Join(words[i:], "")
+		if _, low := lowPrecisionKeySuffixes[name]; low {
+			continue
+		}
+		if _, ok := sensitiveKeyNames[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// splitKeyWords splits k into lowercase words at every character that is not a
+// letter or a digit, and at camelCase boundaries: before an upper-case letter
+// that follows a lower-case letter or a digit (dbPassword, oauth2Config), and
+// before the last upper-case letter of a run that is followed by a lower-case
+// letter (APIKey is "api" and "key").
+func splitKeyWords(k string) []string {
+	var words []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	runes := []rune(k)
+	for i, r := range runes {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush()
+			continue
+		}
+		if unicode.IsUpper(r) && len(cur) > 0 {
+			prev := runes[i-1]
+			nextLower := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return words
+}
+
+// bareTextKeyRe matches a text key that is only a sensitive key name, with no
+// prefix (see textKeyNameRegex).
+var bareTextKeyRe = regexp.MustCompile(`(?i)^(?:` + bareSensitiveKeyRegex() + `)$`)
+
+// textKeyAllowed reports whether the key that textKeyValTokenRe matched is to
+// be redacted: a plain sensitive key name always is, and a compound name is
+// if isSensitiveKey accepts it or a "-" in it precedes a plain name.
+func textKeyAllowed(key string) bool {
+	if bareTextKeyRe.MatchString(key) || isSensitiveKey(key) {
+		return true
+	}
+	// A sensitive name after a "-" has always been matched on its own, as in
+	// foo-signature=..., whose "-" is a word boundary.
+	for i := strings.IndexByte(key, '-'); i >= 0; {
+		if bareTextKeyRe.MatchString(key[i+1:]) {
+			return true
+		}
+		next := strings.IndexByte(key[i+1:], '-')
+		if next < 0 {
+			break
+		}
+		i += 1 + next
+	}
+	return false
 }
 
 // canonicalizeCredentialMarker decodes nested ASCII \u, \x and percent
@@ -1308,7 +1472,24 @@ func findKeyValToken(s string) []int {
 	if loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s); loc != nil {
 		return loc
 	}
-	return textKeyValTokenRe.FindStringSubmatchIndex(s)
+	loc := textKeyValTokenRe.FindStringSubmatchIndex(s)
+	if loc == nil {
+		return nil
+	}
+	// Extend the key back over the prefix of a compound name. The match
+	// starts at the key.
+	start := loc[2]
+	for start > 0 && isTextKeyByte(s[start-1]) {
+		start--
+	}
+	loc[0], loc[2] = start, start
+	return loc
+}
+
+// isTextKeyByte reports whether c may be in the prefix of a compound text key
+// (see textKeyNameRegex).
+func isTextKeyByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' || c == '-'
 }
 
 // replaceMatches replaces each match of re in s with the text returned by
@@ -1412,6 +1593,11 @@ func redactJSONKeyValue(s string, loc []int) (string, int) {
 // trimEnclosingClosers), as in the %+v output {APIKey:...} or
 // [{APIKey:...}]. brackets counts the brackets opened before the key.
 func redactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, int) {
+	if !textKeyAllowed(s[loc[2]:loc[3]]) {
+		// A compound name that does not end in a credential name, such as
+		// next_page_token. What follows the delimiter is scanned again.
+		return s[loc[0]:loc[7]], loc[7]
+	}
 	open := brackets.before(s, loc[0])
 	start, end := loc[8], loc[9]
 	switch kind, pair := nestsSensitiveKey(s, start, end, startsLine(s, loc[7], start)); kind {

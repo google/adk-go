@@ -19,12 +19,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -4121,4 +4123,190 @@ func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *tes
 	if got, _ := row["is_truncated"].(bool); !got {
 		t.Errorf("row[is_truncated] = %v, want true (pinned by hasFailedUploadTruncated)", row["is_truncated"])
 	}
+}
+
+func TestTruncateString_ReplacesInvalidUTF8(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		maxLength int
+		want      string
+		wantTrunc bool
+	}{
+		{"fits", "ok\xff\xfe tail", 100, "ok\uFFFD tail", false},
+		{"no limit", "ok\xff\xfe tail", -1, "ok\uFFFD tail", false},
+		{"valid text is unchanged", "héllo 日本", 100, "héllo 日本", false},
+		{"truncated", "ok\xff\xfe tail", 3, "ok\uFFFD" + truncationSuffix, true},
+		{"lone continuation byte", "\x80", 10, "\uFFFD", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := truncateString(tt.in, tt.maxLength)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("truncateString(%q, %d) = (%q, %v), want (%q, %v)", tt.in, tt.maxLength, got, truncated, tt.want, tt.wantTrunc)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateString(%q, %d) = %q, which is not valid UTF-8", tt.in, tt.maxLength, got)
+			}
+		})
+	}
+}
+
+func TestSanitizeAndTruncateText_ReplacesInvalidUTF8(t *testing.T) {
+	for _, redact := range []bool{true, false} {
+		got, _ := sanitizeAndTruncateText("ok\xff\xfe tail", 1000, redact)
+		if got != "ok\uFFFD tail" {
+			t.Errorf("sanitizeAndTruncateText(redact=%v) = %q, want %q", redact, got, "ok\uFFFD tail")
+		}
+	}
+}
+
+func TestFormatResponseContent_ReplacesInvalidUTF8InText(t *testing.T) {
+	got, _ := formatResponseContent(&genai.Content{Parts: []*genai.Part{{Text: "a\xffb"}}}, 1000, true)
+	if !utf8.ValidString(got) || !strings.Contains(got, "a\uFFFDb") {
+		t.Errorf("formatResponseContent = %q, want valid UTF-8 holding %q", got, "a\uFFFDb")
+	}
+}
+
+type testErrorNoFields struct{ msg string }
+
+func (e *testErrorNoFields) Error() string { return e.msg }
+
+type testErrorValue struct{ msg string }
+
+func (e testErrorValue) Error() string { return e.msg }
+
+type testErrorWithFields struct {
+	Code    int
+	Message string
+}
+
+func (e testErrorWithFields) Error() string { return "must not be used" }
+
+type testErrorCode string
+
+func (e testErrorCode) Error() string { return "code " + string(e) }
+
+type testStringerNoFields struct{ n int }
+
+func (s testStringerNoFields) String() string { return "stringer n=" + strconv.Itoa(s.n) }
+
+type testStringerWithFields struct{ Name string }
+
+func (s testStringerWithFields) String() string { return "must not be used" }
+
+type testPanickingError struct{ p *int }
+
+func (e testPanickingError) Error() string { return strconv.Itoa(*e.p) }
+
+type testPanickingStringer struct{ p *int }
+
+func (s testPanickingStringer) String() string { return strconv.Itoa(*s.p) }
+
+func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        any
+		want      string
+		wantTrunc bool
+	}{
+		{"errors.New", errors.New("boom"), `"boom"`, false},
+		{"wrapped error", fmt.Errorf("outer: %w", errors.New("inner")), `"outer: inner"`, false},
+		{"pointer error type", &testErrorNoFields{"custom"}, `"custom"`, false},
+		{"value error type", testErrorValue{"value"}, `"value"`, false},
+		{"error of a string kind", testErrorCode("E42"), `"code E42"`, false},
+		{"error in a map", map[string]any{"err": errors.New("x")}, `{"err":"x"}`, false},
+		{"error in a slice", []error{errors.New("a"), errors.New("b")}, `["a","b"]`, false},
+		{"credential in the error text", errors.New("dial failed: api_key=SECRET"), `"dial failed: api_key=[REDACTED]"`, true},
+		{"stringer without exported fields", testStringerNoFields{7}, `"stringer n=7"`, false},
+		{"pointer to stringer", &testStringerNoFields{8}, `"stringer n=8"`, false},
+		{"error with exported fields keeps its fields", testErrorWithFields{Code: 7, Message: "m"}, `{"Code":7,"Message":"m"}`, false},
+		{"stringer with exported fields keeps its fields", testStringerWithFields{Name: "n"}, `{"Name":"n"}`, false},
+		{"duration stays a number", time.Second, `1000000000`, false},
+		{"struct with no fields at all", struct{ a int }{3}, `{}`, false},
+		{"panicking error", testPanickingError{}, `"[UNSUPPORTED_OBJECT]"`, true},
+		{"panicking stringer", testPanickingStringer{}, `"[UNSUPPORTED_OBJECT]"`, true},
+		{"nil error pointer", (*testErrorNoFields)(nil), `null`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%v) error: %v", tt.in, err)
+			}
+			if string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%v) = (%s, %v), want (%s, %v)", tt.in, got, truncated, tt.want, tt.wantTrunc)
+			}
+		})
+	}
+}
+
+func TestFormatResponseContent_SanitizesAndBoundsSummary(t *testing.T) {
+	t.Run("function names are sanitized", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "fetch api_key=SECRET"}},
+			{FunctionResponse: &genai.FunctionResponse{Name: "Bearer SECRET"}},
+		}}
+		got, truncated := formatResponseContent(content, 1000, true)
+		if strings.Contains(got, "SECRET") {
+			t.Errorf("formatResponseContent = %q, which still holds the secret", got)
+		}
+		if want := "call: fetch api_key=[REDACTED] | resp: Bearer [REDACTED]"; got != want {
+			t.Errorf("formatResponseContent = %q, want %q", got, want)
+		}
+		if !truncated {
+			t.Error("formatResponseContent did not mark the redacted summary as truncated")
+		}
+	})
+
+	t.Run("function names are not sanitized when redaction is off", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "fetch api_key=SECRET"}}}}
+		got, _ := formatResponseContent(content, 1000, false)
+		if want := "call: fetch api_key=SECRET"; got != want {
+			t.Errorf("formatResponseContent = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a long function name is truncated", func(t *testing.T) {
+		name := strings.Repeat("n", 100_000)
+		content := &genai.Content{Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: name}},
+			{FunctionResponse: &genai.FunctionResponse{Name: name}},
+		}}
+		got, truncated := formatResponseContent(content, 500*1024, true)
+		if !truncated {
+			t.Error("formatResponseContent did not report the truncation of a long name")
+		}
+		if want := 2*(len("call: ")+maxFunctionNameSummaryLength+len(truncationSuffix)) + len(" | "); len(got) != want {
+			t.Errorf("len(formatResponseContent) = %d, want %d", len(got), want)
+		}
+	})
+
+	t.Run("the whole summary is capped", func(t *testing.T) {
+		parts := make([]*genai.Part, 1000)
+		for i := range parts {
+			parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{Name: "tool_with_a_name"}}
+		}
+		got, truncated := formatResponseContent(&genai.Content{Parts: parts}, 100, true)
+		if !truncated {
+			t.Error("formatResponseContent did not report the truncation of the summary")
+		}
+		if want := 100 + responseSummarySlack + len(truncationSuffix); len(got) != want {
+			t.Errorf("len(formatResponseContent) = %d, want %d", len(got), want)
+		}
+		if !strings.HasSuffix(got, truncationSuffix) {
+			t.Errorf("formatResponseContent = %q, want the suffix %q", got, truncationSuffix)
+		}
+	})
+
+	t.Run("a short summary is unchanged", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{
+			{Text: "hello"},
+			{FunctionCall: &genai.FunctionCall{Name: "lookup"}},
+		}}
+		got, truncated := formatResponseContent(content, 1000, true)
+		if want := "text: 'hello' | call: lookup"; got != want || truncated {
+			t.Errorf("formatResponseContent = (%q, %v), want (%q, false)", got, truncated, want)
+		}
+	})
 }

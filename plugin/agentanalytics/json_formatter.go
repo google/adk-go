@@ -55,6 +55,14 @@ const (
 	maxContainerAlloc = 1024
 )
 
+// maxFunctionNameSummaryLength bounds, in runes, the function name that a
+// response summary shows for a function call or response part.
+const maxFunctionNameSummaryLength = 256
+
+// responseSummarySlack is the number of runes by which a response summary may
+// exceed the maximum content length, which bounds each of its pieces.
+const responseSummarySlack = 4096
+
 type nodeBudget struct {
 	remaining int
 }
@@ -70,6 +78,8 @@ func (b *nodeBudget) take() bool {
 var (
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+	errorType         = reflect.TypeFor[error]()
+	stringerType      = reflect.TypeFor[fmt.Stringer]()
 	jsonNumberType    = reflect.TypeFor[json.Number]()
 )
 
@@ -461,9 +471,13 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 			piece = "text: '" + text + "'"
 			isText = true
 		case part.FunctionCall != nil:
-			piece = "call: " + part.FunctionCall.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionCall.Name, maxFunctionNameSummaryLength, redact)
+			piece = "call: " + name
 		case part.FunctionResponse != nil:
-			piece = "resp: " + part.FunctionResponse.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionResponse.Name, maxFunctionNameSummaryLength, redact)
+			piece = "resp: " + name
 		case part.ExecutableCode != nil:
 			var code string
 			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
@@ -498,8 +512,12 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 		truncated = truncated || p.truncated
 	}
 	joined := strings.Join(active, " | ")
-	if m.isResponse {
-		return joined, truncated
+	if m.isResponse && maxLength >= 0 {
+		// Each piece is already bounded by maxLength, so the slack only
+		// leaves room for the "text: '...'" wrapper and the separators of a
+		// few short pieces. It keeps a response with many large parts from
+		// growing to a multiple of maxLength.
+		maxLength += responseSummarySlack
 	}
 	summary, t := truncateString(joined, maxLength)
 	return summary, truncated || t
@@ -898,7 +916,64 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		out, truncated = s.stringValue(string(b), depth)
 		return out, truncated, true
 	}
+	// A value that reflection would show as an empty object, because its
+	// fields are unexported, writes the text it has for itself instead.
+	if m, found := implementer(v, errorType); found && !showsExportedFields(v) {
+		return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
+	}
+	if v.Kind() == reflect.Struct && !showsExportedFields(v) {
+		if m, found := implementer(v, stringerType); found {
+			return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
+		}
+	}
 	return nil, false, false
+}
+
+// textOf sanitizes the text that get returns, or stands in for it with a
+// placeholder if get fails.
+func (s *sanitizer) textOf(get func() (string, error), depth int) (out any, truncated, ok bool) {
+	text, err := get()
+	if err != nil {
+		return unsupportedObjPlaceholder, true, true
+	}
+	out, truncated = s.stringValue(text, depth)
+	return out, truncated, true
+}
+
+// errorText returns err.Error(), turning a panic of the method into an error.
+func errorText(err error) (text string, rerr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rerr = errors.New("error method panicked")
+		}
+	}()
+	return err.Error(), nil
+}
+
+// stringerText returns m.String(), turning a panic of the method into an error.
+func stringerText(m fmt.Stringer) (text string, rerr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rerr = errors.New("string method panicked")
+		}
+	}()
+	return m.String(), nil
+}
+
+// showsExportedFields reports whether v is a struct that encoding/json would
+// encode with at least one field: an exported field, or an embedded struct,
+// whose fields may be promoted. For any other kind of value it is false.
+func showsExportedFields(v reflect.Value) bool {
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	t := v.Type()
+	for i := range t.NumField() {
+		if f := t.Field(i); f.IsExported() || f.Anonymous {
+			return true
+		}
+	}
+	return false
 }
 
 // implementer returns v, or its address when only the pointer type has the
@@ -1175,8 +1250,12 @@ func isEmptyValue(v reflect.Value) bool {
 }
 
 // truncateString shortens s to maxLength runes followed by truncationSuffix.
-// A negative maxLength means no limit.
+// A negative maxLength means no limit. A run of bytes that is not valid UTF-8
+// is replaced with one U+FFFD.
 func truncateString(s string, maxLength int) (string, bool) {
+	// Invalid UTF-8 is replaced whatever the length of s, so that it never
+	// reaches a BigQuery string column or a JSON document.
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if maxLength < 0 {
 		return s, false
 	}
