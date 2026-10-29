@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
@@ -176,68 +177,88 @@ func (s *databaseService) Get(ctx context.Context, req *session.GetRequest) (*se
 		return nil, fmt.Errorf("app_name, user_id, session_id are required, got app_name: %q, user_id: %q, session_id: %q", appName, userID, sessionID)
 	}
 
-	var foundSession storageSession
-	err := s.db.WithContext(ctx).
-		Where(&storageSession{
-			AppName: appName,
-			UserID:  userID,
-			ID:      sessionID,
-		}).
-		First(&foundSession).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("%w: %q: %w", session.ErrNotFound, sessionID, err)
+	// The four reads are independent, so they run concurrently, each on its
+	// own pooled connection: one round trip to the database instead of four.
+	// Any error cancels the rest; the first one wins, so a missing session
+	// still reports session.ErrNotFound.
+	g, gCtx := errgroup.WithContext(ctx)
+	var (
+		foundSession  storageSession
+		storageEvents []storageEvent
+		storageApp    *storageAppState
+		storageUser   *storageUserState
+	)
+	g.Go(func() error {
+		err := s.db.WithContext(gCtx).
+			Where(&storageSession{
+				AppName: appName,
+				UserID:  userID,
+				ID:      sessionID,
+			}).
+			First(&foundSession).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: %q: %w", session.ErrNotFound, sessionID, err)
+			}
+			return fmt.Errorf("database error while fetching session: %w", err)
 		}
-		return nil, fmt.Errorf("database error while fetching session: %w", err)
-	}
+		return nil
+	})
+	g.Go(func() error {
+		eventQuery := s.db.WithContext(gCtx).
+			Model(&storageEvent{}).
+			Where("app_name = ?", appName).
+			Where("user_id = ?", userID).
+			Where("session_id = ?", sessionID)
 
-	// Fetch events
-	eventQuery := s.db.WithContext(ctx).
-		Model(&storageEvent{}).
-		Where("app_name = ?", appName).
-		Where("user_id = ?", userID).
-		Where("session_id = ?", sessionID)
+		// Apply conditional filters from the request
+		if !req.After.IsZero() {
+			eventQuery = eventQuery.Where("timestamp >= ?", req.After)
+		}
 
-	// Apply conditional filters from the request
-	if !req.After.IsZero() {
-		eventQuery = eventQuery.Where("timestamp >= ?", req.After)
-	}
+		// Order by timestamp DESC to get the most recent events when limiting, with
+		// id as a tiebreak so the order is total.
+		//
+		// Without the tiebreak, events sharing a timestamp come back in whatever
+		// order the engine happens to yield and the reversal below then flips them:
+		// SQLite's sort is stable, so a tie is returned in reverse insertion order.
+		// Timestamps are truncated to microseconds on write, so ties are ordinary
+		// rather than exotic. Compaction reads this order to choose what a summary
+		// stands for, and a pair that swaps between two reads means a record can
+		// cover an event nothing summarized, which is that event gone from every
+		// later prompt.
+		//
+		// The id is arbitrary as an ordering, but it is stable, and stable is what
+		// callers need. adk-python orders the same way, by timestamp then id, so
+		// this also removes a divergence rather than creating one.
+		eventQuery = eventQuery.Order("timestamp DESC, id DESC")
 
-	// Order by timestamp DESC to get the most recent events when limiting, with
-	// id as a tiebreak so the order is total.
-	//
-	// Without the tiebreak, events sharing a timestamp come back in whatever
-	// order the engine happens to yield and the reversal below then flips them:
-	// SQLite's sort is stable, so a tie is returned in reverse insertion order.
-	// Timestamps are truncated to microseconds on write, so ties are ordinary
-	// rather than exotic. Compaction reads this order to choose what a summary
-	// stands for, and a pair that swaps between two reads means a record can
-	// cover an event nothing summarized, which is that event gone from every
-	// later prompt.
-	//
-	// The id is arbitrary as an ordering, but it is stable, and stable is what
-	// callers need. adk-python orders the same way, by timestamp then id, so
-	// this also removes a divergence rather than creating one.
-	eventQuery = eventQuery.Order("timestamp DESC, id DESC")
+		if req.NumRecentEvents > 0 {
+			eventQuery = eventQuery.Limit(req.NumRecentEvents)
+		}
 
-	if req.NumRecentEvents > 0 {
-		eventQuery = eventQuery.Limit(req.NumRecentEvents)
-	}
-
-	var storageEvents []storageEvent
-	if err := eventQuery.Find(&storageEvents).Error; err != nil {
-		// This is a system failure, not a "not found"
-		return nil, fmt.Errorf("database error while fetching events: %w", err)
-	}
-
-	// fetch app and user states
-	storageApp, err := fetchStorageAppState(s.db.WithContext(ctx), appName)
-	if err != nil {
-		return nil, fmt.Errorf("error on get session: %w", err)
-	}
-	storageUser, err := fetchStorageUserState(s.db.WithContext(ctx), appName, userID)
-	if err != nil {
-		return nil, fmt.Errorf("error on get session: %w", err)
+		if err := eventQuery.Find(&storageEvents).Error; err != nil {
+			// This is a system failure, not a "not found"
+			return fmt.Errorf("database error while fetching events: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var err error
+		if storageApp, err = fetchStorageAppState(s.db.WithContext(gCtx), appName); err != nil {
+			return fmt.Errorf("error on get session: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
+		var err error
+		if storageUser, err = fetchStorageUserState(s.db.WithContext(gCtx), appName, userID); err != nil {
+			return fmt.Errorf("error on get session: %w", err)
+		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	responseSession, err := createSessionFromStorageSession(&foundSession)

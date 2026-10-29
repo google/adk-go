@@ -603,6 +603,8 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 			if err := s.AppendEvent(t.Context(), created.Session, event); err != nil {
 				t.Fatalf("AppendEvent: %v", err)
 			}
+			_ = s.db.Callback().Query().Remove("test:record_query")
+			_ = s.db.Callback().Create().Remove("test:record_create")
 
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("AppendEvent state statements:\n got %q\nwant %q", got, tc.want)
