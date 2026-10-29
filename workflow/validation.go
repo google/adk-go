@@ -567,46 +567,19 @@ func (r MultiRoute[T]) summarizeMultiRoute() []workflowroute.Value {
 		}
 		switch v := a.(type) {
 		case string:
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindString,
-				Str:   v,
-				Label: strconv.Quote(v),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(v)})
 		case StringRoute:
-			s := string(v)
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindString,
-				Str:   s,
-				Label: strconv.Quote(s),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(string(v))})
 		case bool:
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindBool,
-				Bool:  v,
-				Label: strconv.FormatBool(v),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(v)})
 		case BoolRoute:
-			b := bool(v)
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindBool,
-				Bool:  b,
-				Label: strconv.FormatBool(b),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(bool(v))})
 		case int:
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindOther,
-				Label: strconv.Itoa(v),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(v)})
 		case IntRoute:
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindOther,
-				Label: strconv.Itoa(int(v)),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(int(v))})
 		default:
-			vals = append(vals, workflowroute.Value{
-				Kind:  workflowroute.KindOther,
-				Label: fmt.Sprintf("%T", a),
-			})
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: fmt.Sprintf("%T", a)})
 		}
 	}
 	return vals
@@ -619,24 +592,11 @@ func summarizeOutgoingEdges(edges []Edge) workflowroute.OutgoingSummary {
 		case nil:
 			out.HasUnrouted = true
 		case StringRoute:
-			s := string(r)
-			out.Routes = append(out.Routes, workflowroute.Value{
-				Kind:  workflowroute.KindString,
-				Str:   s,
-				Label: strconv.Quote(s),
-			})
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(string(r))})
 		case BoolRoute:
-			b := bool(r)
-			out.Routes = append(out.Routes, workflowroute.Value{
-				Kind:  workflowroute.KindBool,
-				Bool:  b,
-				Label: strconv.FormatBool(b),
-			})
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(bool(r))})
 		case IntRoute:
-			out.Routes = append(out.Routes, workflowroute.Value{
-				Kind:  workflowroute.KindOther,
-				Label: strconv.Itoa(int(r)),
-			})
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(int(r))})
 		case multiRouteSummarizer:
 			out.Routes = append(out.Routes, r.summarizeMultiRoute()...)
 		default:
@@ -644,10 +604,7 @@ func summarizeOutgoingEdges(edges []Edge) workflowroute.OutgoingSummary {
 				out.HasDefault = true
 				continue
 			}
-			out.Routes = append(out.Routes, workflowroute.Value{
-				Kind:  workflowroute.KindOther,
-				Label: fmt.Sprintf("%T", e.Route),
-			})
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindOther, Label: fmt.Sprintf("%T", e.Route)})
 		}
 	}
 	return out

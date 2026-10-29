@@ -19,11 +19,13 @@ import (
 	"iter"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/workflowroute"
@@ -89,7 +91,10 @@ type NodeConfig struct {
 // When the node has routed outgoing edges, [workflow.New] validates that every
 // edge route can be emitted by Question and that every possible answer has an
 // outgoing edge unless [workflow.Default] or an unconditional edge covers the
-// remaining answers.
+// remaining answers. Routes are matched by kind as in adk-python: a [Binary]
+// question needs bool routes and a [Choice] question string routes, so a
+// [workflow.StringRoute] of "true" on a Binary node is rejected even though
+// the engine compares emitted routes as strings at run time.
 //
 // The zero value is not usable; construct one with [NewNode]. A Node
 // constructed with [NewNode] is safe for concurrent use across workflow runs.
@@ -182,29 +187,101 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 	}, nil
 }
 
-// ValidateInput validates and optionally coerces input against InputSchema,
-// then checks that the result is a valid non-nil classifier input. Errors wrap
-// [workflow.ErrInputValidation] so [workflow.DefaultRetryConfig] does not retry
-// deterministic input validation failures.
+// ValidateInput checks that input is a valid non-nil classifier input (see
+// [ValidateInput]) and, when InputSchema is set, validates and coerces it
+// against the schema. Under InputSchema, a [genai.Content] or [*genai.Content]
+// input is validated using its non-thought text, parsed as JSON when the
+// schema expects a non-string shape and the text parses, as adk-python's
+// validate_node_data does for typed schemas; the classifier then receives that
+// text or JSON rather than the Content. A Content with a nil or non-text part
+// fails with [ErrInvalidInput] under InputSchema, whereas adk-python drops
+// such parts. Without InputSchema, the Content is passed through unchanged.
+//
+// Like [workflow.BaseNode], ValidateInput returns the underlying error; the
+// workflow engine and [Node.Run] wrap it in [workflow.ErrInputValidation] so
+// [workflow.DefaultRetryConfig] does not retry it.
 func (n *Node) ValidateInput(input any) (any, error) {
 	if n == nil || n.classifier == nil {
 		return nil, fmt.Errorf("%w: Node must be constructed with NewNode", ErrInvalidNodeConfig)
 	}
 	if input == nil {
-		return nil, fmt.Errorf("%w: %w: node %q received no input to classify", workflow.ErrInputValidation, ErrInvalidInput, n.Name())
+		return nil, fmt.Errorf("%w: no input to classify", ErrInvalidInput)
 	}
-	validated, err := n.BaseNode.ValidateInput(input)
+	// Check the raw input before schema coercion: coercion JSON-round-trips
+	// values into plain maps and slices, which would carry a []*genai.Content
+	// history or the thought parts of a Content past ValidateInput.
+	if err := ValidateInput(input); err != nil {
+		return nil, err
+	}
+	if n.InputSchema() == nil {
+		return input, nil
+	}
+	toValidate := input
+	if content := contentInput(input); content != nil {
+		payload, err := contentSchemaPayload(content)
+		if err != nil {
+			return nil, err
+		}
+		toValidate = payload
+	}
+	validated, err := n.BaseNode.ValidateInput(toValidate)
 	if err != nil {
-		return nil, fmt.Errorf("%w: node %q: %w", workflow.ErrInputValidation, n.Name(), err)
+		return nil, err
 	}
+	// Coercion can produce nil, a bare number, or a boolean, none of which is
+	// classifier input.
 	if err := ValidateInput(validated); err != nil {
-		return nil, fmt.Errorf("%w: %w: node %q", workflow.ErrInputValidation, err, n.Name())
+		return nil, err
 	}
 	return validated, nil
 }
 
+// contentInput returns input as a *genai.Content when it is one, by value or
+// pointer, and nil otherwise.
+func contentInput(input any) *genai.Content {
+	switch v := input.(type) {
+	case *genai.Content:
+		return v
+	case genai.Content:
+		return &v
+	default:
+		return nil
+	}
+}
+
+// contentSchemaPayload returns the text a Content contributes to InputSchema
+// validation: its non-thought text parts joined, as adk-python's
+// extract_text_from_content does. Unlike adk-python, which drops non-text
+// parts silently, contentSchemaPayload fails with [ErrInvalidInput] if any
+// part (thought or not) carries a non-text field, so an InputSchema never
+// discards multimodal input unnoticed. The field check matches isNonTextPart
+// in exp/classifier/typesafe.
+func contentSchemaPayload(content *genai.Content) (string, error) {
+	var b strings.Builder
+	for _, part := range content.Parts {
+		if part == nil {
+			return "", fmt.Errorf("%w: InputSchema applies to text and JSON input; the Content has a nil part", ErrInvalidInput)
+		}
+		rest := *part
+		rest.Text = ""
+		rest.Thought = false
+		rest.PartMetadata = nil
+		rest.ThoughtSignature = nil
+		if !reflect.ValueOf(rest).IsZero() {
+			return "", fmt.Errorf("%w: InputSchema applies to text and JSON input; the Content has a non-text part", ErrInvalidInput)
+		}
+		if part.Thought {
+			continue
+		}
+		b.WriteString(part.Text)
+	}
+	return b.String(), nil
+}
+
 // Run classifies input against the node's question and yields a single routing
-// event whose Output is the validated input.
+// event whose Output is the validated input. Input validation failures are
+// wrapped in [workflow.ErrInputValidation], as the workflow engine does before
+// calling Run, so [workflow.DefaultRetryConfig] does not retry them.
 func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if n == nil || n.classifier == nil {
@@ -217,7 +294,7 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 		}
 		validated, err := n.ValidateInput(input)
 		if err != nil {
-			yield(nil, err)
+			yield(nil, fmt.Errorf("%w for node %q: %w", workflow.ErrInputValidation, n.Name(), err))
 			return
 		}
 

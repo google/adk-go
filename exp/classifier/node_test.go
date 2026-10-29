@@ -16,6 +16,7 @@ package classifier_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"maps"
 	"math"
@@ -611,6 +612,9 @@ func TestRuntimeErrorsFailWorkflowRun(t *testing.T) {
 		if _, err := nilNode.ValidateInput("x"); !errors.Is(err, classifier.ErrInvalidNodeConfig) {
 			t.Fatalf("nil (*Node).ValidateInput() error = %v, want ErrInvalidNodeConfig", err)
 		}
+		if _, err := zero.ValidateInput("x"); !errors.Is(err, classifier.ErrInvalidNodeConfig) {
+			t.Fatalf("zero Node.ValidateInput() error = %v, want ErrInvalidNodeConfig", err)
+		}
 
 		node, err := classifier.NewNode(classifier.NodeConfig{
 			Name:       "triage",
@@ -1140,4 +1144,187 @@ func TestNewNodeValidationAndSchemas(t *testing.T) {
 	if diff := cmp.Diff([]any{wantContent}, contentSink.inputs); diff != "" {
 		t.Errorf("genai.Content sink output mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// InputSchema coercion JSON-round-trips values into plain maps and slices, so
+// the genai check must run on the raw input first and a Content must be
+// unwrapped to its text rather than coerced into a Content-shaped map.
+func TestInputSchemaDoesNotLaunderGenaiValues(t *testing.T) {
+	objSchema := &jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"ticket": {Type: "string"}},
+		Required:   []string{"ticket"},
+	}
+	arraySchema := &jsonschema.Schema{Type: "array"}
+	stringSchema := &jsonschema.Schema{Type: "string"}
+	imagePart := genai.NewPartFromBytes([]byte("png-bytes"), "image/png")
+	thoughtPart := &genai.Part{Text: "secret reasoning", Thought: true}
+	thoughtImagePart := &genai.Part{Thought: true, InlineData: &genai.Blob{Data: []byte("png-bytes"), MIMEType: "image/png"}}
+	jsonTextContent := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+		thoughtPart,
+		{Text: `{"ticket":`, PartMetadata: map[string]any{"source": "ocr"}},
+		{Text: `"inv-1"}`, ThoughtSignature: []byte("sig")},
+	}}
+	leaked := func(err error) bool {
+		msg := err.Error()
+		return strings.Contains(msg, "secret reasoning") ||
+			strings.Contains(msg, "png-bytes") ||
+			strings.Contains(msg, base64.StdEncoding.EncodeToString([]byte("png-bytes")))
+	}
+
+	newNode := func(t *testing.T, schema *jsonschema.Schema) (*classifier.Node, *fixedClassifier) {
+		t.Helper()
+		fc := &fixedClassifier{answer: choiceAnswer("billing")}
+		node, err := classifier.NewNode(classifier.NodeConfig{
+			Name:        "triage",
+			Classifier:  fc,
+			Question:    triageQuestion,
+			InputSchema: schema,
+		})
+		if err != nil {
+			t.Fatalf("NewNode() unexpected error: %v", err)
+		}
+		return node, fc
+	}
+
+	rejected := []struct {
+		name   string
+		schema *jsonschema.Schema
+		input  any
+		// schemaErr marks inputs rejected by the schema itself rather than by
+		// the classifier input rules, which carry ErrInvalidInput.
+		schemaErr bool
+	}{
+		{name: "content_history_under_array_schema", schema: arraySchema, input: []*genai.Content{jsonTextContent, {Parts: []*genai.Part{imagePart}}}},
+		// A plain object schema would accept the Part's own JSON form.
+		{name: "part_under_object_schema", schema: &jsonschema.Schema{Type: "object"}, input: &genai.Part{Text: "secret reasoning", Thought: true}},
+		{name: "history_in_map_under_object_schema", schema: objSchema, input: map[string]any{"ticket": "inv-1", "history": []*genai.Content{jsonTextContent}}},
+		{name: "content_with_image_under_object_schema", schema: objSchema, input: &genai.Content{Parts: []*genai.Part{{Text: `{"ticket":"inv-1"}`}, imagePart}}},
+		{name: "content_with_thought_image_under_object_schema", schema: objSchema, input: &genai.Content{Parts: []*genai.Part{{Text: `{"ticket":"inv-1"}`}, thoughtImagePart}}},
+		{name: "content_with_nil_part_under_string_schema", schema: stringSchema, input: genai.Content{Parts: []*genai.Part{nil}}},
+		{name: "text_coerced_to_bare_number", schema: &jsonschema.Schema{Type: "integer"}, input: "42"},
+		// The thought part is stripped before the schema error can echo the text.
+		{name: "content_text_not_matching_schema", schema: objSchema, input: &genai.Content{Parts: []*genai.Part{thoughtPart, {Text: "not json"}}}, schemaErr: true},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects_"+tc.name, func(t *testing.T) {
+			node, fc := newNode(t, tc.schema)
+			_, err := node.ValidateInput(tc.input)
+			if err == nil {
+				t.Fatalf("ValidateInput(%T) succeeded, want error", tc.input)
+			}
+			if !tc.schemaErr && !errors.Is(err, classifier.ErrInvalidInput) {
+				t.Errorf("ValidateInput(%T) error = %v, want ErrInvalidInput", tc.input, err)
+			}
+			if leaked(err) {
+				t.Errorf("ValidateInput(%T) error leaked input content: %v", tc.input, err)
+			}
+			yields := 0
+			for _, runErr := range node.Run(agent.Promote(nil), tc.input) {
+				yields++
+				if !errors.Is(runErr, workflow.ErrInputValidation) {
+					t.Fatalf("Run(%T) error = %v, want ErrInputValidation", tc.input, runErr)
+				}
+				if got := strings.Count(runErr.Error(), workflow.ErrInputValidation.Error()); got != 1 {
+					t.Errorf("Run(%T) error mentions ErrInputValidation %d times, want 1: %v", tc.input, got, runErr)
+				}
+			}
+			if yields != 1 {
+				t.Errorf("Run(%T) yielded %d times, want 1 error", tc.input, yields)
+			}
+			if len(fc.calls) != 0 {
+				t.Errorf("classifier calls = %d, want 0", len(fc.calls))
+			}
+		})
+	}
+	// runWithPredecessor feeds output from a predecessor node into a Node with
+	// schema and returns what the classifier and the downstream sink received.
+	runWithPredecessor := func(t *testing.T, schema *jsonschema.Schema, output any) (*fixedClassifier, *capturingSink, error) {
+		t.Helper()
+		source := workflow.NewFunctionNode("src", func(ctx agent.Context, _ any) (*session.Event, error) {
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Output = output
+			return ev, nil
+		}, workflow.NodeConfig{})
+		node, fc := newNode(t, schema)
+		sinkNode, sink := newCapturingNode("sink", "")
+		_, _, err := runWorkflowViaRunner(
+			t,
+			[]workflow.Edge{
+				{From: workflow.Start, To: source},
+				{From: source, To: node},
+				{From: node, To: sinkNode},
+			},
+			genai.NewContentFromText("seed", genai.RoleUser),
+		)
+		return fc, sink, err
+	}
+
+	t.Run("content_text_is_unwrapped_and_thoughts_skipped", func(t *testing.T) {
+		for _, input := range []any{jsonTextContent, *jsonTextContent} {
+			node, _ := newNode(t, objSchema)
+			got, err := node.ValidateInput(input)
+			if err != nil {
+				t.Fatalf("ValidateInput(%T) unexpected error: %v", input, err)
+			}
+			if diff := cmp.Diff(map[string]any{"ticket": "inv-1"}, got); diff != "" {
+				t.Errorf("ValidateInput(%T) mismatch (-want +got):\n%s", input, diff)
+			}
+			fc, sink, err := runWithPredecessor(t, objSchema, input)
+			if err != nil {
+				t.Fatalf("run(%T) unexpected error: %v", input, err)
+			}
+			if len(fc.calls) != 1 {
+				t.Fatalf("classifier calls = %d, want 1", len(fc.calls))
+			}
+			if diff := cmp.Diff(map[string]any{"ticket": "inv-1"}, fc.calls[0].Input); diff != "" {
+				t.Errorf("classifier input mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff([]any{map[string]any{"ticket": "inv-1"}}, sink.inputs); diff != "" {
+				t.Errorf("sink input mismatch (-want +got):\n%s", diff)
+			}
+		}
+	})
+
+	t.Run("content_text_under_string_schema_stays_text", func(t *testing.T) {
+		input := &genai.Content{Parts: []*genai.Part{thoughtPart, {Text: "plain "}, {Text: "ticket"}}}
+		fc, _, err := runWithPredecessor(t, stringSchema, input)
+		if err != nil {
+			t.Fatalf("run unexpected error: %v", err)
+		}
+		if len(fc.calls) != 1 || fc.calls[0].Input != "plain ticket" {
+			t.Errorf("classifier calls = %+v, want one call with input %q", fc.calls, "plain ticket")
+		}
+		// A thought-only Content unwraps to "", as adk-python's
+		// extract_text_from_content returns ''.
+		node, _ := newNode(t, stringSchema)
+		if got, err := node.ValidateInput(&genai.Content{Parts: []*genai.Part{thoughtPart}}); err != nil || got != "" {
+			t.Errorf("ValidateInput(thought-only Content) = %#v, %v; want \"\", nil", got, err)
+		}
+	})
+
+	t.Run("content_without_schema_is_passed_unchanged", func(t *testing.T) {
+		input := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "ticket"}, imagePart}}
+		fc, _, err := runWithPredecessor(t, nil, input)
+		if err != nil {
+			t.Fatalf("run unexpected error: %v", err)
+		}
+		if len(fc.calls) != 1 || fc.calls[0].Input != input {
+			t.Errorf("classifier calls = %+v, want one call with the original *genai.Content", fc.calls)
+		}
+	})
+
+	t.Run("predecessor_history_under_array_schema_fails_the_run", func(t *testing.T) {
+		history := []*genai.Content{jsonTextContent, {Parts: []*genai.Part{imagePart}}}
+		fc, sink, err := runWithPredecessor(t, arraySchema, history)
+		if !errors.Is(err, workflow.ErrInputValidation) || !errors.Is(err, classifier.ErrInvalidInput) {
+			t.Fatalf("run error = %v, want ErrInputValidation + ErrInvalidInput", err)
+		}
+		if got := strings.Count(err.Error(), workflow.ErrInputValidation.Error()); got != 1 {
+			t.Errorf("run error mentions ErrInputValidation %d times, want 1: %v", got, err)
+		}
+		if len(fc.calls) != 0 || len(sink.inputs) != 0 {
+			t.Errorf("classifier calls = %d, sink inputs = %d, want 0 and 0", len(fc.calls), len(sink.inputs))
+		}
+	})
 }

@@ -32,11 +32,11 @@ const (
 	KindOther
 )
 
-// Value describes one concrete route value on an outgoing workflow edge.
+// Value describes one concrete route value on an outgoing workflow edge. Label
+// is the value in the form a node compares and reports: a quoted string for
+// KindString, "true" or "false" for KindBool, and a description otherwise.
 type Value struct {
 	Kind  Kind
-	Str   string
-	Bool  bool
 	Label string
 }
 

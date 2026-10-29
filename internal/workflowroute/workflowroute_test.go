@@ -33,7 +33,7 @@ func TestRegisterAndValidate(t *testing.T) {
 	})
 
 	if err := workflowroute.Validate("other-node", workflowroute.OutgoingSummary{
-		Routes: []workflowroute.Value{{Kind: workflowroute.KindString, Str: "a", Label: `"a"`}},
+		Routes: []workflowroute.Value{{Kind: workflowroute.KindString, Label: `"a"`}},
 	}); err != nil {
 		t.Fatalf("Validate(other-node) unexpected error: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestRegisterAndValidate(t *testing.T) {
 	}
 
 	err := workflowroute.Validate(targetNode{}, workflowroute.OutgoingSummary{
-		Routes: []workflowroute.Value{{Kind: workflowroute.KindString, Str: "a", Label: `"a"`}},
+		Routes: []workflowroute.Value{{Kind: workflowroute.KindString, Label: `"a"`}},
 	})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Validate(targetNode) error = %v, want %v", err, sentinel)
