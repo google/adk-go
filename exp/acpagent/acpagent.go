@@ -50,7 +50,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"iter"
 	"slices"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -209,66 +208,58 @@ func pendingTask(ctx agent.InvocationContext) *a2a.Task {
 
 // handlerClient sends requests straight to an in-process request handler.
 type handlerClient struct {
-	handler a2asrv.RequestHandler
-	// pending is the ID of the task waiting for an answer when the invocation
-	// started, or "".
-	pending a2a.TaskID
+	a2asrv.RequestHandler
 }
 
 // newHandlerClient returns a client with a handler and task store of its own.
-// The store starts with the task waiting for an answer, if there is one.
+// The store starts with the task waiting for an answer, if there is one, and
+// the handler sends the user's message to it.
 //
 // This is done here rather than in a request callback because a callback
 // context does not expose the session.
-func newHandlerClient(ctx context.Context, exec a2asrv.AgentExecutor) (*handlerClient, error) {
-	c := &handlerClient{}
+func newHandlerClient(ctx context.Context, exec a2asrv.AgentExecutor) (handlerClient, error) {
 	store := taskstore.NewInMemory(nil)
+	opts := []a2asrv.RequestHandlerOption{
+		a2asrv.WithTaskStore(store),
+		a2asrv.WithUpdateMaterializer(resumeMaterializer),
+	}
 	// The context is the invocation's, except when an adka2a server cancels
 	// an abandoned task, which needs no pending task.
 	if ic, ok := ctx.(agent.InvocationContext); ok {
 		if t := pendingTask(ic); t != nil {
 			if _, err := store.Create(ctx, t); err != nil {
-				return nil, fmt.Errorf("restoring task %s: %w", t.ID, err)
+				return handlerClient{}, fmt.Errorf("restoring task %s: %w", t.ID, err)
 			}
-			c.pending = t.ID
+			opts = append(opts, a2asrv.WithCallInterceptors(routeToTask{id: t.ID}))
 		}
 	}
-	c.handler = a2asrv.NewHandler(exec,
-		a2asrv.WithTaskStore(store),
-		a2asrv.WithUpdateMaterializer(resumeMaterializer),
-	)
-	return c, nil
-}
-
-// route sends the user's message to the task waiting for an answer, if there
-// is one. remoteagent continues a task only with a function response, while
-// the harness takes a typed answer.
-func (c *handlerClient) route(req *a2a.SendMessageRequest) *a2a.SendMessageRequest {
-	if c.pending == "" || req.Message == nil || req.Message.TaskID != "" {
-		return req
-	}
-	msg := *req.Message
-	msg.TaskID = c.pending
-	routed := *req
-	routed.Message = &msg
-	return &routed
-}
-
-func (c *handlerClient) SendMessage(ctx context.Context, req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
-	return c.handler.SendMessage(ctx, c.route(req))
-}
-
-func (c *handlerClient) SendStreamingMessage(ctx context.Context, req *a2a.SendMessageRequest) iter.Seq2[a2a.Event, error] {
-	return c.handler.SendStreamingMessage(ctx, c.route(req))
-}
-
-func (c *handlerClient) CancelTask(ctx context.Context, req *a2a.CancelTaskRequest) (*a2a.Task, error) {
-	return c.handler.CancelTask(ctx, req)
+	return handlerClient{a2asrv.NewHandler(exec, opts...)}, nil
 }
 
 // Destroy is a no-op: the handler starts no work of its own, and the
 // executor behind it is stopped by the closer [New] returns.
-func (*handlerClient) Destroy() error { return nil }
+func (handlerClient) Destroy() error { return nil }
+
+// routeToTask sends a message which names no task to the task waiting for an
+// answer. remoteagent continues a task only with a function response, while
+// the harness takes a typed answer.
+type routeToTask struct {
+	a2asrv.PassthroughCallInterceptor
+	id a2a.TaskID
+}
+
+func (r routeToTask) Before(ctx context.Context, _ *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	send, ok := req.Payload.(*a2a.SendMessageRequest)
+	if !ok || send.Message == nil || send.Message.TaskID != "" {
+		return ctx, nil, nil
+	}
+	msg := *send.Message
+	msg.TaskID = r.id
+	routed := *send
+	routed.Message = &msg
+	req.Payload = &routed
+	return ctx, nil, nil
+}
 
 // resumeMaterializer is the handler's default materializer, except that an
 // append to an artifact the task lacks creates the artifact. The executor
