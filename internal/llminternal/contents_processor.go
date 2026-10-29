@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"reflect"
 	"slices"
 	"sort"
 
@@ -246,7 +245,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
-			return p == nil || reflect.ValueOf(*p).IsZero()
+			return p == nil || isZeroPart(*p)
 		})
 		if len(content.Parts) == 0 {
 			continue
@@ -317,7 +316,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 				orphanedIDs = append(orphanedIDs, part.FunctionResponse.ID)
 				cleaned := *part
 				cleaned.FunctionResponse = nil
-				if reflect.ValueOf(cleaned).IsZero() {
+				if isZeroPart(cleaned) {
 					continue
 				}
 				part = &cleaned
@@ -1028,4 +1027,28 @@ func copyContentForRequest(c *genai.Content) *genai.Content {
 		out.Parts[i] = &pc
 	}
 	return &out
+}
+
+// isZeroPart reports whether p carries nothing. A field-by-field test rather
+// than reflect.ValueOf(p).IsZero(), which costs about 100 ns per part and runs
+// over the whole history on every model call. TestIsZeroPartCoversEveryField
+// fails when genai.Part gains a field this list does not name.
+func isZeroPart(p genai.Part) bool {
+	return p.Text == "" &&
+		!p.Thought &&
+		p.ThoughtSignature == nil &&
+		p.InlineData == nil &&
+		p.FileData == nil &&
+		p.FunctionCall == nil &&
+		p.FunctionResponse == nil &&
+		p.ToolCall == nil &&
+		p.ToolResponse == nil &&
+		p.ExecutableCode == nil &&
+		p.CodeExecutionResult == nil &&
+		p.VideoMetadata == nil &&
+		p.MediaResolution == nil &&
+		p.AudioTranscription == nil &&
+		p.SpeechMetadata == nil &&
+		p.MediaProcessing == "" &&
+		p.PartMetadata == nil
 }
