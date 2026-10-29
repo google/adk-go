@@ -938,7 +938,7 @@ func (s *fakeVertexAiSessionService) ListEvents(ctx context.Context, req *aiplat
 	return &aiplatformpb.ListEventsResponse{SessionEvents: events}, nil
 }
 
-func newFakeVertexAiClient(t *testing.T, service aiplatformpb.SessionServiceServer) *vertexAiClient {
+func newFakeVertexAiClient(t testing.TB, service aiplatformpb.SessionServiceServer) *vertexAiClient {
 	t.Helper()
 
 	listener := bufconn.Listen(1024 * 1024)
