@@ -15,11 +15,14 @@
 package models_test
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -94,5 +97,48 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
 		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
+	}
+}
+
+func TestFromSessionEvent_FunctionCallEmptyArgsAndRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	ev := session.Event{
+		ID:     "e-fc",
+		Author: "agent",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{
+					{Text: "calling tool"},
+					{FunctionCall: &genai.FunctionCall{ID: "fc-1", Name: "lookup", Args: nil}},
+				},
+			},
+		},
+	}
+
+	dto := models.FromSessionEvent(ev)
+	raw, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"args":{}`) {
+		t.Fatalf("marshalled JSON missing empty args object: %s", raw)
+	}
+
+	var decoded models.Event
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	back := models.ToSessionEvent(decoded)
+	if back.Content == nil || len(back.Content.Parts) != 2 {
+		t.Fatalf("Content = %+v, want 2 parts", back.Content)
+	}
+	if back.Content.Parts[0].Text != "calling tool" {
+		t.Errorf("Parts[0].Text = %q, want %q", back.Content.Parts[0].Text, "calling tool")
+	}
+	fc := back.Content.Parts[1].FunctionCall
+	if fc == nil || fc.ID != "fc-1" || fc.Name != "lookup" || fc.Args == nil {
+		t.Errorf("Parts[1].FunctionCall = %+v, want ID=fc-1 Name=lookup non-nil Args", fc)
 	}
 }

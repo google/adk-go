@@ -15,14 +15,31 @@
 package models
 
 import (
-	"encoding/json"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
+
+// EventFunctionCall overrides genai.FunctionCall.Args so an empty argument map
+// marshals as {} instead of being omitted by omitempty.
+type EventFunctionCall struct {
+	genai.FunctionCall
+	Args map[string]any `json:"args"`
+}
+
+// EventPart overrides genai.Part.FunctionCall to use EventFunctionCall.
+type EventPart struct {
+	genai.Part
+	FunctionCall *EventFunctionCall `json:"functionCall,omitempty"`
+}
+
+// EventContent overrides genai.Content.Parts to use EventPart.
+type EventContent struct {
+	genai.Content
+	Parts []EventPart `json:"parts,omitempty"`
+}
 
 // EventActions represent a data model for session.EventActions
 type EventActions struct {
@@ -43,7 +60,7 @@ type Event struct {
 	Author              string                                      `json:"author"`
 	Partial             bool                                        `json:"partial,omitempty"`
 	LongRunningToolIDs  []string                                    `json:"longRunningToolIds,omitempty"`
-	Content             *genai.Content                              `json:"content"`
+	Content             *EventContent                               `json:"content"`
 	GroundingMetadata   *genai.GroundingMetadata                    `json:"groundingMetadata"`
 	UsageMetadata       *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata"`
 	TurnComplete        bool                                        `json:"turnComplete,omitempty"`
@@ -78,7 +95,7 @@ func ToSessionEvent(event Event) *session.Event {
 		RequestedInput:     event.RequestedInput,
 		LLMResponse: model.LLMResponse{
 			AvgLogprobs:         event.AvgLogprobs,
-			Content:             event.Content,
+			Content:             toGenAIContent(event.Content),
 			GroundingMetadata:   event.GroundingMetadata,
 			UsageMetadata:       event.UsageMetadata,
 			Partial:             event.Partial,
@@ -124,7 +141,7 @@ func FromSessionEvent(event session.Event) Event {
 		Routes:              event.Routes,
 		RequestedInput:      event.RequestedInput,
 		AvgLogprobs:         event.LLMResponse.AvgLogprobs,
-		Content:             event.LLMResponse.Content,
+		Content:             fromGenAIContent(event.LLMResponse.Content),
 		GroundingMetadata:   event.LLMResponse.GroundingMetadata,
 		UsageMetadata:       event.LLMResponse.UsageMetadata,
 		TurnComplete:        event.LLMResponse.TurnComplete,
@@ -147,66 +164,54 @@ func FromSessionEvent(event session.Event) Event {
 	}
 }
 
-func (e Event) MarshalJSON() ([]byte, error) {
-	// Define Proxy structs to override specific JSON tags.
-	// These embed the original types to inherit all other fields automatically.
-
-	// ProxyFunctionCall overrides 'Args' to remove 'omitempty'.
-	type ProxyFunctionCall struct {
-		*genai.FunctionCall
-		Args map[string]any `json:"args"` // Tag changed: omitempty removed
+func fromGenAIContent(c *genai.Content) *EventContent {
+	if c == nil {
+		return nil
 	}
-
-	// ProxyPart overrides 'FunctionCall' to use ProxyFunctionCall.
-	type ProxyPart struct {
-		*genai.Part
-		FunctionCall *ProxyFunctionCall `json:"functionCall,omitempty"`
-	}
-
-	// ProxyContent overrides 'Parts' to use ProxyPart.
-	type ProxyContent struct {
-		*genai.Content
-		Parts []*ProxyPart `json:"parts,omitempty"`
-	}
-
-	// Create an Alias of Event to prevent infinite recursion during Marshal.
-	type EventAlias Event
-
-	// Create a temporary struct that mimics Event but uses ProxyContent.
-	aux := &struct {
-		EventAlias
-		Content *ProxyContent `json:"content"`
-	}{
-		EventAlias: EventAlias(e),
-	}
-
-	// Reconstruct the Content hierarchy if it exists.
-	if e.Content != nil {
-		aux.Content = &ProxyContent{
-			Content: e.Content,
-			Parts:   make([]*ProxyPart, len(e.Content.Parts)),
-		}
-
-		for i, part := range e.Content.Parts {
-			// Wrap the original part
-			proxyPart := &ProxyPart{Part: part}
-
-			// If this part is a FunctionCall, wrap it to enforce Args visibility
+	ec := &EventContent{Content: *c}
+	ec.Content.Parts = nil
+	if len(c.Parts) > 0 {
+		ec.Parts = make([]EventPart, len(c.Parts))
+		for i, part := range c.Parts {
+			if part == nil {
+				continue
+			}
+			ep := EventPart{Part: *part}
+			ep.Part.FunctionCall = nil
 			if part.FunctionCall != nil {
-				// Ensure args is at least an empty map (not nil) so it marshals to {}
 				args := part.FunctionCall.Args
 				if args == nil {
 					args = make(map[string]any)
 				}
-
-				proxyPart.FunctionCall = &ProxyFunctionCall{
-					FunctionCall: part.FunctionCall,
+				fc := *part.FunctionCall
+				fc.Args = nil
+				ep.FunctionCall = &EventFunctionCall{
+					FunctionCall: fc,
 					Args:         args,
 				}
 			}
-			aux.Content.Parts[i] = proxyPart
+			ec.Parts[i] = ep
 		}
 	}
+	return ec
+}
 
-	return json.Marshal(aux)
+func toGenAIContent(ec *EventContent) *genai.Content {
+	if ec == nil {
+		return nil
+	}
+	c := ec.Content
+	if len(ec.Parts) > 0 {
+		c.Parts = make([]*genai.Part, len(ec.Parts))
+		for i := range ec.Parts {
+			p := ec.Parts[i].Part
+			if fc := ec.Parts[i].FunctionCall; fc != nil {
+				f := fc.FunctionCall
+				f.Args = fc.Args
+				p.FunctionCall = &f
+			}
+			c.Parts[i] = &p
+		}
+	}
+	return &c
 }
