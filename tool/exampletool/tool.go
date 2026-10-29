@@ -17,6 +17,8 @@ package exampletool
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -39,13 +41,19 @@ type ExampleToolConfig struct {
 
 // exampleTool is a tool that adds (few-shot) examples to the LLM request.
 type exampleTool struct {
-	examples []*Example
+	examples    []*Example
+	instDefault string
+	instGemini2 string
 }
 
 // New creates an example tool that adds the configured few-shot examples to the
 // LLM request.
 func New(config ExampleToolConfig) (*exampleTool, error) {
-	return &exampleTool{examples: config.Examples}, nil
+	return &exampleTool{
+		examples:    config.Examples,
+		instDefault: buildExamplesSystemInstruction(config.Examples, "gemini-1.5"),
+		instGemini2: buildExamplesSystemInstruction(config.Examples, "gemini-2.0"),
+	}, nil
 }
 
 // Name implements tool.Tool.
@@ -69,7 +77,13 @@ func (s exampleTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) er
 		return nil
 	}
 
-	instruction := buildExamplesSystemInstruction(s.examples, req.Model)
+	instruction := s.instDefault
+	if strings.Contains(req.Model, "gemini-2") {
+		instruction = s.instGemini2
+	}
+	if instruction == "" {
+		instruction = buildExamplesSystemInstruction(s.examples, req.Model)
+	}
 	utils.AppendInstructions(req, instruction)
 	return nil
 }
@@ -124,8 +138,9 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 			previousRole = role
 			for _, part := range content.Parts {
 				if part.FunctionCall != nil {
-					args := []string{}
-					for k, v := range part.FunctionCall.Args {
+					args := make([]string, 0, len(part.FunctionCall.Args))
+					for _, k := range slices.Sorted(maps.Keys(part.FunctionCall.Args)) {
+						v := part.FunctionCall.Args[k]
 						if _, ok := v.(string); ok {
 							args = append(args, fmt.Sprintf("%s='%s'", k, v))
 						} else {

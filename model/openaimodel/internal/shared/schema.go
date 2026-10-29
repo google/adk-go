@@ -18,12 +18,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 )
+
+var schemaToMapCache sync.Map // map[*genai.Schema]map[string]any
 
 // DefaultResponseFormatName is the structured-output format name both
 // endpoints send when the caller's schema has no title OpenAI would accept.
@@ -170,6 +175,9 @@ func SchemaToMap(schema *genai.Schema) (map[string]any, error) {
 	if schema == nil {
 		return nil, nil
 	}
+	if cached, ok := schemaToMapCache.Load(schema); ok {
+		return cached.(map[string]any), nil
+	}
 	bytes, err := json.Marshal(schema)
 	if err != nil {
 		return nil, fmt.Errorf("openai: marshal schema: %w", err)
@@ -179,7 +187,33 @@ func SchemaToMap(schema *genai.Schema) (map[string]any, error) {
 		return nil, fmt.Errorf("openai: unmarshal schema: %w", err)
 	}
 	lowercaseSchemaTypes(result)
+	schemaToMapCache.Store(schema, result)
 	return result, nil
+}
+
+// CloneSchemaMap returns a deep copy of a JSON-schema map so callers that
+// mutate the map in place (such as EnforceStrictOpenAISchema) do not mutate a
+// cached SchemaToMap entry.
+func CloneSchemaMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := maps.Clone(m)
+	for k, v := range out {
+		switch sub := v.(type) {
+		case map[string]any:
+			out[k] = CloneSchemaMap(sub)
+		case []any:
+			cloned := slices.Clone(sub)
+			for i, item := range cloned {
+				if subMap, ok := item.(map[string]any); ok {
+					cloned[i] = CloneSchemaMap(subMap)
+				}
+			}
+			out[k] = cloned
+		}
+	}
+	return out
 }
 
 // lowercaseSchemaTypes rewrites genai's upper-case type names, at every depth

@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -159,5 +160,36 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 				t.Errorf("processA2AMeta() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", event, want, diff)
 			}
 		})
+	}
+}
+
+func TestUsageMetadataWireShapeMatchesToMapStructure(t *testing.T) {
+	u := &genai.GenerateContentResponseUsageMetadata{
+		CacheTokensDetails:         []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 10}},
+		CachedContentTokenCount:    10,
+		CandidatesTokenCount:       20,
+		CandidatesTokensDetails:    []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 20}},
+		PromptTokenCount:           30,
+		PromptTokensDetails:        []*genai.ModalityTokenCount{{Modality: genai.MediaModalityAudio, TokenCount: 5}},
+		ThoughtsTokenCount:         15,
+		ToolUsePromptTokenCount:    25,
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{{Modality: genai.MediaModalityText, TokenCount: 25}},
+		TotalTokenCount:            90,
+		TrafficType:                genai.TrafficTypeOnDemand,
+	}
+	gotMap := usageMetadataToMap(u)
+	wantMap, err := converters.ToMapStructure(u)
+	if err != nil {
+		t.Fatalf("ToMapStructure(u) failed: %v", err)
+	}
+	if diff := cmp.Diff(wantMap, gotMap); diff != "" {
+		t.Errorf("usageMetadataToMap wire shape mismatch (-want +got):\n%s", diff)
+	}
+	gotStruct, ok := mapToUsageMetadata(gotMap)
+	if !ok {
+		t.Fatal("mapToUsageMetadata returned ok=false")
+	}
+	if diff := cmp.Diff(u, gotStruct); diff != "" {
+		t.Errorf("mapToUsageMetadata mismatch (-want +got):\n%s", diff)
 	}
 }

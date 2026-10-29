@@ -20,6 +20,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/internal/plugininternal"
@@ -104,8 +105,8 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	if err := addMeta(result, metadataGroundingKey, event.GroundingMetadata); err != nil {
 		return nil, err
 	}
-	if err := addMeta(result, metadataUsageKey, event.UsageMetadata); err != nil {
-		return nil, err
+	if event.UsageMetadata != nil {
+		result[metadataUsageKey] = usageMetadataToMap(event.UsageMetadata)
 	}
 	if event.CustomMetadata != nil {
 		result[metadataCustomMetaKey] = event.CustomMetadata
@@ -149,8 +150,12 @@ func processA2AMeta(a2aEvent a2a.Event, event *session.Event) error {
 	if err := processMeta(metadataGroundingKey, meta, &event.GroundingMetadata); err != nil {
 		return err
 	}
-	if err := processMeta(metadataUsageKey, meta, &event.UsageMetadata); err != nil {
-		return err
+	if rawUsage, ok := meta[metadataUsageKey].(map[string]any); ok {
+		if u, ok := mapToUsageMetadata(rawUsage); ok {
+			event.UsageMetadata = u
+		} else if err := processMeta(metadataUsageKey, meta, &event.UsageMetadata); err != nil {
+			return err
+		}
 	}
 
 	event.CustomMetadata = ToCustomMetadata(taskInfo.TaskID, taskInfo.ContextID)
@@ -211,4 +216,200 @@ func processMeta[T any](key string, meta map[string]any, target **T) error {
 		*target = converted
 	}
 	return nil
+}
+
+func usageMetadataToMap(u *genai.GenerateContentResponseUsageMetadata) map[string]any {
+	out := make(map[string]any, 6)
+	if v := modalitySliceToAny(u.CacheTokensDetails); len(v) > 0 {
+		out["cacheTokensDetails"] = v
+	}
+	if u.CachedContentTokenCount != 0 {
+		out["cachedContentTokenCount"] = float64(u.CachedContentTokenCount)
+	}
+	if u.CandidatesTokenCount != 0 {
+		out["candidatesTokenCount"] = float64(u.CandidatesTokenCount)
+	}
+	if v := modalitySliceToAny(u.CandidatesTokensDetails); len(v) > 0 {
+		out["candidatesTokensDetails"] = v
+	}
+	if u.PromptTokenCount != 0 {
+		out["promptTokenCount"] = float64(u.PromptTokenCount)
+	}
+	if v := modalitySliceToAny(u.PromptTokensDetails); len(v) > 0 {
+		out["promptTokensDetails"] = v
+	}
+	if u.ThoughtsTokenCount != 0 {
+		out["thoughtsTokenCount"] = float64(u.ThoughtsTokenCount)
+	}
+	if u.ToolUsePromptTokenCount != 0 {
+		out["toolUsePromptTokenCount"] = float64(u.ToolUsePromptTokenCount)
+	}
+	if v := modalitySliceToAny(u.ToolUsePromptTokensDetails); len(v) > 0 {
+		out["toolUsePromptTokensDetails"] = v
+	}
+	if u.TotalTokenCount != 0 {
+		out["totalTokenCount"] = float64(u.TotalTokenCount)
+	}
+	if u.TrafficType != "" {
+		out["trafficType"] = string(u.TrafficType)
+	}
+	return out
+}
+
+func modalitySliceToAny(details []*genai.ModalityTokenCount) []any {
+	if len(details) == 0 {
+		return nil
+	}
+	out := make([]any, len(details))
+	for i, d := range details {
+		if d == nil {
+			out[i] = nil
+			continue
+		}
+		m := make(map[string]any, 2)
+		if d.Modality != "" {
+			m["modality"] = string(d.Modality)
+		}
+		if d.TokenCount != 0 {
+			m["tokenCount"] = float64(d.TokenCount)
+		}
+		out[i] = m
+	}
+	return out
+}
+
+func mapToUsageMetadata(m map[string]any) (*genai.GenerateContentResponseUsageMetadata, bool) {
+	u := &genai.GenerateContentResponseUsageMetadata{}
+	for k, v := range m {
+		if v == nil {
+			continue
+		}
+		switch k {
+		case "cacheTokensDetails":
+			details, ok := anyToModalitySlice(v)
+			if !ok {
+				return nil, false
+			}
+			u.CacheTokensDetails = details
+		case "cachedContentTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.CachedContentTokenCount = n
+		case "candidatesTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.CandidatesTokenCount = n
+		case "candidatesTokensDetails":
+			details, ok := anyToModalitySlice(v)
+			if !ok {
+				return nil, false
+			}
+			u.CandidatesTokensDetails = details
+		case "promptTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.PromptTokenCount = n
+		case "promptTokensDetails":
+			details, ok := anyToModalitySlice(v)
+			if !ok {
+				return nil, false
+			}
+			u.PromptTokensDetails = details
+		case "thoughtsTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.ThoughtsTokenCount = n
+		case "toolUsePromptTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.ToolUsePromptTokenCount = n
+		case "toolUsePromptTokensDetails":
+			details, ok := anyToModalitySlice(v)
+			if !ok {
+				return nil, false
+			}
+			u.ToolUsePromptTokensDetails = details
+		case "totalTokenCount":
+			n, ok := anyToInt32(v)
+			if !ok {
+				return nil, false
+			}
+			u.TotalTokenCount = n
+		case "trafficType":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			u.TrafficType = genai.TrafficType(s)
+		default:
+			return nil, false
+		}
+	}
+	return u, true
+}
+
+func anyToModalitySlice(v any) ([]*genai.ModalityTokenCount, bool) {
+	items, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]*genai.ModalityTokenCount, len(items))
+	for i, item := range items {
+		if item == nil {
+			continue
+		}
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		d := &genai.ModalityTokenCount{}
+		for k, val := range m {
+			if val == nil {
+				continue
+			}
+			switch k {
+			case "modality":
+				s, ok := val.(string)
+				if !ok {
+					return nil, false
+				}
+				d.Modality = genai.MediaModality(s)
+			case "tokenCount":
+				n, ok := anyToInt32(val)
+				if !ok {
+					return nil, false
+				}
+				d.TokenCount = n
+			default:
+				return nil, false
+			}
+		}
+		out[i] = d
+	}
+	return out, true
+}
+
+func anyToInt32(v any) (int32, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int32(n), true
+	case int32:
+		return n, true
+	case int:
+		return int32(n), true
+	case int64:
+		return int32(n), true
+	default:
+		return 0, false
+	}
 }

@@ -499,6 +499,7 @@ func newResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletion
 		schema, err = shared.NormalizeSchema(cfg.ResponseJsonSchema)
 	} else {
 		schema, err = shared.SchemaToMap(cfg.ResponseSchema)
+		schema = shared.CloneSchemaMap(schema)
 	}
 	if err != nil {
 		return nil, err

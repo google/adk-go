@@ -20,10 +20,13 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"google.golang.org/genai"
 )
+
+var toolInputSchemaCache sync.Map // map[*genai.Schema]anthropic.ToolInputSchemaParam
 
 var validToolUseIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
@@ -264,6 +267,13 @@ func convertFunctionDeclaration(decl *genai.FunctionDeclaration) (anthropic.Tool
 }
 
 func buildToolInputSchema(decl *genai.FunctionDeclaration) (anthropic.ToolInputSchemaParam, error) {
+	cacheable := decl != nil && decl.Parameters != nil && decl.ParametersJsonSchema == nil
+	if cacheable {
+		if cached, ok := toolInputSchemaCache.Load(decl.Parameters); ok {
+			return cached.(anthropic.ToolInputSchemaParam), nil
+		}
+	}
+
 	var rawSchema any
 	switch {
 	case decl.ParametersJsonSchema != nil:
@@ -318,6 +328,9 @@ func buildToolInputSchema(decl *genai.FunctionDeclaration) (anthropic.ToolInputS
 		out.ExtraFields[k] = v
 	}
 
+	if cacheable {
+		toolInputSchemaCache.Store(decl.Parameters, out)
+	}
 	return out, nil
 }
 

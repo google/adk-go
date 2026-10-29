@@ -566,6 +566,7 @@ func newJSONSchemaFormat(cfg *genai.GenerateContentConfig) (*oairesponses.Respon
 		schema, err = shared.NormalizeSchema(cfg.ResponseJsonSchema)
 	case cfg.ResponseSchema != nil:
 		schema, err = shared.SchemaToMap(cfg.ResponseSchema)
+		schema = shared.CloneSchemaMap(schema)
 	default:
 		return nil, fmt.Errorf("openai: json schema requested without schema")
 	}

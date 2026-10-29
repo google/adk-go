@@ -20,6 +20,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/internal/converters"
 )
 
 func TestPartsTwoWayConversion(t *testing.T) {
@@ -197,5 +199,59 @@ func TestPartsDataPartConversionRoundTrip(t *testing.T) {
 	}
 	if diff := cmp.Diff([]*a2a.Part{a2aPart}, gotbackA2A); diff != "" {
 		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotbackA2A, a2aPart, diff)
+	}
+}
+
+func TestTypedFunctionPartWireShapeMatchesToMapStructure(t *testing.T) {
+	willCont := true
+	fc := &genai.FunctionCall{
+		ID:           "call-1",
+		Name:         "Lookup",
+		Args:         map[string]any{"q": "adk", "limit": float64(10)},
+		WillContinue: &willCont,
+	}
+	gotFCMap, err := functionCallToMap(fc)
+	if err != nil {
+		t.Fatalf("functionCallToMap failed: %v", err)
+	}
+	wantFCMap, err := converters.ToMapStructure(fc)
+	if err != nil {
+		t.Fatalf("ToMapStructure(fc) failed: %v", err)
+	}
+	if diff := cmp.Diff(wantFCMap, gotFCMap); diff != "" {
+		t.Errorf("functionCallToMap wire shape mismatch (-want +got):\n%s", diff)
+	}
+	gotFC, ok := mapToFunctionCall(gotFCMap)
+	if !ok {
+		t.Fatal("mapToFunctionCall returned ok=false")
+	}
+	if diff := cmp.Diff(fc, gotFC); diff != "" {
+		t.Errorf("mapToFunctionCall mismatch (-want +got):\n%s", diff)
+	}
+
+	fr := &genai.FunctionResponse{
+		ID:           "call-1",
+		Name:         "Lookup",
+		Scheduling:   genai.FunctionResponseSchedulingWhenIdle,
+		WillContinue: &willCont,
+		Response:     map[string]any{"items": []any{"a", "b"}, "ok": true},
+	}
+	gotFRMap, err := functionResponseToMap(fr)
+	if err != nil {
+		t.Fatalf("functionResponseToMap failed: %v", err)
+	}
+	wantFRMap, err := converters.ToMapStructure(fr)
+	if err != nil {
+		t.Fatalf("ToMapStructure(fr) failed: %v", err)
+	}
+	if diff := cmp.Diff(wantFRMap, gotFRMap); diff != "" {
+		t.Errorf("functionResponseToMap wire shape mismatch (-want +got):\n%s", diff)
+	}
+	gotFR, ok := mapToFunctionResponse(gotFRMap)
+	if !ok {
+		t.Fatal("mapToFunctionResponse returned ok=false")
+	}
+	if diff := cmp.Diff(fr, gotFR); diff != "" {
+		t.Errorf("mapToFunctionResponse mismatch (-want +got):\n%s", diff)
 	}
 }

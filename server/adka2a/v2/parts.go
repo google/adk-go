@@ -163,7 +163,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (*a2a.Part, er
 	}
 
 	if part.FunctionResponse != nil {
-		data, err := converters.ToMapStructure(part.FunctionResponse)
+		data, err := functionResponseToMap(part.FunctionResponse)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +183,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (*a2a.Part, er
 	}
 
 	if part.FunctionCall != nil {
-		data, err := converters.ToMapStructure(part.FunctionCall)
+		data, err := functionCallToMap(part.FunctionCall)
 		if err != nil {
 			return nil, err
 		}
@@ -283,12 +283,25 @@ func toGenAIFilePart(part *a2a.Part) (*genai.Part, error) {
 
 func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 	data := part.Data()
+	adkMetaType := part.Metadata[a2aDataPartMetaTypeKey]
+	if dataMap, ok := data.(map[string]any); ok {
+		switch adkMetaType {
+		case a2aDataPartTypeFunctionCall:
+			if fc, ok := mapToFunctionCall(dataMap); ok {
+				return &genai.Part{FunctionCall: fc}, nil
+			}
+		case a2aDataPartTypeFunctionResponse:
+			if fr, ok := mapToFunctionResponse(dataMap); ok {
+				return &genai.Part{FunctionResponse: fr}, nil
+			}
+		}
+	}
+
 	bytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
 
-	adkMetaType := part.Metadata[a2aDataPartMetaTypeKey]
 	switch adkMetaType {
 	case a2aDataPartTypeCodeExecResult:
 		var val genai.CodeExecutionResult
@@ -328,4 +341,129 @@ func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 
 		return &genai.Part{InlineData: &genai.Blob{Data: jsonData, MIMEType: "text/plain"}}, nil
 	}
+}
+
+func functionCallToMap(fc *genai.FunctionCall) (map[string]any, error) {
+	if len(fc.PartialArgs) > 0 {
+		return converters.ToMapStructure(fc)
+	}
+	out := make(map[string]any, 4)
+	if fc.ID != "" {
+		out["id"] = fc.ID
+	}
+	if len(fc.Args) > 0 {
+		out["args"] = fc.Args
+	}
+	if fc.Name != "" {
+		out["name"] = fc.Name
+	}
+	if fc.WillContinue != nil {
+		out["willContinue"] = *fc.WillContinue
+	}
+	return out, nil
+}
+
+func mapToFunctionCall(data map[string]any) (*genai.FunctionCall, bool) {
+	fc := &genai.FunctionCall{}
+	for k, v := range data {
+		if v == nil {
+			continue
+		}
+		switch k {
+		case "id":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			fc.ID = s
+		case "name":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			fc.Name = s
+		case "args":
+			m, ok := v.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			fc.Args = m
+		case "willContinue":
+			b, ok := v.(bool)
+			if !ok {
+				return nil, false
+			}
+			fc.WillContinue = &b
+		default:
+			return nil, false
+		}
+	}
+	return fc, true
+}
+
+func functionResponseToMap(fr *genai.FunctionResponse) (map[string]any, error) {
+	if len(fr.Parts) > 0 {
+		return converters.ToMapStructure(fr)
+	}
+	out := make(map[string]any, 5)
+	if fr.WillContinue != nil {
+		out["willContinue"] = *fr.WillContinue
+	}
+	if fr.Scheduling != "" {
+		out["scheduling"] = string(fr.Scheduling)
+	}
+	if fr.ID != "" {
+		out["id"] = fr.ID
+	}
+	if fr.Name != "" {
+		out["name"] = fr.Name
+	}
+	if len(fr.Response) > 0 {
+		out["response"] = fr.Response
+	}
+	return out, nil
+}
+
+func mapToFunctionResponse(data map[string]any) (*genai.FunctionResponse, bool) {
+	fr := &genai.FunctionResponse{}
+	for k, v := range data {
+		if v == nil {
+			continue
+		}
+		switch k {
+		case "id":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			fr.ID = s
+		case "name":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			fr.Name = s
+		case "scheduling":
+			s, ok := v.(string)
+			if !ok {
+				return nil, false
+			}
+			fr.Scheduling = genai.FunctionResponseScheduling(s)
+		case "willContinue":
+			b, ok := v.(bool)
+			if !ok {
+				return nil, false
+			}
+			fr.WillContinue = &b
+		case "response":
+			m, ok := v.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			fr.Response = m
+		default:
+			return nil, false
+		}
+	}
+	return fr, true
 }
