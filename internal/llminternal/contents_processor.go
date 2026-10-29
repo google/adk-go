@@ -119,7 +119,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 
 func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
-	var filtered []*session.Event
+	filtered := make([]*session.Event, 0, len(events))
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
@@ -170,73 +170,46 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// drops them at collection otherwise.
 	filtered = compactioninternal.Apply(filtered)
 
-	// Aggregate transcription events (convert to text parts on the fly)
-	var processedEvents []*session.Event
-	var accumulatedInputTranscription string
-	var accumulatedOutputTranscription string
-
+	// Aggregate transcription events (convert to text parts on the fly).
+	// Most sessions hold none, so only allocate a new slice when one appears.
 	for i := 0; i < len(filtered); i++ {
 		ev := filtered[i]
 		content := utils.Content(ev)
-		if content == nil || len(content.Parts) == 0 {
-			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
-				accumulatedInputTranscription += ev.LLMResponse.InputTranscription.Text
-				if i != len(filtered)-1 &&
-					filtered[i+1].LLMResponse.InputTranscription != nil &&
-					filtered[i+1].LLMResponse.InputTranscription.Text != "" {
-					continue
-				}
-				// Create a new event with content
-				newEv := cloneEvent(ev)
-				newEv.LLMResponse.InputTranscription = nil
-				newEv.LLMResponse.Content = &genai.Content{
-					Role:  genai.RoleUser,
-					Parts: []*genai.Part{{Text: accumulatedInputTranscription}},
-				}
-				ev = newEv
-				accumulatedInputTranscription = ""
-			} else if ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "" {
-				accumulatedOutputTranscription += ev.LLMResponse.OutputTranscription.Text
-				if i != len(filtered)-1 &&
-					filtered[i+1].LLMResponse.OutputTranscription != nil &&
-					filtered[i+1].LLMResponse.OutputTranscription.Text != "" {
-					continue
-				}
-				// Create a new event with content
-				newEv := cloneEvent(ev)
-				newEv.LLMResponse.OutputTranscription = nil
-				newEv.LLMResponse.Content = &genai.Content{
-					Role:  "model",
-					Parts: []*genai.Part{{Text: accumulatedOutputTranscription}},
-				}
-				ev = newEv
-				accumulatedOutputTranscription = ""
-			}
+		if (content == nil || len(content.Parts) == 0) &&
+			((ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "") ||
+				(ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "")) {
+			filtered = aggregateTranscriptionEvents(filtered, i)
+			break
 		}
-		processedEvents = append(processedEvents, ev)
 	}
-	filtered = processedEvents
 
-	filtered, orphanRemnants := dropOrphanedFunctionResponses(filtered, allEvents)
+	// The pruning and rearrangement below rebuild the slice and index the
+	// history several times over, and leave a well-formed history exactly as
+	// it is. One pass decides whether they would.
+	if !historyIsWellFormed(filtered) {
+		var orphanRemnants map[*session.Event]bool
+		filtered, orphanRemnants = dropOrphanedFunctionResponses(filtered, allEvents)
 
-	//  src/google/adk/flows/llm_flows/contents.py
-	// 	 - _rearrange_events_for_async_function_response
-	filtered, err := rearrangeEventsForLatestFunctionResponse(filtered, orphanRemnants)
-	if err != nil {
-		return nil, err
+		//  src/google/adk/flows/llm_flows/contents.py
+		// 	 - _rearrange_events_for_async_function_response
+		var err error
+		filtered, err = rearrangeEventsForLatestFunctionResponse(filtered, orphanRemnants)
+		if err != nil {
+			return nil, err
+		}
+		//   - _rearrange_events_for_async_function_responses_in_history
+		filtered, err = rearrangeEventsForFunctionResponsesInHistory(filtered)
+		if err != nil {
+			return nil, err
+		}
+		// Runs after both rearrangements: dropping a trailing unanswered call
+		// first would leave a function response as the last event and let
+		// rearrangeEventsForLatestFunctionResponse discard the turns between it
+		// and its call.
+		filtered = dropOrphanedFunctionCalls(filtered)
 	}
-	//   - _rearrange_events_for_async_function_responses_in_history
-	filtered, err = rearrangeEventsForFunctionResponsesInHistory(filtered)
-	if err != nil {
-		return nil, err
-	}
-	// Runs after both rearrangements: dropping a trailing unanswered call
-	// first would leave a function response as the last event and let
-	// rearrangeEventsForLatestFunctionResponse discard the turns between it
-	// and its call.
-	filtered = dropOrphanedFunctionCalls(filtered)
 
-	var contents []*genai.Content
+	contents := make([]*genai.Content, 0, len(filtered))
 	for _, ev := range filtered {
 		content := copyContentForRequest(utils.Content(ev))
 		if content == nil {
@@ -274,14 +247,154 @@ func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
+func aggregateTranscriptionEvents(filtered []*session.Event, start int) []*session.Event {
+	processedEvents := make([]*session.Event, start, len(filtered))
+	copy(processedEvents, filtered[:start])
+	var accumulatedInputTranscription string
+	var accumulatedOutputTranscription string
+
+	for i := start; i < len(filtered); i++ {
+		ev := filtered[i]
+		content := utils.Content(ev)
+		if content == nil || len(content.Parts) == 0 {
+			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
+				accumulatedInputTranscription += ev.LLMResponse.InputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.InputTranscription != nil &&
+					filtered[i+1].LLMResponse.InputTranscription.Text != "" {
+					continue
+				}
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.InputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  genai.RoleUser,
+					Parts: []*genai.Part{{Text: accumulatedInputTranscription}},
+				}
+				ev = newEv
+				accumulatedInputTranscription = ""
+			} else if ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "" {
+				accumulatedOutputTranscription += ev.LLMResponse.OutputTranscription.Text
+				if i != len(filtered)-1 &&
+					filtered[i+1].LLMResponse.OutputTranscription != nil &&
+					filtered[i+1].LLMResponse.OutputTranscription.Text != "" {
+					continue
+				}
+				newEv := cloneEvent(ev)
+				newEv.LLMResponse.OutputTranscription = nil
+				newEv.LLMResponse.Content = &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: accumulatedOutputTranscription}},
+				}
+				ev = newEv
+				accumulatedOutputTranscription = ""
+			}
+		}
+		processedEvents = append(processedEvents, ev)
+	}
+	return processedEvents
+}
+
+// historyIsWellFormed reports whether events already have the shape the
+// orphan pruning and the two rearrangements produce, so that all four would
+// return them unchanged: every function call carries an ID that no other call
+// repeats; every function response answers, by ID, a call in the event
+// immediately before it, and no call is answered twice; and every call is
+// answered or listed as long running. An event mixing calls and responses, or
+// an empty ID, is left to the full passes. One pass and one map, against the
+// several passes and per-event allocations of the full pipeline.
+func historyIsWellFormed(events []*session.Event) bool {
+	// Per call ID: the index of its call event plus one (zero: no call seen
+	// yet) and whether a response or a long-running listing answered it.
+	type callState struct {
+		callEvent int
+		answered  bool
+	}
+	var calls map[string]callState
+	for i, event := range events {
+		content := utils.Content(event)
+		if content == nil {
+			continue
+		}
+		hasCall, hasResponse := false, false
+		for _, part := range content.Parts {
+			if part == nil {
+				continue
+			}
+			if fc := part.FunctionCall; fc != nil {
+				hasCall = true
+				if fc.ID == "" {
+					return false
+				}
+				if len(event.LongRunningToolIDs) == 0 && (i+1 >= len(events) || !hasFunctionResponses(utils.Content(events[i+1]))) {
+					return false
+				}
+				if calls == nil {
+					calls = make(map[string]callState, len(events)/8+1)
+				}
+				state := calls[fc.ID]
+				if state.callEvent != 0 {
+					return false
+				}
+				state.callEvent = i + 1
+				calls[fc.ID] = state
+			}
+			if fr := part.FunctionResponse; fr != nil {
+				hasResponse = true
+				if fr.ID == "" || calls == nil {
+					return false
+				}
+				state := calls[fr.ID]
+				if state.callEvent == 0 || state.callEvent != i || state.answered {
+					return false
+				}
+				state.answered = true
+				calls[fr.ID] = state
+			}
+		}
+		if hasCall && hasResponse {
+			return false
+		}
+		for _, id := range event.LongRunningToolIDs {
+			if calls == nil {
+				calls = make(map[string]callState, len(events)/8+1)
+			}
+			state := calls[id]
+			state.answered = true
+			calls[id] = state
+		}
+	}
+	for _, state := range calls {
+		if state.callEvent != 0 && !state.answered {
+			return false
+		}
+	}
+	return true
+}
+
+// hasFunctionResponses reports whether c carries a function response part,
+// without collecting them.
+func hasFunctionResponses(c *genai.Content) bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range c.Parts {
+		if p != nil && p.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // dropOrphanedFunctionResponses also identifies surviving events whose orphaned
 // responses were removed, so later rearrangement preserves their remaining content.
 func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*session.Event, map[*session.Event]bool) {
 	callIDs := make(map[string]struct{})
 	for _, event := range allEvents {
-		for _, call := range utils.FunctionCalls(utils.Content(event)) {
-			if call.ID != "" {
-				callIDs[call.ID] = struct{}{}
+		if content := utils.Content(event); content != nil {
+			for _, part := range content.Parts {
+				if part != nil && part.FunctionCall != nil && part.FunctionCall.ID != "" {
+					callIDs[part.FunctionCall.ID] = struct{}{}
+				}
 			}
 		}
 	}
@@ -350,9 +463,11 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 func dropOrphanedFunctionCalls(events []*session.Event) []*session.Event {
 	answered := make(map[string]struct{})
 	for _, event := range events {
-		for _, response := range utils.FunctionResponses(utils.Content(event)) {
-			if response.ID != "" {
-				answered[response.ID] = struct{}{}
+		if content := utils.Content(event); content != nil {
+			for _, part := range content.Parts {
+				if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID != "" {
+					answered[part.FunctionResponse.ID] = struct{}{}
+				}
 			}
 		}
 		for _, id := range event.LongRunningToolIDs {
@@ -561,13 +676,17 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	// Create a map to store the index of the event containing each function response.
 	callIDToResponseEventIndex := make(map[string]int)
 	for i, event := range events {
-		responses := utils.FunctionResponses(event.Content)
-
-		if len(responses) > 0 {
-			for _, res := range responses {
-				callIDToResponseEventIndex[res.ID] = i
+		if event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part != nil && part.FunctionResponse != nil {
+				callIDToResponseEventIndex[part.FunctionResponse.ID] = i
 			}
 		}
+	}
+	if len(callIDToResponseEventIndex) == 0 {
+		return events, nil
 	}
 
 	// Index of the last event when it is a function response, otherwise -1.
@@ -575,90 +694,96 @@ func rearrangeEventsForFunctionResponsesInHistory(events []*session.Event) ([]*s
 	// so leaving this at -1 makes the relocation below a no-op for every
 	// history that does not end on a function response.
 	lastResponseEventIdx := -1
-	if len(utils.FunctionResponses(events[len(events)-1].Content)) > 0 {
+	if hasFunctionResponses(events[len(events)-1].Content) {
 		lastResponseEventIdx = len(events) - 1
 	}
 
 	// Rebuild the event list. tailEvents holds the call/response pair(s)
 	// answered by the last event; it is appended after everything else.
-	var resultEvents, tailEvents []*session.Event
+	resultEvents := make([]*session.Event, 0, len(events))
+	var tailEvents []*session.Event
 
 	for _, event := range events {
 		// If the event contains responses, skip it. It will be handled
 		// when we process its corresponding call event.
-		if len(utils.FunctionResponses(event.Content)) > 0 {
+		if hasFunctionResponses(event.Content) {
 			continue
 		}
 
-		calls := utils.FunctionCalls(event.Content)
-		if len(calls) == 0 {
+		firstRespIdx := -1
+		multiResp := false
+		hasCall := false
+		if event.Content != nil {
+			for _, part := range event.Content.Parts {
+				if part == nil || part.FunctionCall == nil {
+					continue
+				}
+				hasCall = true
+				if index, found := callIDToResponseEventIndex[part.FunctionCall.ID]; found {
+					if firstRespIdx == -1 {
+						firstRespIdx = index
+					} else if index != firstRespIdx {
+						multiResp = true
+					}
+				}
+			}
+		}
+		if !hasCall {
 			// This is a regular event (e.g., user message). Just append it.
 			resultEvents = append(resultEvents, event)
 			continue
 		}
+		if !multiResp {
+			if firstRespIdx != -1 && firstRespIdx == lastResponseEventIdx {
+				tailEvents = append(tailEvents, event, events[firstRespIdx])
+			} else {
+				resultEvents = append(resultEvents, event)
+				if firstRespIdx != -1 {
+					resultEvents = append(resultEvents, events[firstRespIdx])
+				}
+			}
+			continue
+		}
 
-		// This is a function call event. The call and its consolidated
-		// response move together as one unit, so the pair holds at most two
-		// events.
-		pair := make([]*session.Event, 0, 2)
-		pair = append(pair, event)
-
-		// Find the unique indices of all corresponding response events.
-		// Using a map[int]struct{} as a set.
+		// Multiple response events exist for that function call so we merge them.
+		//
+		// This branch does reach the tail routing below, on well-formed
+		// input. It needs one call event whose siblings are answered by two
+		// different response events, plus pass 1 leaving the history alone:
+		// rearrangeEventsForLatestFunctionResponse returns early when the
+		// event before the last one carries any call the last event
+		// answers, so it merges nothing. CALL(c1,c2) | RESP(c2) | CALL(c3)
+		// | RESP(c1,c3) does both, and CALL(c1,c2) merges here and then
+		// moves to the tail.
 		responseEventIndicesSet := make(map[int]struct{})
-		for _, call := range calls {
-			if index, found := callIDToResponseEventIndex[call.ID]; found {
-				responseEventIndicesSet[index] = struct{}{}
+		for _, part := range event.Content.Parts {
+			if part != nil && part.FunctionCall != nil {
+				if index, found := callIDToResponseEventIndex[part.FunctionCall.ID]; found {
+					responseEventIndicesSet[index] = struct{}{}
+				}
 			}
 		}
 
-		switch len(responseEventIndicesSet) {
-		case 0:
-			// No responses were found for any call in this event. This is
-			// reachable: a long running tool or a deferring ResponseDeferrer
-			// produces a call with no response event of its own.
-		case 1:
-			// A single unique response event, so use it directly.
-			for index := range responseEventIndicesSet { // A trick to get the single key
-				pair = append(pair, events[index])
-			}
-		default:
-			// Multiple response events exist for that function call so we merge them.
-			//
-			// This branch does reach the tail routing below, on well-formed
-			// input. It needs one call event whose siblings are answered by two
-			// different response events, plus pass 1 leaving the history alone:
-			// rearrangeEventsForLatestFunctionResponse returns early when the
-			// event before the last one carries any call the last event
-			// answers, so it merges nothing. CALL(c1,c2) | RESP(c2) | CALL(c3)
-			// | RESP(c1,c3) does both, and CALL(c1,c2) merges here and then
-			// moves to the tail.
-			//
-			// Collect and sort the indices to process events in order.
-			var sortedIndices []int
-			for index := range responseEventIndicesSet {
-				sortedIndices = append(sortedIndices, index)
-			}
-			sort.Ints(sortedIndices)
+		var sortedIndices []int
+		for index := range responseEventIndicesSet {
+			sortedIndices = append(sortedIndices, index)
+		}
+		sort.Ints(sortedIndices)
 
-			// Collect the actual event objects to be merged.
-			eventsToMerge := make([]*session.Event, len(sortedIndices))
-			for i, index := range sortedIndices {
-				eventsToMerge[i] = events[index]
-			}
+		eventsToMerge := make([]*session.Event, len(sortedIndices))
+		for i, index := range sortedIndices {
+			eventsToMerge[i] = events[index]
+		}
 
-			// Merge the events into a single response.
-			mergedEvent, err := mergeFunctionResponseEvents(eventsToMerge)
-			if err != nil {
-				return nil, fmt.Errorf("failed to merge response events: %w", err)
-			}
-			pair = append(pair, mergedEvent)
+		mergedEvent, err := mergeFunctionResponseEvents(eventsToMerge)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge response events: %w", err)
 		}
 
 		if _, answeredByLastEvent := responseEventIndicesSet[lastResponseEventIdx]; answeredByLastEvent {
-			tailEvents = append(tailEvents, pair...)
+			tailEvents = append(tailEvents, event, mergedEvent)
 		} else {
-			resultEvents = append(resultEvents, pair...)
+			resultEvents = append(resultEvents, event, mergedEvent)
 		}
 	}
 
