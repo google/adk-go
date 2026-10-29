@@ -375,7 +375,7 @@ func TestResponseContentAttributes(t *testing.T) {
 // final response alone.
 func TestResponseContentAttributes_LegacySkipsStreamingChunks(t *testing.T) {
 	captureContent(t)
-	t.Setenv(adkTelemetrySchemaVersionOptIn, otelSemconv136)
+	setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: otelSemconv136})
 
 	partial := &model.LLMResponse{
 		Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "It is ra"}}},
@@ -691,7 +691,7 @@ func TestOversizedAttributeIsDropped(t *testing.T) {
 	}
 	for _, schema := range []string{otelSemconv136, "otel_semconv_1_44"} {
 		t.Run(schema, func(t *testing.T) {
-			t.Setenv(adkTelemetrySchemaVersionOptIn, schema)
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: schema})
 
 			var logged strings.Builder
 			defer log.SetOutput(log.Writer())

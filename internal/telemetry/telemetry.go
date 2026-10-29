@@ -22,8 +22,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -55,30 +55,34 @@ var (
 	genAIToolCallResult             = attribute.Key("gen_ai.tool.call.result")
 )
 
-var tracerProvider = otel.GetTracerProvider()
+const schemaURL144 = "https://opentelemetry.io/schemas/1.44.0"
 
-// tracer is looked up per use, since the schema URL follows the env.
-func tracer() trace.Tracer {
-	return tracerProvider.Tracer(
-		systemName,
-		trace.WithInstrumentationVersion(version.Version),
-		trace.WithSchemaURL(schemaURL()),
-	)
+var tracers atomic.Pointer[[2]trace.Tracer]
+
+func init() {
+	setTracerProvider(otel.GetTracerProvider())
 }
 
-func schemaURL() string {
-	if useLegacySchema() {
-		return semconv.SchemaURL
+func setTracerProvider(tp trace.TracerProvider) *[2]trace.Tracer {
+	ts := [2]trace.Tracer{
+		// TODO(maxind): use semconv/v1.44.0 SchemaURL once otel-go ships it.
+		tp.Tracer(systemName, trace.WithInstrumentationVersion(version.Version), trace.WithSchemaURL(schemaURL144)),
+		tp.Tracer(systemName, trace.WithInstrumentationVersion(version.Version), trace.WithSchemaURL(semconv.SchemaURL)),
 	}
-	// TODO(maxind): use semconv/v1.44.0 SchemaURL once otel-go ships it.
-	return "https://opentelemetry.io/schemas/1.44.0"
+	return tracers.Swap(&ts)
+}
+
+func tracer() trace.Tracer {
+	if useLegacySchema() {
+		return tracers.Load()[1]
+	}
+	return tracers.Load()[0]
 }
 
 // OverrideTracerForTesting makes tracing use tp until the test ends.
 func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
-	original := tracerProvider
-	tracerProvider = tp
-	t.Cleanup(func() { tracerProvider = original })
+	orig := setTracerProvider(tp)
+	t.Cleanup(func() { tracers.Store(orig) })
 }
 
 type TraceAgentResultParams struct {
@@ -119,7 +123,7 @@ func startGenerateContentSpan(ctx context.Context, params GenerateContentParams)
 	if provider, ok := providerName(params.ModelName, params.Backend); ok && !useLegacySchema() {
 		attrs = append(attrs, provider)
 	}
-	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("generate_content %s", modelName), trace.WithAttributes(attrs...))
+	spanCtx, span := tracer().Start(ctx, "generate_content "+modelName, trace.WithAttributes(attrs...))
 	// After the sampling decision, not before: converting a whole conversation
 	// costs milliseconds, and on a span the sampler drops it buys nothing. The
 	// conventions list the attributes worth having at span creation for
@@ -166,9 +170,12 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 
 // traceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func traceGenerateContentResult(span trace.Span, params generateContentResult) {
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, params.Error)
 	span.SetAttributes(generateContentResultAttributes(params)...)
-	if span.IsRecording() && captureContentOnSpans() {
+	if captureContentOnSpans() {
 		span.SetAttributes(spanContentAttributes(responseContent(params))...)
 	}
 }
@@ -230,7 +237,7 @@ func StartExecuteToolSpan(ctx context.Context, params StartExecuteToolSpanParams
 	if legacy {
 		attrs = append(attrs, gcpVertexAgentToolCallArgsName.String(safeSerialize(params.Args)))
 	}
-	spanCtx, span := tracer().Start(ctx, fmt.Sprintf("execute_tool %s", toolName), trace.WithAttributes(attrs...))
+	spanCtx, span := tracer().Start(ctx, "execute_tool "+toolName, trace.WithAttributes(attrs...))
 	if !legacy && params.Args != nil && span.IsRecording() && captureContentOnSpans() {
 		span.SetAttributes(spanContentAttributes([]contentAttr{{genAIToolCallArguments, toolPayload(params.Args)}})...)
 	}

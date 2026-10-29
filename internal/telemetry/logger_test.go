@@ -735,7 +735,7 @@ func TestUseLegacySchema(t *testing.T) {
 		{"true", false},
 	} {
 		t.Run(tc.value, func(t *testing.T) {
-			t.Setenv(adkTelemetrySchemaVersionOptIn, tc.value)
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.value})
 			if got := useLegacySchema(); got != tc.want {
 				t.Errorf("useLegacySchema() = %t, want %t", got, tc.want)
 			}

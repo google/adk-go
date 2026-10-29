@@ -16,7 +16,6 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
@@ -126,7 +125,7 @@ func sessionID(ictx InvocationContext) string {
 }
 
 func startInvokeAgentSpan(ctx context.Context, ictx InvocationContext, a AgentLike) (context.Context, trace.Span) {
-	return tracer().Start(ctx, fmt.Sprintf("invoke_agent %s", a.Name()), trace.WithAttributes(
+	return tracer().Start(ctx, "invoke_agent "+a.Name(), trace.WithAttributes(
 		gcpVertexAgentInvocationID.String(ictx.InvocationID()), // used by adk-web
 		semconv.GenAIOperationNameInvokeAgent,
 		semconv.GenAIAgentDescription(a.Description()),
@@ -145,12 +144,12 @@ func startInvokeWorkflowSpan(ctx context.Context, name, conversationID string) (
 	if ctx.Value(workflowScopeKey{}) != nil && !useLegacySchema() {
 		attrs = append(attrs, genAIWorkflowNested.Bool(true))
 	}
-	ctx, span := tracer().Start(ctx, fmt.Sprintf("invoke_workflow %s", name), trace.WithAttributes(attrs...))
+	ctx, span := tracer().Start(ctx, "invoke_workflow "+name, trace.WithAttributes(attrs...))
 	return context.WithValue(ctx, workflowScopeKey{}, true), span
 }
 
 func startInvokeNodeSpan(ctx context.Context, ictx InvocationContext, n WorkflowNodeLike) (context.Context, trace.Span) {
-	return tracer().Start(ctx, fmt.Sprintf("invoke_node %s", n.Name()), trace.WithAttributes(
+	return tracer().Start(ctx, "invoke_node "+n.Name(), trace.WithAttributes(
 		semconv.GenAIOperationNameKey.String(invokeNodeOperationName),
 		genAINodeName.String(n.Name()),
 		semconv.GenAIConversationID(sessionID(ictx)),

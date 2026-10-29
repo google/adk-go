@@ -64,6 +64,9 @@ var (
 // bareModelName mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/utils/model_name_utils.py#L49-L91
 // Its malformed "projects/" path rule is left out: [providerName] names the same provider either way.
 func bareModelName(model string) string {
+	if !strings.Contains(model, "/") {
+		return model
+	}
 	for _, p := range modelPaths {
 		if m := p.FindStringSubmatch(model); m != nil {
 			return m[1]

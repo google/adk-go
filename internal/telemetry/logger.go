@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
@@ -65,8 +66,9 @@ const (
 )
 
 var (
-	captureMode contentCaptureMode = captureNone
-	once        sync.Once
+	captureMode  atomic.Int32
+	legacySchema atomic.Bool
+	once         sync.Once
 )
 
 func parseContentCaptureMode(s string) contentCaptureMode {
@@ -84,19 +86,22 @@ func parseContentCaptureMode(s string) contentCaptureMode {
 	return captureNone
 }
 
-func useLegacySchema() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(adkTelemetrySchemaVersionOptIn))) {
+func parseLegacySchema(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
 	case otelSemconv136, "1":
 		return true
 	}
 	return false
 }
 
+func useLegacySchema() bool {
+	once.Do(ApplyEnv)
+	return legacySchema.Load()
+}
+
 func contentCapture() contentCaptureMode {
-	once.Do(func() {
-		ApplyEnv()
-	})
-	return captureMode
+	once.Do(ApplyEnv)
+	return contentCaptureMode(captureMode.Load())
 }
 
 // getGenAICaptureMessageContent reports whether message content should be
@@ -114,21 +119,31 @@ func captureContentOnSpans() bool {
 	return mode == captureSpanOnly || mode == captureSpanAndEvent
 }
 
-var loggerProvider = global.GetLoggerProvider()
+var loggers atomic.Pointer[[2]log.Logger]
+
+func init() {
+	setLoggerProvider(global.GetLoggerProvider())
+}
+
+func setLoggerProvider(lp log.LoggerProvider) *[2]log.Logger {
+	ls := [2]log.Logger{
+		lp.Logger(systemName, log.WithSchemaURL(schemaURL144), log.WithInstrumentationVersion(version.Version)),
+		lp.Logger(systemName, log.WithSchemaURL(semconv.SchemaURL), log.WithInstrumentationVersion(version.Version)),
+	}
+	return loggers.Swap(&ls)
+}
 
 func otelLogger() log.Logger {
-	return loggerProvider.Logger(
-		systemName,
-		log.WithSchemaURL(schemaURL()),
-		log.WithInstrumentationVersion(version.Version),
-	)
+	if useLegacySchema() {
+		return loggers.Load()[1]
+	}
+	return loggers.Load()[0]
 }
 
 // OverrideLoggerForTesting makes logging use lp until the test ends.
 func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
-	original := loggerProvider
-	loggerProvider = lp
-	t.Cleanup(func() { loggerProvider = original })
+	orig := setLoggerProvider(lp)
+	t.Cleanup(func() { loggers.Store(orig) })
 }
 
 // logRequest logs the request to the model - the system message and user messages.
@@ -300,7 +315,8 @@ func contentToJSONLikeValue(c *genai.Content) any {
 // EVENT_ONLY, SPAN_ONLY and SPAN_AND_EVENT, and treats "1" or "true" as
 // EVENT_ONLY for back-compatibility. Anything else records no content.
 func ApplyEnv() {
-	captureMode = parseContentCaptureMode(os.Getenv(captureMessageContentEnvVar))
+	captureMode.Store(int32(parseContentCaptureMode(os.Getenv(captureMessageContentEnvVar))))
+	legacySchema.Store(parseLegacySchema(os.Getenv(adkTelemetrySchemaVersionOptIn)))
 }
 
 func evalsToTrue(s string) bool {
