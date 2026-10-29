@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/database"
+	"google.golang.org/adk/v2/tool"
 )
 
 // echoModel answers every request with one fixed text turn and records how
@@ -125,6 +126,54 @@ func benchRunTurn(b *testing.B, backend string, newService func(*testing.B) sess
 func BenchmarkRunTurn(b *testing.B) {
 	benchRunTurn(b, "inmemory", func(*testing.B) session.Service { return session.InMemoryService() })
 	benchRunTurn(b, "sqlite", sqliteService)
+}
+
+// BenchmarkRunToolLoopTurn drives one turn whose model makes three function
+// calls before it answers, so the flow makes four model calls and resolves
+// the agent's toolsets before each of them. Every turn runs on a fresh
+// session, so the history stays short and the toolset work is what is
+// measured. It reports the toolset resolutions (Toolset.Tools calls) per turn.
+func BenchmarkRunToolLoopTurn(b *testing.B) {
+	const calls = 3
+	for _, n := range []int{1, 3} {
+		b.Run(fmt.Sprintf("toolsets=%d", n), func(b *testing.B) {
+			m := &benchutil.ToolLoopModel{Calls: calls, ToolName: "noop0", Args: map[string]any{"q": "x"}}
+			sets := make([]*benchutil.CountingToolset, n)
+			toolsets := make([]tool.Toolset, n)
+			for i := range sets {
+				sets[i] = &benchutil.CountingToolset{
+					ToolsetName: fmt.Sprintf("set%d", i),
+					ToolList:    []tool.Tool{benchutil.NoopTool(fmt.Sprintf("noop%d", i))},
+				}
+				toolsets[i] = sets[i]
+			}
+			a, err := llmagent.New(llmagent.Config{Name: "agent", Model: m, Instruction: "You are terse.", Toolsets: toolsets})
+			if err != nil {
+				b.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "app", Agent: a, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				b.Fatal(err)
+			}
+			msg := genai.NewContentFromText("hello", genai.RoleUser)
+			b.ReportAllocs()
+			turns := 0
+			for b.Loop() {
+				turns++
+				for _, err := range r.Run(b.Context(), "user", fmt.Sprintf("s%d", turns), msg, agent.RunConfig{}) {
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
+			var resolutions int64
+			for _, s := range sets {
+				resolutions += s.Resolutions.Load()
+			}
+			b.ReportMetric(float64(resolutions)/float64(turns), "toolset-resolutions/turn")
+			b.ReportMetric(float64(m.ModelCalls.Load())/float64(turns), "model-calls/turn")
+		})
+	}
 }
 
 // BenchmarkRunnerNew measures constructing a Runner, which the REST server
