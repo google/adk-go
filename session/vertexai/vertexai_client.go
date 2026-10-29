@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -425,20 +426,28 @@ func eventFromRawEvent(raw *structpb.Struct) (*session.Event, error) {
 	return event, nil
 }
 
+const maxEventsPageSize = 1000
+
 func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, sessionID string, after time.Time, numRecentEvents int) ([]*session.Event, error) {
 	reasoningEngine, err := c.getReasoningEngineID(appName)
 	if err != nil {
 		return nil, err
 	}
-	events := make([]*session.Event, 0)
+	desc := numRecentEvents > 0 && after.IsZero()
+	events := make([]*session.Event, 0, max(numRecentEvents, 0))
 	eventsRpcReq := &aiplatformpb.ListEventsRequest{
-		Parent: sessionNameByID(sessionID, c, reasoningEngine),
+		Parent:   sessionNameByID(sessionID, c, reasoningEngine),
+		PageSize: maxEventsPageSize,
+	}
+	if desc {
+		eventsRpcReq.OrderBy = "timestamp desc"
+		eventsRpcReq.PageSize = int32(min(numRecentEvents, maxEventsPageSize))
 	}
 	if !after.IsZero() {
 		eventsRpcReq.Filter = fmt.Sprintf("timestamp>=%q", after.Format("2006-01-02T15:04:05-07:00"))
 	}
 	it := c.rpcClient.ListEvents(ctx, eventsRpcReq)
-	for {
+	for !desc || len(events) < numRecentEvents {
 		rpcResp, err := it.Next()
 		if err == iterator.Done {
 			break
@@ -493,6 +502,10 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 			}
 		}
 		events = append(events, event)
+	}
+	if desc {
+		slices.Reverse(events)
+		return events, nil
 	}
 	if numRecentEvents > 0 {
 		if numRecentEvents > len(events) {

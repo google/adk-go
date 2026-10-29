@@ -1076,3 +1076,40 @@ func TestAiplatformToGenaiContent_OtherParts(t *testing.T) {
 		t.Errorf("aiplatformToGenaiContent() mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestListSessionEventsPaging(t *testing.T) {
+	fake := &pagingSessionService{}
+	client := newFakeVertexAiClient(t, fake)
+	svc := &vertexAiService{client: client}
+	fake.seed(sessionNameByID("s", client, "123"), 250)
+
+	full, err := svc.Get(t.Context(), &session.GetRequest{AppName: "123", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get(full): %v", err)
+	}
+	if got := full.Session.Events().Len(); got != 250 {
+		t.Fatalf("full len = %d, want 250", got)
+	}
+	if got := fake.listRPCs.Load(); got != 1 {
+		t.Errorf("full listRPCs = %d, want 1", got)
+	}
+
+	fake.reset()
+	recent, err := svc.Get(t.Context(), &session.GetRequest{AppName: "123", UserID: "user", SessionID: "s", NumRecentEvents: 20})
+	if err != nil {
+		t.Fatalf("Get(recent=20): %v", err)
+	}
+	if got := recent.Session.Events().Len(); got != 20 {
+		t.Fatalf("recent len = %d, want 20", got)
+	}
+	if got := fake.listRPCs.Load(); got != 1 {
+		t.Errorf("recent listRPCs = %d, want 1", got)
+	}
+	for i := range 20 {
+		wantID := fmt.Sprintf("event-%06d", 230+i)
+		if gotID := recent.Session.Events().At(i).ID; gotID != wantID {
+			t.Fatalf("recent[%d].ID = %q, want %q", i, gotID, wantID)
+		}
+	}
+}
+

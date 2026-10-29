@@ -30,6 +30,7 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/protobuf/proto"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -258,6 +259,16 @@ func setupReplay(t *testing.T, filename string) ([]option.ClientOption, func(), 
 		rep, err := rpcreplay.NewReplayer(filePath)
 		if err != nil {
 			return nil, nil, err
+		}
+		// Existing .replay files were recorded before ListEventsRequest set
+		// page_size and order_by. Clear them before matching; paging and
+		// order_by are covered by pagingSessionService tests.
+		rep.BeforeFunc = func(_ string, m proto.Message) error {
+			if req, ok := m.(*aiplatformpb.ListEventsRequest); ok {
+				req.PageSize = 0
+				req.OrderBy = ""
+			}
+			return nil
 		}
 		conn, err := rep.Connection()
 		if err != nil {
