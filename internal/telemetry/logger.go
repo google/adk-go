@@ -116,19 +116,31 @@ func captureContentOnSpans() bool {
 
 var loggerProvider = global.GetLoggerProvider()
 
+// loggers caches the logger per schema URL for the reason [tracers] does.
+var loggers sync.Map // schema URL -> log.Logger
+
 func otelLogger() log.Logger {
-	return loggerProvider.Logger(
+	schema := schemaURL()
+	if l, ok := loggers.Load(schema); ok {
+		return l.(log.Logger)
+	}
+	l, _ := loggers.LoadOrStore(schema, loggerProvider.Logger(
 		systemName,
-		log.WithSchemaURL(schemaURL()),
+		log.WithSchemaURL(schema),
 		log.WithInstrumentationVersion(version.Version),
-	)
+	))
+	return l.(log.Logger)
 }
 
 // OverrideLoggerForTesting makes logging use lp until the test ends.
 func OverrideLoggerForTesting(t interface{ Cleanup(func()) }, lp log.LoggerProvider) {
 	original := loggerProvider
 	loggerProvider = lp
-	t.Cleanup(func() { loggerProvider = original })
+	loggers.Clear()
+	t.Cleanup(func() {
+		loggerProvider = original
+		loggers.Clear()
+	})
 }
 
 // logRequest logs the request to the model - the system message and user messages.

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -57,13 +58,23 @@ var (
 
 var tracerProvider = otel.GetTracerProvider()
 
-// tracer is looked up per use, since the schema URL follows the env.
+// tracers caches the tracer per schema URL, since the schema URL follows the
+// env. Looking one up per span took the global provider's mutex every time,
+// which concurrent turns contend on. A tracer taken from the global provider
+// before an SDK is installed starts delegating to it once it is.
+var tracers sync.Map // schema URL -> trace.Tracer
+
 func tracer() trace.Tracer {
-	return tracerProvider.Tracer(
+	schema := schemaURL()
+	if t, ok := tracers.Load(schema); ok {
+		return t.(trace.Tracer)
+	}
+	t, _ := tracers.LoadOrStore(schema, tracerProvider.Tracer(
 		systemName,
 		trace.WithInstrumentationVersion(version.Version),
-		trace.WithSchemaURL(schemaURL()),
-	)
+		trace.WithSchemaURL(schema),
+	))
+	return t.(trace.Tracer)
 }
 
 func schemaURL() string {
@@ -78,7 +89,11 @@ func schemaURL() string {
 func OverrideTracerForTesting(t interface{ Cleanup(func()) }, tp trace.TracerProvider) {
 	original := tracerProvider
 	tracerProvider = tp
-	t.Cleanup(func() { tracerProvider = original })
+	tracers.Clear()
+	t.Cleanup(func() {
+		tracerProvider = original
+		tracers.Clear()
+	})
 }
 
 type TraceAgentResultParams struct {
