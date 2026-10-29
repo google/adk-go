@@ -6711,3 +6711,78 @@ func TestBatchProcessor_SplitsSparseContentPartsAndEnforcesSerializedCap(t *test
 		}
 	})
 }
+
+func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) {
+	row := func(id string) map[string]any {
+		return map[string]any{"event_id": id, "content": strings.Repeat("x", 1000)}
+	}
+
+	t.Run("second_chunk_offset_error_after_first_chunk_rotated_does_not_rotate_again", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				switch attempt {
+				case 1:
+					// Chunk 1, attempt 1 on committed-1: triggers the batch's one allowed rotation.
+					return nil, status.Error(codes.NotFound, "stream 1 expired")
+				case 2:
+					// Chunk 1, attempt 2 on committed-2: succeeds at offset 0.
+					return &storagepb.AppendRowsResponse{}, nil
+				case 3:
+					// Chunk 2, attempt 1 on committed-2: returns NotFound after chunk 1 already rotated.
+					return nil, status.Error(codes.NotFound, "stream 2 expired")
+				default:
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+		bp := newErrorClassificationProcessor(t, srv, true)
+		bp.maxAppendBytes = estimateRowBytes(row("a"))
+
+		err := bp.writeBatch(context.Background(), []map[string]any{row("a"), row("b"), row("c")})
+		if err == nil || !strings.Contains(err.Error(), "committed write stream already rotated") {
+			t.Fatalf("writeBatch() error = %v, want already-rotated error on second chunk", err)
+		}
+		if got := srv.attempts(); got != 3 {
+			t.Errorf("AppendRows attempts = %d, want 3 (third chunk must not be sent)", got)
+		}
+		srv.mu.Lock()
+		created := len(srv.createReqs)
+		srv.mu.Unlock()
+		if created != 2 {
+			t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + at most 1 rotation per batch)", created)
+		}
+		if got := bp.DropStats().AppendFailureDrops; got != 3 {
+			t.Errorf("AppendFailureDrops = %d, want 3", got)
+		}
+	})
+
+	t.Run("single_rotation_on_first_chunk_allows_remaining_chunks_on_replacement_stream", func(t *testing.T) {
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				if attempt == 1 {
+					return nil, status.Error(codes.NotFound, "stream 1 expired")
+				}
+				return &storagepb.AppendRowsResponse{}, nil
+			},
+		}
+		bp := newErrorClassificationProcessor(t, srv, true)
+		bp.maxAppendBytes = estimateRowBytes(row("a"))
+
+		if err := bp.writeBatch(context.Background(), []map[string]any{row("a"), row("b"), row("c")}); err != nil {
+			t.Fatalf("writeBatch() error = %v, want nil", err)
+		}
+		if got := srv.attempts(); got != 4 {
+			t.Errorf("AppendRows attempts = %d, want 4 (1 failed on stream 1 + 3 chunks on stream 2)", got)
+		}
+		srv.mu.Lock()
+		created := len(srv.createReqs)
+		offsets := slices.Clone(srv.appendOffsets)
+		srv.mu.Unlock()
+		if created != 2 {
+			t.Errorf("CreateWriteStream calls = %d, want 2", created)
+		}
+		if diff := cmp.Diff([]int64{0, 0, 1, 2}, offsets); diff != "" {
+			t.Errorf("append offsets mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
