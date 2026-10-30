@@ -384,6 +384,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		return nil, errors.New("agentanalytics: writeClient must not be nil when plugin is enabled")
 	}
 	validateEventFilterLists(config)
+	normalizeGCSPathPrefix(&config)
 
 	// The plugin owns, and closes, an offloader that it builds itself. One
 	// that the caller supplies stays the caller's. When content_parts is

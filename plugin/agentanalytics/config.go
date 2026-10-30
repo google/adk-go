@@ -116,8 +116,12 @@ type DropStats struct {
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
-	// Path is the object name within the bucket; it already includes
-	// Config.GCSPathPrefix.
+	// Path is the object name within the bucket. When Config.GCSPathPrefix is
+	// non-empty after trimming leading and trailing '/', Path begins with the
+	// effective prefix followed by "/" — either the '/'-trimmed
+	// Config.GCSPathPrefix verbatim, or its rewritten "<base>~<sha256>" form
+	// when Config.GCSPathPrefix had to be sanitized or capped (see
+	// Config.GCSPathPrefix).
 	Path string
 	// Data is the raw payload to store in the object.
 	Data []byte
@@ -129,11 +133,15 @@ type GCSUploadRequest struct {
 // Storage and returns the gs:// URI of the stored object.
 //
 // The plugin calls UploadContent from several goroutines at the same time.
-// GCSUploadRequest.Path is the object name within the bucket and already
-// includes Config.GCSPathPrefix. If UploadContent fails, a text part keeps its
-// inline text (truncated to MaxContentLen) in the BigQuery row, while a binary
-// part's text is set to "[UPLOAD FAILED]" and its raw bytes are not stored
-// inline.
+// GCSUploadRequest.Path is the object name within the bucket and already begins
+// with the effective prefix derived from Config.GCSPathPrefix: the '/'-trimmed
+// prefix verbatim when valid, or the rewritten "<base>~<sha256>" prefix logged
+// at construction when Config.GCSPathPrefix exceeds 750 bytes, contains invalid
+// UTF-8 or control/line-separator characters, or starts with the reserved
+// ".well-known/acme-challenge" segments (see Config.GCSPathPrefix). If
+// UploadContent fails, a text part keeps its inline text (truncated to
+// MaxContentLen) in the BigQuery row, while a binary part's text is set to
+// "[UPLOAD FAILED]" and its raw bytes are not stored inline.
 // UploadContent must return soon after ctx is done: the plugin waits for the
 // uploads of a batch before writing it, and Close waits for that write.
 type GCSContentOffloader interface {
@@ -349,22 +357,27 @@ type Config struct {
 	// objects. Leading and trailing slashes are trimmed, so "/logs/" and
 	// "logs" are the same prefix and a prefix of only slashes adds nothing.
 	// The trimmed prefix is used verbatim when it is valid UTF-8 of at most
-	// 512 bytes; has no empty ("//"), "." or ".." segment; has no '\', no
-	// '~', no control character (U+0000 to U+001F and U+007F to U+009F, which
-	// include CR, LF and U+0085), and no U+2028 or U+2029; and does not start
-	// with ".well-known/acme-challenge", which Cloud Storage reserves (matched
-	// case-insensitively after empty, "." and ".." segments are dropped).
+	// 750 bytes; has no control character (U+0000 to U+001F and U+007F to
+	// U+009F, which include CR, LF and U+0085) and no Unicode line or
+	// paragraph separator (U+2028 or U+2029); and its first two "/"-separated
+	// segments are not, case-insensitively, ".well-known" and "acme-challenge",
+	// which Cloud Storage reserves (whole segments are compared, so
+	// ".well-known/acme-challenge-x" is kept verbatim). Valid characters and
+	// segments such as '~', '\', spaces, '=', Unicode text, empty inner
+	// segments ("//"), and "." or ".." segments are kept unchanged.
 	//
-	// Any other prefix is rewritten: those segments are dropped, each byte
-	// that is not valid UTF-8 and each of those characters is replaced with
-	// '_', a leading ".well-known" before "acme-challenge" becomes
-	// "_well-known", the result is cut to at most 447 bytes on a rune
-	// boundary, and "~" followed by the 64 hex digits of the SHA-256 digest of
-	// the trimmed prefix is appended, so distinct trimmed prefixes keep
-	// distinct destinations. A prefix of only ".", ".." and empty segments
-	// becomes "_~<digest>". For example, "logs//tenant", "a/./b",
-	// "~team/logs" and `logs\prod` are written as "logs/tenant~<digest>",
-	// "a/b~<digest>", "_team/logs~<digest>" and "logs_prod~<digest>".
+	// Any other prefix is rewritten, and a warning naming the effective prefix
+	// is logged to Logger when the plugin or BatchProcessor is constructed:
+	// each byte that is not valid UTF-8 and each of those control or
+	// line/paragraph-separator characters is replaced with '_', a leading
+	// ".well-known" segment before "acme-challenge" becomes "_well-known", the
+	// result is cut to at most 685 bytes on a UTF-8 rune boundary, and "~"
+	// followed by the 64 lowercase hex digits of the SHA-256 digest of the
+	// trimmed prefix is appended, so distinct trimmed prefixes keep distinct
+	// destinations and assembled object names stay within Cloud Storage's
+	// 1,024-byte limit. Because '~' is kept verbatim, copying a rewritten
+	// "<base>~<digest>" prefix back into GCSPathPrefix uses that prefix as is
+	// without rewriting it again.
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example

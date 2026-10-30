@@ -99,7 +99,7 @@ const (
 	// individual identifier segments so assembled object names stay within
 	// maxGCSObjectNameBytes.
 	maxGCSObjectNameBytes    = 1024
-	maxGCSPrefixBytes        = 512
+	maxGCSPrefixBytes        = 750
 	maxPathSegmentBytes      = 128
 	pathSegmentHashSuffixLen = 65 // "~" + 64 lowercase hex digits (256-bit SHA-256)
 
@@ -315,87 +315,101 @@ func pathSegment(id, fallback string) string {
 	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
 }
 
-// isUnsafeGCSPrefixRune reports whether r is replaced in a GCSPathPrefix
-// segment. Of these runes Cloud Storage only rejects CR and LF in object
-// names, and it recommends avoiding the control characters that XML 1.0 does
-// not allow; the rest is a portability choice. Control characters (U+0000
-// to U+001F and U+007F to U+009F) and the Unicode line and paragraph
-// separators are replaced so names stay printable on one line, '\' because
-// some tools and hosts treat it as a path separator, and '~' because it
-// marks the hash suffix, so a prefix kept verbatim never looks like a
-// rewritten one. Spaces, '=' and other Unicode characters are kept.
+// isUnsafeGCSPrefixRune reports whether r is replaced in a GCSPathPrefix.
+// Cloud Storage rejects CR and LF in object names and recommends avoiding the
+// control characters that XML 1.0 does not allow; control characters (U+0000
+// to U+001F and U+007F to U+009F, including U+0085) and the Unicode line and
+// paragraph separators (U+2028 and U+2029) are replaced so names stay
+// printable on one line. Spaces, '=', '~', '\' and other Unicode characters
+// are kept.
 func isUnsafeGCSPrefixRune(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
-		r == '\u0085' || r == '\u2028' || r == '\u2029' ||
-		r == '\\' || r == '~'
+		r == '\u2028' || r == '\u2029'
+}
+
+// hasReservedACMEPrefix reports whether the first two '/'-separated segments of
+// s are, case-insensitively, ".well-known" and "acme-challenge".
+func hasReservedACMEPrefix(s string) bool {
+	seg0, rest, ok := strings.Cut(s, "/")
+	if !ok || !strings.EqualFold(seg0, ".well-known") {
+		return false
+	}
+	seg1, _, _ := strings.Cut(rest, "/")
+	return strings.EqualFold(seg1, "acme-challenge")
 }
 
 // cleanGCSPrefix returns the object name prefix for a configured
 // GCSPathPrefix, following the contract documented on Config.GCSPathPrefix.
 // Leading and trailing slashes are trimmed first, so "/logs/" and "logs"
 // share a prefix. The trimmed prefix is returned verbatim unless it is
-// longer than maxGCSPrefixBytes; has an empty ("//"), "." or ".." segment, a
-// byte that is not valid UTF-8, or a rune for which isUnsafeGCSPrefixRune
-// reports true; or starts with ".well-known/acme-challenge", which Cloud
-// Storage reserves. That last check is positional and case-insensitive: it
-// looks at the first two segments left once empty, "." and ".." segments are
-// dropped. Any other prefix has those segments dropped, those bytes and runes
-// replaced with '_', and a leading ".well-known" before "acme-challenge"
-// renamed "_well-known", and is cut to fit maxGCSPrefixBytes with the
-// "~<sha256>" suffix of the trimmed prefix appended, so distinct trimmed
-// prefixes do not collapse onto the same object prefix.
+// longer than maxGCSPrefixBytes; has a byte that is not valid UTF-8 or a rune
+// for which isUnsafeGCSPrefixRune reports true; or its first two '/'-separated
+// segments are, case-insensitively, ".well-known" and "acme-challenge", which
+// Cloud Storage reserves (a second segment such as "acme-challenge-x" is kept
+// as is). Any other prefix has those bytes and runes replaced with '_' and a
+// leading ".well-known" segment before "acme-challenge" renamed "_well-known",
+// and is cut to fit maxGCSPrefixBytes with the "~<sha256>" suffix of the
+// trimmed prefix appended, so distinct trimmed prefixes do not collapse onto
+// the same object prefix. Because '~' is kept, cleanGCSPrefix is idempotent on
+// its own rewritten outputs.
 func cleanGCSPrefix(prefix string) string {
 	trimmed := strings.Trim(prefix, "/")
 	if trimmed == "" {
 		return ""
 	}
-	parts := strings.Split(trimmed, "/")
-	segs := make([]string, 0, len(parts))
+	var sb strings.Builder
+	sb.Grow(min(len(trimmed), maxGCSPrefixBytes))
 	altered := false
-	for _, rawSeg := range parts {
-		if rawSeg == "" || rawSeg == "." || rawSeg == ".." {
+	for i := 0; i < len(trimmed); {
+		r, width := utf8.DecodeRuneInString(trimmed[i:])
+		if (r == utf8.RuneError && width == 1) || isUnsafeGCSPrefixRune(r) {
+			sb.WriteByte('_')
 			altered = true
-			continue
+		} else {
+			sb.WriteRune(r)
 		}
-		var segSB strings.Builder
-		segSB.Grow(len(rawSeg))
-		for i := 0; i < len(rawSeg); {
-			r, width := utf8.DecodeRuneInString(rawSeg[i:])
-			if (r == utf8.RuneError && width == 1) || isUnsafeGCSPrefixRune(r) {
-				segSB.WriteByte('_')
-				altered = true
-			} else {
-				segSB.WriteRune(r)
-			}
-			i += width
-		}
-		segs = append(segs, segSB.String())
+		i += width
 	}
-	if len(segs) >= 2 && strings.EqualFold(segs[0], ".well-known") && strings.EqualFold(segs[1], "acme-challenge") {
-		segs[0] = "_well-known"
+	cleaned := sb.String()
+	if hasReservedACMEPrefix(cleaned) {
+		_, rest, _ := strings.Cut(cleaned, "/")
+		cleaned = "_well-known/" + rest
 		altered = true
 	}
-	if len(segs) == 0 {
-		return truncateWithHash("_", trimmed, maxGCSPrefixBytes)
+	if !altered && len(cleaned) <= maxGCSPrefixBytes {
+		return cleaned
 	}
-	joined := strings.Join(segs, "/")
-	if !altered && len(joined) <= maxGCSPrefixBytes {
-		return joined
+	return truncateWithHash(cleaned, trimmed, maxGCSPrefixBytes)
+}
+
+// normalizeGCSPathPrefix cleans c.GCSPathPrefix and logs a warning naming the
+// effective prefix when the '/'-trimmed value had to be rewritten. Because
+// cleanGCSPrefix is idempotent, calling normalizeGCSPathPrefix during plugin
+// construction before NewBatchProcessor logs at most once.
+func normalizeGCSPathPrefix(c *Config) {
+	trimmed := strings.Trim(c.GCSPathPrefix, "/")
+	cleaned := cleanGCSPrefix(c.GCSPathPrefix)
+	if cleaned != trimmed {
+		if len(trimmed) > maxGCSPrefixBytes {
+			c.logf("agentanalytics: WARNING: Config.GCSPathPrefix (%d bytes after trimming '/') exceeds %d bytes and was rewritten to %q", len(trimmed), maxGCSPrefixBytes, cleaned)
+		} else {
+			c.logf("agentanalytics: WARNING: Config.GCSPathPrefix %q was rewritten to %q", c.GCSPathPrefix, cleaned)
+		}
 	}
-	return truncateWithHash(joined, trimmed, maxGCSPrefixBytes)
+	c.GCSPathPrefix = cleaned
 }
 
 // sanitizeExtension returns ext as the readable part of a name that ends in a
 // hash because ext is not one that isSafeExtension accepts. Each run of bytes
 // that is not valid UTF-8 is replaced with one '_', and so is each rune for
-// which isUnsafeGCSPrefixRune reports true, and each '/', which would make
-// part of the extension a path segment of its own. Other runes are kept,
-// including a literal U+FFFD, as cleanGCSPrefix keeps them. The result is valid
-// UTF-8 and no longer than ext, but replacements are not injective, so the name
-// must end in the hash of the extension as it was.
+// which isUnsafeGCSPrefixRune reports true, '/', '\', and '~', so an unsafe
+// extension cannot add a path separator or hash marker to the readable part.
+// Other runes are kept, including a literal U+FFFD, as cleanGCSPrefix keeps
+// them. The result is valid UTF-8 and no longer than ext, but replacements are
+// not injective, so the name must end in the hash of the extension as it was.
 func sanitizeExtension(ext string) string {
 	return strings.Map(func(r rune) rune {
-		if isUnsafeGCSPrefixRune(r) || r == '/' {
+		if isUnsafeGCSPrefixRune(r) || r == '/' || r == '\\' || r == '~' {
 			return '_'
 		}
 		return r
@@ -443,13 +457,12 @@ func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string,
 		pathSegment(eventID, missingEventID),
 		contentOrd, partIdx, ext)
 	out := sb.String()
-	// cleanGCSPrefix and pathSegment bound their results, so even with the
-	// longest int ordinals (20 bytes each) and an extension that
-	// isSafeExtension accepts (at most 17 bytes), out is at most 971 bytes.
-	// extensionForMIME returns only such extensions, so the rest of this
-	// function is a backstop for an extension passed in directly, and the
-	// branch that keeps a safe extension only matters if those bounds ever
-	// grow.
+	// With the hex identifiers that the plugin generates (32, 16, and 32 bytes),
+	// the longest int ordinals (20 bytes each), and an extension that
+	// isSafeExtension accepts (at most 17 bytes from extensionForMIME), out is at
+	// most 905 bytes when cleanGCSPrefix fits maxGCSPrefixBytes (750 bytes). Only
+	// a direct call with long pathSegment identifiers or an oversized or unsafe
+	// extension reaches the cap below.
 	//
 	// A name is returned as is only if its extension is empty or safe. The
 	// name of any other extension ends in the hash of out, however short it
