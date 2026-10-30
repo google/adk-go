@@ -79,7 +79,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				{
 					Name:         "root-span",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						string(semconv.GenAIConversationIDKey): "session-1",
 					},
 					Logs: []DebugLog{
@@ -93,7 +93,7 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 				{
 					Name:         "child-span",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes:   map[string]string{},
+					Attributes:   map[string]any{},
 					Logs: []DebugLog{
 						{
 							Body:      "child-log-body",
@@ -126,10 +126,10 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "test-session-id",
 			wantSessionSpans: []DebugSpan{
-				{Name: "root", Attributes: map[string]string{}},
-				{Name: "child", Attributes: map[string]string{}},
-				{Name: "child-2", Attributes: map[string]string{}},
-				{Name: "grandchild", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "test-session-id"}},
+				{Name: "root", Attributes: map[string]any{}},
+				{Name: "child", Attributes: map[string]any{}},
+				{Name: "child-2", Attributes: map[string]any{}},
+				{Name: "grandchild", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "test-session-id"}},
 			},
 		},
 		{
@@ -154,10 +154,10 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-1",
 			wantSessionSpans: []DebugSpan{
-				{Name: "root-1", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "child-1", Attributes: map[string]string{}},
-				{Name: "root-2", Attributes: map[string]string{}},
-				{Name: "child-2", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "root-1", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "child-1", Attributes: map[string]any{}},
+				{Name: "root-2", Attributes: map[string]any{}},
+				{Name: "child-2", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
 			},
 		},
 		{
@@ -174,8 +174,8 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-1",
 			wantSessionSpans: []DebugSpan{
-				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+				{Name: "mixed-root", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-2"}},
 			},
 		},
 		{
@@ -192,8 +192,8 @@ func TestDebugTelemetryGetSpansBySessionID(t *testing.T) {
 			},
 			querySessionID: "session-2",
 			wantSessionSpans: []DebugSpan{
-				{Name: "mixed-root", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-1"}},
-				{Name: "mixed-child", Attributes: map[string]string{string(semconv.GenAIConversationIDKey): "session-2"}},
+				{Name: "mixed-root", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-1"}},
+				{Name: "mixed-child", Attributes: map[string]any{string(semconv.GenAIConversationIDKey): "session-2"}},
 			},
 		},
 		{
@@ -286,7 +286,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-1",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "generate_content",
 					},
@@ -319,7 +319,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-1",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "generate_content",
 					},
@@ -327,7 +327,7 @@ func TestDebugTelemetryGetSpansByEventID(t *testing.T) {
 				{
 					Name:         "root-2",
 					ParentSpanID: trace.SpanID{}.String(),
-					Attributes: map[string]string{
+					Attributes: map[string]any{
 						"gcp.vertex.agent.event_id": "event-1",
 						"genai.operation.name":      "execute_tool",
 					},
@@ -495,13 +495,14 @@ func compareDebugSpans(a, b DebugSpan) bool {
 	if a.ParentSpanID != b.ParentSpanID {
 		return a.ParentSpanID < b.ParentSpanID
 	}
-	if a.Attributes[string(semconv.GenAIConversationIDKey)] != b.Attributes[string(semconv.GenAIConversationIDKey)] {
-		return a.Attributes[string(semconv.GenAIConversationIDKey)] < b.Attributes[string(semconv.GenAIConversationIDKey)]
+	for _, key := range []string{string(semconv.GenAIConversationIDKey), eventIDKey, "genai.operation.name"} {
+		aValue, _ := a.Attributes[key].(string)
+		bValue, _ := b.Attributes[key].(string)
+		if aValue != bValue {
+			return aValue < bValue
+		}
 	}
-	if a.Attributes[eventIDKey] != b.Attributes[eventIDKey] {
-		return a.Attributes[eventIDKey] < b.Attributes[eventIDKey]
-	}
-	return a.Attributes["genai.operation.name"] < b.Attributes["genai.operation.name"]
+	return false
 }
 
 // TestConvertRecordsBuildsEmptyContainersNotNil asserts on the raw serialized bytes.
@@ -733,7 +734,7 @@ func TestConvertRecordsSynthesizesEventIDForFailedGenerateContent(t *testing.T) 
 		records := []*spanRecord{{
 			Name:       "generate_content gemini",
 			Context:    spanContext(0x03),
-			Attributes: map[string]string{eventIDAttribute: "event-1"},
+			Attributes: map[string]any{eventIDAttribute: "event-1"},
 		}}
 		got := convertRecords(records)
 		if id := got[0].Attributes[eventIDAttribute]; id != "event-1" {
