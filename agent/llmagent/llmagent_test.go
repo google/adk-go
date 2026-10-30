@@ -68,13 +68,11 @@ func TestLLMAgent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			model := newGeminiModel(t, modelName, tc.transport)
 			a, err := llmagent.New(llmagent.Config{
-				Name:                     "hello_world_agent",
-				Description:              "hello world agent",
-				Model:                    model,
-				Instruction:              "Roll the dice and report only the result.",
-				GlobalInstruction:        "Answer as precisely as possible.",
-				DisallowTransferToParent: true,
-				DisallowTransferToPeers:  true,
+				Name:              "hello_world_agent",
+				Description:       "hello world agent",
+				Model:             model,
+				Instruction:       "Roll the dice and report only the result.",
+				GlobalInstruction: "Answer as precisely as possible.",
 			})
 			if err != nil {
 				t.Fatalf("NewLLMAgent failed: %v", err)
@@ -96,12 +94,10 @@ func TestLLMAgent(t *testing.T) {
 func TestLLMAgentStreamingModeSSE(t *testing.T) {
 	model := newGeminiModel(t, "gemini-2.5-flash", nil)
 	a, err := llmagent.New(llmagent.Config{
-		Name:                     "calculator",
-		Description:              "calculating agent",
-		Model:                    model,
-		Instruction:              "Think deep. Always double check the answer before making the conclusion.",
-		DisallowTransferToParent: true,
-		DisallowTransferToPeers:  true,
+		Name:        "calculator",
+		Description: "calculating agent",
+		Model:       model,
+		Instruction: "Think deep. Always double check the answer before making the conclusion.",
 		GenerateContentConfig: &genai.GenerateContentConfig{
 			ThinkingConfig: &genai.ThinkingConfig{
 				IncludeThoughts: true, // can trigger multiple message.
@@ -467,13 +463,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("before_callback_response_used", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
@@ -502,13 +496,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("extra_before_callback_skipped", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				// Since it returns non nil, the next callback won't be executed.
 				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
@@ -538,13 +530,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("after_callback_response_used", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
 					return nil, nil
@@ -573,13 +563,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("extra_after_callback_skipped", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			AfterToolCallbacks: []llmagent.AfterToolCallback{
 				// Since it returns non nil, the next callback won't be executed.
 				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
@@ -609,13 +597,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("after_callback_returned_when_used_with_before_callback", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return map[string]any{"number": "3"}, nil
@@ -646,13 +632,11 @@ func TestToolCallback(t *testing.T) {
 	t.Run("both_callbacks_return_nil_actual_tool_is_executed", func(t *testing.T) {
 		model := newGeminiModel(t, modelName, nil)
 		agent, err := llmagent.New(llmagent.Config{
-			Name:                     "agent",
-			Description:              "random agent",
-			Model:                    model,
-			Instruction:              "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
-			DisallowTransferToParent: true,
-			DisallowTransferToPeers:  true,
-			Tools:                    []tool.Tool{rand},
+			Name:        "agent",
+			Description: "random agent",
+			Model:       model,
+			Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result is number:42 print only 42",
+			Tools:       []tool.Tool{rand},
 			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
 				func(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 					return nil, nil
@@ -880,10 +864,7 @@ func TestFunctionTool(t *testing.T) {
 		Description: "math agent",
 		Model:       model,
 		Instruction: "IMPORTANT: output ONLY the result computed by the provided function, if the result of 10 + 32 is 42 print only 42",
-		// TODO(hakim): set to false when autoflow is implemented.
-		DisallowTransferToParent: true,
-		DisallowTransferToPeers:  true,
-		Tools:                    []tool.Tool{rand},
+		Tools:       []tool.Tool{rand},
 	})
 	if err != nil {
 		t.Fatalf("failed to create LLM Agent: %v", err)
