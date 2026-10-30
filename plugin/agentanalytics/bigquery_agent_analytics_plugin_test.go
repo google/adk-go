@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -34,6 +35,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -3177,6 +3179,185 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 	}
 }
 
+// TestRedactionRegressions checks, through the user message and model error
+// callbacks, that a dotted value that ends in a compound key name, which is
+// redacted with the value after that name, a quote inside a bare value, a
+// dotted OAuth or credential name in free text, and a quote after a Python
+// string prefix keep their credentials out of content_parts and
+// error_message, and that a quote inside a bare value does not extend it over
+// the next pair or the prose after it.
+func TestRedactionRegressions(t *testing.T) {
+	for _, tt := range []struct {
+		name, in, secret, want string
+	}{
+		{"dotted value that ends in a compound key name", "password=Summer.2024Password: dial tcp", "Summer.2024Password", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before another pair", "token=abc:'s note password='SECRET VALUE' rest", "SECRET VALUE", "token=[REDACTED] note password='[REDACTED]' rest"},
+		{"quote inside a bare value before prose", "token=abc:'s scope missing; the user's request", "abc", "token=[REDACTED] scope missing; the user's request"},
+		{"dotted OAuth name", "oauth2.authorization.code=SYNTHETIC_OAUTH_CODE", "SYNTHETIC_OAUTH_CODE", "oauth2.authorization.code=[REDACTED]"},
+		{"dotted credential name", "stripe.api.key=SYNTHETIC_STRIPE_KEY", "SYNTHETIC_STRIPE_KEY", "stripe.api.key=[REDACTED]"},
+		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before a pair of another key", "token=abc:'s id=' 123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "token=[REDACTED] id=' 123' password=[REDACTED]"},
+		{"quote after a Python string prefix", "b'note=123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "b'note=123' password=[REDACTED]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			msg, _ := onlyRowOfType(t, rows, EventLLMError)["error_message"].(string)
+			if strings.Contains(text, tt.secret) || strings.Contains(msg, tt.secret) {
+				t.Errorf("%q: text %q, error_message %q, which hold %q", tt.in, text, msg, tt.secret)
+			}
+			if text != tt.want || msg != tt.want {
+				t.Errorf("%q: text %q, error_message %q, want %q", tt.in, text, msg, tt.want)
+			}
+		})
+	}
+}
+
+// TestUserinfoUserName checks that the user name of a url.Userinfo in a tool
+// argument, which may be the credential itself, as the token of a
+// token-authenticated git remote is, is redacted from a Go value as from a
+// string.
+func TestUserinfoUserName(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{"user name only", url.User("SECRETTOKEN")},
+		{"user name with a password", url.UserPassword("SECRETTOKEN", "x-oauth-basic")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			u := &url.URL{Scheme: "https", Host: "github.com", Path: "/o/r", User: tt.user}
+			var errs callbackErrors
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "clone"}, map[string]any{"remote": u, "remote_url": u.String()}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			b, _ := json.Marshal(jsonObjectColumn(t, onlyRowOfType(t, collectRows(t, requests, untilInvocationEnd), EventToolStarting), "content"))
+			if strings.Contains(string(b), "SECRETTOKEN") {
+				t.Errorf("content = %s, which holds the user name", b)
+			}
+		})
+	}
+}
+
+// guardedJob is an error whose Error method, promoted from the error it
+// embeds, is on the value, and whose other fields another goroutine updates
+// under a lock.
+type guardedJob struct {
+	error
+	mu       sync.Mutex
+	attempts int
+}
+
+// statusText is fmt.Stringer under an unexported name, so that a struct that
+// embeds it has no exported field.
+type statusText interface{ String() string }
+
+// guardedStatus is a fmt.Stringer like guardedJob.
+type guardedStatus struct {
+	statusText
+	mu      sync.Mutex
+	updates int
+}
+
+// TestFormatterDoesNotCopyGuardedState checks that writing a tool result
+// that holds pointers to values whose Error or String method is on the value
+// does not copy the values, which reads the fields that another goroutine
+// updates under a lock, with redaction on or off: run with -race.
+func TestFormatterDoesNotCopyGuardedState(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		disable    bool
+		job, state string
+	}{
+		{"redaction on", false, `{}`, `{}`},
+		{"redaction off", true, `"job failed"`, `"1s"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &guardedJob{error: errors.New("job failed")}
+			s := &guardedStatus{statusText: time.Second}
+			stop, done := make(chan struct{}), make(chan struct{})
+			defer func() {
+				close(stop)
+				<-done
+			}()
+			go func() {
+				defer close(done)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						j.mu.Lock()
+						j.attempts++
+						j.mu.Unlock()
+						s.mu.Lock()
+						s.updates++
+						s.mu.Unlock()
+					}
+				}
+			}()
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.DisableSensitiveKeyRedaction = tt.disable })
+			for range 20 {
+				if _, err := p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{}, map[string]any{"job": j, "status": s}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.AfterRunCallback()(mCtx)
+			rows := rowsOfType(collectRows(t, requests, untilInvocationEnd), EventToolCompleted)
+			if len(rows) != 20 {
+				t.Fatalf("got %d TOOL_COMPLETED rows, want 20", len(rows))
+			}
+			for _, row := range rows {
+				content := jsonObjectColumn(t, row, "content")
+				checkJSONAt(t, content, tt.job, "result", "job")
+				checkJSONAt(t, content, tt.state, "result", "status")
+			}
+		})
+	}
+}
+
+// TestEscapedWhitespaceAfterBearerInJSONText checks that a Bearer token after
+// a Unicode space in JSON text, which the text writes as an escape or which
+// the text is written back with as an escape, is kept out of every row, as a
+// text part, a string tool argument or an error message.
+func TestEscapedWhitespaceAfterBearerInJSONText(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	for _, tt := range []struct{ name, text string }{
+		{"escaped no-break space", `{"h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"escaped ideographic space", `{"h":"Bearer\u3000SYNTHETIC_SECRET"}`},
+		{"escaped line separator", `{"h":"Bearer\u2028SYNTHETIC_SECRET"}`},
+		{"escaped no-break space beside a redacted key", `{"password":"x","h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"raw line separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2028SYNTHETIC_SECRET\"}"},
+		{"raw paragraph separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2029SYNTHETIC_SECRET\"}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			for _, row := range collectRows(t, requests, untilInvocationEnd) {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+				}
+			}
+		})
+	}
+}
+
 // TestValueEndingInKeyName checks that a credential whose value only ends in
 // a sensitive key name, as in the text that fmt.Errorf("password=%s: %w", ...)
 // writes before a wrapped error, is redacted from error_message, content,
@@ -3729,23 +3910,31 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 	}
 
 	t.Run("file URI", func(t *testing.T) {
-		const uri = "https://example.com/search?q=basic%20recipes"
-		p, requests, mCtx := setupTestPlugin(t)
-		var errs callbackErrors
-		errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
-			Role:  "user",
-			Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
-		}))
-		errs.check(t)
-		p.AfterRunCallback()(mCtx)
+		for _, uri := range []string{
+			"https://example.com/search?q=basic%20recipes",
+			// Path segments that end in a credential name, but are not one.
+			"https://example.com/docs/reset-password/step-2",
+			"gs://bucket/db-password/notes.txt",
+		} {
+			t.Run(uri, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				var errs callbackErrors
+				errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
+				}))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
 
-		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-		userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
-		if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
-			t.Errorf("content_parts = %v, want uri %q", parts, uri)
-		}
-		if got := userRow["is_truncated"]; got != false {
-			t.Errorf("is_truncated = %v, want false", got)
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
+					t.Errorf("content_parts = %v, want uri %q", parts, uri)
+				}
+				if got := userRow["is_truncated"]; got != false {
+					t.Errorf("is_truncated = %v, want false", got)
+				}
+			})
 		}
 	})
 

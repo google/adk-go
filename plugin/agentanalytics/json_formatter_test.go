@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -843,6 +844,10 @@ func TestSanitizeURI(t *testing.T) {
 			want:        "https://example.com/token:%5BREDACTED%5D/file.png",
 			wantChanged: true,
 		},
+		// A path segment is taken as a credential name, which the segment
+		// after it is the value of, only by its whole name.
+		{name: "path segment that ends in a credential name", uri: "https://example.com/docs/reset-password/step-2", want: "https://example.com/docs/reset-password/step-2"},
+		{name: "object path segment that ends in a credential name", uri: "gs://bucket/db-password/notes.txt", want: "gs://bucket/db-password/notes.txt"},
 		{
 			name:        "access token after a semicolon in a query value",
 			uri:         "https://example.com/a?a=1;access_token=SECRET123",
@@ -2905,8 +2910,13 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0, 0), len("token=abc "); got != want {
+		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), len("token=abc"), 0, 0), len("token=abc "); got != want {
 			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
+		}
+		// A value that holds a name that textKeyValTokenAtRe does not match
+		// is redacted to its end.
+		if got, want := nestedPairEnd("password=my.key: x", len("password=my."), len("password=my.key:"), 0, 0), len("password=my.key:"); got != want {
+			t.Errorf("nestedPairEnd fallback inside the value = %d, want %d", got, want)
 		}
 	})
 
@@ -4216,8 +4226,10 @@ func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
 	// Under redaction the method of an error or Stringer is called only for
 	// errors.New, whose text is the message it was made with; any other
 	// value without exported fields keeps the structural form that
-	// reflection gives it. With redaction off, the text of all of them is
-	// written.
+	// reflection gives it. With redaction off, the text of a struct without
+	// exported fields is written; a value of another kind, such as an error
+	// of a string or integer kind, keeps the value that encoding/json gives
+	// it.
 	tests := []struct {
 		name         string
 		in           any
@@ -4230,7 +4242,8 @@ func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
 		{name: "wrapped error", in: fmt.Errorf("outer: %w", errors.New("inner")), want: `{}`, wantOff: `"outer: inner"`},
 		{name: "pointer error type", in: &testErrorNoFields{"custom"}, want: `{}`, wantOff: `"custom"`},
 		{name: "value error type", in: testErrorValue{"value"}, want: `{}`, wantOff: `"value"`},
-		{name: "error of a string kind", in: testErrorCode("E42"), want: `"E42"`, wantOff: `"code E42"`},
+		{name: "error of a string kind", in: testErrorCode("E42"), want: `"E42"`},
+		{name: "error of an integer kind", in: syscall.Errno(2), want: `2`},
 		{name: "error in a map", in: map[string]any{"err": errors.New("x")}, want: `{"err":"x"}`},
 		{name: "error in a slice", in: []error{errors.New("a"), errors.New("b")}, want: `["a","b"]`},
 		{
@@ -4955,6 +4968,10 @@ func TestSmartTruncate_DoesNotReadGuardedFieldsOfSensitiveTypes(t *testing.T) {
 			}
 			stop := make(chan struct{})
 			done := make(chan struct{})
+			defer func() {
+				close(stop)
+				<-done
+			}()
 			go func() {
 				defer close(done)
 				for i := 0; ; i++ {
@@ -4973,8 +4990,6 @@ func TestSmartTruncate_DoesNotReadGuardedFieldsOfSensitiveTypes(t *testing.T) {
 					t.Fatalf("SmartTruncate = (%s, %v)", got, err)
 				}
 			}
-			close(stop)
-			<-done
 		})
 	}
 }

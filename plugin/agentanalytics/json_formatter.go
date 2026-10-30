@@ -879,8 +879,8 @@ func hasMarshalerMethod(v reflect.Value) bool {
 // hasMethod reports whether v has the methods of iface as implementer finds
 // them: the type of v has them, or v is addressable and its pointer type
 // has them. Only the method sets of the types are read, not v: unlike
-// implementer, it does not box v into an interface value, which copies it,
-// and so reads it.
+// implementer, it boxes nothing into an interface value, and a value that
+// is boxed without its address is copied, and so read.
 func hasMethod(v reflect.Value, iface reflect.Type) bool {
 	if v.Type().Implements(iface) {
 		return true
@@ -996,12 +996,13 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		out, truncated = s.stringValue(string(b), depth)
 		return out, truncated, true
 	}
-	// url.Userinfo implements fmt.Stringer and publishes its password via
-	// String(); redact it before any generic Stringer fallback.
+	// url.Userinfo implements fmt.Stringer and writes its user name and
+	// password with String(); redact it before any generic Stringer
+	// fallback.
 	if v.Kind() == reflect.Struct && v.Type() == userinfoType {
 		return s.redactUserinfo(v, depth)
 	}
-	// A value that reflection would show as an empty object, because its
+	// A struct that reflection would show as an empty object, because its
 	// fields are unexported, writes the text it has for itself instead, but
 	// only when redaction is off, or the value is of a standard library
 	// error type whose text is the message it was made with. Under redaction
@@ -1011,17 +1012,20 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 	// private fields of a type to find it, which also bypasses the locks that
 	// protect them. Such a value keeps the structural form that reflection
 	// gives it, as in adk-python's fallback for unknown types, which does not
-	// call str or repr either. Maps, slices and arrays are never intercepted
-	// here, even if they implement error or fmt.Stringer, because their
-	// structural traversal (walkMap, walkSlice) already produces a safely
-	// redacted representation that the String() or Error() text would
-	// discard. The value is boxed into an interface value (see implementer)
-	// only when its method is to be called: boxing copies the value, so it
-	// reads the private fields too, while another goroutine may write them
-	// atomically or under a lock; until then only the method sets of the types
-	// are read (see hasMethod).
+	// call str or repr either. A value of any other kind, such as the number
+	// of a syscall.Errno or the string of a defined string type, keeps its
+	// value as encoding/json writes it, whether redaction is on or off. Maps,
+	// slices and arrays are never intercepted here, even if they implement
+	// error or fmt.Stringer, because their structural traversal (walkMap,
+	// walkSlice) already produces a safely redacted representation that the
+	// String() or Error() text would discard. The value is boxed into an
+	// interface value (see implementer) only when its method is to be called,
+	// and then by its address when it has one: boxing the value itself copies
+	// it, so it reads the private fields too, while another goroutine may
+	// write them atomically or under a lock; until then only the method sets
+	// of the types are read (see hasMethod).
 	if !isContainerKind(v.Kind()) {
-		if (!s.redact || isPlainErrorType(v.Type())) && hasMethod(v, errorType) && !showsExportedFields(v) {
+		if (!s.redact || isPlainErrorType(v.Type())) && v.Kind() == reflect.Struct && hasMethod(v, errorType) && !showsExportedFields(v) {
 			if m, found := implementer(v, errorType); found {
 				return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
 			}
@@ -1165,32 +1169,40 @@ func isContainerKind(k reflect.Kind) bool {
 // userinfoType is the type of the password-bearing URL userinfo.
 var userinfoType = reflect.TypeFor[url.Userinfo]()
 
-// redactUserinfo returns a representation of the url.Userinfo v that keeps
-// the user name and replaces the password, if any, with the redaction
-// placeholder.
+// redactUserinfo returns a representation of the url.Userinfo v. Under
+// redaction, one that holds a user name or a password is replaced whole with
+// the redaction placeholder, as sanitizeURI replaces a URI that has user
+// information: the user name may be the credential itself, as in a git
+// remote that authenticates with a token (https://TOKEN@github.com/o/r).
+// With redaction off, or when it is empty, it is written as its String text.
 func (s *sanitizer) redactUserinfo(v reflect.Value, depth int) (any, bool, bool) {
 	if !v.CanInterface() {
 		return redactedValue, false, true
 	}
 	u := v.Interface().(url.Userinfo)
-	text := u.String()
-	if _, hasPassword := u.Password(); hasPassword && s.redact {
-		text = u.Username() + ":" + redactedValue
+	if _, hasPassword := u.Password(); s.redact && (hasPassword || u.Username() != "") {
+		return redactedValue, false, true
 	}
-	out, truncated := s.stringValue(text, depth)
+	out, truncated := s.stringValue(u.String(), depth)
 	return out, truncated, true
 }
 
-// implementer returns v, or its address when only the pointer type has the
-// method, as an interface value implementing iface.
+// implementer returns v as an interface value implementing iface: the
+// address of v, when v is addressable and the pointer type has the methods,
+// or else v itself. The address is tried first because boxing v itself
+// copies it, which reads all of its fields, the unexported ones included,
+// while another goroutine may write them under a lock or atomically; boxing
+// the address reads none of them, and the method set of the pointer type
+// holds the methods of the value type too. A method with a value receiver
+// still copies the value when it is called, as any call of it does.
 func implementer(v reflect.Value, iface reflect.Type) (any, bool) {
-	if v.Type().Implements(iface) && v.CanInterface() {
-		return v.Interface(), true
-	}
 	if v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface) {
 		if a := v.Addr(); a.CanInterface() {
 			return a.Interface(), true
 		}
+	}
+	if v.Type().Implements(iface) && v.CanInterface() {
+		return v.Interface(), true
 	}
 	return nil, false
 }
