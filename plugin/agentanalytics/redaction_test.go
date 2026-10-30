@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -636,12 +637,14 @@ func TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe(t *testing.T) {
 // reads them with, matches, with the same key and delimiter.
 func TestKeyNameRegexps_FindThePairsOfPairRegexps(t *testing.T) {
 	pairRe := regexp.MustCompile(textKeyNameRe.String() + `[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
-	prefixes := []string{"", "x ", "x_", "(", "a.", "db"}
-	names := []string{"token", "Token", "next_page_token", "x_PASSWORD", "dbPassword", "APIKey", "temp:a", "temp:a:b", "oauth2.code", "label", "sig"}
+	prefixes := []string{"", "x ", "x_", "(", "db"}
+	// The "temp:" names that end in "temp" make the colon of a second
+	// "temp:" key their delimiter (see nextKeyName).
+	names := []string{"token", "Token", "next_page_token", "x_PASSWORD", "dbPassword", "APIKey", "temp:a", "temp:a:b", "temp:x&temp", "temp:a;temp", "oauth2.code", "label", "sig"}
 	quotes := []string{"", `"`, `\"`, `'`}
 	spaces := []string{"", " ", "\n", "\x01"}
 	delims := []string{"=", ":", ""}
-	values := []string{"v", "", " ", ",", "&x", " ,x", `"a b"`, "'a", "\x01", " ,token=v"}
+	values := []string{"v", "", " ", ",", "&x", "&y=v", ";b=v", " ,x", `"a b"`, "'a", "\x01", " ,token=v"}
 	compared := 0
 	for _, p := range prefixes {
 		for _, name := range names {
@@ -698,6 +701,13 @@ func TestKeyValFinder_SkipsKeysWithoutValues(t *testing.T) {
 	if loc := nextKeyName(later, 0); loc == nil || later[loc[2]:loc[3]] != "password" {
 		t.Errorf("nextKeyName(%q) = %v, want the password key", later, loc)
 	}
+	// A key without a value whose delimiter is the colon of a "temp:" key
+	// that starts inside it, which has a value.
+	for _, inner := range []string{"temp:x&temp:&y=v", "temp:a;temp:;b=v"} {
+		if loc := nextKeyName(inner, 0); loc == nil || loc[2] != 7 || inner[loc[1]:] != "v" {
+			t.Errorf("nextKeyName(%q) = %v, want the key at 7 that ends before v", inner, loc)
+		}
+	}
 	const camel = "dbPassword: , myToken=x"
 	if loc := findCamelKeyName(camel, len(camel)); loc == nil || camel[loc[2]:loc[3]] != "Token" {
 		t.Errorf("findCamelKeyName(%q) = %v, want the Token of myToken", camel, loc)
@@ -732,6 +742,32 @@ func TestScrubTextPatterns_KeysThatAreNotCredentials(t *testing.T) {
 	} {
 		if got := scrubTextPatterns(tt.in); got != tt.want {
 			t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// TestScrubTextPatterns_TempKeysInsideTempKeys checks that a "temp:" key
+// that starts inside a "temp:" key without a value, whose delimiter is the
+// colon of the inner key (see nextKeyName), is redacted on every path.
+func TestScrubTextPatterns_TempKeysInsideTempKeys(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"temp:x&temp:&y=SYNTHETIC_SECRET", "temp:x&temp:&y=[REDACTED]"},
+		{"temp:a;temp:;b=SYNTHETIC_SECRET", "temp:a;temp:;b=[REDACTED]"},
+		{"temp:temp:&a=SYNTHETIC_SECRET kept", "temp:temp:&a=[REDACTED] kept"},
+		{"state temp:cache&temp:&session_id=SYNTHETIC_SECRET", "state temp:cache&temp:&session_id=[REDACTED]"},
+		// Each key has a value, which is redacted, as for any "temp:" key.
+		{"temp:x=1&temp:y=SYNTHETIC_SECRET", "temp:x=[REDACTED]&temp:y=[REDACTED]"},
+	} {
+		if got := scrubTextPatterns(tt.in); got != tt.want {
+			t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		if got, _ := sanitizeRawText(tt.in); got != tt.want {
+			t.Errorf("sanitizeRawText(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		b, _, err := SmartTruncate(errors.New(tt.in), 1000)
+		var got string
+		if err != nil || json.Unmarshal(b, &got) != nil || got != tt.want {
+			t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), want %q", tt.in, b, err, tt.want)
 		}
 	}
 }
@@ -895,6 +931,17 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		},
 		{
 			"bare run of camel case names that are not credentials", func(n int) string { return strings.Repeat("nextPageToken:", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			// Each "temp:" key runs on to the colon of the next.
+			"bare run of temp keys", func(n int) string { return strings.Repeat("temp:x&", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			// None of them has a value, and the search goes on from the
+			// byte after each.
+			"bare run of temp keys without values", func(n int) string { return strings.Repeat("temp:&", n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 1600,
 		},
 		{

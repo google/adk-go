@@ -1586,9 +1586,18 @@ func (f *keyValFinder) find(rest string) []int {
 
 // nextKeyName returns the submatch indexes in s of the first key and
 // delimiter at or after s[pos:] that textKeyNameRe finds with a value after
-// them (see textValueStartRe), or nil. A key without a value is passed over
-// from its delimiter: a key that starts before that, inside it, has the same
-// delimiter.
+// them (see textValueStartRe), or nil. After a key without a value, the
+// search goes on from the next byte, as a regular expression of whole pairs
+// does, not from the delimiter: a "temp:" name runs on to the first "=" or
+// ":", so it may end in "temp" and its delimiter may be the colon of a second
+// "temp:" key that starts inside it, as in temp:x&temp:&y=..., where the "&"
+// after that colon leaves the first key without a value and the second runs
+// on to its own "=". Any other key that starts inside a key without a value
+// ends at the same delimiter and has no value either, and the "temp:" keys
+// overlap by the four bytes of "temp" only, so a run of keys without values
+// is searched in linear time. A search that starts inside a word may see a
+// word boundary at its first byte that is not there; the only key that it may
+// find there is the one passed over, read from after its "_".
 func nextKeyName(s string, pos int) []int {
 	for {
 		loc := textKeyNameRe.FindStringSubmatchIndex(s[pos:])
@@ -1603,7 +1612,7 @@ func nextKeyName(s string, pos int) []int {
 		if textValueStartRe.MatchString(s[loc[1]:]) {
 			return loc
 		}
-		pos = loc[1]
+		pos = loc[0] + 1
 	}
 }
 

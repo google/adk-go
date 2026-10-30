@@ -5142,7 +5142,8 @@ func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
 // TestHasMarshalerMethod_DoesNotBoxTheValue checks that hasMarshalerMethod
 // reads the method sets of types only: boxing an addressable value into an
 // interface value, as Value.Interface does, copies it, which allocates, and
-// reads it.
+// reads it. hasSensitiveTypeName, which calls it, must not box the value
+// either: it allocates only what isSensitiveKey allocates for the type name.
 func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
 	h := &struct {
 		T testAtomicScalarToken
@@ -5158,6 +5159,14 @@ func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
 		}
 		if allocs := testing.AllocsPerRun(10, func() { hasMarshalerMethod(f) }); allocs != 0 {
 			t.Errorf("hasMarshalerMethod(%s) allocated %v times, want 0", f.Type(), allocs)
+		}
+		if got := hasSensitiveTypeName(f); got != want {
+			t.Errorf("hasSensitiveTypeName(%s) = %v, want %v", f.Type(), got, want)
+		}
+		name := f.Type().Name()
+		allocs := testing.AllocsPerRun(10, func() { hasSensitiveTypeName(f) })
+		if nameAllocs := testing.AllocsPerRun(10, func() { isSensitiveKey(name) }); allocs != nameAllocs {
+			t.Errorf("hasSensitiveTypeName(%s) allocated %v times, want the %v of isSensitiveKey(%q)", f.Type(), allocs, nameAllocs, name)
 		}
 	}
 }
