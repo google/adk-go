@@ -886,9 +886,7 @@ func TestBuildParams_Media(t *testing.T) {
 			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#report.pdf"},
 		},
 		{
-			// filename is optional on this endpoint, so an unnamed file goes
-			// out without one rather than under a name nobody chose. Whether
-			// the server minds is a question for the live run.
+			// Match adk-python's fallback for unnamed inline files.
 			name: "inline_file_without_a_display_name_falls_back_to_inline_data",
 			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}}},
 			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#inline_data"},
@@ -1286,11 +1284,9 @@ func TestReplayedReasoning(t *testing.T) {
 // implements for THIS endpoint: the genai.Part fields its request converter
 // knows what to do with, and why.
 //
-// It is per-endpoint rather than global because the two endpoints no longer
-// agree: Responses emits media and so passes shared.PartFieldMedia, while Chat
-// Completions still reports it. The default answer — the one with no field
-// emitted — is pinned in the shared package, so that a converter gaining a
-// wire field has to say so here before media stops being reported.
+// Each endpoint opts into shared.PartFieldMedia when it emits media. Both
+// Responses and Chat Completions now do; the shared package separately tests
+// the default rejection when a converter does not opt in.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
