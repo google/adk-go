@@ -103,30 +103,42 @@ type sequentialLiveSession struct {
 
 func (s *sequentialLiveSession) Send(req agent.LiveRequest) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed, activeSess := s.closed, s.activeSess
+	s.mu.Unlock()
+	if closed {
 		return fmt.Errorf("session is closed")
 	}
-	if s.activeSess == nil {
+	if activeSess == nil {
 		return fmt.Errorf("no active sub-agent live session")
 	}
-	return s.activeSess.Send(req)
+	return activeSess.Send(req)
 }
 
 func (s *sequentialLiveSession) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.closed = true
-	if s.activeSess != nil {
-		return s.activeSess.Close()
+	activeSess := s.activeSess
+	s.mu.Unlock()
+	if activeSess != nil {
+		return activeSess.Close()
 	}
 	return nil
 }
 
-func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) {
+func (s *sequentialLiveSession) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.closed
+}
+
+func (s *sequentialLiveSession) setActiveSession(sess agent.LiveSession) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
 	s.activeSess = sess
+	return true
 }
 
 func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -184,6 +196,9 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		for _, subAgent := range subAgents {
+			if seqSess.isClosed() {
+				return
+			}
 			liveAgent, ok := subAgent.(liveRunner)
 			if !ok {
 				if !yield(nil, fmt.Errorf("sub-agent %s does not support Live Run", subAgent.Name())) {
@@ -201,14 +216,14 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 				return
 			}
 
-			seqSess.setActiveSession(subSess)
-
-			for ev, err := range innerIter {
-				if !yield(ev, err) {
-					if err := subSess.Close(); err != nil {
-						log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
+			if seqSess.setActiveSession(subSess) {
+				for ev, err := range innerIter {
+					if seqSess.isClosed() || !yield(ev, err) {
+						if err := subSess.Close(); err != nil {
+							log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
+						}
+						return
 					}
-					return
 				}
 			}
 			if err := subSess.Close(); err != nil {
