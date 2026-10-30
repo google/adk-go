@@ -3291,9 +3291,10 @@ func (q *openQuotes) before(s string, i int) quoteKinds {
 		if isApostrophe(s, q.pos, kind, q.active) {
 			continue
 		}
-		if q.active == 0 {
+		switch q.active {
+		case 0:
 			q.active = kind
-		} else if q.active == kind {
+		case kind:
 			q.active = 0
 		}
 	}

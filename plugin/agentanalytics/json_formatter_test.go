@@ -5189,13 +5189,17 @@ func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
 // testCountError, testCountStringer and testCountFieldsError have methods on
 // their values and a private count that another goroutine may update
 // atomically; testCount and testCountFields are the same without methods.
+// Nothing updates their count, so it is a blank field, but it keeps its
+// space: TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls sees a
+// value boxed by the allocation that boxing it makes, and boxing a value of
+// size zero, as testCount would be without the field, allocates nothing.
 type (
 	testCountError    struct{ n uint64 }
 	testCountStringer struct{ n uint64 }
-	testCount         struct{ n uint64 }
+	testCount         struct{ _ uint64 }
 	testCountFields   struct {
 		Code int
-		n    uint64
+		_    uint64
 	}
 	testCountFieldsError struct {
 		Code int
