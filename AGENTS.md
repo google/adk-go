@@ -26,8 +26,8 @@ one before starting that kind of work.
 ## Setup & core commands
 
 This repo is multi-module: the root module `google.golang.org/adk/v2` plus
-`plugin/agentanalytics`. Set up a Go workspace first — `go.work` is local-only
-and gitignored, and `go work init` fails if one already exists:
+`plugin/agentanalytics` and `integrations/slack`. Set up a Go workspace first —
+`go.work` is local-only and gitignored, and `go work init` fails if one already exists:
 
 ```bash
 test -f go.work || go work init
@@ -99,6 +99,7 @@ A change is complete only when all of these pass locally:
 - `auth/`      Credentials and auth providers for outbound requests
 - `agentregistry/`  Client for Google Cloud Agent Registry (A2A agents, MCP servers, models)
 - `plugin/`    Cross-cutting lifecycle hooks; `plugin/agentanalytics` is a separate module
+- `integrations/`  Platform integrations; `integrations/slack` is a separate module
 - `server/`    HTTP servers (`adkrest` is primary; `adka2a`, `agentengine`)
 - `cmd/`       CLI (`adkgo`) and server launchers
 - `telemetry/`, `util/`   Public helper packages

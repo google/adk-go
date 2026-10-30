@@ -6,3 +6,5 @@
 /.github/dependabot.yml        @google/adk-go-maintainers-team
 /plugin/agentanalytics/go.mod  @google/adk-go-maintainers-team
 /plugin/agentanalytics/go.sum  @google/adk-go-maintainers-team
+/integrations/slack/go.mod     @google/adk-go-maintainers-team
+/integrations/slack/go.sum     @google/adk-go-maintainers-team
