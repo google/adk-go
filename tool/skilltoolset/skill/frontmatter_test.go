@@ -195,6 +195,26 @@ Body
 			},
 			wantInstruction: "\n# Long\n\nMulti-line\nMarkdown\nBody\n\n",
 		},
+		{
+			name: "keys outside the specification set are ignored",
+			input: `---
+name: shared-skill
+description: A skill shared with another agent runtime.
+user-invocable: true
+argument-hint: "<query>"
+version: 2
+metadata:
+  author: Someone
+---
+# Markdown
+Body`,
+			want: &Frontmatter{
+				Name:        "shared-skill",
+				Description: "A skill shared with another agent runtime.",
+				Metadata:    map[string]string{"author": "Someone"},
+			},
+			wantInstruction: "# Markdown\nBody",
+		},
 	}
 
 	for _, testcase := range tests {
@@ -255,12 +275,12 @@ func TestParse_InvalidFormat(t *testing.T) {
 			input: "---\n_ : invalid : _\n---\n# Markdown\nBody",
 		},
 		{
-			name:  "fails frontmatter validation",
-			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
+			name:  "empty frontmatter",
+			input: "---\n---\n# Markdown\nBody",
 		},
 		{
-			name:  "unknown fields",
-			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
+			name:  "fails frontmatter validation",
+			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",
