@@ -3954,7 +3954,9 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 // reports with a refusal reach CustomMetadata, on both response paths, and
 // that a refusal still sets no ErrorCode or ErrorMessage.
 func TestRefusalStopDetails(t *testing.T) {
-	const explanation = "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy."
+	// Real explanations carry a policy link. It must reach CustomMetadata
+	// unchanged, unlike an APIError message, which drops text with a URL.
+	const explanation = "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy. To learn more, see https://platform.claude.com/docs/en/build-with-claude/refusals-and-fallback."
 	cyber := `{"type":"refusal","category":"cyber","explanation":"` + explanation + `"}`
 	cases := []struct {
 		name            string
@@ -3964,6 +3966,7 @@ func TestRefusalStopDetails(t *testing.T) {
 	}{
 		{name: "category_and_explanation", stopDetails: cyber, wantCategory: "cyber", wantExplanation: explanation},
 		{name: "no_category", stopDetails: `{"type":"refusal","category":null,"explanation":"Blocked."}`, wantExplanation: "Blocked."},
+		{name: "no_explanation", stopDetails: `{"type":"refusal","category":"bio","explanation":null}`, wantCategory: "bio"},
 		{name: "null_details", stopDetails: `null`},
 	}
 	for _, tc := range cases {

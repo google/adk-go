@@ -323,4 +323,9 @@
 //     reported in `CustomMetadata[CacheCreationInputTokensMetadataKey]` because
 //     Go's `genai.GenerateContentResponseUsageMetadata` struct does not allow
 //     arbitrary dynamic attributes.
+//   - Refusal details: when Claude refuses, the policy category and the
+//     explanation it reports in `stop_details` are preserved in
+//     `CustomMetadata[RefusalCategoryMetadataKey]` and
+//     `CustomMetadata[RefusalExplanationMetadataKey]`. `adk-python` does not
+//     read `stop_details`.
 package anthropicmodel
