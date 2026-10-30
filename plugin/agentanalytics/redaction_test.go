@@ -804,9 +804,11 @@ func TestScrubTextPatterns_OpenedValueEnds(t *testing.T) {
 		{"oversized run, then an object that is not closed", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c" kept`, "credentials:\n a_PASSWORD:[REDACTED]"},
 		// A quote at the end of an oversized run whose last key is followed
 		// by a spaced delimiter opens a value, even when a letter follows
-		// the quoted value; read from the delimiter instead, the value
-		// would end at its first space.
-		{"oversized run, then a quote that ends the word", "credentials:\n a_PASSWORD: " + run + `=" = b c"x`, "credentials:\n a_PASSWORD:[REDACTED]x"},
+		// the quoted value, which the quote runs into: the letter is
+		// redacted with the value, as it may be part of it (see
+		// runOnValueEnd). Read from the delimiter instead, the value would
+		// end at its first space.
+		{"oversized run, then a quote that ends the word", "credentials:\n a_PASSWORD: " + run + `=" = b c"x`, "credentials:\n a_PASSWORD:[REDACTED]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1330,11 +1332,13 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 // or another quote that runs into it, a credential that is padded with a
 // quote or that ends in the name of a key and a delimiter, as
 // R8_..._TOKEN= does, whose closing quote then looks like the one that opens
-// the value of a later key, and a value in which a delimiter and a quote open
-// a nested quoted value. The text that the quote runs into is redacted with
-// the credential, as it may be part of it, and never copied after the
-// redacted value, whereas the words between two strings, and the pairs that a
-// quote opens the value of, are kept and redacted as before.
+// the value of a later key, a credential that starts with whitespace and has
+// several words, whose text reads as the words between two strings, and a
+// value in which a delimiter and a quote open a nested quoted value. The text
+// that the quote runs into is redacted with the credential, as it may be part
+// of it, and never copied after the redacted value, whereas the words between
+// two strings, which a second string follows, and the pairs that a quote opens
+// the value of, are kept and redacted as before.
 func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		// A bearer token that its closing quote does not end.
@@ -1368,6 +1372,38 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`failed: "token": "R8_SYNTHETIC_CREDENTIAL_49173_api_key=" expired`, `failed: "token":"[REDACTED]"`},
 		{`failed: "token": 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `failed: "token":"[REDACTED]"`},
 		{`failed: 'token': 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `failed: 'token':[REDACTED]`},
+		// A credential of several words that starts with whitespace reads as
+		// the words between two strings, but no second string follows it, so
+		// it is redacted whole, whatever its closing quote runs into or opens.
+		{`export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"=' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export 'DB_PASSWORD'=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `export 'DB_PASSWORD'=[REDACTED]`},
+		{`export "DB_PASSWORD" = " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801""`, `export "DB_PASSWORD"="[REDACTED]"`},
+		{`export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801" expired`, `export "DB_PASSWORD"="[REDACTED]" expired`},
+		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `failed: "password":"[REDACTED]"`},
+		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired`, `failed: "password":"[REDACTED]"`},
+		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801""`, `failed: "password":"[REDACTED]"`},
+		{`failed: "token": ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `failed: "token":"[REDACTED]"`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `Bearer [REDACTED]`},
+		{`Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `Bearer [REDACTED]`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801""`, `Bearer [REDACTED]`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired`, `Bearer [REDACTED]`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 more_TOKEN=" expired`, `Bearer [REDACTED]`},
+		{`Authorization: Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `Authorization: [REDACTED]`},
+		{`password=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `password=[REDACTED]`},
+		// The value of a quoted key whose "=" a quote follows at once starts
+		// with that quote, so the text in front of the closing quote is not
+		// the text between two strings: it is redacted, along with a string
+		// that follows it.
+		{`export "DB_PASSWORD"=" in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `export "DB_PASSWORD"="[REDACTED]"`},
+		{`export "DB_PASSWORD"=" for user "bob"`, `export "DB_PASSWORD"="[REDACTED]"`},
+		// After a ":" and whitespace, as in JSON, the same text is the text
+		// between two strings, which is kept, and the pair in the second
+		// string is redacted on its own.
+		{`failed: "password": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `failed: "password": " in config, api_key="[REDACTED]"`},
+		{`failed: "password": " for user "bob"`, `failed: "password": " for user "bob"`},
 		// A nested quoted value after a delimiter, whose closing quote runs
 		// into a letter or into more quotes, with or without spaces around
 		// the delimiter.
@@ -1415,6 +1451,11 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`{"password": a: 'prefix R8_SYNTHETIC_SECRET_4800''}`, "R8_SYNTHETIC_SECRET_4800"},
 		{`{"Authorization": "Bearer \"R8_SYNTHETIC_CREDENTIAL_49173\"expired"}`, "R8_SYNTHETIC_CREDENTIAL_49173"},
 		{`failed: {"password": a = "prefix R8_SYNTHETIC_SECRET_4800"x}`, "R8_SYNTHETIC_SECRET_4800"},
+		// The last word of a credential of several words that starts with
+		// whitespace is the one that a partial redaction leaves in place.
+		{`{"password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix}`, "R8_SYNTHETIC_SECRET_4801"},
+		{`{"token": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired}`, "R8_SYNTHETIC_SECRET_4801"},
+		{`{"password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801""}`, "R8_SYNTHETIC_SECRET_4801"},
 	} {
 		checkNoLeak(t, tt.in, tt.secret)
 	}
@@ -1426,7 +1467,10 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 // on every path, and the pair after the quote is read on its own: redacted if
 // its key is a credential name, kept if it is not, and kept whole if it is an
 // ordinary pair. A quote that a word of another kind follows still runs into
-// it, as the padding of base64 text, a bare letter run or digits do.
+// it, as the padding of base64 text, a bare letter run, digits, a name whose
+// delimiter has no value after it, as in tail= or tail:, or one whose ":" is
+// that of a port or of a URL do: that word is the end of the credential, and
+// is redacted with it.
 func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		{`password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, `password="[REDACTED]"token="[REDACTED]" rest`},
@@ -1451,11 +1495,116 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`password="abc"def==ghi`, `password=[REDACTED]`},
 		{`password="abc"1=b rest`, `password=[REDACTED] rest`},
 		{`password="abc"def rest`, `password=[REDACTED] rest`},
+		// A word that is a name followed by a delimiter that no value follows
+		// at once, or a host or a port, is not a pair either: it is the end
+		// of a credential that the quote runs into, whose tail a "=" or a ":"
+		// with nothing or a space after it does not make a pair of its own.
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, `password=[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802= rest`, `password=[REDACTED] rest`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:`, `password=[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802=`, `password=[REDACTED]`},
+		{`password='R8_SYNTHETIC_SECRET_4800'R8_SYNTHETIC_TAIL_4802:8080`, `password=[REDACTED]`},
+		{`DB_PASSWORD="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802= rest`, `DB_PASSWORD=[REDACTED] rest`},
+		{`Bearer "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, `Bearer [REDACTED]`},
+		{`failed: "password": "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, `failed: "password":"[REDACTED]"`},
+		{`export "DB_PASSWORD"="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`password="x"a:b`, `password=[REDACTED]`},
+		{`password="x"https://example.com/path`, `password=[REDACTED]`},
+		// A name whose delimiter a value follows at once is still a pair: a
+		// credential name is redacted on its own, a ":" starts a pair of
+		// another name only if a quote follows it, and an "=" always does.
+		{`password="x"key=val rest`, `password="[REDACTED]"key=val rest`},
+		{`password="x"url=http://h/p`, `password="[REDACTED]"url=http://h/p`},
+		{`password="x"user="bob" rest`, `password="[REDACTED]"user="bob" rest`},
+		{`password="x"label:"bob"`, `password="[REDACTED]"label:"bob"`},
+		{`password="x"label:'bob'`, `password="[REDACTED]"label:'bob'`},
+		{`password="x"token:R8_SYNTHETIC_SECRET_4801 rest`, `password="[REDACTED]"token:[REDACTED] rest`},
+		{`password="x"token:'R8_SYNTHETIC_SECRET_4801'`, `password="[REDACTED]"token:'[REDACTED]'`},
 		// A closing quote that a space follows ends the value, as before.
 		{`password="R8_SYNTHETIC_SECRET_4700" token="R8_SYNTHETIC_SECRET_4701"`, `password="[REDACTED]" token="[REDACTED]"`},
 		{`password="R8_SYNTHETIC_SECRET_4700" user="bob"`, `password="[REDACTED]" user="bob"`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+	// A URL with a user name after the quote: the other paths redact the URL
+	// before they read the pair, and the text patterns alone read it as the
+	// end of the credential that the quote runs into.
+	url := `password="R8_SYNTHETIC_SECRET_4800"https://R8_SYNTHETIC_TAIL_4802@example.com`
+	if got, want := scrubTextPatterns(url), `password=[REDACTED]`; got != want {
+		t.Errorf("scrubTextPatterns(%q) = %q, want %q", url, got, want)
+	}
+	for _, secret := range []string{"R8_SYNTHETIC_SECRET_4800", "R8_SYNTHETIC_TAIL_4802"} {
+		checkNoLeak(t, url, secret)
+	}
+}
+
+// TestScrubTextPatterns_NestedAndConcatenatedQuotes checks that a credential
+// is redacted whole on every path when its quotes are not those of the one
+// quoted value that its key opens: a quoted value that a delimiter opens
+// inside a bare value, after an apostrophe that starts a contraction, as the
+// one of token=a:'s x'y does; a value made of strings that follow each other,
+// of the same kind of quote or of both, as the output of the quoting function
+// of a shell, 'a'"'"'b', does; an SQL string that doubles its quote; and such
+// a value after an oversized key. Every string that is joined to the
+// credential is part of it, and its words are not left in place after the
+// redacted value, whereas the apostrophes of prose after a bare value, which
+// no quote closes, are not quotes, and the prose is kept.
+func TestScrubTextPatterns_NestedAndConcatenatedQuotes(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		// An apostrophe that starts a contraction opens a quoted value
+		// after the delimiter, whose closing quote runs into a letter or
+		// into another quote.
+		{`token=a:'s R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`password=a='d R8_SYNTHETIC_SECRET_4800'x`, `password=[REDACTED]`},
+		{`api_key=a='re R8_SYNTHETIC_SECRET_4800'x`, `api_key=[REDACTED]`},
+		{`token=a:'ll R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`token=a:'ve R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`token=a:'t R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`token=a='s-part1 R8_SYNTHETIC_SECRET_4800''`, `token=[REDACTED]`},
+		{`token=a:'s R8_SYNTHETIC_SECRET_4800abc'x`, `token=[REDACTED]`},
+		{`token=a: 's R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`token=a:'s R8_SYNTHETIC_SECRET_4800' x y`, `token=[REDACTED] x y`},
+		// Strings of both kinds of quote that are joined, as a shell joins
+		// them, with a word, with the same kind of quote or with the other.
+		{`DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802'`, `DB_PASSWORD='[REDACTED]'`},
+		{`export "DB_PASSWORD"='my'"'"'R8_SYNTHETIC_TAIL_4802'`, `export "DB_PASSWORD"='[REDACTED]'`},
+		{`export DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802' rest`, `export DB_PASSWORD='[REDACTED]' rest`},
+		{`Bearer 'my'"'"'R8_SYNTHETIC_TAIL_4802'`, `Bearer [REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`, `password=[REDACTED]`},
+		{`password='R8_SYNTHETIC_SECRET_4800'"R8_SYNTHETIC_TAIL_4802"`, `password=[REDACTED]`},
+		{`password=a: "R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`, `password=[REDACTED]`},
+		{`password=a: 'R8_SYNTHETIC_SECRET_4800'"R8_SYNTHETIC_TAIL_4802"`, `password=[REDACTED]`},
+		// An SQL string whose doubled quote is followed by more words, or a
+		// string of the other kind that follows a closed one.
+		{`token=a:'R8_SYNTHETIC_SECRET_4800'' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'`, `token=[REDACTED]`},
+		{`token='R8_SYNTHETIC_SECRET_4800'' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'`, `token='[REDACTED]'`},
+		{`token=a:'x'' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'`, `token=[REDACTED]`},
+		{`password=a: 'R8_SYNTHETIC_SECRET_4800'' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801' rest`, `password=[REDACTED] rest`},
+		{`password=a= 'x'' R8_SYNTHETIC_SECRET_4800'`, `password=[REDACTED]`},
+		{`token=a:'my'' R8_SYNTHETIC_SECRET_4800'`, `token=[REDACTED]`},
+		{`token=a:'x'" R8_SYNTHETIC_SECRET_4800"`, `token=[REDACTED]`},
+		{`token=a:'x'"R8_SYNTHETIC_SECRET_4800 x"`, `token=[REDACTED]`},
+		{`token=a:"x"' R8_SYNTHETIC_SECRET_4800'`, `token=[REDACTED]`},
+		// The apostrophes of prose after the value are not quotes, and no
+		// credential follows the value, so the prose is kept.
+		{`token=abc:'s missing; the user's request`, `token=[REDACTED] missing; the user's request`},
+		{`token=abc:'s note password='x' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+	// A quoted value after an oversized key, which an envelope key nests,
+	// with a whitespace-led string or an apostrophe-led string joined to it.
+	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	for _, key := range []string{longKey, "x.y_" + longKey} {
+		for _, value := range []string{
+			`=" R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`,
+			`=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"x`,
+			`='my'"'"'R8_SYNTHETIC_TAIL_4802'`,
+			`=a:'s R8_SYNTHETIC_SECRET_4800'x`,
+		} {
+			checkAllRedactionPaths(t, "credentials:\n a_PASSWORD: "+key+value, "credentials:\n a_PASSWORD:[REDACTED]")
+		}
 	}
 }
 
@@ -1619,6 +1768,54 @@ func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 		if got := textKeyAllowedAt(tt.in, start, start+len(tt.key)); got != tt.want {
 			t.Errorf("textKeyAllowedAt(%q, %d, %d) = %v, want %v", tt.in, start, start+len(tt.key), got, tt.want)
 		}
+	}
+}
+
+// TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators checks that a
+// dotted name that ends in a page token is read whole, as a map key is, when
+// the run of dots, underscores or hyphens before its last words is longer than
+// maxNestedKeyLen: the bound that keeps the search for names linear does not
+// cut the name inside that run, so the value of a.....page_token, which the
+// word "a" makes the access token of a page, is redacted whatever the length
+// of the run, as that of the map key is, and the value of
+// next.....page_token, which is a cursor, is kept.
+func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
+	for _, n := range []int{126, 127, 128, 129, 130, 131, 300} {
+		dots := strings.Repeat(".", n)
+		checkAllRedactionPaths(t, "a"+dots+"page_token=R8_SYNTHETIC_CREDENTIAL_49173", "a"+dots+"page_token=[REDACTED]")
+		checkAllRedactionPaths(t, "x fb"+dots+"page_token: R8_SYNTHETIC_CREDENTIAL_49173 y", "x fb"+dots+"page_token:[REDACTED] y")
+		checkAllRedactionPaths(t, "a"+dots+"page.token=R8_SYNTHETIC_CREDENTIAL_49173", "a"+dots+"page.token=[REDACTED]")
+		checkRedactionPaths(t, "x next"+dots+"page_token: cursor-1", "x next"+dots+"page_token: cursor-1")
+		checkRedactionPaths(t, "prev"+dots+"page.token=cursor-2", "prev"+dots+"page.token=cursor-2")
+	}
+	var sensitive, kept int
+	for _, prefix := range []string{"a", "fb", "next", "abcnext", "x.next"} {
+		for _, sep := range []string{".", "_.", "-."} {
+			for _, n := range []int{1, 64, 127, 128, 129, 130, 200, 300} {
+				for _, last := range []string{"page_token", "next_page_token", "token", "page.token"} {
+					name := prefix + strings.Repeat(sep, n) + last
+					want := isSensitiveKey(name)
+					if want {
+						sensitive++
+					} else {
+						kept++
+					}
+					for _, in := range []string{name + "=R8_SYNTHETIC_CREDENTIAL_49173", "x " + name + ": R8_SYNTHETIC_CREDENTIAL_49173"} {
+						if got := !strings.Contains(scrubTextPatterns(in), "R8_SYNTHETIC_CREDENTIAL_49173"); got != want {
+							t.Errorf("scrubTextPatterns redacted the value of the name %q (%d bytes): %v, want %v as for the map key", prefix+"…"+last, len(name), got, want)
+						}
+					}
+					in := name + "=R8_SYNTHETIC_CREDENTIAL_49173"
+					b, _, err := SmartTruncate(errors.New(in), 1<<20)
+					if got := err == nil && !strings.Contains(string(b), "R8_SYNTHETIC_CREDENTIAL_49173"); got != want {
+						t.Errorf("SmartTruncate(errors.New(%q…%q)) redacted the value: %v, want %v as for the map key (err %v)", prefix, last, got, want, err)
+					}
+				}
+			}
+		}
+	}
+	if sensitive == 0 || kept == 0 {
+		t.Errorf("%d names are sensitive and %d are kept, want some of each", sensitive, kept)
 	}
 }
 
@@ -1931,6 +2128,26 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
 		},
 		{
+			// The name is read whole, past the bound, from the first
+			// word before the dots.
+			"one long run of dots before a page access token", func(n int) string { return "a" + strings.Repeat(".", n) + "page_token=v" },
+			func(in string) { _ = scrubTextPatterns(in) }, 40000,
+		},
+		{
+			"one long run of dots before a page access token through an error", func(n int) string { return "a" + strings.Repeat(".", n) + "page_token=v" },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 40000,
+		},
+		{
+			"one long word before a dotted page token", func(n int) string { return strings.Repeat("a", n) + ".page_token=v" },
+			func(in string) { _ = scrubTextPatterns(in) }, 40000,
+		},
+		{
+			"repeated runs of dots before a page access token", func(n int) string {
+				return strings.Repeat("a"+strings.Repeat(".", 200)+"page_token=v ", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
 			"repeated quoted values that run into a letter", func(n int) string { return strings.Repeat(`password="a"b `, n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
@@ -1955,6 +2172,54 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			// bearer token runs on through.
 			"one long run of bearer values that end in a key and a delimiter", func(n int) string { return "Bearer " + strings.Repeat(`"a_TOKEN="`, n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"repeated whitespace-led bearer values that run into a letter", func(n int) string { return strings.Repeat(`Bearer " a b"c `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated whitespace-led quoted values of a quoted key that run into a letter", func(n int) string { return strings.Repeat(`export "DB_PASSWORD"=" a b"c `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated whitespace-led quoted values of a JSON key that run into a letter", func(n int) string { return strings.Repeat(`failed: "password": " a b"c `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one long run of whitespace-led bearer values", func(n int) string { return "Bearer " + strings.Repeat(`" a b"`, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"one long run of whitespace-led bearer values that end in a key and a delimiter", func(n int) string { return "Bearer " + strings.Repeat(`" a b_TOKEN="`, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"repeated quoted values that run into a name and a port", func(n int) string { return strings.Repeat(`password="a"b:8080 `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated quoted values that run into a name and a delimiter", func(n int) string { return strings.Repeat(`password="a"b= `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated nested quoted values after an apostrophe", func(n int) string { return strings.Repeat(`token=a:'s b c'x `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated shell-quoted values", func(n int) string { return strings.Repeat(`DB_PASSWORD='a'"'"'b' `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated SQL strings with a doubled quote", func(n int) string { return strings.Repeat(`token=a:'b'' c d' `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one long run of strings joined to a credential", func(n int) string { return "password=" + strings.Repeat(`'a'"b"`, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"one long run of strings joined to a credential through an error", func(n int) string { return "password=" + strings.Repeat(`'a'"b"`, n) },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
 		},
 	}
 	for _, tt := range tests {
