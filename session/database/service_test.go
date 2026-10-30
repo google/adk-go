@@ -28,6 +28,7 @@ import (
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -249,6 +250,59 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 	if usr.UpdateTime.IsZero() {
 		t.Errorf("user_states.update_time is zero after AppendEvent; want it populated")
+	}
+}
+
+// The test database is SQLite without PRAGMA foreign_keys, so the ON DELETE
+// CASCADE on events is not enforced and only an explicit delete removes them.
+func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	deleted := session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "s1"}
+	// Sessions that share part of the deleted session's (app, user, session)
+	// key, so their events must survive the delete.
+	kept := []session.DeleteRequest{
+		{AppName: "app", UserID: "user", SessionID: "s2"},
+		{AppName: "app", UserID: "other-user", SessionID: "s1"},
+		{AppName: "other-app", UserID: "user", SessionID: "s1"},
+	}
+	for _, key := range append([]session.DeleteRequest{deleted}, kept...) {
+		created, err := s.Create(ctx, &session.CreateRequest{AppName: key.AppName, UserID: key.UserID, SessionID: key.SessionID})
+		if err != nil {
+			t.Fatalf("Create(%+v): %v", key, err)
+		}
+		event := &session.Event{
+			ID:          "e-" + key.AppName + "-" + key.UserID + "-" + key.SessionID,
+			Author:      "tool",
+			Timestamp:   time.Now(),
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("tool output", genai.RoleUser)},
+		}
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%+v): %v", key, err)
+		}
+	}
+
+	if err := s.Delete(ctx, &deleted); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	countEvents := func(key session.DeleteRequest) int64 {
+		t.Helper()
+		var n int64
+		if err := s.db.Model(&storageEvent{}).
+			Where("app_name = ? AND user_id = ? AND session_id = ?", key.AppName, key.UserID, key.SessionID).
+			Count(&n).Error; err != nil {
+			t.Fatalf("count events of %+v: %v", key, err)
+		}
+		return n
+	}
+	if got := countEvents(deleted); got != 0 {
+		t.Errorf("events left for deleted session %+v = %d, want 0", deleted, got)
+	}
+	for _, key := range kept {
+		if got := countEvents(key); got != 1 {
+			t.Errorf("events left for kept session %+v = %d, want 1", key, got)
+		}
 	}
 }
 
