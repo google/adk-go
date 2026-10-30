@@ -20,6 +20,8 @@ package agenttool
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -200,6 +202,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	})
 
 	var lastEvent *session.Event
+	// Long-running calls that are never answered before the run ends (e.g. a
+	// tool confirmation) leave the sub-agent paused. Its session is discarded,
+	// so the pause can never be resumed.
+	pendingIDs := map[string]bool{}
 	for event, err := range eventCh {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
@@ -207,9 +213,29 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
+		// Partial chunks carry IDs the flow never acts on; a streamed call
+		// gets its final ID only on the aggregated event.
+		if !event.Partial {
+			for _, id := range event.LongRunningToolIDs {
+				pendingIDs[id] = true
+			}
+			for _, fr := range utils.FunctionResponses(event.LLMResponse.Content) {
+				delete(pendingIDs, fr.ID)
+			}
+		}
 		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
+	}
+
+	if len(pendingIDs) > 0 {
+		// The parent model must see this error, so don't end its turn here.
+		if t.skipSummarization {
+			if actions := toolCtx.Actions(); actions != nil {
+				actions.SkipSummarization = false
+			}
+		}
+		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
 	}
 
 	if lastEvent == nil {
