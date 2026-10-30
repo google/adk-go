@@ -300,7 +300,6 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 			return
 		}
 		validated := input
-
 		if s := n.InputSchema(); s == nil || contentInput(input) != nil || s.Validate(input) != nil {
 			var err error
 			if validated, err = n.ValidateInput(input); err != nil {

@@ -1448,7 +1448,6 @@ func TestNodeAppliesInputSchemaInParallelWorker(t *testing.T) {
 	if len(fc.calls) != 0 {
 		t.Errorf("classifier calls = %d, want 0", len(fc.calls))
 	}
-
 }
 
 func TestNodeAppliesInputSchemaInParallelWorkerWithValidInput(t *testing.T) {
@@ -1488,7 +1487,6 @@ func TestNodeAppliesInputSchemaInParallelWorkerWithValidInput(t *testing.T) {
 		{From: workflow.Start, To: src},
 		{From: src, To: pw},
 	}, genai.NewContentFromText("seed", genai.RoleUser))
-
 	if err != nil {
 		t.Fatalf("workflow run unexpected error: %v", err)
 	}
