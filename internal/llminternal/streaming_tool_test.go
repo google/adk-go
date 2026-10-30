@@ -15,9 +15,14 @@
 package llminternal
 
 import (
+	"errors"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 type mockLiveSession struct {
@@ -318,5 +324,301 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	liveSess.mu.Unlock()
 	if len(tasksAfter) != 0 {
 		t.Errorf("expected registry to be empty after cancellation, got: %v", tasksAfter)
+	}
+}
+
+// fixedToolset hands out the same tools on every call.
+type fixedToolset []tool.Tool
+
+func (fixedToolset) Name() string { return "fixed" }
+
+func (ts fixedToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) { return ts, nil }
+
+// TestHandleFunctionCalls_LiveConfirmationGate checks that a streaming call the
+// confirmation gate stops in live mode is refused on the calling goroutine. The
+// model gets an error rather than a pending status, the confirmation request is
+// on the response event, and the stream never starts. Each response carries two
+// calls, which the flow runs concurrently, so -race sees two gates and two
+// response events being built at once.
+func TestHandleFunctionCalls_LiveConfirmationGate(t *testing.T) {
+	type Args struct{}
+	const toolName = "gated_stream"
+
+	newStreamingTool := func(t *testing.T, cfg functiontool.Config, handlerRan *atomic.Bool) tool.Tool {
+		t.Helper()
+		cfg.Name = toolName
+		st, err := functiontool.NewStreaming(cfg, func(agent.Context, Args) iter.Seq2[string, error] {
+			return func(yield func(string, error) bool) {
+				handlerRan.Store(true)
+				yield("chunk", nil)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	wrap := func(t *testing.T, inner tool.Tool, requireConfirmation bool) tool.Tool {
+		t.Helper()
+		tools, err := tool.WithConfirmation(fixedToolset{inner}, requireConfirmation, nil).Tools(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tools[0]
+	}
+
+	tests := []struct {
+		name          string
+		build         func(t *testing.T, handlerRan *atomic.Bool) tool.Tool
+		confirmations map[string]*toolconfirmation.ToolConfirmation
+		// wantErr is the sentinel each call's error response wraps. Nil means
+		// the call is allowed and streams.
+		wantErr       error
+		wantRequested bool
+	}{
+		{
+			name: "tool requires confirmation",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return newStreamingTool(t, functiontool.Config{RequireConfirmation: true}, handlerRan)
+			},
+			wantErr:       tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "provider requires confirmation",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return newStreamingTool(t, functiontool.Config{
+					RequireConfirmationProvider: func(Args) bool { return true },
+				}, handlerRan)
+			},
+			wantErr:       tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "toolset requires confirmation",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return wrap(t, newStreamingTool(t, functiontool.Config{}, handlerRan), true)
+			},
+			wantErr:       tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "tool requires confirmation inside a toolset that does not",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return wrap(t, newStreamingTool(t, functiontool.Config{RequireConfirmation: true}, handlerRan), false)
+			},
+			wantErr:       tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "rejected",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return wrap(t, newStreamingTool(t, functiontool.Config{RequireConfirmation: true}, handlerRan), true)
+			},
+			confirmations: map[string]*toolconfirmation.ToolConfirmation{
+				"call_1": {Confirmed: false},
+				"call_2": {Confirmed: false},
+			},
+			wantErr: tool.ErrConfirmationRejected,
+		},
+		{
+			name: "confirmed",
+			build: func(t *testing.T, handlerRan *atomic.Bool) tool.Tool {
+				return wrap(t, newStreamingTool(t, functiontool.Config{RequireConfirmation: true}, handlerRan), true)
+			},
+			confirmations: map[string]*toolconfirmation.ToolConfirmation{
+				"call_1": {Confirmed: true},
+				"call_2": {Confirmed: true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var handlerRan atomic.Bool
+			gated := tt.build(t, &handlerRan)
+
+			sent := make(chan string, 2)
+			liveSess := &mockLiveSession{sendFunc: func(req agent.LiveRequest) error {
+				sent <- req.Content.Parts[0].Text
+				return nil
+			}}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+			resp := &model.LLMResponse{Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: toolName, Args: map[string]any{}}},
+					{FunctionCall: &genai.FunctionCall{ID: "call_2", Name: toolName, Args: map[string]any{}}},
+				},
+			}}
+
+			flow := &Flow{Tools: []tool.Tool{gated}}
+			ev, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{toolName: gated}, resp, tt.confirmations, liveSess)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ev == nil {
+				t.Fatal("handleFunctionCalls() returned no event")
+			}
+
+			for _, part := range ev.Content.Parts {
+				fr := part.FunctionResponse
+				if fr == nil {
+					t.Fatalf("response part has no FunctionResponse: %+v", part)
+				}
+				if tt.wantErr == nil {
+					if fr.Response["status"] == nil {
+						t.Errorf("response for %s = %v, want a pending status", fr.ID, fr.Response)
+					}
+					continue
+				}
+				if status, ok := fr.Response["status"]; ok {
+					t.Errorf("response for %s has status %q, want an error and no pending status", fr.ID, status)
+				}
+				errText, _ := fr.Response["error"].(string)
+				if !strings.Contains(errText, tt.wantErr.Error()) {
+					t.Errorf("response for %s error = %q, want it to contain %q", fr.ID, errText, tt.wantErr.Error())
+				}
+			}
+
+			var wantRequested []string
+			if tt.wantRequested {
+				wantRequested = []string{"call_1", "call_2"}
+			}
+			gotRequested := slices.Sorted(maps.Keys(ev.Actions.RequestedToolConfirmations))
+			if diff := cmp.Diff(wantRequested, gotRequested); diff != "" {
+				t.Errorf("RequestedToolConfirmations call IDs mismatch (-want +got):\n%s", diff)
+			}
+			if ev.Actions.SkipSummarization != tt.wantRequested {
+				t.Errorf("SkipSummarization = %t, want %t", ev.Actions.SkipSummarization, tt.wantRequested)
+			}
+
+			if tt.wantErr != nil {
+				if handlerRan.Load() {
+					t.Error("the stream ran for a call the gate stopped")
+				}
+				return
+			}
+			for range 2 {
+				select {
+				case got := <-sent:
+					if want := "Function " + toolName + " returned: chunk"; got != want {
+						t.Errorf("model received %q, want %q", got, want)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("a confirmed call did not stream to the model")
+				}
+			}
+		})
+	}
+}
+
+// TestHandleFunctionCalls_LiveStreamErrorReachesModel checks that a live
+// streaming call that fails after its pending response tells the model so.
+// Otherwise the model keeps waiting on output that is never coming.
+func TestHandleFunctionCalls_LiveStreamErrorReachesModel(t *testing.T) {
+	type Args struct{}
+	const toolName = "failing_stream"
+	st, err := functiontool.NewStreaming(functiontool.Config{Name: toolName}, func(agent.Context, Args) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) {
+			if !yield("partial", nil) {
+				return
+			}
+			yield("", errors.New("backend unavailable"))
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sent := make(chan string, 3)
+	liveSess := &mockLiveSession{sendFunc: func(req agent.LiveRequest) error {
+		sent <- req.Content.Parts[0].Text
+		return nil
+	}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: toolName, Args: map[string]any{}}}},
+	}}
+
+	flow := &Flow{Tools: []tool.Tool{st}}
+	if _, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{toolName: st}, resp, nil, liveSess); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"Function failing_stream returned: partial",
+		"Function failing_stream failed: backend unavailable",
+	}
+	var got []string
+	for range want {
+		select {
+		case text := <-sent:
+			got = append(got, text)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("model received %q, want %q", got, want)
+		}
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("content sent to the model mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestHandleFunctionCalls_LiveGateRunsOnce checks that a live streaming call is
+// gated once, on the calling goroutine. Gating it again in the background
+// stream calls the confirmation provider a second time, and a provider that
+// answers differently then records its request after the response event has
+// been built.
+func TestHandleFunctionCalls_LiveGateRunsOnce(t *testing.T) {
+	type Args struct{}
+	const toolName = "provider_gated_stream"
+	var providerCalls atomic.Int32
+	st, err := functiontool.NewStreaming(functiontool.Config{
+		Name: toolName,
+		// Allows the first check of a call and asks for confirmation on any later one.
+		RequireConfirmationProvider: func(Args) bool { return providerCalls.Add(1) > 1 },
+	}, func(agent.Context, Args) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) { yield("chunk", nil) }
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sent := make(chan string, 2)
+	liveSess := &mockLiveSession{sendFunc: func(req agent.LiveRequest) error {
+		sent <- req.Content.Parts[0].Text
+		return nil
+	}}
+	invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		InvocationID: "inv_1",
+		Agent:        &mockAgent{name: "agent_1"},
+	})
+	resp := &model.LLMResponse{Content: &genai.Content{
+		Role:  "model",
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: toolName, Args: map[string]any{}}}},
+	}}
+
+	flow := &Flow{Tools: []tool.Tool{st}}
+	if _, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{toolName: st}, resp, nil, liveSess); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-sent:
+		if want := "Function " + toolName + " returned: chunk"; got != want {
+			t.Errorf("model received %q, want %q", got, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the allowed call did not stream to the model")
+	}
+	if got := providerCalls.Load(); got != 1 {
+		t.Errorf("confirmation provider called %d times, want 1", got)
 	}
 }

@@ -128,6 +128,59 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 // RunStream executes the tool with the provided context and yields events.
 func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		if err := f.CheckConfirmation(ctx, args); err != nil {
+			yield("", err)
+			return
+		}
+		for res, err := range f.RunStreamUngated(ctx, args) {
+			if !yield(res, err) {
+				return
+			}
+		}
+	}
+}
+
+// CheckConfirmation implements toolinternal.ConfirmationGatedStreamingTool.
+func (f *streamingFunctionTool[TArgs]) CheckConfirmation(ctx agent.Context, args any) (err error) {
+	// The provider is user code and runs here, outside the stream's recover.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+		}
+	}()
+
+	input, err := f.convertArgs(args)
+	if err != nil {
+		return err
+	}
+
+	if confirmation := ctx.ToolConfirmation(); confirmation != nil {
+		if !confirmation.Confirmed {
+			return fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)
+		}
+		return nil
+	}
+
+	requireConfirmation := f.requireConfirmation
+	if f.requireConfirmationProvider != nil {
+		requireConfirmation = f.requireConfirmationProvider(input)
+	}
+	if !requireConfirmation {
+		return nil
+	}
+
+	if err := ctx.RequestConfirmation(
+		fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+			f.Name()), nil); err != nil {
+		return err
+	}
+	ctx.Actions().SkipSummarization = true
+	return fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)
+}
+
+// RunStreamUngated implements toolinternal.ConfirmationGatedStreamingTool.
+func (f *streamingFunctionTool[TArgs]) RunStreamUngated(ctx agent.Context, args any) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
 		// Consumer panics must propagate, and a stopped consumer cannot receive errors.
 		canYield := true
 		callerYield := yield
@@ -145,47 +198,24 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 			}
 		}()
 
-		m, ok := args.(map[string]any)
-		if !ok {
-			yield("", fmt.Errorf("unexpected args type, got: %T", args))
-			return
-		}
-		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
+		input, err := f.convertArgs(args)
 		if err != nil {
 			yield("", err)
 			return
 		}
-
-		if confirmation := ctx.ToolConfirmation(); confirmation != nil {
-			if !confirmation.Confirmed {
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected))
-				return
-			}
-		} else {
-			requireConfirmation := f.requireConfirmation
-
-			if f.requireConfirmationProvider != nil {
-				requireConfirmation = f.requireConfirmationProvider(input)
-			}
-
-			if requireConfirmation {
-				err := ctx.RequestConfirmation(
-					fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
-						f.Name()), nil)
-				if err != nil {
-					yield("", err)
-					return
-				}
-				ctx.Actions().SkipSummarization = true
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired))
-				return
-			}
-		}
-
 		for res, err := range f.handler(ctx, input) {
 			if !yield(res, err) {
 				return
 			}
 		}
 	}
+}
+
+func (f *streamingFunctionTool[TArgs]) convertArgs(args any) (TArgs, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		var zero TArgs
+		return zero, fmt.Errorf("unexpected args type, got: %T", args)
+	}
+	return typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 }
