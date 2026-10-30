@@ -66,7 +66,8 @@ func TestConvertForeignEvent_RetainsPayloadParts(t *testing.T) {
 						Author: "otherAgent",
 						LLMResponse: model.LLMResponse{Content: &genai.Content{
 							Role: "model", Parts: []*genai.Part{
-								{}, {ThoughtSignature: []byte{1, 2}},
+								{},
+								{ThoughtSignature: []byte{1, 2}},
 								{PartMetadata: map[string]any{"source": "test"}},
 								{VideoMetadata: &genai.VideoMetadata{EndOffset: time.Second}},
 								{MediaResolution: &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}},
