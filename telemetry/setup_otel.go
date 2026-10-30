@@ -16,19 +16,33 @@ package telemetry
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/detectors/gcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+)
+
+const (
+	gcpTracesEndpoint  = "https://telemetry.googleapis.com/v1/traces"
+	gcpMetricsEndpoint = "https://telemetry.googleapis.com/v1/metrics"
+
+	gcpMetricExportInterval = 5 * time.Second
 )
 
 func configure(ctx context.Context, opts ...Option) (*config, error) {
@@ -62,12 +76,13 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 		return nil, fmt.Errorf("failed to resolve resource: %w", err)
 	}
 
-	spanProcessors, logProcessors, err := configureExporters(ctx, cfg)
+	exp, err := configureExporters(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure exporters: %w", err)
 	}
-	cfg.spanProcessors = append(cfg.spanProcessors, spanProcessors...)
-	cfg.logProcessors = append(cfg.logProcessors, logProcessors...)
+	cfg.spanProcessors = append(cfg.spanProcessors, exp.spanProcessors...)
+	cfg.logProcessors = append(cfg.logProcessors, exp.logProcessors...)
+	cfg.metricReaders = append(cfg.metricReaders, exp.metricReaders...)
 	return cfg, nil
 }
 
@@ -85,12 +100,12 @@ func configFromOpts(opts ...Option) (*config, error) {
 func newInternal(cfg *config) (*Providers, error) {
 	tp := initTracerProvider(cfg)
 	lp := initLoggerProvider(cfg)
-
-	// TODO(#479) init meter provider
+	mp := initMeterProvider(cfg)
 
 	return &Providers{
 		TracerProvider: tp,
 		LoggerProvider: lp,
+		MeterProvider:  mp,
 	}, nil
 }
 
@@ -130,12 +145,16 @@ func resolveProject(configuredProject string, creds *google.Credentials, require
 }
 
 // resolveResource creates a new resource with attributes specified in the following order (later attributes override earlier ones):
-//  1. [resource.Default()] populates the resource labels from environment variables like OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
-//  2. GCP related attributes when otelToCloud is enabled or gcpResourceProject is set - `gcp.project_id` attribute needed by Cloud Trace and other attributes provided by [gcp.NewDetector()].
-//  3. GCP detector adds runtime attributes if ADK runs on one of supported platforms (e.g. GCE, GKE, CloudRun).
-//  4. Resource from config, if present.
+//  1. A `service.instance.id` unique to this process.
+//  2. [resource.Default()] populates the resource labels from environment variables like OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
+//  3. GCP related attributes when otelToCloud is enabled or gcpResourceProject is set - `gcp.project_id` attribute needed by Cloud Trace and other attributes provided by [gcp.NewDetector()].
+//  4. GCP detector adds runtime attributes if ADK runs on one of supported platforms (e.g. GCE, GKE, CloudRun).
+//  5. Resource from config, if present.
 func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, error) {
-	r := resource.Default()
+	r, err := resource.Merge(resource.NewSchemaless(semconv.ServiceInstanceID(serviceInstanceID())), resource.Default())
+	if err != nil {
+		return nil, fmt.Errorf("failed to merge default resource: %w", err)
+	}
 
 	opts := []resource.Option{
 		resource.WithAttributes(
@@ -146,7 +165,6 @@ func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, erro
 		// Add GCP specific detectors.
 		opts = append(opts, resource.WithDetectors(gcp.NewDetector()))
 	}
-	var err error
 	gcpResource, err := resource.New(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create GCP resource: %w", err)
@@ -166,43 +184,110 @@ func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, erro
 	return r, nil
 }
 
-// configureExporters initializes OTel exporters from environment variables and otelToCloud.
-func configureExporters(ctx context.Context, cfg *config) ([]sdktrace.SpanProcessor, []sdklog.Processor, error) {
-	var spanProcessors []sdktrace.SpanProcessor
-	var logProcessors []sdklog.Processor
+// serviceInstanceID returns an id unique to this process, in the same
+// `<uuid hex>-<pid>` form as ADK Python.
+func serviceInstanceID() string {
+	u := uuid.New()
+	return hex.EncodeToString(u[:]) + "-" + strconv.Itoa(os.Getpid())
+}
 
-	otelEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
-	// Tracing section.
-	otelTracesEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
-	if otelEndpointEnv != "" || otelTracesEndpointEnv != "" {
-		exporter, err := otlptracehttp.New(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
-		}
-		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(
-			exporter,
-		))
+type exporters struct {
+	spanProcessors []sdktrace.SpanProcessor
+	logProcessors  []sdklog.Processor
+	metricReaders  []sdkmetric.Reader
+}
+
+func (e *exporters) add(other exporters) {
+	e.spanProcessors = append(e.spanProcessors, other.spanProcessors...)
+	e.logProcessors = append(e.logProcessors, other.logProcessors...)
+	e.metricReaders = append(e.metricReaders, other.metricReaders...)
+}
+
+// ownProviders says which providers [New] builds itself, as opposed to taking
+// from [WithTracerProvider], [WithLoggerProvider] or [WithMeterProvider].
+type ownProviders struct {
+	tracer, logger, meter bool
+}
+
+// configureExporters initializes OTel exporters from environment variables and otelToCloud.
+func configureExporters(ctx context.Context, cfg *config) (exporters, error) {
+	own := ownProviders{
+		tracer: cfg.tracerProvider == nil,
+		logger: cfg.loggerProvider == nil,
+		meter:  cfg.meterProvider == nil,
+	}
+	exp, err := otlpExporters(ctx, own)
+	if err != nil {
+		return exporters{}, err
 	}
 	if cfg.oTelToCloud {
-		spanExporter, err := newGcpSpanExporter(ctx, cfg)
+		gcp, err := gcpExporters(ctx, cfg, own)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create GCP span exporter: %w", err)
+			return exporters{}, err
 		}
-		spanProcessors = append(spanProcessors, sdktrace.NewBatchSpanProcessor(spanExporter))
+		exp.add(gcp)
 	}
-	// Logs section.
-	otelLogsEndpointEnv := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"))
-	if otelEndpointEnv != "" || otelLogsEndpointEnv != "" {
+	return exp, nil
+}
+
+func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
+	endpoint := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	endpointSet := func(signal string) bool {
+		return endpoint != "" || strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT")) != ""
+	}
+
+	var exp exporters
+	if own.tracer && endpointSet("TRACES") {
+		exporter, err := otlptracehttp.New(ctx)
+		if err != nil {
+			return exporters{}, fmt.Errorf("failed to create OTLP HTTP exporter: %w", err)
+		}
+		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+	}
+	if own.meter && endpointSet("METRICS") {
+		exporter, err := otlpmetrichttp.New(ctx)
+		if err != nil {
+			return exporters{}, fmt.Errorf("failed to create OTLP HTTP metric exporter: %w", err)
+		}
+		exp.metricReaders = append(exp.metricReaders, newPeriodicReader(exporter))
+	}
+	if own.logger && endpointSet("LOGS") {
 		exporter, err := otlploghttp.New(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
+			return exporters{}, fmt.Errorf("failed to create OTLP HTTP log exporter: %w", err)
 		}
-		logProcessors = append(logProcessors, sdklog.NewBatchProcessor(
-			exporter,
-		))
+		exp.logProcessors = append(exp.logProcessors, sdklog.NewBatchProcessor(exporter))
 	}
-	// Golang OTel exporter to CloudLogging is not yet available.
-	return spanProcessors, logProcessors, nil
+	return exp, nil
+}
+
+func gcpExporters(ctx context.Context, cfg *config, own ownProviders) (exporters, error) {
+	client := oauth2.NewClient(ctx, cfg.googleCredentials.TokenSource)
+	headers := map[string]string{"x-goog-user-project": cfg.gcpQuotaProject}
+
+	var exp exporters
+	if own.tracer {
+		exporter, err := otlptracehttp.New(ctx,
+			otlptracehttp.WithHTTPClient(client),
+			otlptracehttp.WithEndpointURL(gcpTracesEndpoint),
+			otlptracehttp.WithHeaders(headers))
+		if err != nil {
+			return exporters{}, fmt.Errorf("failed to create GCP span exporter: %w", err)
+		}
+		exp.spanProcessors = append(exp.spanProcessors, sdktrace.NewBatchSpanProcessor(exporter))
+	}
+	if own.meter {
+		exporter, err := otlpmetrichttp.New(ctx,
+			otlpmetrichttp.WithHTTPClient(client),
+			otlpmetrichttp.WithEndpointURL(gcpMetricsEndpoint),
+			otlpmetrichttp.WithHeaders(headers))
+		if err != nil {
+			return exporters{}, fmt.Errorf("failed to create GCP metric exporter: %w", err)
+		}
+		exp.metricReaders = append(exp.metricReaders, newPeriodicReader(exporter, sdkmetric.WithInterval(gcpMetricExportInterval)))
+	}
+	// TODO log exporter
+	return exp, nil
 }
 
 func initTracerProvider(cfg *config) *sdktrace.TracerProvider {
@@ -241,14 +326,20 @@ func initLoggerProvider(cfg *config) *sdklog.LoggerProvider {
 	return lp
 }
 
-func newGcpSpanExporter(ctx context.Context, cfg *config) (sdktrace.SpanExporter, error) {
-	client := oauth2.NewClient(ctx, cfg.googleCredentials.TokenSource)
-	return otlptracehttp.New(ctx,
-		otlptracehttp.WithHTTPClient(client),
-		otlptracehttp.WithEndpointURL("https://telemetry.googleapis.com/v1/traces"),
-		// Pass the quota project id in headers to fix auth errors.
-		// https://cloud.google.com/docs/authentication/adc-troubleshooting/user-creds
-		otlptracehttp.WithHeaders(map[string]string{
-			"x-goog-user-project": cfg.gcpQuotaProject,
-		}))
+func initMeterProvider(cfg *config) *sdkmetric.MeterProvider {
+	if cfg.meterProvider != nil {
+		return cfg.meterProvider
+	}
+	if len(cfg.metricReaders) == 0 {
+		return nil
+	}
+	opts := []sdkmetric.Option{
+		sdkmetric.WithResource(cfg.resource),
+	}
+	for _, r := range cfg.metricReaders {
+		opts = append(opts, sdkmetric.WithReader(r))
+	}
+	mp := sdkmetric.NewMeterProvider(opts...)
+
+	return mp
 }
