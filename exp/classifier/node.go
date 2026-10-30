@@ -15,6 +15,7 @@
 package classifier
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -85,8 +86,8 @@ type NodeConfig struct {
 // [workflow.StringRoute] or [workflow.MultiRoute]). For a [Binary] question, it
 // emits "true" when the probability is at or above Threshold and "false"
 // otherwise (matched by [workflow.BoolRoute] or [workflow.MultiRoute]). The
-// node forwards its validated input as Event.Output so downstream nodes receive
-// what the classifier evaluated.
+// node forwards the input it received as Event.Output so downstream nodes
+// receive what the classifier evaluated.
 //
 // When the node has routed outgoing edges, [workflow.New] validates that every
 // edge route can be emitted by Question and that every possible answer has an
@@ -198,7 +199,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 // such parts. Without InputSchema, the Content is passed through unchanged.
 //
 // Like [workflow.BaseNode], ValidateInput returns the underlying error; the
-// workflow engine and [Node.Run] wrap it in [workflow.ErrInputValidation] so
+// workflow engine wraps it in [workflow.ErrInputValidation] so
 // [workflow.DefaultRetryConfig] does not retry it.
 func (n *Node) ValidateInput(input any) (any, error) {
 	if n == nil || n.classifier == nil {
@@ -279,9 +280,18 @@ func contentSchemaPayload(content *genai.Content) (string, error) {
 }
 
 // Run classifies input against the node's question and yields a single routing
-// event whose Output is the validated input. Input validation failures are
-// wrapped in [workflow.ErrInputValidation], as the workflow engine does before
-// calling Run, so [workflow.DefaultRetryConfig] does not retry them.
+// event whose Output is input. Run expects input that the workflow scheduler
+// has already passed through [Node.ValidateInput] and does not apply
+// InputSchema itself, since coercing a string through the schema a second time
+// can change it; a caller that invokes Run directly therefore gets no
+// InputSchema validation. Run still checks that input is a non-nil classifier
+// input (see [ValidateInput]) and wraps a failure in
+// [workflow.ErrInputValidation].
+//
+// A classifier error that satisfies [ErrInvalidInput] or [ErrInvalidQuestion]
+// is wrapped in [workflow.ErrInputValidation] as well, so
+// [workflow.DefaultRetryConfig] does not retry a failure that repeats on every
+// attempt; adk-python retries these.
 func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		if n == nil || n.classifier == nil {
@@ -292,8 +302,7 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 			yield(nil, fmt.Errorf("classifier.Node.Run: nil context for node %q", n.Name()))
 			return
 		}
-		validated, err := n.ValidateInput(input)
-		if err != nil {
+		if err := ValidateInput(input); err != nil {
 			yield(nil, fmt.Errorf("%w for node %q: %w", workflow.ErrInputValidation, n.Name(), err))
 			return
 		}
@@ -301,10 +310,17 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 		// Unlike adk-python's _run_impl (which converts BaseModel inputs to
 		// dicts), Go's Classifier.Classify accepts JSON-serializable structs
 		// directly.
-		resp, err := n.classifier.Classify(ctx, validated, map[string]Question{
+		resp, err := n.classifier.Classify(ctx, input, map[string]Question{
 			routeQuestionName: cloneNodeQuestion(n.question),
 		})
 		if err != nil {
+			// The classifier rejecting the input or the node's question fails
+			// the same way on every attempt, and ErrInputValidation is the only
+			// error workflow.DefaultRetryConfig does not retry.
+			if errors.Is(err, ErrInvalidInput) || errors.Is(err, ErrInvalidQuestion) {
+				yield(nil, fmt.Errorf("%w for node %q: %w", workflow.ErrInputValidation, n.Name(), err))
+				return
+			}
 			yield(nil, fmt.Errorf("node %q: %w", n.Name(), err))
 			return
 		}
@@ -332,7 +348,7 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 		}
 
 		ev := session.NewEvent(ctx, ctx.InvocationID())
-		ev.Output = validated
+		ev.Output = input
 		ev.Routes = []string{route}
 		if n.answerKey != "" {
 			ev.Actions.StateDelta = map[string]any{n.answerKey: answerToStateMap(ans)}

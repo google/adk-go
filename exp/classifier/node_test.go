@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"maps"
 	"math"
 	"strings"
@@ -667,6 +668,64 @@ func TestRuntimeErrorsFailWorkflowRun(t *testing.T) {
 			t.Errorf("classifier calls = %d, want 0", len(fc.calls))
 		}
 	})
+
+	// A classifier rejecting the input or the question fails identically on
+	// every attempt, so Run marks those errors as input validation failures;
+	// other classifier errors keep the retry behavior (adk-python retries all).
+	t.Run("deterministic_classifier_errors_not_retried_under_default_retry_config", func(t *testing.T) {
+		transient := errors.New("upstream failed")
+		cases := []struct {
+			name      string
+			clfErr    error
+			wantCalls int
+			wantInput bool // errors.Is(err, workflow.ErrInputValidation)
+		}{
+			{name: "invalid_question", clfErr: fmt.Errorf("%w: needs instructions", classifier.ErrInvalidQuestion), wantCalls: 1, wantInput: true},
+			{name: "invalid_input", clfErr: fmt.Errorf("%w: non-text part", classifier.ErrInvalidInput), wantCalls: 1, wantInput: true},
+			{name: "other_error_still_retried", clfErr: transient, wantCalls: 2},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				retry := workflow.DefaultRetryConfig()
+				retry.MaxAttempts = 2
+				retry.InitialDelay = 0
+				retry.MaxDelay = 0
+				fc := &fixedClassifier{err: tc.clfErr}
+				node, err := classifier.NewNode(classifier.NodeConfig{
+					Name:       "triage",
+					Classifier: fc,
+					Question:   triageQuestion,
+					NodeConfig: workflow.NodeConfig{RetryConfig: retry},
+				})
+				if err != nil {
+					t.Fatalf("NewNode() unexpected error: %v", err)
+				}
+				sinkNode, _ := newCapturingNode("sink", "")
+				_, _, err = runWorkflowViaRunner(
+					t,
+					[]workflow.Edge{
+						{From: workflow.Start, To: node},
+						{From: node, To: sinkNode},
+					},
+					genai.NewContentFromText("ticket", genai.RoleUser),
+				)
+				if !errors.Is(err, tc.clfErr) {
+					t.Fatalf("run error = %v, want errors.Is(%v)", err, tc.clfErr)
+				}
+				if got := errors.Is(err, workflow.ErrInputValidation); got != tc.wantInput {
+					t.Errorf("errors.Is(err, ErrInputValidation) = %t, want %t: %v", got, tc.wantInput, err)
+				}
+				if tc.wantInput {
+					if got := strings.Count(err.Error(), workflow.ErrInputValidation.Error()); got != 1 {
+						t.Errorf("run error mentions ErrInputValidation %d times, want 1: %v", got, err)
+					}
+				}
+				if len(fc.calls) != tc.wantCalls {
+					t.Errorf("classifier calls = %d, want %d", len(fc.calls), tc.wantCalls)
+				}
+			})
+		}
+	})
 }
 
 func TestGraphOutgoingEdgeValidation(t *testing.T) {
@@ -1103,10 +1162,11 @@ func TestNewNodeValidationAndSchemas(t *testing.T) {
 		t.Errorf("coerced sink output mismatch (-want +got):\n%s", diff)
 	}
 
-	// Direct Run also enforces InputSchema (covering RunNode / ParallelWorker paths).
-	for _, runErr := range typedNode.Run(agent.Promote(nil), "not-matching-object-schema") {
-		if !errors.Is(runErr, workflow.ErrInputValidation) {
-			t.Fatalf("typedNode.Run(bad input) error = %v, want ErrInputValidation", runErr)
+	// Direct Run does not apply InputSchema (the engine does, once) but still
+	// rejects values that are not classifier input.
+	for _, runErr := range typedNode.Run(agent.Promote(nil), 42) {
+		if !errors.Is(runErr, workflow.ErrInputValidation) || !errors.Is(runErr, classifier.ErrInvalidInput) {
+			t.Fatalf("typedNode.Run(42) error = %v, want ErrInputValidation + ErrInvalidInput", runErr)
 		}
 	}
 
@@ -1194,11 +1254,15 @@ func TestInputSchemaDoesNotLaunderGenaiValues(t *testing.T) {
 		// schemaErr marks inputs rejected by the schema itself rather than by
 		// the classifier input rules, which carry ErrInvalidInput.
 		schemaErr bool
+		// directRun marks inputs that Run rejects on its own: it re-checks only
+		// classifier input rules, not InputSchema, which the engine applies.
+		directRun bool
 	}{
-		{name: "content_history_under_array_schema", schema: arraySchema, input: []*genai.Content{jsonTextContent, {Parts: []*genai.Part{imagePart}}}},
+		{name: "nil_input", schema: objSchema, input: nil, directRun: true},
+		{name: "content_history_under_array_schema", schema: arraySchema, input: []*genai.Content{jsonTextContent, {Parts: []*genai.Part{imagePart}}}, directRun: true},
 		// A plain object schema would accept the Part's own JSON form.
-		{name: "part_under_object_schema", schema: &jsonschema.Schema{Type: "object"}, input: &genai.Part{Text: "secret reasoning", Thought: true}},
-		{name: "history_in_map_under_object_schema", schema: objSchema, input: map[string]any{"ticket": "inv-1", "history": []*genai.Content{jsonTextContent}}},
+		{name: "part_under_object_schema", schema: &jsonschema.Schema{Type: "object"}, input: &genai.Part{Text: "secret reasoning", Thought: true}, directRun: true},
+		{name: "history_in_map_under_object_schema", schema: objSchema, input: map[string]any{"ticket": "inv-1", "history": []*genai.Content{jsonTextContent}}, directRun: true},
 		{name: "content_with_image_under_object_schema", schema: objSchema, input: &genai.Content{Parts: []*genai.Part{{Text: `{"ticket":"inv-1"}`}, imagePart}}},
 		{name: "content_with_thought_image_under_object_schema", schema: objSchema, input: &genai.Content{Parts: []*genai.Part{{Text: `{"ticket":"inv-1"}`}, thoughtImagePart}}},
 		{name: "content_with_nil_part_under_string_schema", schema: stringSchema, input: genai.Content{Parts: []*genai.Part{nil}}},
@@ -1219,11 +1283,17 @@ func TestInputSchemaDoesNotLaunderGenaiValues(t *testing.T) {
 			if leaked(err) {
 				t.Errorf("ValidateInput(%T) error leaked input content: %v", tc.input, err)
 			}
+			if !tc.directRun {
+				return
+			}
 			yields := 0
 			for _, runErr := range node.Run(agent.Promote(nil), tc.input) {
 				yields++
-				if !errors.Is(runErr, workflow.ErrInputValidation) {
-					t.Fatalf("Run(%T) error = %v, want ErrInputValidation", tc.input, runErr)
+				if !errors.Is(runErr, workflow.ErrInputValidation) || !errors.Is(runErr, classifier.ErrInvalidInput) {
+					t.Fatalf("Run(%T) error = %v, want ErrInputValidation + ErrInvalidInput", tc.input, runErr)
+				}
+				if leaked(runErr) {
+					t.Errorf("Run(%T) error leaked input content: %v", tc.input, runErr)
 				}
 				if got := strings.Count(runErr.Error(), workflow.ErrInputValidation.Error()); got != 1 {
 					t.Errorf("Run(%T) error mentions ErrInputValidation %d times, want 1: %v", tc.input, got, runErr)
@@ -1325,6 +1395,22 @@ func TestInputSchemaDoesNotLaunderGenaiValues(t *testing.T) {
 		}
 		if len(fc.calls) != 0 || len(sink.inputs) != 0 {
 			t.Errorf("classifier calls = %d, sink inputs = %d, want 0 and 0", len(fc.calls), len(sink.inputs))
+		}
+	})
+
+	// InputSchema is applied once, by the engine. A second pass in Run would
+	// JSON-decode the string "42" again and fail it as a bare number.
+	t.Run("schema_is_applied_once", func(t *testing.T) {
+		anyOf := &jsonschema.Schema{AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "number"}}}
+		fc, sink, err := runWithPredecessor(t, anyOf, genai.NewContentFromText(`"42"`, genai.RoleUser))
+		if err != nil {
+			t.Fatalf("run unexpected error: %v", err)
+		}
+		if len(fc.calls) != 1 || fc.calls[0].Input != "42" {
+			t.Errorf("classifier calls = %+v, want one call with the string \"42\"", fc.calls)
+		}
+		if diff := cmp.Diff([]any{"42"}, sink.inputs); diff != "" {
+			t.Errorf("sink input mismatch (-want +got):\n%s", diff)
 		}
 	})
 }
