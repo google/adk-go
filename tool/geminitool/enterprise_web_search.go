@@ -21,6 +21,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -64,10 +65,10 @@ func (EnterpriseWebSearch) ProcessRequest(ctx agent.Context, req *model.LLMReque
 		req.Config = &genai.GenerateContentConfig{}
 	}
 
-	if !isGeminiModel(req.Model) {
+	if !googlellm.IsGeminiModel(req.Model) {
 		return fmt.Errorf("cannot process: Enterprise Web Search tool is not supported for model %s", req.Model)
 	}
-	if isGemini1Model(req.Model) && len(req.Config.Tools) > 0 {
+	if googlellm.IsGemini1Model(req.Model) && len(req.Config.Tools) > 0 {
 		return errors.New("cannot process: Enterprise Web Search tool cannot be used with other tools in Gemini 1.x")
 	}
 

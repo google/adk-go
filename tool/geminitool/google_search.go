@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -41,10 +42,10 @@ func (s GoogleSearch) Description() string {
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (s GoogleSearch) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	if !isGeminiModel(req.Model) {
+	if !googlellm.IsGeminiModel(req.Model) {
 		return fmt.Errorf("cannot process: Google search tool is not supported for model %v", req.Model)
 	}
-	if isGemini1Model(req.Model) {
+	if googlellm.IsGemini1Model(req.Model) {
 		if len(req.Tools) > 0 {
 			return fmt.Errorf("cannot process: Google search tool cannot be used with other tools in Gemini 1.x")
 		}

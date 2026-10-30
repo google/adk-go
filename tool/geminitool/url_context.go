@@ -20,6 +20,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/model"
 )
 
@@ -41,10 +42,10 @@ func (u UrlContext) Description() string {
 
 // ProcessRequest adds the GoogleSearch tool to the LLM request.
 func (u UrlContext) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
-	if !isGeminiModel(req.Model) {
+	if !googlellm.IsGeminiModel(req.Model) {
 		return fmt.Errorf("cannot process: Url context tool is not supported for model %v", req.Model)
 	}
-	if isGemini1Model(req.Model) {
+	if googlellm.IsGemini1Model(req.Model) {
 		return fmt.Errorf("cannot process: Url context tool cannot be used in Gemini 1.x")
 	}
 	return setTool(req, &genai.Tool{
