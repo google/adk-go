@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/auth"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	iremoteagent "google.golang.org/adk/v2/internal/agent/remoteagent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
 )
@@ -702,6 +703,9 @@ func cleanupRemoteTask(ctx context.Context, cfg A2AConfig, card *a2a.AgentCard, 
 	}
 }
 
+// newMessage builds the message sent to the remote agent. Its ID comes from
+// platform.NewUUID, like the IDs of ADK's events, so a host that installs a
+// UUID provider controls it.
 func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error) {
 	events := ctx.Session().Events()
 	// Resume path: do not rewrite function responses to text. A single user
@@ -715,6 +719,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+		msg.ID = platform.NewUUID(ctx)
 		msg.TaskID = a2a.TaskID(userFnCall.taskID)
 		msg.ContextID = userFnCall.contextID
 		return msg, nil
@@ -737,6 +742,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 		}
 	}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+	msg.ID = platform.NewUUID(ctx)
 	msg.ContextID = contextID
 	return msg, nil
 }
