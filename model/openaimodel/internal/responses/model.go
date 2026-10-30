@@ -198,8 +198,8 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
 				completedContent = genaiResp.Candidates[0].Content
-				// Prefer a complete snapshot before adoption can pair an
-				// additional terminal call with a streamed call of the same name.
+				// If the snapshot preserves the streamed content, use it before
+				// adoption so additional calls do not borrow streamed arguments.
 				if shared.CompletedContentSupersedes(final.Content, completedContent) {
 					final.Content = completedContent
 				}

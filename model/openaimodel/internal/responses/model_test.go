@@ -2172,7 +2172,7 @@ func TestModel_GenerateStream_CompletedTextAfterCallIDFallback(t *testing.T) {
 	}
 }
 
-func TestModel_GenerateStream_TerminalCallDoesNotBorrowAnotherCallsArguments(t *testing.T) {
+func TestModel_GenerateStream_CompletedContentSupersedesBeforeCallAdoption(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		callID string
