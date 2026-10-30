@@ -1029,6 +1029,14 @@ func (s *scriptedCommittedStreamServer) createCount() int {
 // closed when the test ends.
 func newScriptedWriteClient(t *testing.T, srv storagepb.BigQueryWriteServer, serverOpts ...grpc.ServerOption) *bqstorage.BigQueryWriteClient {
 	t.Helper()
+	return newScriptedWriteClientWithDialOptions(t, srv, serverOpts, nil)
+}
+
+// newScriptedWriteClientWithDialOptions is newScriptedWriteClient with options
+// for the connection of the client as well, such as an interceptor that wraps
+// or refuses the streams that the client opens.
+func newScriptedWriteClientWithDialOptions(t *testing.T, srv storagepb.BigQueryWriteServer, serverOpts []grpc.ServerOption, dialOpts []grpc.DialOption) *bqstorage.BigQueryWriteClient {
+	t.Helper()
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -1037,7 +1045,7 @@ func newScriptedWriteClient(t *testing.T, srv storagepb.BigQueryWriteServer, ser
 	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(lis.Addr().String(), append([]grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}, dialOpts...)...)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -6172,7 +6180,14 @@ func TestBatchProcessor_AppendRowsRequestTraceID(t *testing.T) {
 // newErrorClassificationProcessor returns a processor for srv, a scripted
 // write server, that retries four times in all (three retries) with
 // millisecond backoff. With exactlyOnce it writes to a committed stream.
-func newErrorClassificationProcessor(t *testing.T, srv *scriptedCommittedStreamServer, exactlyOnce bool) *BatchProcessor {
+func newErrorClassificationProcessor(t *testing.T, srv storagepb.BigQueryWriteServer, exactlyOnce bool) *BatchProcessor {
+	t.Helper()
+	return newErrorClassificationProcessorForClient(t, newScriptedWriteClient(t, srv), exactlyOnce)
+}
+
+// newErrorClassificationProcessorForClient is newErrorClassificationProcessor
+// over writeClient, a client of a scripted write server.
+func newErrorClassificationProcessorForClient(t *testing.T, writeClient *bqstorage.BigQueryWriteClient, exactlyOnce bool) *BatchProcessor {
 	t.Helper()
 	config := exactlyOnceTestConfig()
 	config.ExactlyOnceDelivery = exactlyOnce
@@ -6181,7 +6196,7 @@ func newErrorClassificationProcessor(t *testing.T, srv *scriptedCommittedStreamS
 	if !exactlyOnce {
 		streamName = "projects/test-proj/datasets/test-ds/tables/agent_events/_default"
 	}
-	bp, err := NewBatchProcessor(context.Background(), newScriptedWriteClient(t, srv), streamName, config)
+	bp, err := NewBatchProcessor(context.Background(), writeClient, streamName, config)
 	if err != nil {
 		t.Fatalf("NewBatchProcessor() error = %v", err)
 	}
@@ -6310,6 +6325,338 @@ func TestStreamWriter_InBandErrorRetriesAreBounded(t *testing.T) {
 	}
 }
 
+// streamEndingServer serves AppendRows streams and ends the first of them with
+// code, as a server that recycles an idle or long-lived stream does; OK ends
+// it cleanly. Every later stream answers each request. It records the requests
+// that it receives, with the number of the stream that received each.
+type streamEndingServer struct {
+	scriptedCommittedStreamServer // CreateWriteStream, for ExactlyOnceDelivery
+
+	code codes.Code
+	// endOnNextRequest makes the first stream end on its second request,
+	// without answering it, instead of right after answering its first.
+	endOnNextRequest bool
+
+	streams   int
+	delivered []deliveredRequest
+}
+
+// deliveredRequest is a request that streamEndingServer received.
+type deliveredRequest struct {
+	stream int   // 1 for the first stream that the server served
+	offset int64 // -1 for a request without an offset
+	req    *storagepb.AppendRowsRequest
+}
+
+func (s *streamEndingServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	s.mu.Lock()
+	s.streams++
+	streamNo := s.streams
+	s.mu.Unlock()
+
+	first := streamNo == 1
+	answered := 0
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		offset := int64(-1)
+		if req.GetOffset() != nil {
+			offset = req.GetOffset().GetValue()
+		}
+		s.mu.Lock()
+		s.delivered = append(s.delivered, deliveredRequest{stream: streamNo, offset: offset, req: req})
+		s.mu.Unlock()
+
+		if first && s.endOnNextRequest && answered == 1 {
+			return status.Error(s.code, "stream ended by server")
+		}
+		if err := stream.Send(&storagepb.AppendRowsResponse{}); err != nil {
+			return err
+		}
+		answered++
+		if first && !s.endOnNextRequest {
+			return status.Error(s.code, "stream ended by server")
+		}
+	}
+}
+
+// received returns how many streams the server has served and the requests
+// that it has received.
+func (s *streamEndingServer) received() (streams int, delivered []deliveredRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streams, slices.Clone(s.delivered)
+}
+
+// TestNextBatchAfterServerEndedStream checks that the first batch written after
+// the server ended the open AppendRows stream goes out on a fresh stream,
+// whatever status ended the old one. That status says how the old stream
+// ended, not what BigQuery makes of the batch, so it must not fail the batch
+// fast, even when the same status does for a request on a stream that was
+// opened for it.
+//
+// The server ends the first stream either right after it answers the first
+// batch, or on the request of the second batch without answering it. In the
+// first case gRPC reports the status at Send (as io.EOF, with the status left
+// for Recv) if the client has seen the end by the time of the second batch,
+// and at Recv if it has not, so the pause makes the first more likely. In the
+// second case the status is always reported at Recv, after the server received
+// the request. TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream
+// pins both places.
+func TestNextBatchAfterServerEndedStream(t *testing.T) {
+	endCodes := []codes.Code{
+		// OK ends the stream cleanly, which Send and Recv report as io.EOF.
+		codes.OK,
+		codes.Unavailable,
+		codes.FailedPrecondition,
+		codes.Unauthenticated,
+		codes.PermissionDenied,
+		codes.InvalidArgument,
+		codes.Unimplemented,
+		codes.NotFound,
+	}
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, code := range endCodes {
+			if exactlyOnce && code == codes.NotFound {
+				// With ExactlyOnceDelivery, NotFound replaces the committed
+				// stream, which other tests cover.
+				continue
+			}
+			for _, tc := range []struct {
+				name             string
+				endOnNextRequest bool
+				pause            time.Duration
+			}{
+				{name: "ended after the answer"},
+				{name: "ended after the answer and a pause", pause: 50 * time.Millisecond},
+				{name: "ended on the next request", endOnNextRequest: true},
+			} {
+				t.Run(fmt.Sprintf("%s/exactlyOnce=%v/%s", code, exactlyOnce, tc.name), func(t *testing.T) {
+					srv := &streamEndingServer{code: code, endOnNextRequest: tc.endOnNextRequest}
+					bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+					batch := func(id string) []map[string]any {
+						return []map[string]any{{"event_id": id, "event_type": "X"}}
+					}
+
+					if err := bp.writeBatch(context.Background(), batch("A")); err != nil {
+						t.Fatalf("first batch error = %v", err)
+					}
+					time.Sleep(tc.pause)
+					if err := bp.writeBatch(context.Background(), batch("B")); err != nil {
+						streams, _ := srv.received()
+						t.Fatalf("second batch dropped after %d stream(s): %v", streams, err)
+					}
+
+					streams, delivered := srv.received()
+					if streams != 2 {
+						t.Errorf("streams served = %d, want 2: the second batch needs a fresh one", streams)
+					}
+					var got []string
+					var gotOffsets []int64
+					for _, d := range delivered {
+						rows := decodeArrowRows(t, d.req)
+						if len(rows) != 1 {
+							t.Fatalf("a request holds %d rows, want 1", len(rows))
+						}
+						got = append(got, fmt.Sprintf("%d:%v", d.stream, rows[0]["event_id"]))
+						gotOffsets = append(gotOffsets, d.offset)
+					}
+					// In the first case the second request is not received
+					// by the first stream, which has ended; in the second it
+					// is, and is sent again.
+					want, wantOffsets := []string{"1:A", "2:B"}, []int64{0, 1}
+					if tc.endOnNextRequest {
+						want, wantOffsets = []string{"1:A", "1:B", "2:B"}, []int64{0, 1, 1}
+					}
+					if !exactlyOnce {
+						wantOffsets = slices.Repeat([]int64{-1}, len(want))
+					}
+					if diff := cmp.Diff(want, got); diff != "" {
+						t.Errorf("requests received (stream:event_id) mismatch (-want +got):\n%s", diff)
+					}
+					if diff := cmp.Diff(wantOffsets, gotOffsets); diff != "" {
+						t.Errorf("request offsets mismatch (-want +got):\n%s", diff)
+					}
+					if got := srv.createCount(); exactlyOnce && got != 1 {
+						t.Errorf("CreateWriteStream calls = %d, want 1: the committed stream stays", got)
+					}
+					if got := bp.DropStats().AppendFailureDrops; got != 0 {
+						t.Errorf("AppendFailureDrops = %d, want 0", got)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream pins the two
+// places at which the status of a stream that the server ended reaches append,
+// each of which TestNextBatchAfterServerEndedStream reaches only when gRPC
+// reports the status there: Send reports io.EOF and leaves the status to the
+// drain of Recv, or Send succeeds and Recv reports the status. The stream is
+// injected as one that an earlier batch opened, so the request gets an attempt
+// on a fresh stream whatever the status is, and only a permanent status from
+// that stream fails the batch.
+func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
+	permanent := []codes.Code{
+		codes.PermissionDenied,
+		codes.InvalidArgument,
+		codes.Unauthenticated,
+		codes.FailedPrecondition,
+		codes.Unimplemented,
+		codes.NotFound,
+	}
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, code := range permanent {
+			if exactlyOnce && code == codes.NotFound {
+				// With ExactlyOnceDelivery, NotFound replaces the committed
+				// stream, which other tests cover.
+				continue
+			}
+			for _, site := range []string{"send", "recv"} {
+				for _, freshStreamAccepts := range []bool{true, false} {
+					t.Run(fmt.Sprintf("%s/exactlyOnce=%v/%s/freshStreamAccepts=%v", code, exactlyOnce, site, freshStreamAccepts), func(t *testing.T) {
+						srv := &scriptedCommittedStreamServer{
+							onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+								if freshStreamAccepts {
+									return &storagepb.AppendRowsResponse{}, nil
+								}
+								return nil, status.Error(code, "scripted")
+							},
+						}
+						bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+						ended := &mockStream{recvErr: status.Error(code, "stream ended by server")}
+						if site == "send" {
+							ended.sendErr = io.EOF
+						}
+						bp.streamWriter.stream = ended
+
+						err := bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+
+						if got := atomic.LoadInt32(&ended.sendCount); got != 1 {
+							t.Errorf("sends on the ended stream = %d, want 1", got)
+						}
+						// The ended stream takes the request first; the fresh
+						// stream then gets it once, and a permanent status from
+						// it ends the batch without a retry.
+						if got := srv.attempts(); got != 1 {
+							t.Errorf("requests that reached the server = %d, want 1 (error: %v)", got, err)
+						}
+						if freshStreamAccepts {
+							if err != nil {
+								t.Fatalf("writeBatch() error = %v, want nil", err)
+							}
+							if got := bp.DropStats().AppendFailureDrops; got != 0 {
+								t.Errorf("AppendFailureDrops = %d, want 0", got)
+							}
+							return
+						}
+						if got := status.Code(err); got != code {
+							t.Errorf("status.Code(writeBatch() error) = %v, want %v (error: %v)", got, code, err)
+						}
+						if got := bp.DropStats().AppendFailureDrops; got != 1 {
+							t.Errorf("AppendFailureDrops = %d, want 1", got)
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// endedClientStream is a client stream on which Send reports io.EOF and Recv
+// reports err, as gRPC does for a stream that ended with the status err before
+// the request could be sent.
+type endedClientStream struct {
+	grpc.ClientStream
+	err error
+}
+
+func (s *endedClientStream) SendMsg(any) error { return io.EOF }
+
+func (s *endedClientStream) RecvMsg(any) error { return s.err }
+
+// TestStreamWriter_PermanentStatusFailsFastOnFreshStream covers the two places
+// other than Recv at which a permanent status ends the write of a batch at
+// once: where the stream is opened, and where Send reports that the stream
+// ended (TestStreamWriter_PermanentStatusFailsFast covers Recv). The stream was
+// opened for the request in both, so the status is BigQuery's verdict on it and
+// a retry cannot change it.
+func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
+	wantErr := map[string]string{
+		"open": "failed to open append rows stream",
+		"send": "failed to send row batch",
+	}
+	type testCase struct {
+		site       string
+		code       codes.Code
+		wantOpened int32
+	}
+	var cases []testCase
+	for _, site := range []string{"open", "send"} {
+		for _, code := range []codes.Code{
+			codes.PermissionDenied,
+			codes.InvalidArgument,
+			codes.Unauthenticated,
+			codes.FailedPrecondition,
+			codes.Unimplemented,
+			codes.NotFound,
+		} {
+			cases = append(cases, testCase{site: site, code: code, wantOpened: 1})
+		}
+	}
+	// A transient status still uses up the retries: four streams in all. (The
+	// generated client retries Unavailable when it opens a stream, so the open
+	// site has no such case.)
+	cases = append(cases, testCase{site: "send", code: codes.Unavailable, wantOpened: 4})
+
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s/%s", tc.site, tc.code), func(t *testing.T) {
+			var opened atomic.Int32
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					t.Error("a request reached the server, want none")
+					return &storagepb.AppendRowsResponse{}, nil
+				},
+			}
+			writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+				grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+					opened.Add(1)
+					if tc.site == "open" {
+						return nil, status.Error(tc.code, "scripted")
+					}
+					cs, err := streamer(ctx, desc, cc, method, opts...)
+					if err != nil {
+						return nil, err
+					}
+					return &endedClientStream{ClientStream: cs, err: status.Error(tc.code, "scripted")}, nil
+				}),
+			})
+			bp := newErrorClassificationProcessorForClient(t, writeClient, false)
+
+			err := bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+
+			if err == nil || !strings.Contains(err.Error(), wantErr[tc.site]) {
+				t.Fatalf("writeBatch() error = %v, want it to contain %q", err, wantErr[tc.site])
+			}
+			if got := status.Code(err); got != tc.code {
+				t.Errorf("status.Code(writeBatch() error) = %v, want %v (error: %v)", got, tc.code, err)
+			}
+			if got := opened.Load(); got != tc.wantOpened {
+				t.Errorf("streams opened = %d, want %d", got, tc.wantOpened)
+			}
+			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				t.Errorf("AppendFailureDrops = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestSplitBatchByEstimatedBytes(t *testing.T) {
 	row := func(n int) map[string]any { return map[string]any{"content": strings.Repeat("x", n)} }
 	rowCost := estimateRowBytes(row(1000))
@@ -6430,10 +6777,30 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 // split batch fails permanently, the later requests are not sent, and only the
 // rows that BigQuery did not confirm are counted as dropped: those of the failed
 // request and of the requests after it.
+//
+// The second request is the first one that BigQuery rejects, and it goes out on
+// the stream that carried the confirmed first request. A status on that stream
+// does not fail the batch alone, since the server may have ended the stream
+// after an earlier request (see isPermanentWriteError), so the second request
+// is sent once more, on a fresh stream. The server rejects that one too, which
+// is when the batch fails. The third request is never sent.
 func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		received []string
+	)
 	srv := &scriptedCommittedStreamServer{
-		onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
-			if attempt == 2 {
+		onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+			rows := decodeArrowRows(t, req)
+			if len(rows) != 1 {
+				t.Errorf("request %d carries %d rows, want 1", attempt, len(rows))
+				return nil, status.Error(codes.Internal, "unexpected request")
+			}
+			mu.Lock()
+			received = append(received, fmt.Sprint(rows[0]["event_id"]))
+			mu.Unlock()
+			// Confirm the first request; reject every later one.
+			if attempt >= 2 {
 				return nil, status.Error(codes.PermissionDenied, "scripted")
 			}
 			return &storagepb.AppendRowsResponse{}, nil
@@ -6450,11 +6817,70 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	if err == nil {
 		t.Fatal("writeBatch() error = nil, want the failure of the second request")
 	}
-	if got := srv.attempts(); got != 2 {
-		t.Errorf("AppendRows attempts = %d, want 2: the third request must not be sent", got)
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Errorf("status.Code(err) = %v, want %v", got, codes.PermissionDenied)
+	}
+	mu.Lock()
+	got := append([]string(nil), received...)
+	mu.Unlock()
+	// a is confirmed; b is rejected on the reused stream and then on a fresh
+	// one; c is never sent.
+	if want := []string{"a", "b", "b"}; !slices.Equal(got, want) {
+		t.Errorf("requests received = %v, want %v: the third request must not be sent", got, want)
 	}
 	if got := bp.DropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the rows after the confirmed first request)", got)
+	}
+}
+
+// TestWriteRunEndBatch_DropsOnlyUnconfirmedRows checks that when a batch that
+// the run-end flush writes is split into several requests and BigQuery confirms
+// the first ones, only the rows of the requests that it did not confirm count as
+// dropped, and none of them are kept for a later flush. The batch reaches the
+// flush through the queue, or through deferredBatch as the retry of an earlier
+// flush.
+func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
+	for _, retry := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retry=%v", retry), func(t *testing.T) {
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					// Confirm the first request; reject every later one.
+					if attempt >= 2 {
+						return nil, status.Error(codes.PermissionDenied, "scripted")
+					}
+					return &storagepb.AppendRowsResponse{}, nil
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, false)
+			row := func(id string) map[string]any {
+				return map[string]any{"event_id": id, "content": strings.Repeat("x", 1000)}
+			}
+			rows := []map[string]any{row("a"), row("b"), row("c")}
+			// Each row is a request of its own under this limit.
+			bp.maxAppendBytes = estimateRowBytes(rows[0])
+			if retry {
+				bp.deferredBatch = rows
+			} else {
+				for _, r := range rows {
+					bp.queue <- r
+				}
+			}
+
+			bp.flushRunEnd()
+
+			// a is confirmed; b is rejected on the reused stream and then on a
+			// fresh one; c is never sent.
+			if got := srv.attempts(); got != 3 {
+				t.Errorf("AppendRows attempts = %d, want 3", got)
+			}
+			// Counting the whole batch as dropped would report 3 here.
+			if got := bp.DropStats().AppendFailureDrops; got != 2 {
+				t.Errorf("AppendFailureDrops = %d, want 2 (b and c; a was confirmed)", got)
+			}
+			if got := len(bp.deferredBatch); got != 0 {
+				t.Errorf("len(deferredBatch) = %d, want 0: a failed write is dropped, not kept", got)
+			}
+		})
 	}
 }
 
@@ -6499,7 +6925,20 @@ func TestReviewIgnoredCyclicMetadataDoesNotCrash(t *testing.T) {
 		return
 	}
 
-	cmd := exec.Command(os.Args[0], "-test.run=^TestReviewIgnoredCyclicMetadataDoesNotCrash$")
+	// The subprocess runs under a deadline of its own: a hang in it would
+	// otherwise block this test until the go test timeout of the parent. The
+	// child's -test.timeout is shorter than the context's, so that a hang makes
+	// the child dump its goroutines into the output before the context kills it.
+	timeout := time.Minute
+	if d, ok := t.Deadline(); ok {
+		timeout = min(timeout, time.Until(d)/2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0],
+		"-test.run=^TestReviewIgnoredCyclicMetadataDoesNotCrash$",
+		"-test.timeout="+(timeout*9/10).String())
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = append(os.Environ(), "REVIEW_CYCLIC_METADATA_SUBPROCESS=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {

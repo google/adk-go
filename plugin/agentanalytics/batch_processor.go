@@ -113,9 +113,11 @@ type BatchProcessor struct {
 
 	appendMu sync.RWMutex
 	flushMu  sync.Mutex
-	// deferredBatch holds at most one batch whose BigQuery write was cut
-	// short by flushRunEnd's ShutdownTimeout; guarded by flushMu and
-	// drained before the queue by flush, flushRunEnd, and Close.
+	// deferredBatch holds the rows that BigQuery had not confirmed of at most
+	// one batch whose write was cut short by flushRunEnd's ShutdownTimeout;
+	// the rows of that batch's requests that BigQuery confirmed first are
+	// written, not kept. Guarded by flushMu and drained before the queue by
+	// flush, flushRunEnd, and Close.
 	deferredBatch []map[string]any
 	arrowSchema   *arrow.Schema
 	allocator     memory.Allocator
@@ -152,7 +154,11 @@ type BatchProcessor struct {
 	maxPendingUploadBytes int64
 	uploadBudgetWarned    atomic.Bool
 
-	// maxAppendBytes overrides maxAppendRequestBytes in tests.
+	// maxAppendBytes overrides maxAppendRequestBytes in tests. When it is
+	// below maxSerializedAppendRequestBytes it also lowers the serialized
+	// limit (see serializedAppendRequestByteLimit) unless
+	// maxSerializedAppendBytes is set, so a test that sets only this field
+	// gets serialized-size halving as well as estimated-size splitting.
 	maxAppendBytes int
 	// maxSerializedAppendBytes overrides serializedAppendRequestByteLimit in
 	// tests, so that serialized-size halving can be exercised without
@@ -1142,11 +1148,22 @@ func (s *streamWriter) resetStream() {
 	s.streamCtx = nil
 }
 
-// isPermanentWriteError reports whether code is a status that a retry of the
-// same request cannot fix, such as a missing permission or table, or a request
-// that BigQuery rejects as malformed. Retrying it only burns the backoff budget
-// while the caller holds flushMu. With ExactlyOnceDelivery, NotFound is not
-// permanent: it signals a stale stream, which handleExactlyOnceError replaces.
+// isPermanentWriteError reports whether code, the status that BigQuery
+// returned for a request on a stream that was opened for that request, is one
+// that a retry of the same request cannot fix, such as a missing permission or
+// table, or a request that BigQuery rejects as malformed. Retrying it only
+// burns the backoff budget while the caller holds flushMu. With
+// ExactlyOnceDelivery, NotFound is not permanent: it signals a stale stream,
+// which handleExactlyOnceError replaces.
+//
+// A status on a stream that an earlier request opened is not BigQuery's
+// verdict on this request, because the server may have ended that stream after
+// its last answer, so append never fails a batch on it alone.
+//
+// FailedPrecondition is permanent on purpose: adk-python drops a batch that
+// gets it, too. Google's managedwriter client retries it, and BigQuery does
+// not document which conditions it reports with this code on AppendRows, so if
+// a transient one turns out to use it, remove it from this list.
 func (s *streamWriter) isPermanentWriteError(code codes.Code) bool {
 	switch code {
 	case codes.PermissionDenied,
@@ -1401,6 +1418,12 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			if s.nowOrDefault().Before(s.rotateRetryAt) {
 				return nil, fmt.Errorf("committed write stream rotation in cooldown until %s", s.rotateRetryAt.Format(time.RFC3339Nano))
 			}
+			// Not reachable today: every place that sets offsetDesynced also
+			// fails the chunk, and tryAppendBatch and the halving in
+			// appendChunkWithRotationBudget stop at the first error, so no
+			// later chunk of the batch enters append with it set. The check
+			// keeps a batch to one rotation if either is changed to go on
+			// after a failed chunk.
 			if *rotatedInBatch {
 				return nil, fmt.Errorf("committed write stream already rotated in batch")
 			}
@@ -1441,6 +1464,14 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			s.resetStream()
 		}
 
+		// A stream that is still open here was opened before this attempt, usually
+		// for an earlier request, and the server may have ended it since, as it
+		// does with an idle or recycled stream. The status that Send (after the
+		// drain below) or Recv then reports describes how that stream ended, not
+		// BigQuery's verdict on this request, so it must not fail the batch fast:
+		// the request gets an attempt on a fresh stream first. That attempt uses
+		// up one retry and its backoff, as any resend does.
+		reusedStream := s.stream != nil
 		if s.stream == nil {
 			baseCtx := s.baseCtx
 			if baseCtx == nil || baseCtx.Err() != nil {
@@ -1523,7 +1554,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				}
 			}
 			lastErr = fmt.Errorf("failed to send row batch: %w", sendErr)
-			if s.isPermanentWriteError(status.Code(sendErr)) {
+			if !reusedStream && s.isPermanentWriteError(status.Code(sendErr)) {
 				return nil, lastErr
 			}
 			continue
@@ -1548,7 +1579,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 				}
 			}
 			lastErr = fmt.Errorf("failed to receive response for row batch: %w", recvErr)
-			if s.isPermanentWriteError(status.Code(recvErr)) {
+			if !reusedStream && s.isPermanentWriteError(status.Code(recvErr)) {
 				return nil, lastErr
 			}
 			continue
