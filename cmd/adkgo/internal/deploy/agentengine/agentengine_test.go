@@ -407,3 +407,58 @@ func TestPrepareDockerfile_EntryPointReachesRUNLine(t *testing.T) {
 		t.Errorf("RUN line = %q, want it to end with %q", runLine, want)
 	}
 }
+
+func TestSecretFlagIsRegistered(t *testing.T) {
+	f := agentEngineCmd.PersistentFlags().Lookup("secret")
+	if f == nil {
+		t.Fatal("agentengine command has no --secret flag for mapping Secret Manager secrets to env variables")
+	}
+	if got := f.Value.Type(); got != "stringArray" && got != "stringSlice" {
+		t.Errorf("--secret flag type = %q, want a repeatable string flag", got)
+	}
+}
+
+func TestParseSecrets(t *testing.T) {
+	got, err := parseSecrets([]string{"A=my-secret:latest", "B=projects/p/secrets/s:3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "A" || got[0].SecretRef.Secret != "my-secret" || got[0].SecretRef.Version != "latest" ||
+		got[1].SecretRef.Secret != "projects/p/secrets/s" || got[1].SecretRef.Version != "3" {
+		t.Errorf("unexpected result %v", got)
+	}
+	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:"} {
+		if _, err := parseSecrets([]string{bad}); err == nil {
+			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
+		}
+	}
+}
+
+func TestParseSecrets_RejectsInvalidNameAndDuplicates(t *testing.T) {
+	for _, bad := range [][]string{{"1A=s:1"}, {"A-B=s:1"}, {"A=s:1", "A=t:2"}} {
+		if _, err := parseSecrets(bad); err == nil {
+			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
+		}
+	}
+}
+
+func TestComputeFlags_RejectsInvalidSecret(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	flags.agentEngine.secrets = []string{"bad"}
+	if err := flags.computeFlags(); err == nil {
+		t.Fatal("computeFlags() = nil, want an error for an invalid --secret")
+	}
+}
+
+func TestCreateRequest_SecretEnv(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	flags.agentEngine.secrets = []string{"API_KEY=my-secret:latest"}
+	if err := flags.computeFlags(); err != nil {
+		t.Fatal(err)
+	}
+	req := flags.createRequest("parent", nil, nil)
+	got := req.ReasoningEngine.Spec.DeploymentSpec.SecretEnv
+	if len(got) != 1 || got[0].Name != "API_KEY" || got[0].SecretRef.Secret != "my-secret" || got[0].SecretRef.Version != "latest" {
+		t.Errorf("SecretEnv = %v, want API_KEY=my-secret:latest", got)
+	}
+}
