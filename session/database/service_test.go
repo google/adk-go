@@ -28,6 +28,7 @@ import (
 	"google.golang.org/genai"
 	"gorm.io/gorm"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
@@ -139,6 +140,63 @@ func TestDatabaseService_AppendEvent_TranscriptionsRoundTrip(t *testing.T) {
 	}
 	if diff := cmp.Diff(event.OutputTranscription, ev.OutputTranscription); diff != "" {
 		t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestDatabaseService_AppendEvent_CacheMetadataRoundTrip guards that context
+// cache state survives storage. Without it the next invocation cannot find the
+// cache the last one created, and creates another.
+func TestDatabaseService_AppendEvent_CacheMetadataRoundTrip(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata *model.CacheMetadata
+	}{
+		{
+			name: "active cache",
+			metadata: &model.CacheMetadata{
+				CacheName:       "cachedContents/1",
+				ExpireTime:      time.Date(2026, 1, 1, 12, 30, 0, 0, time.UTC),
+				InvocationsUsed: 2,
+				CreatedAt:       time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+				Fingerprint:     "abc",
+				ContentsCount:   4,
+			},
+		},
+		{
+			name:     "fingerprint only with no contents",
+			metadata: &model.CacheMetadata{Fingerprint: "abc"},
+		},
+		// Events stored before the column existed, and events of agents with
+		// caching off, read back as nil.
+		{name: "no cache state"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			s := emptyService(t)
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			event := &session.Event{ID: "model_event", Author: "agent"}
+			event.CacheMetadata = tt.metadata
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			evs := got.Session.Events()
+			if evs.Len() != 1 {
+				t.Fatalf("got %d events, want 1", evs.Len())
+			}
+			if diff := cmp.Diff(tt.metadata, evs.At(0).CacheMetadata); diff != "" {
+				t.Errorf("CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

@@ -363,6 +363,40 @@ func TestRawEventNumericContract(t *testing.T) {
 	}
 }
 
+// TestCacheMetadataRoundTripsThroughRawEvent guards that context cache state
+// survives the raw_event blob, in the form adk-python reads from it.
+func TestCacheMetadataRoundTripsThroughRawEvent(t *testing.T) {
+	want := &model.CacheMetadata{
+		CacheName:       "cachedContents/1",
+		ExpireTime:      time.Date(2026, 1, 1, 12, 30, 0, 0, time.UTC),
+		InvocationsUsed: 2,
+		CreatedAt:       time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+		Fingerprint:     "abc",
+		ContentsCount:   4,
+	}
+	event := &session.Event{Author: "agent", LLMResponse: model.LLMResponse{CacheMetadata: want}}
+
+	raw, err := eventToRawEvent(event)
+	if err != nil {
+		t.Fatalf("eventToRawEvent() error = %v", err)
+	}
+	cache, ok := raw.AsMap()["cacheMetadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("raw_event has no cacheMetadata object: %v", raw.AsMap())
+	}
+	if _, ok := cache["cache_name"]; !ok {
+		t.Errorf("raw_event cacheMetadata = %v, want adk-python's snake_case keys", cache)
+	}
+
+	got, err := eventFromRawEvent(raw)
+	if err != nil {
+		t.Fatalf("eventFromRawEvent() error = %v", err)
+	}
+	if diff := cmp.Diff(want, got.CacheMetadata); diff != "" {
+		t.Errorf("CacheMetadata mismatch after the round trip (-want +got):\n%s", diff)
+	}
+}
+
 // TestEventNeedsRawEvent guards the invariant that plain events keep
 // their legacy wire format (no raw_event) while events carrying state
 // that only raw_event preserves opt into raw_event. Changing
@@ -389,6 +423,9 @@ func TestEventNeedsRawEvent(t *testing.T) {
 		}, want: true},
 		{name: "with output transcription", event: &session.Event{
 			LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "hi"}},
+		}, want: true},
+		{name: "with cache metadata", event: &session.Event{
+			LLMResponse: model.LLMResponse{CacheMetadata: &model.CacheMetadata{Fingerprint: "abc"}},
 		}, want: true},
 	}
 	for _, tc := range tests {

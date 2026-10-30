@@ -80,6 +80,17 @@ type Config struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// ContextCache enables explicit context caching for the model requests of
+	// every LLM agent this runner drives, so the system instruction, tools and
+	// stable conversation prefix are not resent in full on every turn. Nil, the
+	// default, disables it. It does not apply to [Runner.RunLive].
+	//
+	// See [model.ContextCacheConfig] for when a cache is created and reused,
+	// and which models and session services support it.
+	//
+	// optional
+	ContextCache *model.ContextCacheConfig
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -141,6 +152,17 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 
+	if err := cfg.ContextCache.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid ContextCache: %w", err)
+	}
+	var contextCache *model.ContextCacheConfig
+	if cfg.ContextCache != nil {
+		// A copy, so a later change to the caller's config cannot reach
+		// invocations already running.
+		cacheCopy := *cfg.ContextCache
+		contextCache = &cacheCopy
+	}
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -151,6 +173,7 @@ func New(cfg Config) (*Runner, error) {
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
+		contextCache:      contextCache,
 	}, nil
 }
 
@@ -241,6 +264,10 @@ type Runner struct {
 	// validated copy of Config.Compaction with the summarizer
 	// resolved.
 	compactionConfig *compaction.Config
+
+	// contextCache is nil when context caching is disabled. Otherwise it is
+	// a validated copy of Config.ContextCache.
+	contextCache *model.ContextCacheConfig
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -648,6 +675,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+		ctx = llminternal.WithContextCacheConfig(ctx, r.contextCache)
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and

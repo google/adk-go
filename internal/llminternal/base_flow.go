@@ -96,6 +96,10 @@ var (
 		// appends is reflected in the history assembled for this very request.
 		CompactionRequestProcessor,
 		ContentsRequestProcessor,
+		// The same position as in adk-python's single flow. The model fingerprints
+		// the finished request when it is called, so processors after this one
+		// still count towards the cached prefix.
+		ContextCacheRequestProcessor,
 		// Some implementations of NL Planning mark planning contents as thoughts in the post processor.
 		// Since these need to be unmarked, NL Planning should be after contentsRequestProcessor.
 		nlPlanningRequestProcessor,
@@ -1057,6 +1061,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 
 			if callbackResp != nil {
+				callbackResp = keepCacheMetadata(callbackResp, resp.LLMResponse)
 				resp := &responseWithEventID{
 					LLMResponse: callbackResp,
 					eventID:     resp.eventID,
@@ -1110,6 +1115,21 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			}
 		}
 	})
+}
+
+// keepCacheMetadata returns replacement carrying the context cache state of
+// the model's response, so that a callback rewriting the response does not
+// drop it. Without it the session keeps naming the cache the request replaced,
+// which the model has already deleted. A replacement that sets its own state
+// is returned as it is, and so is one when the model's response has none. The
+// replacement is copied rather than changed, since the callback may hold it.
+func keepCacheMetadata(replacement, original *model.LLMResponse) *model.LLMResponse {
+	if replacement.CacheMetadata != nil || original == nil || original.CacheMetadata == nil {
+		return replacement
+	}
+	out := *replacement
+	out.CacheMetadata = original.CacheMetadata
+	return &out
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {

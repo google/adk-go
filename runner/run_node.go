@@ -81,6 +81,7 @@ func (r *Runner) runNode(
 	// processor a different instance from the one this function reads, so the
 	// "already compacted" hand-off between the two strategies never arrived.
 	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+	ctx = llminternal.WithContextCacheConfig(ctx, r.contextCache)
 
 	invocationFailed := false
 	emit := yield
