@@ -26,6 +26,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool/authconsent"
 )
 
 // HasSlidingWindow reports whether sliding-window compaction is enabled.
@@ -354,12 +355,26 @@ func copyPart(p *genai.Part) *genai.Part {
 			Name: fc.Name,
 			Args: copyAny(fc.Args).(map[string]any),
 		}
+		if fc.Name == authconsent.FunctionCallName {
+			// The consent request's args are the consent URL, which names the
+			// acting user, and the nonce that binds the credential. The main
+			// prompt never sees this event; a summarizer may know consent was
+			// asked for, but not that payload. Keep the id of the paused call.
+			out.FunctionCall.Args = map[string]any{
+				authconsent.FunctionCallIDArg: fc.Args[authconsent.FunctionCallIDArg],
+			}
+		}
 	}
 	if fr := p.FunctionResponse; fr != nil {
 		out.FunctionResponse = &genai.FunctionResponse{
 			ID:       fr.ID,
 			Name:     fr.Name,
 			Response: copyAny(fr.Response).(map[string]any),
+		}
+		if fr.Name == authconsent.FunctionCallName {
+			// The client's reply carries the callback URL with the authorization
+			// code. Nothing in it belongs in a model prompt.
+			out.FunctionResponse.Response = map[string]any{}
 		}
 	}
 	// Of these four, only Blob.Data holds a reference; every other member is a

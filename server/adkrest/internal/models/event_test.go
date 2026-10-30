@@ -15,6 +15,7 @@
 package models_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -40,6 +42,9 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		Actions: session.EventActions{
 			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
 				"call-1": {Hint: "please confirm"},
+			},
+			RequestedCredentials: map[string]authconsent.AuthConfig{
+				"call-2": authconsent.OAuth2Consent("https://consent.example/auth", "n", "key-1"),
 			},
 		},
 	}
@@ -60,6 +65,20 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	}
 	if got, ok := back.Actions.RequestedToolConfirmations["call-1"]; !ok || got.Hint != "please confirm" {
 		t.Errorf("RequestedToolConfirmations = %+v, want call-1 hint", back.Actions.RequestedToolConfirmations)
+	}
+	// A pending consent request that does not survive the REST round-trip strands
+	// the run: the client is told to collect consent for a call ADK no longer
+	// knows is waiting on one.
+	got, ok := back.Actions.RequestedCredentials["call-2"]
+	if !ok {
+		t.Fatalf("RequestedCredentials = %+v, want call-2", back.Actions.RequestedCredentials)
+	}
+	if got.CredentialKey != "key-1" {
+		t.Errorf("RequestedCredentials[call-2].CredentialKey = %q, want %q", got.CredentialKey, "key-1")
+	}
+	if got.ExchangedAuthCredential == nil || got.ExchangedAuthCredential.OAuth2 == nil ||
+		got.ExchangedAuthCredential.OAuth2.AuthURI != "https://consent.example/auth" {
+		t.Errorf("RequestedCredentials[call-2] = %+v, want the consent URL preserved", got)
 	}
 }
 
@@ -94,5 +113,37 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
 		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
+	}
+}
+
+// TestRequestedCredentialsRESTKey pins the consent request's key on the REST
+// event model, which an ADK client reads to find a pending consent. It is
+// adk-python's requested_auth_configs and must not drift from the session
+// event's key.
+func TestRequestedCredentialsRESTKey(t *testing.T) {
+	ev := &session.Event{ID: "e1", Author: "agent"}
+	ev.Actions.RequestedCredentials = map[string]authconsent.AuthConfig{
+		"call-1": authconsent.OAuth2Consent("https://consent.example/auth", "n0nce", "key-1"),
+	}
+	b, err := json.Marshal(models.FromSessionEvent(*ev))
+	if err != nil {
+		t.Fatalf("Marshal() failed: %v", err)
+	}
+	var m struct {
+		Actions struct {
+			RequestedAuthConfigs map[string]struct {
+				ExchangedAuthCredential struct {
+					OAuth2 struct {
+						AuthURI string `json:"authUri"`
+					} `json:"oauth2"`
+				} `json:"exchangedAuthCredential"`
+			} `json:"requestedAuthConfigs"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	if got := m.Actions.RequestedAuthConfigs["call-1"].ExchangedAuthCredential.OAuth2.AuthURI; got != "https://consent.example/auth" {
+		t.Errorf("actions.requestedAuthConfigs.call-1.exchangedAuthCredential.oauth2.authUri = %q, want the consent URL; raw: %s", got, b)
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -282,4 +283,25 @@ func TestCallbackContextWrapper_NoLogForSupportedMethods(t *testing.T) {
 			t.Errorf("State() unexpectedly emitted log output: %q", output)
 		}
 	})
+}
+
+// TestCallbackContextWrapper_CredentialMethods pins the credential half of the
+// unified context on a real callback context, which is what a callback
+// receives: there is no tool call to pause, so RequestCredential refuses and
+// AuthResponse is nil. Neither logs, unlike the older tool-only methods above.
+func TestCallbackContextWrapper_CredentialMethods(t *testing.T) {
+	cc := newTestCallbackContext(t)
+	if got := cc.AuthResponse(); got != nil {
+		t.Errorf("AuthResponse() = %v, want nil", got)
+	}
+	err := cc.RequestCredential(authconsent.OAuth2Consent("https://consent.example/auth", "n", "k"))
+	if err == nil {
+		t.Fatal("RequestCredential() error = nil, want non-nil: a callback has no tool call to pause")
+	}
+	if !strings.Contains(err.Error(), "not supported") {
+		t.Errorf("RequestCredential() error = %q, want it to say the call is not supported here", err)
+	}
+	if actions := cc.Actions(); actions != nil && len(actions.RequestedCredentials) != 0 {
+		t.Errorf("RequestCredential() recorded %v on a callback context", actions.RequestedCredentials)
+	}
 }

@@ -55,12 +55,34 @@ func (m *MockCallbackContext) ToolConfirmation() *toolconfirmation.ToolConfirmat
 func (m *MockCallbackContext) RequestConfirmation(hint string, payload any) error {
 	return fmt.Errorf("RequestConfirmation() is not supported for MockCallbackContext")
 }
+func (m *MockCallbackContext) AuthResponse() *authconsent.AuthConfig { return nil }
+func (m *MockCallbackContext) RequestCredential(cfg authconsent.AuthConfig) error {
+	return fmt.Errorf("RequestCredential() is not supported for MockCallbackContext")
+}
 func (m *MockCallbackContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return nil, fmt.Errorf("SearchMemory() is not supported for MockCallbackContext")
 }
 
 var _ agent.Context = (*MockCallbackContext)(nil)
 ```
+
+### Mocks update required for the interactive OAuth consent round-trip
+
+`agent.Context` gained two more methods for the consent round-trip
+(`adk_request_credential`), the credential twins of `ToolConfirmation` and
+`RequestConfirmation`:
+
+```go
+func (m *MockCallbackContext) AuthResponse() *authconsent.AuthConfig { return nil }
+func (m *MockCallbackContext) RequestCredential(cfg authconsent.AuthConfig) error {
+	return fmt.Errorf("RequestCredential() is not supported for MockCallbackContext")
+}
+```
+
+They are included in the #945 snippet above, and `authconsent` is
+`google.golang.org/adk/v2/tool/authconsent`. A mock that already carried the
+#945 methods needs these two added. Embedders of `agent.ContextMock` or
+`agent.StrictContextMock` are unaffected.
 
 #### Alternative: embed `agent.StrictContextMock`
 

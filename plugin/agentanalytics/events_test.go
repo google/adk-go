@@ -469,7 +469,11 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 			t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 		}
 
-		wantScrubbedArgs := `{"tool_id":"call-cred","tool":"adk_request_credential","args":{"auth_scheme":"oauth2","access_token":"[REDACTED]","auth_code":"[REDACTED]","code":"raw-oauth-code-secret","code_verifier":"[REDACTED]","api_key_string":"[REDACTED]","api_key_secret":"[REDACTED]","redirect_uri":"https://app.example.com/cb?code=uri-callback-code-secret&state=pub","authConfig":{"exchangedAuthCredential":{"oauth2":{"accessToken":"[REDACTED]","refreshToken":"[REDACTED]","clientSecret":"[REDACTED]","authCode":"[REDACTED]","codeVerifier":"[REDACTED]","apiKeyString":"[REDACTED]","apiKeySecret":"[REDACTED]","clientId":"public-client-id"}}}}}`
+		// A consent request's args are dropped whole rather than scrubbed by
+		// key: the consent URL names the acting user and the raw authorization
+		// code and redirect URI above carry no key the scrubber knows. Only the
+		// id of the paused call is kept, and this fixture carries none.
+		wantScrubbedArgs := `{"tool_id":"call-cred","tool":"adk_request_credential","args":{}}`
 
 		credReq := onlyRowOfType(t, rows, EventHITLCredentialRequest)
 		checkJSON(t, "HITL_CREDENTIAL_REQUEST content", jsonObjectColumn(t, credReq, "content"), wantScrubbedArgs)
@@ -503,7 +507,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 
 		credCompleted := onlyRowOfType(t, rows, EventHITLCredentialCompleted)
 		checkJSON(t, "HITL_CREDENTIAL_REQUEST_COMPLETED content", jsonObjectColumn(t, credCompleted, "content"),
-			`{"tool_id":"call-cred","tool":"adk_request_credential","result":{"status":"granted","accessToken":"[REDACTED]","refreshToken":"[REDACTED]","api_key":"[REDACTED]","auth_code":"[REDACTED]","code":"granted-raw-code-secret","codeVerifier":"[REDACTED]","apiKeyString":"[REDACTED]","apiKeySecret":"[REDACTED]"}}`)
+			`{"tool_id":"call-cred","tool":"adk_request_credential","result":{}}`)
 
 		confirmCompleted := onlyRowOfType(t, rows, EventHITLConfirmationCompleted)
 		checkJSON(t, "HITL_CONFIRMATION_COMPLETED content", jsonObjectColumn(t, confirmCompleted, "content"),
@@ -516,7 +520,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 		checkJSONAt(t, jsonObjectColumn(t, resumedTool, "attributes"), `"call-pause"`, "adk", "function_call_id")
 	})
 
-	t.Run("HITL credential scrubbing redacts typed maps, struct slices, and cyclic payloads while propagating is_truncated", func(t *testing.T) {
+	t.Run("HITL request scrubbing redacts typed maps, struct slices, and cyclic payloads while propagating is_truncated", func(t *testing.T) {
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.MaxContentLen = 20
 		})
@@ -540,7 +544,10 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 		}
 		cyclicResp["self"] = cyclicResp
 
-		// 1. Long-running credential request with typed map, typed struct slice, and cyclic map.
+		// The confirmation request is the vehicle here: a consent request's payload
+		// is dropped whole (see TestConsentRoundTripIsRedacted), so it cannot
+		// exercise the scrubber.
+		// 1. Long-running confirmation request with typed map, typed struct slice, and cyclic map.
 		errs.add(p.OnEventCallback()(mCtx, &session.Event{
 			ID:                 "ev-cred-typed-1",
 			Author:             "test-agent",
@@ -551,7 +558,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 					Parts: []*genai.Part{
 						{FunctionCall: &genai.FunctionCall{
 							ID:   "call-cred-typed",
-							Name: hitlCredentialFunctionCallName,
+							Name: toolconfirmation.FunctionCallName,
 							Args: map[string]any{
 								"typedMap": map[string]string{
 									"accessToken": "typed-map-secret",
@@ -582,14 +589,14 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 					Parts: []*genai.Part{
 						{FunctionCall: &genai.FunctionCall{
 							ID:   "call-cred-unmatched",
-							Name: hitlCredentialFunctionCallName,
+							Name: toolconfirmation.FunctionCallName,
 							Args: map[string]any{
 								"cyclic": cyclicArgs,
 							},
 						}},
 						{FunctionResponse: &genai.FunctionResponse{
 							ID:   "call-cred-unmatched",
-							Name: hitlCredentialFunctionCallName,
+							Name: toolconfirmation.FunctionCallName,
 							Response: map[string]any{
 								"tokens": []credTokenStruct{
 									{AccessToken: "resp-struct-secret", ClientID: "pub-resp"},
@@ -608,7 +615,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 			Parts: []*genai.Part{
 				{FunctionResponse: &genai.FunctionResponse{
 					ID:   "call-cred-typed",
-					Name: hitlCredentialFunctionCallName,
+					Name: toolconfirmation.FunctionCallName,
 					Response: map[string]any{
 						"accessToken": "user-msg-access-token-secret",
 						"typedMap":    map[string]string{"apiKey": "user-msg-api-key-secret"},
@@ -623,12 +630,12 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 
 		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
 		wantTypes := []string{
-			EventHITLCredentialRequest,
+			EventHITLConfirmationRequest,
 			EventToolPaused,
-			EventHITLCredentialRequest,
-			EventHITLCredentialCompleted,
+			EventHITLConfirmationRequest,
+			EventHITLConfirmationCompleted,
 			EventUserMessageReceived,
-			EventHITLCredentialCompleted,
+			EventHITLConfirmationCompleted,
 			EventInvocationCompleted,
 		}
 		if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
@@ -668,13 +675,13 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 			}
 		}
 
-		reqRows := rowsOfType(rows, EventHITLCredentialRequest)
+		reqRows := rowsOfType(rows, EventHITLConfirmationRequest)
 		reqContent := jsonObjectColumn(t, reqRows[0], "content")
 		checkJSONAt(t, reqContent, `{"accessToken":"[REDACTED]","clientId":"public-id"}`, "args", "typedMap")
 		checkJSONAt(t, reqContent, `[{"accessToken":"[REDACTED]","refreshToken":"[REDACTED]","clientId":"pub"}]`, "args", "tokens")
 		checkJSONAt(t, reqContent, `"[CIRCULAR_REFERENCE]"`, "args", "cyclic", "oauth2")
 
-		completedRows := rowsOfType(rows, EventHITLCredentialCompleted)
+		completedRows := rowsOfType(rows, EventHITLConfirmationCompleted)
 		userMsgCompletedContent := jsonObjectColumn(t, completedRows[1], "content")
 		checkJSONAt(t, userMsgCompletedContent, `"[REDACTED]"`, "result", "accessToken")
 		checkJSONAt(t, userMsgCompletedContent, `{"apiKey":"[REDACTED]"}`, "result", "typedMap")

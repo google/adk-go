@@ -16,10 +16,12 @@ package compactioninternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +31,10 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool/authconsent"
 )
 
 // staticSession is a minimal session.Session over a fixed event list, so the
@@ -549,5 +553,45 @@ func TestSnapshotCarriesAttachmentPayloads(t *testing.T) {
 
 	if diff := cmp.Diff(part, snap[0].LLMResponse.Content.Parts[0]); diff != "" {
 		t.Errorf("snapshot dropped attachment content (-want +got):\n%s", diff)
+	}
+}
+
+// TestSnapshotRedactsConsentTraffic pins that the consent round-trip's payload
+// never reaches a summarizer. The adk_request_credential call carries the
+// consent URL (with the user's login hint) and the nonce, and the client's
+// reply carries the callback URL with the authorization code. The main prompt
+// filters these events out; the summarizer keeps them, since a transcript
+// should still show that consent was asked for, but with the payload removed.
+func TestSnapshotRedactsConsentTraffic(t *testing.T) {
+	args, err := authconsent.WireArgs("call-1", authconsent.OAuth2Consent(
+		"https://consent.example/auth?login_hint=someone%40example.com", "s3cr3t-nonce", "cred-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consentCall := &session.Event{Author: "agent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "cc-1", Name: authconsent.FunctionCallName, Args: args},
+	}}}}}
+	reply := &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "cc-1", Name: authconsent.FunctionCallName, Response: map[string]any{
+			"exchangedAuthCredential": map[string]any{"oauth2": map[string]any{"authResponseUri": "http://localhost/cb?code=AUTHCODE123&state=st"}},
+		}},
+	}}}}}
+
+	out := snapshotForSummarizer([]*session.Event{consentCall, reply})
+	dump, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leaked := range []string{"consent.example", "login_hint", "s3cr3t-nonce", "AUTHCODE123", "cred-key"} {
+		if strings.Contains(string(dump), leaked) {
+			t.Errorf("summarizer snapshot contains %q", leaked)
+		}
+	}
+	call := out[0].Content.Parts[0].FunctionCall
+	if call == nil || call.Name != authconsent.FunctionCallName || call.Args[authconsent.FunctionCallIDArg] != "call-1" {
+		t.Errorf("snapshot call = %+v, want the consent call kept with only its functionCallId", call)
+	}
+	if resp := out[1].Content.Parts[0].FunctionResponse; resp == nil || resp.Name != authconsent.FunctionCallName || len(resp.Response) != 0 {
+		t.Errorf("snapshot reply = %+v, want the reply kept with an empty payload", resp)
 	}
 }

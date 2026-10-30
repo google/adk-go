@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/authconsent"
 )
 
 func fullyPopulatedEvent() *session.Event {
@@ -476,5 +477,50 @@ func TestEventActionsJSONDeltaMapEncoding(t *testing.T) {
 					got.Actions.ArtifactDelta == nil, tt.actions.ArtifactDelta == nil)
 			}
 		})
+	}
+}
+
+// TestRequestedCredentialsJSONKeys pins the consent request's wire names on the
+// persisted event. The outer key is adk-python's requested_auth_configs and the
+// inner keys are its AuthConfig aliases; a reader on the other runtime matches
+// on them, so none of them is ours to rename.
+func TestRequestedCredentialsJSONKeys(t *testing.T) {
+	ev := &session.Event{ID: "e1", Author: "agent"}
+	ev.Actions.RequestedCredentials = map[string]authconsent.AuthConfig{
+		"call-1": authconsent.OAuth2Consent("https://consent.example/auth", "n0nce", "key-1"),
+	}
+	b, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("Marshal() failed: %v", err)
+	}
+	var m struct {
+		Actions struct {
+			RequestedAuthConfigs map[string]struct {
+				AuthScheme struct {
+					Type string `json:"type"`
+				} `json:"authScheme"`
+				CredentialKey           string `json:"credentialKey"`
+				ExchangedAuthCredential struct {
+					AuthType string `json:"authType"`
+					OAuth2   struct {
+						AuthURI string `json:"authUri"`
+						Nonce   string `json:"nonce"`
+					} `json:"oauth2"`
+				} `json:"exchangedAuthCredential"`
+			} `json:"requestedAuthConfigs"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	got, ok := m.Actions.RequestedAuthConfigs["call-1"]
+	if !ok {
+		t.Fatalf("actions.requestedAuthConfigs lacks call-1: %s", b)
+	}
+	if got.AuthScheme.Type != "oauth2" || got.CredentialKey != "key-1" ||
+		got.ExchangedAuthCredential.AuthType != "oauth2" ||
+		got.ExchangedAuthCredential.OAuth2.AuthURI != "https://consent.example/auth" ||
+		got.ExchangedAuthCredential.OAuth2.Nonce != "n0nce" {
+		t.Errorf("requestedAuthConfigs.call-1 = %+v, want the adk-python aliases carrying the request; raw: %s", got, b)
 	}
 }

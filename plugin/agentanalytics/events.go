@@ -49,8 +49,45 @@ const (
 )
 
 const (
+	// hitlCredentialFunctionCallName is the function call ADK emits to ask a
+	// client to collect interactive OAuth consent (tool/authconsent's
+	// FunctionCallName, adk-python's REQUEST_EUC_FUNCTION_CALL_NAME).
 	hitlCredentialFunctionCallName = "adk_request_credential"
+	// consentPausedCallArg is the one argument of a consent request that a row
+	// keeps: the id of the tool call the consent pauses.
+	consentPausedCallArg = "functionCallId"
 )
+
+// hitlRequestArgs returns the args a HITL request row records. A consent
+// request's args carry the consent URL, which names the acting user, and the
+// nonce that binds the credential. The key-based redaction does not know those
+// names, and whether they are logged is not an operator-tunable choice, so the
+// round-trip is recognized by its function name and only the id of the paused
+// call survives. Other HITL requests are recorded whole.
+func hitlRequestArgs(name string, args map[string]any) map[string]any {
+	if name != hitlCredentialFunctionCallName {
+		return nonNilMap(args)
+	}
+	return consentRequestArgs(args)
+}
+
+func consentRequestArgs(args map[string]any) map[string]any {
+	out := map[string]any{}
+	if id, ok := args[consentPausedCallArg]; ok {
+		out[consentPausedCallArg] = id
+	}
+	return out
+}
+
+// hitlCompletedResult returns the result a HITL completed row records. The
+// client's reply to a consent request carries the callback URL, authorization
+// code included, and is recorded empty.
+func hitlCompletedResult(name string, result map[string]any) map[string]any {
+	if name != hitlCredentialFunctionCallName {
+		return nonNilMap(result)
+	}
+	return map[string]any{}
+}
 
 type hitlToolMapping struct {
 	requestEvent   string
@@ -933,7 +970,7 @@ func (p *analyticsPlugin) emitUserMessageSignalEvents(ctx agent.InvocationContex
 				d.content = map[string]any{
 					"tool_id": fr.ID,
 					"tool":    fr.Name,
-					"result":  nonNilMap(fr.Response),
+					"result":  hitlCompletedResult(fr.Name, fr.Response),
 				}
 			})
 			continue
@@ -1153,7 +1190,7 @@ func (p *analyticsPlugin) emitHITLAndPauseSignals(ctx agent.InvocationContext, i
 			fc := calls[matchIdx]
 			resolvedID := cmp.Or(toolID, fc.ID)
 			pauseKind := "tool"
-			args, argsTrunc := nonNilMap(fc.Args), false
+			args, argsTrunc := hitlRequestArgs(fc.Name, fc.Args), false
 			if hitl, ok := hitlTools[fc.Name]; ok {
 				pauseKind = hitl.pauseKind
 				if fc.Name == workflow.WorkflowInputFunctionCallName {
@@ -1212,7 +1249,7 @@ func (p *analyticsPlugin) emitHITLAndPauseSignals(ctx agent.InvocationContext, i
 		}
 		fcCopy := fc
 		p.logSessionEvent(ctx, id, hitl.requestEvent, span, func(d *eventData) {
-			args, argsTrunc := nonNilMap(fcCopy.Args), false
+			args, argsTrunc := hitlRequestArgs(fcCopy.Name, fcCopy.Args), false
 			applyEventBase(d)
 			d.functionCallID = fcCopy.ID
 			d.contentTruncated = argsTrunc
@@ -1248,7 +1285,7 @@ func (p *analyticsPlugin) emitHITLAndPauseSignals(ctx agent.InvocationContext, i
 				continue
 			}
 			p.logSessionEvent(ctx, id, hitl.completedEvent, span, func(d *eventData) {
-				result, resTrunc := nonNilMap(fr.Response), false
+				result, resTrunc := hitlCompletedResult(fr.Name, fr.Response), false
 				applyEventBase(d)
 				d.functionCallID = fr.ID
 				d.contentTruncated = resTrunc

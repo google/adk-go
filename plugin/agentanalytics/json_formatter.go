@@ -192,7 +192,7 @@ func (c *partsCollector) addPart(entry map[string]any, part *genai.Part, content
 		name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionCall.Name), c.opts.maxLen, c.opts.redact)
 		attrs, attrTrunc := formatPartAttributes(map[string]any{
 			"function_name": part.FunctionCall.Name,
-			"function_call": part.FunctionCall,
+			"function_call": withoutConsentPayload(part.FunctionCall),
 		}, c.opts.maxLen, c.opts.redact)
 		entry["mime_type"] = "application/json"
 		entry["text"] = "Function: " + name
@@ -202,7 +202,7 @@ func (c *partsCollector) addPart(entry map[string]any, part *genai.Part, content
 	case part.FunctionResponse != nil:
 		name, nameTrunc := sanitizeAndTruncateText(orUnknown(part.FunctionResponse.Name), c.opts.maxLen, c.opts.redact)
 		attrs, attrTrunc := formatPartAttributes(map[string]any{
-			"function_response": normalizeFunctionResponse(part.FunctionResponse),
+			"function_response": normalizeFunctionResponse(withoutConsentReply(part.FunctionResponse)),
 		}, c.opts.maxLen, c.opts.redact)
 		entry["mime_type"] = "application/json"
 		entry["text"] = "Function response: " + name
@@ -1185,4 +1185,27 @@ func truncateString(s string, maxLength int) (string, bool) {
 		return s, false
 	}
 	return string(r[:maxLength]) + truncationSuffix, true
+}
+
+// withoutConsentPayload returns fc with the consent payload removed when fc is
+// an interactive OAuth consent request (see hitlCredentialFunctionCallName).
+// Any other call is returned as is.
+func withoutConsentPayload(fc *genai.FunctionCall) *genai.FunctionCall {
+	if fc == nil || fc.Name != hitlCredentialFunctionCallName {
+		return fc
+	}
+	out := *fc
+	out.Args = consentRequestArgs(fc.Args)
+	return &out
+}
+
+// withoutConsentReply returns fr with its payload removed when fr answers a
+// consent request. Any other response is returned as is.
+func withoutConsentReply(fr *genai.FunctionResponse) *genai.FunctionResponse {
+	if fr == nil || fr.Name != hitlCredentialFunctionCallName {
+		return fr
+	}
+	out := *fr
+	out.Response = nil
+	return &out
 }

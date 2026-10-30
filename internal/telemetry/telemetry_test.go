@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -31,6 +32,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/tool/authconsent"
 
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
@@ -657,6 +660,61 @@ func attributesToMap(attrs []attribute.KeyValue) map[attribute.Key]string {
 		m[attr.Key] = attr.Value.Emit()
 	}
 	return m
+}
+
+// TestTraceMergedToolCallsResultOmitsConsentRequests pins that a pending consent
+// request does not reach the merged tool span under either telemetry schema. The
+// legacy schema records the whole merged event in gcp.vertex.agent.tool_response,
+// so a parallel batch in which one tool asks for consent would otherwise carry
+// that tool's consent URL and nonce there; the default schema records no event
+// body at all, and the test pins that no attribute carries it.
+func TestTraceMergedToolCallsResultOmitsConsentRequests(t *testing.T) {
+	const uri = "https://consent.example/auth?login_hint=someone%40example.com&state=s"
+	leaks := []string{"consent.example", "login_hint", "secret-nonce", "requestedAuthConfigs"}
+	for _, tc := range []struct {
+		schema       string
+		wantResponse bool
+	}{
+		{schema: otelSemconv136, wantResponse: true},
+		{schema: "", wantResponse: false},
+	} {
+		t.Run("schema="+tc.schema, func(t *testing.T) {
+			setEnvForTesting(t, map[string]string{adkTelemetrySchemaVersionOptIn: tc.schema})
+			exporter := setupTestTracer(t)
+			ev := &session.Event{ID: "merged-1"}
+			ev.Actions.StateDelta = map[string]any{"visible": "kept"}
+			ev.Actions.RequestedCredentials = map[string]authconsent.AuthConfig{
+				"call-2": authconsent.OAuth2Consent(uri, "secret-nonce", "k"),
+			}
+
+			_, span := StartTrace(t.Context(), "execute_tool (merged)")
+			TraceMergedToolCallsResult(span, ev, nil)
+			span.End()
+
+			spans := exporter.GetSpans()
+			if len(spans) != 1 {
+				t.Fatalf("got %d spans, want 1", len(spans))
+			}
+			attrs := attributesToMap(spans[0].Attributes)
+			for key, val := range attrs {
+				for _, leaked := range leaks {
+					if strings.Contains(val, leaked) {
+						t.Errorf("span attribute %s contains %q; a consent URL must not reach a span", key, leaked)
+					}
+				}
+			}
+			got, ok := attrs[gcpVertexAgentToolResponseName]
+			if ok != tc.wantResponse {
+				t.Fatalf("tool_response attribute present = %v, want %v under this schema", ok, tc.wantResponse)
+			}
+			if tc.wantResponse && !strings.Contains(got, "kept") {
+				t.Errorf("merged span response attribute = %q, want the rest of the event still recorded", got)
+			}
+			if len(ev.Actions.RequestedCredentials) != 1 {
+				t.Error("tracing cleared RequestedCredentials on the caller's event; the flow still needs it to emit the consent call")
+			}
+		})
+	}
 }
 
 func TestErrorType(t *testing.T) {

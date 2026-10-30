@@ -16,6 +16,8 @@
 package mcptoolset
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,6 +98,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 		metadataProvider:            cfg.MetadataProvider,
+		auth:                        cfg.Auth,
 	}, nil
 }
 
@@ -149,9 +152,52 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 	}
 	c.Transport = &trackingTransport{base: c.Transport}
 	if provider != nil {
-		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+		c.Transport = &auth.Transport{Provider: consentTolerantProvider{inner: provider}, Base: c.Transport}
 	}
 	return &c
+}
+
+// consentTolerantProvider is what the MCP transport sees. The transport also
+// carries initialize and tools/list, which run before any tool call and have
+// nowhere to pause, so a provider that still needs interactive consent is
+// treated there as "no credential yet": the request goes out unauthenticated
+// and the tool's own preflight (consentPreflight) raises the consent on the
+// first call. Without this, Tools() failed on the client side for every server
+// and the round-trip was unreachable for a user who had not consented.
+type consentTolerantProvider struct {
+	inner auth.CredentialProvider
+}
+
+// noCredential is the credential applied while consent is pending: it sets no
+// header, so a server that authenticates listing answers with its own 401.
+type noCredential struct{}
+
+func (noCredential) Apply(http.Header) error { return nil }
+
+func (p consentTolerantProvider) Credential(ctx context.Context) (auth.Credential, error) {
+	cred, err := p.inner.Credential(ctx)
+	if err == nil {
+		return cred, nil
+	}
+	var consent *auth.ConsentRequiredError
+	if errors.As(err, &consent) && consent != nil {
+		return noCredential{}, nil
+	}
+	return nil, err
+}
+
+// Refresh forwards to the inner provider when it can refresh. A 401 on a
+// request that went out with noCredential has nothing to refresh: the user has
+// not consented, so the rejection stands.
+func (p consentTolerantProvider) Refresh(ctx context.Context, rejected auth.Credential) (auth.Credential, error) {
+	if _, pending := rejected.(noCredential); pending {
+		return nil, errors.New("mcptoolset: no credential to refresh while consent is pending")
+	}
+	rp, ok := p.inner.(auth.RefreshingProvider)
+	if !ok {
+		return nil, errors.New("mcptoolset: provider does not refresh")
+	}
+	return rp.Refresh(ctx, rejected)
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -199,6 +245,22 @@ type Config struct {
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
 	// would fight over the same request.
+	//
+	// A provider that needs interactive 3-legged consent (one that can return
+	// auth.ConsentRequiredError) raises it from the tool call, which can pause
+	// the run to ask the user. Tool listing runs before any tool call and cannot
+	// pause, so while consent is pending the listing requests go out without a
+	// credential rather than failing on the client side. A server that itself
+	// authenticates listing then answers 401 and Tools fails: such a server
+	// needs a credential that resolves without consent — non-interactive, or
+	// already consented and cached.
+	//
+	// An interactive provider cannot be combined with a confirmation on the
+	// same call: two human-in-the-loop round-trips on one call are not
+	// supported, and a call that needs both fails with an error saying so
+	// rather than pausing on a prompt no client receives. With
+	// RequireConfirmationProvider this is decided per call, so a provider that
+	// gates only some tools leaves the others free to pause for consent.
 	Auth auth.CredentialProvider
 
 	// Deprecated: use tool.FilterToolset instead.
@@ -242,6 +304,7 @@ type set struct {
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
 	metadataProvider            MetadataProvider
+	auth                        auth.CredentialProvider
 }
 
 func (s *set) Close() error {
@@ -271,7 +334,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
+		t, err := convertTool(mcpTool, s)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}

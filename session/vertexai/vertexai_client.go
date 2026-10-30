@@ -378,7 +378,11 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		// raw_event nothing about it reaches the backend. On reload the session
 		// would hold neither the summary nor any record that compaction ran,
 		// and the same range would be summarized again on every trigger.
-		event.Actions.Compaction != nil
+		event.Actions.Compaction != nil ||
+		// A pending human-in-the-loop request lives only on the actions too, and
+		// compaction reads it to keep the paused call open until it is answered.
+		len(event.Actions.RequestedCredentials) > 0 ||
+		len(event.Actions.RequestedToolConfirmations) > 0
 }
 
 // eventToRawEvent serializes a session.Event into a structpb.Struct for

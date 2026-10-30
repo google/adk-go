@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/authconsent"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -566,6 +567,12 @@ func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
 			},
 		},
 		{
+			name: "RequestedCredentials",
+			write: func(event *session.Event) {
+				event.Actions.RequestedCredentials["injected"] = authconsent.OAuth2Consent("https://consent.example/auth", "n", "k")
+			},
+		},
+		{
 			name: "StateDelta",
 			write: func(event *session.Event) {
 				event.Actions.StateDelta["injected"] = 1
@@ -626,6 +633,7 @@ func TestInMemoryService_AppendEvent_ConcurrentActionMapWrites(t *testing.T) {
 							StateDelta:                 delta,
 							ArtifactDelta:              map[string]int64{"a": int64(i)},
 							RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{"call": {}},
+							RequestedCredentials:       map[string]authconsent.AuthConfig{"call": authconsent.OAuth2Consent("https://consent.example/auth", "n", "k")},
 						},
 					}
 					if err := svc.AppendEvent(ctx, live, ev); err != nil {
@@ -762,5 +770,86 @@ func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *tes
 				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
 			}
 		})
+	}
+}
+
+// TestInMemoryService_AppendEvent_CopiesRequestedCredentials pins that the
+// stored record does not alias the caller's consent-request map.
+//
+// A pending consent request is what tells the resume path which tool call is
+// waiting, and the caller keeps a live reference to the event it appended. If
+// the stored copy aliased that map, a later mutation would silently retarget or
+// erase a consent the user has already been shown.
+func TestInMemoryService_AppendEvent_CopiesRequestedCredentials(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+
+	mine := map[string]authconsent.AuthConfig{
+		"call-1": authconsent.OAuth2Consent("https://consent.example/auth", "n", "key-1"),
+	}
+	event := &session.Event{ID: "c1", Author: "user"}
+	event.Actions.RequestedCredentials = mine
+	if err := service.AppendEvent(ctx, sess, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// Rewrite the map through the reference the caller still holds.
+	delete(mine, "call-1")
+	mine["call-2"] = authconsent.OAuth2Consent("https://attacker.example/auth", "", "other-key")
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stored := got.Session.Events().At(0).Actions.RequestedCredentials
+	if len(stored) != 1 {
+		t.Fatalf("stored RequestedCredentials = %v, want exactly the one appended", stored)
+	}
+	cfg, ok := stored["call-1"]
+	if !ok {
+		t.Fatalf("stored RequestedCredentials = %v, want call-1: the caller's delete reached the stored record", stored)
+	}
+	if cfg.CredentialKey != "key-1" {
+		t.Errorf("stored CredentialKey = %q, want %q", cfg.CredentialKey, "key-1")
+	}
+}
+
+// TestInMemoryService_AppendEvent_DeepCopiesRequestedCredentials is the nested
+// half of the copy above. AuthConfig carries pointers, so a map clone alone left
+// the stored consent URL and nonce writable through the config the caller kept.
+func TestInMemoryService_AppendEvent_DeepCopiesRequestedCredentials(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess := createResp.Session
+
+	cfg := authconsent.OAuth2Consent("https://consent.example/auth", "n0nce", "key-1")
+	event := &session.Event{ID: "c1", Author: "user"}
+	event.Actions.RequestedCredentials = map[string]authconsent.AuthConfig{"call-1": cfg}
+	if err := service.AppendEvent(ctx, sess, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	// Rewrite through the nested pointers the caller still holds.
+	cfg.ExchangedAuthCredential.OAuth2.AuthURI = "https://attacker.example/auth"
+	cfg.ExchangedAuthCredential.OAuth2.Nonce = "rewritten"
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: sess.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stored := got.Session.Events().At(0).Actions.RequestedCredentials["call-1"]
+	if o := stored.ExchangedAuthCredential.OAuth2; o.AuthURI != "https://consent.example/auth" || o.Nonce != "n0nce" {
+		t.Errorf("stored consent = %+v, want the appended URL and nonce: the caller's nested write reached the store", o)
 	}
 }
