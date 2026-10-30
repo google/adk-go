@@ -43,47 +43,60 @@ func TestConvertForeignEvent_RetainsPayloadParts(t *testing.T) {
 		{"audio transcription", &genai.Part{AudioTranscription: &genai.Transcription{Text: "spoken answer"}}},
 	} {
 		for _, signed := range []bool{false, true} {
-			name := "unsigned " + tc.name
-			if signed {
-				name = "signed " + tc.name
-			}
-			t.Run(name, func(t *testing.T) {
-				part := *tc.part
-				part.VideoMetadata = &genai.VideoMetadata{EndOffset: time.Second}
-				part.MediaResolution = &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}
-				part.MediaProcessing = genai.MediaProcessingStatic
-				part.SpeechMetadata = &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}
+			for _, metadata := range []bool{false, true} {
+				name := "unsigned " + tc.name
 				if signed {
-					part.ThoughtSignature = []byte{3, 4}
+					name = "signed " + tc.name
 				}
-				event := &session.Event{
-					Author: "otherAgent",
-					LLMResponse: model.LLMResponse{Content: &genai.Content{
-						Role: "model", Parts: []*genai.Part{
-							{}, {ThoughtSignature: []byte{1, 2}}, &part,
-						},
-					}},
+				if metadata {
+					name += " with metadata"
 				}
-				before, err := json.Marshal(event)
-				if err != nil {
-					t.Fatal("could not snapshot the stored event")
-				}
-				got := llminternal.ConvertForeignEvent(event)
-				if got == nil || got.Content == nil {
-					t.Fatal("foreign payload was discarded")
-				}
-				want := []*genai.Part{{Text: "For context:"}, &part}
-				if !cmp.Equal(got.Content.Parts, want) {
-					t.Error("foreign conversion did not retain the payload and its attached metadata")
-				}
-				after, err := json.Marshal(event)
-				if err != nil {
-					t.Fatal("could not snapshot the stored event after conversion")
-				}
-				if !cmp.Equal(before, after) {
-					t.Error("foreign conversion modified the stored event")
-				}
-			})
+				t.Run(name, func(t *testing.T) {
+					part := *tc.part
+					if metadata {
+						part.VideoMetadata = &genai.VideoMetadata{EndOffset: time.Second}
+						part.MediaResolution = &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}
+						part.MediaProcessing = genai.MediaProcessingStatic
+						part.SpeechMetadata = &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}
+					}
+					if signed {
+						part.ThoughtSignature = []byte{3, 4}
+					}
+					event := &session.Event{
+						Author: "otherAgent",
+						LLMResponse: model.LLMResponse{Content: &genai.Content{
+							Role: "model", Parts: []*genai.Part{
+								{}, {ThoughtSignature: []byte{1, 2}},
+								{PartMetadata: map[string]any{"source": "test"}},
+								{VideoMetadata: &genai.VideoMetadata{EndOffset: time.Second}},
+								{MediaResolution: &genai.PartMediaResolution{Level: "MEDIA_RESOLUTION_HIGH"}},
+								{MediaProcessing: genai.MediaProcessingStatic},
+								{SpeechMetadata: &genai.SpeechMetadata{Speaker: "speaker", Style: "calm"}},
+								&part,
+							},
+						}},
+					}
+					before, err := json.Marshal(event)
+					if err != nil {
+						t.Fatal("could not snapshot the stored event")
+					}
+					got := llminternal.ConvertForeignEvent(event)
+					if got == nil || got.Content == nil {
+						t.Fatal("foreign payload was discarded")
+					}
+					want := []*genai.Part{{Text: "For context:"}, &part}
+					if !cmp.Equal(got.Content.Parts, want) {
+						t.Error("foreign conversion did not retain only the payload and its attached metadata")
+					}
+					after, err := json.Marshal(event)
+					if err != nil {
+						t.Fatal("could not snapshot the stored event after conversion")
+					}
+					if !cmp.Equal(before, after) {
+						t.Error("foreign conversion modified the stored event")
+					}
+				})
+			}
 		}
 	}
 }
