@@ -68,7 +68,7 @@ func (EnterpriseWebSearch) ProcessRequest(ctx agent.Context, req *model.LLMReque
 		return fmt.Errorf("cannot process: Enterprise Web Search tool is not supported for model %s", req.Model)
 	}
 	if isGemini1Model(req.Model) && len(req.Config.Tools) > 0 {
-		return errors.New("cannot process: Enterprise Web Search tool cannot be used with other tools in Gemini 1.x.")
+		return errors.New("cannot process: Enterprise Web Search tool cannot be used with other tools in Gemini 1.x")
 	}
 
 	req.Config.Tools = append(req.Config.Tools, &genai.Tool{
