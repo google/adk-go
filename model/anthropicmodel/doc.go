@@ -290,7 +290,11 @@
 //     synthetic tool declaration. Non-object root schemas are wrapped in a
 //     single-property object for `output_config.format` and unwrapped on the
 //     final response text (holding back wrapped partial text deltas during
-//     streaming).
+//     streaming). Keywords `output_config.format` does not accept, such as
+//     `minimum`, `maxLength`, `nullable` or `propertyOrdering`, are removed
+//     and appended to the schema's `description` as `{keyword: value}`, as
+//     Anthropic's SDK helpers do. Claude sees them as guidance but does not
+//     enforce them.
 //   - Strict `ThinkingLevel` rejection: Setting
 //     `ThinkingConfig.ThinkingLevel` returns an error wrapping
 //     [ErrInvalidConfig] naming `ThinkingLevel`, whereas `adk-python` logs a

@@ -3059,10 +3059,8 @@ func TestOutputSchemaAndStructuredOutput(t *testing.T) {
 							map[string]any{"$ref": "#/$defs/CityAlias"},
 							map[string]any{"$ref": "#/definitions/LegacyCity"},
 							map[string]any{"$ref": "#"},
+							map[string]any{"$ref": "#/items/anyOf/0"},
 						},
-					},
-					"additionalItems": map[string]any{
-						"$ref": "#/items",
 					},
 					"$defs": map[string]any{
 						"CityAlias": map[string]any{"type": "string"},
@@ -3095,14 +3093,10 @@ func TestOutputSchemaAndStructuredOutput(t *testing.T) {
 		if _, stillHasDefinitions := resultSchema["definitions"]; stillHasDefinitions {
 			t.Errorf("expected definitions removed from properties.result, got %+v", resultSchema)
 		}
-		addItems, _ := resultSchema["additionalItems"].(map[string]any)
-		if addItems["$ref"] != "#/properties/result/items" {
-			t.Errorf("additionalItems.$ref = %v, want \"#/properties/result/items\"", addItems["$ref"])
-		}
 		itemsMap, _ := resultSchema["items"].(map[string]any)
 		anyOfSlice, _ := itemsMap["anyOf"].([]any)
-		if len(anyOfSlice) != 4 {
-			t.Fatalf("len(anyOf) = %d, want 4", len(anyOfSlice))
+		if len(anyOfSlice) != 5 {
+			t.Fatalf("len(anyOf) = %d, want 5", len(anyOfSlice))
 		}
 		if gotRef := anyOfSlice[1].(map[string]any)["$ref"]; gotRef != "#/$defs/CityAlias" {
 			t.Errorf("anyOf[1].$ref = %v, want \"#/$defs/CityAlias\"", gotRef)
@@ -3112,6 +3106,9 @@ func TestOutputSchemaAndStructuredOutput(t *testing.T) {
 		}
 		if gotRef := anyOfSlice[3].(map[string]any)["$ref"]; gotRef != "#/properties/result" {
 			t.Errorf("anyOf[3].$ref = %v, want \"#/properties/result\"", gotRef)
+		}
+		if gotRef := anyOfSlice[4].(map[string]any)["$ref"]; gotRef != "#/properties/result/items/anyOf/0" {
+			t.Errorf("anyOf[4].$ref = %v, want \"#/properties/result/items/anyOf/0\"", gotRef)
 		}
 	})
 
@@ -3190,6 +3187,257 @@ func TestOutputSchemaAndStructuredOutput(t *testing.T) {
 			t.Errorf("array OutputSchema agent output = %q, want %q", got, `["Warsaw","Krakow"]`)
 		}
 	})
+}
+
+func TestOutputSchemaUnsupportedKeywordsMovedToDescription(t *testing.T) {
+	var lastBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		lastBody = nil
+		_ = json.Unmarshal(data, &lastBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_kw","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"{\"result\":[]}"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{
+		APIKey:  "test-key",
+		BaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		cfg  *genai.GenerateContentConfig
+		want string
+	}{
+		{
+			name: "genai_schema_constraints",
+			cfg: &genai.GenerateContentConfig{
+				ResponseSchema: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"label": {Type: genai.TypeString, Format: "enum", Enum: []string{"spam", "ham"}},
+						"note":  {Type: genai.TypeString, Nullable: genai.Ptr(true)},
+						"probability": {
+							Type:        genai.TypeNumber,
+							Description: "Confidence in the label.",
+							Minimum:     genai.Ptr(0.0),
+							Maximum:     genai.Ptr(1.0),
+						},
+						"tags": {
+							Type:     genai.TypeArray,
+							Items:    &genai.Schema{Type: genai.TypeString, MaxLength: genai.Ptr[int64](10)},
+							MinItems: genai.Ptr[int64](2),
+							MaxItems: genai.Ptr[int64](5),
+						},
+					},
+					PropertyOrdering: []string{"label", "probability"},
+					Required:         []string{"label", "probability"},
+				},
+			},
+			want: `{
+				"type": "object",
+				"properties": {
+					"label": {"type": "string", "enum": ["spam", "ham"], "description": "{format: enum}"},
+					"note": {"type": "string", "description": "{nullable: true}"},
+					"probability": {"type": "number", "description": "Confidence in the label.\n\n{maximum: 1, minimum: 0}"},
+					"tags": {
+						"type": "array",
+						"items": {"type": "string", "description": "{maxLength: 10}"},
+						"description": "{maxItems: 5, minItems: 2}"
+					}
+				},
+				"required": ["label", "probability"],
+				"additionalProperties": false,
+				"description": "{propertyOrdering: [\"label\",\"probability\"]}"
+			}`,
+		},
+		{
+			name: "supported_keywords_kept",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type":  "object",
+					"title": "Event",
+					"properties": map[string]any{
+						"when":      map[string]any{"type": "string", "format": "date-time"},
+						"code":      map[string]any{"type": "string", "pattern": "^[A-Z]{3}$", "default": "ABC"},
+						"kind":      map[string]any{"const": "meeting"},
+						"attendees": map[string]any{"type": "array", "items": map[string]any{"$ref": "#/$defs/Person"}, "minItems": 1},
+						"tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "minItems": 0},
+					},
+					"required": []any{"when"},
+					"$defs": map[string]any{
+						"Person": map[string]any{"type": "object", "properties": map[string]any{"name": map[string]any{"type": "string"}}},
+					},
+				},
+			},
+			want: `{
+				"type": "object",
+				"title": "Event",
+				"properties": {
+					"when": {"type": "string", "format": "date-time"},
+					"code": {"type": "string", "pattern": "^[A-Z]{3}$", "default": "ABC"},
+					"kind": {"const": "meeting"},
+					"attendees": {"type": "array", "items": {"$ref": "#/$defs/Person"}, "minItems": 1},
+					"tags": {"type": "array", "items": {"type": "string"}, "minItems": 0}
+				},
+				"required": ["when"],
+				"additionalProperties": false,
+				"$defs": {
+					"Person": {"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": false}
+				}
+			}`,
+		},
+		{
+			name: "supported_formats_kept",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"a": map[string]any{"type": "string", "format": "date-time"},
+						"b": map[string]any{"type": "string", "format": "time"},
+						"c": map[string]any{"type": "string", "format": "date"},
+						"d": map[string]any{"type": "string", "format": "duration"},
+						"e": map[string]any{"type": "string", "format": "email"},
+						"f": map[string]any{"type": "string", "format": "hostname"},
+						"g": map[string]any{"type": "string", "format": "uri"},
+						"h": map[string]any{"type": "string", "format": "ipv4"},
+						"i": map[string]any{"type": "string", "format": "ipv6"},
+						"j": map[string]any{"type": "string", "format": "uuid"},
+					},
+				},
+			},
+			want: `{
+				"type": "object",
+				"properties": {
+					"a": {"type": "string", "format": "date-time"},
+					"b": {"type": "string", "format": "time"},
+					"c": {"type": "string", "format": "date"},
+					"d": {"type": "string", "format": "duration"},
+					"e": {"type": "string", "format": "email"},
+					"f": {"type": "string", "format": "hostname"},
+					"g": {"type": "string", "format": "uri"},
+					"h": {"type": "string", "format": "ipv4"},
+					"i": {"type": "string", "format": "ipv6"},
+					"j": {"type": "string", "format": "uuid"}
+				},
+				"additionalProperties": false
+			}`,
+		},
+		{
+			name: "keyword_names_in_property_names_and_values",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"minimum": map[string]any{"type": "integer", "maximum": 3},
+						"pattern": map[string]any{
+							"type":       "object",
+							"properties": map[string]any{"maxLength": map[string]any{"type": "string"}},
+							"default":    map[string]any{"maxLength": "x"},
+						},
+					},
+				},
+			},
+			want: `{
+				"type": "object",
+				"properties": {
+					"minimum": {"type": "integer", "description": "{maximum: 3}"},
+					"pattern": {
+						"type": "object",
+						"properties": {"maxLength": {"type": "string"}},
+						"default": {"maxLength": "x"},
+						"additionalProperties": false
+					}
+				},
+				"additionalProperties": false
+			}`,
+		},
+		{
+			name: "every_subschema_position",
+			cfg: &genai.GenerateContentConfig{
+				ResponseJsonSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"a": map[string]any{"anyOf": []any{
+							map[string]any{"type": "integer", "multipleOf": 5},
+							map[string]any{"type": "string", "minLength": 1},
+						}},
+						"b": map[string]any{"oneOf": []any{map[string]any{"type": "number", "exclusiveMinimum": 0}}},
+						"c": map[string]any{"allOf": []any{map[string]any{"type": "string", "maxLength": 3}}},
+						"d": map[string]any{"type": "array", "items": []any{map[string]any{"type": "integer", "maximum": 9}}},
+						"e": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "integer", "minimum": 1}},
+						"f": map[string]any{"$ref": "#/$defs/F"},
+						"g": map[string]any{"$ref": "#/definitions/G"},
+						"h": map[string]any{"type": "integer", "format": "int64"},
+						"i": map[string]any{"type": "array", "minItems": "2"},
+					},
+					"$defs":       map[string]any{"F": map[string]any{"type": "string", "maxLength": 8}},
+					"definitions": map[string]any{"G": map[string]any{"type": "number", "maximum": 2}},
+				},
+			},
+			want: `{
+				"type": "object",
+				"properties": {
+					"a": {"anyOf": [
+						{"type": "integer", "description": "{multipleOf: 5}"},
+						{"type": "string", "description": "{minLength: 1}"}
+					]},
+					"b": {"oneOf": [{"type": "number", "description": "{exclusiveMinimum: 0}"}]},
+					"c": {"allOf": [{"type": "string", "description": "{maxLength: 3}"}]},
+					"d": {"type": "array", "items": [{"type": "integer", "description": "{maximum: 9}"}]},
+					"e": {"type": "object", "properties": {}, "additionalProperties": {"type": "integer", "description": "{minimum: 1}"}},
+					"f": {"$ref": "#/$defs/F"},
+					"g": {"$ref": "#/definitions/G"},
+					"h": {"type": "integer", "description": "{format: int64}"},
+					"i": {"type": "array", "description": "{minItems: 2}"}
+				},
+				"additionalProperties": false,
+				"$defs": {"F": {"type": "string", "description": "{maxLength: 8}"}},
+				"definitions": {"G": {"type": "number", "description": "{maximum: 2}"}}
+			}`,
+		},
+		{
+			name: "non_object_root_wrapped",
+			cfg: &genai.GenerateContentConfig{
+				ResponseSchema: &genai.Schema{
+					Type:     genai.TypeArray,
+					Items:    &genai.Schema{Type: genai.TypeString},
+					MaxItems: genai.Ptr[int64](3),
+				},
+			},
+			want: `{
+				"type": "object",
+				"properties": {
+					"result": {"type": "array", "items": {"type": "string"}, "description": "{maxItems: 3}"}
+				},
+				"required": ["result"],
+				"additionalProperties": false
+			}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: genai.Text("Return JSON"), Config: tt.cfg}
+			for _, err := range m.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			var want map[string]any
+			if err := json.Unmarshal([]byte(tt.want), &want); err != nil {
+				t.Fatalf("bad want JSON: %v", err)
+			}
+			outCfg, _ := lastBody["output_config"].(map[string]any)
+			format, _ := outCfg["format"].(map[string]any)
+			if diff := cmp.Diff(want, format["schema"]); diff != "" {
+				t.Errorf("output_config.format.schema mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestTruncatedStreamedToolCall(t *testing.T) {
