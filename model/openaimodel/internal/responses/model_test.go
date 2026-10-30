@@ -36,40 +36,6 @@ import (
 	"google.golang.org/adk/v2/model/openaimodel/internal/shared"
 )
 
-func TestModel_Generate(t *testing.T) {
-	server := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/responses" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		if _, err := fmt.Fprint(w, `{"id":"resp_123","model":"test-model","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":2}}`); err != nil {
-			t.Errorf("failed to write mock response: %v", err)
-		}
-	}))
-
-	clientCfg := &testClientConfig{
-		APIKey:     "test",
-		BaseURL:    server.URL + "/v1",
-		HTTPClient: server.Client(),
-	}
-
-	ctx := t.Context()
-	llm := newTestModel(openai.ChatModelGPT4oMini, clientCfg)
-	req := &model.LLMRequest{
-		Contents: []*genai.Content{genai.NewContentFromText("World?", genai.RoleUser)},
-	}
-	var text string
-	for resp, err := range llm.GenerateContent(ctx, req, false) {
-		if err != nil {
-			t.Fatalf("GenerateContent() err = %v", err)
-		}
-		text += allText(resp.Content)
-	}
-	if diff := cmp.Diff("hello", text); diff != "" {
-		t.Fatalf("response text mismatch (-want +got):\n%s", diff)
-	}
-}
-
 // TestModel_FailedStatus pins every way a failure can arrive to one outcome: an
 // error naming what the server said, and no response claiming the turn
 // finished. Streamed, it need not come as "response.failed" — an ordinary
