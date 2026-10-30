@@ -96,9 +96,11 @@ A PR leaves the queue when its change reaches `v1` — matched on the
 `(cherry picked from commit <sha>)` trailer the script writes, not on anything
 parsed out of a title — or while a backport pull request for it is open. Close
 that pull request and delete its `backport/v1/pr-<n>` branch and the PR is
-queued again, which is how you regenerate a backport that went stale. A branch
-left behind by a run that died does not suppress anything: the next run replays
-it.
+queued again, which is how you regenerate a backport that went stale. A
+`backport/v1/pr-<n>` branch with no open pull request — its pull request was
+closed, or a run died before opening one — is skipped with a warning rather
+than failing the run. Delete the branch to have the PR replayed, or drop
+`v1-needed` from the original if it does not need a backport after all.
 
 Backport PRs get the usual CI, because `go.yml` runs on every pull request
 whatever its base branch, and `apidiff.yml` lists `v1` among the base branches
