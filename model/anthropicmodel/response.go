@@ -34,6 +34,17 @@ const (
 	// CacheCreationInputTokensMetadataKey is the key in [model.LLMResponse.CustomMetadata]
 	// holding the int64 count of prompt-cache creation tokens when > 0.
 	CacheCreationInputTokensMetadataKey = "anthropic_cache_creation_input_tokens"
+
+	// RefusalCategoryMetadataKey is the key in [model.LLMResponse.CustomMetadata]
+	// holding, as a string, the policy category Claude reported for a refusal
+	// (such as "cyber" or "bio"). It is set only when the stop_reason is
+	// "refusal" and Claude named a category.
+	RefusalCategoryMetadataKey = "anthropic_refusal_category"
+
+	// RefusalExplanationMetadataKey is the key in [model.LLMResponse.CustomMetadata]
+	// holding, as a string, Claude's human-readable explanation of a refusal.
+	// It is set only when the stop_reason is "refusal" and Claude gave one.
+	RefusalExplanationMetadataKey = "anthropic_refusal_explanation"
 )
 
 func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*model.LLMResponse, error) {
@@ -67,6 +78,14 @@ func convertMessageToLLMResponse(msg *anthropic.Message, unwrapOutput bool) (*mo
 	if rawStopReason != "" {
 		customMeta = make(map[string]any)
 		customMeta[StopReasonMetadataKey] = rawStopReason
+		if msg.StopReason == anthropic.StopReasonRefusal {
+			if category := string(msg.StopDetails.Category); category != "" {
+				customMeta[RefusalCategoryMetadataKey] = category
+			}
+			if msg.StopDetails.Explanation != "" {
+				customMeta[RefusalExplanationMetadataKey] = msg.StopDetails.Explanation
+			}
+		}
 	}
 	if cacheCreationTokens > 0 {
 		if customMeta == nil {

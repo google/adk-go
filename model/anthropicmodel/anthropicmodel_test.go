@@ -3949,3 +3949,98 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"ExaAISearch":           true,
 	})
 }
+
+// TestRefusalStopDetails checks that the category and explanation Claude
+// reports with a refusal reach CustomMetadata, on both response paths, and
+// that a refusal still sets no ErrorCode or ErrorMessage.
+func TestRefusalStopDetails(t *testing.T) {
+	const explanation = "This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy."
+	cyber := `{"type":"refusal","category":"cyber","explanation":"` + explanation + `"}`
+	cases := []struct {
+		name            string
+		stopDetails     string
+		wantCategory    string
+		wantExplanation string
+	}{
+		{name: "category_and_explanation", stopDetails: cyber, wantCategory: "cyber", wantExplanation: explanation},
+		{name: "no_category", stopDetails: `{"type":"refusal","category":null,"explanation":"Blocked."}`, wantExplanation: "Blocked."},
+		{name: "null_details", stopDetails: `null`},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%v", tc.name, stream), func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if stream {
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = io.WriteString(w, `event: message_start`+"\n"+`data: {"type":"message_start","message":{"id":"msg_r","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":1}}}`+"\n\n")
+						_, _ = io.WriteString(w, `event: message_delta`+"\n"+`data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":`+tc.stopDetails+`},"usage":{"output_tokens":1}}`+"\n\n")
+						_, _ = io.WriteString(w, `event: message_stop`+"\n"+`data: {"type":"message_stop"}`+"\n\n")
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"msg_r","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"stop_reason":"refusal","stop_sequence":null,"stop_details":`+tc.stopDetails+`,"usage":{"input_tokens":12,"output_tokens":1}}`)
+				}))
+				defer srv.Close()
+
+				m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{APIKey: "test-key", BaseURL: srv.URL})
+				if err != nil {
+					t.Fatalf("NewModel() error = %v", err)
+				}
+				var got *model.LLMResponse
+				for resp, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hi")}, stream) {
+					if err != nil {
+						t.Fatalf("GenerateContent() error = %v", err)
+					}
+					got = resp
+				}
+				if got == nil || got.Partial {
+					t.Fatalf("final response = %+v, want a non-partial response", got)
+				}
+				if got.FinishReason != genai.FinishReasonSafety || got.CustomMetadata[anthropicmodel.StopReasonMetadataKey] != "refusal" {
+					t.Errorf("FinishReason = %v, stop reason metadata = %v, want SAFETY and refusal", got.FinishReason, got.CustomMetadata[anthropicmodel.StopReasonMetadataKey])
+				}
+				if got.ErrorCode != "" || got.ErrorMessage != "" {
+					t.Errorf("ErrorCode = %q, ErrorMessage = %q, want both empty", got.ErrorCode, got.ErrorMessage)
+				}
+				for key, want := range map[string]string{
+					anthropicmodel.RefusalCategoryMetadataKey:    tc.wantCategory,
+					anthropicmodel.RefusalExplanationMetadataKey: tc.wantExplanation,
+				} {
+					v, present := got.CustomMetadata[key]
+					if want == "" {
+						if present {
+							t.Errorf("CustomMetadata[%q] = %v, want absent", key, v)
+						}
+						continue
+					}
+					if v != want {
+						t.Errorf("CustomMetadata[%q] = %v, want %q", key, v, want)
+					}
+				}
+			})
+		}
+	}
+
+	t.Run("details_on_other_stop_reason_ignored", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"msg_p","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","content":[{"type":"text","text":"partial"}],"stop_reason":"pause_turn","stop_sequence":null,"stop_details":`+cyber+`,"usage":{"input_tokens":12,"output_tokens":1}}`)
+		}))
+		defer srv.Close()
+
+		m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{APIKey: "test-key", BaseURL: srv.URL})
+		if err != nil {
+			t.Fatalf("NewModel() error = %v", err)
+		}
+		for resp, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: genai.Text("hi")}, false) {
+			if err != nil {
+				t.Fatalf("GenerateContent() error = %v", err)
+			}
+			for _, key := range []string{anthropicmodel.RefusalCategoryMetadataKey, anthropicmodel.RefusalExplanationMetadataKey} {
+				if v, present := resp.CustomMetadata[key]; present {
+					t.Errorf("CustomMetadata[%q] = %v on a pause_turn response, want absent", key, v)
+				}
+			}
+		}
+	})
+}
