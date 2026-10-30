@@ -190,7 +190,7 @@ func (m *anthropicModel) buildMessages(
 			if role == anthropic.MessageParamRoleAssistant {
 				// Claude requires thinking blocks in the latest assistant
 				// message to match a single original response. Drop thinking
-				// from earlier assistant turns when merging retries.
+				// from earlier assistant turns when merging adjacent assistant turns.
 				prev = stripThinkingBlocks(prev)
 			}
 			merged := append(prev, blocks...)

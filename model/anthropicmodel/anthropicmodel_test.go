@@ -2201,6 +2201,76 @@ func TestMergedAssistantTurnsKeepLatestThinkingOnly(t *testing.T) {
 	if strings.Contains(joined, "sig_first_response") {
 		t.Errorf("merged thinking still contains first response signature: %q", joined)
 	}
+
+	// Second case: earlier turn has signed thinking with text plus a text part;
+	// later turn has signed thinking plus a function call. Merging must keep
+	// only the later thinking, preserve the earlier text, then the tool_use.
+	req2 := &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("Compute 6*7", genai.RoleUser),
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{
+					{Thought: true, Text: "I should use the calc tool.", ThoughtSignature: []byte("sig_earlier_thought")},
+					genai.NewPartFromText("Calling calc."),
+				},
+			},
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{
+					{Thought: true, Text: "Now invoke calc with expr.", ThoughtSignature: []byte("sig_later_thought")},
+					{FunctionCall: &genai.FunctionCall{ID: "toolu_calc", Name: "calc", Args: map[string]any{"expr": "6*7"}}},
+				},
+			},
+			{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					{FunctionResponse: &genai.FunctionResponse{ID: "toolu_calc", Name: "calc", Response: map[string]any{"result": 42}}},
+				},
+			},
+		},
+	}
+	for _, err := range m.GenerateContent(t.Context(), req2, false) {
+		if err != nil {
+			t.Fatalf("second case GenerateContent() error = %v", err)
+		}
+	}
+
+	msgs2, _ := lastBody["messages"].([]any)
+	if len(msgs2) != 3 {
+		t.Fatalf("second case messages len = %d, want 3 (user + merged assistant + tool_result user)", len(msgs2))
+	}
+	asst2, _ := msgs2[1].(map[string]any)
+	content2, _ := asst2["content"].([]any)
+	if len(content2) != 3 {
+		t.Fatalf("second case merged blocks = %d (%+v), want 3 [thinking(later), text(earlier), tool_use]", len(content2), content2)
+	}
+	b0, _ := content2[0].(map[string]any)
+	b1, _ := content2[1].(map[string]any)
+	b2, _ := content2[2].(map[string]any)
+	if b0["type"] != "thinking" || b0["signature"] != "sig_later_thought" {
+		t.Errorf("second case block[0] = %+v, want thinking with sig_later_thought", b0)
+	}
+	if b0["thinking"] != "Now invoke calc with expr." {
+		t.Errorf("second case block[0].thinking = %v, want later turn text", b0["thinking"])
+	}
+	if b1["type"] != "text" || b1["text"] != "Calling calc." {
+		t.Errorf("second case block[1] = %+v, want earlier turn text", b1)
+	}
+	if b2["type"] != "tool_use" || b2["name"] != "calc" {
+		t.Errorf("second case block[2] = %+v, want tool_use calc", b2)
+	}
+	// Ensure earlier thinking signature did not survive.
+	for _, block := range content2 {
+		b, _ := block.(map[string]any)
+		if b["type"] == "thinking" || b["type"] == "redacted_thinking" {
+			sig, _ := b["signature"].(string)
+			data, _ := b["data"].(string)
+			if strings.Contains(sig+data, "sig_earlier_thought") {
+				t.Errorf("second case still has earlier thinking: %+v", b)
+			}
+		}
+	}
 }
 
 func TestPromptCaching(t *testing.T) {
