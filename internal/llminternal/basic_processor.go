@@ -60,6 +60,17 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 	}
 }
 
+// CloneGenerateContentConfig returns a copy of cfg, or nil for nil, so callers
+// can set per-request fields without mutating the shared value. It makes the
+// same copy basicRequestProcessor makes for every agent request: pointers,
+// slices, maps, and struct fields are copied recursively, while values held in
+// interface-typed fields, such as HTTPOptions.ExtraBody entries or
+// ResponseJsonSchema, remain shared with cfg. Like clone, it panics on a
+// struct with unexported fields.
+func CloneGenerateContentConfig(cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
+	return clone(cfg)
+}
+
 // clone returns a deep copy of the src.
 // NOTE: this does not work for types with unexported fields.
 func clone[M any](src M) M {
