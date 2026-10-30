@@ -135,7 +135,7 @@ func NewNode(cfg NodeConfig) (*Node, error) {
 
 	var normalized Question
 	threshold := DefaultThreshold
-	switch q := derefNodeQuestion(cfg.Question).(type) {
+	switch q := derefQuestion(cfg.Question).(type) {
 	case Choice:
 		if cfg.Threshold != nil {
 			return nil, fmt.Errorf(
@@ -462,11 +462,15 @@ func isScoreQuestion(q Question) bool {
 	}
 }
 
-func derefNodeQuestion(q Question) Question {
+// derefQuestion returns the value form of a pointer question so type switches
+// need only handle Choice, Binary, and Score.
+func derefQuestion(q Question) Question {
 	switch v := q.(type) {
 	case *Choice:
 		return *v
 	case *Binary:
+		return *v
+	case *Score:
 		return *v
 	default:
 		return q

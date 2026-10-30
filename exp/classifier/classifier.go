@@ -46,6 +46,13 @@ var (
 	// when a [Node] has outgoing routed edges it can never emit or leaves one of
 	// its routes uncovered without a Default or unconditional fallback edge.
 	ErrInvalidRoute = errors.New("classifier: invalid outgoing route")
+	// ErrInvalidLLMConfig is returned when [LLMConfig] fails validation in
+	// [NewLLM], or when an [LLMClassifier] was not constructed with [NewLLM].
+	ErrInvalidLLMConfig = errors.New("classifier: invalid LLM classifier configuration")
+	// ErrModelFailure is returned by [LLMClassifier.Classify] when the model
+	// yields no response before ctx ends, sets an error code on its response,
+	// or stops at FinishReasonMaxTokens before finishing its JSON answer.
+	ErrModelFailure = errors.New("classifier: model failed to classify")
 )
 
 // Classifier answers typed questions about an input with probability distributions.
