@@ -93,7 +93,9 @@ type Config struct {
 	// BeforeAgentCallbacks are called sequentially before the agent starts its
 	// run. See [BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []BeforeAgentCallback
-	// Run is the function that defines the agent's behavior.
+	// Run is the function that defines the agent's behavior. An agent without
+	// one can be built, for example as a node in an agent tree, but running it
+	// yields an error.
 	Run func(InvocationContext) iter.Seq2[*session.Event, error]
 	// AfterAgentCallbacks are called sequentially after the agent completes its
 	// run. See [AfterAgentCallback] for when they are skipped and how return
@@ -177,6 +179,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
+		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
+			a.OnBeforeAgentCallbackEvent(event)
+		}
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return
@@ -184,6 +189,13 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		if nodeCtx.Ended() {
+			return
+		}
+
+		// Matches adk-python, where an agent without a run implementation is
+		// constructed fine and fails when run.
+		if a.run == nil {
+			yield(nil, fmt.Errorf("agent %q has no Run function", a.name))
 			return
 		}
 
@@ -255,7 +267,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunBeforeAgentCallback(callbackCtx)
@@ -296,7 +308,7 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()
@@ -314,7 +326,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	pluginManager := pluginManagerFromContext(ctx)
 
 	actions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-	callbackCtx := NewCallbackContext(ctx, actions)
+	callbackCtx := NewCallbackContextWithArtifactTracking(ctx, actions)
 
 	if pluginManager != nil {
 		content, err := pluginManager.RunAfterAgentCallback(callbackCtx)
@@ -359,7 +371,7 @@ func runAfterAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	// check if has delta create event with it
-	if len(actions.StateDelta) > 0 {
+	if len(actions.StateDelta) > 0 || len(actions.ArtifactDelta) > 0 {
 		event := session.NewEvent(ctx, ctx.InvocationID())
 		event.Author = agent.Name()
 		event.Branch = ctx.Branch()

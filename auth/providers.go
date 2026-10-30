@@ -46,6 +46,43 @@ type CredentialProvider interface {
 	Credential(ctx context.Context) (Credential, error)
 }
 
+// RefreshingProvider is an optional [CredentialProvider] capability. After a
+// credential is rejected downstream (HTTP 401/403) — and the request body can be
+// replayed — [Transport] calls Refresh to obtain a fresh credential and retries
+// the request once. Providers without a cache, or that self-refresh (e.g. an
+// oauth2.TokenSource), need not implement it.
+//
+// adk-python's equivalent seam is BaseCredentialRefresher, whose refresh() also
+// takes the credential rather than re-deriving it
+// (auth/refresher/base_credential_refresher.py). The retry itself has no
+// adk-python counterpart.
+type RefreshingProvider interface {
+	CredentialProvider
+
+	// Refresh resolves a replacement for rejected. It must not return rejected,
+	// and must not leave rejected where a later call will find it.
+	//
+	// Minting is not required. An implementation that finds another request has
+	// already replaced the credential should return what that request fetched,
+	// and one that is rate-limiting itself should return an error rather than
+	// mint again — a forced refresh typically invalidates a live token, so a
+	// downstream returning 401 to everything must not set the rate at which that
+	// happens.
+	//
+	// rejected is the credential [Transport] applied to the request the
+	// downstream turned down — passed in rather than looked up, because between
+	// the rejection and this call another request may already have replaced the
+	// cached value, and force-refreshing a credential that is working destroys a
+	// good token. It is never nil.
+	//
+	// Returning an error leaves [Transport] to surface the downstream's original
+	// rejection, so a provider that cannot refresh should say so rather than
+	// return the credential it was given. The exception is
+	// [ConsentRequiredError], which Transport propagates: it is the one refusal
+	// the caller can act on.
+	Refresh(ctx context.Context, rejected Credential) (Credential, error)
+}
+
 // ProviderFunc adapts an ordinary function to a [CredentialProvider].
 type ProviderFunc func(ctx context.Context) (Credential, error)
 
@@ -215,9 +252,21 @@ func lazyTokenSource(init func(context.Context) (oauth2.TokenSource, error)) Cre
 			cur = a
 			// Detach from the caller's cancellation (keep values); initTimeout bounds it.
 			go func() {
-				dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), initTimeout)
-				defer cancel()
-				a.ts, a.err = init(dctx)
+				// The token source refreshes on ictx, so ictx must outlive init. A
+				// timer bounds init instead of a deadline because it can be stopped.
+				ictx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+				timer := time.AfterFunc(initTimeout, cancel)
+				a.ts, a.err = init(ictx)
+				if !timer.Stop() {
+					// ictx is canceled, so a source init returned is unusable.
+					bound := fmt.Errorf("auth: credential initialization exceeded %v: %w", initTimeout, context.DeadlineExceeded)
+					if a.err != nil {
+						// %v: init's error wraps context.Canceled, which callers
+						// treat as cancellation rather than failure.
+						bound = fmt.Errorf("%w: %v", bound, a.err)
+					}
+					a.err = bound
+				}
 				mu.Lock()
 				if a.err == nil {
 					ts = a.ts

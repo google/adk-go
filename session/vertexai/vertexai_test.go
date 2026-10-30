@@ -365,7 +365,7 @@ func TestRawEventNumericContract(t *testing.T) {
 
 // TestEventNeedsRawEvent guards the invariant that plain events keep
 // their legacy wire format (no raw_event) while events carrying state
-// without a dedicated SessionEvent column opt into raw_event. Changing
+// that only raw_event preserves opt into raw_event. Changing
 // this for plain events would invalidate the recorded replay fixtures.
 func TestEventNeedsRawEvent(t *testing.T) {
 	tests := []struct {
@@ -383,6 +383,12 @@ func TestEventNeedsRawEvent(t *testing.T) {
 		{name: "with routes", event: &session.Event{Routes: []string{"approve"}}, want: true},
 		{name: "with requested input", event: &session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "i"},
+		}, want: true},
+		{name: "with input transcription", event: &session.Event{
+			LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "hi"}},
+		}, want: true},
+		{name: "with output transcription", event: &session.Event{
+			LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "hi"}},
 		}, want: true},
 	}
 	for _, tc := range tests {
@@ -972,6 +978,56 @@ func newFakeVertexAiClient(t *testing.T, service aiplatformpb.SessionServiceServ
 		}
 	})
 	return client
+}
+
+// TestVertexAiClientTranscriptionRoundTrip pins that live audio
+// transcriptions survive storage. RunLive appends a finished transcription as
+// an event with no Content, and the contents processor turns it back into a
+// user or model turn for later requests, so an event stored without it loses
+// that turn from the model's history after a reload.
+func TestVertexAiClientTranscriptionRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.LLMResponse
+	}{
+		{
+			name: "input transcription",
+			in:   model.LLMResponse{InputTranscription: &genai.Transcription{Text: "what time is it", Finished: true}},
+		},
+		{
+			name: "output transcription",
+			in:   model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "it is noon", Finished: true}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := &fakeVertexAiSessionService{}
+			client := newFakeVertexAiClient(t, service)
+
+			event := session.NewEvent(ctx, "invocation-1")
+			event.Author = "agent"
+			event.LLMResponse = tc.in
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+				t.Fatalf("appendEvent() failed: %v", err)
+			}
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() failed: %v", err)
+			}
+			if gotLen := len(got); gotLen != 1 {
+				t.Fatalf("len(got) = %d, want 1", gotLen)
+			}
+			if diff := cmp.Diff(tc.in.InputTranscription, got[0].InputTranscription); diff != "" {
+				t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.in.OutputTranscription, got[0].OutputTranscription); diff != "" {
+				t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestAiplatformToGenaiContent_OtherParts(t *testing.T) {

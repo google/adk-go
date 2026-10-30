@@ -17,10 +17,12 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"log"
 	"maps"
+	"slices"
 	"time"
 
 	"google.golang.org/genai"
@@ -36,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/memory"
@@ -184,9 +187,10 @@ func resolveCompactionConfig(cfg *compaction.Config, rootAgent agent.Agent) (*co
 	}
 	summarizer, err := compaction.NewLLMSummarizer(compaction.LLMSummarizerConfig{
 		Model: m,
-		// Safety settings and output limits the application configured govern
-		// the summarization call too, rather than it silently falling back to
+		// The settings the summarizer keeps, such as safety settings, govern the
+		// summarization call too, rather than it silently falling back to
 		// provider defaults for the one call that sees the whole transcript.
+		// The summarizer ignores the rest of the config, output limits included.
 		GenerateContentConfig: llminternal.Reveal(llmAgent).GenerateContentConfig,
 		// A bound on the one call the application did not ask for. Compaction
 		// runs inside the run loop, and the post-invocation pass runs from a
@@ -535,6 +539,12 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+	})
+}
+
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -634,6 +644,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
 		ctx = plugininternal.ToContext(ctx, r.pluginManager)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
@@ -715,7 +726,12 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 
 		for event, err := range r.rootAgent.Run(ctx) {
 			if err != nil {
-				if !yield(event, err) {
+				// The model-call budget is spent for the whole invocation, so
+				// nothing that runs after this can reach a model. Ending here
+				// stops a root agent that carries on after a sub-agent error
+				// from turning the rest of the run into a stream of limit
+				// errors, as adk-python does.
+				if !yield(event, err) || errors.Is(err, agent.ErrLLMCallsLimitExceeded) {
 					return
 				}
 				continue
@@ -825,6 +841,15 @@ type runnerLiveSession struct {
 }
 
 func (s *runnerLiveSession) Send(req agent.LiveRequest) error {
+	if req.Content != nil && slices.Contains(req.Content.Parts, nil) {
+		// A nil part carries no content, so it is dropped; adk-python rejects
+		// the request instead.
+		content := *req.Content
+		content.Parts = slices.DeleteFunc(slices.Clone(content.Parts), func(p *genai.Part) bool {
+			return p == nil
+		})
+		req.Content = &content
+	}
 	err := s.sess.Send(req)
 	if err != nil {
 		return err
