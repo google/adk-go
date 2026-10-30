@@ -63,7 +63,7 @@ func TestEnterpriseWebSearch_ProcessRequest(t *testing.T) {
 					Tools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
 				},
 			},
-			wantErrText: "cannot be used with other tools in Gemini 1.x.",
+			wantErrText: "cannot be used with other tools in Gemini 1.x",
 		},
 		{
 			name:      "path-based gemini model resolves and adds tool",
