@@ -391,11 +391,12 @@ type Config struct {
 	// quarters of the batch's upload time (for example after waiting for a
 	// free slot behind other uploads) does not pause the uploads when another
 	// upload in the batch succeeded, and neither does a budget during Close.
-	// The run-end deadline of a retried deferred batch, or of a batch that
-	// started with less than a quarter of ShutdownTimeout left, does not pause
-	// them either, though the batch's own GCSUploadTimeout still does when that
-	// ends its uploads first. A pause that a run-end flush starts lasts
-	// GCSUploadTimeout as well, so it can outlast the flush: until it ends,
+	// Caller cancellation and an already-expired deadline do not pause the
+	// uploads either. The run-end deadline of a retried deferred batch, or of
+	// a batch that started with less than a quarter of ShutdownTimeout left,
+	// does not pause them either, though the batch's own GCSUploadTimeout still
+	// does when that ends its uploads first. A pause that a run-end flush starts
+	// lasts GCSUploadTimeout as well, so it can outlast the flush: until it ends,
 	// background flushes, later run-end flushes and Close also fall back
 	// without calling the offloader.
 	// Values <= 0 mean 10s.
