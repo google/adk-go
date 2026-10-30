@@ -873,6 +873,107 @@ func TestSanitizeURI(t *testing.T) {
 	}
 }
 
+func TestUnicodeWhitespaceCredentialRedaction(t *testing.T) {
+	separators := []struct {
+		name    string
+		literal string
+		escaped string
+	}{
+		{"next line", "\u0085", `\u0085`},
+		{"non-breaking space", "\u00a0", `\u00a0`},
+		{"em space", "\u2003", `\u2003`},
+		{"line separator", "\u2028", `\u2028`},
+		{"paragraph separator", "\u2029", `\u2029`},
+		{"ideographic space", "\u3000", `\u3000`},
+	}
+	for _, separator := range separators {
+		for _, scheme := range []struct {
+			name  string
+			token string
+		}{
+			{"Bearer", "SYNTHETIC_SECRET"},
+			{"Basic", "dXNlcjpTWU5USEVUSUNfU0VDUkVU"},
+		} {
+			for _, tt := range []struct {
+				name     string
+				raw      string
+				want     string
+				wantPart string
+			}{
+				{
+					name:     "literal",
+					raw:      scheme.name + separator.literal + scheme.token + separator.literal + "detail",
+					want:     scheme.name + " [REDACTED]" + separator.literal + "detail",
+					wantPart: scheme.name + " [REDACTED]" + separator.literal + "detail",
+				},
+				{
+					name:     "escaped",
+					raw:      scheme.name + separator.escaped + scheme.token,
+					want:     redactedSensitiveTextPlaceholder,
+					wantPart: redactedSensitiveTextPlaceholder,
+				},
+				{
+					name: "JSON string",
+					raw:  `{"message":"` + scheme.name + separator.escaped + scheme.token + `"}`,
+					want: `{"message":"` + scheme.name + ` [REDACTED]"}`,
+					// Raw JSON text fails closed when its escapes expose a credential.
+					wantPart: redactedSensitiveTextPlaceholder,
+				},
+			} {
+				t.Run(separator.name+"/"+scheme.name+"/"+tt.name, func(t *testing.T) {
+					if got := redactErrorMessage(tt.raw); got != tt.want {
+						t.Error("error message did not redact the credential while preserving surrounding text")
+					}
+					parts := FormatContentParts(singlePart(genai.NewPartFromText(tt.raw)), 1000)
+					if len(parts) != 1 {
+						t.Fatalf("FormatContentParts returned %d parts, want 1", len(parts))
+					}
+					if parts[0]["text"] != tt.wantPart {
+						t.Error("content part did not redact the credential while preserving surrounding text")
+					}
+				})
+			}
+		}
+	}
+
+	for _, prose := range []string{
+		"the bearer\u00a0of\u00a0good news",
+		`the bearer\u00a0of good news`,
+		"basic\u2003auth",
+		`basic\u2003auth`,
+	} {
+		if redactErrorMessage(prose) != prose {
+			t.Error("credential redaction changed ordinary prose")
+		}
+	}
+}
+
+func TestUnicodeWhitespaceBearerTokenBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"bracket interior NBSP", "Bearer\u00a0[prefix\u00a0detail]", "Bearer [REDACTED]\u00a0detail]"},
+		{"bracket interior NEL", "Bearer\u0085[prefix\u0085detail]", "Bearer [REDACTED]\u0085detail]"},
+		{"bracket suffix NBSP", "Bearer\u00a0[REDACTED]SYNTHETIC_SECRET\u00a0detail", "Bearer [REDACTED]\u00a0detail"},
+		{"bracket suffix NEL", "Bearer\u0085[REDACTED]SYNTHETIC_SECRET\u0085detail", "Bearer [REDACTED]\u0085detail"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if redactErrorMessage(tt.raw) != tt.want {
+				t.Error("error message redaction did not preserve text after the token boundary")
+			}
+			parts := FormatContentParts(singlePart(genai.NewPartFromText(tt.raw)), 1000)
+			if len(parts) != 1 {
+				t.Fatalf("FormatContentParts returned %d parts, want 1", len(parts))
+			}
+			if parts[0]["text"] != tt.want {
+				t.Error("content part redaction did not preserve text after the token boundary")
+			}
+		})
+	}
+}
+
 func TestRedactErrorMessage(t *testing.T) {
 	tests := []struct {
 		name string

@@ -112,13 +112,14 @@ var sensitiveKeyNames = func() map[string]struct{} {
 var (
 	uriTokenRe   = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
 	authHeaderRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
+	// Python's \s matches Unicode whitespace; Go's only matches ASCII.
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
-	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)[\s\p{Z}\x{0085}]+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s\p{Z}\x{0085}]+\][^\s\p{Z}\x{0085},;)"']*|[^\s\p{Z}\x{0085},;)"'\]]+)`)
 	// basicTokenRe matches a candidate basic credential, which
 	// redactBasicCredential redacts only if it is valid base64.
-	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)\s+([A-Za-z0-9+/]+={0,2})`)
+	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)[\s\p{Z}\x{0085}]+([A-Za-z0-9+/]+={0,2})`)
 	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
 	// textKeyValTokenRe matches key=value and key: value pairs. As in
 	// adk-python, the key may be quoted (Python dict reprs use single
@@ -315,6 +316,8 @@ func isSensitiveKey(k string) bool {
 // escapes, and escaped quotes (\" and \'), in one pass. The result is used
 // for detection only: callers keep the original text unless the canonical
 // form exposes a credential construct.
+// Unlike adk-python's ASCII-only decoder, it also decodes Unicode whitespace
+// so escaped credential separators cannot bypass redaction.
 func canonicalizeCredentialMarker(s string) string {
 	if !strings.ContainsAny(s, `\%`) {
 		// Every escape starts with "\" or "%".
@@ -347,7 +350,7 @@ func canonicalizeCredentialMarker(s string) string {
 				break
 			}
 			decoded, err := strconv.ParseUint(digits, 16, 32)
-			if err != nil || decoded > 0x7F {
+			if err != nil || (decoded > 0x7F && !unicode.IsSpace(rune(decoded))) {
 				break
 			}
 			output = append(output[:escapeStart], rune(decoded))
