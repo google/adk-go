@@ -57,14 +57,51 @@ type consoleLauncher struct {
 
 // NewLauncher creates new console launcher
 func NewLauncher() launcher.SubLauncher {
-	config := &consoleConfig{}
+	config := &consoleConfig{shutdownTimeout: 2 * time.Second}
 
 	fs := flag.NewFlagSet("console", flag.ContinueOnError)
 	fs.StringVar(&config.streamingModeString, "streaming_mode", "",
 		fmt.Sprintf("defines streaming mode (%s|%s)", agent.StreamingModeNone, agent.StreamingModeSSE))
-	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 2*time.Second, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", config.shutdownTimeout, "Console shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables OpenTelemetry export to GCP: telemetry.googleapis.com. When not set, a telemetry.WithOtelToCloud option in launcher.Config.TelemetryOptions decides. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	return &consoleLauncher{config: config, flags: fs}
+}
+
+// Config carries the console launcher's options as values. A zero
+// ShutdownTimeout keeps the flag default, and an empty StreamingMode lets Run
+// pick between SSE and none from the terminal.
+type Config struct {
+	StreamingMode   agent.StreamingMode
+	OTelToCloud     bool
+	ShutdownTimeout time.Duration
+}
+
+// NewRunnable returns a launcher that runs with cfg and parses no command-line
+// arguments.
+//
+// It exists for applications that define their own flags: passing
+// [NewLauncher] to [launcher.Launcher.Execute] hands every argument in os.Args,
+// including the application's own, to the launcher's flag set, where they are
+// rejected as unknown.
+func NewRunnable(cfg Config) (launcher.Runnable, error) {
+	switch cfg.StreamingMode {
+	case "", agent.StreamingModeNone, agent.StreamingModeSSE:
+	default:
+		return nil, fmt.Errorf("invalid streaming_mode: %v. Should be (%s|%s)", cfg.StreamingMode,
+			agent.StreamingModeNone, agent.StreamingModeSSE)
+	}
+	shutdownTimeout := cfg.ShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = 2 * time.Second
+	}
+	return &consoleLauncher{
+		flags: flag.NewFlagSet("console", flag.ContinueOnError),
+		config: &consoleConfig{
+			streamingMode:   cfg.StreamingMode,
+			otelToCloud:     cfg.OTelToCloud,
+			shutdownTimeout: shutdownTimeout,
+		},
+	}, nil
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.

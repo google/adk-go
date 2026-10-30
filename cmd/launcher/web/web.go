@@ -389,11 +389,11 @@ func (w *webLauncher) SimpleDescription() string {
 // NewLauncher creates a new WebLauncher. It should be extended by providing
 // one or more Sublaunchers that add the actual content and functionality.
 func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
-	config := &webConfig{}
+	config := defaultWebConfig()
 
 	fs := flag.NewFlagSet("web", flag.ContinueOnError)
-	fs.StringVar(&config.host, "host", defaultHost, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
-	fs.IntVar(&config.port, "port", 8080, "Port for the web server")
+	fs.StringVar(&config.host, "host", config.host, "Host/IP to bind the web server to. Defaults to 127.0.0.1 (loopback only) so the server is not exposed to the network. Use 0.0.0.0 to listen on all interfaces, which may be required when running adk web inside a container. An empty value is treated as the default.")
+	fs.IntVar(&config.port, "port", config.port, "Port for the web server")
 	// Named and repeated like adk-python's --allow_origins, which also accepts
 	// regex: entries; originguard matches literal origins only, so the help
 	// offers none. launcher.Config.AllowedOrigins documents what the list does.
@@ -401,10 +401,10 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 		config.allowOrigins = append(config.allowOrigins, origin)
 		return nil
 	})
-	fs.DurationVar(&config.writeTimeout, "write-timeout", 15*time.Second, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
-	fs.DurationVar(&config.readTimeout, "read-timeout", 15*time.Second, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
-	fs.DurationVar(&config.idleTimeout, "idle-timeout", 60*time.Second, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
-	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", 15*time.Second, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
+	fs.DurationVar(&config.writeTimeout, "write-timeout", config.writeTimeout, "Server write timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for writing the response after reading the headers & body")
+	fs.DurationVar(&config.readTimeout, "read-timeout", config.readTimeout, "Server read timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for reading the whole request including body")
+	fs.DurationVar(&config.idleTimeout, "idle-timeout", config.idleTimeout, "Server idle timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for the next request (only when keep-alive is enabled)")
+	fs.DurationVar(&config.shutdownTimeout, "shutdown-timeout", config.shutdownTimeout, "Server shutdown timeout (i.e. '10s', '2m' - see time.ParseDuration for details) - for waiting for active requests to finish during shutdown")
 	fs.BoolVar(&config.otelToCloud, "otel_to_cloud", false, "Enables OpenTelemetry export to GCP: telemetry.googleapis.com. When not set, a telemetry.WithOtelToCloud option in launcher.Config.TelemetryOptions decides. See adk-go/telemetry package for details about supported options, credentials and environment variables.")
 	fs.BoolVar(&config.useH2C, "h2c", false, "Enable prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1 Upgrade) on the web server listener. Cleartext is insecure; do not expose it to untrusted networks. Long-lived streaming responses may require increasing --write-timeout.")
 	fs.Int64Var(&config.maxPayloadSize, "max_request_body_size", 0, "Maximum request body size in bytes. Larger requests are rejected with HTTP 400. 0 uses the default (10 MiB) or a value set by an embedder. Applied to the base router so all sublauncher and trigger routes are covered.")
@@ -414,6 +414,95 @@ func NewLauncher(sublaunchers ...Sublauncher) launcher.SubLauncher {
 		flags:        fs,
 		sublaunchers: sublaunchers,
 	}
+}
+
+// defaultWebConfig returns the values the command-line flags also default to,
+// so a value-configured launcher and a flag-configured one start the same way.
+func defaultWebConfig() *webConfig {
+	return &webConfig{
+		host:            defaultHost,
+		port:            8080,
+		writeTimeout:    15 * time.Second,
+		readTimeout:     15 * time.Second,
+		idleTimeout:     60 * time.Second,
+		shutdownTimeout: 15 * time.Second,
+	}
+}
+
+// Config carries the web launcher's options as values. A zero field keeps the
+// same default as the corresponding command-line flag: Port 8080, Host
+// 127.0.0.1, and the timeouts as shown by -help.
+type Config struct {
+	Host            string
+	Port            int
+	AllowOrigins    []string
+	WriteTimeout    time.Duration
+	ReadTimeout     time.Duration
+	IdleTimeout     time.Duration
+	ShutdownTimeout time.Duration
+	OTelToCloud     bool
+	UseH2C          bool
+	MaxPayloadSize  int64
+}
+
+// NewRunnable returns a launcher that runs with cfg and parses no command-line
+// arguments. The sublaunchers passed are the ones it activates, replacing the
+// keyword walk Parse performs; without any, Run reports that none is active.
+//
+// It exists for applications that define their own flags: passing
+// [NewLauncher] to [launcher.Launcher.Execute] hands every argument in os.Args,
+// including the application's own, to the launcher's flag set, where they are
+// rejected as unknown.
+func NewRunnable(cfg Config, sublaunchers ...Sublauncher) (launcher.Runnable, error) {
+	if cfg.Port < 0 || cfg.Port > 65535 {
+		return nil, fmt.Errorf("invalid port %d", cfg.Port)
+	}
+	active := make(map[string]Sublauncher, len(sublaunchers))
+	for _, l := range sublaunchers {
+		if _, ok := active[l.Keyword()]; ok {
+			return nil, fmt.Errorf("cannot create web launcher. Keywords for sublaunchers should be unique and they are not: '%s'", l.Keyword())
+		}
+		active[l.Keyword()] = l
+	}
+	return &webLauncher{
+		flags:              flag.NewFlagSet("web", flag.ContinueOnError),
+		config:             newWebConfigFromValues(cfg),
+		sublaunchers:       sublaunchers,
+		activeSublaunchers: active,
+	}, nil
+}
+
+// newWebConfigFromValues applies cfg over the defaults, so a zero field means
+// "the flag default" rather than "zero".
+func newWebConfigFromValues(cfg Config) *webConfig {
+	c := defaultWebConfig()
+	if cfg.Host != "" {
+		c.host = cfg.Host
+	}
+	if cfg.Port != 0 {
+		c.port = cfg.Port
+	}
+	if len(cfg.AllowOrigins) > 0 {
+		c.allowOrigins = slices.Clip(cfg.AllowOrigins)
+	}
+	if cfg.WriteTimeout != 0 {
+		c.writeTimeout = cfg.WriteTimeout
+	}
+	if cfg.ReadTimeout != 0 {
+		c.readTimeout = cfg.ReadTimeout
+	}
+	if cfg.IdleTimeout != 0 {
+		c.idleTimeout = cfg.IdleTimeout
+	}
+	if cfg.ShutdownTimeout != 0 {
+		c.shutdownTimeout = cfg.ShutdownTimeout
+	}
+	if cfg.MaxPayloadSize != 0 {
+		c.maxPayloadSize = cfg.MaxPayloadSize
+	}
+	c.otelToCloud = cfg.OTelToCloud
+	c.useH2C = cfg.UseH2C
+	return c
 }
 
 // logger is a middleware that logs the HTTP method, request URI, and the time taken to process the request.
