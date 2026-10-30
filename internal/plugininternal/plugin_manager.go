@@ -16,6 +16,7 @@ package plugininternal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,21 +34,18 @@ import (
 const BeforeRunReplyKey = "adk:before_run_reply"
 
 type PluginConfig struct {
-	Plugins      []*plugin.Plugin
-	CloseTimeout time.Duration
+	Plugins []*plugin.Plugin
 }
 
 // PluginManager manages the registration and execution of plugins.
 type PluginManager struct {
-	plugins      []*plugin.Plugin
-	closeTimeout time.Duration
+	plugins []*plugin.Plugin
 }
 
 // NewPluginManager creates a new PluginManager.
 func NewPluginManager(cfg PluginConfig) (*PluginManager, error) {
 	pm := &PluginManager{
-		closeTimeout: cfg.CloseTimeout,
-		plugins:      make([]*plugin.Plugin, 0, len(cfg.Plugins)),
+		plugins: make([]*plugin.Plugin, 0, len(cfg.Plugins)),
 	}
 
 	// Register plugins defined in the config
@@ -272,18 +270,45 @@ func (pm *PluginManager) RunOnModelErrorCallback(cctx agent.Context, llmRequest 
 	return nil, nil
 }
 
-// Close calls the CloseFunc on all registered plugins.
-func (pm *PluginManager) Close() error {
-	var errors []error
-	for _, plugin := range pm.plugins {
-		if err := plugin.Close(); err != nil {
-			errors = append(errors, fmt.Errorf("error closing plugin '%s': %w", plugin.Name(), err))
+// ClosePlugins implements runner.PluginConfig.Close, which documents its
+// behavior. Nil entries in plugins are skipped.
+func ClosePlugins(ctx context.Context, plugins []*plugin.Plugin, timeout time.Duration) error {
+	var errs []error
+	for _, p := range plugins {
+		if p == nil {
+			continue
+		}
+		// adk-python keeps closing the remaining plugins after a cancellation.
+		// Here a done ctx means the caller has stopped waiting, so nothing new
+		// is started.
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("plugin %q was not closed: %w", p.Name(), err))
+			continue
+		}
+		if err := closePlugin(ctx, p, timeout); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	if len(errors) > 0 {
-		return fmt.Errorf("failed to close plugins: %v", errors)
+	return errors.Join(errs...)
+}
+
+func closePlugin(ctx context.Context, p *plugin.Plugin, timeout time.Duration) error {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
-	return nil
+	done := make(chan error, 1)
+	go func() { done <- p.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("closing plugin %q: %w", p.Name(), err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("plugin %q did not finish closing: %w", p.Name(), ctx.Err())
+	}
 }
 
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
