@@ -48,10 +48,10 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 	}
 
 	if t.InputSchema != nil {
-		mcp.funcDeclaration.ParametersJsonSchema = t.InputSchema
+		mcp.funcDeclaration.ParametersJsonSchema = toolutils.SanitizeSchemaForVertex(t.InputSchema)
 	}
 	if t.OutputSchema != nil {
-		mcp.funcDeclaration.ResponseJsonSchema = t.OutputSchema
+		mcp.funcDeclaration.ResponseJsonSchema = toolutils.SanitizeSchemaForVertex(t.OutputSchema)
 	}
 	return mcp, nil
 }
