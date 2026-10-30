@@ -33,6 +33,7 @@ import (
 	"go.opentelemetry.io/otel"
 	logglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -42,6 +43,8 @@ type Providers struct {
 	TracerProvider *sdktrace.TracerProvider
 	// LoggerProvider is the configured LoggerProvider or nil.
 	LoggerProvider *sdklog.LoggerProvider
+	// MeterProvider is the configured MeterProvider or nil.
+	MeterProvider *sdkmetric.MeterProvider
 }
 
 // Shutdown shuts down underlying OTel providers.
@@ -57,6 +60,13 @@ func (t *Providers) Shutdown(ctx context.Context) error {
 			err = errors.Join(err, lpErr)
 		}
 	}
+	if t.MeterProvider != nil {
+		// The tracer and logger providers return nil on a repeated Shutdown;
+		// the meter provider reports it as ErrReaderShutdown.
+		if mpErr := t.MeterProvider.Shutdown(ctx); mpErr != nil && !errors.Is(mpErr, sdkmetric.ErrReaderShutdown) {
+			err = errors.Join(err, mpErr)
+		}
+	}
 	return err
 }
 
@@ -67,6 +77,9 @@ func (t *Providers) SetGlobalOtelProviders() {
 	}
 	if t.LoggerProvider != nil {
 		logglobal.SetLoggerProvider(t.LoggerProvider)
+	}
+	if t.MeterProvider != nil {
+		otel.SetMeterProvider(t.MeterProvider)
 	}
 }
 

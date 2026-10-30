@@ -21,9 +21,11 @@ require (
 	go.opentelemetry.io/contrib/detectors/gcp v1.47.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
+	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.47.0
 	go.opentelemetry.io/otel/log v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
+	go.opentelemetry.io/otel/sdk/metric v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	golang.org/x/oauth2 v0.37.0
 	golang.org/x/sync v0.24.0
@@ -105,7 +107,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/sdk/log v1.47.0
-	go.opentelemetry.io/otel/sdk/metric v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
