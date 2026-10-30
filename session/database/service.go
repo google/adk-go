@@ -121,16 +121,31 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		storageApp, err := fetchStorageAppState(tx, req.AppName)
-		if err != nil {
-			return fmt.Errorf("error on create session: %w", err)
-		}
-		storageUser, err := fetchStorageUserState(tx, req.AppName, req.UserID)
-		if err != nil {
-			return fmt.Errorf("error on create session: %w", err)
-		}
-
 		appDelta, userDelta, sessionState := extractStateDeltas(req.State)
+
+		var err error
+		// Lock the shared rows this session's state changes, app before user,
+		// for the same reasons and in the same order as applyEvent.
+		appTx := tx
+		if len(appDelta) > 0 {
+			if appTx, err = lockStateRow(tx, &storageAppState{AppName: req.AppName, State: map[string]any{}, UpdateTime: createdSession.UpdateTime}); err != nil {
+				return fmt.Errorf("failed to lock app state: %w", err)
+			}
+		}
+		storageApp, err := fetchStorageAppState(appTx, req.AppName)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
+		}
+		userTx := tx
+		if len(userDelta) > 0 {
+			if userTx, err = lockStateRow(tx, &storageUserState{AppName: req.AppName, UserID: req.UserID, State: map[string]any{}, UpdateTime: createdSession.UpdateTime}); err != nil {
+				return fmt.Errorf("failed to lock user state: %w", err)
+			}
+		}
+		storageUser, err := fetchStorageUserState(userTx, req.AppName, req.UserID)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
+		}
 
 		// apply state delta
 		if len(appDelta) > 0 {
