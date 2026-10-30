@@ -858,6 +858,7 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 func TestBuildParams_Media(t *testing.T) {
 	tests := []struct {
 		name        string
+		role        string
 		part        *genai.Part
 		want        []string
 		wantErr     error
@@ -969,12 +970,56 @@ func TestBuildParams_Media(t *testing.T) {
 			},
 			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
 		},
+		{
+			// System and developer messages take input_text only. The
+			// Completions path already refuses media in those roles; sending
+			// input_image here would be a 400 from the API instead.
+			name:        "image_in_a_system_message_is_refused",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: image/png",
+		},
+		{
+			name:        "image_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a developer message is not supported: image/png",
+		},
+		{
+			name:        "file_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "https://example.com/report.pdf"}},
+			wantErrText: "media in a developer message is not supported: application/pdf",
+		},
+		{
+			// The role is checked before the media type, as in Completions.
+			name:        "audio_in_a_system_message_gets_the_role_error",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: audio/mpeg",
+		},
+		{
+			name: "text_in_a_system_message_is_kept",
+			role: "system",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/system:be terse"},
+		},
+		{
+			name: "text_in_a_developer_message_is_kept",
+			role: "developer",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/developer:be terse"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			role := tt.role
+			if role == "" {
+				role = string(genai.RoleUser)
+			}
 			params, err := buildParams("fallback", &model.LLMRequest{
-				Contents: []*genai.Content{userContent(tt.part)},
+				Contents: []*genai.Content{{Role: role, Parts: []*genai.Part{tt.part}}},
 			})
 			if tt.wantErr != nil || tt.wantErrText != "" {
 				if err == nil {

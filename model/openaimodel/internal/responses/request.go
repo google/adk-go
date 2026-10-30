@@ -251,6 +251,10 @@ func newMessage(msgRole oairesponses.EasyInputMessageRole, buffered []bufferedCo
 	contentList := make(oairesponses.ResponseInputMessageContentListParam, 0, len(buffered))
 	for _, b := range buffered {
 		if b.media != nil {
+			// System and developer messages take input_text only.
+			if msgRole == oairesponses.EasyInputMessageRoleSystem || msgRole == oairesponses.EasyInputMessageRoleDeveloper {
+				return nil, fmt.Errorf("openai: media in a %s message is not supported: %s", msgRole, b.media.MIMEType)
+			}
 			content, err := newMediaContent(*b.media)
 			if err != nil {
 				return nil, err
