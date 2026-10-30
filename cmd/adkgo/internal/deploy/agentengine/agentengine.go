@@ -35,6 +35,7 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"google.golang.org/adk/v2/cmd/adkgo/internal/deploy"
 	"google.golang.org/adk/v2/internal/cli/util"
@@ -65,6 +66,8 @@ type agentEngineServiceFlags struct {
 	serverPort    int
 	agentEngineID string
 	memoryBank    memoryBankFlags
+	secrets       []string
+	secretEnv     []*aiplatformpb.SecretEnvVar
 }
 
 type buildFlags struct {
@@ -117,13 +120,48 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "", "Name of the model to be used for memory generation, as publishers/google/models/<model_id>. If empty, Memory Bank uses its own default model."+
 		" A non-empty value is prefixed with projects/<project_name>/locations/<region>, so the model must be available in that region. To list models, GET"+
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models")
+	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.secrets, "secret", nil, "Secret Manager secret to expose as an environment variable, as ENV_VARIABLE=SECRET:VERSION, where VERSION is a version number or \"latest\". Can be repeated.")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+}
+
+var secretFlagRegexp = regexp.MustCompile(`^([^=]+)=(.+):(.+)$`)
+
+var envVarNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// parseSecrets converts ENV_VARIABLE=SECRET:VERSION values into SecretEnvVars.
+func parseSecrets(specs []string) ([]*aiplatformpb.SecretEnvVar, error) {
+	var out []*aiplatformpb.SecretEnvVar
+	seen := map[string]bool{}
+	for i, spec := range specs {
+		m := secretFlagRegexp.FindStringSubmatch(spec)
+		if m == nil {
+			return nil, fmt.Errorf("invalid --secret value at position %d, want ENV_VARIABLE=SECRET:VERSION", i+1)
+		}
+		if !envVarNameRegexp.MatchString(m[1]) {
+			return nil, fmt.Errorf("invalid --secret value at position %d: environment variable name must match %s", i+1, envVarNameRegexp)
+		}
+		if seen[m[1]] {
+			return nil, fmt.Errorf("invalid --secret value at position %d: duplicate environment variable name", i+1)
+		}
+		seen[m[1]] = true
+		out = append(out, &aiplatformpb.SecretEnvVar{
+			Name:      m[1],
+			SecretRef: &aiplatformpb.SecretRef{Secret: m[2], Version: m[3]},
+		})
+	}
+	return out, nil
 }
 
 // computeFlags uses command line arguments to create a full config
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
+			secretEnv, err := parseSecrets(f.agentEngine.secrets)
+			if err != nil {
+				return err
+			}
+			f.agentEngine.secretEnv = secretEnv
+
 			f.source.origEntryPointPath = f.source.entryPointPath
 			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
@@ -345,6 +383,43 @@ func (f *deployAgentEngineFlags) memoryBankContextSpec() *aiplatformpb.Reasoning
 	return &aiplatformpb.ReasoningEngineContextSpec{MemoryBankConfig: cfg}
 }
 
+// createRequest builds the CreateReasoningEngine request, without the optional
+// Memory Bank context.
+func (f *deployAgentEngineFlags) createRequest(parent string, archiveContent []byte, methods []*structpb.Struct) *aiplatformpb.CreateReasoningEngineRequest {
+	req := &aiplatformpb.CreateReasoningEngineRequest{
+		Parent: parent,
+		ReasoningEngine: &aiplatformpb.ReasoningEngine{
+			DisplayName: f.agentEngine.displayName,
+			Spec: &aiplatformpb.ReasoningEngineSpec{
+				DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
+					SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
+						Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
+							InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
+								SourceArchive: archiveContent,
+							},
+						},
+						LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
+							ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
+						},
+					},
+				},
+				AgentFramework: "google-adk",
+				DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
+					Env: []*aiplatformpb.EnvVar{
+						{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
+						{Name: "NUM_WORKERS", Value: "1"},
+						{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
+						{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
+					},
+					SecretEnv: f.agentEngine.secretEnv,
+				},
+				ClassMethods: methods,
+			},
+		},
+	}
+	return req
+}
+
 // gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
 func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 	return util.LogStartStop("Deploying to Agent Engine",
@@ -377,36 +452,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 			p("Methods:", string(methodsJSON))
 
-			req := &aiplatformpb.CreateReasoningEngineRequest{
-				Parent: parent,
-				ReasoningEngine: &aiplatformpb.ReasoningEngine{
-					DisplayName: f.agentEngine.displayName,
-					Spec: &aiplatformpb.ReasoningEngineSpec{
-						DeploymentSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_{
-							SourceCodeSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec{
-								Source: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource_{
-									InlineSource: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_InlineSource{
-										SourceArchive: archiveContent,
-									},
-								},
-								LanguageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec_{
-									ImageSpec: &aiplatformpb.ReasoningEngineSpec_SourceCodeSpec_ImageSpec{},
-								},
-							},
-						},
-						AgentFramework: "google-adk",
-						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
-						},
-						ClassMethods: methods,
-					},
-				},
-			}
+			req := f.createRequest(parent, archiveContent, methods)
 
 			if f.agentEngine.memoryBank.deploy {
 				req.ReasoningEngine.ContextSpec = f.memoryBankContextSpec()
