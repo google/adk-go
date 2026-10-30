@@ -34,8 +34,9 @@ type Config struct {
 
 	OnEventCallback OnEventCallback
 
-	BeforeRunCallback BeforeRunCallback
-	AfterRunCallback  AfterRunCallback
+	BeforeRunCallback  BeforeRunCallback
+	AfterRunCallback   AfterRunCallback
+	OnRunErrorCallback OnRunErrorCallback
 
 	BeforeAgentCallback agent.BeforeAgentCallback
 	AfterAgentCallback  agent.AfterAgentCallback
@@ -59,6 +60,7 @@ func New(cfg Config) (*Plugin, error) {
 		onEventCallback:       cfg.OnEventCallback,
 		beforeRunCallback:     cfg.BeforeRunCallback,
 		afterRunCallback:      cfg.AfterRunCallback,
+		onRunErrorCallback:    cfg.OnRunErrorCallback,
 		beforeAgentCallback:   cfg.BeforeAgentCallback,
 		afterAgentCallback:    cfg.AfterAgentCallback,
 		beforeModelCallback:   cfg.BeforeModelCallback,
@@ -88,8 +90,9 @@ type Plugin struct {
 	onUserMessageCallback OnUserMessageCallback
 	onEventCallback       OnEventCallback
 
-	beforeRunCallback BeforeRunCallback
-	afterRunCallback  AfterRunCallback
+	beforeRunCallback  BeforeRunCallback
+	afterRunCallback   AfterRunCallback
+	onRunErrorCallback OnRunErrorCallback
 
 	beforeAgentCallback agent.BeforeAgentCallback
 	afterAgentCallback  agent.AfterAgentCallback
@@ -135,6 +138,11 @@ func (p *Plugin) BeforeRunCallback() BeforeRunCallback {
 // AfterRunCallback returns the plugin's AfterRunCallback.
 func (p *Plugin) AfterRunCallback() AfterRunCallback {
 	return p.afterRunCallback
+}
+
+// OnRunErrorCallback returns the plugin's OnRunErrorCallback.
+func (p *Plugin) OnRunErrorCallback() OnRunErrorCallback {
+	return p.onRunErrorCallback
 }
 
 // BeforeAgentCallback returns the plugin's BeforeAgentCallback.
@@ -187,6 +195,19 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
 // AfterRunCallback is invoked after a run completes.
 type AfterRunCallback func(agent.InvocationContext)
+
+// OnRunErrorCallback is invoked before a runner exposes an error to its caller,
+// once an invocation context exists. It receives the same error as the caller
+// and cannot replace or suppress it. Errors handled within an agent are excluded.
+//
+// A run can yield multiple errors if the caller continues reading; each triggers
+// this callback before AfterRunCallback. Stopping iteration alone is not an error.
+// RunLive also invokes this callback for setup errors after its invocation context
+// is created, even when no event iterator is returned. Failures before context
+// creation, such as session lookup errors, do not invoke it.
+//
+// Like other plugin callbacks, it may run concurrently for different invocations.
+type OnRunErrorCallback func(agent.InvocationContext, error)
 
 // OnEventCallback is invoked for each event, and may return a replacement event.
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)
