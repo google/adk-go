@@ -5036,6 +5036,22 @@ func (v *testAtomicScalarToken) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.FormatUint(atomic.LoadUint64((*uint64)(v)), 10)), nil
 }
 
+// testValueAtomicToken is a scalar that is written atomically, whose method
+// is on its value.
+type testValueAtomicToken uint64
+
+func (v testValueAtomicToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(uint64(v), 10)), nil
+}
+
+// testAtomicArrayToken is an array whose items are written atomically, whose
+// method is on its value.
+type testAtomicArrayToken [4]uint64
+
+func (v testAtomicArrayToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(v[0], 10)), nil
+}
+
 func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET"
 	for _, tt := range []struct {
@@ -5065,6 +5081,8 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 		{"empty string with MarshalText in a field", struct{ P testZeroTextPassword }{}, `{"P":"[REDACTED]"}`},
 		{"zero scalar with a pointer method", new(testAtomicScalarToken), `"[REDACTED]"`},
 		{"zero scalar with a pointer method in a field", &struct{ T testAtomicScalarToken }{}, `{"T":"[REDACTED]"}`},
+		{"array with MarshalJSON", testAtomicArrayToken{}, `"[REDACTED]"`},
+		{"array with MarshalJSON in a field", &struct{ A testAtomicArrayToken }{}, `{"A":"[REDACTED]"}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, _, err := SmartTruncate(tt.in, 1000)
@@ -5075,14 +5093,19 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 	}
 }
 
-// TestSmartTruncate_DoesNotReadAtomicScalarsOfSensitiveTypes checks that a
-// credential-named scalar whose method reads it atomically is redacted
-// without being read while another goroutine writes it atomically: run with
-// -race. The zero value rows of
+// TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes checks that
+// credential-named values with a marshaling method, on the pointer or on the
+// value, are redacted without being read while another goroutine writes them
+// atomically: run with -race. The zero value rows of
 // TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole check the
-// output without it.
-func TestSmartTruncate_DoesNotReadAtomicScalarsOfSensitiveTypes(t *testing.T) {
-	type holder struct{ T testAtomicScalarToken }
+// output without it, and TestHasMarshalerMethod_DoesNotBoxTheValue that the
+// value is not copied.
+func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
+	type holder struct {
+		T testAtomicScalarToken
+		V testValueAtomicToken
+		A testAtomicArrayToken
+	}
 	v := new(testAtomicScalarToken)
 	h := new(holder)
 	stop := make(chan struct{})
@@ -5101,14 +5124,40 @@ func TestSmartTruncate_DoesNotReadAtomicScalarsOfSensitiveTypes(t *testing.T) {
 			}
 			atomic.AddUint64((*uint64)(v), 1)
 			atomic.AddUint64((*uint64)(&h.T), 1)
+			atomic.AddUint64((*uint64)(&h.V), 1)
+			atomic.AddUint64(&h.A[0], 1)
 		}
 	}()
 	for range 200 {
 		if got, _, err := SmartTruncate(v, 1000); err != nil || string(got) != `"[REDACTED]"` {
 			t.Fatalf(`SmartTruncate(*testAtomicScalarToken) = (%s, %v), want "[REDACTED]"`, got, err)
 		}
-		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != `{"T":"[REDACTED]"}` {
-			t.Fatalf(`SmartTruncate(holder) = (%s, %v), want {"T":"[REDACTED]"}`, got, err)
+		const want = `{"A":"[REDACTED]","T":"[REDACTED]","V":"[REDACTED]"}`
+		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
+			t.Fatalf(`SmartTruncate(holder) = (%s, %v), want %s`, got, err, want)
+		}
+	}
+}
+
+// TestHasMarshalerMethod_DoesNotBoxTheValue checks that hasMarshalerMethod
+// reads the method sets of types only: boxing an addressable value into an
+// interface value, as Value.Interface does, copies it, which allocates, and
+// reads it.
+func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
+	h := &struct {
+		T testAtomicScalarToken
+		V testValueAtomicToken
+		A testAtomicArrayToken
+		N [4]uint64
+	}{}
+	fields := reflect.ValueOf(h).Elem()
+	for i, want := range []bool{true, true, true, false} {
+		f := fields.Field(i)
+		if got := hasMarshalerMethod(f); got != want {
+			t.Errorf("hasMarshalerMethod(%s) = %v, want %v", f.Type(), got, want)
+		}
+		if allocs := testing.AllocsPerRun(10, func() { hasMarshalerMethod(f) }); allocs != 0 {
+			t.Errorf("hasMarshalerMethod(%s) allocated %v times, want 0", f.Type(), allocs)
 		}
 	}
 }

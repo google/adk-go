@@ -846,7 +846,8 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 // by name. A map, slice, array, pointer or interface of such a type is
 // redacted whole too. These values are not read, because a type may guard
 // its fields in a way that nothing here can see (a mutex, an atomic value, a
-// channel, a lock held elsewhere). A value of a scalar kind without such a
+// channel, a lock held elsewhere): the methods are looked up on the types
+// only (see hasMarshalerMethod). A value of a scalar kind without such a
 // method is redacted when it is not zero, since a zero one holds none; it is
 // read for that only then, as encoding/json would read it, while the method
 // of a scalar that has one may read it under a lock or atomically.
@@ -855,10 +856,7 @@ func hasSensitiveTypeName(v reflect.Value) bool {
 	if name == "" || !isSensitiveKey(name) {
 		return false
 	}
-	if _, isJSON := implementer(v, jsonMarshalerType); isJSON {
-		return true
-	}
-	if _, isText := implementer(v, textMarshalerType); isText {
+	if hasMarshalerMethod(v) {
 		return true
 	}
 	switch v.Kind() {
@@ -868,6 +866,23 @@ func hasSensitiveTypeName(v reflect.Value) bool {
 		return true
 	}
 	return !v.IsZero()
+}
+
+// hasMarshalerMethod reports whether encoding/json would write v with a
+// MarshalJSON or MarshalText method: the type of v has one, or v is
+// addressable and its pointer type has one. Only the method sets of the
+// types are read, not v: unlike implementer, it does not box v into an
+// interface value, which copies it, and so reads it.
+func hasMarshalerMethod(v reflect.Value) bool {
+	t := v.Type()
+	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+		return true
+	}
+	if v.Kind() == reflect.Pointer || !v.CanAddr() {
+		return false
+	}
+	pt := reflect.PointerTo(t)
+	return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
 }
 
 // redacted stands in for a value that is redacted whole, as one node of the

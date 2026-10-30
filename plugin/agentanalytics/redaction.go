@@ -140,20 +140,33 @@ var (
 	// redactBasicCredential redacts only if it is valid base64.
 	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)` + unicodeSpaceRun + `([A-Za-z0-9+/]+={0,2})`)
 	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
-	// textKeyValTokenRe matches key=value and key: value pairs. As in
-	// adk-python, the key may be quoted (Python dict reprs use single
-	// quotes); it may also be quoted with escaped quotes, as in JSON text
-	// formatted with %q. Unlike adk-python's, a bare value does not stop
-	// at "}", so a value such as "ab}rest" is redacted as a whole;
-	// redactTextKeyValue leaves out the "}" and "]" that end the value
-	// and close a bracket opened before the key, as in the %+v output
+	// textKeyValTokenAtRe matches a key=value or key: value pair at the start
+	// of the text. As in adk-python, the key may be quoted (Python dict reprs
+	// use single quotes); it may also be quoted with escaped quotes, as in
+	// JSON text formatted with %q. Unlike adk-python's, a bare value does not
+	// stop at "}", so a value such as "ab}rest" is redacted as a whole;
+	// redactTextKeyValue leaves out the "}" and "]" that end the value and
+	// close a bracket opened before the key, as in the %+v output
 	// {APIKey:...}.
-	textKeyValTokenRe   = regexp.MustCompile(`(?i)(?:\b|_)(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	textKeyValTokenAtRe = regexp.MustCompile(`(?i)^(` + textKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	// textKeyNameAtRe matches the start of textKeyValTokenAtRe, up to and
 	// including the delimiter, so that the name of a key can be read without
 	// reading its value, which may be long (see allowedKeyAt).
 	textKeyNameAtRe = regexp.MustCompile(`(?i)^(` + textKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])`)
+	// textKeyNameRe finds the key of a pair as textKeyNameAtRe reads it, up to
+	// its delimiter, anywhere in the text: a credential name after a word
+	// boundary or a "_" (see bareTextKeyNameRegex), whose compound prefix
+	// keyValFinder reads back itself.
+	textKeyNameRe = regexp.MustCompile(`(?i)(?:\b|_)(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])`)
+	// textKeyNameCamelAtRe matches the key of a pair at the start of the
+	// text, like textKeyNameRe, but starts at the credential name without a
+	// word boundary before it (see findCamelKeyName).
+	textKeyNameCamelAtRe = regexp.MustCompile(`(?i)^(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])`)
+	// textKeyValBareAtRe matches a pair at the start of the text, like
+	// textKeyValTokenAtRe, but from the credential name of its key, which
+	// textKeyNameRe and textKeyNameCamelAtRe find, without the compound
+	// prefix that keyValFinder reads back itself.
+	textKeyValBareAtRe = regexp.MustCompile(`(?i)^(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	// textValueStartRe matches the start of the value that
 	// textKeyValTokenAtRe reads after the delimiter: a quoted value starts
 	// with a byte that a bare value may start with, so whitespace and one
@@ -183,7 +196,7 @@ var (
 )
 
 // patternWords holds words of which every match of authHeaderRe,
-// bearerTokenRe, basicTokenRe, jsonKeyValTokenRe, textKeyValTokenRe and
+// bearerTokenRe, basicTokenRe, jsonKeyValTokenRe, textKeyNameRe and
 // quotedSensitiveKeyRe contains at least one, once the text is folded by
 // foldPatternText: the sensitive key names without separators (which include
 // "authorization", "apikey" and "bearer"), the "temp:" prefix and the "basic"
@@ -302,9 +315,9 @@ func textKeyNameRegex() string {
 // bare name, so keyValFinder searches with this pattern, after a word
 // boundary or a "_", and extends the key back over the prefix itself. A name
 // that continues a word without a separator, as in dbPassword, has no such
-// boundary; findCamelKeyValToken finds it in a name that is followed by "="
-// or ":" instead, at a camelCase boundary: a capital after a lower-case letter
-// or a digit, or the last capital of an acronym, as in the "P" of DBPassword.
+// boundary; findCamelKeyName finds it in a name that is followed by "=" or
+// ":" instead, at a camelCase boundary: a capital after a lower-case letter or
+// a digit, or the last capital of an acronym, as in the "P" of DBPassword.
 func bareTextKeyNameRegex() string {
 	return bareSensitiveKeyRegex() + `|oauth[a-z0-9_-]*[.]code`
 }
@@ -488,8 +501,8 @@ func splitKeyWords(k string) []string {
 // prefix (see textKeyNameRegex).
 var bareTextKeyRe = regexp.MustCompile(`(?i)^(?:` + bareSensitiveKeyRegex() + `)$`)
 
-// textKeyAllowed reports whether the key that textKeyValTokenRe matched is to
-// be redacted: a plain sensitive key name always is, and a compound name is
+// textKeyAllowed reports whether a key that keyValFinder found is to be
+// redacted: a plain sensitive key name always is, and a compound name is
 // if isSensitiveKey accepts it or a "-" in it precedes a plain name.
 func textKeyAllowed(key string) bool {
 	if bareTextKeyRe.MatchString(key) || isSensitiveKey(key) {
@@ -1510,35 +1523,34 @@ func scrubTextPatterns(s string) string {
 
 // keyValFinder finds the key-value pairs with a sensitive key in whole, one
 // after the other, for replaceMatchesFunc, which calls find with the text
-// that is left. It keeps the next match of textKeyValTokenRe from one call to
-// the next, so that the text between the matches is searched once, however
-// many pairs that textKeyValTokenRe does not find (see findCamelKeyValToken)
-// the text holds.
+// that is left. It reads the name of a key and the delimiter after it first,
+// and the value, which may run on to the end of a long word, only for a key
+// that textKeyAllowed accepts, so that a run of keys that it does not, as in
+// next_page_token:next_page_token:..., is read once rather than to its end
+// from each key. It keeps the next key that textKeyNameRe finds from one call
+// to the next, so that the text between the keys is searched once, however
+// many keys that textKeyNameRe does not find (see findCamelKeyName) the text
+// holds.
 type keyValFinder struct {
 	whole string
-	// next is the submatch indexes in whole of the first match of
-	// textKeyValTokenRe at or after the offset of the last search, if
-	// searched and not nil. Once a search has found nothing, none is run
-	// again.
+	// next is the submatch indexes in whole of the first key, with a value
+	// after it, that textKeyNameRe finds at or after the offset of the last
+	// search (see nextKeyName), if searched and not nil. Once a search has
+	// found nothing, none is run again.
 	next     []int
 	searched bool
 }
 
 // find returns the submatch indexes in rest, the end of f.whole, of the first
-// key-value pair with a sensitive key in it, or nil.
+// key-value pair with a sensitive key in it, or nil (see pairAt).
 func (f *keyValFinder) find(rest string) []int {
-	if loc := textKeyValTokenAtRe.FindStringSubmatchIndex(rest); loc != nil {
-		return loc
+	if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && textValueStartRe.MatchString(rest[loc[1]:]) {
+		return pairAt(rest, loc, 0, textKeyValTokenAtRe)
 	}
 	pos := len(f.whole) - len(rest)
 	if !f.searched || f.next != nil && f.next[0] < pos {
 		f.searched = true
-		f.next = textKeyValTokenRe.FindStringSubmatchIndex(rest)
-		for i, v := range f.next {
-			if v >= 0 {
-				f.next[i] = v + pos
-			}
-		}
+		f.next = nextKeyName(f.whole, pos)
 	}
 	var loc []int
 	limit := len(rest)
@@ -1554,26 +1566,68 @@ func (f *keyValFinder) find(rest string) []int {
 	}
 	// A key joined to its prefix at a camelCase boundary, as in dbPassword,
 	// has no word boundary before its credential name; it starts before the
-	// match at a word boundary, if there is one.
-	if camel := findCamelKeyValToken(rest, limit); camel != nil {
+	// key at a word boundary, if there is one.
+	if camel := findCamelKeyName(rest, limit); camel != nil {
 		loc = camel
 	}
-	if loc != nil {
-		// Extend the key back over the prefix of a compound name. The match
-		// starts at the key.
-		start := loc[2]
-		for start > 0 && isTextKeyByte(rest[start-1]) {
-			start--
-		}
-		loc[0], loc[2] = start, start
+	if loc == nil {
+		return nil
 	}
-	return loc
+	// Extend the key back over the prefix of a compound name. The match
+	// starts at the key.
+	name := loc[2]
+	start := name
+	for start > 0 && isTextKeyByte(rest[start-1]) {
+		start--
+	}
+	loc[0], loc[2] = start, start
+	return pairAt(rest, loc, name, textKeyValBareAtRe)
 }
 
-// textKeyValCamelAtRe matches a key-value pair at the start of the text, like
-// textKeyValTokenRe, but starts at the credential name without a word
-// boundary before it.
-var textKeyValCamelAtRe = regexp.MustCompile(`(?i)^(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+// nextKeyName returns the submatch indexes in s of the first key and
+// delimiter at or after s[pos:] that textKeyNameRe finds with a value after
+// them (see textValueStartRe), or nil. A key without a value is passed over
+// from its delimiter: a key that starts before that, inside it, has the same
+// delimiter.
+func nextKeyName(s string, pos int) []int {
+	for {
+		loc := textKeyNameRe.FindStringSubmatchIndex(s[pos:])
+		if loc == nil {
+			return nil
+		}
+		for i, v := range loc {
+			if v >= 0 {
+				loc[i] = v + pos
+			}
+		}
+		if textValueStartRe.MatchString(s[loc[1]:]) {
+			return loc
+		}
+		pos = loc[1]
+	}
+}
+
+// pairAt returns the submatch indexes in s of the pair whose key and
+// delimiter are at loc, starting at the key, if textKeyAllowed accepts the
+// key: those of re matched at s[at:], where re reads the key, with the key of
+// loc. re reads the value, which ends the pair. Otherwise it returns loc and
+// no value, which redactTextKeyValue leaves in place, as the value is not
+// read. A match of re whose key does not end where that of loc does is not
+// taken (see TestKeyNameRegexps_FindThePairsOfPairRegexps).
+func pairAt(s string, loc []int, at int, re *regexp.Regexp) []int {
+	if textKeyAllowed(s[loc[2]:loc[3]]) {
+		if pair := re.FindStringSubmatchIndex(s[at:]); pair != nil && at+pair[3] == loc[3] {
+			for i, v := range pair {
+				if v >= 0 {
+					pair[i] = v + at
+				}
+			}
+			pair[0], pair[2] = loc[0], loc[2]
+			return pair
+		}
+	}
+	return append(loc[:8:8], -1, -1)
+}
 
 // maxFixedKeyNameLen is the length of the longest name in sensitiveKeys.
 var maxFixedKeyNameLen = func() int {
@@ -1591,11 +1645,12 @@ func isCamelTokenByte(c byte) bool {
 	return isTextKeyByte(c) || c == '.'
 }
 
-// findCamelKeyValToken returns the submatch indexes in s of the first
-// key-value pair whose credential name starts before s[:limit] ends, at a
-// camelCase boundary inside a longer name, such as the "Password" of
-// dbPassword, or nil. A boundary is a capital after a lower-case letter or a
-// digit, or the last capital of an acronym, as in the "P" of DBPassword.
+// findCamelKeyName returns the submatch indexes in s of the first key and
+// delimiter, with a value after them, whose credential name starts before
+// s[:limit] ends, at a camelCase boundary inside a longer name, such as the
+// "Password" of dbPassword, or nil. A boundary is a capital after a
+// lower-case letter or a digit, or the last capital of an acronym, as in the
+// "P" of DBPassword.
 //
 // A credential name ends the token (the run of name bytes) that it is in, as
 // the delimiter of the pair follows it, so only a token that is followed by
@@ -1603,7 +1658,7 @@ func isCamelTokenByte(c byte) bool {
 // boundaries. Of its boundaries, only those that leave room for a name of
 // sensitiveKeys are tried, and only the first one of an OAuth name, so the
 // work for a token is linear in its length.
-func findCamelKeyValToken(s string, limit int) []int {
+func findCamelKeyName(s string, limit int) []int {
 	for t := 0; t < limit; {
 		if !isCamelTokenByte(s[t]) {
 			t++
@@ -1638,8 +1693,8 @@ func findCamelKeyValToken(s string, limit int) []int {
 					}
 					oauthTried = true
 				}
-				loc := textKeyValCamelAtRe.FindStringSubmatchIndex(s[i:])
-				if loc == nil {
+				loc := textKeyNameCamelAtRe.FindStringSubmatchIndex(s[i:])
+				if loc == nil || !textValueStartRe.MatchString(s[i+loc[1]:]) {
 					continue
 				}
 				for j, v := range loc {
@@ -1776,7 +1831,7 @@ func redactJSONKeyValue(s string, loc []int) (string, int) {
 	return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
 }
 
-// redactTextKeyValue replaces a textKeyValTokenRe match, keeping the key, its
+// redactTextKeyValue replaces a pair from keyValFinder, keeping the key, its
 // quote, the delimiter and the quotes around the value. A value that is itself
 // a sensitive key, as in the YAML "credentials:\n  token: ...", is left in
 // place, so that the pair it starts is matched and redacted on its own (see
@@ -1790,9 +1845,11 @@ func redactJSONKeyValue(s string, loc []int) (string, int) {
 // trimEnclosingClosers), as in the %+v output {APIKey:...} or
 // [{APIKey:...}]. brackets counts the brackets opened before the key.
 func redactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, int) {
-	if !textKeyAllowed(s[loc[2]:loc[3]]) {
+	if loc[8] < 0 {
 		// A compound name that does not end in a credential name, such as
-		// next_page_token. What follows the delimiter is scanned again.
+		// next_page_token, which textKeyAllowed does not accept, and whose
+		// value pairAt has not read. What follows the delimiter is scanned
+		// again.
 		return s[loc[0]:loc[7]], loc[7]
 	}
 	open := brackets.before(s, loc[0])
@@ -1865,7 +1922,7 @@ func openedValueEnd(s string, start, end int, trailingQuoteOpens bool) int {
 		switch c := s[at]; {
 		case c == '{' || c == '[':
 			e = sensitiveValueEnd(s, at, at)
-		case c == '"' || c == '\'' || c == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\''):
+		case c == '"' || c == '\'' || (c == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\'')):
 			q := quotedValueRe.FindString(s[at:])
 			if q == "" {
 				return end
@@ -1996,10 +2053,12 @@ func nestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind,
 // rather than the key only, which would leave the value in place: the value
 // is a key when it ends with a delimiter or is followed by one, or is a
 // quoted name followed by one, or a name and a delimiter and a redacted
-// value or the start of a quoted value that runs on past it, and a pair with a sensitive key starts at its name. A key that starts a line is left in place, so that its pair is
-// matched on its own (nestedKey); any other is redacted with the value of its
-// pair (valueEndingInKeyName). Only the delimiter and the value that follow
-// it are read besides the pair that the regular expressions match, which are
+// value or the start of a quoted value that runs on past it, and a pair with
+// a sensitive key starts at its name, or after a dot or a colon in it. A key
+// that starts a line is left in place, so that its pair is matched on its
+// own (nestedKey); any other is redacted with the value of its pair
+// (valueEndingInKeyName). Only the delimiter and the value that follow it
+// are read besides the pair that the regular expressions match, which are
 // matched once, as the pair is redacted whole.
 func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind, int) {
 	name := start
@@ -2042,20 +2101,22 @@ func oversizedNestedKey(s string, start, end int, lineStart bool) (nestedKeyKind
 		keyText = keyText[min(n, len(keyText)):]
 	}
 	if !allowedKeyAt(s, name) {
-		// A name with a dot before its credential name, as in x.y_PASSWORD,
-		// is read from after the dot: the name is the part that
-		// textKeyValTokenAtRe reads. Only the name after each dot is read
-		// until one is allowed (see allowedKeyAt), so that a run of names
-		// that are not, as in x.next_page_token:x.next_page_token:..., is
-		// read once rather than to its end from each dot.
+		// A name after a dot or a colon in the key text, as in x.y_PASSWORD
+		// or a run of keys whose first is not a credential, as in
+		// next_page_token:x_PASSWORD, is read from after it: the name is the
+		// part that textKeyValTokenAtRe reads. Only the name after each dot
+		// or colon is read until one is allowed (see allowedKeyAt), so that a
+		// run of names that are not, as in
+		// x.next_page_token:x.next_page_token:..., is read once rather than
+		// to its end from each one.
 		found := false
-		for d := strings.IndexByte(keyText, '.'); d >= 0; {
+		for d := strings.IndexAny(keyText, ".:"); d >= 0; {
 			if allowedKeyAt(s, name+d+1) {
 				name += d + 1
 				found = true
 				break
 			}
-			next := strings.IndexByte(keyText[d+1:], '.')
+			next := strings.IndexAny(keyText[d+1:], ".:")
 			if next < 0 {
 				break
 			}
@@ -2129,6 +2190,15 @@ func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
 			}
 			return valueEndingInKeyName, at
 		}
+		// So is the last name of a run of names in one word, as in
+		// next_page_token:x_TOKEN, whose first is not a credential: the value
+		// that follows the word is the value of its last name.
+		if i := strings.LastIndexByte(name, ':'); i >= 0 && isCompoundSensitiveKey(name[i+1:]) {
+			if lineStart {
+				return nestedKey, at + i + 1
+			}
+			return valueEndingInKeyName, at + i + 1
+		}
 		return notNestedKey, 0
 	case lineStart:
 		return nestedKey, at + m[2]
@@ -2171,16 +2241,21 @@ func nestedPairEnd(s string, pair, open int) int {
 }
 
 // oversizedValueEnd returns the end of the value of the last key of a word
-// longer than maxNestedKeyLen that holds a run of keys, s[start:end]: the
-// quoted value, object or array that a delimiter in the word opens and that
-// runs on past it (see openedValueEnd), even if a quote ends the word, or
-// else the value that follows the word and a delimiter (adjacent to it or
-// after whitespace): a quoted value, an object or an array, which is read to
-// its closing bracket or to the end of s as in sensitiveValueEnd, or a bare
-// value. Without a delimiter after it, the word is read as a bare value (see
-// textValueEnd).
+// longer than maxNestedKeyLen that holds a run of keys, s[start:end], which
+// starts after the delimiter of a key: the object or array that the value
+// opens, the quoted value, object or array that a delimiter in the word opens
+// (see openedValueEnd), even if a quote ends the word, when it runs on past
+// the word, or else the value that follows the word and a delimiter (adjacent
+// to it or after whitespace): a quoted value, an object or an array, which is
+// read to its closing bracket or to the end of s as in sensitiveValueEnd, or a
+// bare value. Without a delimiter after it, the word is read as a bare value
+// (see textValueEnd).
 func oversizedValueEnd(s string, start, end, open int) int {
-	if opened := openedValueEnd(s, start, end, true); opened > end {
+	closed := sensitiveValueEnd(s, start, start)
+	if closed > end {
+		return closed
+	}
+	if opened := openedValueEnd(s, closed, end, true); opened > end {
 		return opened
 	}
 	v := s[start:end]
@@ -2207,11 +2282,11 @@ func oversizedValueEnd(s string, start, end, open int) int {
 }
 
 // regexpSpace holds the bytes that \s matches in a regular expression such
-// as textKeyValTokenRe.
+// as textKeyValTokenAtRe.
 const regexpSpace = "\t\n\f\r "
 
 // delimSpace holds the bytes that [\s[:cntrl:]] matches around delimiters in
-// textKeyValTokenRe.
+// textKeyValTokenAtRe.
 const delimSpace = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f \x7f"
 
 // followedByDelimiter reports whether a key-value delimiter, ":" or "=",

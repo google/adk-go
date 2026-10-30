@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -437,6 +438,8 @@ func TestIsCompoundSensitiveKey_LongKey(t *testing.T) {
 func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 	longKey := strings.Repeat("x_", 70) + "PASSWORD"
 	dottedKey := "x.y_" + longKey
+	// longName makes the name of an object field longer than maxNestedKeyLen.
+	longName := strings.Repeat("a", 150)
 	tests := []struct {
 		name string
 		in   string
@@ -500,6 +503,26 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"dotted names that are not credentials, then a dotted key", "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", 3) + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"dotted name that is not a credential, then a short key", "credentials:\n a_PASSWORD: x.next_page_token:x_PASSWORD=\"prefix SYNTHETIC_SECRET suffix\""},
 		{"name that is not a credential, then an oversized key", "a_PASSWORD: next_page_token:" + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"run whose last value is an object", `token=a_TOKEN:b_TOKEN:{"` + longName + `": "x", "value": "SYNTHETIC_SECRET"}`},
+		{"run whose last value is an object of numbers", `token=a_TOKEN:b_TOKEN:{"` + longName + `": 1, "value": "SYNTHETIC_SECRET"}`},
+		{"run whose last value is a Python dict", `token=a_TOKEN:b_TOKEN:{'` + longName + `': 'x', 'value': 'SYNTHETIC_SECRET'}`},
+		{"run whose last value is an array", `token=a_TOKEN:b_TOKEN:[{"` + longName + `": "x", "value": "SYNTHETIC_SECRET"}]`},
+		{"oversized children whose last value is an object", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + `:{"` + longName + `": "x", "value": "SYNTHETIC_SECRET"}`},
+		{"oversized children in one word, then an object with a brace in a string", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = {"a": "}", "other": "SYNTHETIC_SECRET"}`},
+		{"dotted name that is not a credential, then an oversized key and an object", "credentials:\n a_PASSWORD: x.next_page_token:" + longKey + ` = {"b": "SYNTHETIC_SECRET"}`},
+		{"dotted name that is not a credential, then a dotted oversized key and an object", "credentials:\n a_PASSWORD: x.next_page_token:y." + longKey + ` = {"b": "SYNTHETIC_SECRET"}`},
+		{"name that is not a credential, then an oversized key and a spaced quoted value", "next_page_token:" + longKey + ` = "prefix SYNTHETIC_SECRET suffix"`},
+		{"label, then an oversized key and an object", "label:" + longKey + ` = {"b": "SYNTHETIC_SECRET"}`},
+		{"child label, then an oversized key and an object", "credentials:\n a_PASSWORD: label:" + longKey + ` = {"b": "SYNTHETIC_SECRET"}`},
+		{"child name that is not a credential, then an oversized key and a spaced quoted value", "credentials:\n a_PASSWORD: next_page_token:" + longKey + ` = "prefix SYNTHETIC_SECRET suffix"`},
+		{"child name that is not a credential, then oversized keys and an object", "credentials:\n a_PASSWORD: next_page_token:" + longKey + ":" + longKey + ` = {"b": "SYNTHETIC_SECRET"}`},
+		{"name that is not a credential, then a short key and an object", `token=next_page_token:x_TOKEN = {"b": "SYNTHETIC_SECRET"}`},
+		{"child label, then a short key and an object", "credentials:\n a_PASSWORD: label:x_TOKEN = {\"b\": \"SYNTHETIC_SECRET\"}"},
+		{"child name that is not a credential, then a short key and a spaced quoted value", "credentials:\n a_PASSWORD: next_page_token:x_TOKEN = \"prefix SYNTHETIC_SECRET suffix\""},
+		{"dotted name that is not a credential, then a key in one word", "x.next_page_token:x_TOKEN=SYNTHETIC_SECRET"},
+		{"dotted label, then a camel case key in one word", "foo.bar:myPassword=SYNTHETIC_SECRET"},
+		{"camel case name that is not a credential, then a camel case key", "nextPageToken:dbPassword=SYNTHETIC_SECRET"},
+		{"run of names that are not credentials, then a key", strings.Repeat("next_page_token:", 50) + "x_TOKEN=SYNTHETIC_SECRET"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -602,6 +625,114 @@ func TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe(t *testing.T) {
 	}
 	if allowed == 0 {
 		t.Error("no pair was allowed, so nothing was compared")
+	}
+}
+
+// TestKeyNameRegexps_FindThePairsOfPairRegexps checks that keyValFinder,
+// which reads the name and delimiter of a key before its value, finds the
+// pairs that regular expressions of whole pairs find: nextKeyName the first
+// pair that textKeyNameRe followed by a value finds, and textKeyNameCamelAtRe
+// followed by a value start the pairs that textKeyValBareAtRe, which pairAt
+// reads them with, matches, with the same key and delimiter.
+func TestKeyNameRegexps_FindThePairsOfPairRegexps(t *testing.T) {
+	pairRe := regexp.MustCompile(textKeyNameRe.String() + `[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	prefixes := []string{"", "x ", "x_", "(", "a.", "db"}
+	names := []string{"token", "Token", "next_page_token", "x_PASSWORD", "dbPassword", "APIKey", "temp:a", "temp:a:b", "oauth2.code", "label", "sig"}
+	quotes := []string{"", `"`, `\"`, `'`}
+	spaces := []string{"", " ", "\n", "\x01"}
+	delims := []string{"=", ":", ""}
+	values := []string{"v", "", " ", ",", "&x", " ,x", `"a b"`, "'a", "\x01", " ,token=v"}
+	compared := 0
+	for _, p := range prefixes {
+		for _, name := range names {
+			for _, q := range quotes {
+				for _, sp := range spaces {
+					for _, d := range delims {
+						for _, v := range values {
+							s := p + name + q + sp + d + v
+							want, got := pairRe.FindStringSubmatchIndex(s), nextKeyName(s, 0)
+							if (want == nil) != (got == nil) || want != nil && (want[0] != got[0] || want[2] != got[2] || want[3] != got[3] || want[7] != got[7]) {
+								t.Errorf("nextKeyName(%q) = %v, want the key and delimiter of %v", s, got, want)
+							}
+							if p != "" {
+								// The anchored expressions read s[i:] only.
+								continue
+							}
+							// Where a credential name may start in the name:
+							// at it, at a capital and after "_" or ":".
+							for i := range len(name) {
+								if i > 0 && (s[i] < 'A' || s[i] > 'Z') && s[i-1] != '_' && s[i-1] != ':' {
+									continue
+								}
+								want := textKeyValBareAtRe.FindStringSubmatchIndex(s[i:])
+								got := textKeyNameCamelAtRe.FindStringSubmatchIndex(s[i:])
+								found := got != nil && textValueStartRe.MatchString(s[i+got[1]:])
+								if (want != nil) != found || found && (want[3] != got[3] || want[7] != got[7]) {
+									t.Errorf("key name at %d of %q = %v (value %v), want the key and delimiter of %v", i, s, got, found, want)
+								}
+								if want != nil {
+									compared++
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if compared == 0 {
+		t.Error("no pair was found, so nothing was compared")
+	}
+}
+
+// TestKeyValFinder_SkipsKeysWithoutValues checks that a key with no value
+// after its delimiter is passed over, as a regular expression of a whole pair
+// passes over it, on each of the paths of keyValFinder.
+func TestKeyValFinder_SkipsKeysWithoutValues(t *testing.T) {
+	const at = "token: , password=x"
+	f := keyValFinder{whole: at}
+	if loc := f.find(at); loc == nil || at[loc[2]:loc[3]] != "password" || loc[8] < 0 || at[loc[8]:loc[9]] != "x" {
+		t.Errorf("keyValFinder.find(%q) = %v, want the password pair", at, loc)
+	}
+	const later = "x token: , password=x"
+	if loc := nextKeyName(later, 0); loc == nil || later[loc[2]:loc[3]] != "password" {
+		t.Errorf("nextKeyName(%q) = %v, want the password key", later, loc)
+	}
+	const camel = "dbPassword: , myToken=x"
+	if loc := findCamelKeyName(camel, len(camel)); loc == nil || camel[loc[2]:loc[3]] != "Token" {
+		t.Errorf("findCamelKeyName(%q) = %v, want the Token of myToken", camel, loc)
+	}
+	// A pair without a value, as pairAt returns for a key whose value it
+	// does not read, is left in place up to its delimiter, whatever its key.
+	var brackets openBrackets
+	if got, end := redactTextKeyValue("token= rest", []int{0, 6, 0, 5, 5, 5, 5, 6, -1, -1}, &brackets); got != "token=" || end != 6 {
+		t.Errorf(`redactTextKeyValue(pair without a value) = (%q, %d), want ("token=", 6)`, got, end)
+	}
+	// pairAt does not take a pair whose key ends elsewhere than the key it
+	// was given, here the first token for the second.
+	const two = "token=v token=w"
+	if loc := pairAt(two, []int{8, 14, 8, 13, 13, 13, 13, 14}, 0, textKeyValBareAtRe); loc[8] >= 0 {
+		t.Errorf("pairAt(%q, second key, read at the first) = %v, want no value", two, loc)
+	}
+	if loc := pairAt(two, []int{8, 14, 8, 13, 13, 13, 13, 14}, 8, textKeyValBareAtRe); loc[8] < 0 || two[loc[8]:loc[9]] != "w" {
+		t.Errorf("pairAt(%q, second key) = %v, want its value w", two, loc)
+	}
+}
+
+// TestScrubTextPatterns_KeysThatAreNotCredentials checks that a key that
+// textKeyAllowed does not accept, whose value keyValFinder does not read, is
+// written as it is, with its value, and that a key in its value is read.
+func TestScrubTextPatterns_KeysThatAreNotCredentials(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{"next_page_token=abc123 kept", "next_page_token=abc123 kept"},
+		{"x.next_page_token:abc, method_signature=xyz;nextPageToken: q", "x.next_page_token:abc, method_signature=xyz;nextPageToken: q"},
+		{strings.Repeat("next_page_token:", 3) + "abc", strings.Repeat("next_page_token:", 3) + "abc"},
+		{"next_page_token:x_TOKEN=SECRET kept", "next_page_token:x_TOKEN=[REDACTED] kept"},
+		{"nextPageToken:dbPassword=SECRET kept", "nextPageToken:dbPassword=[REDACTED] kept"},
+	} {
+		if got := scrubTextPatterns(tt.in); got != tt.want {
+			t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
@@ -742,6 +873,28 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			"oversized run of dotted names, then a dotted key", func(n int) string {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", n) + "x.y_" + strings.Repeat("x_", 70) + `PASSWORD="a b"`
 			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			// No key before the run reads it whole, so each key in it is
+			// found and passed over on its own.
+			"bare run of dotted names that are not credentials", func(n int) string { return strings.Repeat("x.next_page_token:", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"bare run of dotted names that are not credentials through an error", func(n int) string { return strings.Repeat("x.next_page_token:", n) },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 1600,
+		},
+		{
+			"bare run of names that are not credentials", func(n int) string { return strings.Repeat("next_page_token:", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"bare run of low-precision names", func(n int) string { return strings.Repeat("method_signature=", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"bare run of camel case names that are not credentials", func(n int) string { return strings.Repeat("nextPageToken:", n) },
 			func(in string) { _ = scrubTextPatterns(in) }, 1600,
 		},
 		{
