@@ -949,65 +949,72 @@ func textOfContent(c *genai.Content) string {
 	return b.String()
 }
 
-// TestCompactionSpanJoinsTheCallersTrace checks that compaction is traced
-// inside the caller's trace rather than in one of its own, and names the turn
-// that triggered it.
-//
-// Compaction runs from a defer, after the invocation has ended, so it is not a
-// child of the turn's span and should not pretend to be. What it must do is
-// stay in the caller's trace, and carry the invocation ID so the two can be
-// joined.
-//
-// Known gap, not asserted here because it is not yet true: with no ambient
-// caller span the compaction span is a root of its own, separate from the
-// turn's own root. Closing that needs the invocation's span context to reach
-// the runner, which it does not today, since the agent derives it internally
-// and only passes it to its own children.
-func TestCompactionSpanJoinsTheCallersTrace(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
-	telemetry.OverrideTracerForTesting(t, tp)
-
-	const userID, sessionID = "u", "s"
-	r, _ := newCompactionRunner(t, &scriptedModel{replyFmt: "answer %d"}, &compaction.Config{
-		CompactionInterval: 1,
-		Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
-	})
-
-	// A caller that traces its own work, which is the normal case in a server.
-	ctx, outer := tp.Tracer("test").Start(t.Context(), "caller")
-	drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
-	outer.End()
-
-	var compactionTrace, turnTrace, named string
-	for _, sp := range exp.GetSpans() {
-		switch {
-		case strings.HasPrefix(sp.Name, "compact_events"):
-			compactionTrace = sp.SpanContext.TraceID().String()
-			if !sp.Parent.IsValid() {
-				t.Error("the compaction span has no parent, so it escaped the caller's trace")
+// Compaction runs after the agent finishes, but still belongs to the
+// invocation's trace, including when the caller supplies no parent span.
+func TestCompactionSpanJoinsTheInvocationTrace(t *testing.T) {
+	forEachTraceSchema(t, func(t *testing.T) {
+		for _, parent := range []bool{false, true} {
+			name := "root"
+			if parent {
+				name = "parent"
 			}
-			for _, a := range sp.Attributes {
-				if string(a.Key) == "gcp.vertex.agent.invocation_id" {
-					named = a.Value.AsString()
+			t.Run(name, func(t *testing.T) {
+				exp := tracetest.NewInMemoryExporter()
+				tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+				telemetry.OverrideTracerForTesting(t, tp)
+
+				const userID, sessionID = "u", "s"
+				r, _ := newCompactionRunner(t, &scriptedModel{replyFmt: "answer %d"}, &compaction.Config{
+					CompactionInterval: 1,
+					Summarizer:         &recordingSummarizer{summary: "SUMMARY"},
+				})
+
+				ctx := t.Context()
+				if parent {
+					parentCtx, outer := tp.Tracer("test").Start(ctx, "caller")
+					defer outer.End()
+					ctx = parentCtx
 				}
-			}
-		case strings.HasPrefix(sp.Name, "invoke_agent"):
-			turnTrace = sp.SpanContext.TraceID().String()
+				drain(t, r.Run(ctx, userID, sessionID, genai.NewContentFromText("q1", genai.RoleUser), agent.RunConfig{}))
+				invocation := invocationSpan(t, exp)
+
+				var compactionTrace, turnTrace, named string
+				for _, sp := range exp.GetSpans() {
+					switch {
+					case strings.HasPrefix(sp.Name, "compact_events"):
+						compactionTrace = sp.SpanContext.TraceID().String()
+						if !sp.Parent.IsValid() {
+							t.Error("the compaction span has no parent")
+						}
+						if !sp.Parent.Equal(invocation.SpanContext) {
+							t.Error("compaction is not a child of the invocation")
+						}
+						if sp.EndTime.After(invocation.EndTime) {
+							t.Error("compaction outlived the invocation")
+						}
+						for _, a := range sp.Attributes {
+							if string(a.Key) == "gcp.vertex.agent.invocation_id" {
+								named = a.Value.AsString()
+							}
+						}
+					case strings.HasPrefix(sp.Name, "invoke_agent"):
+						turnTrace = sp.SpanContext.TraceID().String()
+					}
+				}
+				if compactionTrace == "" || turnTrace == "" {
+					t.Fatalf("missing spans: compaction=%q turn=%q", compactionTrace, turnTrace)
+				}
+				if compactionTrace != turnTrace {
+					t.Errorf("compaction is in trace %s and the turn in %s, so they cannot be seen together",
+						compactionTrace, turnTrace)
+				}
+				// Keep the invocation ID for consumers that join spans by this attribute.
+				if named == "" {
+					t.Error("the compaction span does not name the invocation that triggered it")
+				}
+			})
 		}
-	}
-	if compactionTrace == "" || turnTrace == "" {
-		t.Fatalf("missing spans: compaction=%q turn=%q", compactionTrace, turnTrace)
-	}
-	if compactionTrace != turnTrace {
-		t.Errorf("compaction is in trace %s and the turn in %s, so they cannot be seen together",
-			compactionTrace, turnTrace)
-	}
-	// The correlation attribute is the only join between the two, so a span
-	// without it cannot be tied to its turn at all.
-	if named == "" {
-		t.Error("the compaction span does not name the invocation that triggered it")
-	}
+	})
 }
 
 // usageModel replies with a canned answer and reports a fixed prompt token
