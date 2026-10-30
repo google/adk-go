@@ -41,13 +41,19 @@ func isThinkingEnabled(tc *genai.ThinkingConfig) bool {
 	return tc != nil && tc.ThinkingBudget != nil && *tc.ThinkingBudget != 0
 }
 
-func buildThinkingParam(cfg *genai.GenerateContentConfig) anthropic.ThinkingConfigParamUnion {
+func buildThinkingParam(cfg *genai.GenerateContentConfig, modelID string) anthropic.ThinkingConfigParamUnion {
 	if cfg == nil || cfg.ThinkingConfig == nil || cfg.ThinkingConfig.ThinkingBudget == nil {
 		return anthropic.ThinkingConfigParamUnion{}
 	}
 	budget := *cfg.ThinkingConfig.ThinkingBudget
 	switch {
 	case budget == 0:
+		// Claude 5.5 rejects {"type":"disabled"} and asks for between_tools to
+		// turn thinking off. Older generations still accept disabled.
+		if thinkingDisableUsesBetweenTools(modelID) {
+			between := anthropic.NewThinkingConfigBetweenToolsParam()
+			return anthropic.ThinkingConfigParamUnion{OfBetweenTools: &between}
+		}
 		disabled := anthropic.NewThinkingConfigDisabledParam()
 		return anthropic.ThinkingConfigParamUnion{OfDisabled: &disabled}
 	case budget < 0:
@@ -59,6 +65,17 @@ func buildThinkingParam(cfg *genai.GenerateContentConfig) anthropic.ThinkingConf
 	default:
 		return anthropic.ThinkingConfigParamOfEnabled(int64(budget))
 	}
+}
+
+// thinkingDisableUsesBetweenTools reports whether modelID turns thinking off
+// with {"type":"between_tools"} instead of {"type":"disabled"}.
+func thinkingDisableUsesBetweenTools(modelID string) bool {
+	m := strings.ToLower(modelID)
+	// Match bare IDs and Vertex resource names that embed them.
+	return strings.Contains(m, "claude-sonnet-5-5") ||
+		strings.Contains(m, "claude-opus-5-5") ||
+		strings.Contains(m, "sonnet-5-5") ||
+		strings.Contains(m, "opus-5-5")
 }
 
 func validateOutputFormatConfig(cfg *genai.GenerateContentConfig) error {

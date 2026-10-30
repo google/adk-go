@@ -1978,7 +1978,7 @@ func TestExtendedThinkingAndEffort(t *testing.T) {
 			t.Errorf("output_config.effort = %v, want \"high\"", outCfg["effort"])
 		}
 
-		// 2. ThinkingBudget == 0 -> disabled.
+		// 2. ThinkingBudget == 0 -> disabled on pre-5.5 models.
 		for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{
 			Contents: genai.Text("q"),
 			Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &zero}},
@@ -1990,6 +1990,27 @@ func TestExtendedThinkingAndEffort(t *testing.T) {
 		thMap, _ := lastBody["thinking"].(map[string]any)
 		if thMap["type"] != "disabled" {
 			t.Errorf("thinking = %+v, want type=disabled", thMap)
+		}
+
+		// 2b. ThinkingBudget == 0 on Claude 5.5 -> between_tools (disabled is rejected).
+		m55, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-5-5", anthropicmodel.ClientConfig{
+			APIKey:  "test-key",
+			BaseURL: srv.URL,
+		})
+		if err != nil {
+			t.Fatalf("NewModel(claude-sonnet-5-5) error = %v", err)
+		}
+		for _, err := range m55.GenerateContent(t.Context(), &model.LLMRequest{
+			Contents: genai.Text("q"),
+			Config:   &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingBudget: &zero}},
+		}, false) {
+			if err != nil {
+				t.Fatalf("ThinkingBudget=0 on 5.5 error = %v", err)
+			}
+		}
+		thMap, _ = lastBody["thinking"].(map[string]any)
+		if thMap["type"] != "between_tools" {
+			t.Errorf("thinking on 5.5 = %+v, want type=between_tools", thMap)
 		}
 
 		// 3. ThinkingBudget > 0 -> enabled with unclamped budget_tokens.
