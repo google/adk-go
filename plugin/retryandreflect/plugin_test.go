@@ -19,7 +19,12 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/genai"
+
 	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 type mockTool struct {
@@ -235,5 +240,177 @@ func TestRetryAndReflect_Scopes(t *testing.T) {
 	_, _ = rGlobal.onToolError(ctx2, tl, nil, err)
 	if rGlobal.scopedFailureCounters[globalScopeKey]["test-tool"] != 2 {
 		t.Errorf("expected 2 failures in global scope")
+	}
+}
+
+// newRunContext returns the context of a run of invocationID over a session
+// holding events.
+func newRunContext(t *testing.T, invocationID string, events ...*session.Event) agent.InvocationContext {
+	t.Helper()
+	service := session.InMemoryService()
+	resp, err := service.Create(t.Context(), &session.CreateRequest{AppName: "test", UserID: "user", SessionID: "ses1"})
+	if err != nil {
+		t.Fatalf("Failed to create session: %v", err)
+	}
+	for _, ev := range events {
+		if err := service.AppendEvent(t.Context(), resp.Session, ev); err != nil {
+			t.Fatalf("Failed to append event: %v", err)
+		}
+	}
+	return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Session:      resp.Session,
+		InvocationID: invocationID,
+	})
+}
+
+func longRunningCallEvent(invocationID string, callIDs ...string) *session.Event {
+	parts := make([]*genai.Part, 0, len(callIDs))
+	for _, id := range callIDs {
+		parts = append(parts, &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "ask_approval"}})
+	}
+	return &session.Event{
+		InvocationID:       invocationID,
+		Author:             "agent",
+		LongRunningToolIDs: callIDs,
+		LLMResponse:        model.LLMResponse{Content: &genai.Content{Role: "model", Parts: parts}},
+	}
+}
+
+func functionResponseEvent(invocationID, author, callID string, response map[string]any) *session.Event {
+	return &session.Event{
+		InvocationID: invocationID,
+		Author:       author,
+		LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "user", Parts: []*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{ID: callID, Name: "ask_approval", Response: response}},
+		}}},
+	}
+}
+
+func TestRetryAndReflect_AfterRunDropsInvocationCounts(t *testing.T) {
+	p, err := New()
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	if p.AfterRunCallback() == nil {
+		t.Fatal("expected New to register an AfterRunCallback")
+	}
+
+	r := &retryAndReflect{
+		maxRetries:            3,
+		scope:                 Invocation,
+		scopedFailureCounters: make(map[string]map[string]int),
+	}
+	tl := &mockTool{name: "test-tool"}
+	err = errors.New("some error")
+	_, _ = r.onToolError(&mockContext{invocationID: "inv1"}, tl, nil, err)
+	_, _ = r.onToolError(&mockContext{invocationID: "inv2"}, tl, nil, err)
+
+	r.afterRun(newRunContext(t, "inv1"))
+
+	if _, ok := r.scopedFailureCounters["inv1"]; ok {
+		t.Errorf("expected the counts of the ended invocation inv1 to be dropped")
+	}
+	if count := r.scopedFailureCounters["inv2"]["test-tool"]; count != 1 {
+		t.Errorf("expected the counts of invocation inv2 to be kept, got count %d", count)
+	}
+}
+
+func TestRetryAndReflect_AfterRunKeepsCountsOfPausedInvocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		events   []*session.Event
+		wantKept bool
+	}{
+		{
+			name:     "unanswered long-running call",
+			events:   []*session.Event{longRunningCallEvent("inv1", "call-1")},
+			wantKept: true,
+		},
+		{
+			name: "long-running call answered by the user",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1"),
+				functionResponseEvent("inv1", "user", "call-1", map[string]any{"approved": true}),
+			},
+			wantKept: false,
+		},
+		{
+			name: "long-running call settled by a failure response of the plugin",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1"),
+				functionResponseEvent("inv1", "agent", "call-1", map[string]any{"response_type": reflectAndRetryResponseType}),
+			},
+			wantKept: false,
+		},
+		{
+			name: "intermediate response of the tool itself",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1"),
+				functionResponseEvent("inv1", "agent", "call-1", map[string]any{"status": "pending"}),
+			},
+			wantKept: true,
+		},
+		{
+			name: "one of two parallel long-running calls answered",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1", "call-2"),
+				functionResponseEvent("inv1", "user", "call-1", map[string]any{"approved": true}),
+			},
+			wantKept: true,
+		},
+		{
+			name: "both parallel long-running calls answered",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1", "call-2"),
+				functionResponseEvent("inv1", "user", "call-1", map[string]any{"approved": true}),
+				functionResponseEvent("inv1", "user", "call-2", map[string]any{"approved": false}),
+			},
+			wantKept: false,
+		},
+		{
+			name: "response to an unrelated call ID",
+			events: []*session.Event{
+				longRunningCallEvent("inv1", "call-1"),
+				functionResponseEvent("inv1", "user", "call-unknown", map[string]any{"approved": true}),
+			},
+			wantKept: true,
+		},
+		{
+			name:     "unanswered long-running call of another invocation",
+			events:   []*session.Event{longRunningCallEvent("inv0", "call-0")},
+			wantKept: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &retryAndReflect{
+				maxRetries:            3,
+				scope:                 Invocation,
+				scopedFailureCounters: make(map[string]map[string]int),
+			}
+			_, _ = r.onToolError(&mockContext{invocationID: "inv1"}, &mockTool{name: "test-tool"}, nil, errors.New("some error"))
+
+			r.afterRun(newRunContext(t, "inv1", tt.events...))
+
+			_, kept := r.scopedFailureCounters["inv1"]
+			if kept != tt.wantKept {
+				t.Errorf("counts of inv1 kept = %t, want %t", kept, tt.wantKept)
+			}
+		})
+	}
+}
+
+func TestRetryAndReflect_AfterRunKeepsGlobalCounts(t *testing.T) {
+	r := &retryAndReflect{
+		maxRetries:            3,
+		scope:                 Global,
+		scopedFailureCounters: make(map[string]map[string]int),
+	}
+	_, _ = r.onToolError(&mockContext{invocationID: "inv1"}, &mockTool{name: "test-tool"}, nil, errors.New("some error"))
+
+	r.afterRun(newRunContext(t, "inv1"))
+
+	if count := r.scopedFailureCounters[globalScopeKey]["test-tool"]; count != 1 {
+		t.Errorf("expected the global counts to be kept, got count %d", count)
 	}
 }
