@@ -3182,10 +3182,13 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 // TestRedactionRegressions checks, through the user message and model error
 // callbacks, that a dotted value that ends in a compound key name, which is
 // redacted with the value after that name, a quote inside a bare value, a
-// dotted OAuth or credential name in free text, and a quote after a Python
-// string prefix keep their credentials out of content_parts and
+// dotted OAuth or credential name in free text, a quote after a Python
+// string prefix, a dotted page access token, and a quoted credential that
+// its closing quote runs into, whether padding, a letter, another quote or
+// the next pair, keep their credentials out of content_parts and
 // error_message, and that a quote inside a bare value does not extend it over
-// the next pair or the prose after it.
+// the next pair or the prose after it, nor is a dotted pagination cursor or
+// the pair that follows a quoted credential redacted with it.
 func TestRedactionRegressions(t *testing.T) {
 	for _, tt := range []struct {
 		name, in, secret, want string
@@ -3198,6 +3201,16 @@ func TestRedactionRegressions(t *testing.T) {
 		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
 		{"quote inside a bare value before a pair of another key", "token=abc:'s id=' 123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "token=[REDACTED] id=' 123' password=[REDACTED]"},
 		{"quote after a Python string prefix", "b'note=123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "b'note=123' password=[REDACTED]"},
+		{"bearer token padded with a key name and a delimiter", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"bearer token that a letter runs into", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"shell value that a word runs into", `export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, "R8_SYNTHETIC_CREDENTIAL_49173", `export "DB_PASSWORD"=[REDACTED]`},
+		{"dotted page access tokens", "fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN home.page_token: SYNTHETIC_PAGE_ACCESS_TOKEN", "SYNTHETIC_PAGE_ACCESS_TOKEN", "fb.page_token=[REDACTED] home.page_token:[REDACTED]"},
+		{"dotted cursors beside a dotted page access token", "x.next.page.token=cursor-1 fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN prev.page.token: cursor-0", "SYNTHETIC_PAGE_ACCESS_TOKEN", "x.next.page.token=cursor-1 fb.page_token=[REDACTED] prev.page.token: cursor-0"},
+		{"nested quoted value that a letter runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800"x`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested quoted value that a quote runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800""`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested single-quoted value that a letter runs into", `token=a: 'prefix R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
+		{"quoted value before the pair of a credential key", `password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token="[REDACTED]" rest`},
+		{"quoted value before the pair of another key", `password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"user="bob" rest`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)

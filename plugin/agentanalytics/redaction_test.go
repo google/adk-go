@@ -116,6 +116,12 @@ func TestIsSensitiveKey_CompoundNames(t *testing.T) {
 		{"homepage-token", true},
 		{"fb-page-token", true},
 		{"fb_page_token", true},
+		// The same names after dotted words, which are read whole.
+		{"fb.page_token", true},
+		{"home.page_token", true},
+		{"x.y.page_token", true},
+		{"fb.page.token", true},
+		{"x.fb-page-token", true},
 		// Names that only contain a credential name.
 		{"token_count", false},
 		{"prompt_tokens", false},
@@ -139,6 +145,15 @@ func TestIsSensitiveKey_CompoundNames(t *testing.T) {
 		{"previous_page_token", false},
 		{"x.next_page_token", false},
 		{"app:next_page_token", false},
+		// Pagination cursor names written with dots, after dotted words or
+		// not.
+		{"page.token", false},
+		{"next.page.token", false},
+		{"prev.page.token", false},
+		{"previous.page.token", false},
+		{"x.next.page.token", false},
+		{"Next.Page.Token", false},
+		{"x.nextPageToken", false},
 		// Ordinary words in a payload.
 		{"method_signature", false},
 		{"design", false},
@@ -209,6 +224,16 @@ func TestScrubTextPatterns_CompoundKeyNames(t *testing.T) {
 		{"homepage token is redacted", "homepage-token=SECRET", "homepage-token=[REDACTED]"},
 		{"page access token is redacted", "fb-page-token=SECRET fb_page_token: SECRET", "fb-page-token=[REDACTED] fb_page_token:[REDACTED]"},
 		{"previous page cursors are kept", "prev_page_token=p1 previous-page-token=p2 NextPageToken=p3", "prev_page_token=p1 previous-page-token=p2 NextPageToken=p3"},
+		// The same names after dotted words: the whole dotted name says
+		// whether it is a cursor, not only its last words.
+		{"dotted page access tokens are redacted", "fb.page_token=SECRET home.page_token: SECRET x.y.page_token=SECRET", "fb.page_token=[REDACTED] home.page_token:[REDACTED] x.y.page_token=[REDACTED]"},
+		{"dotted page words are redacted", "fb.page.token=SECRET x.fb-page-token: SECRET", "fb.page.token=[REDACTED] x.fb-page-token:[REDACTED]"},
+		{"dotted cursors are kept", "page.token=c1 next.page.token: c2 prev.page.token=c3 previous.page.token: c4 x.next.page.token=c5", "page.token=c1 next.page.token: c2 prev.page.token=c3 previous.page.token: c4 x.next.page.token=c5"},
+		{"dotted cursor before a dotted page access token", "next.page.token=c1 fb.page_token=SECRET", "next.page.token=c1 fb.page_token=[REDACTED]"},
+		{"dotted page access token before a dotted cursor", "fb.page_token=SECRET next.page.token=c1", "fb.page_token=[REDACTED] next.page.token=c1"},
+		{"dotted page access token after a credential", "DB_PASSWORD=SECRET home.page_token=SECRET", "DB_PASSWORD=[REDACTED] home.page_token=[REDACTED]"},
+		{"dotted page access token in truncated json", `err: {"fb.page_token": "SECRET"`, `err: {"fb.page_token":"[REDACTED]"`},
+		{"dotted cursor in truncated json", `err: {"next.page.token": "c1"`, `err: {"next.page.token": "c1"`},
 		// Acronyms in a row, such as the "AIAPI" of OpenAIAPIKey.
 		{"acronyms in a row", "OpenAIAPIKey=SECRET AWSAPIKey=SECRET GCPAPIKey=SECRET", "OpenAIAPIKey=[REDACTED] AWSAPIKey=[REDACTED] GCPAPIKey=[REDACTED]"},
 		{"acronyms in a row after a prefix", "x AWSAPIKey: SECRET", "x AWSAPIKey:[REDACTED]"},
@@ -233,35 +258,42 @@ func TestScrubTextPatterns_CompoundKeyNames(t *testing.T) {
 
 func TestSanitizeValue_CompoundMapKeys(t *testing.T) {
 	in := map[string]any{
-		"DB_PASSWORD":       "SECRET",
-		"GITHUB_TOKEN":      "SECRET",
-		"OPENAI_API_KEY":    "SECRET",
-		"dbPassword":        "SECRET",
-		"oauth2Config.code": "SECRET",
-		"x_auth_token":      "SECRET",
-		"stripe.api.key":    "SECRET",
-		"jwt.private.key":   "SECRET",
-		"OpenAIAPIKey":      "SECRET",
-		"AWSAPIKey":         "SECRET",
-		"fb-page-token":     "SECRET",
-		"homepage-token":    "SECRET",
-		"prompt_tokens":     12,
-		"total_tokens":      30,
-		"next_page_token":   "page-2",
-		"prev_page_token":   "page-0",
-		"model":             "gemini",
+		"DB_PASSWORD":         "SECRET",
+		"GITHUB_TOKEN":        "SECRET",
+		"OPENAI_API_KEY":      "SECRET",
+		"dbPassword":          "SECRET",
+		"oauth2Config.code":   "SECRET",
+		"x_auth_token":        "SECRET",
+		"stripe.api.key":      "SECRET",
+		"jwt.private.key":     "SECRET",
+		"OpenAIAPIKey":        "SECRET",
+		"AWSAPIKey":           "SECRET",
+		"fb-page-token":       "SECRET",
+		"homepage-token":      "SECRET",
+		"fb.page_token":       "SECRET",
+		"home.page_token":     "SECRET",
+		"prompt_tokens":       12,
+		"total_tokens":        30,
+		"next_page_token":     "page-2",
+		"prev_page_token":     "page-0",
+		"page.token":          "page-1",
+		"next.page.token":     "page-3",
+		"prev.page.token":     "page-4",
+		"previous.page.token": "page-5",
+		"x.next.page.token":   "page-6",
+		"model":               "gemini",
 	}
 	got, _ := sanitizeValue(in, 1<<20, true)
 	m, ok := got.(map[string]any)
 	if !ok {
 		t.Fatalf("sanitizeValue returned %T, want a map", got)
 	}
-	for _, k := range []string{"DB_PASSWORD", "GITHUB_TOKEN", "OPENAI_API_KEY", "dbPassword", "oauth2Config.code", "x_auth_token", "stripe.api.key", "jwt.private.key", "OpenAIAPIKey", "AWSAPIKey", "fb-page-token", "homepage-token"} {
+	for _, k := range []string{"DB_PASSWORD", "GITHUB_TOKEN", "OPENAI_API_KEY", "dbPassword", "oauth2Config.code", "x_auth_token", "stripe.api.key", "jwt.private.key", "OpenAIAPIKey", "AWSAPIKey", "fb-page-token", "homepage-token", "fb.page_token", "home.page_token"} {
 		if m[k] != redactedValue {
 			t.Errorf("%s = %v, want %q", k, m[k], redactedValue)
 		}
 	}
-	for k, want := range map[string]any{"next_page_token": "page-2", "prev_page_token": "page-0", "model": "gemini"} {
+	for k, want := range map[string]any{"next_page_token": "page-2", "prev_page_token": "page-0", "page.token": "page-1", "next.page.token": "page-3", "prev.page.token": "page-4", "previous.page.token": "page-5", "x.next.page.token": "page-6", "model": "gemini"} {
 		if m[k] != want {
 			t.Errorf("%s = %v, want %v", k, m[k], want)
 		}
@@ -299,6 +331,64 @@ func TestSanitizeValue_CompoundStructFieldNames(t *testing.T) {
 	}
 	if m["TokenCount"] == redactedValue {
 		t.Errorf("TokenCount was redacted: %v", m)
+	}
+}
+
+// TestSanitizeValue_DottedPageTokenNames checks that a map key, and a struct
+// field that a json tag names, which is a dotted name that ends in a page
+// token is redacted exactly when isSensitiveKey says so: the access token of a
+// page, as fb.page_token is, is a credential, and a pagination cursor, written
+// with underscores or with dots, is not.
+func TestSanitizeValue_DottedPageTokenNames(t *testing.T) {
+	type pageTokens struct {
+		FB       string `json:"fb.page_token"`
+		Home     string `json:"home.page_token"`
+		Dotted   string `json:"fb.page.token"`
+		Page     string `json:"page.token"`
+		Next     string `json:"next.page.token"`
+		Prev     string `json:"prev.page.token"`
+		Previous string `json:"previous.page.token"`
+		XNext    string `json:"x.next.page.token"`
+		XCursor  string `json:"x.next_page_token"`
+	}
+	want := map[string]any{
+		"fb.page_token":       redactedValue,
+		"home.page_token":     redactedValue,
+		"fb.page.token":       redactedValue,
+		"page.token":          "page-1",
+		"next.page.token":     "page-2",
+		"prev.page.token":     "page-3",
+		"previous.page.token": "page-4",
+		"x.next.page.token":   "page-5",
+		"x.next_page_token":   "page-6",
+	}
+	for k, v := range want {
+		if got := isSensitiveKey(k); got != (v == redactedValue) {
+			t.Errorf("isSensitiveKey(%q) = %v, want %v", k, got, v == redactedValue)
+		}
+	}
+	values := map[string]any{
+		"fb.page_token": "SECRET", "home.page_token": "SECRET", "fb.page.token": "SECRET",
+		"page.token": "page-1", "next.page.token": "page-2", "prev.page.token": "page-3",
+		"previous.page.token": "page-4", "x.next.page.token": "page-5", "x.next_page_token": "page-6",
+	}
+	for name, in := range map[string]any{
+		"map": values,
+		"struct": pageTokens{
+			FB: "SECRET", Home: "SECRET", Dotted: "SECRET", Page: "page-1", Next: "page-2",
+			Prev: "page-3", Previous: "page-4", XNext: "page-5", XCursor: "page-6",
+		},
+	} {
+		got, _ := sanitizeValue(in, 1<<20, true)
+		m, ok := got.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: sanitizeValue returned %T, want a map", name, got)
+		}
+		for k, v := range want {
+			if m[k] != v {
+				t.Errorf("%s: %s = %v, want %v", name, k, m[k], v)
+			}
+		}
 	}
 }
 
@@ -584,6 +674,13 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"oversized app key, quoted multiword value", "app:" + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized child, quoted multiword value", "credentials:\n " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized key, quoted multiword value after a word", "call failed " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
+		{"oversized key, quoted value that a letter runs into", longKey + `="prefix SYNTHETIC_SECRET"x`},
+		{"oversized key, quoted value that a quote runs into", longKey + `="prefix SYNTHETIC_SECRET""`},
+		{"oversized key, quoted value after : that a letter runs into", longKey + `: "prefix SYNTHETIC_SECRET"x`},
+		{"oversized key, single-quoted value that a letter runs into", longKey + `='prefix SYNTHETIC_SECRET'x`},
+		{"oversized key, spaced = and a quoted value that a letter runs into", longKey + ` = "prefix SYNTHETIC_SECRET"x`},
+		{"oversized key, spaced : and a quoted value that a quote runs into", longKey + ` : "prefix SYNTHETIC_SECRET""`},
+		{"oversized dotted child, quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + dottedKey + `="prefix SYNTHETIC_SECRET"x`},
 		{"two oversized children, then a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"three oversized children, then a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + ": " + longKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized children, then a delimiter and a quoted multiword value", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + `: "prefix SYNTHETIC_SECRET suffix"`},
@@ -596,6 +693,14 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 		{"oversized children in one word, then a spaced = and a single-quoted value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` =  'prefix SYNTHETIC_SECRET suffix'`},
 		{"oversized children in one word, then a delimiter and a spaced quoted value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `= "prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized children in one word, then a spaced = and a bare value", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = SYNTHETIC_SECRET`},
+		{"oversized children in one word, then a quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `="prefix SYNTHETIC_SECRET"x`},
+		{"oversized children in one word, then a delimiter and a quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + `: "prefix SYNTHETIC_SECRET"x`},
+		{"oversized children in one word, then a spaced = and a quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` = "prefix SYNTHETIC_SECRET"x`},
+		{"oversized children in one word, then a spaced : and a quoted value that a quote runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` : "prefix SYNTHETIC_SECRET""`},
+		{"oversized children in one word, then a spaced = and a single-quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + ` =  'prefix SYNTHETIC_SECRET'x`},
+		{"oversized children apart, then a spaced = and a quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ": " + longKey + ": " + longKey + ` = "prefix SYNTHETIC_SECRET"x`},
+		{"oversized children in one word, then a delimiter on the next line and a quoted value that a letter runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + "\n = \"prefix SYNTHETIC_SECRET\"x"},
+		{"oversized children in one word, then a delimiter on the next line and a quoted value that a quote runs into", "credentials:\n a_PASSWORD: " + longKey + ":" + longKey + ":" + longKey + "\n : \"prefix SYNTHETIC_SECRET\"\""},
 		{"oversized dotted child, quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `="prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized dotted child, delimiter and quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `: "prefix SYNTHETIC_SECRET suffix"`},
 		{"oversized dotted child, single-quoted multiword value", "credentials:\n a_PASSWORD: " + dottedKey + `='prefix SYNTHETIC_SECRET suffix'`},
@@ -913,6 +1018,45 @@ func checkRedactionPaths(t *testing.T, in, want string) {
 	}
 }
 
+// checkAllRedactionPaths checks, as checkRedactionPaths does, that
+// scrubTextPatterns, sanitizeRawText and SmartTruncate of an error write want
+// for in, and that scrubbing want again changes nothing, and that
+// redactErrorMessage, which scrubs the message of an error before
+// error_message holds it, writes want for in too, and for want itself.
+func checkAllRedactionPaths(t *testing.T, in, want string) {
+	t.Helper()
+	checkRedactionPaths(t, in, want)
+	if got := redactErrorMessage(in); got != want {
+		t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, want)
+	}
+	if again := redactErrorMessage(want); again != want {
+		t.Errorf("redactErrorMessage(%q) = %q, want it unchanged", want, again)
+	}
+}
+
+// checkNoLeak checks that none of scrubTextPatterns, sanitizeRawText,
+// redactErrorMessage and SmartTruncate of an error writes the secret in in.
+// It is for texts that the paths write differently, as they do for a JSON
+// object that is not valid, which only the text patterns read as pairs.
+func checkNoLeak(t *testing.T, in, secret string) {
+	t.Helper()
+	raw, _ := sanitizeRawText(in)
+	smart, _, err := SmartTruncate(errors.New(in), 1000)
+	if err != nil {
+		t.Errorf("SmartTruncate(errors.New(%q)) error = %v", in, err)
+	}
+	for _, p := range []struct{ name, got string }{
+		{"scrubTextPatterns", scrubTextPatterns(in)},
+		{"sanitizeRawText", raw},
+		{"redactErrorMessage", redactErrorMessage(in)},
+		{"SmartTruncate", string(smart)},
+	} {
+		if strings.Contains(p.got, secret) {
+			t.Errorf("%s(%q) = %q, which still holds the secret", p.name, in, p.got)
+		}
+	}
+}
+
 // TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters checks that a bare
 // value that ends in or is followed after horizontal whitespace by a
 // delimiter, followed by whitespace (including Unicode spaces and vertical
@@ -987,7 +1131,11 @@ func TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters(t *testing.T) {
 		{`failed: "password="   R7_SYNTHETIC_CREDENTIAL_9327"" for user "bob"`, `failed: "password="[REDACTED]"" for user "bob"`},
 		{`failed: "password=abc-token: " for user "bob""`, `failed: "password=[REDACTED] " for user "bob""`},
 		{`got "password=abc-token=", want "x"`, `got "password=[REDACTED], want "x"`},
-		{`password=a: "x""y"`, `password=[REDACTED] "x""y"`},
+		// A nested quoted value whose closing quote runs into another quote
+		// is read to the end of that run, as that quote may be part of the
+		// credential: the run was kept after "[REDACTED]" before (see
+		// TestScrubTextPatterns_QuotedCredentialsRunningIntoText).
+		{`password=a: "x""y"`, `password=[REDACTED]`},
 		{`failed: "password=" "x"`, `failed: "password=" "x"`},
 		{`failed: "password=" and "y""`, `failed: "password=" and "y""`},
 	} {
@@ -1176,6 +1324,141 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 	}
 }
 
+// TestScrubTextPatterns_QuotedCredentialsRunningIntoText checks that a quoted
+// credential is redacted whole on every path when what follows its closing
+// quote makes the quote read as one that belongs to something else: a letter
+// or another quote that runs into it, a credential that is padded with a
+// quote or that ends in the name of a key and a delimiter, as
+// R8_..._TOKEN= does, whose closing quote then looks like the one that opens
+// the value of a later key, and a value in which a delimiter and a quote open
+// a nested quoted value. The text that the quote runs into is redacted with
+// the credential, as it may be part of it, and never copied after the
+// redacted value, whereas the words between two strings, and the pairs that a
+// quote opens the value of, are kept and redacted as before.
+func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		// A bearer token that its closing quote does not end.
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_PASSWORD:" expired`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173 more_TOKEN=" expired`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_api_key=" and more`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, `Bearer [REDACTED]`},
+		{`Bearer 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173"x"y"`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173""second"`, `Bearer [REDACTED]`},
+		{`Authorization: Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, `Authorization: [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173" expired`, `Bearer [REDACTED] expired`},
+		// The value of a quoted or an unquoted key in a shell command or an
+		// environment, with the quotes of the shell.
+		{`export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"='R8_SYNTHETIC_CREDENTIAL_49173'suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export 'DB_PASSWORD'="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export 'DB_PASSWORD'=[REDACTED]`},
+		{`export "DB_PASSWORD" = "R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export DB_PASSWORD="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD='R8_SYNTHETIC_CREDENTIAL_49173'suffix`, `export DB_PASSWORD=[REDACTED]`},
+		{`token="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `token=[REDACTED]`},
+		{`password="R8_SYNTHETIC_CREDENTIAL_49173_PASSWORD:" expired`, `password=[REDACTED]`},
+		{`password="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `password=[REDACTED]`},
+		{`export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173"; echo ok`, `export "DB_PASSWORD"="[REDACTED]"; echo ok`},
+		// The value of a JSON key that is written in text.
+		{`failed: "password":"R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `failed: "password":"[REDACTED]"`},
+		{`failed: "password": "R8_SYNTHETIC_CREDENTIAL_49173"x rest`, `failed: "password":"[REDACTED]" rest`},
+		{`failed: "token": "R8_SYNTHETIC_CREDENTIAL_49173"expired`, `failed: "token":"[REDACTED]"`},
+		{`failed: "token": "R8_SYNTHETIC_CREDENTIAL_49173_api_key=" expired`, `failed: "token":"[REDACTED]"`},
+		{`failed: "token": 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `failed: "token":"[REDACTED]"`},
+		{`failed: 'token': 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `failed: 'token':[REDACTED]`},
+		// A nested quoted value after a delimiter, whose closing quote runs
+		// into a letter or into more quotes, with or without spaces around
+		// the delimiter.
+		{`password=a= "prefix R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`password=a= "prefix R8_SYNTHETIC_SECRET_4800""`, `password=[REDACTED]`},
+		{`token=a: 'prefix R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`token=a: 'prefix R8_SYNTHETIC_SECRET_4800''`, `token=[REDACTED]`},
+		{`password=a="prefix R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`token=a:'prefix R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`password=a = "prefix R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`password=a = "prefix R8_SYNTHETIC_SECRET_4800""`, `password=[REDACTED]`},
+		{`token=a : 'prefix R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
+		{`password=abc :"prefix R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`password=a= "   R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`password=a= \"prefix R8_SYNTHETIC_SECRET_4800\"x`, `password=[REDACTED]`},
+		{`password=a: "R8_SYNTHETIC_SECRET_4800""x"`, `password=[REDACTED]`},
+		{`password=a:"R8_SYNTHETIC_SECRET_4800""`, `password=[REDACTED]`},
+		{`password=a: "R8_SYNTHETIC_SECRET_4800"x`, `password=[REDACTED]`},
+		{`credentials: token = "prefix R8_SYNTHETIC_SECRET_4800"x`, `credentials: token=[REDACTED]`},
+		{`token=a: "R8_SYNTHETIC_SECRET_4800"x token=b`, `token=[REDACTED] token=[REDACTED]`},
+		// What follows the word that the quote runs into is kept.
+		{`password=a= "prefix R8_SYNTHETIC_SECRET_4800"x y z`, `password=[REDACTED] y z`},
+		{`failed: "password=a: "R8_SYNTHETIC_SECRET_4800"x"`, `failed: "password=[REDACTED]`},
+		// The words between two strings are not a credential, and the pair
+		// that a closing quote opens the value of is redacted on its own.
+		{`got "token": " for user "bob"`, `got "token": " for user "bob"`},
+		{`Bearer " for user "bob"`, `Bearer " for user "bob"`},
+		{`got "token": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `got "token": " in config, api_key="[REDACTED]"`},
+		{`Bearer " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `Bearer " in config, api_key="[REDACTED]"`},
+		{`password=" in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `password="[REDACTED]"`},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+	// A quote of the other kind after the closing quote, and a JSON object
+	// that is not valid, which the paths write differently, as only the text
+	// patterns read it as pairs and the others fail closed, are checked for
+	// the credential alone.
+	for _, tt := range []struct{ in, secret string }{
+		{`password=a= "prefix R8_SYNTHETIC_SECRET_4800"'`, "R8_SYNTHETIC_SECRET_4800"},
+		{`password=a: "R8_SYNTHETIC_SECRET_4800"'x'`, "R8_SYNTHETIC_SECRET_4800"},
+		{`password=a: 'R8_SYNTHETIC_SECRET_4800'"`, "R8_SYNTHETIC_SECRET_4800"},
+		{`{"password":"R8_SYNTHETIC_CREDENTIAL_49173"suffix}`, "R8_SYNTHETIC_CREDENTIAL_49173"},
+		{`{"password":"R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired}`, "R8_SYNTHETIC_CREDENTIAL_49173"},
+		{`{"token": a = "prefix R8_SYNTHETIC_SECRET_4800"x}`, "R8_SYNTHETIC_SECRET_4800"},
+		{`{"password": a: 'prefix R8_SYNTHETIC_SECRET_4800''}`, "R8_SYNTHETIC_SECRET_4800"},
+		{`{"Authorization": "Bearer \"R8_SYNTHETIC_CREDENTIAL_49173\"expired"}`, "R8_SYNTHETIC_CREDENTIAL_49173"},
+		{`failed: {"password": a = "prefix R8_SYNTHETIC_SECRET_4800"x}`, "R8_SYNTHETIC_SECRET_4800"},
+	} {
+		checkNoLeak(t, tt.in, tt.secret)
+	}
+}
+
+// TestScrubTextPatterns_QuotedValueFollowedByKey checks that a quoted value
+// that another key and its delimiter follow at once, as the keys of a shell
+// word or a log line that joins pairs do, is redacted up to its closing quote
+// on every path, and the pair after the quote is read on its own: redacted if
+// its key is a credential name, kept if it is not, and kept whole if it is an
+// ordinary pair. A quote that a word of another kind follows still runs into
+// it, as the padding of base64 text, a bare letter run or digits do.
+func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{`password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, `password="[REDACTED]"token="[REDACTED]" rest`},
+		{`password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, `password="[REDACTED]"user="bob" rest`},
+		{`password="R8_SYNTHETIC_SECRET_4700"token="R8_SYNTHETIC_SECRET_4701"`, `password="[REDACTED]"token="[REDACTED]"`},
+		{`password="benign"token=R8_SYNTHETIC_SECRET_4700 rest`, `password="[REDACTED]"token=[REDACTED] rest`},
+		{`password='benign'api_key='R8_SYNTHETIC_SECRET_4700'`, `password='[REDACTED]'api_key='[REDACTED]'`},
+		{`password="benign"user=bob rest`, `password="[REDACTED]"user=bob rest`},
+		{`password="benign"label:"bob" rest`, `password="[REDACTED]"label:"bob" rest`},
+		{`password="benign"user="bob"token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"user="bob"token="[REDACTED]"`},
+		{"password=\"benign\"\ttoken=\"R8_SYNTHETIC_SECRET_4700\"", "password=\"[REDACTED]\"\ttoken=\"[REDACTED]\""},
+		{`password="benign"a.b=c token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"a.b=c token="[REDACTED]"`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		// The quoted value of a JSON key that another quoted key follows,
+		// whether the keys are credential names or not.
+		{`failed: {"password":"R8_SYNTHETIC_SECRET_4700""user":"bob"}`, `failed: {"password":"[REDACTED]""user":"bob"}`},
+		{`failed: {"user":"bob""password":"R8_SYNTHETIC_SECRET_4700"}`, `failed: {"user":"bob""password":"[REDACTED]"}`},
+		{`failed: {"password":"benign""token":"R8_SYNTHETIC_SECRET_4700"}`, `failed: {"password":"[REDACTED]""token":"[REDACTED]"}`},
+		// A word that is not a pair runs into the quote: base64 padding, a
+		// run of letters, or a name that starts with a digit.
+		{`password="abc"ZGVmZ2g==`, `password=[REDACTED]`},
+		{`password="abc"def==ghi`, `password=[REDACTED]`},
+		{`password="abc"1=b rest`, `password=[REDACTED] rest`},
+		{`password="abc"def rest`, `password=[REDACTED] rest`},
+		// A closing quote that a space follows ends the value, as before.
+		{`password="R8_SYNTHETIC_SECRET_4700" token="R8_SYNTHETIC_SECRET_4701"`, `password="[REDACTED]" token="[REDACTED]"`},
+		{`password="R8_SYNTHETIC_SECRET_4700" user="bob"`, `password="[REDACTED]" user="bob"`},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+}
+
 // TestScrubTextPatterns_DottedOAuthNames checks that the value of a dotted
 // OAuth name of any number of words, which isCompoundSensitiveKey accepts as
 // a map key, is redacted in text on every path, wherever the name starts in
@@ -1254,15 +1537,100 @@ func TestScrubTextPatterns_DottedCredentialNames(t *testing.T) {
 	}
 }
 
+// TestScrubTextPatterns_DottedPageTokens checks that text reads the complete
+// dotted name that ends in a page token, as isSensitiveKey reads a map key, on
+// every path, to tell the access token of a page from a pagination cursor:
+// the value of fb.page_token or home.page_token is redacted although that of
+// page_token is a cursor, and the value of page.token, next.page.token,
+// prev.page.token, previous.page.token or x.next.page.token is kept although
+// that of token is a credential, whichever of the two comes first and whatever
+// pair or key surrounds them. A dotted name that is neither is read by its
+// last words, as before.
+func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
+	longDotted := strings.Repeat("abcdefgh.", 16)
+	for _, tt := range []struct{ in, want string }{
+		// The access token of a page, after dotted words.
+		{"fb.page_token=R8_SYNTHETIC_CREDENTIAL_49173", "fb.page_token=[REDACTED]"},
+		{"home.page_token=R8_SYNTHETIC_CREDENTIAL_49173", "home.page_token=[REDACTED]"},
+		{"x fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173 y", "x fb.page_token:[REDACTED] y"},
+		{"a.b.fb.page_token=R8_SYNTHETIC_CREDENTIAL_49173", "a.b.fb.page_token=[REDACTED]"},
+		{`fb.page_token="R8_SYNTHETIC_CREDENTIAL_49173"`, `fb.page_token="[REDACTED]"`},
+		{"fb.page.token=R8_SYNTHETIC_CREDENTIAL_49173", "fb.page.token=[REDACTED]"},
+		{"x.page.token=R8_SYNTHETIC_CREDENTIAL_49173", "x.page.token=[REDACTED]"},
+		{"x.fb-page-token=R8_SYNTHETIC_CREDENTIAL_49173", "x.fb-page-token=[REDACTED]"},
+		{"FB.PAGE_TOKEN=R8_SYNTHETIC_CREDENTIAL_49173", "FB.PAGE_TOKEN=[REDACTED]"},
+		{"page.token.fb.page_token=R8_SYNTHETIC_CREDENTIAL_49173", "page.token.fb.page_token=[REDACTED]"},
+		{"next.page.token.token=R8_SYNTHETIC_CREDENTIAL_49173", "next.page.token.token=[REDACTED]"},
+		{`failed: {"fb.page_token": "R8_SYNTHETIC_CREDENTIAL_49173"}`, `failed: {"fb.page_token":"[REDACTED]"}`},
+		{"credentials:\n  fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:\n  fb.page_token:[REDACTED]"},
+		// An oversized run of dotted words before the name.
+		{"credentials:\n  " + longDotted + "z.fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:\n  " + longDotted + "z.fb.page_token:[REDACTED]"},
+		// The access token and the cursor in either order.
+		{"a.b.fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173 next.page.token: cursor-1", "a.b.fb.page_token:[REDACTED] next.page.token: cursor-1"},
+		{"next.page.token: cursor-1 fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "next.page.token: cursor-1 fb.page_token:[REDACTED]"},
+		{"home.page_token=R8_SYNTHETIC_CREDENTIAL_49173 x.next.page.token=cursor-2 DB_PASSWORD=R8_SYNTHETIC_CREDENTIAL_49173", "home.page_token=[REDACTED] x.next.page.token=cursor-2 DB_PASSWORD=[REDACTED]"},
+		// A dotted name that is neither a page token nor a cursor is read by
+		// its last words: x.signature is, but method_signature is not.
+		{"x.signature=R8_SYNTHETIC_CREDENTIAL_49173", "x.signature=[REDACTED]"},
+		{"x.method_signature=kept", "x.method_signature=kept"},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+	for _, in := range []string{
+		"page_token=cursor-0",
+		"page.token=cursor-1",
+		"next.page.token=cursor-2",
+		"prev.page.token: cursor-3",
+		"previous.page.token=cursor-4",
+		"x.next.page.token=cursor-5",
+		"x.next_page_token=cursor-6",
+		"Next.Page.Token=cursor-7",
+		"x.nextPageToken=cursor-8",
+		"page.token=cursor-9 next.page.token: cursor-10 prev.page.token=cursor-11 previous.page.token: cursor-12 x.next.page.token=cursor-13",
+		`failed: {"next.page.token": "cursor-14"}`,
+		`failed: {"x.next.page.token": "cursor-15"}`,
+		"credentials:\n  next.page.token: cursor-16",
+	} {
+		checkRedactionPaths(t, in, in)
+	}
+	// textKeyAllowedAt reads the dotted name that the key found at
+	// s[start:end] ends: the key of x.fb.page_token is page_token, which is a
+	// cursor alone, and that of x.next.page.token is token, a credential
+	// alone.
+	for _, tt := range []struct {
+		in, key string
+		want    bool
+	}{
+		{"x.fb.page_token: v", "page_token", true},
+		{"x.home.page_token: v", "page_token", true},
+		{"x.fb.page.token: v", "token", true},
+		{"x.page.token: v", "token", true},
+		{"x.next.page.token: v", "token", false},
+		{"x.prev.page.token: v", "token", false},
+		{"x.previous.page.token: v", "token", false},
+		{"page.token: v", "token", false},
+		{"x.next_page_token: v", "next_page_token", false},
+		{"x.signature: v", "signature", true},
+		{"x.method_signature: v", "method_signature", false},
+		{"page_token: v", "page_token", false},
+		{"token: v", "token", true},
+	} {
+		start := strings.Index(tt.in, tt.key)
+		if got := textKeyAllowedAt(tt.in, start, start+len(tt.key)); got != tt.want {
+			t.Errorf("textKeyAllowedAt(%q, %d, %d) = %v, want %v", tt.in, start, start+len(tt.key), got, tt.want)
+		}
+	}
+}
+
 // TestScrubTextPatterns_DottedNamesAgreeWithMapKeys checks that a dotted name
 // has its value redacted in text exactly when isSensitiveKey redacts the
-// value of a map key of that name, for names of up to four words: dotted
-// OAuth names, and names made of the words of credential names and others,
-// as in stripe.api.key or x.goog.api.key. It leaves out two kinds of names
-// that text reads otherwise: those with an empty dotted word that are not
-// OAuth names, as in api..key, which text does not read as a credential
-// name, and a pagination cursor name after a dot, as in fb.page_token, of
-// which text reads only the words after the last dot (see isPageTokenName).
+// value of a map key of that name, for names of up to four dotted words:
+// dotted OAuth names, names made of the words of credential names and
+// others, as in stripe.api.key or x.goog.api.key, and names that end in a
+// page token or in a pagination cursor, as fb.page_token, the access token
+// of a page, and x.next.page.token, a cursor, do. It leaves out the names
+// with an empty dotted word that are not OAuth names, as in api..key, which
+// text does not read as a credential name.
 func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 	var names []string
 	var build func(words, lasts []string, prefix string, n int)
@@ -1278,6 +1646,7 @@ func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 	}
 	build([]string{"", "oauth", "OAuth2", "oauth_client", "status", "xoauth", "code"}, []string{"code", "Code", "codes", "xcode"}, "", 3)
 	build([]string{"stripe", "jwt", "aws", "x", "goog", "google", "api", "private", "secret", "access", "auth", "code"}, []string{"key", "Key", "id", "verifier", "code", "token"}, "", 3)
+	build([]string{"page", "next", "prev", "previous", "fb", "home", "x"}, []string{"token", "Token", "page_token", "next_page_token", "prev_page_token", "previous_page_token", "nextPageToken"}, "", 3)
 	sensitive := 0
 	for _, name := range names {
 		want := isSensitiveKey(name)
@@ -1538,6 +1907,54 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat("oauth.", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
 			},
 			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 8000,
+		},
+		{
+			// Each dotted name ends in a name that its complete dotted name
+			// decides on, which is read from the last bytes of the run.
+			"bare run of dotted cursor names", func(n int) string { return strings.Repeat("x.next.page.token:", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 1600,
+		},
+		{
+			"bare run of dotted cursor names through an error", func(n int) string { return strings.Repeat("x.next.page.token:", n) },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 1600,
+		},
+		{
+			"repeated dotted page access tokens", func(n int) string { return strings.Repeat("x.fb.page_token: v ", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one long dotted run before a page access token", func(n int) string { return strings.Repeat("a.", n) + "fb.page_token=v" },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			"one long dotted run before a page access token through an error", func(n int) string { return strings.Repeat("a.", n) + "fb.page_token=v" },
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
+		},
+		{
+			"repeated quoted values that run into a letter", func(n int) string { return strings.Repeat(`password="a"b `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated quoted values that run into a key", func(n int) string { return strings.Repeat(`password="a"token="b" `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated bearer tokens that run into a letter", func(n int) string { return strings.Repeat(`Bearer "a"b `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated nested quoted values that run into a letter", func(n int) string { return strings.Repeat(`password=a= "b c"d `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one long run of quoted values that run into each other", func(n int) string { return "password=" + strings.Repeat(`"a"`, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
+		},
+		{
+			// Each closing quote opens the value of a later key, which the
+			// bearer token runs on through.
+			"one long run of bearer values that end in a key and a delimiter", func(n int) string { return "Bearer " + strings.Repeat(`"a_TOKEN="`, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 10000,
 		},
 	}
 	for _, tt := range tests {
