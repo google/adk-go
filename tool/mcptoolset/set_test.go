@@ -22,10 +22,13 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +39,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/auth"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
@@ -1414,5 +1418,232 @@ func TestMetadataProviderConfirmation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAuthRedirectPolicy covers where a Config.Auth credential may follow a
+// redirect. auth.Transport applies the credential on every hop, below the layer
+// where net/http strips Authorization on a cross-host redirect, so the
+// toolset's CheckRedirect is the only thing bounding where it travels.
+func TestAuthRedirectPolicy(t *testing.T) {
+	const token = "user-tok"
+	allowAll := func(*http.Request, []*http.Request) error { return nil }
+	tests := []struct {
+		name string
+		// crossHost makes the endpoint redirect every request to a server
+		// on another host. Otherwise the endpoint redirects /mcp to /mcp/
+		// and serves MCP there itself.
+		crossHost     bool
+		checkRedirect func(*http.Request, []*http.Request) error
+		// retarget installs a caller CheckRedirect that points the next hop
+		// at the target server, editing the request alone or the whole
+		// chain net/http hands it.
+		retarget string
+		noAuth   bool
+		wantErr  string
+		// wantTargetHit expects the target to be reached, with the
+		// credential unless noAuth is set.
+		wantTargetHit bool
+	}{
+		{
+			// The target is addressed by a different host name than the
+			// endpoint, so net/http itself would treat the hop as cross-host.
+			name:      "cross host",
+			crossHost: true,
+			wantErr:   "refusing redirect",
+		},
+		{
+			// A caller's own CheckRedirect may stop more redirects, never
+			// let the credential through to more hosts.
+			name:          "cross host with a permissive caller CheckRedirect",
+			crossHost:     true,
+			checkRedirect: allowAll,
+			wantErr:       "refusing redirect",
+		},
+		{
+			// What Starlette and FastMCP send for a mount at /mcp.
+			name:          "same origin trailing slash",
+			wantTargetHit: true,
+		},
+		{
+			name: "caller CheckRedirect still applies",
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return errors.New("caller refused")
+			},
+			wantErr: "caller refused",
+		},
+		{
+			// The policy decides before the caller's CheckRedirect does, so
+			// a caller asking for the 3xx itself still gets the refusal.
+			name:      "cross host with a caller CheckRedirect returning ErrUseLastResponse",
+			crossHost: true,
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			wantErr: "refusing redirect",
+		},
+		{
+			// On a hop the policy allows, the caller's sentinel reaches
+			// net/http as is and the 3xx comes back unfollowed.
+			name: "same origin with a caller CheckRedirect returning ErrUseLastResponse",
+			checkRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			wantErr: "Temporary Redirect",
+		},
+		{
+			// net/http sends the request as CheckRedirect leaves it, so a
+			// caller hook that edits the URL after the policy passed it
+			// must be judged again.
+			name:     "same origin, caller CheckRedirect retargets the request",
+			retarget: "request",
+			wantErr:  "refusing redirect",
+		},
+		{
+			// The hook also sees the chain the policy compares against.
+			name:     "same origin, caller CheckRedirect retargets the request and the chain",
+			retarget: "request and chain",
+			wantErr:  "refusing redirect",
+		},
+		{
+			// Without Auth nothing is installed: net/http follows the hop
+			// and strips nothing, because nothing set Authorization.
+			name:          "cross host without Auth",
+			crossHost:     true,
+			noAuth:        true,
+			wantTargetHit: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var targetAuth []string
+			mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+			record := func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					mu.Lock()
+					targetAuth = append(targetAuth, r.Header.Get("Authorization"))
+					mu.Unlock()
+					next.ServeHTTP(w, r)
+				})
+			}
+
+			target := httptest.NewServer(record(mcpHandler))
+			defer target.Close()
+			mux := http.NewServeMux()
+			endpoint := httptest.NewServer(mux)
+			defer endpoint.Close()
+			// httptest listens on 127.0.0.1; naming the endpoint localhost
+			// makes the hop to target cross-host to net/http.
+			endpointURL := strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp"
+			if tc.crossHost {
+				mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, target.URL+"/mcp", http.StatusTemporaryRedirect)
+				})
+			} else {
+				mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, "/mcp/", http.StatusTemporaryRedirect)
+				})
+				mux.Handle("/mcp/", record(mcpHandler))
+			}
+
+			checkRedirect := tc.checkRedirect
+			if tc.retarget != "" {
+				targetHost := strings.TrimPrefix(target.URL, "http://")
+				checkRedirect = func(req *http.Request, via []*http.Request) error {
+					req.URL.Host = targetHost
+					if tc.retarget == "request and chain" {
+						for _, v := range via {
+							v.URL.Host = targetHost
+						}
+					}
+					return nil
+				}
+			}
+			var provider auth.CredentialProvider
+			if !tc.noAuth {
+				provider = auth.StaticToken(token)
+			}
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Transport: &mcp.StreamableClientTransport{
+					Endpoint:   endpointURL,
+					HTTPClient: &http.Client{CheckRedirect: checkRedirect},
+				},
+				Auth: provider,
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("Tools() error = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tc.wantTargetHit {
+				if len(targetAuth) != 0 {
+					t.Errorf("redirect target received Authorization %q, want no request", targetAuth)
+				}
+				return
+			}
+			wantAuth := "Bearer " + token
+			if tc.noAuth {
+				wantAuth = ""
+			}
+			if len(targetAuth) == 0 || targetAuth[0] != wantAuth {
+				t.Errorf("redirect target received Authorization %q, want %q first", targetAuth, wantAuth)
+			}
+		})
+	}
+}
+
+// TestAuthRedirectCap pins the hop limit. Installing a CheckRedirect replaces
+// net/http's default cap rather than extending it, so a same-origin redirect
+// loop would otherwise never end.
+func TestAuthRedirectCap(t *testing.T) {
+	// Count the longest chain rather than requests.
+	var maxHop atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hop, _ := strconv.Atoi(r.URL.Query().Get("hop"))
+		if int32(hop) > maxHop.Load() {
+			maxHop.Store(int32(hop))
+		}
+		// Past the cap under test the chain ends on its own, so a missing
+		// cap fails the hop count below instead of hanging the package.
+		if hop > 15 {
+			http.Error(w, "redirect loop", http.StatusLoopDetected)
+			return
+		}
+		http.Redirect(w, r, fmt.Sprintf("%s?hop=%d", r.URL.Path, hop+1), http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Endpoint: srv.URL + "/mcp", Auth: auth.StaticToken("tok")})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() error = %v", err)
+	}
+	defer func() {
+		if err := ts.(io.Closer).Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
+	_, err = ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+	if err == nil || !strings.Contains(err.Error(), "stopped after 10 redirects") {
+		t.Errorf("Tools() error = %v, want it to report the redirect cap", err)
+	}
+	// The literal, not a constant: net/http's own default is 10 requests per
+	// chain, the original and nine redirects.
+	if got := maxHop.Load(); got != 9 {
+		t.Errorf("longest chain reached hop %d, want %d", got, 9)
 	}
 }
