@@ -280,13 +280,10 @@ func contentSchemaPayload(content *genai.Content) (string, error) {
 }
 
 // Run classifies input against the node's question and yields a single routing
-// event whose Output is input. Run expects input that the workflow scheduler
-// has already passed through [Node.ValidateInput] and does not apply
-// InputSchema itself, since coercing a string through the schema a second time
-// can change it; a caller that invokes Run directly therefore gets no
-// InputSchema validation. Run still checks that input is a non-nil classifier
-// input (see [ValidateInput]) and wraps a failure in
-// [workflow.ErrInputValidation].
+// event whose Output is the validated input. Run validates classifier input
+// and applies InputSchema validation when needed, including when called
+// directly without the workflow scheduler. Validation failures are wrapped
+// in [workflow.ErrInputValidation].
 //
 // A classifier error that satisfies [ErrInvalidInput] or [ErrInvalidQuestion]
 // is wrapped in [workflow.ErrInputValidation] as well, so
@@ -302,7 +299,15 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 			yield(nil, fmt.Errorf("classifier.Node.Run: nil context for node %q", n.Name()))
 			return
 		}
-		if err := ValidateInput(input); err != nil {
+		validated := input
+
+		if s := n.InputSchema(); s == nil || contentInput(input) != nil || s.Validate(input) != nil {
+			var err error
+			if validated, err = n.ValidateInput(input); err != nil {
+				yield(nil, fmt.Errorf("%w for node %q: %w", workflow.ErrInputValidation, n.Name(), err))
+				return
+			}
+		} else if err := ValidateInput(input); err != nil {
 			yield(nil, fmt.Errorf("%w for node %q: %w", workflow.ErrInputValidation, n.Name(), err))
 			return
 		}
@@ -310,7 +315,7 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 		// Unlike adk-python's _run_impl (which converts BaseModel inputs to
 		// dicts), Go's Classifier.Classify accepts JSON-serializable structs
 		// directly.
-		resp, err := n.classifier.Classify(ctx, input, map[string]Question{
+		resp, err := n.classifier.Classify(ctx, validated, map[string]Question{
 			routeQuestionName: cloneNodeQuestion(n.question),
 		})
 		if err != nil {
@@ -348,7 +353,7 @@ func (n *Node) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error
 		}
 
 		ev := session.NewEvent(ctx, ctx.InvocationID())
-		ev.Output = input
+		ev.Output = validated
 		ev.Routes = []string{route}
 		if n.answerKey != "" {
 			ev.Actions.StateDelta = map[string]any{n.answerKey: answerToStateMap(ans)}
