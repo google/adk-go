@@ -167,7 +167,8 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 
 	fmYAML := frontmatterYAML{}
 	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes.Bytes()))
-	decoder.KnownFields(true)
+	// Ignore unknown top-level keys (e.g. user-invocable, version) so skills
+	// shared with other runtimes load, matching adk-python's extra="allow".
 	if err := decoder.Decode(&fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
