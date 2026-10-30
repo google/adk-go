@@ -19,6 +19,8 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 	"testing/fstest"
 
@@ -322,6 +324,318 @@ func TestFileSystemSource_LoadResource(t *testing.T) {
 			}
 			if !bytes.Equal(got, tc.want) {
 				t.Errorf("LoadResource(%q, %q) = %q, want %q", "test-skill", tc.resourcePath, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFileSystemSource_LoadResource_SymlinkEscape exercises LoadResource
+// against a real on-disk filesystem (os.DirFS), since fstest.MapFS has no
+// notion of symbolic links and so cannot represent this attack at all.
+//
+// A skill is free to ship a symlink inside assets/, references/, or
+// scripts/ (a normal thing for a skill bundle to do, e.g. linking a shared
+// asset). Before this change, LoadResource validated resourcePath as a
+// string but then opened it with the OS, which transparently follows any
+// symlink in the path -- so a symlink pointing outside the skill's own
+// directory let LoadResource return the content of an arbitrary file on
+// disk. This test fails without the rejectSymlinkPath check in
+// LoadResource.
+func TestFileSystemSource_LoadResource_SymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+
+	secretDir := filepath.Join(root, "outside-secret")
+	if err := os.MkdirAll(secretDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secretPath := filepath.Join(secretDir, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte("top-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skillDir := filepath.Join(root, "test-skill")
+	assetsDir := filepath.Join(skillDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: test-skill\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary file, to confirm the fix does not break normal access.
+	if err := os.WriteFile(filepath.Join(assetsDir, "image.png"),
+		[]byte("image-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The symlink a malicious (or merely careless) skill author ships
+	// inside an otherwise-ordinary resource directory.
+	if err := os.Symlink(secretDir, filepath.Join(assetsDir, "link")); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	source := NewFileSystemSource(os.DirFS(root))
+
+	t.Run("Error_Symlink_Escape", func(t *testing.T) {
+		resource, err := source.LoadResource(t.Context(), "test-skill", "assets/link/secret.txt")
+		if !errors.Is(err, ErrInvalidResourcePath) {
+			t.Fatalf("LoadResource(assets/link/secret.txt) error = %v, want %v", err, ErrInvalidResourcePath)
+		}
+		if resource != nil {
+			_ = resource.Close()
+		}
+	})
+
+	t.Run("Success_Ordinary_File_Still_Served", func(t *testing.T) {
+		resource, err := source.LoadResource(t.Context(), "test-skill", "assets/image.png")
+		if err != nil {
+			t.Fatalf("LoadResource(assets/image.png) error = %v, want nil", err)
+		}
+		defer func() { _ = resource.Close() }()
+		got, err := io.ReadAll(resource)
+		if err != nil {
+			t.Fatalf("read resource: %v", err)
+		}
+		if string(got) != "image-data" {
+			t.Errorf("LoadResource(assets/image.png) = %q, want %q", got, "image-data")
+		}
+	})
+}
+
+// TestFileSystemSource_LoadResource_SymlinkWithinSkillAllowed exercises the
+// case raised in review: a skill sharing one file between its resource
+// directories via a symlink that stays inside the skill's own directory.
+// This must keep working, or WithCompletePreloadSource fails for any
+// skill that ships a symlink at all, not only ones that escape.
+func TestFileSystemSource_LoadResource_SymlinkWithinSkillAllowed(t *testing.T) {
+	root := t.TempDir()
+
+	skillDir := filepath.Join(root, "test-skill")
+	referencesDir := filepath.Join(skillDir, "references")
+	assetsDir := filepath.Join(skillDir, "assets")
+	if err := os.MkdirAll(referencesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: test-skill\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(referencesDir, "shared.md"),
+		[]byte("shared-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink that resolves to another resource directory of the same
+	// skill -- this must be served, not rejected.
+	if err := os.Symlink(filepath.Join("..", "references", "shared.md"),
+		filepath.Join(assetsDir, "shared.md")); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	source := NewFileSystemSource(os.DirFS(root))
+	resource, err := source.LoadResource(t.Context(), "test-skill", "assets/shared.md")
+	if err != nil {
+		t.Fatalf("LoadResource(assets/shared.md) error = %v, want nil", err)
+	}
+	defer func() { _ = resource.Close() }()
+	got, err := io.ReadAll(resource)
+	if err != nil {
+		t.Fatalf("read resource: %v", err)
+	}
+	if string(got) != "shared-content" {
+		t.Errorf("LoadResource(assets/shared.md) = %q, want %q", got, "shared-content")
+	}
+}
+
+// TestFileSystemSource_LoadResource_SymlinkAsLastComponentEscape covers a
+// symlink as the final path component (assets/passwd -> /etc/passwd),
+// distinct from TestFileSystemSource_LoadResource_SymlinkEscape above,
+// which only exercises a symlinked directory in the middle of the path.
+func TestFileSystemSource_LoadResource_SymlinkAsLastComponentEscape(t *testing.T) {
+	root := t.TempDir()
+
+	secretPath := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte("top-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skillDir := filepath.Join(root, "test-skill")
+	assetsDir := filepath.Join(skillDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: test-skill\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretPath, filepath.Join(assetsDir, "passwd")); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	source := NewFileSystemSource(os.DirFS(root))
+	resource, err := source.LoadResource(t.Context(), "test-skill", "assets/passwd")
+	if !errors.Is(err, ErrInvalidResourcePath) {
+		t.Fatalf("LoadResource(assets/passwd) error = %v, want %v", err, ErrInvalidResourcePath)
+	}
+	if resource != nil {
+		_ = resource.Close()
+	}
+}
+
+// TestFileSystemSource_LoadResource_AbsoluteSymlinkTargetEscape covers a
+// symlink whose stored target is itself an absolute path, which must be
+// rejected outright since it cannot be reinterpreted as a path inside this
+// filesystem.
+func TestFileSystemSource_LoadResource_AbsoluteSymlinkTargetEscape(t *testing.T) {
+	root := t.TempDir()
+
+	secretPath := filepath.Join(root, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte("top-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skillDir := filepath.Join(root, "test-skill")
+	assetsDir := filepath.Join(skillDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: test-skill\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// os.Symlink(secretPath, ...) with an absolute secretPath (t.TempDir()
+	// is always absolute) stores an absolute target, exercising this case
+	// directly rather than through a symlinked intermediate directory.
+	if err := os.Symlink(secretPath, filepath.Join(assetsDir, "link")); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	source := NewFileSystemSource(os.DirFS(root))
+	resource, err := source.LoadResource(t.Context(), "test-skill", "assets/link")
+	if !errors.Is(err, ErrInvalidResourcePath) {
+		t.Fatalf("LoadResource(assets/link) error = %v, want %v", err, ErrInvalidResourcePath)
+	}
+	if resource != nil {
+		_ = resource.Close()
+	}
+}
+
+// TestFileSystemSource_WithCompletePreloadSource_SkillWithInternalSymlink
+// reproduces the scenario from review: a source with two skills, one plain
+// and one carrying a symlink that stays inside its own directory.
+// WithCompletePreloadSource must still succeed; before this fix, the
+// second skill's internal symlink made the whole preload -- including the
+// unrelated first skill -- fail with err != nil.
+func TestFileSystemSource_WithCompletePreloadSource_SkillWithInternalSymlink(t *testing.T) {
+	root := t.TempDir()
+
+	plainDir := filepath.Join(root, "plain")
+	if err := os.MkdirAll(filepath.Join(plainDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plainDir, "SKILL.md"),
+		[]byte("---\nname: plain\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(plainDir, "assets", "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	linkedDir := filepath.Join(root, "linked")
+	if err := os.MkdirAll(filepath.Join(linkedDir, "references"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedDir, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linkedDir, "SKILL.md"),
+		[]byte("---\nname: linked\ndescription: test\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(linkedDir, "references", "shared.md"), []byte("shared"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "references", "shared.md"),
+		filepath.Join(linkedDir, "assets", "shared.md")); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+
+	source := NewFileSystemSource(os.DirFS(root))
+	if _, _, err := WithCompletePreloadSource(t.Context(), source); err != nil {
+		t.Fatalf("WithCompletePreloadSource() error = %v, want nil", err)
+	}
+}
+
+// TestFileSystemSource_LoadResource_WindowsStyleSymlinkTarget uses an
+// unwrapped fstest.MapFS to inject a symlink target with backslash
+// separators directly, the way os.Symlink(filepath.Join(...), ...) stores
+// one on Windows. This runs the same on every host OS, unlike a real
+// os.Symlink call, whose separator depends on the OS running the test.
+func TestFileSystemSource_LoadResource_WindowsStyleSymlinkTarget(t *testing.T) {
+	tests := []struct {
+		name       string
+		target     string
+		wantErr    error
+		wantServed bool
+	}{
+		{
+			name:       "Relative backslash target within skill is served",
+			target:     `..\references\shared.md`,
+			wantServed: true,
+		},
+		{
+			name:    "Backslash target escaping the skill is rejected",
+			target:  `..\..\outside\secret.txt`,
+			wantErr: ErrInvalidResourcePath,
+		},
+		{
+			name:    "Backslash drive-letter target is rejected outright",
+			target:  `C:\Users\victim\.ssh\id_rsa`,
+			wantErr: ErrInvalidResourcePath,
+		},
+		{
+			name:    "Backslash UNC target is rejected outright",
+			target:  `\\fileserver\share\secret.txt`,
+			wantErr: ErrInvalidResourcePath,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mapFS := fstest.MapFS{
+				"test-skill/SKILL.md":             &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+				"test-skill/references/shared.md": &fstest.MapFile{Data: []byte("shared-content")},
+				"outside/secret.txt":              &fstest.MapFile{Data: []byte("top-secret")},
+				"test-skill/assets/link": &fstest.MapFile{
+					Mode: fs.ModeSymlink,
+					Data: []byte(tt.target),
+				},
+			}
+
+			source := NewFileSystemSource(mapFS)
+			resource, err := source.LoadResource(t.Context(), "test-skill", "assets/link")
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("LoadResource(assets/link) error = %v, want %v", err, tt.wantErr)
+				}
+				if resource != nil {
+					_ = resource.Close()
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("LoadResource(assets/link) error = %v, want nil", err)
+			}
+			defer func() { _ = resource.Close() }()
+			got, err := io.ReadAll(resource)
+			if err != nil {
+				t.Fatalf("read resource: %v", err)
+			}
+			if string(got) != "shared-content" {
+				t.Errorf("LoadResource(assets/link) = %q, want %q", got, "shared-content")
 			}
 		})
 	}
