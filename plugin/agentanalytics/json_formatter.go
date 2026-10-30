@@ -871,18 +871,21 @@ func hasSensitiveTypeName(v reflect.Value) bool {
 // hasMarshalerMethod reports whether encoding/json would write v with a
 // MarshalJSON or MarshalText method: the type of v has one, or v is
 // addressable and its pointer type has one. Only the method sets of the
-// types are read, not v: unlike implementer, it does not box v into an
-// interface value, which copies it, and so reads it.
+// types are read, not v (see hasMethod).
 func hasMarshalerMethod(v reflect.Value) bool {
-	t := v.Type()
-	if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) {
+	return hasMethod(v, jsonMarshalerType) || hasMethod(v, textMarshalerType)
+}
+
+// hasMethod reports whether v has the methods of iface as implementer finds
+// them: the type of v has them, or v is addressable and its pointer type
+// has them. Only the method sets of the types are read, not v: unlike
+// implementer, it does not box v into an interface value, which copies it,
+// and so reads it.
+func hasMethod(v reflect.Value, iface reflect.Type) bool {
+	if v.Type().Implements(iface) {
 		return true
 	}
-	if v.Kind() == reflect.Pointer || !v.CanAddr() {
-		return false
-	}
-	pt := reflect.PointerTo(t)
-	return pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+	return v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface)
 }
 
 // redacted stands in for a value that is redacted whole, as one node of the
@@ -1012,13 +1015,21 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 	// here, even if they implement error or fmt.Stringer, because their
 	// structural traversal (walkMap, walkSlice) already produces a safely
 	// redacted representation that the String() or Error() text would
-	// discard.
+	// discard. The value is boxed into an interface value (see implementer)
+	// only when its method is to be called: boxing copies the value, so it
+	// reads the private fields too, while another goroutine may write them
+	// atomically or under a lock; until then only the method sets of the types
+	// are read (see hasMethod).
 	if !isContainerKind(v.Kind()) {
-		if m, found := implementer(v, errorType); found && (!s.redact || isPlainErrorType(v.Type())) && !showsExportedFields(v) {
-			return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
+		if (!s.redact || isPlainErrorType(v.Type())) && hasMethod(v, errorType) && !showsExportedFields(v) {
+			if m, found := implementer(v, errorType); found {
+				return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
+			}
 		}
-		if m, found := implementer(v, stringerType); found && !s.redact && v.Kind() == reflect.Struct && !showsExportedFields(v) {
-			return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
+		if !s.redact && v.Kind() == reflect.Struct && hasMethod(v, stringerType) && !showsExportedFields(v) {
+			if m, found := implementer(v, stringerType); found {
+				return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
+			}
 		}
 	}
 	return nil, false, false

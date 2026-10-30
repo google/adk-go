@@ -601,7 +601,7 @@ func TestScrubTextPatterns_OpenedValueEnds(t *testing.T) {
 func TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe(t *testing.T) {
 	names := []string{"token", "TOKEN", "next_page_token", "x_PASSWORD", "dbPassword", "temp:a", "temp:a:b", "user:token", "oauth2.code", "oauth2.x.code", "xtoken", "temptoken", "a.b", "label"}
 	quotes := []string{"", `"`, `\"`, `'`}
-	spaces := []string{"", " ", "\t", "\n", "\x01", " \x0b "}
+	spaces := []string{"", " ", "\t", "\n", "\x01", " \x0b ", "\u00a0", "\u3000"}
 	delims := []string{"=", ":", ""}
 	values := []string{"v", "", " ", ",", ";", "&x", " ,x", `"a b"`, "'a", "\x01", "\t\x02y"}
 	allowed := 0
@@ -636,13 +636,13 @@ func TestAllowedKeyAt_AgreesWithTextKeyValTokenAtRe(t *testing.T) {
 // followed by a value start the pairs that textKeyValBareAtRe, which pairAt
 // reads them with, matches, with the same key and delimiter.
 func TestKeyNameRegexps_FindThePairsOfPairRegexps(t *testing.T) {
-	pairRe := regexp.MustCompile(textKeyNameRe.String() + `[\s[:cntrl:]]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
+	pairRe := regexp.MustCompile(textKeyNameRe.String() + `[` + delimSpaceClass + `]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	prefixes := []string{"", "x ", "x_", "(", "db"}
 	// The "temp:" names that end in "temp" make the colon of a second
 	// "temp:" key their delimiter (see nextKeyName).
-	names := []string{"token", "Token", "next_page_token", "x_PASSWORD", "dbPassword", "APIKey", "temp:a", "temp:a:b", "temp:x&temp", "temp:a;temp", "oauth2.code", "label", "sig"}
+	names := []string{"token", "Token", "next_page_token", "x_PASSWORD", "dbPassword", "APIKey", "temp:a", "temp:a:b", "temp:x&temp", "temp:a;temp", "oauth2.code", "oauth2.x.code", "label", "sig"}
 	quotes := []string{"", `"`, `\"`, `'`}
-	spaces := []string{"", " ", "\n", "\x01"}
+	spaces := []string{"", " ", "\n", "\x01", "\u00a0", "\u3000"}
 	delims := []string{"=", ":", ""}
 	values := []string{"v", "", " ", ",", "&x", "&y=v", ";b=v", " ,x", `"a b"`, "'a", "\x01", " ,token=v"}
 	compared := 0
@@ -715,7 +715,8 @@ func TestKeyValFinder_SkipsKeysWithoutValues(t *testing.T) {
 	// A pair without a value, as pairAt returns for a key whose value it
 	// does not read, is left in place up to its delimiter, whatever its key.
 	var brackets openBrackets
-	if got, end := redactTextKeyValue("token= rest", []int{0, 6, 0, 5, 5, 5, 5, 6, -1, -1}, &brackets); got != "token=" || end != 6 {
+	var quotes openQuotes
+	if got, end := redactTextKeyValue("token= rest", []int{0, 6, 0, 5, 5, 5, 5, 6, -1, -1}, &brackets, &quotes); got != "token=" || end != 6 {
 		t.Errorf(`redactTextKeyValue(pair without a value) = (%q, %d), want ("token=", 6)`, got, end)
 	}
 	// pairAt does not take a pair whose key ends elsewhere than the key it
@@ -772,6 +773,286 @@ func TestScrubTextPatterns_TempKeysInsideTempKeys(t *testing.T) {
 	}
 }
 
+// checkRedactionPaths checks that scrubTextPatterns, sanitizeRawText and the
+// error serializer, SmartTruncate of errors.New, all write want for in, and
+// that scrubbing want again changes nothing.
+func checkRedactionPaths(t *testing.T, in, want string) {
+	t.Helper()
+	if got := scrubTextPatterns(in); got != want {
+		t.Errorf("scrubTextPatterns(%q) = %q, want %q", in, got, want)
+	}
+	if again := scrubTextPatterns(want); again != want {
+		t.Errorf("scrubbing %q again gave %q, want it unchanged", want, again)
+	}
+	if got, _ := sanitizeRawText(in); got != want {
+		t.Errorf("sanitizeRawText(%q) = %q, want %q", in, got, want)
+	}
+	b, _, err := SmartTruncate(errors.New(in), 1000)
+	var got string
+	if err != nil || json.Unmarshal(b, &got) != nil || got != want {
+		t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), want %q", in, b, err, want)
+	}
+}
+
+// TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters checks that a bare
+// value that ends in or is followed after horizontal whitespace by a
+// delimiter, followed by whitespace (including Unicode spaces and vertical
+// tab) and a quoted value, an object or an array, is redacted with that
+// value, and that a quote after a delimiter in or after a bare value that
+// nothing closes is redacted to the end of the text, on every path.
+func TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{`password=a= "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix"`, `password=[REDACTED]`},
+		{`password=a= 'prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix'`, `password=[REDACTED]`},
+		{"password=a=\t\"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\" kept", "password=[REDACTED] kept"},
+		{`password=a= \"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\" kept`, `password=[REDACTED] kept`},
+		{`token=a: {"value": "R7_SYNTHETIC_CREDENTIAL_9327"}`, `token=[REDACTED]`},
+		{`token=a: {"value": "R7_SYNTHETIC_CREDENTIAL_9327"}, kept=1`, `token=[REDACTED], kept=1`},
+		{`token=a: ["prefix", "SYNTHETIC_R7_CREDENTIAL"]`, `token=[REDACTED]`},
+		{`token=a: ["prefix", "R7_SYNTHETIC_CREDENTIAL_9327"]`, `token=[REDACTED]`},
+		{`token=a:  ["prefix", "R7_SYNTHETIC_CREDENTIAL_9327"] kept`, `token=[REDACTED] kept`},
+		{`token=a: {"value": "R7_SYNTHETIC_CREDENTIAL_9327`, `token=[REDACTED]`},
+		{`token=a: ["prefix", "R7_SYNTHETIC_CREDENTIAL_9327`, `token=[REDACTED]`},
+		{`password=x-token: "prefix R7_SYNTHETIC_CREDENTIAL_9327`, `password=[REDACTED]`},
+		{`password=x-token:"prefix R7_SYNTHETIC_CREDENTIAL_9327`, `password=[REDACTED]`},
+		{`password=a:'prefix R7_SYNTHETIC_CREDENTIAL_9327`, `password=[REDACTED]`},
+		// Spaced inner delimiter (whitespace before and/or after ":" or "=").
+		{`password=a = "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix"`, `password=[REDACTED]`},
+		{`password=abc :"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix"`, `password=[REDACTED]`},
+		{`token=a : {"value": "R7_SYNTHETIC_CREDENTIAL_9327"}`, `token=[REDACTED]`},
+		{`password=a = "unclosed R7_SYNTHETIC_CREDENTIAL_9327`, `password=[REDACTED]`},
+		{`failed: password: R7_SYNTHETIC_CREDENTIAL_9327 : retry`, `failed: password:[REDACTED] : retry`},
+		{`password="R7_SYNTHETIC_CREDENTIAL_9327" :`, `password="[REDACTED]" :`},
+		{`token=dGVzdA== "user@example.com" logged in`, `token=[REDACTED] logged in`},
+		// Unicode delimiter whitespace and control characters.
+		{"password=\u00a0\"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\"", "password=\"[REDACTED]\""},
+		{"password=\u3000\"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\"", "password=\"[REDACTED]\""},
+		{"token\u00a0= R7_SYNTHETIC_CREDENTIAL_9327", "token=[REDACTED]"},
+		{"token=a\u00a0b kept", "token=[REDACTED] kept"},
+		{"password=a=\u00a0\"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\"", "password=[REDACTED]"},
+		{"password=a=\v\"prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix\"", "password=[REDACTED]"},
+		// The value of a quoted key, as JSON text writes it.
+		{`failed: {"password": a= "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix"}`, `failed: {"password":"[REDACTED]"}`},
+		{`failed: {"password": a = "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix"}`, `failed: {"password":"[REDACTED]"}`},
+		{`failed: {"token": a:{"value": "R7_SYNTHETIC_CREDENTIAL_9327"}}`, `failed: {"token":"[REDACTED]"}`},
+		// Inner quoted value immediately followed by the enclosing string's
+		// closing quote, and negative controls where adjacent quotes do not
+		// close an enclosing string.
+		{`failed: "password=a: "R7_SYNTHETIC_CREDENTIAL_9327""`, `failed: "password=[REDACTED]"`},
+		{`failed: "password=a = "R7_SYNTHETIC_CREDENTIAL_9327""`, `failed: "password=[REDACTED]"`},
+		{`failed: 'password=a: 'R7_SYNTHETIC_CREDENTIAL_9327''`, `failed: 'password=[REDACTED]'`},
+		{`failed: 'password=a = 'R7_SYNTHETIC_CREDENTIAL_9327''`, `failed: 'password=[REDACTED]'`},
+		{`failed: \"password=a: \"R7_SYNTHETIC_CREDENTIAL_9327\"\"`, `failed: \"password=[REDACTED]\"`},
+		{`failed: "password=a = "R7_SYNTHETIC_CREDENTIAL_9327"" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL"`, `failed: "password=[REDACTED]" DB_PASSWORD="[REDACTED]"`},
+		{`failed: "password=a = "R7_SYNTHETIC_CREDENTIAL_9327"" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL`, `failed: "password=[REDACTED]" DB_PASSWORD=[REDACTED]`},
+		{`failed: "password=abc-token: " for user "bob""`, `failed: "password=[REDACTED] " for user "bob""`},
+		{`got "password=abc-token=", want "x"`, `got "password=[REDACTED], want "x"`},
+		{`password=a: "x""y"`, `password=[REDACTED] "x""y"`},
+	} {
+		checkRedactionPaths(t, tt.in, tt.want)
+	}
+}
+
+// TestScrubTextPatterns_UnclosedQuotedValues checks that a value that starts
+// with a quote that nothing closes is redacted to the end of the text on
+// every path, as no closing quote tells where its words end, and that a quote
+// that closes the string around the pair, or that only punctuation follows,
+// is not read as one, nor paired with a later string's opening quote.
+func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
+	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	run := longKey + ":" + longKey + ":" + longKey
+	for _, tt := range []struct{ in, want string }{
+		{`DB_PASSWORD="prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix`, `DB_PASSWORD=[REDACTED]`},
+		{`DB_PASSWORD="   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `DB_PASSWORD=[REDACTED]`},
+		{`dbPassword='prefix R7_SYNTHETIC_CREDENTIAL_9327`, `dbPassword=[REDACTED]`},
+		{`password="prefix R7_SYNTHETIC_CREDENTIAL_9327`, `password=[REDACTED]`},
+		{`token: 'prefix R7_SYNTHETIC_CREDENTIAL_9327`, `token:[REDACTED]`},
+		{`DB_PASSWORD=\"prefix R7_SYNTHETIC_CREDENTIAL_9327`, `DB_PASSWORD=[REDACTED]`},
+		{`DB_PASSWORD=\'prefix R7_SYNTHETIC_CREDENTIAL_9327`, `DB_PASSWORD=[REDACTED]`},
+		{`err="failed: DB_PASSWORD="prefix R7_SYNTHETIC_CREDENTIAL_9327`, `err="failed: DB_PASSWORD=[REDACTED]`},
+		{"credentials:\n a_PASSWORD: " + run + ` = "prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		{"credentials:\n a_PASSWORD: " + run + `: 'prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		// Unclosed spaced quotes under envelope and nested keys.
+		{`credentials: token = "   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
+		{`credentials: token = '   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
+		{`credentials: token = \"   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
+		{`credentials: token = \'   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
+		{`credentials: password="correct R7_SYNTHETIC_CREDENTIAL_9327 battery"`, `credentials: password="[REDACTED]"`},
+		{"credentials:\n  token: \"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "credentials:\n  token:[REDACTED]"},
+		// The quote closes the string that the pair is in, including when
+		// another quoted pair follows on the same line.
+		{`failed: "password=" in config`, `failed: "password=" in config`},
+		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=" DB_PASSWORD="[REDACTED]"`},
+		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password=" DB_PASSWORD=[REDACTED]`},
+		{`failed: "password=   " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=   " DB_PASSWORD="[REDACTED]"`},
+		{`failed: "password=abc:" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=[REDACTED] DB_PASSWORD="[REDACTED]"`},
+		{`failed: "password=abc:" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password=[REDACTED] DB_PASSWORD=[REDACTED]`},
+		{`failed: "password=abc: " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=[REDACTED] " DB_PASSWORD="[REDACTED]"`},
+		{`failed: 'password=abc: ' dbPassword='   R7_SYNTHETIC_CREDENTIAL_9327'`, `failed: 'password=[REDACTED] ' dbPassword='[REDACTED]'`},
+		{`failed: "credentials: token = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials:[REDACTED] = " DB_PASSWORD="[REDACTED]"`},
+		{"failed: \"credentials= " + run + ` = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials=[REDACTED] = " DB_PASSWORD="[REDACTED]"`},
+		{"failed: \"credentials= " + run + `=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials=[REDACTED] DB_PASSWORD="[REDACTED]"`},
+		{"failed: \"credentials= " + run + ` = " in config`, `failed: "credentials=[REDACTED] = " in config`},
+		{"failed: \"a_PASSWORD: " + run + `:[REDACTED] = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "a_PASSWORD:[REDACTED] = " DB_PASSWORD="[REDACTED]"`},
+		{"failed: \"a_PASSWORD: " + run + `:[REDACTED] = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "a_PASSWORD:[REDACTED] = " DB_PASSWORD=[REDACTED]`},
+		{`parsing "password=SECRETP-token: ": invalid syntax`, `parsing "password=[REDACTED] ": invalid syntax`},
+		{`parsing 'password=SECRETP-token: ': invalid syntax`, `parsing 'password=[REDACTED] ': invalid syntax`},
+		{`failed: \"password=SECRETP-token: \" in config`, `failed: \"password=[REDACTED] \" in config`},
+		// Lexical quote state: prose apostrophes, cross-quotes, escaped
+		// backslashes and line breaks.
+		{`couldn't connect: dbPassword='   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `couldn't connect: dbPassword=[REDACTED]`},
+		{`err="can't connect" dbPassword='   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `err="can't connect" dbPassword=[REDACTED]`},
+		{`x='a "b' DB_PASSWORD="   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `x='a "b' DB_PASSWORD=[REDACTED]`},
+		{`dir="C:\\" DB_PASSWORD="   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `dir="C:\\" DB_PASSWORD=[REDACTED]`},
+		{"\\\"Authorization: R7_SYNTHETIC_CREDENTIAL_9327\\\"\nDB_PASSWORD=\\\"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "\\\"Authorization: [REDACTED]\nDB_PASSWORD=[REDACTED]"},
+		{"msg=\"line1\nDB_PASSWORD=\"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "msg=\"line1\nDB_PASSWORD=[REDACTED]"},
+		// A quote in a redacted value leaves no string open, and balanced
+		// quotes inside a redacted value inside an outer string preserve the
+		// outer string's active quote state.
+		{`password=a"b x "token=SECRETP-token: " in config`, `password=[REDACTED] x "token=[REDACTED] " in config`},
+		{`failed: "credentials={"user":"alice","pass":"x"}" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "credentials=[REDACTED]" DB_PASSWORD=[REDACTED]`},
+		{`failed: "password="x"" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password="[REDACTED]"" DB_PASSWORD=[REDACTED]`},
+		{`failed: "credentials: token = "x"" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "credentials: token="[REDACTED]"" DB_PASSWORD=[REDACTED]`},
+		{`failed: 'password='x'' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: 'password='[REDACTED]'' DB_PASSWORD=[REDACTED]`},
+		{`failed: "token={"a":"b"} password=" in config`, `failed: "token=[REDACTED] password=" in config`},
+		// A quote inside the bare value, which a value may follow in the
+		// same word, does not close the string.
+		{`x 'password=abc:':{"k": "R7_SYNTHETIC_CREDENTIAL_9327"}`, `x 'password=[REDACTED]`},
+		{`failed: "password=abc:{\"k\":\"R7_SYNTHETIC_CREDENTIAL_9327\"}"`, `failed: "password=[REDACTED]`},
+		// The value of a quoted key or bearer token, including when an outer
+		// quote closes right after the prefix or pairs forward with a later
+		// string's opening quote.
+		{`failed: {"password": "prefix R7_SYNTHETIC_CREDENTIAL_9327`, `failed: {"password":"[REDACTED]"`},
+		{`x "temp:cache": "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix}`, `x "temp:cache":"[REDACTED]"`},
+		{`failed: 'error at "token": ' user=alice`, `failed: 'error at "token": ' user=alice`},
+		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327'`, `failed: 'error at "token": ' DB_PASSWORD='[REDACTED]'`},
+		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: 'error at "token": ' DB_PASSWORD=[REDACTED]`},
+		{`got "token": " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
+		{`failed: "Bearer " api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "Bearer " api_key="[REDACTED]"`},
+		{`Bearer " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer " in config, api_key="[REDACTED]"`},
+		{`failed: "Bearer "R7_SYNTHETIC_CREDENTIAL_9327""`, `failed: "Bearer [REDACTED]"`},
+		{`failed: {"token":"R7_SYNTHETIC_CREDENTIAL_9327""api_key":"SYNTHETIC_R7_CREDENTIAL"}`, `failed: {"token":"[REDACTED]""api_key":"[REDACTED]"}`},
+		{`failed: '{"token": "R7_SYNTHETIC_CREDENTIAL_9327"}' DB_PASSWORD='   SYNTHETIC_R7_CREDENTIAL'`, `failed: '{"token":"[REDACTED]"}' DB_PASSWORD='[REDACTED]'`},
+		{`failed: '{"token": "R7_SYNTHETIC_CREDENTIAL_9327"}' DB_PASSWORD='   SYNTHETIC_R7_CREDENTIAL`, `failed: '{"token":"[REDACTED]"}' DB_PASSWORD=[REDACTED]`},
+		// Only punctuation follows the quote, including after an oversized key run.
+		{`failed: {Password:"}`, `failed: {Password:[REDACTED]}`},
+		{`failed: {Password:SECRETP-token: '}`, `failed: {Password:[REDACTED] '}`},
+		{"failed: {" + longKey + `: "}`, "failed: {" + longKey + `:[REDACTED]}`},
+		{"failed: {a_PASSWORD: " + run + `:[REDACTED] = "}`, `failed: {a_PASSWORD:[REDACTED] = "}`},
+		{"failed: {a_PASSWORD: " + run + `:[REDACTED] = ""}`, `failed: {a_PASSWORD:[REDACTED] = ""}`},
+	} {
+		checkRedactionPaths(t, tt.in, tt.want)
+	}
+	adjJSON := `{"token":"R7_SYNTHETIC_CREDENTIAL_9327""api_key":"SYNTHETIC_R7_CREDENTIAL"}`
+	if got, want := scrubTextPatterns(adjJSON), `{"token":"[REDACTED]""api_key":"[REDACTED]"}`; got != want {
+		t.Errorf("scrubTextPatterns(%q) = %q, want %q", adjJSON, got, want)
+	}
+	if raw, _ := sanitizeRawText(adjJSON); strings.Contains(raw, "R7_SYNTHETIC_CREDENTIAL_9327") || strings.Contains(raw, "SYNTHETIC_R7_CREDENTIAL") {
+		t.Errorf("sanitizeRawText(%q) = %q, leaked credential", adjJSON, raw)
+	}
+	// Quote-led multiline input where authHeaderRe consumes the closing quote
+	// on line 1 (sanitizeRawText and SmartTruncate fail closed as unparseable
+	// JSON; scrubTextPatterns resets quote state at the newline).
+	quoteLedAuth := "\"Authorization: R7_SYNTHETIC_CREDENTIAL_9327\"\nDB_PASSWORD=\"   prefix R7_SYNTHETIC_CREDENTIAL_9327"
+	if got, want := scrubTextPatterns(quoteLedAuth), "\"Authorization: [REDACTED]\nDB_PASSWORD=[REDACTED]"; got != want {
+		t.Errorf("scrubTextPatterns(%q) = %q, want %q", quoteLedAuth, got, want)
+	}
+	if raw, _ := sanitizeRawText(quoteLedAuth); strings.Contains(raw, "R7_SYNTHETIC_CREDENTIAL_9327") {
+		t.Errorf("sanitizeRawText(%q) = %q, leaked credential", quoteLedAuth, raw)
+	}
+	if b, _, err := SmartTruncate(errors.New(quoteLedAuth), 1000); err != nil || strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327") {
+		t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), leaked credential", quoteLedAuth, b, err)
+	}
+}
+
+// TestScrubTextPatterns_DottedOAuthNames checks that the value of a dotted
+// OAuth name of any number of words, which isCompoundSensitiveKey accepts as
+// a map key, is redacted in text on every path, wherever the name starts in
+// its dotted words and whatever key or value surrounds it, and that a dotted
+// name that isCompoundSensitiveKey does not accept is kept.
+func TestScrubTextPatterns_DottedOAuthNames(t *testing.T) {
+	longKey := strings.Repeat("x_", 70) + "PASSWORD"
+	for _, tt := range []struct{ in, want string }{
+		{"oauth2Config.extra.code=R7_SYNTHETIC_CREDENTIAL_9327", "oauth2Config.extra.code=[REDACTED]"},
+		{"status.oauth2Config.extra.code=R7_SYNTHETIC_CREDENTIAL_9327", "status.oauth2Config.extra.code=[REDACTED]"},
+		{"a.b.oauth_client.sub.code=R7_SYNTHETIC_CREDENTIAL_9327 kept", "a.b.oauth_client.sub.code=[REDACTED] kept"},
+		{"oauth2.x.code: R7_SYNTHETIC_CREDENTIAL_9327", "oauth2.x.code:[REDACTED]"},
+		{"x OAuth2.Extra.CODE = R7_SYNTHETIC_CREDENTIAL_9327", "x OAuth2.Extra.CODE=[REDACTED]"},
+		{`x oauth2Config.extra.code="R7_SYNTHETIC_CREDENTIAL_9327 tail"`, `x oauth2Config.extra.code="[REDACTED]"`},
+		{`x "status.oauth2Config.extra.code": "R7_SYNTHETIC_CREDENTIAL_9327"`, `x "status.oauth2Config.extra.code":"[REDACTED]"`},
+		{"oauth..oauth.x.code=R7_SYNTHETIC_CREDENTIAL_9327", "oauth..oauth.x.code=[REDACTED]"},
+		{"oauth..x.code=R7_SYNTHETIC_CREDENTIAL_9327", "oauth..x.code=[REDACTED]"},
+		{"a.oauth.b..c.code=R7_SYNTHETIC_CREDENTIAL_9327", "a.oauth.b..c.code=[REDACTED]"},
+		{"status.oauth2Config..extra.code=R7_SYNTHETIC_CREDENTIAL_9327", "status.oauth2Config..extra.code=[REDACTED]"},
+		{"credentials: oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
+		{"credentials: status.oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
+		{"password=secretPrefix.oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "password=[REDACTED]"},
+		{"password=secretPrefix.dbPassword: R7_SYNTHETIC_CREDENTIAL_9327", "password=[REDACTED]"},
+		{"credentials:\n  oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327\n  region: us", "credentials:\n  oauth2Config.extra.code:[REDACTED]\n  region: us"},
+		{"credentials:\n a_PASSWORD: " + longKey + ".oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:\n a_PASSWORD:[REDACTED]"},
+		// Names that isCompoundSensitiveKey does not accept.
+		{"xoauth.extra.code=kept", "xoauth.extra.code=kept"},
+		{"oauth2Config.extra.codes=kept", "oauth2Config.extra.codes=kept"},
+		{"status.extra.code=kept", "status.extra.code=kept"},
+	} {
+		checkRedactionPaths(t, tt.in, tt.want)
+	}
+	// keyValFinder finds the name from its word that starts with "oauth".
+	for _, tt := range []struct{ in, key string }{
+		{"oauth2.code=v", "oauth2.code"},
+		{"oauth2.x.code=v", "oauth2.x.code"},
+		{"oauth..x.code=v", "oauth..x.code"},
+		{"a.oauth2.x.code=v", "oauth2.x.code"},
+		{"oauth2Config.extra.code=v", "oauth2Config.extra.code"},
+		{"status.oauth2Config.extra.code=v", "oauth2Config.extra.code"},
+	} {
+		f := keyValFinder{whole: tt.in}
+		if loc := f.find(tt.in); loc == nil || tt.in[loc[2]:loc[3]] != tt.key || loc[8] < 0 || tt.in[loc[8]:loc[9]] != "v" {
+			t.Errorf("keyValFinder.find(%q) = %v, want the key %q and the value v", tt.in, loc, tt.key)
+		}
+	}
+}
+
+// TestScrubTextPatterns_DottedNamesAgreeWithMapKeys checks that a dotted name
+// has its value redacted in text exactly when isSensitiveKey redacts the
+// value of a map key of that name, for names of up to four words.
+func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
+	words := []string{"", "oauth", "OAuth2", "oauth_client", "status", "xoauth", "code"}
+	lasts := []string{"code", "Code", "codes", "xcode"}
+	var names []string
+	var build func(prefix string, n int)
+	build = func(prefix string, n int) {
+		for _, last := range lasts {
+			names = append(names, prefix+last)
+		}
+		if n > 0 {
+			for _, w := range words {
+				build(prefix+w+".", n-1)
+			}
+		}
+	}
+	build("", 3)
+	sensitive := 0
+	for _, name := range names {
+		want := isSensitiveKey(name)
+		if want {
+			sensitive++
+		}
+		for _, in := range []string{name + "=R7_SYNTHETIC_CREDENTIAL_9327", "x " + name + ": R7_SYNTHETIC_CREDENTIAL_9327"} {
+			if got := !strings.Contains(scrubTextPatterns(in), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
+				t.Errorf("scrubTextPatterns(%q) redacted the value: %v, want %v as for the map key", in, got, want)
+			}
+			b, _, err := SmartTruncate(errors.New(in), 1000)
+			if got := err == nil && !strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
+				t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), redacted the value: %v, want %v as for the map key", in, b, err, got, want)
+			}
+		}
+	}
+	if sensitive == 0 || sensitive == len(names) {
+		t.Errorf("%d of the %d names are sensitive, want some of each", sensitive, len(names))
+	}
+}
+
 func TestNestedKeyName_StatePrefix(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -786,6 +1067,8 @@ func TestNestedKeyName_StatePrefix(t *testing.T) {
 		{"upper-case prefix", "APP:dbPassword", true, nestedKey, 4},
 		{"prefix of a name that is not a credential", "user:name", true, notNestedKey, 0},
 		{"fixed name with prefix", "user:password", true, nestedKey, 5},
+		{"prefixed dotted oauth key", "secretPrefix.oauth2Config.extra.code", false, valueEndingInKeyName, 13},
+		{"prefixed dotted camel key", "secretPrefix.dbPassword", false, valueEndingInKeyName, 13},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -957,6 +1240,55 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 				return `password=a:'b ` + strings.Repeat(`token=a:b:c:d `, n)
 			},
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated values opened after spaced delimiters", func(n int) string { return strings.Repeat(`password=a= "b c" token=a: {"d": "e"} `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated quotes that close the strings around pairs", func(n int) string { return strings.Repeat(`parsing "password=a-token: ": x `, n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated dotted OAuth names", func(n int) string { return strings.Repeat("x status.oauth2Config.extra.code=v ", n) },
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			// Each word starts a dotted OAuth name, which no value follows.
+			"bare run of dotted OAuth words without a value", func(n int) string { return strings.Repeat("oauth.a.", n) + "code=" },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"bare run of hyphenated OAuth words without a value", func(n int) string { return strings.Repeat("oauth-", n) + "x.code=," },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"bare run of underscored OAuth words without a value", func(n int) string { return strings.Repeat("oauth_", n) + "x.code=" },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"bare run of double-dotted OAuth words without a value", func(n int) string { return strings.Repeat("oauth..", n) + "x.code=" },
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			// Each word starts a dotted OAuth name, which runs on to the
+			// end of the run, where no ".code" ends it.
+			"oversized run of dotted OAuth words", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("oauth.", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"oversized run of double-dotted OAuth words", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("oauth..", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		{
+			"oversized run of dotted OAuth words through an error", func(n int) string {
+				return "credentials:\n a_PASSWORD: " + strings.Repeat("oauth.", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
+			},
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 8000,
 		},
 	}
 	for _, tt := range tests {

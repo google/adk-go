@@ -2905,7 +2905,7 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
+		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0, 0), len("token=abc "); got != want {
 			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
 		}
 	})
@@ -5167,6 +5167,110 @@ func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
 		allocs := testing.AllocsPerRun(10, func() { hasSensitiveTypeName(f) })
 		if nameAllocs := testing.AllocsPerRun(10, func() { isSensitiveKey(name) }); allocs != nameAllocs {
 			t.Errorf("hasSensitiveTypeName(%s) allocated %v times, want the %v of isSensitiveKey(%q)", f.Type(), allocs, nameAllocs, name)
+		}
+	}
+}
+
+// testCountError, testCountStringer and testCountFieldsError have methods on
+// their values and a private count that another goroutine may update
+// atomically; testCount and testCountFields are the same without methods.
+type (
+	testCountError    struct{ n uint64 }
+	testCountStringer struct{ n uint64 }
+	testCount         struct{ n uint64 }
+	testCountFields   struct {
+		Code int
+		n    uint64
+	}
+	testCountFieldsError struct {
+		Code int
+		n    uint64
+	}
+)
+
+func (testCountError) Error() string        { return "count error" }
+func (testCountStringer) String() string    { return "count stringer" }
+func (testCountFieldsError) Error() string  { return "count fields error" }
+func (testCountFieldsError) String() string { return "count fields stringer" }
+
+// TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls checks that
+// sanitizer.marshaled does not box a value whose Error or String method it
+// does not call: under redaction, a value of a type other than errors.New,
+// and with redaction off, a struct with exported fields. Boxing an
+// addressable value, as Value.Interface does, copies it, which allocates,
+// and reads its private fields. marshaled may read the type for
+// showsExportedFields, but must not allocate more than that does.
+func TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls(t *testing.T) {
+	h := &struct {
+		E  testCountError
+		S  testCountStringer
+		N  testCount
+		FE testCountFieldsError
+		F  testCountFields
+	}{}
+	fields := reflect.ValueOf(h).Elem()
+	for _, tt := range []struct {
+		redact bool
+		field  int
+	}{{true, 0}, {true, 1}, {true, 2}, {true, 3}, {true, 4}, {false, 2}, {false, 3}, {false, 4}} {
+		f := fields.Field(tt.field)
+		s := sanitizer{maxLength: 1000, redact: tt.redact, budget: &nodeBudget{remaining: maxSanitizeNodes}, visiting: map[visitKey]struct{}{}}
+		if out, _, ok := s.marshaled(f, 0); ok {
+			t.Errorf("marshaled(%s, redact %v) = %v, want the structural form", f.Type(), tt.redact, out)
+		}
+		allocs := testing.AllocsPerRun(10, func() { s.marshaled(f, 0) })
+		if scan := testing.AllocsPerRun(10, func() { showsExportedFields(f) }); allocs > scan {
+			t.Errorf("marshaled(%s, redact %v) allocated %v times, want at most the %v of showsExportedFields", f.Type(), tt.redact, allocs, scan)
+		}
+	}
+	// The method of a value that writes its text is still called.
+	s := sanitizer{maxLength: 1000, redact: false, budget: &nodeBudget{remaining: maxSanitizeNodes}, visiting: map[visitKey]struct{}{}}
+	for i, want := range []string{"count error", "count stringer"} {
+		if out, _, ok := s.marshaled(fields.Field(i), 0); !ok || out != want {
+			t.Errorf("marshaled(%s, redact off) = (%v, %v), want %q", fields.Field(i).Type(), out, ok, want)
+		}
+	}
+}
+
+// TestSmartTruncate_DoesNotReadPrivateFieldsOfValueMethods checks that values
+// whose Error or String method is on the value, and is not called, are
+// written without reading their private fields while another goroutine
+// updates them atomically: run with -race.
+// TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls checks that they
+// are not copied without it.
+func TestSmartTruncate_DoesNotReadPrivateFieldsOfValueMethods(t *testing.T) {
+	e, st, fe := new(testCountError), new(testCountStringer), &testCountFieldsError{Code: 7}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			atomic.AddUint64(&e.n, 1)
+			atomic.AddUint64(&st.n, 1)
+			atomic.AddUint64(&fe.n, 1)
+		}
+	}()
+	for range 200 {
+		for _, in := range []any{e, st, fe} {
+			want := `{}`
+			if in == fe {
+				want = `{"Code":7}`
+			}
+			if got, _, err := SmartTruncate(in, 1000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(%T) = (%s, %v), want %s", in, got, err, want)
+			}
+		}
+		if got, _, err := smartTruncate(fe, 1000, false); err != nil || string(got) != `{"Code":7}` {
+			t.Fatalf(`smartTruncate(%T, redact off) = (%s, %v), want {"Code":7}`, fe, got, err)
 		}
 	}
 }

@@ -3206,8 +3206,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 		wantContent string
 		// wantResponse is the AGENT_RESPONSE content.response, if it is not
 		// "text: '" + the content + "'". The response is redacted again
-		// once the text is quoted, and a redacted value that runs to the
-		// end of the text then also takes the closing "'".
+		// once the text is quoted, and a multiline redacted value whose
+		// newline resets quote tracking then also takes the closing "'".
 		wantResponse string
 	}{
 		{
@@ -3221,10 +3221,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `login failed: password="[REDACTED]"`,
 		},
 		{
-			name:         "API key before a wrapped error",
-			text:         "api_key=prodSECRET123-api-key: permission denied",
-			want:         "api_key=[REDACTED]",
-			wantResponse: "text: 'api_key=[REDACTED]",
+			name: "API key before a wrapped error",
+			text: "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
 		},
 		{
 			name: "token in prose",
@@ -3252,10 +3251,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `password="[REDACTED]" tcp`,
 		},
 		{
-			name:         "temp: key on the line of credentials",
-			text:         "credentials: temp:foo: SECRET123",
-			want:         "credentials:[REDACTED]",
-			wantResponse: "text: 'credentials:[REDACTED]",
+			name: "temp: key on the line of credentials",
+			text: "credentials: temp:foo: SECRET123",
+			want: "credentials:[REDACTED]",
 		},
 		{
 			name:         "temp: key on an indented line under credentials",
@@ -3540,11 +3538,10 @@ func TestValueEndingInKeyName(t *testing.T) {
 			wantContent: redactedSensitiveTextPlaceholder,
 		},
 		{
-			name:         "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
-			text:         "failed: {Password:abc-token: }\bSECRET123",
-			want:         "failed: {Password:[REDACTED]",
-			wantContent:  "failed: {Password:[REDACTED]",
-			wantResponse: "text: 'failed: {Password:[REDACTED]",
+			name:        "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			text:        "failed: {Password:abc-token: }\bSECRET123",
+			want:        "failed: {Password:[REDACTED]",
+			wantContent: "failed: {Password:[REDACTED]",
 		},
 		{
 			name:        "Go struct field ending in key name followed by space, backspace byte and closing brace",
