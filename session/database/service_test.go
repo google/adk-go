@@ -58,6 +58,86 @@ func Test_databaseService_CreateUsesProviders(t *testing.T) {
 	}
 }
 
+func TestDatabaseService_CreateMicrosecondPrecision(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		nanos     int
+		wantNanos int
+	}{
+		{name: "already_aligned", nanos: 123456000, wantNanos: 123456000},
+		{name: "rounds_down", nanos: 123456100, wantNanos: 123456000},
+		{name: "rounds_up", nanos: 123456789, wantNanos: 123456000},
+		{name: "rounds_into_next_second", nanos: 999999789, wantNanos: 999999000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixedTime := time.Date(2026, time.October, 22, 0, 0, 0, tc.nanos, time.UTC)
+			wantTime := time.Date(2026, time.October, 22, 0, 0, 0, tc.wantNanos, time.UTC)
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
+			s := emptyService(t)
+			created, err := s.Create(ctx, &session.CreateRequest{
+				AppName: "app",
+				UserID:  "user",
+				State:   map[string]any{"app:config": "enabled", "user:preference": "brief"},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			var stored storageSession
+			if err := s.db.Where(&storageSession{AppName: "app", UserID: "user", ID: created.Session.ID()}).First(&stored).Error; err != nil {
+				t.Fatalf("load session: %v", err)
+			}
+			var storedApp storageAppState
+			if err := s.db.Where(&storageAppState{AppName: "app"}).First(&storedApp).Error; err != nil {
+				t.Fatalf("load app state: %v", err)
+			}
+			var storedUser storageUserState
+			if err := s.db.Where(&storageUserState{AppName: "app", UserID: "user"}).First(&storedUser).Error; err != nil {
+				t.Fatalf("load user state: %v", err)
+			}
+			for name, got := range map[string]time.Time{
+				"LastUpdateTime": created.Session.LastUpdateTime(),
+				"CreateTime":     stored.CreateTime,
+				"UpdateTime":     stored.UpdateTime,
+				"AppUpdateTime":  storedApp.UpdateTime,
+				"UserUpdateTime": storedUser.UpdateTime,
+			} {
+				if !got.Equal(wantTime) {
+					t.Errorf("%s = %v, want %v", name, got, wantTime)
+				}
+			}
+
+			// SQLite preserves nanoseconds. Round only the stored value to model
+			// MySQL's datetime(6) conversion without updating the returned session.
+			if err := s.db.Model(&stored).Update("update_time", stored.UpdateTime.Round(time.Microsecond)).Error; err != nil {
+				t.Fatalf("round stored update time: %v", err)
+			}
+			event := &session.Event{ID: "first", Author: "user", Timestamp: fixedTime.Add(time.Second)}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("first AppendEvent: %v", err)
+			}
+			if err := s.db.First(&stored).Error; err != nil {
+				t.Fatalf("reload session after append: %v", err)
+			}
+			if want := wantTime.Add(time.Second); !stored.UpdateTime.Equal(want) {
+				t.Errorf("UpdateTime after append = %v, want %v", stored.UpdateTime, want)
+			}
+			if got := created.Session.LastUpdateTime(); !got.Equal(stored.UpdateTime) {
+				t.Errorf("LastUpdateTime after append = %v, stored UpdateTime = %v", got, stored.UpdateTime)
+			}
+			loaded, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get after append: %v", err)
+			}
+			if got := loaded.Session.Events().Len(); got != 1 {
+				t.Fatalf("stored event count = %d, want 1", got)
+			}
+			if loaded.Session.Events().At(0).ID != event.ID {
+				t.Error("stored event ID does not match appended event")
+			}
+		})
+	}
+}
+
 // TestDatabaseService_AppendEvent_WorkflowFieldsRoundTrip guards that
 // the storage layer serializes/deserializes the workflow event fields
 // (NodeInfo, RequestedInput, Routes, IsolationScope); dropping them
