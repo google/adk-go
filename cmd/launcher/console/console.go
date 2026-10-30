@@ -27,8 +27,10 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/ergochat/readline"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -69,7 +71,7 @@ func NewLauncher() launcher.SubLauncher {
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.
 func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) error {
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	telemetry, err := telemetry.InitAndSetGlobalOtelProviders(ctx, config, l.config.otelToCloud)
@@ -117,24 +119,10 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		return fmt.Errorf("failed to create runner: %v", err)
 	}
 
-	inputChan := make(chan string)
-	readErrChan := make(chan error, 1)
-
-	go func() {
-		reader := bufio.NewReader(os.Stdin)
-		for {
-			userInput, err := reader.ReadString('\n')
-			if err != nil {
-				readErrChan <- err
-				return
-			}
-			inputChan <- userInput
-		}
-	}()
+	reader := bufio.NewReader(os.Stdin)
+	interactiveInput := isCharacterDevice(os.Stdin) && isCharacterDevice(os.Stdout)
 	// Print an initial newline to work around PTY/exec buffering issues in some environments.
 	fmt.Println()
-
-	fmt.Print("\nUser -> ")
 
 	// Resolve "auto" streaming mode once per session (stdout TTY-ness doesn't change).
 	defaultStreamingMode := l.config.streamingMode
@@ -157,131 +145,193 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 	var pendingResponses []*genai.Part
 
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return nil
-		case err := <-readErrChan:
-			if errors.Is(err, io.EOF) {
-				fmt.Println("\nEOF detected, exiting...")
-				return nil
-			}
-			log.Fatal(err)
-		case userInput := <-inputChan:
-			// Drop the line terminator the reader keeps, so the message
-			// matches what the web UI submits (no trailing newline).
-			userInput = strings.TrimRight(userInput, "\r\n")
+		}
+		prompt := "\nUser -> "
+		if len(pendingInterrupts) > 0 {
+			// renderInterruptPrompt has already printed the prompt.
+			prompt = ""
+		}
+		userInput, err := readConsoleLine(ctx, reader, os.Stdout, interactiveInput, prompt)
+		if ctx.Err() != nil || isInputInterrupt(err) {
+			return nil
+		}
+		if errors.Is(err, io.EOF) {
+			fmt.Println("\nEOF detected, exiting...")
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read console input: %w", err)
+		}
+		// Drop the line terminator the reader keeps, so the message
+		// matches what the web UI submits (no trailing newline).
+		userInput = strings.TrimRight(userInput, "\r\n")
 
-			var userMsg *genai.Content
+		var userMsg *genai.Content
+		if len(pendingInterrupts) > 0 {
+			// Answer the head of the queue; loop back if more
+			// prompts remain.
+			current := pendingInterrupts[0]
+			pendingInterrupts = pendingInterrupts[1:]
+			pendingResponses = append(pendingResponses, buildInterruptResponse(current, userInput))
 			if len(pendingInterrupts) > 0 {
-				// Answer the head of the queue; loop back if more
-				// prompts remain.
-				current := pendingInterrupts[0]
-				pendingInterrupts = pendingInterrupts[1:]
-				pendingResponses = append(pendingResponses, buildInterruptResponse(current, userInput))
-				if len(pendingInterrupts) > 0 {
-					renderInterruptPrompt(pendingInterrupts[0])
-					continue
-				}
-				// All answers collected. Bundle every
-				// FunctionResponse into one user Content; the
-				// workflow runtime routes each to its waiting
-				// node by FunctionResponse.ID.
-				// TODO: legacy non-workflow agents still pick
-				// one agent from the first FunctionResponse.ID
-				// and drop the rest.
-				userMsg = &genai.Content{
-					Role:  string(genai.RoleUser),
-					Parts: pendingResponses,
-				}
-				pendingResponses = nil
-			} else {
-				userMsg = genai.NewContentFromText(userInput, genai.RoleUser)
-			}
-
-			streamingMode := l.config.streamingMode
-			if streamingMode == "" {
-				streamingMode = defaultStreamingMode
-			}
-
-			fmt.Print("\nAgent -> ")
-			prevText := ""
-			printedContent := false
-			var finalOutput any
-			var collectedEvents []*session.Event
-			for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
-				StreamingMode: streamingMode,
-			}) {
-				if err != nil {
-					// A compaction failure is not this turn's failure. It runs
-					// after the agent has answered and after the answer's events
-					// are stored, so all it costs is a larger prompt next time.
-					// Printing AGENT_ERROR under an answer the user has already
-					// read says the turn failed when it did not. The other
-					// surfaces make the same distinction.
-					if errors.Is(err, compaction.ErrCompaction) {
-						log.Printf("adk: context compaction failed: %v", err)
-						continue
-					}
-					fmt.Printf("\nAGENT_ERROR: %v\n", err)
-				} else {
-					collectedEvents = append(collectedEvents, event)
-					if event.LLMResponse.Content == nil {
-						// Function/terminal nodes carry their result in
-						// Event.Output, not model content; keep the latest
-						// so a content-less turn still surfaces a result.
-						if event.Output != nil {
-							finalOutput = event.Output
-						}
-						continue
-					}
-
-					text := ""
-					for _, p := range event.LLMResponse.Content.Parts {
-						text += p.Text
-					}
-					if text != "" {
-						printedContent = true
-					}
-
-					if streamingMode != agent.StreamingModeSSE {
-						fmt.Print(text)
-						continue
-					}
-
-					// In SSE mode, always print partial responses and capture them.
-					if !event.IsFinalResponse() {
-						fmt.Print(text)
-						prevText += text
-						continue
-					}
-
-					// Only print final response if it doesn't match previously captured text.
-					if text != prevText {
-						fmt.Print(text)
-					}
-
-					prevText = ""
-				}
-			}
-
-			// If the turn paused on any long-running interrupts,
-			// render the first prompt; the next stdin read will
-			// be its answer.
-			pendingInterrupts = collectPendingInterrupts(collectedEvents)
-			if len(pendingInterrupts) > 0 {
-				fmt.Println()
 				renderInterruptPrompt(pendingInterrupts[0])
 				continue
 			}
-			// A workflow whose terminal node returns a value rather than
-			// model content streams no text; surface that result so the
-			// turn isn't silent.
-			if !printedContent && finalOutput != nil {
-				fmt.Print(renderOutput(finalOutput))
+			// All answers collected. Bundle every
+			// FunctionResponse into one user Content; the
+			// workflow runtime routes each to its waiting
+			// node by FunctionResponse.ID.
+			// TODO: legacy non-workflow agents still pick
+			// one agent from the first FunctionResponse.ID
+			// and drop the rest.
+			userMsg = &genai.Content{
+				Role:  string(genai.RoleUser),
+				Parts: pendingResponses,
 			}
-			fmt.Print("\nUser -> ")
+			pendingResponses = nil
+		} else {
+			userMsg = genai.NewContentFromText(userInput, genai.RoleUser)
+		}
+
+		streamingMode := l.config.streamingMode
+		if streamingMode == "" {
+			streamingMode = defaultStreamingMode
+		}
+
+		fmt.Print("\nAgent -> ")
+		prevText := ""
+		printedContent := false
+		var finalOutput any
+		var collectedEvents []*session.Event
+		for event, err := range r.Run(ctx, userID, sess.ID(), userMsg, agent.RunConfig{
+			StreamingMode: streamingMode,
+		}) {
+			if err != nil {
+				if errors.Is(err, compaction.ErrCompaction) {
+					log.Printf("adk: context compaction failed: %v", err)
+					continue
+				}
+				fmt.Printf("\nAGENT_ERROR: %v\n", err)
+			} else {
+				collectedEvents = append(collectedEvents, event)
+				if event.LLMResponse.Content == nil {
+					// Function/terminal nodes carry their result in
+					// Event.Output, not model content; keep the latest
+					// so a content-less turn still surfaces a result.
+					if event.Output != nil {
+						finalOutput = event.Output
+					}
+					continue
+				}
+
+				text := ""
+				for _, p := range event.LLMResponse.Content.Parts {
+					text += p.Text
+				}
+				if text != "" {
+					printedContent = true
+				}
+
+				if streamingMode != agent.StreamingModeSSE {
+					fmt.Print(text)
+					continue
+				}
+
+				// In SSE mode, always print partial responses and capture them.
+				if !event.IsFinalResponse() {
+					fmt.Print(text)
+					prevText += text
+					continue
+				}
+
+				// Only print final response if it doesn't match previously captured text.
+				if text != prevText {
+					fmt.Print(text)
+				}
+
+				prevText = ""
+			}
+		}
+
+		// If the turn paused on any long-running interrupts,
+		// render the first prompt; the next stdin read will
+		// be its answer.
+		pendingInterrupts = collectPendingInterrupts(collectedEvents)
+		if len(pendingInterrupts) > 0 {
+			fmt.Println()
+			renderInterruptPrompt(pendingInterrupts[0])
+			continue
+		}
+		// A workflow whose terminal node returns a value rather than
+		// model content streams no text; surface that result so the
+		// turn isn't silent.
+		if !printedContent && finalOutput != nil {
+			fmt.Print(renderOutput(finalOutput))
 		}
 	}
+}
+
+// isCharacterDevice reports whether a stream is attached to a character device.
+// Readline needs both streams on a terminal for its cursor-position exchange.
+func isCharacterDevice(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func isInputInterrupt(err error) bool {
+	return errors.Is(err, readline.ErrInterrupt)
+}
+
+// readConsoleLine owns readline only while waiting for input. Closing it before
+// the agent turn restores the terminal's signal handling and keeps output ordered.
+func readConsoleLine(ctx context.Context, reader *bufio.Reader, output io.Writer, interactive bool, prompt string) (string, error) {
+	if !interactive {
+		fmt.Fprint(output, prompt)
+		type result struct {
+			line string
+			err  error
+		}
+		resultChan := make(chan result, 1)
+		go func() {
+			line, err := reader.ReadString('\n')
+			resultChan <- result{line: line, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case got := <-resultChan:
+			return got.line, got.err
+		}
+	}
+
+	if strings.HasPrefix(prompt, "\n") {
+		fmt.Fprintln(output)
+		prompt = strings.TrimPrefix(prompt, "\n")
+	}
+	rl, err := readline.NewEx(&readline.Config{Prompt: prompt, Stdout: output})
+	if err != nil {
+		return "", err
+	}
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = rl.Close()
+		case <-stopped:
+		}
+	}()
+	line, readErr := rl.Readline()
+	close(stopped)
+	closeErr := rl.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return line, nil
 }
 
 // renderOutput formats a node's Output value for the console: strings
