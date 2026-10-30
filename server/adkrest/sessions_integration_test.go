@@ -167,6 +167,98 @@ func TestCreateSessionRejectsMalformedChunkedBody(t *testing.T) {
 	}
 }
 
+// TestCreateSessionKeepsSeededStateDeltaOutOfSharedState checks that a state
+// delta on a create-session event cannot reach "app:" state, which every user
+// of the app reads, or "user:" state, which every session of that user reads.
+// Two servers share one session service so the read can come from a different
+// authenticated user.
+func TestCreateSessionKeepsSeededStateDeltaOutOfSharedState(t *testing.T) {
+	sessionService := session.InMemoryService()
+	mallory := newSharedSessionServer(t, sessionService, "mallory")
+	alice := newSharedSessionServer(t, sessionService, "alice")
+
+	// The ID-less route is the one the ADK web UI's session import uses.
+	for _, path := range []string{"/apps/app/users/mallory/sessions", "/apps/app/users/mallory/sessions/seeded"} {
+		status, body := sendSessionRequest(t, mallory, http.MethodPost, path,
+			`{"events":[{"author":"user","actions":{"stateDelta":{"app:prompt":"injected","user:is_admin":true}}}]}`)
+		if status != http.StatusBadRequest {
+			t.Errorf("POST %s with a scoped state delta: status = %d, want %d; body: %s", path, status, http.StatusBadRequest, body)
+		}
+	}
+	if status, body := sendSessionRequest(t, mallory, http.MethodGet, "/apps/app/users/mallory/sessions", ""); status != http.StatusOK || body != "[]\n" {
+		t.Errorf("list sessions after rejected creates: status = %d, body = %q; want %d, %q", status, body, http.StatusOK, "[]\n")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		server *httptest.Server
+		path   string
+	}{
+		{name: "same user, another session", server: mallory, path: "/apps/app/users/mallory/sessions/other"},
+		{name: "another user", server: alice, path: "/apps/app/users/alice/sessions/other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := sendSessionRequest(t, tc.server, http.MethodPost, tc.path, "")
+			if status != http.StatusOK {
+				t.Fatalf("create session: status = %d, want %d; body: %s", status, http.StatusOK, body)
+			}
+			var got createSessionResponse
+			if err := json.Unmarshal([]byte(body), &got); err != nil {
+				t.Fatalf("json.Unmarshal(response body) failed: %v", err)
+			}
+			for _, key := range []string{"app:prompt", "user:is_admin"} {
+				if _, ok := got.State[key]; ok {
+					t.Errorf("session state has %q, written by another session's create request", key)
+				}
+			}
+		})
+	}
+}
+
+// newSharedSessionServer serves sessionService with every request
+// authenticated as authenticatedUserID.
+func newSharedSessionServer(t *testing.T, sessionService session.Service, authenticatedUserID string) *httptest.Server {
+	t.Helper()
+
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService: sessionService,
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: authenticatedUserID}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+	testServer := httptest.NewServer(server)
+	t.Cleanup(testServer.Close)
+	return testServer
+}
+
+// sendSessionRequest sends body, if any, as JSON and returns the response
+// status and body.
+func sendSessionRequest(t *testing.T, testServer *httptest.Server, method, path, body string) (int, string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), method, testServer.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext() failed: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := testServer.Client().Do(req)
+	if err != nil {
+		t.Fatalf("client.Do() failed: %v", err)
+	}
+	respBody, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("io.ReadAll(response body) failed: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("response body Close() failed: %v", closeErr)
+	}
+	return resp.StatusCode, string(respBody)
+}
+
 func newChunkedSessionServer(t *testing.T, authenticatedUserID string) *httptest.Server {
 	t.Helper()
 

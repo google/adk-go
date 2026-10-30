@@ -275,6 +275,146 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+// TestCreateSessionValidatesInitializationEvents covers the events a client may
+// seed a new session with: conversation history is accepted, and anything only
+// the runtime produces is refused before the session exists.
+func TestCreateSessionValidatesInitializationEvents(t *testing.T) {
+	const (
+		text         = `{"author":"user","content":{"role":"user","parts":[{"text":"hello"}]}}`
+		toolCall     = `{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{"path":"x"}}}]}}`
+		toolResponse = `{"author":"agent","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{"status":"ok"}}}]}}`
+	)
+	type testCase struct {
+		name    string
+		events  []string
+		wantErr string // empty when the request is accepted
+	}
+	tests := []testCase{
+		{name: "text message", events: []string{text}},
+		{name: "tool call and response", events: []string{toolCall, toolResponse}},
+		{
+			name:   "empty action maps, as every runtime event reads back",
+			events: []string{`{"author":"user","actions":{"stateDelta":{},"artifactDelta":{}}}`},
+		},
+		{
+			name:   "null action maps",
+			events: []string{`{"author":"user","actions":{"stateDelta":null,"artifactDelta":null}}`},
+		},
+		{
+			name:    "long-running tool IDs",
+			events:  []string{`{"author":"agent","longRunningToolIds":["call-1"],"content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include long-running tool IDs",
+		},
+		{
+			name:    "app- and user-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"app:prompt":"injected","user:is_admin":true}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "session-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"theme":"dark"}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "artifact delta",
+			events:  []string{`{"author":"agent","actions":{"artifactDelta":{"report.txt":1}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "escalate",
+			events:  []string{`{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "skip summarization",
+			events:  []string{`{"author":"agent","actions":{"skipSummarization":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "transfer to agent",
+			events:  []string{`{"author":"agent","actions":{"transferToAgent":"other"}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "requested tool confirmations",
+			events:  []string{`{"author":"agent","actions":{"requestedToolConfirmations":{"call-1":{"confirmed":false}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "compaction",
+			events:  []string{`{"author":"agent","actions":{"compaction":{"compactedContent":{"role":"model","parts":[{"text":"summary"}]}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "workflow routes",
+			events:  []string{`{"author":"agent","routes":["approve"]}`},
+			wantErr: "session initialization event 0 cannot include workflow routes",
+		},
+		{
+			name:    "input request",
+			events:  []string{`{"author":"agent","requestedInput":{"interruptId":"review-1","message":"Approve?"}}`},
+			wantErr: "session initialization event 0 cannot include an input request",
+		},
+		{
+			name:    "reports the index of the offending event",
+			events:  []string{text, `{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 1 cannot include event actions",
+		},
+	}
+	for _, name := range []string{"adk_request_confirmation", "adk_request_credential", "adk_request_input"} {
+		tests = append(tests,
+			testCase{
+				name:    name + " call",
+				events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"` + name + `","args":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+			testCase{
+				name:    name + " response",
+				events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"` + name + `","response":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+		)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			body := `{"events":[` + strings.Join(tt.events, ",") + `]}`
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", strings.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			stored, created := sessionService.Sessions[id]
+			if tt.wantErr == "" {
+				if rr.Code != http.StatusOK {
+					t.Fatalf("CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body)
+				}
+				if !created {
+					t.Fatal("CreateSessionHandler() accepted the request but stored no session")
+				}
+				if got, want := len(stored.SessionEvents), len(tt.events); got != want {
+					t.Errorf("stored session has %d events, want %d", got, want)
+				}
+				return
+			}
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got := strings.TrimSpace(rr.Body.String()); got != tt.wantErr {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, tt.wantErr)
+			}
+			if created {
+				t.Error("CreateSessionHandler() rejected the request but still created the session")
+			}
+		})
+	}
+}
+
 func TestDeleteSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",
