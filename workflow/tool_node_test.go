@@ -17,6 +17,7 @@ package workflow
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -186,6 +188,25 @@ func TestToolNode_Run(t *testing.T) {
 			wantErr: "tool \"fail_tool\" execution failed: something went wrong",
 		},
 		{
+			name: "function_call_id_from_uuid_provider",
+			tool: func() (tool.Tool, error) {
+				return functiontool.New(functiontool.Config{
+					Name: "call_id",
+				}, func(ctx agent.Context, in Input) (string, error) {
+					return ctx.FunctionCallID(), nil
+				})
+			},
+			nodeInput: Input{Name: "World"},
+			node: func(t tool.Tool) (Node, error) {
+				return NewToolNodeTyped[Input, string](t, defaultNodeConfig)
+			},
+			extract: func(t *testing.T, out any) string {
+				return out.(map[string]any)["result"].(string)
+			},
+			// The call ID is the first draw, before the event ID.
+			want: "provider-uuid-1",
+		},
+		{
 			name: "nil_output_schema_no_panic",
 			tool: func() (tool.Tool, error) {
 				return functiontool.New(functiontool.Config{
@@ -221,6 +242,11 @@ func TestToolNode_Run(t *testing.T) {
 			}
 
 			mockCtx := newMockCtx(t)
+			var draws int
+			mockCtx.Context = platform.WithUUIDProvider(mockCtx.Context, func() string {
+				draws++
+				return fmt.Sprintf("provider-uuid-%d", draws)
+			})
 			validatedInput, err := node.ValidateInput(tc.nodeInput)
 			if err != nil {
 				t.Fatalf("ValidateInput failed: %v", err)
