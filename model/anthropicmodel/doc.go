@@ -154,6 +154,19 @@
 // `Temperature`, `TopP`, and `TopK` are omitted from the request with a warning
 // log, matching `adk-python`.
 //
+// Support for some fields also varies by model. The API rejects a field the
+// model does not support with HTTP 400, returned as [ErrBadRequest]:
+//
+//   - The Claude 5.5 models (`claude-opus-5-5`, `claude-sonnet-5-5`, and
+//     `claude-haiku-5-5`) reject `Temperature`, `TopP`, and `TopK` whenever they
+//     are sent. Setting a negative `ThinkingConfig.ThinkingBudget` or
+//     [ClientConfig.Effort] makes the package omit them.
+//   - `claude-opus-5-5` and `claude-sonnet-5-5` reject `ToolConfig` mode ANY,
+//     with or without an allowed function name.
+//   - On Vertex AI, `ResponseSchema` and `ResponseJsonSchema` use Claude's
+//     structured outputs feature, which the project's organization policy
+//     (`constraints/vertexai.allowedPartnerModelFeatures`) can disallow.
+//
 // # Multimodal Input Support
 //
 // Claude accepts images and documents on user turns and inside tool results,
@@ -194,16 +207,19 @@
 //	| IncludeThoughts               | Ignored; thought parts are always returned when thinking is enabled |
 //
 // Model support for individual thinking modes varies by model generation:
-// `claude-haiku-4-5`, `claude-sonnet-4-6`, and `claude-opus-4-6` accept all
-// three modes (`disabled`, `enabled`, and `adaptive`), whereas newer models
+// `claude-sonnet-4-6` and `claude-opus-4-6` accept all three modes
+// (`disabled`, `enabled`, and `adaptive`), and `claude-haiku-4-5` accepts
+// `disabled` and `enabled` but rejects `adaptive` with HTTP 400. Newer models
 // such as `claude-sonnet-5-5` and `claude-opus-5-5` accept `adaptive` thinking
 // (`*ThinkingBudget < 0`) or omitted `ThinkingConfig` (and may emit thought
 // parts by default when `ThinkingConfig` is nil), while rejecting `disabled`
 // and manual `enabled` budgets with HTTP 400.
 //
 // Reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`) is configured via
-// [ClientConfig.Effort] (`output_config.effort`). Claude `thinking` blocks are
-// returned as `genai.Part{Thought: true, Text: ..., ThoughtSignature: ...}` and
+// [ClientConfig.Effort] (`output_config.effort`). The levels a model accepts
+// vary: `claude-sonnet-4-6`, for example, rejects `xhigh` with HTTP 400.
+// Claude `thinking` blocks are returned as
+// `genai.Part{Thought: true, Text: ..., ThoughtSignature: ...}` and
 // `redacted_thinking` blocks as
 // `genai.Part{Thought: true, ThoughtSignature: ...}`. When replaying assistant
 // history, signed `thinking` and `redacted_thinking` blocks are placed at the
