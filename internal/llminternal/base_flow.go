@@ -949,10 +949,36 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 // If a tool set is encountered, it's expanded recursively in DFS fashion.
 // TODO: check need/feasibility of running this concurrently.
 func toolPreprocess(ctx agent.InvocationContext, req *model.LLMRequest, tools []tool.Tool) error {
+	// The request processors have already run and registered the names the
+	// framework dispatches itself: the output-schema processor packs
+	// set_model_response, the agent-transfer processor packs transfer_to_agent, and
+	// the workflow agents pack finish_task and task_completed. Those registrations
+	// are in req.Tools before this loop adds the agent's own tools and its
+	// toolsets' tools.
+	//
+	// An agent tool or a toolset tool answering to one of those names loses here
+	// rather than failing the run. Failing is what let any MCP server abort an
+	// invocation by advertising set_model_response at an agent that happens to
+	// declare an output schema -- a tool listing is attacker-influenced, so it must
+	// not be able to end the run. Nothing usable is lost either way: once the
+	// framework owns the name, the model's call to it is resolved by the framework,
+	// so the colliding tool was unreachable whether or not it was registered.
+	//
+	// A duplicate *among* the tools below is still an error. That is not a name the
+	// framework claims, so it is an application mistake with no correct resolution
+	// to choose.
+	frameworkTools := make(map[string]struct{}, len(req.Tools))
+	for name := range req.Tools {
+		frameworkTools[name] = struct{}{}
+	}
+
 	for _, t := range tools {
 		requestProcessor, ok := t.(toolinternal.RequestProcessor)
 		if !ok {
 			return fmt.Errorf("tool %q does not implement RequestProcessor() method", t.Name())
+		}
+		if _, shadowed := frameworkTools[t.Name()]; shadowed {
+			continue
 		}
 		// TODO: how to prevent mutation on this?
 		toolCtx := agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
