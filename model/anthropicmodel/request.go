@@ -184,13 +184,12 @@ func (m *anthropicModel) buildMessages(
 		}
 
 		// Coalesce adjacent messages with the same role so conversation turns
-		// strictly alternate between user and assistant.
+		// strictly alternate between user and assistant. Merged assistant turns
+		// keep their own block order: moving a later turn's thinking ahead of an
+		// earlier turn's blocks modifies the latest assistant message, which
+		// Claude rejects.
 		if len(messages) > 0 && messages[len(messages)-1].Role == role {
-			merged := append(messages[len(messages)-1].Content, blocks...)
-			if role == anthropic.MessageParamRoleAssistant {
-				merged = orderAssistantBlocks(merged)
-			}
-			messages[len(messages)-1].Content = merged
+			messages[len(messages)-1].Content = append(messages[len(messages)-1].Content, blocks...)
 		} else {
 			messages = append(messages, anthropic.MessageParam{
 				Role:    role,

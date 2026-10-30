@@ -207,8 +207,10 @@
 // `redacted_thinking` blocks as
 // `genai.Part{Thought: true, ThoughtSignature: ...}`. When replaying assistant
 // history, signed `thinking` and `redacted_thinking` blocks are placed at the
-// start of the assistant message as Claude requires, while unsigned thought
-// parts and content-free foreign signatures are stripped.
+// start of the turn they belong to, while unsigned thought parts and
+// content-free foreign signatures are stripped. Consecutive model turns, such as
+// those a LoopAgent records between iterations, are sent as one assistant
+// message in which each turn keeps its own block order.
 //
 // # Prompt Caching and Token Usage Metadata
 //

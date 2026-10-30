@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3948,4 +3949,86 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"MCPServers":            true,
 		"ExaAISearch":           true,
 	})
+}
+
+// TestConsecutiveAssistantTurnsKeepBlockOrder covers history in which one
+// model turn directly follows another, as a LoopAgent produces between
+// iterations. The two turns are sent as one assistant message, and each turn's
+// blocks keep their original order: Claude rejects the latest assistant message
+// when a thinking block from the second turn is moved ahead of the first turn.
+func TestConsecutiveAssistantTurnsKeepBlockOrder(t *testing.T) {
+	var lastBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		lastBody = nil
+		_ = json.Unmarshal(data, &lastBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_loop","type":"message","role":"assistant","model":"claude-sonnet-4-5-20250929","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":10,"output_tokens":2}}`)
+	}))
+	defer srv.Close()
+
+	m, err := anthropicmodel.NewModel(t.Context(), "claude-sonnet-4-5-20250929", anthropicmodel.ClientConfig{APIKey: "test-key", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("NewModel() error = %v", err)
+	}
+
+	thought := func(sig, text string) *genai.Part {
+		return &genai.Part{Thought: true, Text: text, ThoughtSignature: []byte(sig)}
+	}
+	call := &genai.Part{FunctionCall: &genai.FunctionCall{ID: "toolu_inc", Name: "increment", Args: map[string]any{}}}
+	result := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{FunctionResponse: &genai.FunctionResponse{ID: "toolu_inc", Name: "increment", Response: map[string]any{"value": 2}}},
+	}}
+
+	tests := []struct {
+		name       string
+		turns      []*genai.Content
+		wantBlocks []string // block type, plus the signature for thinking blocks
+	}{
+		{
+			name: "text turn then thinking turn",
+			turns: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{genai.NewPartFromText("continuing")}},
+				{Role: genai.RoleModel, Parts: []*genai.Part{thought("sig_b", "think b"), call}},
+			},
+			wantBlocks: []string{"text", "thinking:sig_b", "tool_use"},
+		},
+		{
+			name: "two thinking turns",
+			turns: []*genai.Content{
+				{Role: genai.RoleModel, Parts: []*genai.Part{thought("sig_a", "think a"), genai.NewPartFromText("continuing")}},
+				{Role: genai.RoleModel, Parts: []*genai.Part{thought("sig_b", "think b"), call}},
+			},
+			wantBlocks: []string{"thinking:sig_a", "text", "thinking:sig_b", "tool_use"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contents := append([]*genai.Content{genai.NewContentFromText("Start.", genai.RoleUser)}, tc.turns...)
+			contents = append(contents, result)
+			for _, err := range m.GenerateContent(t.Context(), &model.LLMRequest{Contents: contents}, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+
+			msgs, _ := lastBody["messages"].([]any)
+			if len(msgs) != 3 {
+				t.Fatalf("messages = %d, want 3 (user, merged assistant, user)", len(msgs))
+			}
+			var got []string
+			blocks, _ := msgs[1].(map[string]any)["content"].([]any)
+			for _, b := range blocks {
+				bm, _ := b.(map[string]any)
+				desc, _ := bm["type"].(string)
+				if desc == "thinking" {
+					desc += ":" + fmt.Sprint(bm["signature"])
+				}
+				got = append(got, desc)
+			}
+			if !slices.Equal(got, tc.wantBlocks) {
+				t.Errorf("merged assistant blocks = %v, want %v", got, tc.wantBlocks)
+			}
+		})
+	}
 }
