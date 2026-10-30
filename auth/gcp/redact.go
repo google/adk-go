@@ -87,12 +87,11 @@ const maxScrubbableSecret = 4096
 // decoded is examined in full and can still be shown. 120,000 bytes of \u0041
 // decode to 20,000 and come back scrubbed rather than withheld.
 //
-// The ContinueURI is covered less thoroughly than the UserID in one shape. Where
-// the UserID is a substring of the URI and the service escapes the URI so the
-// scrub cannot match it, the UserID's marker lands inside the URI and the rest of
-// the URI stays visible around it. The contract holds as stated, since this
-// package's decoder does not reconstruct the URI from what is returned, but a
-// reader sees most of it: https://github.com/google/adk-go/issues/1539.
+// Where one secret is a substring of another — a UserID inside the ContinueURI —
+// and the service echoes the longer one in an escaped spelling, the response is
+// withheld whole: the scrub cannot remove the escaped value as a unit, and
+// marking the shorter one inside it would leave the rest readable. A response
+// naming only the shorter secret is still scrubbed and shown.
 //
 // Two things here look like they could be simpler and cannot be.
 //
@@ -109,6 +108,9 @@ func redactedForError(s string, secrets ...string) string {
 		if len(v) > maxScrubbableSecret {
 			return withheldText
 		}
+	}
+	if splitsContainer(s, secrets) {
+		return withheldText
 	}
 	if out, ok := showable(s, secrets); ok {
 		return out
@@ -181,6 +183,37 @@ func showable(s string, secrets []string) (string, bool) {
 		return "", false
 	}
 	return out, true
+}
+
+// splitsContainer reports whether s carries one secret only in an escaped
+// spelling while a shorter secret sits inside it. The scrub cannot match the
+// escaped container, so it would mark the shorter one in the middle of it and
+// leave the rest of the container readable. The container is found by decoding
+// s, which covers the spellings this package's decoder handles.
+func splitsContainer(s string, secrets []string) bool {
+	var lowered []string
+	for _, v := range secrets {
+		if v != "" {
+			lowered = append(lowered, strings.ToLower(v))
+		}
+	}
+	var ls, ld string
+	for _, inner := range lowered {
+		for _, outer := range lowered {
+			if len(outer) <= len(inner) || !strings.Contains(outer, inner) {
+				continue
+			}
+			if ls == "" {
+				ls = strings.ToLower(s)
+				d, _ := decodeFully(s)
+				ld = strings.ToLower(d)
+			}
+			if !strings.Contains(ls, outer) && strings.Contains(ld, outer) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // recoverable reports whether any secret can be read out of x, either literally or

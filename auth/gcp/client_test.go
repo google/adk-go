@@ -1653,3 +1653,84 @@ func TestMarkersAreBudgetedAgainstTheCap(t *testing.T) {
 		t.Errorf("Body = %d bytes, want it capped to %d", got, want)
 	}
 }
+
+func TestContinueURISurvivesTheUserIDMarker(t *testing.T) {
+	tests := []struct {
+		name, userID, uri, body string
+	}{
+		{"escaped slashes", "app", "https://my-app.test/oauth/callback", `error at https:\/\/my-app.test\/oauth\/callback`},
+		{"unicode escaped slashes", "app", "https://my-app.test/oauth/callback", `error at https:\u002f\u002fmy-app.test\u002foauth\u002fcallback`},
+		{"partly escaped slashes", "alice", "https://cb.test/u/alice/done", `error at https://cb.test\/u\/alice\/done`},
+		{"plain", "alice", "https://cb.test/u/alice/done", `error at https://cb.test/u/alice/done`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+				Resource: authProviderResource, UserID: tt.userID, ContinueURI: tt.uri,
+			})
+			if err == nil {
+				t.Fatal("RetrieveCredential() error = nil, want an error")
+			}
+			text := strings.ReplaceAll(err.Error(), `\`, "")
+			const window = 8
+			for i := 0; i+window <= len(tt.uri); i++ {
+				if frag := tt.uri[i : i+window]; strings.Contains(text, frag) {
+					t.Errorf("error text shows part of the ContinueURI (offset %d, %d bytes): %q", i, window, text)
+					break
+				}
+			}
+		})
+	}
+
+	t.Run("body naming only the user id", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `denied for alice, try later`)
+		}))
+		defer srv.Close()
+
+		_, err := newTestClient(t, srv).RetrieveCredential(t.Context(), Request{
+			Resource: authProviderResource, UserID: "alice", ContinueURI: "https://cb.test/u/alice/done",
+		})
+		if err == nil {
+			t.Fatal("RetrieveCredential() error = nil, want an error")
+		}
+		if strings.Contains(err.Error(), "alice,") {
+			t.Errorf("error text shows the user id: %q", err)
+		}
+		if !strings.Contains(err.Error(), redactedMarker) || !strings.Contains(err.Error(), "try later") {
+			t.Errorf("error text = %q, want the body shown with the user id redacted, not withheld", err)
+		}
+	})
+}
+
+func TestRedactedForErrorWithholdsEscapedContainer(t *testing.T) {
+	const uri = "https://cb.test/u/alice/done"
+	tests := []struct {
+		name, body string
+		wantShown  bool
+	}{
+		{"escaped, other case", `at HTTPS:\/\/CB.test\/u\/ALICE\/done`, false},
+		{"unicode escaped", `at https:\u002f\u002fcb.test\u002fu\u002falice\u002fdone`, false},
+		{"unescaped", `at https://cb.test/u/alice/done`, true},
+		{"user id only", `denied for alice, try later`, true},
+		{"unrelated escape kept", `a\/b for alice`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactedForError(tt.body, "alice", uri)
+			if shown := got != withheldText; shown != tt.wantShown {
+				t.Errorf("redactedForError() = %q, shown = %v, want %v", got, shown, tt.wantShown)
+			}
+			if strings.Contains(strings.ToLower(got), "cb.test") {
+				t.Errorf("result shows part of the ContinueURI: %q", got)
+			}
+		})
+	}
+}
