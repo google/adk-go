@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 
@@ -52,7 +53,7 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 		return
 	}
 	content := requestContent(req)
-	if reflect.DeepEqual(content, d.request) {
+	if contentEqual(content, d.request) {
 		return
 	}
 	d.request = content
@@ -64,6 +65,77 @@ func (d *operationDetails) noteLLMRequest(req *model.LLMRequest) {
 	if onEvent {
 		d.eventRequest = eventContentAttributes(content)
 	}
+}
+
+// contentEqual is reflect.DeepEqual(a, b) without reflection for the values
+// requestContent builds. DeepEqual would record every slice and interface it
+// passes in a map, two per message of the conversation. Values of other types
+// are left to reflect.DeepEqual.
+func contentEqual(a, b []contentAttr) bool {
+	return slicesDeepEqual(a, b, func(x, y contentAttr) bool {
+		if x.key != y.key {
+			return false
+		}
+		switch xv := x.value.(type) {
+		case messageList:
+			yv, ok := y.value.(messageList)
+			return ok && slicesDeepEqual(xv, yv, messageEqual)
+		case partList:
+			yv, ok := y.value.(partList)
+			return ok && slicesDeepEqual(xv, yv, partEqual)
+		}
+		return reflect.DeepEqual(x.value, y.value)
+	})
+}
+
+func messageEqual(x, y chatMessage) bool {
+	return x.Role == y.Role && slicesDeepEqual(x.Parts, y.Parts, partEqual) &&
+		(x.FinishReason == y.FinishReason ||
+			x.FinishReason != nil && y.FinishReason != nil && *x.FinishReason == *y.FinishReason)
+}
+
+func partEqual(x, y contentValue) bool {
+	switch xv := x.(type) {
+	case textPart:
+		yv, ok := y.(textPart)
+		return ok && xv == yv
+	case blobPart:
+		yv, ok := y.(blobPart)
+		return ok && xv == yv
+	case uriPart:
+		yv, ok := y.(uriPart)
+		return ok && xv == yv
+	case toolCallPart:
+		yv, ok := y.(toolCallPart)
+		return ok && xv.Type == yv.Type && xv.ID == yv.ID && xv.Name == yv.Name && rawJSONEqual(xv.Arguments, yv.Arguments)
+	case toolResponsePart:
+		yv, ok := y.(toolResponsePart)
+		return ok && xv.Type == yv.Type && xv.ID == yv.ID && xv.Name == yv.Name && rawJSONEqual(xv.Response, yv.Response)
+	}
+	return reflect.DeepEqual(x, y)
+}
+
+// rawJSONEqual tells nil from empty, as reflect.DeepEqual does.
+func rawJSONEqual(x, y rawJSON) bool {
+	return (x == nil) == (y == nil) && bytes.Equal(x, y)
+}
+
+// slicesDeepEqual is reflect.DeepEqual's rule for slices, with eq comparing
+// their elements: a nil slice differs from an empty one, and a slice equals
+// itself whatever it holds.
+func slicesDeepEqual[S ~[]E, E any](a, b S, eq func(x, y E) bool) bool {
+	if (a == nil) != (b == nil) || len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 || &a[0] == &b[0] {
+		return true
+	}
+	for i := range a {
+		if !eq(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // emit emits the event, with messages only when capture is on.
