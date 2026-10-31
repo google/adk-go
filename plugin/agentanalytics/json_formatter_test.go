@@ -4460,10 +4460,10 @@ func TestSmartTruncate_OpaqueMethodsDoNotWriteCredentials(t *testing.T) {
 		}
 	})
 
-	t.Run("a zero value of a sensitive type name holds none", func(t *testing.T) {
+	t.Run("a zero value of a sensitive type name is redacted without reading it", func(t *testing.T) {
 		got, _, _ := SmartTruncate(testKimiToken(0), 1<<20)
-		if string(got) != `0` {
-			t.Errorf("SmartTruncate(testKimiToken(0)) = %s, want 0", got)
+		if string(got) != `"[REDACTED]"` {
+			t.Errorf(`SmartTruncate(testKimiToken(0)) = %s, want "[REDACTED]"`, got)
 		}
 	})
 }
@@ -5067,6 +5067,19 @@ func (v testAtomicArrayToken) MarshalJSON() ([]byte, error) {
 	return []byte(strconv.FormatUint(v[0], 10)), nil
 }
 
+// synthPlainAtomicToken is a credential-named scalar with no methods at all
+// that another goroutine updates atomically.
+type synthPlainAtomicToken uint64
+
+// synthAtomicErrorToken is a credential-named scalar without MarshalJSON or
+// MarshalText that implements error and may be updated atomically by another
+// goroutine while SmartTruncate serializes it.
+type synthAtomicErrorToken uint64
+
+func (t synthAtomicErrorToken) Error() string {
+	return strconv.FormatUint(uint64(t), 10)
+}
+
 func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET"
 	for _, tt := range []struct {
@@ -5085,7 +5098,10 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 		{"struct with a mutex behind a pointer", &testPointerGuardedPassword{mu: new(sync.Mutex)}, `"[REDACTED]"`},
 		{"struct with an atomic value", &testAtomicPassword{}, `"[REDACTED]"`},
 		{"array of a struct with a mutex", &testGuardedArrayPassword{}, `"[REDACTED]"`},
-		{"zero scalar", testKimiToken(0), `0`},
+		{"zero scalar", testKimiToken(0), `"[REDACTED]"`},
+		{"zero scalar in a field", struct{ T testKimiToken }{}, `{"T":"[REDACTED]"}`},
+		{"zero scalar with Error method", synthAtomicErrorToken(0), `"[REDACTED]"`},
+		{"zero scalar with Error method in a field", struct{ E synthAtomicErrorToken }{}, `{"E":"[REDACTED]"}`},
 		{"nil slice", testKimiPassword(nil), `"[REDACTED]"`},
 		{"map", testMapPassword{"k": "v"}, `"[REDACTED]"`},
 		{"zero scalar with MarshalJSON", testZeroScalarToken(0), `"[REDACTED]"`},
@@ -5109,8 +5125,9 @@ func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) 
 }
 
 // TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes checks that
-// credential-named values with a marshaling method, on the pointer or on the
-// value, are redacted without being read while another goroutine writes them
+// credential-named values — whether they define a marshaling method or are
+// plain/error scalars without MarshalJSON or MarshalText — are redacted
+// without being read (no v.IsZero() read) while another goroutine writes them
 // atomically: run with -race. The zero value rows of
 // TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole check the
 // output without it, and TestHasMarshalerMethod_DoesNotBoxTheValue that the
@@ -5120,8 +5137,12 @@ func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
 		T testAtomicScalarToken
 		V testValueAtomicToken
 		A testAtomicArrayToken
+		E synthAtomicErrorToken
+		K synthPlainAtomicToken
 	}
 	v := new(testAtomicScalarToken)
+	eTok := new(synthAtomicErrorToken)
+	var errIface error = eTok
 	h := new(holder)
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -5138,16 +5159,25 @@ func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
 			default:
 			}
 			atomic.AddUint64((*uint64)(v), 1)
+			atomic.AddUint64((*uint64)(eTok), 1)
 			atomic.AddUint64((*uint64)(&h.T), 1)
 			atomic.AddUint64((*uint64)(&h.V), 1)
 			atomic.AddUint64(&h.A[0], 1)
+			atomic.AddUint64((*uint64)(&h.E), 1)
+			atomic.AddUint64((*uint64)(&h.K), 1)
 		}
 	}()
 	for range 200 {
 		if got, _, err := SmartTruncate(v, 1000); err != nil || string(got) != `"[REDACTED]"` {
 			t.Fatalf(`SmartTruncate(*testAtomicScalarToken) = (%s, %v), want "[REDACTED]"`, got, err)
 		}
-		const want = `{"A":"[REDACTED]","T":"[REDACTED]","V":"[REDACTED]"}`
+		if got, _, err := SmartTruncate(eTok, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*synthAtomicErrorToken) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		if got, _, err := SmartTruncate(&errIface, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*error(*synthAtomicErrorToken)) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		const want = `{"A":"[REDACTED]","E":"[REDACTED]","K":"[REDACTED]","T":"[REDACTED]","V":"[REDACTED]"}`
 		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
 			t.Fatalf(`SmartTruncate(holder) = (%s, %v), want %s`, got, err, want)
 		}
@@ -5157,26 +5187,30 @@ func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
 // TestHasMarshalerMethod_DoesNotBoxTheValue checks that hasMarshalerMethod
 // reads the method sets of types only: boxing an addressable value into an
 // interface value, as Value.Interface does, copies it, which allocates, and
-// reads it. hasSensitiveTypeName, which calls it, must not box the value
-// either: it allocates only what isSensitiveKey allocates for the type name.
+// reads it. hasSensitiveTypeName, which calls it on structs and classifies
+// scalars by type alone, must not box or read the value either: it allocates
+// only what isSensitiveKey allocates for the type name.
 func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
 	h := &struct {
 		T testAtomicScalarToken
 		V testValueAtomicToken
 		A testAtomicArrayToken
+		E synthAtomicErrorToken
 		N [4]uint64
 	}{}
 	fields := reflect.ValueOf(h).Elem()
-	for i, want := range []bool{true, true, true, false} {
+	wantMarshaler := []bool{true, true, true, false, false}
+	wantSensitive := []bool{true, true, true, true, false}
+	for i := range wantMarshaler {
 		f := fields.Field(i)
-		if got := hasMarshalerMethod(f); got != want {
-			t.Errorf("hasMarshalerMethod(%s) = %v, want %v", f.Type(), got, want)
+		if got := hasMarshalerMethod(f); got != wantMarshaler[i] {
+			t.Errorf("hasMarshalerMethod(%s) = %v, want %v", f.Type(), got, wantMarshaler[i])
 		}
 		if allocs := testing.AllocsPerRun(10, func() { hasMarshalerMethod(f) }); allocs != 0 {
 			t.Errorf("hasMarshalerMethod(%s) allocated %v times, want 0", f.Type(), allocs)
 		}
-		if got := hasSensitiveTypeName(f); got != want {
-			t.Errorf("hasSensitiveTypeName(%s) = %v, want %v", f.Type(), got, want)
+		if got := hasSensitiveTypeName(f); got != wantSensitive[i] {
+			t.Errorf("hasSensitiveTypeName(%s) = %v, want %v", f.Type(), got, wantSensitive[i])
 		}
 		name := f.Type().Name()
 		allocs := testing.AllocsPerRun(10, func() { hasSensitiveTypeName(f) })

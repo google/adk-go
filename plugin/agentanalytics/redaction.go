@@ -100,16 +100,6 @@ var sensitiveKeys = map[string]struct{}{
 	"x_goog_signature":      {},
 }
 
-// maxSensitiveKeyWords is the greatest number of words in a name of
-// sensitiveKeys, such as the four of aws_secret_access_key.
-var maxSensitiveKeyWords = func() int {
-	most := 1
-	for k := range sensitiveKeys {
-		most = max(most, strings.Count(k, "_")+1)
-	}
-	return most
-}()
-
 // sensitiveKeyNames holds the names in sensitiveKeys with "_" removed, the
 // form in which isSensitiveKey compares keys.
 var sensitiveKeyNames = func() map[string]struct{} {
@@ -118,6 +108,18 @@ var sensitiveKeyNames = func() map[string]struct{} {
 		names[removeKeySeparators(k)] = struct{}{}
 	}
 	return names
+}()
+
+// maxCompactSensitiveKeyLen is the length of the longest compact credential
+// spelling in sensitiveKeyNames. Even if a separator splits every letter of a
+// credential suffix (as in DB_P_A_S_S_W_O_R_D), at most this many words can
+// belong to that suffix.
+var maxCompactSensitiveKeyLen = func() int {
+	most := 1
+	for k := range sensitiveKeyNames {
+		most = max(most, len(k))
+	}
+	return most
 }()
 
 // unicodeSpaceClass matches every Unicode White_Space character: ASCII
@@ -140,11 +142,15 @@ var (
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
-	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)` + unicodeSpaceRun + `("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n` + unicodeSpaceClass + `]+\][^` + unicodeSpaceClass + `,;)"']*|[^` + unicodeSpaceClass + `,;)"'\]]+)`)
+	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)` + unicodeSpaceRun + `("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|'(?:"(?:[^"\\]|\\.)*"|[^` + unicodeSpaceClass + `,;)"'\\\]}][^` + unicodeSpaceClass + `,;)"'\]]*)|"(?:'(?:[^'\\]|\\.)*'|[^` + unicodeSpaceClass + `,;)"'\\\]}][^` + unicodeSpaceClass + `,;)"'\]]*)|\[[^\]\r\n` + unicodeSpaceClass + `]+\][^` + unicodeSpaceClass + `,;)"']*|[^` + unicodeSpaceClass + `,;)"'\]]+)`)
 	// basicTokenRe matches a candidate basic credential, which
 	// redactBasicCredential redacts only if it is valid base64.
 	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)` + unicodeSpaceRun + `([A-Za-z0-9+/]+={0,2})`)
-	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
+	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"([\s\p{Z}]*(?:` + sensitiveKeyRegex() + `)[\s\p{Z}]*)"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
+	// textValueAtRe matches delimiter whitespace and the value part of
+	// textKeyValTokenAtRe at the start of a slice, for quoted keys whose name and
+	// delimiter quotedKeyScanAt has already read.
+	textValueAtRe = regexp.MustCompile(`^[` + delimSpaceClass + `]*(` + sensitiveValueRegex(`\s,;&`) + `)`)
 	// textKeyValTokenAtRe matches a key=value or key: value pair at the start
 	// of the text. As in adk-python, the key may be quoted (Python dict reprs
 	// use single quotes); it may also be quoted with escaped quotes, as in
@@ -269,9 +275,28 @@ func foldPatternText(s string) string {
 	return string(b)
 }
 
-// hasQuotedSensitiveKey reports whether quotedSensitiveKeyRe matches s.
+// hasQuotedSensitiveKey reports whether s holds a quoted sensitive key
+// followed by ":" or "=", including padded compound and camelCase keys.
 func hasQuotedSensitiveKey(s string) bool {
-	return mayMatchTextPatterns(s) && quotedSensitiveKeyRe.MatchString(s)
+	if !mayMatchTextPatterns(s) {
+		return false
+	}
+	if quotedSensitiveKeyRe.MatchString(s) {
+		return true
+	}
+	for i := 0; i < len(s); {
+		quote := openingQuote(s, i)
+		if quote == "" || (quote == "'" && isApostrophe(s, i, 2, 0)) {
+			i++
+			continue
+		}
+		_, closeQ, nextPos := scanQuotedKeyToken(s, i, quote)
+		if closeQ >= 0 && (quotedKeyAllowed(s[i+len(quote):closeQ]) || isSensitiveKey(s[i+len(quote):closeQ])) && followedByDelimiter(s, closeQ+len(quote)) {
+			return true
+		}
+		i = max(nextPos, i+len(quote))
+	}
+	return false
 }
 
 // sensitiveValueRegex returns the pattern for the value that follows a
@@ -304,7 +329,7 @@ func escapedQuotedRegex(q string) string {
 // sensitiveKeyRegex returns an alternation of the sensitive key names for
 // keys read inside quotes, where a "temp:" key name may contain "=" and ":".
 func sensitiveKeyRegex() string {
-	return `temp:[^"'\s\r\n,}]+|[_.-]*(?:` + fixedSensitiveKeyRegex() + `)`
+	return `temp:[^"'\\\s\r\n,}]+|[_.-]*(?:` + fixedSensitiveKeyRegex() + `)`
 }
 
 // textKeyNameRegex returns the pattern for the name of a key in key=value and
@@ -373,21 +398,71 @@ func bareSensitiveKeyRegex() string {
 	return `temp:[^=:"'\s\r\n,}]+|` + fixedSensitiveKeyRegex()
 }
 
-// fixedSensitiveKeyRegex returns an alternation of the names in sensitiveKeys,
-// in which each "_" may be written as any run of "_", "-" and "." or left out,
-// and trailing "_", "-" and "." separators are accepted, so that api_key,
-// api-key, api.key, api__key, api..key, api_key_, apiKey and APIKey all match,
-// agreeing with removeKeySeparators and splitKeyWords.
-func fixedSensitiveKeyRegex() string {
-	parts := make([]string, 0, len(sensitiveKeys))
-	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
-		parts = append(parts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_.-]*"))
+// keyTrie factors shared ASCII byte prefixes across compact credential
+// spellings in fixedSensitiveKeyRegex so Go's RE2 engine steps each shared
+// prefix once.
+type keyTrie struct {
+	end      bool
+	children [128]*keyTrie
+}
+
+func (n *keyTrie) tailRegex() string {
+	var branches []string
+	for i, ch := range n.children {
+		if ch != nil {
+			branches = append(branches, regexp.QuoteMeta(string(byte(i)))+ch.tailRegex())
+		}
 	}
-	return `(?:` + strings.Join(parts, "|") + `)[_.-]*`
+	if len(branches) == 0 {
+		return ""
+	}
+	var cont string
+	if len(branches) == 1 {
+		cont = `[_.-]*` + branches[0]
+	} else {
+		cont = `[_.-]*(?:` + strings.Join(branches, "|") + `)`
+	}
+	if n.end {
+		// "?" is greedy in RE2, so longer suffixes (such as "credentials",
+		// "signature" and "api_key_secret") match ahead of shorter prefixes.
+		return `(?:` + cont + `)?`
+	}
+	return cont
+}
+
+// fixedSensitiveKeyRegex returns a prefix-factored expression of the compact
+// credential spellings in sensitiveKeyNames with optional "_", "-" and "."
+// separator runs allowed between any two letters and at the end, so that
+// api_key, api-key, api.key, api__key, api..key, api_key_, api.k_ey, pass_word,
+// apiKey and APIKey all match in text discovery just as removeKeySeparators and
+// splitKeyWords classify them in maps and structs.
+func fixedSensitiveKeyRegex() string {
+	root := &keyTrie{}
+	for k := range sensitiveKeyNames {
+		cur := root
+		for i := 0; i < len(k); i++ {
+			b := k[i]
+			if b >= 128 {
+				continue
+			}
+			if cur.children[b] == nil {
+				cur.children[b] = &keyTrie{}
+			}
+			cur = cur.children[b]
+		}
+		cur.end = true
+	}
+	var top []string
+	for i, ch := range root.children {
+		if ch != nil {
+			top = append(top, regexp.QuoteMeta(string(byte(i)))+ch.tailRegex())
+		}
+	}
+	return `(?:` + strings.Join(top, "|") + `)[_.-]*`
 }
 
 func normalizeKey(k string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(k)), "-", "_")
+	return strings.ReplaceAll(strings.ToLower(strings.TrimFunc(k, isDelimSpace)), "-", "_")
 }
 
 // removeKeySeparators returns k without its "_", "-" and "." separators.
@@ -421,7 +496,7 @@ func isSensitiveKey(k string) bool {
 // and a "user:" or "app:" state prefix. It also returns k without the
 // whitespace around it and without that prefix.
 func exactSensitiveKey(k string) (name string, ok bool) {
-	orig := strings.TrimSpace(k)
+	orig := strings.TrimFunc(k, isDelimSpace)
 	n := strings.ToLower(orig)
 	if strings.HasPrefix(n, session.KeyPrefixTemp) {
 		return orig, true
@@ -431,8 +506,8 @@ func exactSensitiveKey(k string) (name string, ok bool) {
 	} else if rest, found := strings.CutPrefix(n, session.KeyPrefixApp); found {
 		n, orig = rest, orig[len(session.KeyPrefixApp):]
 	}
-	_, ok = sensitiveKeyNames[removeKeySeparators(strings.TrimSpace(n))]
-	return strings.TrimSpace(orig), ok
+	_, ok = sensitiveKeyNames[removeKeySeparators(strings.TrimFunc(n, isDelimSpace))]
+	return strings.TrimFunc(orig, isDelimSpace), ok
 }
 
 // lowPrecisionKeySuffixes are the credential names that are not taken as the
@@ -465,16 +540,41 @@ func isPageTokenName(k string) bool {
 }
 
 // isPageTokenWords reports whether the words of a key, as splitKeyWords
-// returns them, name a pagination cursor (see isPageTokenName).
+// returns them, name a pagination cursor (see isPageTokenName), including when
+// intra-word separators split "page" or "token".
 func isPageTokenWords(words []string) bool {
 	n := len(words)
-	if n < 2 || words[n-2] != "page" || words[n-1] != "token" {
+	if n < 2 {
 		return false
 	}
-	if n == 2 {
+	t := -1
+	for i := n - 1; i >= max(1, n-len("token")); i-- {
+		if joined := strings.Join(words[i:], ""); joined == "token" {
+			t = i
+			break
+		} else if len(joined) >= len("token") {
+			break
+		}
+	}
+	if t < 1 {
+		return false
+	}
+	p := -1
+	for i := t - 1; i >= max(0, t-len("page")); i-- {
+		if joined := strings.Join(words[i:t], ""); joined == "page" {
+			p = i
+			break
+		} else if len(joined) >= len("page") {
+			break
+		}
+	}
+	if p < 0 {
+		return false
+	}
+	if p == 0 {
 		return true
 	}
-	switch words[n-3] {
+	switch words[p-1] {
 	case "next", "prev", "previous":
 		return true
 	}
@@ -526,9 +626,9 @@ func isCompoundSensitiveKey(k string) bool {
 	if isPageTokenWords(words) {
 		return false
 	}
-	// Only the last maxSensitiveKeyWords words can form a credential name,
+	// Only the last maxCompactSensitiveKeyLen words can form a credential name,
 	// so the suffixes are not rebuilt for a long prefix of other words.
-	start := max(1, len(words)-maxSensitiveKeyWords)
+	start := max(1, len(words)-maxCompactSensitiveKeyLen)
 	for i := start; i < len(words); i++ {
 		if isCredentialSuffix(strings.Join(words[i:], "")) {
 			return true
@@ -536,7 +636,7 @@ func isCompoundSensitiveKey(k string) bool {
 	}
 	// Of an acronym, only the letters that leave room for a name of
 	// sensitiveKeys are tried, so a long one is not read to its start.
-	for i := max(0, len(words)-maxSensitiveKeyWords); i < len(words)-1; i++ {
+	for i := max(0, len(words)-maxCompactSensitiveKeyLen); i < len(words)-1; i++ {
 		if !acronyms[i] {
 			continue
 		}
@@ -677,7 +777,7 @@ func dottedKeyStart(s string, i int) int {
 	words := 0
 	inWord := false
 	for i > 0 && isCamelTokenByte(s[i-1]) {
-		if i <= lo && words >= maxSensitiveKeyWords && isSeparator(s[i-1]) {
+		if i <= lo && words >= maxCompactSensitiveKeyLen && isSeparator(s[i-1]) {
 			break
 		}
 		if isSeparator(s[i-1]) {
@@ -1688,8 +1788,9 @@ func scrubTextPatterns(s string) string {
 	}
 	s = authHeaderRe.ReplaceAllString(s, "${1}: "+redactedValue)
 	var bearerQuotes openQuotes
+	var bearerPairs sensitivePairSpans
 	s = replaceMatches(s, bearerTokenRe, func(s string, loc []int) (string, int) {
-		return redactBearerToken(s, loc, &bearerQuotes)
+		return redactBearerToken(s, loc, &bearerQuotes, &bearerPairs)
 	})
 	s = replaceMatches(s, basicTokenRe, redactBasicCredential)
 	var jsonQuotes openQuotes
@@ -1722,14 +1823,37 @@ type keyValFinder struct {
 	// found nothing, none is run again.
 	next     []int
 	searched bool
+	// qNext is the submatch indexes in whole of the first padded sensitive
+	// quoted key (opening at whole[qOpen:]), with a delimiter and value start
+	// after its closing quote, at or after the offset of the last quoted-key
+	// search. Unpadded quoted keys are found by nextKeyName and findCamelKeyName.
+	qNext     []int
+	qOpen     int
+	qSearched bool
 }
 
 // find returns the submatch indexes in rest, the end of f.whole, of the first
 // key-value pair with a sensitive key in it, or nil (see pairAtIf).
 func (f *keyValFinder) find(rest string) []int {
 	pos := len(f.whole) - len(rest)
-	if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && textValueStartRe.MatchString(rest[loc[1]:]) {
-		return pairAtIf(textKeyAllowedAt(f.whole, pos+loc[2], pos+loc[3]), rest, loc, 0, textKeyValTokenAtRe)
+	if !f.qSearched || f.qNext != nil && f.qOpen < pos {
+		f.qSearched = true
+		f.qNext, f.qOpen = nextPaddedQuotedKeyName(f.whole, pos)
+	}
+	if f.qNext != nil && f.qOpen == pos {
+		qLoc := make([]int, len(f.qNext))
+		for i, v := range f.qNext {
+			qLoc[i] = -1
+			if v >= 0 {
+				qLoc[i] = v - pos
+			}
+		}
+		return quotedPairAtIf(true, rest, qLoc)
+	}
+	if rest != "" && (isTextKeyByte(rest[0]) || rest[0] >= utf8.RuneSelf) {
+		if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && textValueStartRe.MatchString(rest[loc[1]:]) {
+			return pairAtIf(textKeyAllowedAt(f.whole, pos+loc[2], pos+loc[3]), rest, loc, 0, textKeyValTokenAtRe)
+		}
 	}
 	if !f.searched || f.next != nil && f.next[0] < pos {
 		f.searched = true
@@ -1747,24 +1871,208 @@ func (f *keyValFinder) find(rest string) []int {
 		}
 		limit = loc[2]
 	}
+	if f.qNext != nil {
+		if qLim := f.qNext[0] - pos; qLim < limit {
+			limit = qLim
+		}
+	}
 	// A key joined to its prefix at a camelCase boundary, as in dbPassword,
 	// has no word boundary before its credential name; it starts before the
 	// key at a word boundary, if there is one.
 	if camel := findCamelKeyName(rest, limit); camel != nil {
 		loc = camel
 	}
+	var name, start int
+	if loc != nil {
+		// Extend the key back over the prefix of a compound name. The match
+		// starts at the key.
+		name = loc[2]
+		start = name
+		for start > 0 && isTextKeyByte(rest[start-1]) {
+			start--
+		}
+	}
+	if f.qNext != nil && (loc == nil || f.qNext[0]-pos < start) {
+		qLoc := make([]int, len(f.qNext))
+		for i, v := range f.qNext {
+			qLoc[i] = -1
+			if v >= 0 {
+				qLoc[i] = v - pos
+			}
+		}
+		return quotedPairAtIf(true, rest, qLoc)
+	}
 	if loc == nil {
 		return nil
 	}
-	// Extend the key back over the prefix of a compound name. The match
-	// starts at the key.
-	name := loc[2]
-	start := name
-	for start > 0 && isTextKeyByte(rest[start-1]) {
-		start--
-	}
 	loc[0], loc[2] = start, start
 	return pairAtIf(textKeyAllowedAt(f.whole, pos+start, pos+loc[3]), rest, loc, name, textKeyValBareAtRe)
+}
+
+// quotedKeyAllowed reports whether raw, the complete unquoted text of a
+// single-line quoted key name, names a sensitive key once interior delimiter
+// whitespace padding around it is trimmed.
+func quotedKeyAllowed(raw string) bool {
+	trimmed := strings.TrimFunc(raw, isDelimSpace)
+	if trimmed == "" || strings.ContainsFunc(trimmed, isDelimSpace) || strings.ContainsAny(trimmed, `"'`+"\\,}\r\n") {
+		return false
+	}
+	rest, _ := cutStatePrefix(trimmed)
+	if len(rest) >= len(session.KeyPrefixTemp) && strings.EqualFold(rest[:len(session.KeyPrefixTemp)], session.KeyPrefixTemp) {
+		name := rest[len(session.KeyPrefixTemp):]
+		return name != "" && !strings.ContainsAny(name, "=:")
+	}
+	if isSensitiveKey(trimmed) {
+		return true
+	}
+	return !isPageTokenName(trimmed) && bareTextKeyRe.MatchString(rest)
+}
+
+// scanQuotedKeyToken scans from the opening quote at s[i:] (of length
+// len(quote)) to a matching closing quote on the same line, stopping early if
+// a line break, an inner quote, or a JSON container separator appears inside.
+// It returns (keyStart, closeQuoteStart, nextPos) where closeQuoteStart is -1
+// when no single-line quoted key token closes cleanly, and nextPos > i is the
+// next offset at which another quote can begin, keeping full-text scans O(n).
+func scanQuotedKeyToken(s string, i int, quote string) (int, int, int) {
+	keyStart := i + len(quote)
+	p := keyStart
+	for p < len(s) {
+		c := s[p]
+		if c == '\r' || c == '\n' {
+			return keyStart, -1, p + 1
+		}
+		if strings.HasPrefix(s[p:], quote) {
+			return keyStart, p, p
+		}
+		if c == '\\' {
+			if p+1 < len(s) && (s[p+1] == '"' || s[p+1] == '\'') {
+				return keyStart, -1, p
+			}
+			if p+1 < len(s) && s[p+1] == '\\' {
+				return keyStart, -1, p + 2
+			}
+			return keyStart, -1, p + 1
+		}
+		if c == '"' || c == '\'' {
+			return keyStart, -1, p
+		}
+		if c == '{' || c == ',' || c == '}' {
+			return keyStart, -1, p + 1
+		}
+		p++
+	}
+	return keyStart, -1, max(p, keyStart)
+}
+
+// quotedKeyScanAt inspects s at an opening quote quote at s[i:]. When s[i:] is
+// a single-line quoted key token followed outside its closing quote by ":" or
+// "=" and the start of a value, it returns the 8-index submatch slice matching
+// textKeyNameAtRe's layout ([keyStart, delimEnd, keyStart, closeQ, closeQ,
+// closeQEnd, delim, delimEnd]) in s, along with nextPos.
+func quotedKeyScanAt(s string, i int, quote string) ([]int, int) {
+	keyStart, closeQ, nextPos := scanQuotedKeyToken(s, i, quote)
+	if closeQ < 0 {
+		return nil, nextPos
+	}
+	trimmed := strings.TrimFunc(s[keyStart:closeQ], isDelimSpace)
+	if trimmed == "" || strings.ContainsFunc(trimmed, isDelimSpace) {
+		return nil, nextPos
+	}
+	qEnd := closeQ + len(quote)
+	delim := skipDelimSpace(s, qEnd)
+	if delim >= len(s) || (s[delim] != ':' && s[delim] != '=') || !textValueStartRe.MatchString(s[delim+1:]) {
+		return nil, nextPos
+	}
+	return []int{keyStart, delim + 1, keyStart, closeQ, closeQ, qEnd, delim, delim + 1}, nextPos
+}
+
+// quotedKeyAtStart matches a single-line quoted key and its delimiter at s[0:],
+// returning the 8-index submatch layout of textKeyNameAtRe, or nil.
+func quotedKeyAtStart(s string) []int {
+	quote := openingQuote(s, 0)
+	if quote == "" || (quote == "'" && isApostrophe(s, 0, 2, 0)) {
+		return nil
+	}
+	loc, _ := quotedKeyScanAt(s, 0, quote)
+	return loc
+}
+
+// quotedPairAtStart matches a single-line quoted key, its delimiter, and (when
+// quotedKeyAllowed accepts the key) its value at s[0:], agreeing with
+// quotedKeyAtStart on submatch boundaries [0..7].
+func quotedPairAtStart(s string) []int {
+	loc := quotedKeyAtStart(s)
+	if loc == nil {
+		return nil
+	}
+	return quotedPairAtIf(quotedKeyAllowed(s[loc[2]:loc[3]]), s, loc)
+}
+
+// quotedPairUncheckedAtStart matches a single-line quoted key, delimiter, and
+// value at s[0:] when the caller (nestsSensitiveKey) has already classified
+// the key as sensitive.
+func quotedPairUncheckedAtStart(s string) []int {
+	loc := quotedKeyAtStart(s)
+	if loc == nil {
+		return nil
+	}
+	return quotedPairAtIf(true, s, loc)
+}
+
+// quotedPairAtIf extends an 8-index quoted-key match loc in s with the value
+// submatch [valStart, valEnd] when allowed is true, or [-1, -1] otherwise.
+func quotedPairAtIf(allowed bool, s string, loc []int) []int {
+	if allowed {
+		if vLoc := textValueAtRe.FindStringSubmatchIndex(s[loc[7]:]); vLoc != nil {
+			return append(loc[:8:8], loc[7]+vLoc[2], loc[7]+vLoc[3])
+		}
+	}
+	return append(loc[:8:8], -1, -1)
+}
+
+// hasEdgeDelimSpace reports whether raw begins or ends with delimiter
+// whitespace.
+func hasEdgeDelimSpace(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	if c := raw[0]; c <= ' ' || c == '\x7f' {
+		return true
+	}
+	if c := raw[len(raw)-1]; c <= ' ' || c == '\x7f' {
+		return true
+	}
+	if r, _ := utf8.DecodeRuneInString(raw); unicode.IsSpace(r) {
+		return true
+	}
+	r, _ := utf8.DecodeLastRuneInString(raw)
+	return unicode.IsSpace(r)
+}
+
+// nextPaddedQuotedKeyName returns the 8-index submatch slice in s and opening
+// quote index of the first sensitive quoted key with interior padding (and a
+// delimiter and value start after its closing quote) at or after s[pos:],
+// scanning each inter-quote span at most once.
+func nextPaddedQuotedKeyName(s string, pos int) ([]int, int) {
+	for i := pos; i < len(s); {
+		quote := openingQuote(s, i)
+		if quote == "" || (quote == "'" && isApostrophe(s, i, 2, 0)) {
+			i++
+			continue
+		}
+		keyStart, closeQ, nextPos := scanQuotedKeyToken(s, i, quote)
+		if closeQ > keyStart && hasEdgeDelimSpace(s[keyStart:closeQ]) {
+			qEnd := closeQ + len(quote)
+			delim := skipDelimSpace(s, qEnd)
+			if delim < len(s) && (s[delim] == ':' || s[delim] == '=') &&
+				quotedKeyAllowed(s[keyStart:closeQ]) && textValueStartRe.MatchString(s[delim+1:]) {
+				return []int{keyStart, delim + 1, keyStart, closeQ, closeQ, qEnd, delim, delim + 1}, i
+			}
+		}
+		i = max(nextPos, i+len(quote))
+	}
+	return nil, -1
 }
 
 // nextKeyName returns the submatch indexes in s of the first key and
@@ -2061,7 +2369,7 @@ func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, l
 // Bearer " in config, api_key="x", where it is left in place with its opening
 // quote skipped (see openQuotes.unpaired), so that the text after it is
 // searched again.
-func redactBearerToken(s string, loc []int, quotes *openQuotes) (string, int) {
+func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitivePairSpans) (string, int) {
 	end := loc[5]
 	quoted := quotes.before(s, loc[4])
 	value := s[loc[4]:end]
@@ -2076,6 +2384,42 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes) (string, int) {
 		if closes && !ownsQuotedValue(s, loc[4], end, q) {
 			quotes.skip(s, loc[4])
 			return s[loc[0]:loc[4]], loc[4]
+		}
+		if quoted&quoteKind(q) != 0 && !closes && pairs.covers(s, quotes.openPos, loc[4]) {
+			quotes.skip(s, loc[4])
+			return s[loc[0]:loc[4]], loc[4]
+		}
+		if quoted&quoteKind(q) != 0 {
+			if q2 := openingQuote(s, loc[4]+len(q)); q2 != "" && q2 != q {
+				quotes.drop()
+				afterClose := quoted &^ quoteKind(q)
+				q2Start := loc[4] + len(q)
+				if m := quotedValueRe.FindString(s[q2Start:]); m != "" {
+					end = q2Start + len(m)
+					if !quotedValueEnds(s[q2Start:], len(m), afterClose) {
+						end = runOnValueEnd(s, q2Start, end, 0, afterClose)
+					}
+				} else {
+					end = len(s)
+				}
+				quotes.skip(s, end)
+				return s[loc[2]:loc[3]] + " " + redactedValue, end
+			}
+			if _, valQuote := unquoteValue(value); valQuote == "" {
+				if endsString(s, loc[4], q, quoted) {
+					quotes.skip(s, loc[4])
+					return s[loc[0]:loc[4]], loc[4]
+				}
+				if rest := s[loc[4]+len(q):]; len(rest) >= 2 && strings.EqualFold(rest[:2], "of") {
+					if r, _ := utf8.DecodeRuneInString(rest[2:]); len(rest) == 2 || unicode.IsSpace(r) {
+						quotes.skip(s, end)
+						return s[loc[0]:end], end
+					}
+				}
+				quotes.drop()
+				quotes.skip(s, end)
+				return s[loc[2]:loc[3]] + " " + redactedValue, end
+			}
 		}
 		if end > loc[4]+len(q) && !quotedValueEnds(s[loc[4]:], end-loc[4], quoted) {
 			if quote := textBetweenStrings(s, loc[4], end, quoted); quote != "" {
@@ -2155,6 +2499,18 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 	if quote := textBetweenStrings(s, loc[4], loc[5], quoted); quote != "" {
 		next := quotes.unpaired(s, loc[4], quote)
 		return s[loc[0]:next], next
+	}
+	colon := loc[3] + 1 + max(0, strings.IndexByte(s[loc[3]+1:loc[4]], ':'))
+	switch kind, pair := nestsSensitiveKey(s, loc[4], loc[5], startsLine(s, colon+1, loc[4]), true, quoted); kind {
+	case nestedKey:
+		return s[loc[0]:loc[4]], loc[4]
+	case valueEndingInKeyName:
+		end := nestedPairEnd(s, pair, loc[5], 0, quoted)
+		if closes && end > loc[4] {
+			quotes.drop()
+		}
+		quotes.skip(s, end)
+		return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
 	}
 	end := textValueEnd(s, loc[4], loc[5], 0, quoted)
 	if closes && end > loc[4] {
@@ -2493,8 +2849,8 @@ func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
 // but if its quoted value runs on past the bare value, it opens a value only
 // if its closing quote does not open the value of a later key, sensitive or
 // not (see opensLaterPair), unlike the apostrophe in token=abc:'s label=' x',
-// and not if an enclosing outer quote or bracket closes the bare value right
-// after a contraction ending (see closesOuterContext), as in
+// and not if an enclosing outer quote closes the bare value right after a
+// contraction ending (see closesOuterQuote), as in
 // failed: "token=abc:'s"; the user's request. A quoted value that opens a
 // value but does not end where a value may end (see quotedValueEnds), as in
 // password=a = "b"c, password=a="b"c or password=a="b"'c', runs on (see
@@ -2521,7 +2877,7 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 			if q == "" {
 				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && s[i] == ':' && quote == "'" {
 					cEnd := at + len(quote) + n
-					if closesOuterContext(s, cEnd, end, open, quoted) || (cEnd == end && laterConstructFollowsContraction(s[end:])) {
+					if closesOuterQuote(s, cEnd, end, open, quoted) || (cEnd == end && laterConstructFollowsContraction(s[end:])) {
 						return end
 					}
 				}
@@ -2531,14 +2887,14 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 				return end
 			}
 			// A quote inside the bare value whose quoted value runs on past
-			// it opens no value when an enclosing outer quote or bracket
-			// closes the bare value right after a contraction ending, or when
-			// its closing quote opens a later pair, a Bearer token or a
-			// quoted key, as in token=abc:'s label=' x',
+			// it opens no value when an enclosing outer quote closes the
+			// bare value right after a contraction ending, or when its
+			// closing quote opens a later pair, a Bearer token or a quoted
+			// key, as in token=abc:'s label=' x',
 			// token=abc:'s note Bearer ' x' or token=abc:'s note 'password': ' x'.
 			if at < end && at+len(q) > end {
 				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && s[i] == ':' && quote == "'" &&
-					closesOuterContext(s, at+len(quote)+n, end, open, quoted) {
+					closesOuterQuote(s, at+len(quote)+n, end, open, quoted) {
 					return end
 				}
 				if inner, _ := unquoteValue(q); opensLaterConstruct(s, at, len(q), len(quote), inner) {
@@ -2734,7 +3090,14 @@ func nestsSensitiveKey(s string, start, end int, lineStart, mayClose bool, quote
 		if !valueFollowsDelimiter(s, end, mayClose, quoted) {
 			return notNestedKey, 0
 		}
-		return nestedKeyName(inner, start+len(quote), lineStart)
+		leadTrim := strings.TrimLeftFunc(inner, isDelimSpace)
+		lead := len(inner) - len(leadTrim)
+		trimmed := strings.TrimRightFunc(leadTrim, isDelimSpace)
+		kind, pair := nestedKeyName(trimmed, start+len(quote)+lead, lineStart)
+		if kind != notNestedKey && len(trimmed) != len(inner) {
+			return kind, start
+		}
+		return kind, pair
 	}
 	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
 		if !valueStartsAt(s, end, mayClose, quoted) {
@@ -2794,6 +3157,15 @@ func oversizedNestedKey(s string, start, end int, lineStart, mayClose bool, quot
 	if inner, quote := unquoteValue(v); quote != "" {
 		if !valueFollowsDelimiter(s, end, mayClose, quoted) {
 			return notNestedKey, 0
+		}
+		if len(strings.TrimFunc(inner, isDelimSpace)) != len(inner) {
+			if !quotedKeyAllowed(inner) {
+				return notNestedKey, 0
+			}
+			if lineStart {
+				return nestedKey, start
+			}
+			return valueEndingInKeyName, start
 		}
 		name += len(quote)
 		keyText = inner
@@ -2923,6 +3295,9 @@ func containsFoldASCII(s, sub string) bool {
 // that it may read at s[i:] ends before a delimiter, since a name holds no
 // delimiter but the colon of a "temp:" prefix, and no name ends in "temp".
 func allowedKeyAt(s string, i int) bool {
+	if qLoc := quotedKeyAtStart(s[i:]); qLoc != nil {
+		return quotedKeyAllowed(s[i+qLoc[2] : i+qLoc[3]])
+	}
 	loc := textKeyNameAtRe.FindStringSubmatchIndex(s[i:])
 	return loc != nil && textKeyAllowedAt(s, i+loc[2], i+loc[3]) && textValueStartRe.MatchString(s[i+loc[1]:])
 }
@@ -3031,7 +3406,10 @@ func nestedPairEnd(s string, pair, valueEnd, open int, quoted quoteKinds) int {
 	// from each one of them, and is stopped at the second.
 	prevEnd := -1
 	for {
-		loc := textKeyValTokenAtRe.FindStringSubmatchIndex(s[pair:])
+		loc := quotedPairUncheckedAtStart(s[pair:])
+		if loc == nil {
+			loc = textKeyValTokenAtRe.FindStringSubmatchIndex(s[pair:])
+		}
 		if loc == nil {
 			// Not reached: nestsSensitiveKey has read a delimiter and a
 			// value after a key name that textKeyValTokenAtRe matches. Were
@@ -3431,6 +3809,7 @@ func trailingKeyStart(v string, allowed func(name string) bool) int {
 	v = strings.TrimRightFunc(v[:len(v)-1], isDelimSpace)
 	if strings.HasSuffix(v, `"`) || strings.HasSuffix(v, `'`) {
 		v = strings.TrimSuffix(v[:len(v)-1], `\`)
+		v = strings.TrimRightFunc(v, isDelimSpace)
 	}
 	i := len(v)
 	for i > 0 && isCamelTokenByte(v[i-1]) {
@@ -3552,10 +3931,14 @@ func opensLaterConstruct(s string, at, qLen, quoteLen int, inner string) bool {
 }
 
 // opensLaterBearer reports whether inner ends with the word "Bearer" followed
-// by delimiter whitespace and a value starts in after, as in
-// token=abc:'s note Bearer ' secret'.
+// by delimiter whitespace and a separated value starts after delimiter
+// whitespace in after, as in token=abc:'s note Bearer ' secret'. An
+// immediately joined fragment after the closing quote (without leading
+// delimiter whitespace in after), as in
+// export DB_PASSWORD=a:'s correct; horse Bearer '"secret", stays part of the
+// credential rather than opening an independent Bearer token.
 func opensLaterBearer(inner, after string) bool {
-	if !valueFollows(after) {
+	if skipDelimSpace(after, 0) == 0 || !valueFollows(after) {
 		return false
 	}
 	trimmed := strings.TrimRightFunc(inner, isDelimSpace)
@@ -3583,7 +3966,7 @@ func startsQuotedKeyWithValue(s string) bool {
 		return false
 	}
 	key, _ := unquoteValue(q)
-	key = strings.TrimSpace(key)
+	key = strings.TrimFunc(key, isDelimSpace)
 	if key == "" || len(key) > maxNestedKeyLen || !isIdentifierKey(key) {
 		return false
 	}
@@ -3599,40 +3982,32 @@ func startsQuotedKeyWithValue(s string) bool {
 	return valueStartsAt(s, delim+1, false, 0)
 }
 
-// closesOuterContext reports whether s[cEnd:end] is non-empty and consists
-// solely of closing brackets for brackets opened before the pair (up to open)
-// and/or a quote closing an active outer string in quoted (see endsString),
-// optionally followed by sentence punctuation. When it does, as in
-// failed: "token=abc:'s"; the user's request or {token=abc:'s}; retry later,
-// an independent enclosing context terminates the bare token before any
-// following prose or clause delimiter.
-func closesOuterContext(s string, cEnd, end, open int, quoted quoteKinds) bool {
-	if cEnd >= end {
+// closesOuterQuote reports whether s[cEnd:end] begins with a quote closing an
+// active enclosing outer string in quoted (see endsString), optionally
+// followed by closing brackets for brackets opened before the pair (up to
+// open) and sentence punctuation. Requiring an enclosing outer string to close
+// at cEnd (as in failed: "token=abc:'s"; the user's request) ensures that a
+// "}" or "]" inside a candidate quoted credential (as in
+// command: { export DB_PASSWORD=a:'s} secret'; }) is never mistaken for an
+// outer bracket terminator before quote ownership is established.
+func closesOuterQuote(s string, cEnd, end, open int, quoted quoteKinds) bool {
+	if cEnd >= end || quoted == 0 {
 		return false
 	}
-	pos := cEnd
+	q := openingQuote(s, cEnd)
+	if q == "" || !endsString(s, cEnd, q, quoted) {
+		return false
+	}
+	pos := cEnd + len(q)
 	remOpen := open
-	closed := false
 	for pos < end && remOpen > 0 && (s[pos] == '}' || s[pos] == ']') {
 		pos++
 		remOpen--
-		closed = true
-	}
-	if pos < end && quoted != 0 {
-		if q := openingQuote(s, pos); q != "" && endsString(s, pos, q, quoted) {
-			pos += len(q)
-			closed = true
-		}
-	}
-	for pos < end && remOpen > 0 && (s[pos] == '}' || s[pos] == ']') {
-		pos++
-		remOpen--
-		closed = true
 	}
 	for pos < end && strings.IndexByte(".,;:!?)", s[pos]) >= 0 {
 		pos++
 	}
-	return closed && pos == end
+	return pos == end
 }
 
 // laterConstructFollowsContraction reports whether after, the text immediately
@@ -3851,9 +4226,102 @@ func quoteKind(q string) quoteKinds {
 // strings, apostrophes that end a word (see isTrailingApostrophe), and
 // resetting line-local quote state at line breaks.
 type openQuotes struct {
-	pos    int // s[:pos] has been read or skipped
-	active quoteKinds
-	bs     int // consecutive backslashes immediately preceding s[pos]
+	pos     int // s[:pos] has been read or skipped
+	active  quoteKinds
+	openPos int // byte offset where active became non-zero
+	bs      int // consecutive backslashes immediately preceding s[pos]
+}
+
+type pairSpan struct {
+	keyStart int
+	valStart int
+	valEnd   int
+}
+
+// sensitivePairSpans lazily records the non-overlapping value spans of
+// sensitive key-value pairs in s in a single O(N) forward pass (mirroring
+// redactTextKeyValue's bracket and quote tracking) and answers coverage queries
+// in amortized O(1) as monotonically increasing Bearer match positions arrive.
+type sensitivePairSpans struct {
+	built  bool
+	spans  []pairSpan
+	cursor int
+}
+
+// covers reports whether an earlier sensitive key-value pair starts before
+// openPos and has a value span covering [openPos, target+1), so
+// redactBearerToken yields to keyValFinder rather than splitting a joined
+// credential containing "Bearer".
+func (p *sensitivePairSpans) covers(s string, openPos, target int) bool {
+	if openPos < 0 || openPos >= target || target > len(s) {
+		return false
+	}
+	if !p.built {
+		p.built = true
+		p.build(s)
+	}
+	for p.cursor < len(p.spans) && p.spans[p.cursor].valEnd <= target {
+		p.cursor++
+	}
+	if p.cursor >= len(p.spans) {
+		return false
+	}
+	sp := p.spans[p.cursor]
+	return sp.keyStart < openPos && sp.valStart <= openPos && sp.valEnd > target
+}
+
+func (p *sensitivePairSpans) build(s string) {
+	finder := keyValFinder{whole: s}
+	var brackets openBrackets
+	var quotes openQuotes
+	for pos := 0; pos < len(s); {
+		loc := finder.find(s[pos:])
+		if loc == nil {
+			break
+		}
+		for i, v := range loc {
+			if v >= 0 {
+				loc[i] = v + pos
+			}
+		}
+		if loc[8] < 0 {
+			pos = max(loc[7], loc[0]+1)
+			continue
+		}
+		open := brackets.before(s, loc[0])
+		start, end := loc[8], loc[9]
+		quoted := quotes.before(s, start)
+		if loc[4] < loc[5] && (quoted&quoteKind(openingQuote(s, start)) != 0 || s[loc[5]:loc[7]] != "=") {
+			if quote := textBetweenStrings(s, start, end, quoted); quote != "" {
+				next := quotes.unpaired(s, start, quote)
+				brackets.skip(next)
+				pos = max(next, loc[0]+1)
+				continue
+			}
+		}
+		switch kind, pair := nestsSensitiveKey(s, start, end, startsLine(s, loc[7], start), true, quoted); kind {
+		case nestedKey:
+			pos = max(start, loc[0]+1)
+			continue
+		case valueEndingInKeyName:
+			end = nestedPairEnd(s, pair, end, open, quoted)
+			brackets.skip(end)
+			quotes.skip(s, end)
+			p.spans = append(p.spans, pairSpan{keyStart: loc[0], valStart: start, valEnd: end})
+			pos = max(end, loc[0]+1)
+			continue
+		}
+		end = textValueEnd(s, start, end, open, quoted)
+		brackets.skip(end)
+		if q := openingQuote(s, start); q != "" && end > start && closesString(s, start, q, quoted) {
+			quotes.drop()
+		}
+		quotes.skip(s, end)
+		if end > start {
+			p.spans = append(p.spans, pairSpan{keyStart: loc[0], valStart: start, valEnd: end})
+		}
+		pos = max(end, loc[0]+1)
+	}
 }
 
 // isMidWordApostrophe reports whether the single quote at s[pos] is an
@@ -4025,6 +4493,7 @@ func (q *openQuotes) before(s string, i int) quoteKinds {
 		switch q.active {
 		case 0:
 			q.active = kind
+			q.openPos = q.pos
 		case kind:
 			q.active = 0
 		}
@@ -4092,6 +4561,7 @@ func (q *openQuotes) skip(s string, i int) {
 		if kind == savedActive {
 			if q.active == 0 {
 				q.active = savedActive
+				q.openPos = q.pos
 			} else {
 				q.active = 0
 			}

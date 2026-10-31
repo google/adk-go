@@ -3306,26 +3306,67 @@ func TestRedactionRegressions(t *testing.T) {
 		{"closed shell password with semicolon before following command", `export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok`, "staple horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{"unclosed shell password with semicolon after contraction prefix", `password=a:'s correct; horse battery`, "horse battery", `password=[REDACTED]`},
 		{"trailing separator compound keys beside trailing separator cursors", `page_token_=cursor-1 DB_PASSWORD_=SYNTHETIC_CREDENTIAL_7319 OpenAIAPIKey_=SYNTHETIC_CREDENTIAL_7319 stripe.api..key_=SYNTHETIC_CREDENTIAL_7319 next.page.token_=cursor-2`, "SYNTHETIC_CREDENTIAL_7319", `page_token_=cursor-1 DB_PASSWORD_=[REDACTED] OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED] next.page.token_=cursor-2`},
+		{"outer curly bracket around quoted shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; }`},
+		{"outer curly bracket around quoted password with inner closer and suffix", `failed: {password=a:'s} R12_SYNTHETIC_90517'suffix}`, "suffix", `failed: {password=[REDACTED]}`},
+		{"outer square bracket around quoted shell password with inner closer", `command: [ export DB_PASSWORD=a:'s] R12_SYNTHETIC_90517'; ]`, "R12_SYNTHETIC_90517", `command: [ export DB_PASSWORD=[REDACTED]; ]`},
+		{"outer curly bracket around unclosed shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]`},
+		{"outer curly bracket around quoted shell password before following command", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; echo ok; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; echo ok; }`},
+		{"intra-word underscore split compound password key", `DB_PASS_WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS_WORD=[REDACTED]`},
+		{"intra-word underscore split camelCase password key", `failed: dbPass_Word: R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `failed: dbPass_Word:[REDACTED]`},
+		{"intra-word underscore split dotted API key in JSON", `failed: {"stripe.api.k_ey": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {"stripe.api.k_ey":"[REDACTED]"}`},
+		{"intra-word double underscore split compound password key", `DB_PASS__WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS__WORD=[REDACTED]`},
+		{"intra-word split compound password key in YAML", "creds:\n  DB_PASS_WORD: R12_SYNTHETIC_90517", "R12_SYNTHETIC_90517", "creds:\n  DB_PASS_WORD:[REDACTED]"},
+		{"space-padded compound password key in JSON", `failed: {" DB_PASSWORD ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" DB_PASSWORD ":"[REDACTED]"}`},
+		{"space-padded camelCase password key in JSON", `failed: {" dbPassword ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" dbPassword ":"[REDACTED]"}`},
+		{"tab-padded compound password key in single-quoted dict", "failed: {'\tDB_PASSWORD\t': 'R12_SYNTHETIC_90517'}", "R12_SYNTHETIC_90517", "failed: {'\tDB_PASSWORD\t':'[REDACTED]'}"},
+		{"joined Bearer fragment inside contraction-led shell password", `export DB_PASSWORD=a:'s correct; horse Bearer '"R12_SYNTHETIC_7319"`, "correct; horse", `export DB_PASSWORD=[REDACTED]`},
+		{"joined single-quoted Bearer fragment inside shell password", `export DB_PASSWORD='my Bearer ''R12_SYNTHETIC_7319'; echo ok`, "R12_SYNTHETIC_7319", `export DB_PASSWORD='[REDACTED]'; echo ok`},
+		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]; echo 'done'`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in}
 			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
 			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 5)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") {
+					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("%q: missing event row %s (seen %v)", tt.in, wantEvent, seen)
+				}
+			}
 			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
 			if len(parts) != 1 {
 				t.Fatalf("content_parts = %v, want one part", parts)
 			}
 			text, _ := parts[0]["text"].(string)
+			toolMsg, _ := onlyRowOfType(t, rows, EventToolError)["error_message"].(string)
 			msg, _ := onlyRowOfType(t, rows, EventLLMError)["error_message"].(string)
-			if strings.Contains(text, tt.secret) || strings.Contains(msg, tt.secret) {
-				t.Errorf("%q: text %q, error_message %q, which hold %q", tt.in, text, msg, tt.secret)
+			if strings.Contains(text, tt.secret) || strings.Contains(toolMsg, tt.secret) || strings.Contains(msg, tt.secret) {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, which hold %q", tt.in, text, toolMsg, msg, tt.secret)
 			}
-			if text != tt.want || msg != tt.want {
-				t.Errorf("%q: text %q, error_message %q, want %q", tt.in, text, msg, tt.want)
+			if text != tt.want || toolMsg != tt.want || msg != tt.want {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, want %q", tt.in, text, toolMsg, msg, tt.want)
 			}
 		})
 	}
