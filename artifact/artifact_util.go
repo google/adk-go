@@ -63,8 +63,9 @@ var (
 // A reference names a stored version, so the version segment requires a positive
 // value ([1-9][0-9]*): in this package version 0 is the "latest" sentinel, and
 // following a reference to "versions/0" would silently resolve to whatever the
-// target's newest version is at load time. The regexes reject such a URI. The
-// adk-python port accepts "versions/0" because Python has no such sentinel;
+// target's newest version is at load time. The regexes reject such a URI.
+// adk-python accepts "versions/0" because Python has no such sentinel, so this
+// parser is deliberately stricter.
 func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 	if !strings.HasPrefix(uri, artifactURIScheme) {
 		return parsedArtifactURI{}, false
@@ -103,9 +104,11 @@ func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 // buildArtifactURI constructs an artifact reference URI. If sessionID is empty,
 // a user-scoped URI is constructed instead of a session-scoped one.
 //
-// The segments are not escaped, so an app, user, session, or file name that
-// contains "/" is not round-trippable through parseArtifactURI for the same
-// reason as above; call with segments that match [^/]+.
+// The app, user, and session segments are not escaped, so a value containing
+// "/" cannot be represented in a reference URI for the reason above. The file
+// name is the final group and is matched greedily, so it does round-trip
+// through parseArtifactURI even though SaveRequest.Validate rejects a file name
+// containing a path separator.
 func buildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
 	if sessionID == "" {
 		return fmt.Sprintf("artifact://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)

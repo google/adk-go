@@ -16,6 +16,7 @@ package artifact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"iter"
@@ -160,7 +161,9 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if isArtifactRef(req.Part) {
 		parsed, ok := parseArtifactURI(req.Part.FileData.FileURI)
 		if !ok {
-			return nil, fmt.Errorf("invalid artifact reference URI: %s", req.Part.FileData.FileURI)
+			// Do not echo the URI: it carries app, user, session, and file
+			// identifiers, which are caller data.
+			return nil, errors.New("invalid artifact reference URI")
 		}
 		// Check the caller's session before the user-scope rewrite, so the scope
 		// is validated against the caller, matching Load's per-hop rule.
@@ -239,9 +242,9 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	// "artifact://" scheme), pointing at another artifact rather than storing
 	// data. Resolve it here, re-validating scope at each hop so a reference can
 	// never escape the app/user/session it was saved under. maxArtifactRefDepth
-	// bounds resolution against cycles; the first load is the requested artifact
-	// and is not a reference, while the error below counts reference hops. This
-	// mirrors adk-python's cap of 5 (artifact_util._MAX_ARTIFACT_REFERENCE_DEPTH).
+	// bounds resolution against cycles and counts reference hops only, so the
+	// requested artifact does not consume one. This mirrors adk-python's cap of 5
+	// (artifact_util._MAX_ARTIFACT_REFERENCE_DEPTH).
 	const maxArtifactRefDepth = 5
 	remainingDepth := maxArtifactRefDepth
 	for {
@@ -273,7 +276,9 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 
 		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
 		if !ok {
-			return nil, fmt.Errorf("invalid artifact reference URI: %s", entry.part.FileData.FileURI)
+			// Do not echo the URI: it carries app, user, session, and file
+			// identifiers, which are caller data.
+			return nil, errors.New("invalid artifact reference URI")
 		}
 		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
 			return nil, fmt.Errorf("invalid artifact reference: %w", err)
@@ -394,9 +399,15 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 	if userScoped {
 		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
 	}
-	mimeType := "text/plain"
-	if entry.part.InlineData != nil {
+	// Report the media type the same way adk-python's in-memory service does:
+	// inline data carries its own, text is text/plain, and a reference has no
+	// media type until it is loaded.
+	var mimeType string
+	switch {
+	case entry.part.InlineData != nil:
 		mimeType = entry.part.InlineData.MIMEType
+	case entry.part.Text != "":
+		mimeType = "text/plain"
 	}
 
 	return &GetArtifactVersionResponse{

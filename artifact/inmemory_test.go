@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +243,61 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 		}
 	})
 
+	// A user-scoped URI (no sessions segment) may point at a user-scoped file,
+	// which is stored under the shared user key. Both the alias and the target
+	// are visible from every session of the user, so following the reference
+	// must resolve from each of them.
+	t.Run("user-scoped URI resolves a user-scoped target", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		target, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s1", FileName: "user:target.txt",
+			Part: genai.NewPartFromText("shared contents"),
+		})
+		if err != nil {
+			t.Fatalf("Save(user:target) failed: %v", err)
+		}
+		if _, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s1", FileName: "user:alias.txt",
+			Part: &genai.Part{FileData: &genai.FileData{
+				FileURI: fmt.Sprintf("artifact://apps/app/users/user/artifacts/user:target.txt/versions/%d", target.Version),
+			}},
+		}); err != nil {
+			t.Fatalf("Save(user:alias) failed: %v", err)
+		}
+		for _, sessionID := range []string{"s1", "s2"} {
+			resp, err := svc.Load(ctx, &artifact.LoadRequest{
+				AppName: "app", UserID: "user", SessionID: sessionID, FileName: "user:alias.txt",
+			})
+			if err != nil {
+				t.Fatalf("Load(user:alias) from %q failed: %v", sessionID, err)
+			}
+			if resp.Part.Text != "shared contents" {
+				t.Errorf("Load(user:alias) from %q = %q, want %q", sessionID, resp.Part.Text, "shared contents")
+			}
+		}
+	})
+
+	t.Run("save rejects a malformed reference URI", func(t *testing.T) {
+		for _, uri := range []string{
+			"artifact://nonsense",
+			"artifact://apps/app/users/user/sessions/s/artifacts/f.txt/versions/0",
+		} {
+			t.Run(uri, func(t *testing.T) {
+				svc := artifact.InMemoryService()
+				_, err := svc.Save(ctx, &artifact.SaveRequest{
+					AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+					Part: &genai.Part{FileData: &genai.FileData{FileURI: uri}},
+				})
+				if err == nil {
+					t.Fatalf("Save(alias) with URI %q succeeded, want an error", uri)
+				}
+				if !strings.Contains(err.Error(), "invalid artifact reference URI") {
+					t.Errorf("Save(alias) error = %v, want an invalid-reference-URI error", err)
+				}
+			})
+		}
+	})
+
 	t.Run("save rejects out-of-scope references", func(t *testing.T) {
 		cases := []struct {
 			name                  string
@@ -367,6 +423,9 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 		if err == nil {
 			t.Fatal("Load over the depth limit succeeded, want the depth error")
 		}
+		if !strings.Contains(err.Error(), "maximum depth of 5") {
+			t.Errorf("Load over the depth limit error = %v, want the maximum-depth error", err)
+		}
 	})
 
 	t.Run("a self-referencing chain is bounded by the depth limit", func(t *testing.T) {
@@ -383,5 +442,52 @@ func TestInMemoryArtifactService_References(t *testing.T) {
 		if err == nil {
 			t.Fatal("Load of a self-referencing artifact succeeded, want the depth error")
 		}
+		if !strings.Contains(err.Error(), "maximum depth of 5") {
+			t.Errorf("Load of a self-referencing artifact error = %v, want the maximum-depth error", err)
+		}
 	})
+}
+
+// TestInMemoryArtifactVersionReferenceMimeType pins that a stored reference has
+// no media type of its own: the target's type is only known once Load follows
+// the reference. adk-python's in-memory service leaves mime_type unset for a
+// reference (in_memory_artifact_service.py), and Load still reports the
+// target's type.
+func TestInMemoryArtifactVersionReferenceMimeType(t *testing.T) {
+	ctx := context.Background()
+	svc := artifact.InMemoryService()
+	target, err := svc.Save(ctx, &artifact.SaveRequest{
+		AppName: "app", UserID: "user", SessionID: "s", FileName: "target.png",
+		Part: genai.NewPartFromBytes([]byte("png"), "image/png"),
+	})
+	if err != nil {
+		t.Fatalf("Save(target) failed: %v", err)
+	}
+	alias, err := svc.Save(ctx, &artifact.SaveRequest{
+		AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+		Part: refPart("app", "user", "s", "target.png", target.Version),
+	})
+	if err != nil {
+		t.Fatalf("Save(alias) failed: %v", err)
+	}
+
+	got, err := svc.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+		AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt", Version: alias.Version,
+	})
+	if err != nil {
+		t.Fatalf("GetArtifactVersion(alias) failed: %v", err)
+	}
+	if got.ArtifactVersion.MimeType != "" {
+		t.Errorf("GetArtifactVersion(alias).MimeType = %q, want empty for a reference", got.ArtifactVersion.MimeType)
+	}
+
+	loaded, err := svc.Load(ctx, &artifact.LoadRequest{
+		AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+	})
+	if err != nil {
+		t.Fatalf("Load(alias) failed: %v", err)
+	}
+	if got := loaded.Part.InlineData.MIMEType; got != "image/png" {
+		t.Errorf("Load(alias).Part.InlineData.MIMEType = %q, want %q", got, "image/png")
+	}
 }
