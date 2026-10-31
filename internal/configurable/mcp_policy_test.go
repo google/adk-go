@@ -164,6 +164,7 @@ func TestWithMCPPolicyInvalid(t *testing.T) {
 
 func TestWithMCPPolicyErrorDiagnostics(t *testing.T) {
 	tests := []struct{ name, policy, want string }{
+		{"duplicate", `{"allowed_servers":[],"allowed_servers":[]}`, "decode MCP policy: duplicate JSON field"},
 		{"null argument", `{"allowed_servers":[{"args":["private-value",null]}]}`, "decode MCP policy: args[1]: expected string, got null"},
 		{"syntax", `{"allowed_servers":!}`, "decode MCP policy: invalid JSON at byte 20"},
 		{"wrong type", `{"allowed_servers":[{"command":123456789}]}`, "decode MCP policy: JSON value must have Go type string"},
