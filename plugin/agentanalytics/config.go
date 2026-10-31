@@ -51,13 +51,28 @@ type Logger interface {
 // InitialDelay: 100ms, MaxDelay: 10s, Multiplier: 2.0); to disable retries,
 // set MaxRetries: 0 alongside a non-zero InitialDelay, MaxDelay, or Multiplier.
 //
+// MaxRetries applies to each AppendRows request. A batch that is too large for
+// one request is split into several that are sent in order (see [Config]); a
+// request that fails is resent on its own, up to MaxRetries times, and the
+// requests that BigQuery already confirmed are not resent. A status that a
+// retry cannot fix, such as PermissionDenied or InvalidArgument, ends the write
+// of the batch without further retries when opening the stream fails with it or
+// BigQuery reports it in an AppendRowsResponse. When it instead ends the
+// stream, the server may not have read the request, so while retries remain the
+// request is resent on a fresh stream: always if an earlier batch opened that
+// stream, and once per request if it was opened for the request, after which
+// the status ends the write. Each such resend uses up one retry and its
+// backoff.
+//
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
 // between them, ends when ShutdownTimeout expires, while the writes made by a
 // run-end flush, and those made while Close drains the queue, share a single
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
-// in-flight batch is deferred for at most one retry in the next flush
-// (background, run-end, or Close). This provides at-least-once delivery; if
+// rows of the in-flight batch that BigQuery has not confirmed are deferred for
+// at most one retry in the next flush (background, run-end, or Close); the
+// rows of the split requests that it confirmed before then are not resent.
+// This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
 // succeed on retry; queries deduplicating by event_id should prefer rows where
@@ -148,10 +163,11 @@ type GCSContentOffloader interface {
 // exactly_once_delivery and creates a COMMITTED write stream when enabled, but
 // differs in handling. After OutOfRange, NotFound, or an unexpected
 // AlreadyExists, Go replaces the stream (at most once per batch) and resends
-// the batch within the same append, with two exceptions: if the stream was
-// rotated by an earlier batch and has not committed yet, Go drops the batch
-// and pauses rotation; if an earlier attempt of the batch had an unknown
-// outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
+// the request that failed within the same append (the whole batch, unless it
+// was split into several requests; see below), with two exceptions: if the
+// stream was rotated by an earlier batch and has not committed yet, Go drops
+// the batch and pauses rotation; if an earlier attempt of the request had an
+// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
 // duplicate delivery, and replace the stream before the next batch (pausing
 // rotation if the stream had not committed yet). adk-python drops the batch
 // after any of the three and replaces the stream before the next one. On an
@@ -160,7 +176,7 @@ type GCSContentOffloader interface {
 // DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
 // outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
 // as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the batch had an unknown
+// replaces the stream only if an earlier attempt of the request had an unknown
 // outcome, whereas adk-python also replaces it when the error is not a schema
 // mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
 // returns ten per-reason counts. adk-python uploads while it parses an event,
@@ -174,6 +190,20 @@ type GCSContentOffloader interface {
 // desynchronization (rotating to a fresh stream without consuming append retry
 // attempts) and distinguishes ambiguous transport errors from definite server
 // rejections.
+//
+// Go splits a batch whose rows are estimated at more than 8 MiB into several
+// AppendRows requests, and halves a multi-row request that serializes to more
+// than 9 MiB, so that a multi-row request stays under the Write API's size
+// limit; adk-python sends every batch as one request. The requests of a batch
+// are sent in order, each with its own retries (see [RetryConfig]). The first
+// request that fails ends the batch: the requests that BigQuery confirmed
+// before it are written and are not resent, and only the rows that BigQuery
+// did not confirm count as dropped or, when a run-end flush times out, are
+// deferred. After an AppendRowsResponse.Error, Go resends the request while
+// retries remain if the code is Unavailable, ResourceExhausted, Internal,
+// DeadlineExceeded, or Aborted, whereas adk-python resends it only for
+// DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
+// other code.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
@@ -214,10 +244,13 @@ type Config struct {
 	// [RetryConfig]), and separately bounds a whole run-end flush (see
 	// DisableFlushOnRunEnd) and the BigQuery writes of the drain of queued
 	// rows during Close. The drain starts once a background write that is
-	// already in flight has finished. In a run-end flush, an in-flight batch
-	// that times out is deferred for at most one retry in the next flush
-	// (background, run-end, or Close); rows whose write remains unfinished
-	// after retrying or when the timeout expires during Close are dropped.
+	// already in flight has finished. In a run-end flush, the rows of an
+	// in-flight batch that BigQuery has not confirmed when the timeout expires
+	// are deferred for at most one retry in the next flush (background,
+	// run-end, or Close); the rows of the batch's requests that BigQuery
+	// confirmed first are written, not retried. Rows whose write remains
+	// unfinished after retrying or when the timeout expires during Close are
+	// dropped.
 	// (Duplicates under the same event_id can occur and may differ if cut-short
 	// uploads succeed on retry; prefer rows with GCS_REFERENCE storage_mode).
 	// Close logs each batch it drops.
