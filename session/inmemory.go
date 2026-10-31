@@ -16,6 +16,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
@@ -195,10 +196,13 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 }
 
 func (s *inMemoryService) GetUserState(ctx context.Context, req *GetUserStateRequest) (*GetUserStateResponse, error) {
-	appName, userID := req.AppName, req.UserID
-	if appName == "" || userID == "" {
-		return nil, fmt.Errorf("app_name, user_id are required, got app_name: %q, user_id: %q", appName, userID)
+	if req == nil {
+		return nil, errors.New("request is nil")
 	}
+	if req.AppName == "" || req.UserID == "" {
+		return nil, errors.New("app_name and user_id are required")
+	}
+	appName, userID := req.AppName, req.UserID
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -521,3 +525,5 @@ func copySessionWithoutStateAndEvents(sess *session) *session {
 }
 
 var _ Service = (*inMemoryService)(nil)
+
+var _ UserStateGetter = (*inMemoryService)(nil)

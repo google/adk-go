@@ -198,8 +198,4 @@ func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session
 	return nil
 }
 
-func (s *FakeSessionService) GetUserState(ctx context.Context, req *session.GetUserStateRequest) (*session.GetUserStateResponse, error) {
-	return &session.GetUserStateResponse{State: map[string]any{}}, nil
-}
-
 var _ session.Service = (*FakeSessionService)(nil)
