@@ -545,3 +545,43 @@ func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 
 	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
 }
+
+// With SkipSummarization, invalid arguments must not end the parent turn: the
+// error goes back to the parent model so it can retry with corrected args.
+func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"city": {Type: "STRING"},
+			"days": {Type: "INTEGER"},
+		},
+		Required: []string{"city", "days"},
+	}
+	tests := []struct {
+		name        string
+		inputSchema *genai.Schema
+		args        map[string]any
+	}{
+		{name: "input_schema_missing_required", inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "no_schema_missing_request", args: map[string]any{"query": "Paris"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ag := createAgent(t, tt.inputSchema, nil)
+			toolCtx := createToolContext(t, ag)
+			toolImpl, ok := agenttool.New(ag, &agenttool.Config{SkipSummarization: true}).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(toolCtx, tt.args); err == nil {
+				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
+			}
+
+			if toolCtx.Actions().SkipSummarization {
+				t.Error("SkipSummarization = true after invalid arguments, want false so the parent model can retry")
+			}
+		})
+	}
+}

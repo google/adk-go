@@ -109,12 +109,6 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	if t.skipSummarization {
-		if actions := toolCtx.Actions(); actions != nil {
-			actions.SkipSummarization = true
-		}
-	}
-
 	var agentInputSchema *genai.Schema
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
@@ -148,6 +142,14 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 			inputText = fmt.Sprint(input)
 		}
 		content = genai.NewContentFromText(inputText, genai.RoleUser)
+	}
+
+	// Set only once the input is valid, so an argument error goes back to the
+	// parent model instead of ending its turn.
+	if t.skipSummarization {
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = true
+		}
 	}
 
 	sessionService := session.InMemoryService()
