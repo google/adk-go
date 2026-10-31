@@ -1345,7 +1345,11 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `Bearer [REDACTED]`},
 		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_PASSWORD:" expired`, `Bearer [REDACTED]`},
 		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173 more_TOKEN=" expired`, `Bearer [REDACTED]`},
-		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_api_key=" and more`, `Bearer [REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_api_key=" and more`, `Bearer [REDACTED] more`},
+		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, `Bearer [REDACTED]`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" "R8_SYNTHETIC_SECRET_4802"`, `Bearer [REDACTED]`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired in "prod"`, `Bearer [REDACTED] in "prod"`},
+		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"`, `Bearer [REDACTED]; echo "done"`},
 		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, `Bearer [REDACTED]`},
 		{`Bearer 'R8_SYNTHETIC_CREDENTIAL_49173'expired`, `Bearer [REDACTED]`},
 		{`Bearer "R8_SYNTHETIC_CREDENTIAL_49173"x"y"`, `Bearer [REDACTED]`},
@@ -1359,6 +1363,10 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`export 'DB_PASSWORD'="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export 'DB_PASSWORD'=[REDACTED]`},
 		{`export "DB_PASSWORD" = "R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export "DB_PASSWORD"=[REDACTED]`},
 		{`export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `export "DB_PASSWORD"=[REDACTED]`},
+		{`export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, `export "DB_PASSWORD"="[REDACTED]"`},
+		{`password="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, `password="[REDACTED]"`},
+		{`export "DB_PASSWORD" = " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"`, `export "DB_PASSWORD"=[REDACTED]; echo "done"`},
+		{`cmd='export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"'`, `cmd='export "DB_PASSWORD"=[REDACTED]; echo "done"'`},
 		{`export DB_PASSWORD="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, `export DB_PASSWORD=[REDACTED]`},
 		{`export DB_PASSWORD='R8_SYNTHETIC_CREDENTIAL_49173'suffix`, `export DB_PASSWORD=[REDACTED]`},
 		{`token="R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, `token=[REDACTED]`},
@@ -1384,6 +1392,8 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801" expired`, `export "DB_PASSWORD"="[REDACTED]" expired`},
 		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `failed: "password":"[REDACTED]"`},
 		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired`, `failed: "password":"[REDACTED]"`},
+		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired in "prod"`, `failed: "password":"[REDACTED]" in "prod"`},
+		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix, "user": "bob"`, `failed: "password":"[REDACTED]", "user": "bob"`},
 		{`failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801""`, `failed: "password":"[REDACTED]"`},
 		{`failed: "token": ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `failed: "token":"[REDACTED]"`},
 		{`Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `Bearer [REDACTED]`},
@@ -1483,7 +1493,20 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`password="benign"user="bob"token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"user="bob"token="[REDACTED]"`},
 		{"password=\"benign\"\ttoken=\"R8_SYNTHETIC_SECRET_4700\"", "password=\"[REDACTED]\"\ttoken=\"[REDACTED]\""},
 		{`password="benign"a.b=c token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"a.b=c token="[REDACTED]"`},
-		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"`},
+		{"DB_PASSWORD=\"benign\"\nGITHUB_TOKEN=\"R8_SYNTHETIC_SECRET_4700\"", "DB_PASSWORD=\"[REDACTED]\"\nGITHUB_TOKEN=\"[REDACTED]\""},
+		// Standalone sensitive keys after a closed quote with whitespace after
+		// ":" or "=", and compound credential tails ending in a key suffix.
+		{`password="benign"token: R8_SYNTHETIC_SECRET_4700`, `password="[REDACTED]"token:[REDACTED]`},
+		{`password="benign"token: "R8_SYNTHETIC_SECRET_4700 R8_SYNTHETIC_SECRET_4701"`, `password="[REDACTED]"token:"[REDACTED]"`},
+		{`password="benign"api_key= R8_SYNTHETIC_SECRET_4700`, `password="[REDACTED]"api_key=[REDACTED]`},
+		{`Bearer "benign"token: R8_SYNTHETIC_SECRET_4700`, `Bearer [REDACTED]token:[REDACTED]`},
+		{`failed: "password": "benign"token: R8_SYNTHETIC_SECRET_4700`, `failed: "password":"[REDACTED]"token:[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, `password=[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN: R8_SYNTHETIC_SECRET_4801`, `password=[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN= R8_SYNTHETIC_SECRET_4801`, `password=[REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, `Bearer [REDACTED]`},
+		{`failed: "password": "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_PASSWORD:8080`, `failed: "password":"[REDACTED]"`},
 		// The quoted value of a JSON key that another quoted key follows,
 		// whether the keys are credential names or not.
 		{`failed: {"password":"R8_SYNTHETIC_SECRET_4700""user":"bob"}`, `failed: {"password":"[REDACTED]""user":"bob"}`},
@@ -1563,8 +1586,19 @@ func TestScrubTextPatterns_NestedAndConcatenatedQuotes(t *testing.T) {
 		{`token=a:'t R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
 		{`token=a='s-part1 R8_SYNTHETIC_SECRET_4800''`, `token=[REDACTED]`},
 		{`token=a:'s R8_SYNTHETIC_SECRET_4800abc'x`, `token=[REDACTED]`},
+		{`token=a:'s R8_SECRET_ABCD's`, `token=[REDACTED]`},
+		{`token=a:'d R8_SECRET_ABCD'd`, `token=[REDACTED]`},
+		{`token=a:'s R8_SECRET_ABCD're rest`, `token=[REDACTED] rest`},
 		{`token=a: 's R8_SYNTHETIC_SECRET_4800'x`, `token=[REDACTED]`},
 		{`token=a:'s R8_SYNTHETIC_SECRET_4800' x y`, `token=[REDACTED] x y`},
+		// Values opened at the end of a bare match after nested ":'x_token='"
+		// or unclosed joined quotes with whitespace inside the tail.
+		{`password=a:'x_token=' "R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"`, `password=[REDACTED]`},
+		{`password=a:'x_token=' R8_SYNTHETIC_SECRET_4800`, `password=[REDACTED]`},
+		{`token=a:"x_api_key=" "R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"`, `token=[REDACTED]`},
+		{`password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, `password=[REDACTED]`},
+		{`DB_PASSWORD='my'"'"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, `DB_PASSWORD=[REDACTED]`},
+		{`Bearer "R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, `Bearer [REDACTED]`},
 		// Strings of both kinds of quote that are joined, as a shell joins
 		// them, with a word, with the same kind of quote or with the other.
 		{`DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802'`, `DB_PASSWORD='[REDACTED]'`},
@@ -1590,6 +1624,10 @@ func TestScrubTextPatterns_NestedAndConcatenatedQuotes(t *testing.T) {
 		// credential follows the value, so the prose is kept.
 		{`token=abc:'s missing; the user's request`, `token=[REDACTED] missing; the user's request`},
 		{`token=abc:'s note password='x' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
+		{`token=abc:'s note Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `token=[REDACTED] note Bearer [REDACTED]`},
+		{`token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `token=[REDACTED] note 'password':[REDACTED]`},
+		{`token=abc:'s Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `token=[REDACTED] Bearer [REDACTED]`},
+		{`token=abc:'s "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, `token=[REDACTED] "password":"[REDACTED]"`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
 	}
@@ -1780,18 +1818,21 @@ func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 // of the run, as that of the map key is, and the value of
 // next.....page_token, which is a cursor, is kept.
 func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
-	for _, n := range []int{126, 127, 128, 129, 130, 131, 300} {
+	for _, n := range []int{124, 125, 126, 127, 128, 129, 130, 131, 300} {
 		dots := strings.Repeat(".", n)
 		checkAllRedactionPaths(t, "a"+dots+"page_token=R8_SYNTHETIC_CREDENTIAL_49173", "a"+dots+"page_token=[REDACTED]")
 		checkAllRedactionPaths(t, "x fb"+dots+"page_token: R8_SYNTHETIC_CREDENTIAL_49173 y", "x fb"+dots+"page_token:[REDACTED] y")
 		checkAllRedactionPaths(t, "a"+dots+"page.token=R8_SYNTHETIC_CREDENTIAL_49173", "a"+dots+"page.token=[REDACTED]")
+		checkAllRedactionPaths(t, "fb.page"+dots+"token=R8_SYNTHETIC_CREDENTIAL_49173", "fb.page"+dots+"token=[REDACTED]")
+		checkAllRedactionPaths(t, "fb_page"+dots+"token=R8_SYNTHETIC_CREDENTIAL_49173", "fb_page"+dots+"token=[REDACTED]")
 		checkRedactionPaths(t, "x next"+dots+"page_token: cursor-1", "x next"+dots+"page_token: cursor-1")
 		checkRedactionPaths(t, "prev"+dots+"page.token=cursor-2", "prev"+dots+"page.token=cursor-2")
+		checkRedactionPaths(t, "x.next.page"+dots+"token=cursor-3", "x.next.page"+dots+"token=cursor-3")
 	}
 	var sensitive, kept int
-	for _, prefix := range []string{"a", "fb", "next", "abcnext", "x.next"} {
+	for _, prefix := range []string{"a", "fb", "fb.page", "fb_page", "fb-page", "a.b.c.page", "next", "abcnext", "x.next", "x.next.page"} {
 		for _, sep := range []string{".", "_.", "-."} {
-			for _, n := range []int{1, 64, 127, 128, 129, 130, 200, 300} {
+			for _, n := range []int{1, 64, 124, 125, 127, 128, 129, 130, 200, 300} {
 				for _, last := range []string{"page_token", "next_page_token", "token", "page.token"} {
 					name := prefix + strings.Repeat(sep, n) + last
 					want := isSensitiveKey(name)
@@ -2220,6 +2261,24 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"one long run of strings joined to a credential through an error", func(n int) string { return "password=" + strings.Repeat(`'a'"b"`, n) },
 			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
+		},
+		{
+			"repeated multi-word dotted page tokens after long dot runs", func(n int) string {
+				return strings.Repeat("fb.page"+strings.Repeat(".", 130)+"token=v ", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
+			"repeated closed quotes followed by spaced sensitive keys", func(n int) string {
+				return strings.Repeat(`password="a"token: b `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated prose apostrophes after colon before quoted keys", func(n int) string {
+				return strings.Repeat(`token=abc:'s note 'password': ' x y'z `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
 	}
 	for _, tt := range tests {

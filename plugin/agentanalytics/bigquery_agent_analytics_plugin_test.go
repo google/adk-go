@@ -3223,6 +3223,19 @@ func TestRedactionRegressions(t *testing.T) {
 		{"value joined from strings of both kinds of quote", `DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", `DB_PASSWORD='[REDACTED]'`},
 		{"quoted value that a string of the other kind is joined to", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED]"},
 		{"dotted page access token after a long run of dots", "a" + strings.Repeat(".", 200) + "page_token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "a" + strings.Repeat(".", 200) + "page_token=[REDACTED]"},
+		{"quoted value followed by standalone key and spaced value", `password="benign"token: R8_SYNTHETIC_SECRET_4700`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token:[REDACTED]`},
+		{"quoted value followed by standalone key and quoted multi-word value", `password="benign"token: "R8_SYNTHETIC_SECRET_4700 R8_SYNTHETIC_SECRET_4701"`, "R8_SYNTHETIC_SECRET_4701", `password="[REDACTED]"token:"[REDACTED]"`},
+		{"quoted value followed by compound credential tail and port", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, "R8_SYNTHETIC_TAIL_TOKEN", "password=[REDACTED]"},
+		{"space-led multi-word bearer token before quoted prose", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired in "prod"`, "R8_SYNTHETIC_SECRET_4801", `Bearer [REDACTED] in "prod"`},
+		{"space-led multi-word value inside single-quoted shell command", `cmd='export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"'`, "R8_SYNTHETIC_SECRET_4801", `cmd='export "DB_PASSWORD"=[REDACTED]; echo "done"'`},
+		{"nested contraction-like single-quoted credential running into 's", `token=a:'s R8_SECRET_ABCD's`, "R8_SECRET_ABCD", "token=[REDACTED]"},
+		{"bearer value ending in key delimiter before quoted second value", `Bearer "R8_SYNTHETIC_SECRET_4800_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
+		{"bare value ending in nested single-quoted key delimiter before quoted value", `password=a:'x_token=' "R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "password=[REDACTED]"},
+		{"joined unclosed quote with multi-word tail", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, "R8_SYNTHETIC_SECRET_4802", "password=[REDACTED]"},
+		{"prose apostrophe after colon before bearer credential", `token=abc:'s note Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note Bearer [REDACTED]`},
+		{"prose apostrophe after colon before single-quoted key", `token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note 'password':[REDACTED]`},
+		{"two-word page access token before long separator run", "fb.page" + strings.Repeat(".", 130) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 130) + "token=[REDACTED]"},
+		{"two-word page access token cut inside page by bound", "fb.page" + strings.Repeat(".", 125) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 125) + "token=[REDACTED]"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
