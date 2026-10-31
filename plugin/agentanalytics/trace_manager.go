@@ -4013,21 +4013,27 @@ func (inv *invocationTrace) settleFinishedLocked() {
 // failure cause of what it retires up to the nearest span above it that is
 // still open (see retireAgentLocked). As there, an activation that failed,
 // and those that it runs under, stay. Here, so does one that carries a
-// failure cause (see spanRecord.openFailureCause), but only while something
-// can still read the cause: an agent above it that is still open, through
-// which failure reporting (see failuresLocked) reads the cause and whose end
-// moves the cause up, or, for an activation that runs right under the
-// invocation span on a node path below the invocation span's, a tool call
-// under the invocation span that is still open, as the root agent's calls
-// are in RunLive, where the end of the last such call reports the failures
-// of those activations (see endToolRunsLocked). Unlike a failure, the cause
-// keeps no agent above the activation, so once nothing can read the cause
-// anymore, the activation retires, as it does with the agent above it when
-// its last call ends before that agent does. The callbacks that can release
-// such an activation (the end of an agent, of a tool call or of a model
-// call, and a response event, see completeResponse) call it last, once they
-// no longer hold an index into agentStack and have reported the failures
-// that they found.
+// failure cause (see spanRecord.openFailureCause) or runs an activation that
+// carries one, but only while something can still read the cause through
+// it: an agent above it that is still open, through which failure reporting
+// (see failuresLocked) reads the cause and whose end moves the cause up, or,
+// for an activation that runs right under the invocation span on a node path
+// below the invocation span's, a tool call under the invocation span that is
+// still open, as the root agent's calls are in RunLive, where the end of the
+// last such call reports the failures of those activations and of the ones
+// under them (see endToolRunsLocked). Failure reporting reads the causes in
+// the subtree of the activation that it reports for, and writes the rows of
+// the activations that failed along their lineage on agentStack, so the
+// activations between the one that carries the cause and the one through
+// which it is read stay too, and the rows do not depend on whether the
+// reading comes as soon as the activations settle or only later. Unlike a
+// failure, the cause keeps no activation once nothing can read it anymore:
+// the activation then retires, as do those above it that the cause kept, as
+// it does with the agent above it when its last call ends before that agent
+// does. The callbacks that can release such an activation (the end of an
+// agent, of a tool call or of a model call, and a response event, see
+// completeResponse) call it last, once they no longer hold an index into
+// agentStack and have reported the failures that they found.
 func (inv *invocationTrace) retireLateSettledLocked() {
 	if !inv.isLate || len(inv.agentStack) <= 1 {
 		return
@@ -4058,7 +4064,8 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 	// In RunLive the root agent has no span on agentStack, so its tool calls
 	// run under the invocation span, and the end of the last of them reports
 	// the failures of the activations right under the invocation span on a
-	// node path below that span's (see endToolRunsLocked).
+	// node path below that span's, and of the ones under them (see
+	// endToolRunsLocked).
 	invSpan := inv.agentStack[0]
 	invSpanCallOpen := false
 	for _, call := range inv.toolSpans {
@@ -4073,23 +4080,32 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 		for _, rec := range inv.agentStack[1:] {
 			openAgents[rec.spanID] = true
 		}
-		// heldByCause reports whether rec carries a failure cause that
-		// something can still read: an agent that rec runs under and that is
-		// still open, following parent across the agents that already
-		// retired, or, for rec right under the invocation span on a node path
-		// below that span's, a tool call under the invocation span that is
-		// still open (see invSpanCallOpen). Unlike a failure, the cause keeps
-		// only rec, not the agents above it, so they still retire here.
-		heldByCause := func(rec *spanRecord) bool {
-			if rec.openFailureCause() == nil {
+		// heldByCause reports whether agentStack[idx], or an activation that
+		// runs under it (see subtreeLocked), carries a failure cause that
+		// something can still read through agentStack[idx]: an agent that it
+		// runs under and that is still open, following parent across the
+		// agents that already retired, or, for agentStack[idx] right under
+		// the invocation span on a node path below that span's, a tool call
+		// under the invocation span that is still open (see invSpanCallOpen),
+		// whose end reads the causes in its whole subtree through it. So the
+		// activation that carries the cause stays with each one between it
+		// and the reader, which keeps the lineage along which failure
+		// reporting writes rows (see failuresLocked). Unlike a failure, the
+		// cause keeps no activation that nothing can read it through, so
+		// such activations still retire here.
+		heldByCause := func(idx int) bool {
+			rec := inv.agentStack[idx]
+			readable := invSpanCallOpen && rec.parentSpanID == invSpan.spanID && isSubNodePath(rec.path, invSpan.path)
+			for a := rec.parent; !readable && a != nil && a.kind == spanKindAgent; a = a.parent {
+				readable = openAgents[a.spanID]
+			}
+			if !readable {
 				return false
 			}
-			for a := rec.parent; a != nil && a.kind == spanKindAgent; a = a.parent {
-				if openAgents[a.spanID] {
-					return true
-				}
-			}
-			return invSpanCallOpen && rec.parentSpanID == invSpan.spanID && isSubNodePath(rec.path, invSpan.path)
+			subtree := inv.subtreeLocked(idx)
+			return slices.ContainsFunc(inv.agentStack[idx:], func(d *spanRecord) bool {
+				return subtree[d.spanID] && d.openFailureCause() != nil
+			})
 		}
 		changed := false
 		// Retiring an activation can release the activations that run under
@@ -4097,7 +4113,7 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 		for idx := len(inv.agentStack) - 1; idx >= 1; idx-- {
 			rec := inv.agentStack[idx]
 			parentOpen := rec.parent != nil && rec.parent.kind == spanKindAgent && openAgents[rec.parent.spanID]
-			if !parentOpen && rec.runDone && rec.contextEnded && !inv.launcherOpenLocked(rec) && !failed[rec.spanID] && !heldByCause(rec) {
+			if !parentOpen && rec.runDone && rec.contextEnded && !inv.launcherOpenLocked(rec) && !failed[rec.spanID] && !heldByCause(idx) {
 				retired = append(retired, rec)
 				if rec.parent != nil && rec.parent.kind == spanKindAgent {
 					retired = append(retired, rec.parent)
