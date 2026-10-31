@@ -77,6 +77,28 @@ type Service interface {
 	AppendEvent(context.Context, Session, *Event) error
 }
 
+// UserStateGetter is an optional capability of a [Service] that reads
+// user-scoped state without an active session. Keys are returned without the
+// "user:" prefix, and an empty map means no user state has been stored.
+//
+// Not every backend can expose user state independently of a session: the
+// Vertex AI session service merges it into each session and has no separately
+// queryable resource. Assert the capability where it is needed:
+//
+//	if getter, ok := svc.(session.UserStateGetter); ok {
+//		resp, err := getter.GetUserState(ctx, &session.GetUserStateRequest{
+//			AppName: appName,
+//			UserID:  userID,
+//		})
+//	}
+//
+// A backend that cannot answer simply does not implement this interface. That
+// is the Go analog of adk-python's get_user_state raising NotImplementedError
+// on the base service.
+type UserStateGetter interface {
+	GetUserState(ctx context.Context, req *GetUserStateRequest) (*GetUserStateResponse, error)
+}
+
 // InMemoryService returns an in-memory implementation of the session service.
 func InMemoryService() Service {
 	return &inMemoryService{
@@ -136,4 +158,17 @@ type DeleteRequest struct {
 	AppName   string
 	UserID    string
 	SessionID string
+}
+
+// GetUserStateRequest represents a request to get user-scoped state.
+type GetUserStateRequest struct {
+	AppName string
+	UserID  string
+}
+
+// GetUserStateResponse represents a response from
+// [UserStateGetter.GetUserState].
+type GetUserStateResponse struct {
+	// State holds the user-scoped key/value pairs, without the "user:" prefix.
+	State map[string]any
 }

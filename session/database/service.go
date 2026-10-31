@@ -362,6 +362,25 @@ func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest
 	})
 }
 
+func (s *databaseService) GetUserState(ctx context.Context, req *session.GetUserStateRequest) (*session.GetUserStateResponse, error) {
+	if req == nil {
+		return nil, errors.New("request is nil")
+	}
+	if req.AppName == "" || req.UserID == "" {
+		return nil, errors.New("app_name and user_id are required")
+	}
+	appName, userID := req.AppName, req.UserID
+
+	storageUser, err := fetchStorageUserState(s.db.WithContext(ctx), appName, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	state := make(map[string]any, len(storageUser.State))
+	maps.Copy(state, storageUser.State)
+	return &session.GetUserStateResponse{State: state}, nil
+}
+
 func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
 	if curSession == nil {
 		return fmt.Errorf("session is nil")
@@ -615,3 +634,5 @@ func mergeStates(appState, userState, sessionState map[string]any) map[string]an
 
 	return mergedState
 }
+
+var _ session.UserStateGetter = (*databaseService)(nil)
