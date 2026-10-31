@@ -416,11 +416,13 @@ func cleanGCSPrefixWithReason(prefix string) (cleaned, reason string) {
 	return truncateWithHash(cleaned, trimmed, maxGCSPrefixBytes), strings.Join(reasons, "; ")
 }
 
-// warnGCSPathPrefix logs a constant-format warning with the rewrite reason and
-// byte counts when c.GCSPathPrefix is rewritten by cleanGCSPrefix, without
-// logging raw or sanitized prefix text. Config.GCSPathPrefix itself is left
-// unmodified so gcsObjectPath normalizes it once.
-func warnGCSPathPrefix(c Config) {
+// resolveGCSPathPrefix returns cleanGCSPrefix(c.GCSPathPrefix) and logs a
+// constant-format warning with the rewrite reason and byte counts when
+// c.GCSPathPrefix had to be rewritten, without logging raw or sanitized prefix
+// text. Config.GCSPathPrefix itself is left unmodified; NewBatchProcessor
+// caches the returned effective prefix so uploads neither re-clean nor
+// double-normalize it.
+func resolveGCSPathPrefix(c Config) string {
 	trimmed := strings.Trim(c.GCSPathPrefix, "/")
 	cleaned, reason := cleanGCSPrefixWithReason(c.GCSPathPrefix)
 	if reason != "" {
@@ -429,6 +431,7 @@ func warnGCSPathPrefix(c Config) {
 			len(c.GCSPathPrefix), len(trimmed), len(cleaned), reason,
 		)
 	}
+	return cleaned
 }
 
 // sanitizeExtension returns ext as the readable part of a name that ends in a
@@ -477,9 +480,13 @@ func sanitizeExtension(ext string) string {
 // hash still covers the name with the extension as it was, so extensions that
 // differ only in those bytes or runes give distinct names.
 func gcsObjectPath(prefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
+	return gcsObjectPathFromCleanPrefix(cleanGCSPrefix(prefix), ts, traceID, spanID, eventID, contentOrd, partIdx, ext)
+}
+
+func gcsObjectPathFromCleanPrefix(cleanPrefix string, ts time.Time, traceID, spanID, eventID string, contentOrd, partIdx int, ext string) string {
 	var sb strings.Builder
-	if p := cleanGCSPrefix(prefix); p != "" {
-		sb.WriteString(p)
+	if cleanPrefix != "" {
+		sb.WriteString(cleanPrefix)
 		sb.WriteByte('/')
 	}
 	fmt.Fprintf(&sb, "%s/%s/%s_%s_c%d_p%d%s",
@@ -926,7 +933,11 @@ func (b *BatchProcessor) objectPath(row map[string]any, u pendingUpload) string 
 	traceID, _ := row["trace_id"].(string)
 	spanID, _ := row["span_id"].(string)
 	eventID, _ := row[eventIDField].(string)
-	return gcsObjectPath(b.config.GCSPathPrefix, ts, traceID, spanID, eventID, u.contentOrd, u.partIdx, extensionForMIME(u.mimeType))
+	cleanPrefix := b.effectiveGCSPathPrefix
+	if !b.gcsPathPrefixResolved {
+		cleanPrefix = cleanGCSPrefix(b.config.GCSPathPrefix)
+	}
+	return gcsObjectPathFromCleanPrefix(cleanPrefix, ts, traceID, spanID, eventID, u.contentOrd, u.partIdx, extensionForMIME(u.mimeType))
 }
 
 type offloaderPanicError struct {

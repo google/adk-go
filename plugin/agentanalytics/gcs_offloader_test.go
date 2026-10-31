@@ -5959,6 +5959,13 @@ func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *
 }
 
 func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
+	// Pin Cloud Storage's external 1,024-byte object-name limit and 65-byte
+	// "~<sha256>" suffix length independently of production constants so any
+	// drift in maxGCSObjectNameBytes or pathSegmentHashSuffixLen fails tests.
+	const (
+		wantObjectLimit   = 1024
+		wantHashSuffixLen = 65
+	)
 	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 
 	t.Run("non-ASCII and sanitized ids do not collide", func(t *testing.T) {
@@ -6061,8 +6068,8 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				got := gcsObjectPath(tc.prefix, ts, tc.traceID, tc.spanID, tc.eventID, 0, 0, tc.ext)
-				if len(got) > maxGCSObjectNameBytes {
-					t.Errorf("len(gcsObjectPath) = %d, exceeds maxGCSObjectNameBytes (%d): %q", len(got), maxGCSObjectNameBytes, got)
+				if len(got) > wantObjectLimit {
+					t.Errorf("len(gcsObjectPath) = %d, exceeds %d: %q", len(got), wantObjectLimit, got)
 				}
 				if !strings.HasSuffix(got, tc.ext) {
 					t.Errorf("gcsObjectPath = %q, want suffix %q", got, tc.ext)
@@ -6082,26 +6089,36 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		// call with 128-byte identifiers hits the 1024-byte cap while preserving
 		// a safe extension.
 		safeExt := ".abcdefghijklmnop"
-		maxPrefix := strings.Repeat("p", maxGCSPrefixBytes)
+		maxPrefix := strings.Repeat("p", 750)
 		gotPluginMax := gcsObjectPath(maxPrefix, ts, strings.Repeat("a", 32), strings.Repeat("b", 16), strings.Repeat("c", 32), math.MinInt, math.MinInt, safeExt)
 		if len(gotPluginMax) != 905 || !strings.HasPrefix(gotPluginMax, maxPrefix+"/") || !strings.HasSuffix(gotPluginMax, safeExt) {
 			t.Errorf("gcsObjectPath with 750-byte prefix and plugin hex IDs = %q (%d bytes), want 905 bytes starting with prefix and ending in %q", gotPluginMax, len(gotPluginMax), safeExt)
 		}
-		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != maxGCSObjectNameBytes || !strings.HasSuffix(got, safeExt) {
-			t.Errorf("gcsObjectPath with the longest direct-call parts and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), maxGCSObjectNameBytes, safeExt)
+		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantObjectLimit || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with the longest direct-call parts and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), wantObjectLimit, safeExt)
 		}
-		// Two safe-extension direct-call names that overflow maxGCSObjectNameBytes
-		// and differ only after the truncation cut must preserve their safe
+		// Focused exact-1,024-byte cap check across safe, empty, and oversized
+		// extensions so changing maxGCSObjectNameBytes away from 1,024 fails
+		// immediately on both truncation branches.
+		trace128 := strings.Repeat("t", 128)
+		span128 := strings.Repeat("s", 128)
+		event128 := strings.Repeat("e", 128)
+		for _, ext := range []string{".txt", safeExt, "", strings.Repeat("x", 1100), "." + strings.Repeat("x", 1100)} {
+			got := gcsObjectPath(maxPrefix, ts, trace128, span128, event128, 0, 0, ext)
+			if len(got) != wantObjectLimit {
+				t.Errorf("ext len %d: len(gcsObjectPath) = %d, want exact %d", len(ext), len(got), wantObjectLimit)
+			}
+		}
+		// Two safe-extension direct-call names that overflow 1,024 bytes and
+		// differ only after the truncation cut must preserve their safe
 		// extension, stay at 1,024 bytes, remain distinct, and embed the full
 		// SHA-256 digest of each entire uncapped object name.
-		trace128 := strings.Repeat("t", maxPathSegmentBytes)
-		span128 := strings.Repeat("s", maxPathSegmentBytes)
-		event128A := strings.Repeat("e", maxPathSegmentBytes-1) + "a"
-		event128B := strings.Repeat("e", maxPathSegmentBytes-1) + "b"
+		event128A := strings.Repeat("e", 127) + "a"
+		event128B := strings.Repeat("e", 127) + "b"
 		for _, ext := range []string{".txt", safeExt} {
 			uncappedA := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128A, ext)
 			uncappedB := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128B, ext)
-			cut := maxGCSObjectNameBytes - pathSegmentHashSuffixLen - len(ext)
+			cut := wantObjectLimit - wantHashSuffixLen - len(ext)
 			if uncappedA[:cut] != uncappedB[:cut] {
 				t.Fatalf("ext %q: uncapped inputs already differ before cut %d", ext, cut)
 			}
@@ -6111,11 +6128,11 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			wantB := fmt.Sprintf("%s~%x%s", uncappedB[:cut], sumB, ext)
 			gotA := gcsObjectPath(maxPrefix, ts, trace128, span128, event128A, 0, 0, ext)
 			gotB := gcsObjectPath(maxPrefix, ts, trace128, span128, event128B, 0, 0, ext)
-			if len(gotA) != maxGCSObjectNameBytes || !strings.HasSuffix(gotA, ext) {
-				t.Errorf("ext %q: gotA = %q (%d bytes), want %d bytes ending in %q", ext, gotA, len(gotA), maxGCSObjectNameBytes, ext)
+			if len(gotA) != wantObjectLimit || !strings.HasSuffix(gotA, ext) {
+				t.Errorf("ext %q: gotA = %q (%d bytes), want %d bytes ending in %q", ext, gotA, len(gotA), wantObjectLimit, ext)
 			}
-			if len(gotB) != maxGCSObjectNameBytes || !strings.HasSuffix(gotB, ext) {
-				t.Errorf("ext %q: gotB = %q (%d bytes), want %d bytes ending in %q", ext, gotB, len(gotB), maxGCSObjectNameBytes, ext)
+			if len(gotB) != wantObjectLimit || !strings.HasSuffix(gotB, ext) {
+				t.Errorf("ext %q: gotB = %q (%d bytes), want %d bytes ending in %q", ext, gotB, len(gotB), wantObjectLimit, ext)
 			}
 			if gotA == gotB {
 				t.Errorf("ext %q: distinct safe-extension overflow names differing after cut collided on %q", ext, gotA)
@@ -6132,9 +6149,9 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		// name, so names that differ only after the cut stay apart.
 		for _, ext := range []string{"." + strings.Repeat("x", 1100), "." + strings.Repeat("x", 1099) + "y"} {
 			uncapped := "logs/2026-03-04/trace/span_event_c0_p0" + ext
-			want := uncapped[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(uncapped)
-			if got := gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext); got != want {
-				t.Errorf("gcsObjectPath with a %d-byte extension = %q, want %q", len(ext), got, want)
+			want := uncapped[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(uncapped)
+			if got := gcsObjectPath("logs", ts, "trace", "span", "event", 0, 0, ext); got != want || len(got) != wantObjectLimit {
+				t.Errorf("gcsObjectPath with a %d-byte extension = %q (%d bytes), want %q (%d bytes)", len(ext), got, len(got), want, wantObjectLimit)
 			}
 		}
 	})
@@ -6153,21 +6170,21 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		// its own, and the name that it makes is as long as p1: if a name
 		// that fits were returned as is, that would be p1 itself.
 		p1 := pathWith("." + strings.Repeat("x", 1100))
-		if !strings.HasPrefix(p1, base) || len(p1) != maxGCSObjectNameBytes {
-			t.Fatalf("name with an oversized extension = %q (%d bytes), want %d bytes starting with %q", p1, len(p1), maxGCSObjectNameBytes, base)
+		if !strings.HasPrefix(p1, base) || len(p1) != wantObjectLimit {
+			t.Fatalf("name with an oversized extension = %q (%d bytes), want %d bytes starting with %q", p1, len(p1), wantObjectLimit, base)
 		}
 		ext2 := strings.TrimPrefix(p1, base)
 		p2 := pathWith(ext2)
 		if p2 == p1 {
 			t.Errorf("name with extension %q = %q, the name that an oversized extension makes", ext2, p2)
 		}
-		if len(p2) > maxGCSObjectNameBytes {
-			t.Errorf("len(name with extension %q) = %d, exceeds maxGCSObjectNameBytes (%d)", ext2, len(p2), maxGCSObjectNameBytes)
+		if len(p2) > wantObjectLimit {
+			t.Errorf("len(name with extension %q) = %d, exceeds %d", ext2, len(p2), wantObjectLimit)
 		}
 		if !utf8.ValidString(p2) {
 			t.Errorf("name with extension %q = %q, want valid UTF-8", ext2, p2)
 		}
-		if want := p1[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(p1); p2 != want {
+		if want := p1[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(p1); p2 != want {
 			t.Errorf("name with extension %q = %q, want %q: the hash of the whole name p1", ext2, p2, want)
 		}
 
@@ -6217,8 +6234,8 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			if !utf8.ValidString(name) {
 				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
 			}
-			if len(name) > maxGCSObjectNameBytes {
-				t.Errorf("%s: len(name) = %d, exceeds maxGCSObjectNameBytes (%d)", desc, len(name), maxGCSObjectNameBytes)
+			if len(name) > wantObjectLimit {
+				t.Errorf("%s: len(name) = %d, exceeds %d", desc, len(name), wantObjectLimit)
 			}
 			if prev, ok := names[name]; ok {
 				t.Errorf("%s and %s both give the name %q", prev, desc, name)
@@ -6253,7 +6270,7 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		// here, and the hash is still that of the whole raw name.
 		long := "." + strings.Repeat("\xffa", 600)
 		readable := base + "." + strings.Repeat("_a", 600)
-		want := readable[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(base+long)
+		want := readable[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(base+long)
 		got := pathWith(long)
 		if got != want {
 			t.Errorf("name with an oversized extension of ASCII and invalid bytes = %q, want %q", got, want)
@@ -6288,8 +6305,8 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			if !utf8.ValidString(name) {
 				t.Errorf("%s: name = %q, want valid UTF-8", desc, name)
 			}
-			if len(name) > maxGCSObjectNameBytes {
-				t.Errorf("%s: len(name) = %d, exceeds maxGCSObjectNameBytes (%d)", desc, len(name), maxGCSObjectNameBytes)
+			if len(name) > wantObjectLimit {
+				t.Errorf("%s: len(name) = %d, exceeds %d", desc, len(name), wantObjectLimit)
 			}
 			for i, r := range name {
 				if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '\\' {
@@ -6354,7 +6371,7 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			{"line breaks", "." + strings.Repeat("\r\n", 600), base + "." + strings.Repeat("__", 600)},
 			{"line separators between letters", "." + strings.Repeat("\u2028a", 500), base + "." + strings.Repeat("_a", 500)},
 		} {
-			want := tc.readable[:maxGCSObjectNameBytes-pathSegmentHashSuffixLen] + pathSegmentHashSuffix(base+tc.ext)
+			want := tc.readable[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(base+tc.ext)
 			got := pathWith(tc.ext)
 			if got != want {
 				t.Errorf("name with an oversized extension of %s = %q, want %q", tc.name, got, want)
@@ -6405,8 +6422,8 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			if tc.wantLead != "" && !strings.HasPrefix(got, tc.wantLead) {
 				t.Errorf("gcsObjectPath(prefix=%q) = %q, want prefix %q", tc.prefix, got, tc.wantLead)
 			}
-			if !utf8.ValidString(got) || len(got) > maxGCSObjectNameBytes {
-				t.Errorf("gcsObjectPath(prefix=%q) = %q (%d bytes), want valid UTF-8 <= %d bytes", tc.prefix, got, len(got), maxGCSObjectNameBytes)
+			if !utf8.ValidString(got) || len(got) > wantObjectLimit {
+				t.Errorf("gcsObjectPath(prefix=%q) = %q (%d bytes), want valid UTF-8 <= %d bytes", tc.prefix, got, len(got), wantObjectLimit)
 			}
 			if seg0, rest, ok := strings.Cut(got, "/"); ok && strings.EqualFold(seg0, ".well-known") {
 				if seg1, _, _ := strings.Cut(rest, "/"); strings.EqualFold(seg1, "acme-challenge") {
@@ -6740,4 +6757,113 @@ func TestGCSPathPrefix_RewriteWarningAndDisjointNamespace(t *testing.T) {
 			t.Errorf("disabled plugin warnings = %d (%s), want 0", got, disabledLog.String())
 		}
 	})
+}
+
+func TestBatchProcessor_ObjectPathCachesEffectivePrefix(t *testing.T) {
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	row := map[string]any{
+		timestampField: ts,
+		"trace_id":     "trace-1",
+		"span_id":      "span-1",
+		eventIDField:   "event-1",
+	}
+	upload := pendingUpload{contentOrd: 0, partIdx: 0, mimeType: textUploadContentType}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"4MiB_raw_prefix", "tenant/" + strings.Repeat("a", 4<<20)},
+		{"control_char_prefix", "logs\nx"},
+		{"slash_only_4MiB_prefix", strings.Repeat("/", 4<<20)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &recordingLogger{}
+			cfg := DefaultConfig()
+			cfg.GCSPathPrefix = tc.prefix
+			cfg.Logger = log
+
+			bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+			if err != nil {
+				t.Fatalf("NewBatchProcessor() error: %v", err)
+			}
+			t.Cleanup(bp.Close)
+
+			if bp.config.GCSPathPrefix != tc.prefix {
+				t.Fatalf("len(bp.config.GCSPathPrefix) = %d, want raw %d-byte prefix preserved unmutated", len(bp.config.GCSPathPrefix), len(tc.prefix))
+			}
+
+			wantClean := cleanGCSPrefix(tc.prefix)
+			wantPath := gcsObjectPath(tc.prefix, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
+			doubleNormalizedPath := gcsObjectPath(wantClean, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
+
+			for i := range 3 {
+				got := bp.objectPath(row, upload)
+				if got != wantPath {
+					t.Fatalf("call %d: bp.objectPath() = %q, want %q", i, got, wantPath)
+				}
+				if wantClean != "" && got == doubleNormalizedPath {
+					t.Fatalf("call %d: bp.objectPath() double-normalized effective prefix to %q", i, got)
+				}
+			}
+
+			var sink string
+			sink = bp.objectPath(row, upload)
+			runtime.GC()
+			var m0, m1 runtime.MemStats
+			runtime.ReadMemStats(&m0)
+			const runs = 200
+			for range runs {
+				sink = bp.objectPath(row, upload)
+			}
+			runtime.ReadMemStats(&m1)
+			_ = sink
+
+			bytesPerCall := (m1.TotalAlloc - m0.TotalAlloc) / runs
+			if bytesPerCall >= 16*1024 {
+				t.Errorf("bp.objectPath() allocated %d bytes/call for %d-byte raw prefix, want < 16384 bytes/call", bytesPerCall, len(tc.prefix))
+			}
+			if allocs := testing.AllocsPerRun(100, func() { sink = bp.objectPath(row, upload) }); allocs > 20 {
+				t.Errorf("bp.objectPath() allocs/op = %v, want <= 20", allocs)
+			}
+		})
+	}
+}
+
+func BenchmarkBatchProcessorObjectPath(b *testing.B) {
+	ts := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	row := map[string]any{
+		timestampField: ts,
+		"trace_id":     "trace-1",
+		"span_id":      "span-1",
+		eventIDField:   "event-1",
+	}
+	upload := pendingUpload{contentOrd: 0, partIdx: 0, mimeType: textUploadContentType}
+
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"751B", strings.Repeat("a", 751)},
+		{"4MiB", strings.Repeat("a", 4<<20)},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			cfg := DefaultConfig()
+			cfg.GCSPathPrefix = tc.prefix
+			cfg.Logger = &recordingLogger{}
+			bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+			if err != nil {
+				b.Fatalf("NewBatchProcessor() error: %v", err)
+			}
+			b.Cleanup(bp.Close)
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			var sink string
+			for i := 0; i < b.N; i++ {
+				sink = bp.objectPath(row, upload)
+			}
+			_ = sink
+		})
+	}
 }
