@@ -1148,17 +1148,22 @@ func (s *streamWriter) resetStream() {
 	s.streamCtx = nil
 }
 
-// isPermanentWriteError reports whether code, the status that BigQuery
-// returned for a request on a stream that was opened for that request, is one
-// that a retry of the same request cannot fix, such as a missing permission or
-// table, or a request that BigQuery rejects as malformed. Retrying it only
-// burns the backoff budget while the caller holds flushMu. With
-// ExactlyOnceDelivery, NotFound is not permanent: it signals a stale stream,
-// which handleExactlyOnceError replaces.
+// isPermanentWriteError reports whether code is a status that retrying the same
+// request cannot fix when BigQuery returned it as a verdict on that request,
+// such as a missing permission or table, or a malformed request. Retrying a
+// definitive rejection only burns the backoff budget while the caller holds
+// flushMu. With ExactlyOnceDelivery, NotFound is not permanent: it signals a
+// stale stream, which handleExactlyOnceError replaces.
 //
-// A status on a stream that an earlier request opened is not BigQuery's
-// verdict on this request, because the server may have ended that stream after
-// its last answer, so append never fails a batch on it alone.
+// Transport statuses on an AppendRows stream do not always represent BigQuery's
+// verdict on the current request: a reused stream may have ended after an
+// earlier answer, and even a newly opened stream can be closed by the server
+// before reading any request (surfacing either as io.EOF from Send followed by
+// the drained status, or directly from Recv). When retries remain, append
+// never fails on a reused stream's status alone and allows one fresh-stream
+// retry before treating a transport status on a newly opened stream as
+// definitive, while definite in-band responses, stream-open errors, and direct
+// non-io.EOF Send errors on a newly opened stream fail immediately.
 //
 // FailedPrecondition is permanent on purpose: adk-python drops a batch that
 // gets it, too. Google's managedwriter client retries it, and BigQuery does
@@ -1413,6 +1418,7 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 	delay := s.config.RetryConfig.InitialDelay
 	maxRetries := s.config.RetryConfig.MaxRetries
 	hadAmbiguousSend := false
+	freshStreamRetried := false
 	if s.config.ExactlyOnceDelivery {
 		if s.offsetDesynced {
 			if s.nowOrDefault().Before(s.rotateRetryAt) {
@@ -1466,11 +1472,13 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 
 		// A stream that is still open here was opened before this attempt, usually
 		// for an earlier request, and the server may have ended it since, as it
-		// does with an idle or recycled stream. The status that Send (after the
-		// drain below) or Recv then reports describes how that stream ended, not
-		// BigQuery's verdict on this request, so it must not fail the batch fast:
-		// the request gets an attempt on a fresh stream first. That attempt uses
-		// up one retry and its backoff, as any resend does.
+		// does with an idle or recycled stream. Even on a newly opened stream,
+		// the server can close the stream before reading any request, which
+		// surfaces either as io.EOF from Send (with the status drained from Recv)
+		// or directly at Recv. When retries remain, a reused stream's status never
+		// fails the batch fast, and a transport status on a newly opened stream
+		// gets one bounded fresh-stream retry (tracked by freshStreamRetried)
+		// before being treated as BigQuery's verdict on the request.
 		reusedStream := s.stream != nil
 		if s.stream == nil {
 			baseCtx := s.baseCtx
@@ -1525,7 +1533,8 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			// real status left for Recv; drain until it surfaces, releasing the stream.
 			// Wrapped errors match too: draining a client-aborted stream is harmless,
 			// and an exact match would let the wrapper escape in place of the status.
-			if errors.Is(sendErr, io.EOF) {
+			sendEOF := errors.Is(sendErr, io.EOF)
+			if sendEOF {
 				for {
 					_, rerr := s.stream.Recv()
 					if rerr == nil {
@@ -1555,7 +1564,10 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			}
 			lastErr = fmt.Errorf("failed to send row batch: %w", sendErr)
 			if !reusedStream && s.isPermanentWriteError(status.Code(sendErr)) {
-				return nil, lastErr
+				if !sendEOF || freshStreamRetried {
+					return nil, lastErr
+				}
+				freshStreamRetried = true
 			}
 			continue
 		}
@@ -1580,7 +1592,10 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			}
 			lastErr = fmt.Errorf("failed to receive response for row batch: %w", recvErr)
 			if !reusedStream && s.isPermanentWriteError(status.Code(recvErr)) {
-				return nil, lastErr
+				if freshStreamRetried {
+					return nil, lastErr
+				}
+				freshStreamRetried = true
 			}
 			continue
 		}

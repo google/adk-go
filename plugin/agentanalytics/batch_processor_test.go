@@ -6216,14 +6216,20 @@ func TestStreamWriter_PermanentStatusFailsFast(t *testing.T) {
 			code         codes.Code
 			wantAttempts int
 		}{
-			{codes.PermissionDenied, 1},
-			{codes.InvalidArgument, 1},
-			{codes.Unauthenticated, 1},
-			{codes.FailedPrecondition, 1},
-			{codes.Unimplemented, 1},
-			// NotFound is permanent without ExactlyOnceDelivery. With it, the
-			// stream is replaced and the batch is resent once, as before.
-			{codes.NotFound, map[bool]int{false: 1, true: 2}[exactlyOnce]},
+			// A transport status on the first fresh stream may reflect a
+			// premature stream close rather than a request verdict, so append
+			// allows one bounded fresh-stream retry (2 attempts total) before
+			// failing fast without burning the remaining retries.
+			{codes.PermissionDenied, 2},
+			{codes.InvalidArgument, 2},
+			{codes.Unauthenticated, 2},
+			{codes.FailedPrecondition, 2},
+			{codes.Unimplemented, 2},
+			// NotFound is permanent without ExactlyOnceDelivery (2 attempts via
+			// the bounded fresh-stream retry). With ExactlyOnceDelivery, the
+			// stream is replaced once and the second NotFound stops rotation
+			// (also 2 attempts).
+			{codes.NotFound, 2},
 			// Transient statuses still use up the retries.
 			{codes.Unavailable, 4},
 		} {
@@ -6541,11 +6547,15 @@ func TestStreamWriter_StatusOfEndedStreamIsRetriedOnFreshStream(t *testing.T) {
 						if got := atomic.LoadInt32(&ended.sendCount); got != 1 {
 							t.Errorf("sends on the ended stream = %d, want 1", got)
 						}
-						// The ended stream takes the request first; the fresh
-						// stream then gets it once, and a permanent status from
-						// it ends the batch without a retry.
-						if got := srv.attempts(); got != 1 {
-							t.Errorf("requests that reached the server = %d, want 1 (error: %v)", got, err)
+						// The ended stream takes the request first; when the first fresh
+						// stream rejects with a transport status, one bounded fresh-stream
+						// retry runs before failing fast without exhausting the final retry.
+						wantAttempts := 2
+						if freshStreamAccepts {
+							wantAttempts = 1
+						}
+						if got := srv.attempts(); got != wantAttempts {
+							t.Errorf("requests that reached the server = %d, want %d (error: %v)", got, wantAttempts, err)
 						}
 						if freshStreamAccepts {
 							if err != nil {
@@ -6581,16 +6591,28 @@ func (s *endedClientStream) SendMsg(any) error { return io.EOF }
 
 func (s *endedClientStream) RecvMsg(any) error { return s.err }
 
-// TestStreamWriter_PermanentStatusFailsFastOnFreshStream covers the two places
-// other than Recv at which a permanent status ends the write of a batch at
-// once: where the stream is opened, and where Send reports that the stream
-// ended (TestStreamWriter_PermanentStatusFailsFast covers Recv). The stream was
-// opened for the request in both, so the status is BigQuery's verdict on it and
-// a retry cannot change it.
+// directSendErrClientStream is a client stream on which SendMsg fails directly
+// with err instead of io.EOF.
+type directSendErrClientStream struct {
+	grpc.ClientStream
+	err error
+}
+
+func (s *directSendErrClientStream) SendMsg(any) error { return s.err }
+
+// TestStreamWriter_PermanentStatusFailsFastOnFreshStream covers permanent
+// statuses reported before Recv when opening or sending on a fresh stream
+// (TestStreamWriter_PermanentStatusFailsFast covers Recv). Opening a stream or
+// failing directly in Send (!io.EOF) fails immediately after one stream; when
+// Send returns io.EOF and drains the server status from Recv, the server may
+// have closed the stream before reading the request, so append reconnects once
+// on a fresh stream (2 streams opened) before failing fast without exhausting
+// all retries.
 func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 	wantErr := map[string]string{
-		"open": "failed to open append rows stream",
-		"send": "failed to send row batch",
+		"open":        "failed to open append rows stream",
+		"send":        "failed to send row batch",
+		"send-direct": "failed to send row batch",
 	}
 	type testCase struct {
 		site       string
@@ -6598,7 +6620,11 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 		wantOpened int32
 	}
 	var cases []testCase
-	for _, site := range []string{"open", "send"} {
+	for _, site := range []string{"open", "send", "send-direct"} {
+		wantPermOpened := int32(1)
+		if site == "send" {
+			wantPermOpened = 2
+		}
 		for _, code := range []codes.Code{
 			codes.PermissionDenied,
 			codes.InvalidArgument,
@@ -6607,13 +6633,16 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 			codes.Unimplemented,
 			codes.NotFound,
 		} {
-			cases = append(cases, testCase{site: site, code: code, wantOpened: 1})
+			cases = append(cases, testCase{site: site, code: code, wantOpened: wantPermOpened})
 		}
 	}
 	// A transient status still uses up the retries: four streams in all. (The
 	// generated client retries Unavailable when it opens a stream, so the open
 	// site has no such case.)
-	cases = append(cases, testCase{site: "send", code: codes.Unavailable, wantOpened: 4})
+	cases = append(cases,
+		testCase{site: "send", code: codes.Unavailable, wantOpened: 4},
+		testCase{site: "send-direct", code: codes.Unavailable, wantOpened: 4},
+	)
 
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%s", tc.site, tc.code), func(t *testing.T) {
@@ -6634,6 +6663,9 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 					if err != nil {
 						return nil, err
 					}
+					if tc.site == "send-direct" {
+						return &directSendErrClientStream{ClientStream: cs, err: status.Error(tc.code, "scripted")}, nil
+					}
 					return &endedClientStream{ClientStream: cs, err: status.Error(tc.code, "scripted")}, nil
 				}),
 			})
@@ -6652,6 +6684,538 @@ func TestStreamWriter_PermanentStatusFailsFastOnFreshStream(t *testing.T) {
 			}
 			if got := bp.DropStats().AppendFailureDrops; got != 1 {
 				t.Errorf("AppendFailureDrops = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// freshStreamPrematureCloseServer serves real AppendRows gRPC streams where a
+// configured prefix of newly opened streams return before calling stream.Recv()
+// (so zero requests are read on those streams), and later streams accept every
+// request.
+type freshStreamPrematureCloseServer struct {
+	scriptedCommittedStreamServer // CreateWriteStream, for ExactlyOnceDelivery
+
+	closeStreams int // number of initial streams to close before Recv
+	codeFor      func(streamNo int) codes.Code
+	waitFor      func(streamNo int) <-chan struct{}
+
+	streams   int
+	delivered []deliveredRequest
+}
+
+func (s *freshStreamPrematureCloseServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	s.mu.Lock()
+	s.streams++
+	streamNo := s.streams
+	s.mu.Unlock()
+
+	if streamNo <= s.closeStreams {
+		if s.waitFor != nil {
+			if ch := s.waitFor(streamNo); ch != nil {
+				select {
+				case <-ch:
+				case <-stream.Context().Done():
+					return stream.Context().Err()
+				}
+			}
+		}
+		return status.Error(s.codeFor(streamNo), "stream closed before recv")
+	}
+
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		offset := int64(-1)
+		if req.GetOffset() != nil {
+			offset = req.GetOffset().GetValue()
+		}
+		s.mu.Lock()
+		s.delivered = append(s.delivered, deliveredRequest{stream: streamNo, offset: offset, req: req})
+		s.mu.Unlock()
+		if err := stream.Send(&storagepb.AppendRowsResponse{}); err != nil {
+			return err
+		}
+	}
+}
+
+func (s *freshStreamPrematureCloseServer) received() (streams int, delivered []deliveredRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streams, slices.Clone(s.delivered)
+}
+
+// sendHookClientStream forwards every method to a real grpc.ClientStream while
+// running optional hooks around SendMsg so a test can deterministically align a
+// premature server close with either the Send or Recv observation site without
+// mocking gRPC framing.
+type sendHookClientStream struct {
+	grpc.ClientStream
+	beforeSend func(grpc.ClientStream)
+	afterSend  func(error)
+}
+
+func (s *sendHookClientStream) SendMsg(m any) error {
+	if s.beforeSend != nil {
+		s.beforeSend(s.ClientStream)
+	}
+	err := s.ClientStream.SendMsg(m)
+	if s.afterSend != nil {
+		s.afterSend(err)
+	}
+	return err
+}
+
+// TestFreshStreamClosedBeforeRecvIsRetried verifies over a real local gRPC
+// server that when the first newly opened AppendRows stream closes before
+// reading any request (reusedStream == false), writeBatch reconnects on a fresh
+// stream instead of dropping the batch, across both observation sites:
+//   - "send": the client has already received the server's trailers when Send
+//     runs, so Send returns io.EOF and drains the status from Recv.
+//   - "recv": Send completes before the server closes the stream (still without
+//     calling stream.Recv()), so Recv observes the status directly.
+func TestFreshStreamClosedBeforeRecvIsRetried(t *testing.T) {
+	endCodes := []codes.Code{
+		codes.OK,
+		codes.Unavailable,
+		codes.FailedPrecondition,
+		codes.Unauthenticated,
+		codes.PermissionDenied,
+		codes.InvalidArgument,
+		codes.Unimplemented,
+		codes.NotFound,
+	}
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, code := range endCodes {
+			for _, site := range []string{"send", "recv"} {
+				t.Run(fmt.Sprintf("%s/exactlyOnce=%v/%s", code, exactlyOnce, site), func(t *testing.T) {
+					afterFirstSend := make(chan struct{})
+					var closeAfterFirstSend sync.Once
+					srv := &freshStreamPrematureCloseServer{
+						closeStreams: 1,
+						codeFor:      func(int) codes.Code { return code },
+						waitFor: func(streamNo int) <-chan struct{} {
+							if streamNo == 1 && site == "recv" {
+								return afterFirstSend
+							}
+							return nil
+						},
+					}
+
+					var (
+						opened       atomic.Int32
+						firstSendMu  sync.Mutex
+						firstSendSet bool
+						firstSendErr error
+					)
+					writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+						grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+							cs, err := streamer(ctx, desc, cc, method, opts...)
+							if err != nil || !strings.HasSuffix(method, "/AppendRows") {
+								return cs, err
+							}
+							if opened.Add(1) != 1 {
+								return cs, nil
+							}
+							return &sendHookClientStream{
+								ClientStream: cs,
+								beforeSend: func(raw grpc.ClientStream) {
+									if site == "send" {
+										// Wait for the server's Trailers-Only close frame to
+										// arrive on the HTTP/2 stream before SendMsg runs.
+										_, _ = raw.Header()
+									}
+								},
+								afterSend: func(sendErr error) {
+									firstSendMu.Lock()
+									if !firstSendSet {
+										firstSendSet = true
+										firstSendErr = sendErr
+									}
+									firstSendMu.Unlock()
+									if site == "recv" {
+										closeAfterFirstSend.Do(func() { close(afterFirstSend) })
+									}
+								},
+							}, nil
+						}),
+					})
+					bp := newErrorClassificationProcessorForClient(t, writeClient, exactlyOnce)
+
+					err := bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+					if err != nil {
+						streams, _ := srv.received()
+						t.Fatalf("writeBatch() failed after %d stream(s): %v", streams, err)
+					}
+
+					firstSendMu.Lock()
+					gotFirstSendSet, gotFirstSendErr := firstSendSet, firstSendErr
+					firstSendMu.Unlock()
+					if !gotFirstSendSet {
+						t.Fatal("first stream SendMsg did not run")
+					}
+					if site == "send" && !errors.Is(gotFirstSendErr, io.EOF) {
+						t.Fatalf("first stream Send() error = %v, want io.EOF so the Send branch is exercised", gotFirstSendErr)
+					}
+					if site == "recv" && gotFirstSendErr != nil {
+						t.Fatalf("first stream Send() error = %v, want nil so the Recv branch is exercised", gotFirstSendErr)
+					}
+
+					streams, delivered := srv.received()
+					if streams != 2 {
+						t.Errorf("streams served = %d, want 2", streams)
+					}
+					var got []string
+					var gotOffsets []int64
+					for _, d := range delivered {
+						rows := decodeArrowRows(t, d.req)
+						if len(rows) != 1 {
+							t.Fatalf("request holds %d rows, want 1", len(rows))
+						}
+						got = append(got, fmt.Sprintf("%d:%v", d.stream, rows[0]["event_id"]))
+						gotOffsets = append(gotOffsets, d.offset)
+					}
+					// Stream 1 closed before reading any request, so only stream 2
+					// receives the row.
+					want := []string{"2:A"}
+					wantOffsets := []int64{-1}
+					if exactlyOnce {
+						wantOffsets = []int64{0}
+					}
+					if diff := cmp.Diff(want, got); diff != "" {
+						t.Errorf("requests received (stream:event_id) mismatch (-want +got):\n%s", diff)
+					}
+					if diff := cmp.Diff(wantOffsets, gotOffsets); diff != "" {
+						t.Errorf("request offsets mismatch (-want +got):\n%s", diff)
+					}
+					if exactlyOnce {
+						wantCreates := 1
+						if code == codes.NotFound {
+							wantCreates = 2
+						}
+						if gotCreates := srv.createCount(); gotCreates != wantCreates {
+							t.Errorf("CreateWriteStream calls = %d, want %d", gotCreates, wantCreates)
+						}
+					}
+					if gotDrops := bp.DropStats().AppendFailureDrops; gotDrops != 0 {
+						t.Errorf("AppendFailureDrops = %d, want 0", gotDrops)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestFreshStreamClosedBeforeRecvRetryIsBounded verifies that persistent
+// permanent transport statuses on newly opened streams stop after one bounded
+// fresh-stream retry (2 streams when MaxRetries >= 1, 1 stream when
+// MaxRetries == 0) across Send, Recv, and mixed Send/Recv observation sites,
+// and that a PermissionDenied fresh-stream retry does not replenish the
+// committed-stream rotation budget under ExactlyOnceDelivery.
+func TestFreshStreamClosedBeforeRecvRetryIsBounded(t *testing.T) {
+	permanent := []codes.Code{
+		codes.PermissionDenied,
+		codes.InvalidArgument,
+		codes.Unauthenticated,
+		codes.FailedPrecondition,
+		codes.Unimplemented,
+		codes.NotFound,
+	}
+	siteForStream := func(mode string, streamNo int) string {
+		switch mode {
+		case "send", "recv":
+			return mode
+		case "send-then-recv":
+			if streamNo == 1 {
+				return "send"
+			}
+			return "recv"
+		case "recv-then-send":
+			if streamNo == 1 {
+				return "recv"
+			}
+			return "send"
+		default:
+			panic("unknown mode: " + mode)
+		}
+	}
+
+	for _, exactlyOnce := range []bool{false, true} {
+		for _, code := range permanent {
+			if exactlyOnce && code == codes.NotFound {
+				continue
+			}
+			for _, mode := range []string{"send", "recv", "send-then-recv", "recv-then-send"} {
+				t.Run(fmt.Sprintf("%s/exactlyOnce=%v/%s", code, exactlyOnce, mode), func(t *testing.T) {
+					var gatesMu sync.Mutex
+					gates := map[int]chan struct{}{}
+					gateFor := func(streamNo int) chan struct{} {
+						gatesMu.Lock()
+						defer gatesMu.Unlock()
+						ch, ok := gates[streamNo]
+						if !ok {
+							ch = make(chan struct{})
+							gates[streamNo] = ch
+						}
+						return ch
+					}
+					srv := &freshStreamPrematureCloseServer{
+						closeStreams: 10,
+						codeFor:      func(int) codes.Code { return code },
+						waitFor: func(streamNo int) <-chan struct{} {
+							if siteForStream(mode, streamNo) == "recv" {
+								return gateFor(streamNo)
+							}
+							return nil
+						},
+					}
+					var opened atomic.Int32
+					writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+						grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+							cs, err := streamer(ctx, desc, cc, method, opts...)
+							if err != nil || !strings.HasSuffix(method, "/AppendRows") {
+								return cs, err
+							}
+							n := int(opened.Add(1))
+							site := siteForStream(mode, n)
+							var once sync.Once
+							return &sendHookClientStream{
+								ClientStream: cs,
+								beforeSend: func(raw grpc.ClientStream) {
+									if site == "send" {
+										_, _ = raw.Header()
+									}
+								},
+								afterSend: func(error) {
+									if site == "recv" {
+										ch := gateFor(n)
+										once.Do(func() { close(ch) })
+									}
+								},
+							}, nil
+						}),
+					})
+					bp := newErrorClassificationProcessorForClient(t, writeClient, exactlyOnce)
+
+					err := bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+					if err == nil {
+						t.Fatal("writeBatch() error = nil, want permanent error")
+					}
+					if got := status.Code(err); got != code {
+						t.Errorf("status.Code(err) = %v, want %v (err: %v)", got, code, err)
+					}
+					streams, delivered := srv.received()
+					if streams != 2 {
+						t.Errorf("streams served = %d, want 2 (1 fresh-stream retry)", streams)
+					}
+					if len(delivered) != 0 {
+						t.Errorf("delivered requests = %d, want 0", len(delivered))
+					}
+					if got := bp.DropStats().AppendFailureDrops; got != 1 {
+						t.Errorf("AppendFailureDrops = %d, want 1", got)
+					}
+				})
+			}
+		}
+	}
+
+	t.Run("maxRetries=0_does_not_reconnect", func(t *testing.T) {
+		srv := &freshStreamPrematureCloseServer{
+			closeStreams: 10,
+			codeFor:      func(int) codes.Code { return codes.FailedPrecondition },
+		}
+		writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+			grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+				cs, err := streamer(ctx, desc, cc, method, opts...)
+				if err != nil || !strings.HasSuffix(method, "/AppendRows") {
+					return cs, err
+				}
+				return &sendHookClientStream{
+					ClientStream: cs,
+					beforeSend:   func(raw grpc.ClientStream) { _, _ = raw.Header() },
+				}, nil
+			}),
+		})
+		config := DefaultConfig()
+		config.RetryConfig = RetryConfig{MaxRetries: 0, InitialDelay: time.Millisecond, MaxDelay: 2 * time.Millisecond, Multiplier: 1.0}
+		bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/test-proj/datasets/test-ds/tables/agent_events/_default", config)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(bp.Close)
+
+		err = bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+		if got := status.Code(err); got != codes.FailedPrecondition {
+			t.Fatalf("status.Code(err) = %v, want FailedPrecondition (err: %v)", got, err)
+		}
+		if streams, _ := srv.received(); streams != 1 {
+			t.Errorf("streams served = %d, want 1 when MaxRetries == 0", streams)
+		}
+		if got := bp.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops = %d, want 1", got)
+		}
+	})
+
+	for _, site := range []string{"send", "recv"} {
+		t.Run("rotation_budget_preserved_across_PermissionDenied/"+site, func(t *testing.T) {
+			// Stream 1 closes with NotFound -> rotates committed stream once
+			// (CreateWriteStream == 2, *rotatedInBatch == true, freshlyRotated == true).
+			// Stream 2 closes before Recv with PermissionDenied -> uses the
+			// bounded fresh-stream retry without replenishing rotation budget.
+			// Stream 3 closes with NotFound -> must fail with "already rotated"
+			// rather than calling CreateWriteStream a third time.
+			var gatesMu sync.Mutex
+			gates := map[int]chan struct{}{}
+			gateFor := func(streamNo int) chan struct{} {
+				gatesMu.Lock()
+				defer gatesMu.Unlock()
+				ch, ok := gates[streamNo]
+				if !ok {
+					ch = make(chan struct{})
+					gates[streamNo] = ch
+				}
+				return ch
+			}
+			srv := &freshStreamPrematureCloseServer{
+				closeStreams: 10,
+				codeFor: func(streamNo int) codes.Code {
+					if streamNo == 2 {
+						return codes.PermissionDenied
+					}
+					return codes.NotFound
+				},
+				waitFor: func(streamNo int) <-chan struct{} {
+					if site == "recv" {
+						return gateFor(streamNo)
+					}
+					return nil
+				},
+			}
+			var opened atomic.Int32
+			writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+				grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+					cs, err := streamer(ctx, desc, cc, method, opts...)
+					if err != nil || !strings.HasSuffix(method, "/AppendRows") {
+						return cs, err
+					}
+					n := int(opened.Add(1))
+					var once sync.Once
+					return &sendHookClientStream{
+						ClientStream: cs,
+						beforeSend: func(raw grpc.ClientStream) {
+							if site == "send" {
+								_, _ = raw.Header()
+							}
+						},
+						afterSend: func(error) {
+							if site == "recv" {
+								ch := gateFor(n)
+								once.Do(func() { close(ch) })
+							}
+						},
+					}, nil
+				}),
+			})
+			bp := newErrorClassificationProcessorForClient(t, writeClient, true)
+
+			err := bp.writeBatch(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}})
+			if err == nil || !strings.Contains(err.Error(), "already rotated") {
+				t.Fatalf("writeBatch() error = %v, want committed write stream already rotated", err)
+			}
+			if gotCreates := srv.createCount(); gotCreates != 2 {
+				t.Errorf("CreateWriteStream calls = %d, want 2 (PermissionDenied must not replenish rotation budget)", gotCreates)
+			}
+			if streams, _ := srv.received(); streams != 3 {
+				t.Errorf("streams served = %d, want 3", streams)
+			}
+			if !bp.streamWriter.isRotationInCooldown() {
+				t.Error("isRotationInCooldown() = false, want true because freshlyRotated remained armed")
+			}
+		})
+
+		t.Run("rotatedInBatch_preserved_when_freshlyRotated_is_false/"+site, func(t *testing.T) {
+			// Isolate *rotatedInBatch from freshlyRotated: start on the initial
+			// committed stream (freshlyRotated == false, CreateWriteStream == 1)
+			// with rotated := true (as on a later chunk of a split batch whose
+			// earlier chunk rotated and already committed on the replacement
+			// stream). Stream 1 closes before Recv with PermissionDenied (using
+			// the bounded fresh-stream retry), and Stream 2 closes with NotFound.
+			// Only *rotatedInBatch == true prevents a second rotation here.
+			var gatesMu sync.Mutex
+			gates := map[int]chan struct{}{}
+			gateFor := func(streamNo int) chan struct{} {
+				gatesMu.Lock()
+				defer gatesMu.Unlock()
+				ch, ok := gates[streamNo]
+				if !ok {
+					ch = make(chan struct{})
+					gates[streamNo] = ch
+				}
+				return ch
+			}
+			srv := &freshStreamPrematureCloseServer{
+				closeStreams: 10,
+				codeFor: func(streamNo int) codes.Code {
+					if streamNo == 1 {
+						return codes.PermissionDenied
+					}
+					return codes.NotFound
+				},
+				waitFor: func(streamNo int) <-chan struct{} {
+					if site == "recv" {
+						return gateFor(streamNo)
+					}
+					return nil
+				},
+			}
+			var opened atomic.Int32
+			writeClient := newScriptedWriteClientWithDialOptions(t, srv, nil, []grpc.DialOption{
+				grpc.WithStreamInterceptor(func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+					cs, err := streamer(ctx, desc, cc, method, opts...)
+					if err != nil || !strings.HasSuffix(method, "/AppendRows") {
+						return cs, err
+					}
+					n := int(opened.Add(1))
+					var once sync.Once
+					return &sendHookClientStream{
+						ClientStream: cs,
+						beforeSend: func(raw grpc.ClientStream) {
+							if site == "send" {
+								_, _ = raw.Header()
+							}
+						},
+						afterSend: func(error) {
+							if site == "recv" {
+								ch := gateFor(n)
+								once.Do(func() { close(ch) })
+							}
+						},
+					}, nil
+				}),
+			})
+			bp := newErrorClassificationProcessorForClient(t, writeClient, true)
+
+			rotated := true
+			_, err := bp.appendChunkWithRotationBudget(context.Background(), []map[string]any{{"event_id": "A", "event_type": "X"}}, &rotated)
+			if err == nil || !strings.Contains(err.Error(), "already rotated") {
+				t.Fatalf("appendChunkWithRotationBudget() error = %v, want committed write stream already rotated", err)
+			}
+			if !rotated {
+				t.Error("rotated = false, want true (PermissionDenied retry must not clear *rotatedInBatch)")
+			}
+			if gotCreates := srv.createCount(); gotCreates != 1 {
+				t.Errorf("CreateWriteStream calls = %d, want 1", gotCreates)
+			}
+			if streams, _ := srv.received(); streams != 2 {
+				t.Errorf("streams served = %d, want 2", streams)
+			}
+			if bp.streamWriter.isRotationInCooldown() {
+				t.Error("isRotationInCooldown() = true, want false because freshlyRotated was false")
 			}
 		})
 	}
@@ -6782,8 +7346,9 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 // the stream that carried the confirmed first request. A status on that stream
 // does not fail the batch alone, since the server may have ended the stream
 // after an earlier request (see isPermanentWriteError), so the second request
-// is sent once more, on a fresh stream. The server rejects that one too, which
-// is when the batch fails. The third request is never sent.
+// is sent on a fresh stream, and after one bounded fresh-stream retry the
+// batch fails without exhausting the final retry. The third request is never
+// sent.
 func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	var (
 		mu       sync.Mutex
@@ -6823,9 +7388,10 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	mu.Lock()
 	got := append([]string(nil), received...)
 	mu.Unlock()
-	// a is confirmed; b is rejected on the reused stream and then on a fresh
-	// one; c is never sent.
-	if want := []string{"a", "b", "b"}; !slices.Equal(got, want) {
+	// a is confirmed; b is rejected on the reused stream, on the first fresh
+	// stream, and on the bounded fresh-stream retry (stopping before the final
+	// retry); c is never sent.
+	if want := []string{"a", "b", "b", "b"}; !slices.Equal(got, want) {
 		t.Errorf("requests received = %v, want %v: the third request must not be sent", got, want)
 	}
 	if got := bp.DropStats().AppendFailureDrops; got != 2 {
@@ -6868,10 +7434,11 @@ func TestWriteRunEndBatch_DropsOnlyUnconfirmedRows(t *testing.T) {
 
 			bp.flushRunEnd()
 
-			// a is confirmed; b is rejected on the reused stream and then on a
-			// fresh one; c is never sent.
-			if got := srv.attempts(); got != 3 {
-				t.Errorf("AppendRows attempts = %d, want 3", got)
+			// a is confirmed; b is rejected on the reused stream, on the first
+			// fresh stream, and on the bounded fresh-stream retry (stopping before
+			// the final retry); c is never sent.
+			if got := srv.attempts(); got != 4 {
+				t.Errorf("AppendRows attempts = %d, want 4", got)
 			}
 			// Counting the whole batch as dropped would report 3 here.
 			if got := bp.DropStats().AppendFailureDrops; got != 2 {

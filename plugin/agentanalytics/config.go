@@ -56,10 +56,13 @@ type Logger interface {
 // request that fails is resent on its own, up to MaxRetries times, and the
 // requests that BigQuery already confirmed are not resent. A status that a
 // retry cannot fix, such as PermissionDenied or InvalidArgument, ends the write
-// of the batch without further retries when BigQuery returns it for a request
-// on a stream that was opened for that request. If the status comes from a
-// stream that the server ended after an earlier batch, the request is resent
-// on a fresh stream first, which uses up one retry.
+// of the batch without further retries when opening the stream fails with it or
+// BigQuery reports it in an AppendRowsResponse. When it instead ends the
+// stream, the server may not have read the request, so while retries remain the
+// request is resent on a fresh stream: always if an earlier batch opened that
+// stream, and once per request if it was opened for the request, after which
+// the status ends the write. Each such resend uses up one retry and its
+// backoff.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
