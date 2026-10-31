@@ -120,7 +120,9 @@ type GCSUploadRequest struct {
 	// non-empty after trimming leading and trailing '/', Path begins with the
 	// effective prefix followed by "/" — either the '/'-trimmed
 	// Config.GCSPathPrefix verbatim, or its rewritten "<base>~<sha256>" form
-	// when Config.GCSPathPrefix had to be sanitized or capped (see
+	// when Config.GCSPathPrefix contains '~', control/line-separator
+	// characters, or invalid UTF-8, starts with the reserved
+	// ".well-known/acme-challenge" segments, or exceeds 750 bytes (see
 	// Config.GCSPathPrefix).
 	Path string
 	// Data is the raw payload to store in the object.
@@ -135,13 +137,14 @@ type GCSUploadRequest struct {
 // The plugin calls UploadContent from several goroutines at the same time.
 // GCSUploadRequest.Path is the object name within the bucket and already begins
 // with the effective prefix derived from Config.GCSPathPrefix: the '/'-trimmed
-// prefix verbatim when valid, or the rewritten "<base>~<sha256>" prefix logged
-// at construction when Config.GCSPathPrefix exceeds 750 bytes, contains invalid
-// UTF-8 or control/line-separator characters, or starts with the reserved
-// ".well-known/acme-challenge" segments (see Config.GCSPathPrefix). If
-// UploadContent fails, a text part keeps its inline text (truncated to
-// MaxContentLen) in the BigQuery row, while a binary part's text is set to
-// "[UPLOAD FAILED]" and its raw bytes are not stored inline.
+// prefix verbatim when valid, or its rewritten "<base>~<sha256>" form when
+// Config.GCSPathPrefix contains '~', control/line-separator characters, or
+// invalid UTF-8, starts with the reserved ".well-known/acme-challenge"
+// segments, or exceeds 750 bytes (see Config.GCSPathPrefix), so raw and
+// rewritten prefix namespaces are strictly disjoint. If UploadContent fails, a
+// text part keeps its inline text (truncated to MaxContentLen) in the BigQuery
+// row, while a binary part's text is set to "[UPLOAD FAILED]" and its raw bytes
+// are not stored inline.
 // UploadContent must return soon after ctx is done: the plugin waits for the
 // uploads of a batch before writing it, and Close waits for that write.
 type GCSContentOffloader interface {
@@ -357,27 +360,30 @@ type Config struct {
 	// objects. Leading and trailing slashes are trimmed, so "/logs/" and
 	// "logs" are the same prefix and a prefix of only slashes adds nothing.
 	// The trimmed prefix is used verbatim when it is valid UTF-8 of at most
-	// 750 bytes; has no control character (U+0000 to U+001F and U+007F to
+	// 750 bytes; does not contain '~' (reserved as the rewrite hash
+	// delimiter); has no control character (U+0000 to U+001F and U+007F to
 	// U+009F, which include CR, LF and U+0085) and no Unicode line or
 	// paragraph separator (U+2028 or U+2029); and its first two "/"-separated
 	// segments are not, case-insensitively, ".well-known" and "acme-challenge",
 	// which Cloud Storage reserves (whole segments are compared, so
 	// ".well-known/acme-challenge-x" is kept verbatim). Valid characters and
-	// segments such as '~', '\', spaces, '=', Unicode text, empty inner
-	// segments ("//"), and "." or ".." segments are kept unchanged.
+	// segments such as '\', spaces, '=', Unicode text, empty inner segments
+	// ("//"), and "." or ".." segments are kept unchanged.
 	//
-	// Any other prefix is rewritten, and a warning naming the effective prefix
-	// is logged to Logger when the plugin or BatchProcessor is constructed:
-	// each byte that is not valid UTF-8 and each of those control or
+	// Any other prefix is rewritten to "<base>~<sha256>", and a warning with
+	// the rewrite reason and byte lengths (without logging prefix text) is
+	// logged to Logger when the plugin or BatchProcessor is constructed: each
+	// '~', each byte that is not valid UTF-8, and each of those control or
 	// line/paragraph-separator characters is replaced with '_', a leading
 	// ".well-known" segment before "acme-challenge" becomes "_well-known", the
 	// result is cut to at most 685 bytes on a UTF-8 rune boundary, and "~"
 	// followed by the 64 lowercase hex digits of the SHA-256 digest of the
 	// trimmed prefix is appended, so distinct trimmed prefixes keep distinct
-	// destinations and assembled object names stay within Cloud Storage's
-	// 1,024-byte limit. Because '~' is kept verbatim, copying a rewritten
-	// "<base>~<digest>" prefix back into GCSPathPrefix uses that prefix as is
-	// without rewriting it again.
+	// destinations, assembled object names stay within Cloud Storage's
+	// 1,024-byte limit, and raw and rewritten prefix namespaces are strictly
+	// disjoint. Because '~' is reserved, passing a rewritten "<base>~<sha256>"
+	// output back into GCSPathPrefix rewrites it again rather than aliasing
+	// the original rewritten prefix.
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example

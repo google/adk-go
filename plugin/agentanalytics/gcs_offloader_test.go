@@ -17,6 +17,7 @@ package agentanalytics
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -424,10 +425,16 @@ func TestGCSObjectPath(t *testing.T) {
 			want: "./../2026-03-04/trace/span_event_c0_p0.txt",
 		},
 		{
-			name:   "tildes and backslashes in prefix are preserved",
+			name:   "backslashes in prefix are preserved",
+			prefix: `team\prod/v1`, ts: ts, traceID: "trace", spanID: "span", eventID: "event",
+			ext:  ".txt",
+			want: `team\prod/v1/2026-03-04/trace/span_event_c0_p0.txt`,
+		},
+		{
+			name:   "tildes in prefix are rewritten with hash suffix",
 			prefix: `~team\prod/v~1`, ts: ts, traceID: "trace", spanID: "span", eventID: "event",
 			ext:  ".txt",
-			want: `~team\prod/v~1/2026-03-04/trace/span_event_c0_p0.txt`,
+			want: `_team\prod/v_1` + pathSegmentHashSuffix(`~team\prod/v~1`) + `/2026-03-04/trace/span_event_c0_p0.txt`,
 		},
 		{
 			name:   "non-matching .well-known prefix is preserved",
@@ -1774,7 +1781,7 @@ func TestCleanGCSPrefix(t *testing.T) {
 		{"a dot-dot segment is kept", "logs/../tenant", "logs/../tenant"},
 		{"only dot segments are kept after trimming slashes", "/./../", "./.."},
 		{"a backslash is kept", `logs\prod`, `logs\prod`},
-		{"a tilde is kept", "~team/logs~v1", "~team/logs~v1"},
+		{"a tilde is reserved and rewritten", "~team/logs~v1", "_team/logs_v1" + pathSegmentHashSuffix("~team/logs~v1")},
 		{"an ACME path that does not lead is kept", "logs/.well-known/acme-challenge", "logs/.well-known/acme-challenge"},
 		{"a .well-known without acme-challenge is kept", ".well-known/x", ".well-known/x"},
 		{"a .well-known/acme-challenge-x lookalike segment is kept", ".well-known/acme-challenge-x", ".well-known/acme-challenge-x"},
@@ -1807,11 +1814,25 @@ func TestCleanGCSPrefix(t *testing.T) {
 			if len(got) > maxGCSPrefixBytes || !utf8.ValidString(got) {
 				t.Errorf("cleanGCSPrefix(%q) = %q (%d bytes), want valid UTF-8 of at most %d bytes", tt.prefix, got, len(got), maxGCSPrefixBytes)
 			}
-			if trimmed := strings.Trim(tt.prefix, "/"); got != trimmed && !strings.HasSuffix(got, pathSegmentHashSuffix(trimmed)) {
-				t.Errorf("cleanGCSPrefix(%q) = %q, rewritten without the hash suffix of %q", tt.prefix, got, trimmed)
-			}
-			if again := cleanGCSPrefix(got); again != got {
-				t.Errorf("cleanGCSPrefix is not idempotent: cleanGCSPrefix(%q) = %q, cleanGCSPrefix(%q) = %q", tt.prefix, got, got, again)
+			trimmed := strings.Trim(tt.prefix, "/")
+			if got == trimmed {
+				if strings.Contains(got, "~") {
+					t.Errorf("cleanGCSPrefix(%q) = %q kept '~' verbatim; '~' must be reserved for rewritten prefixes", tt.prefix, got)
+				}
+				if again := cleanGCSPrefix(got); again != got {
+					t.Errorf("cleanGCSPrefix(%q) = %q was rewritten on second pass to %q", got, got, again)
+				}
+			} else {
+				suffix := pathSegmentHashSuffix(trimmed)
+				if !strings.HasSuffix(got, suffix) {
+					t.Errorf("cleanGCSPrefix(%q) = %q, rewritten without the hash suffix of %q", tt.prefix, got, trimmed)
+				}
+				if base := strings.TrimSuffix(got, suffix); strings.Contains(base, "~") {
+					t.Errorf("cleanGCSPrefix(%q) = %q contains '~' before its trailing hash suffix", tt.prefix, got)
+				}
+				if again := cleanGCSPrefix(got); again == got {
+					t.Errorf("cleanGCSPrefix(%q) = %q collided with literal cleanGCSPrefix(%q) = %q; raw and rewritten prefix namespaces must be disjoint", tt.prefix, got, got, again)
+				}
 			}
 		})
 	}
@@ -6069,6 +6090,43 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != maxGCSObjectNameBytes || !strings.HasSuffix(got, safeExt) {
 			t.Errorf("gcsObjectPath with the longest direct-call parts and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), maxGCSObjectNameBytes, safeExt)
 		}
+		// Two safe-extension direct-call names that overflow maxGCSObjectNameBytes
+		// and differ only after the truncation cut must preserve their safe
+		// extension, stay at 1,024 bytes, remain distinct, and embed the full
+		// SHA-256 digest of each entire uncapped object name.
+		trace128 := strings.Repeat("t", maxPathSegmentBytes)
+		span128 := strings.Repeat("s", maxPathSegmentBytes)
+		event128A := strings.Repeat("e", maxPathSegmentBytes-1) + "a"
+		event128B := strings.Repeat("e", maxPathSegmentBytes-1) + "b"
+		for _, ext := range []string{".txt", safeExt} {
+			uncappedA := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128A, ext)
+			uncappedB := fmt.Sprintf("%s/2026-03-04/%s/%s_%s_c0_p0%s", maxPrefix, trace128, span128, event128B, ext)
+			cut := maxGCSObjectNameBytes - pathSegmentHashSuffixLen - len(ext)
+			if uncappedA[:cut] != uncappedB[:cut] {
+				t.Fatalf("ext %q: uncapped inputs already differ before cut %d", ext, cut)
+			}
+			sumA := sha256.Sum256([]byte(uncappedA))
+			sumB := sha256.Sum256([]byte(uncappedB))
+			wantA := fmt.Sprintf("%s~%x%s", uncappedA[:cut], sumA, ext)
+			wantB := fmt.Sprintf("%s~%x%s", uncappedB[:cut], sumB, ext)
+			gotA := gcsObjectPath(maxPrefix, ts, trace128, span128, event128A, 0, 0, ext)
+			gotB := gcsObjectPath(maxPrefix, ts, trace128, span128, event128B, 0, 0, ext)
+			if len(gotA) != maxGCSObjectNameBytes || !strings.HasSuffix(gotA, ext) {
+				t.Errorf("ext %q: gotA = %q (%d bytes), want %d bytes ending in %q", ext, gotA, len(gotA), maxGCSObjectNameBytes, ext)
+			}
+			if len(gotB) != maxGCSObjectNameBytes || !strings.HasSuffix(gotB, ext) {
+				t.Errorf("ext %q: gotB = %q (%d bytes), want %d bytes ending in %q", ext, gotB, len(gotB), maxGCSObjectNameBytes, ext)
+			}
+			if gotA == gotB {
+				t.Errorf("ext %q: distinct safe-extension overflow names differing after cut collided on %q", ext, gotA)
+			}
+			if gotA != wantA {
+				t.Errorf("ext %q: gotA = %q, want %q (full SHA-256 of uncapped name)", ext, gotA, wantA)
+			}
+			if gotB != wantB {
+				t.Errorf("ext %q: gotB = %q, want %q (full SHA-256 of uncapped name)", ext, gotB, wantB)
+			}
+		}
 		// Only an oversized extension passed in directly reaches the cap on the
 		// whole name. The capped name ends in the hash of the whole uncapped
 		// name, so names that differ only after the cut stay apart.
@@ -6331,7 +6389,8 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			{".", "./2026-03-04/"},
 			{"..", "../2026-03-04/"},
 			{"a/./b", "a/./b/2026-03-04/"},
-			{`~team\prod/v~1`, `~team\prod/v~1/2026-03-04/`},
+			{`team\prod/v1`, `team\prod/v1/2026-03-04/`},
+			{`~team\prod/v~1`, `_team\prod/v_1` + pathSegmentHashSuffix(`~team\prod/v~1`) + `/2026-03-04/`},
 			{".well-known/acme-challenge-x", ".well-known/acme-challenge-x/2026-03-04/"},
 			{strings.Repeat("a", 750), strings.Repeat("a", 750) + "/2026-03-04/"},
 			{strings.Repeat("a", 751), strings.Repeat("a", 685) + pathSegmentHashSuffix(strings.Repeat("a", 751)) + "/2026-03-04/"},
@@ -6361,8 +6420,11 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			}
 		}
 
-		// Distinct configured prefixes (after leading/trailing '/' trim) must never
-		// collapse onto the same object path.
+		// Distinct configured prefixes (after leading/trailing '/' trim), including
+		// rewritten prefixes and their generated "<base>~<sha256>" outputs reused as
+		// literal Config.GCSPathPrefix values, must never collapse onto the same
+		// object path or lose create-only uploads in a shared bucket.
+		overLimitRaw := strings.Repeat("a", maxGCSPrefixBytes+1)
 		distinctPrefixes := []string{
 			"",
 			".",
@@ -6374,15 +6436,31 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			"logs/../tenant",
 			"logs/./tenant",
 			"logs//tenant",
+			`team\prod`,
 			`~team\prod`,
+			cleanGCSPrefix(`~team\prod`),
+			`_team\prod`,
 			".well-known/acme-challenge-x",
 			".well-known/acme-challenge/x",
+			cleanGCSPrefix(".well-known/acme-challenge/x"),
 			"_well-known/acme-challenge/x",
 			"logs\tx",
 			"logs\nx",
+			cleanGCSPrefix("logs\nx"),
 			"logs_x",
+			"\xff",
+			cleanGCSPrefix("\xff"),
+			"_",
+			overLimitRaw,
+			cleanGCSPrefix(overLimitRaw),
 		}
 		seenPrefixPaths := make(map[string]string, len(distinctPrefixes))
+		type storedCheck struct {
+			prefix      string
+			objectPath  string
+			wantPayload string
+		}
+		storedChecks := make([]storedCheck, 0, len(distinctPrefixes))
 		fs := newFakeStorage(t)
 		offloader, err := newGCSOffloader(context.Background(), "test-bucket", fs.clientOptions()...)
 		if err != nil {
@@ -6398,7 +6476,15 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			seenPrefixPaths[got] = p
 
 			wantPayload := fmt.Sprintf("prefix-payload-%d-%s", i, p)
-			bp := &BatchProcessor{config: Config{GCSOffloader: offloader, GCSPathPrefix: p, ConnectionID: "us.conn"}}
+			bpCfg := DefaultConfig()
+			bpCfg.GCSOffloader = offloader
+			bpCfg.GCSPathPrefix = p
+			bpCfg.ConnectionID = "us.conn"
+			bpCfg.Logger = &recordingLogger{}
+			bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", bpCfg)
+			if err != nil {
+				t.Fatalf("NewBatchProcessor(prefix=%q) error: %v", p, err)
+			}
 			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 5}
 			row := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: wantPayload}}})
 			row[timestampField] = ts
@@ -6406,17 +6492,30 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			row["span_id"] = "span"
 			row[eventIDField] = "event"
 			bp.resolveUploads(context.Background(), false, []map[string]any{row})
+			bp.Close()
 
 			uri, _ := row[columnContentParts].([]map[string]any)[0]["uri"].(string)
-			obj, ok := fs.object("test-bucket", strings.TrimPrefix(uri, "gs://test-bucket/"))
+			wantURI := "gs://test-bucket/" + got
+			if uri != wantURI {
+				t.Errorf("prefix %q uploaded to %q, want %q", p, uri, wantURI)
+			}
+			objPath := strings.TrimPrefix(uri, "gs://test-bucket/")
+			obj, ok := fs.object("test-bucket", objPath)
 			if !ok || string(obj.data) != wantPayload {
 				t.Errorf("prefix %q stored (%v, %q), want %q at %q", p, ok, obj.data, wantPayload, uri)
+			}
+			storedChecks = append(storedChecks, storedCheck{prefix: p, objectPath: objPath, wantPayload: wantPayload})
+		}
+		for _, sc := range storedChecks {
+			obj, ok := fs.object("test-bucket", sc.objectPath)
+			if !ok || string(obj.data) != sc.wantPayload {
+				t.Errorf("after all uploads, prefix %q object %q holds (%v, %q), want %q", sc.prefix, sc.objectPath, ok, obj.data, sc.wantPayload)
 			}
 		}
 	})
 }
 
-func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
+func TestGCSPathPrefix_RewriteWarningAndDisjointNamespace(t *testing.T) {
 	countWarnings := func(l *recordingLogger) int {
 		l.mu.Lock()
 		defer l.mu.Unlock()
@@ -6433,7 +6532,6 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 		for _, prefix := range []string{
 			"",
 			"/logs/tenant/",
-			"~team/v~1",
 			`logs\prod`,
 			"a//b",
 			"a/./b",
@@ -6470,17 +6568,21 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 		}
 	})
 
-	t.Run("rewritten prefixes log one deduplicated warning and are idempotent when reused", func(t *testing.T) {
+	t.Run("rewritten prefixes log constant privacy-safe warning and stay disjoint when reused", func(t *testing.T) {
+		const secretSentinel = "PrivateCustomerSecretMarker98765"
 		for _, tc := range []struct {
-			name   string
-			prefix string
+			name       string
+			prefix     string
+			wantReason string
 		}{
-			{"reserved acme-challenge", ".well-known/acme-challenge/x"},
-			{"control character", "logs\ninjected"},
-			{"invalid UTF-8", "logs/\xff"},
-			{"over 750 bytes", strings.Repeat("a", maxGCSPrefixBytes+1)},
+			{"reserved acme-challenge", ".well-known/acme-challenge/" + secretSentinel, "starts with reserved .well-known/acme-challenge prefix"},
+			{"control character", "tenant-" + secretSentinel + "\ninjected", "contains control or line-separator character"},
+			{"reserved tilde", "tenant-" + secretSentinel + "~v1", "contains reserved '~'"},
+			{"invalid UTF-8", "tenant-" + secretSentinel + "/\xff", "contains invalid UTF-8"},
+			{"over 750 bytes", secretSentinel + strings.Repeat("a", maxGCSPrefixBytes+1-len(secretSentinel)), "exceeds 750 bytes"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
+				trimmed := strings.Trim(tc.prefix, "/")
 				wantEffective := cleanGCSPrefix(tc.prefix)
 				off := &fakeOffloader{}
 				log := &recordingLogger{}
@@ -6492,11 +6594,22 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 				if got := countWarnings(log); got != 1 {
 					t.Fatalf("logged %d warnings (%s), want exactly 1", got, log.String())
 				}
-				if !log.contains(fmt.Sprintf("%q", wantEffective)) {
-					t.Errorf("warning %q does not name effective prefix %q", log.String(), wantEffective)
+				if log.contains(secretSentinel) {
+					t.Errorf("warning %q leaked private sentinel %q", log.String(), secretSentinel)
 				}
-				if len(tc.prefix) > maxGCSPrefixBytes && log.contains(tc.prefix) {
-					t.Errorf("warning for %d-byte prefix dumped raw oversized prefix", len(tc.prefix))
+				if log.contains(tc.prefix) || log.contains(wantEffective) {
+					t.Errorf("warning %q logged raw or rewritten prefix text", log.String())
+				}
+				digestHex := strings.TrimPrefix(pathSegmentHashSuffix(trimmed), "~")
+				if log.contains(digestHex) {
+					t.Errorf("warning %q logged prefix SHA-256 digest %q", log.String(), digestHex)
+				}
+				wantCounts := fmt.Sprintf("(%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes)", len(tc.prefix), len(trimmed), len(wantEffective))
+				if !log.contains(wantCounts) {
+					t.Errorf("warning %q missing byte counts %q", log.String(), wantCounts)
+				}
+				if !log.contains(tc.wantReason) {
+					t.Errorf("warning %q missing reason %q", log.String(), tc.wantReason)
 				}
 
 				row := logRequest(t, p, requests, mCtx, &model.LLMRequest{
@@ -6512,8 +6625,13 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 					t.Errorf("GCSUploadRequest.Path = %q, want prefix %q", uploads[0].Path, wantLead)
 				}
 
-				// Copying the effective prefix from the warning back into
-				// Config.GCSPathPrefix must neither rewrite again nor warn.
+				// Passing a generated "<base>~<sha256>" output back into
+				// Config.GCSPathPrefix must rewrite it again (never alias the
+				// original rewritten prefix) and log a privacy-safe '~' warning.
+				wantReusedEffective := cleanGCSPrefix(wantEffective)
+				if wantReusedEffective == wantEffective {
+					t.Fatalf("cleanGCSPrefix(%q) = %q, want disjoint rewritten prefix", wantEffective, wantReusedEffective)
+				}
 				offReuse := &fakeOffloader{}
 				logReuse := &recordingLogger{}
 				pReuse, reqReuse, mCtxReuse := offloadingPlugin(t, offReuse, func(c *Config) {
@@ -6521,22 +6639,32 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 					c.MaxInlineTextSize = 5
 					c.Logger = logReuse
 				})
-				if got := countWarnings(logReuse); got != 0 {
-					t.Errorf("reusing effective prefix %q logged %d warnings (%s), want 0", wantEffective, got, logReuse.String())
+				if got := countWarnings(logReuse); got != 1 {
+					t.Errorf("reusing effective prefix logged %d warnings (%s), want 1", got, logReuse.String())
+				}
+				if logReuse.contains(secretSentinel) || logReuse.contains(wantEffective) || logReuse.contains(wantReusedEffective) {
+					t.Errorf("reuse warning %q leaked prefix text or sentinel", logReuse.String())
+				}
+				if !logReuse.contains("contains reserved '~'") {
+					t.Errorf("reuse warning %q missing reserved '~' reason", logReuse.String())
 				}
 				rowReuse := logRequest(t, pReuse, reqReuse, mCtxReuse, &model.LLMRequest{
 					Model:    "gemini-2.5-flash",
 					Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "offloaded text payload"}}}},
 				})
 				uploadsReuse := offReuse.uploads()
-				if len(uploadsReuse) != 1 || !strings.HasPrefix(uploadsReuse[0].Path, wantEffective+"/"+rowDate(rowReuse)+"/") {
-					t.Errorf("reusing effective prefix %q uploaded %+v, want prefix %q", wantEffective, uploadsReuse, wantEffective+"/"+rowDate(rowReuse)+"/")
+				wantReuseLead := wantReusedEffective + "/" + rowDate(rowReuse) + "/"
+				if len(uploadsReuse) != 1 || !strings.HasPrefix(uploadsReuse[0].Path, wantReuseLead) {
+					t.Errorf("reusing effective prefix uploaded %+v, want prefix %q", uploadsReuse, wantReuseLead)
+				}
+				if strings.HasPrefix(uploadsReuse[0].Path, wantEffective+"/") {
+					t.Errorf("reused effective prefix aliased original rewritten prefix %q in path %q", wantEffective, uploadsReuse[0].Path)
 				}
 			})
 		}
 	})
 
-	t.Run("direct NewBatchProcessor warns once on rewrite and disabled plugin stays quiet", func(t *testing.T) {
+	t.Run("direct NewBatchProcessor warns once without leaking prefix and disabled plugin stays quiet", func(t *testing.T) {
 		ctx := context.Background()
 		lis, err := net.Listen("tcp", "localhost:0")
 		if err != nil {
@@ -6559,25 +6687,35 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = wc.Close() })
 
+		const directSentinel = "DirectCustomerSecret42"
 		warnLog := &recordingLogger{}
 		cfgWarn := DefaultConfig()
 		cfgWarn.ProjectID = "test-project"
 		cfgWarn.DatasetID = "test_dataset"
 		cfgWarn.TableName = "test-table"
-		cfgWarn.GCSPathPrefix = ".well-known/acme-challenge/direct"
+		cfgWarn.GCSPathPrefix = "/.well-known/acme-challenge/" + directSentinel + "/"
 		cfgWarn.Logger = warnLog
 		bpWarn, err := NewBatchProcessor(ctx, wc, "", cfgWarn)
 		if err != nil {
 			t.Fatalf("NewBatchProcessor(rewrite) error: %v", err)
 		}
 		bpWarn.Close()
-		if got := countWarnings(warnLog); got != 1 || !warnLog.contains(cleanGCSPrefix(cfgWarn.GCSPathPrefix)) {
-			t.Errorf("direct NewBatchProcessor(rewrite) warnings = %d (%s), want 1 naming %q", got, warnLog.String(), cleanGCSPrefix(cfgWarn.GCSPathPrefix))
+		wantWarnEffective := cleanGCSPrefix(cfgWarn.GCSPathPrefix)
+		wantDirectCounts := fmt.Sprintf("(%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes)",
+			len(cfgWarn.GCSPathPrefix), len(strings.Trim(cfgWarn.GCSPathPrefix, "/")), len(wantWarnEffective))
+		if got := countWarnings(warnLog); got != 1 {
+			t.Errorf("direct NewBatchProcessor(rewrite) warnings = %d (%s), want 1", got, warnLog.String())
+		}
+		if warnLog.contains(directSentinel) || warnLog.contains(wantWarnEffective) {
+			t.Errorf("direct NewBatchProcessor(rewrite) warning %q leaked prefix text", warnLog.String())
+		}
+		if !warnLog.contains(wantDirectCounts) || !warnLog.contains("starts with reserved .well-known/acme-challenge prefix") {
+			t.Errorf("direct NewBatchProcessor(rewrite) warning %q missing counts %q or reason", warnLog.String(), wantDirectCounts)
 		}
 
 		okLog := &recordingLogger{}
 		cfgOK := cfgWarn
-		cfgOK.GCSPathPrefix = "~team/logs"
+		cfgOK.GCSPathPrefix = `team\logs`
 		cfgOK.Logger = okLog
 		bpOK, err := NewBatchProcessor(ctx, wc, "", cfgOK)
 		if err != nil {
@@ -6591,7 +6729,7 @@ func TestGCSPathPrefix_RewriteWarningAndIdempotence(t *testing.T) {
 		disabledLog := &recordingLogger{}
 		cfgDisabled := DefaultConfig()
 		cfgDisabled.Enabled = false
-		cfgDisabled.GCSPathPrefix = "logs\ninjected"
+		cfgDisabled.GCSPathPrefix = "logs\ninjected-" + directSentinel
 		cfgDisabled.Logger = disabledLog
 		pDisabled, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfgDisabled, nil, nil)
 		if err != nil {

@@ -315,13 +315,14 @@ func pathSegment(id, fallback string) string {
 	return truncateWithHash(sanitized, id, maxPathSegmentBytes)
 }
 
-// isUnsafeGCSPrefixRune reports whether r is replaced in a GCSPathPrefix.
-// Cloud Storage rejects CR and LF in object names and recommends avoiding the
-// control characters that XML 1.0 does not allow; control characters (U+0000
-// to U+001F and U+007F to U+009F, including U+0085) and the Unicode line and
-// paragraph separators (U+2028 and U+2029) are replaced so names stay
-// printable on one line. Spaces, '=', '~', '\' and other Unicode characters
-// are kept.
+// isUnsafeGCSPrefixRune reports whether r is a control or line-separator
+// character replaced in a GCSPathPrefix. Cloud Storage rejects CR and LF in
+// object names and recommends avoiding the control characters that XML 1.0
+// does not allow; control characters (U+0000 to U+001F and U+007F to U+009F,
+// including U+0085) and the Unicode line and paragraph separators (U+2028 and
+// U+2029) are replaced so names stay printable on one line. Spaces, '=', '\'
+// and other printable Unicode characters are kept here, except '~', which
+// cleanGCSPrefix reserves as the hash-suffix delimiter.
 func isUnsafeGCSPrefixRune(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
 		r == '\u2028' || r == '\u2029'
@@ -342,61 +343,92 @@ func hasReservedACMEPrefix(s string) bool {
 // GCSPathPrefix, following the contract documented on Config.GCSPathPrefix.
 // Leading and trailing slashes are trimmed first, so "/logs/" and "logs"
 // share a prefix. The trimmed prefix is returned verbatim unless it is
-// longer than maxGCSPrefixBytes; has a byte that is not valid UTF-8 or a rune
-// for which isUnsafeGCSPrefixRune reports true; or its first two '/'-separated
+// longer than maxGCSPrefixBytes; contains '~' (reserved as the hash-suffix
+// delimiter), a byte that is not valid UTF-8, or a rune for which
+// isUnsafeGCSPrefixRune reports true; or its first two '/'-separated
 // segments are, case-insensitively, ".well-known" and "acme-challenge", which
 // Cloud Storage reserves (a second segment such as "acme-challenge-x" is kept
-// as is). Any other prefix has those bytes and runes replaced with '_' and a
-// leading ".well-known" segment before "acme-challenge" renamed "_well-known",
-// and is cut to fit maxGCSPrefixBytes with the "~<sha256>" suffix of the
-// trimmed prefix appended, so distinct trimmed prefixes do not collapse onto
-// the same object prefix. Because '~' is kept, cleanGCSPrefix is idempotent on
-// its own rewritten outputs.
+// as is). Any other prefix has '~' and those bytes and runes replaced with '_'
+// and a leading ".well-known" segment before "acme-challenge" renamed
+// "_well-known", and is cut to fit maxGCSPrefixBytes with the "~<sha256>"
+// suffix of the trimmed prefix appended, so distinct trimmed prefixes do not
+// collapse onto the same object prefix and unchanged and rewritten prefixes
+// occupy strictly disjoint namespaces.
 func cleanGCSPrefix(prefix string) string {
+	cleaned, _ := cleanGCSPrefixWithReason(prefix)
+	return cleaned
+}
+
+func cleanGCSPrefixWithReason(prefix string) (cleaned, reason string) {
 	trimmed := strings.Trim(prefix, "/")
 	if trimmed == "" {
-		return ""
+		return "", ""
 	}
-	var sb strings.Builder
+	var (
+		sb             strings.Builder
+		hasInvalidUTF8 bool
+		hasControl     bool
+		hasTilde       bool
+	)
 	sb.Grow(min(len(trimmed), maxGCSPrefixBytes))
-	altered := false
 	for i := 0; i < len(trimmed); {
 		r, width := utf8.DecodeRuneInString(trimmed[i:])
-		if (r == utf8.RuneError && width == 1) || isUnsafeGCSPrefixRune(r) {
+		switch {
+		case r == utf8.RuneError && width == 1:
 			sb.WriteByte('_')
-			altered = true
-		} else {
+			hasInvalidUTF8 = true
+		case r == '~':
+			sb.WriteByte('_')
+			hasTilde = true
+		case isUnsafeGCSPrefixRune(r):
+			sb.WriteByte('_')
+			hasControl = true
+		default:
 			sb.WriteRune(r)
 		}
 		i += width
 	}
-	cleaned := sb.String()
-	if hasReservedACMEPrefix(cleaned) {
+	cleaned = sb.String()
+	hasReservedACME := hasReservedACMEPrefix(cleaned)
+	if hasReservedACME {
 		_, rest, _ := strings.Cut(cleaned, "/")
 		cleaned = "_well-known/" + rest
-		altered = true
 	}
-	if !altered && len(cleaned) <= maxGCSPrefixBytes {
-		return cleaned
+	var reasons []string
+	if hasInvalidUTF8 {
+		reasons = append(reasons, "contains invalid UTF-8")
 	}
-	return truncateWithHash(cleaned, trimmed, maxGCSPrefixBytes)
+	if hasControl {
+		reasons = append(reasons, "contains control or line-separator character")
+	}
+	if hasTilde {
+		reasons = append(reasons, "contains reserved '~'")
+	}
+	if hasReservedACME {
+		reasons = append(reasons, "starts with reserved .well-known/acme-challenge prefix")
+	}
+	if len(trimmed) > maxGCSPrefixBytes {
+		reasons = append(reasons, fmt.Sprintf("exceeds %d bytes", maxGCSPrefixBytes))
+	}
+	if len(reasons) == 0 {
+		return cleaned, ""
+	}
+	return truncateWithHash(cleaned, trimmed, maxGCSPrefixBytes), strings.Join(reasons, "; ")
 }
 
-// normalizeGCSPathPrefix cleans c.GCSPathPrefix and logs a warning naming the
-// effective prefix when the '/'-trimmed value had to be rewritten. Because
-// cleanGCSPrefix is idempotent, calling normalizeGCSPathPrefix during plugin
-// construction before NewBatchProcessor logs at most once.
-func normalizeGCSPathPrefix(c *Config) {
+// warnGCSPathPrefix logs a constant-format warning with the rewrite reason and
+// byte counts when c.GCSPathPrefix is rewritten by cleanGCSPrefix, without
+// logging raw or sanitized prefix text. Config.GCSPathPrefix itself is left
+// unmodified so gcsObjectPath normalizes it once.
+func warnGCSPathPrefix(c Config) {
 	trimmed := strings.Trim(c.GCSPathPrefix, "/")
-	cleaned := cleanGCSPrefix(c.GCSPathPrefix)
-	if cleaned != trimmed {
-		if len(trimmed) > maxGCSPrefixBytes {
-			c.logf("agentanalytics: WARNING: Config.GCSPathPrefix (%d bytes after trimming '/') exceeds %d bytes and was rewritten to %q", len(trimmed), maxGCSPrefixBytes, cleaned)
-		} else {
-			c.logf("agentanalytics: WARNING: Config.GCSPathPrefix %q was rewritten to %q", c.GCSPathPrefix, cleaned)
-		}
+	cleaned, reason := cleanGCSPrefixWithReason(c.GCSPathPrefix)
+	if reason != "" {
+		c.logf(
+			"agentanalytics: WARNING: Config.GCSPathPrefix (%d raw bytes, %d trimmed bytes) was rewritten (%d effective bytes): %s",
+			len(c.GCSPathPrefix), len(trimmed), len(cleaned), reason,
+		)
 	}
-	c.GCSPathPrefix = cleaned
 }
 
 // sanitizeExtension returns ext as the readable part of a name that ends in a

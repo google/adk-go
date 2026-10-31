@@ -182,7 +182,6 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		cancelUploads()
 		return nil, fmt.Errorf("agentanalytics: ExactlyOnceDelivery requires an empty streamName (got %q; offsets cannot be used with a _default or caller-supplied stream)", streamName)
 	}
-	normalizeGCSPathPrefix(&config)
 
 	createdCommittedStream := false
 	if config.ExactlyOnceDelivery && writeClient != nil {
@@ -195,6 +194,7 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		}
 		createdCommittedStream = true
 	}
+	warnGCSPathPrefix(config)
 
 	return &BatchProcessor{
 		writeClient:            writeClient,
