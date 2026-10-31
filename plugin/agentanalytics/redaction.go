@@ -184,7 +184,7 @@ var (
 	// name (see nestsSensitiveKey): the name, possibly after a quote,
 	// which may be escaped, and a "user:" or "app:" state prefix, as
 	// isSensitiveKey reads it. The submatch is the key name.
-	nestedKeyNameRe = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)?(` + fixedSensitiveKeyRegex() + `)$`)
+	nestedKeyNameRe = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)?([_-]*(?:` + fixedSensitiveKeyRegex() + `))$`)
 	// compoundKeyNameRe matches a value that is a "temp:" key name or only
 	// ends in a sensitive key name (see nestsSensitiveKey): the name,
 	// possibly after a quote, which may be escaped, and optional words
@@ -304,7 +304,7 @@ func escapedQuotedRegex(q string) string {
 // sensitiveKeyRegex returns an alternation of the sensitive key names for
 // keys read inside quotes, where a "temp:" key name may contain "=" and ":".
 func sensitiveKeyRegex() string {
-	return `temp:[^"'\s\r\n,}]+|` + fixedSensitiveKeyRegex()
+	return `temp:[^"'\s\r\n,}]+|[_.-]*(?:` + fixedSensitiveKeyRegex() + `)`
 }
 
 // textKeyNameRegex returns the pattern for the name of a key in key=value and
@@ -375,14 +375,15 @@ func bareSensitiveKeyRegex() string {
 
 // fixedSensitiveKeyRegex returns an alternation of the names in sensitiveKeys,
 // in which each "_" may be written as any run of "_", "-" and "." or left out,
-// so that api_key, api-key, api.key, api__key, api..key, apiKey and APIKey all
-// match, agreeing with removeKeySeparators and splitKeyWords.
+// and trailing "_", "-" and "." separators are accepted, so that api_key,
+// api-key, api.key, api__key, api..key, api_key_, apiKey and APIKey all match,
+// agreeing with removeKeySeparators and splitKeyWords.
 func fixedSensitiveKeyRegex() string {
 	parts := make([]string, 0, len(sensitiveKeys))
 	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
 		parts = append(parts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_.-]*"))
 	}
-	return strings.Join(parts, "|")
+	return `(?:` + strings.Join(parts, "|") + `)[_.-]*`
 }
 
 func normalizeKey(k string) string {
@@ -1879,7 +1880,11 @@ func findCamelKeyName(s string, limit int) []int {
 					return loc
 				}
 			}
-			for i := camelScanStart(s, t, e); i < min(e, limit); i++ {
+			endNonSep := e
+			for endNonSep > t && (s[endNonSep-1] == '.' || s[endNonSep-1] == '_' || s[endNonSep-1] == '-') {
+				endNonSep--
+			}
+			for i := camelScanStart(s, t, endNonSep); i < min(endNonSep, limit); i++ {
 				if !isCamelBoundary(s, i) && !insideAcronym(s, i) {
 					continue
 				}
@@ -2488,10 +2493,9 @@ func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
 // but if its quoted value runs on past the bare value, it opens a value only
 // if its closing quote does not open the value of a later key, sensitive or
 // not (see opensLaterPair), unlike the apostrophe in token=abc:'s label=' x',
-// and not if its quotes are the apostrophes of prose, one after a ":" that
-// starts the ending of a contraction or a possessive and one inside a word
-// that starts another (see isContraction), as in
-// token=abc:'s scope missing; the user's request. A quoted value that opens a
+// and not if an enclosing outer quote or bracket closes the bare value right
+// after a contraction ending (see closesOuterContext), as in
+// failed: "token=abc:'s"; the user's request. A quoted value that opens a
 // value but does not end where a value may end (see quotedValueEnds), as in
 // password=a = "b"c, password=a="b"c or password=a="b"'c', runs on (see
 // runOnValueEnd, where open is as for textValueEnd), so that the credential
@@ -2515,8 +2519,11 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 			}
 			q := quotedValueRe.FindString(s[at:])
 			if q == "" {
-				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && at+len(quote)+n == end && s[i] == ':' && quote == "'" && proseFollowsContraction(s[end:]) {
-					return end
+				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && s[i] == ':' && quote == "'" {
+					cEnd := at + len(quote) + n
+					if closesOuterContext(s, cEnd, end, open, quoted) || (cEnd == end && laterConstructFollowsContraction(s[end:])) {
+						return end
+					}
 				}
 				if unclosedQuoteOpens(s, at, quote, at >= end, quoted) {
 					return len(s)
@@ -2524,11 +2531,16 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 				return end
 			}
 			// A quote inside the bare value whose quoted value runs on past
-			// it and ends where its closing quote opens a later pair, a
-			// Bearer token or a quoted key, as in token=abc:'s label=' x',
-			// token=abc:'s note Bearer ' x' or token=abc:'s note 'password': ' x',
-			// opens no value.
+			// it opens no value when an enclosing outer quote or bracket
+			// closes the bare value right after a contraction ending, or when
+			// its closing quote opens a later pair, a Bearer token or a
+			// quoted key, as in token=abc:'s label=' x',
+			// token=abc:'s note Bearer ' x' or token=abc:'s note 'password': ' x'.
 			if at < end && at+len(q) > end {
+				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && s[i] == ':' && quote == "'" &&
+					closesOuterContext(s, at+len(quote)+n, end, open, quoted) {
+					return end
+				}
 				if inner, _ := unquoteValue(q); opensLaterConstruct(s, at, len(q), len(quote), inner) {
 					return end
 				}
@@ -2541,13 +2553,9 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 			}
 			// A quote inside the bare value whose quoted value runs on past
 			// it but does not end there opens a value that runs on, as in
-			// token=a:'s b 1'x or password=a='d b'c, unless an outer ";"
-			// clause boundary separates two independent prose contractions,
-			// as in token=abc:'s missing; the user's request.
+			// token=a:'s b 1'x, password=a='d b'c or
+			// export DB_PASSWORD=a:'s correct staple horse; the user's.
 			if at+len(quote) < end && at+len(q) > end && !quotedValueEnds(s[at:], len(q), quoted) {
-				if closing := at + len(q) - len(quote); quote == "'" && isProseContractions(s, i, at, end, closing) {
-					return end
-				}
 				return runOnValueEnd(s, at, at+len(q), open, quoted)
 			}
 			// A quote or value that follows a quoted value closed in or at the
@@ -3591,56 +3599,57 @@ func startsQuotedKeyWithValue(s string) bool {
 	return valueStartsAt(s, delim+1, false, 0)
 }
 
-// isProseContractions reports whether the apostrophe at s[at] immediately
-// after ":" at s[colon] (ending the bare token s[:end]) and the apostrophe at
-// s[closing] are independent prose contractions separated by an outer ";"
-// clause boundary, as in token=abc:'s scope missing; the user's request,
-// rather than a single-quoted or joined credential such as
-// export DB_PASSWORD=a:'s correct horse battery's.
-func isProseContractions(s string, colon, at, end, closing int) bool {
-	n1 := contractionLen(s[at+1:])
-	n2 := contractionLen(s[closing+1:])
-	if s[colon] != ':' || at != colon+1 || n1 == 0 || at+1+n1 != end || !isMidWordApostrophe(s, closing) || n2 == 0 {
+// closesOuterContext reports whether s[cEnd:end] is non-empty and consists
+// solely of closing brackets for brackets opened before the pair (up to open)
+// and/or a quote closing an active outer string in quoted (see endsString),
+// optionally followed by sentence punctuation. When it does, as in
+// failed: "token=abc:'s"; the user's request or {token=abc:'s}; retry later,
+// an independent enclosing context terminates the bare token before any
+// following prose or clause delimiter.
+func closesOuterContext(s string, cEnd, end, open int, quoted quoteKinds) bool {
+	if cEnd >= end {
 		return false
 	}
-	afterClosing := closing + 1 + n2
-	if afterClosing < len(s) {
-		r, _ := utf8.DecodeRuneInString(s[afterClosing:])
-		if !isDelimSpace(r) && !strings.ContainsRune(",;:.!?)]}", r) {
-			return false
+	pos := cEnd
+	remOpen := open
+	closed := false
+	for pos < end && remOpen > 0 && (s[pos] == '}' || s[pos] == ']') {
+		pos++
+		remOpen--
+		closed = true
+	}
+	if pos < end && quoted != 0 {
+		if q := openingQuote(s, pos); q != "" && endsString(s, pos, q, quoted) {
+			pos += len(q)
+			closed = true
 		}
 	}
-	between := s[end:closing]
-	semi := strings.IndexByte(between, ';')
-	if semi < 0 || semi+1 >= len(between) || skipHorizDelimSpace(between, semi+1) == semi+1 {
-		return false
+	for pos < end && remOpen > 0 && (s[pos] == '}' || s[pos] == ']') {
+		pos++
+		remOpen--
+		closed = true
 	}
-	if strings.ContainsAny(between, "\r\n=:,'\"\\") {
-		return false
+	for pos < end && strings.IndexByte(".,;:!?)", s[pos]) >= 0 {
+		pos++
 	}
-	for _, field := range strings.FieldsFunc(strings.ReplaceAll(between, ";", " "), isDelimSpace) {
-		for k := 0; k < len(field); k++ {
-			if field[k] < 'a' || field[k] > 'z' {
-				return false
-			}
-		}
-	}
-	return strings.TrimSpace(between[semi+1:]) != ""
+	return closed && pos == end
 }
 
-// proseFollowsContraction reports whether after, the text immediately
-// following an unclosed ':'<contraction>, ends the value at an outer delimiter
-// or line break, or leads through lowercase prose words on the same line to an
-// outer ";" clause boundary or an independent credential or key-value
-// construct (Bearer token, quoted key or key=value pair), as in
-// token=abc:'s note Bearer [REDACTED]. Bare words without such a boundary, as
-// in password=a:'s correct horse battery, stay inside the unclosed credential
-// span.
-func proseFollowsContraction(after string) bool {
-	if after == "" || strings.IndexByte("\r\n;,&", after[0]) >= 0 {
-		return true
+// laterConstructFollowsContraction reports whether after, the text immediately
+// following an unclosed ':'<contraction>, leads on the same line (through
+// optional ",", ";" delimiters and lowercase prose words) to an independent
+// sensitive credential construct (a Bearer credential, a quoted key-value
+// pair, or a sensitive key-value pair), as in
+// token=abc:'s note Bearer [REDACTED] or token=abc:'s "password":"[REDACTED]".
+// Plain words or semicolons without a following sensitive construct, as in
+// password=a:'s correct horse battery or password=a:'s correct; horse battery,
+// stay inside the unclosed credential span.
+func laterConstructFollowsContraction(after string) bool {
+	i := 0
+	for i < len(after) && (after[i] == ';' || after[i] == ',') {
+		i++
 	}
-	at := skipHorizDelimSpace(after, 0)
+	at := skipHorizDelimSpace(after, i)
 	if at == 0 {
 		return false
 	}
@@ -3649,9 +3658,6 @@ func proseFollowsContraction(after string) bool {
 		line = line[:nl]
 	}
 	line = strings.TrimRightFunc(line, isDelimSpace)
-	if line == "" {
-		return true
-	}
 	for pos := 0; pos < len(line); {
 		rest := line[pos:]
 		if startsLaterConstructAt(rest) {
@@ -3665,10 +3671,7 @@ func proseFollowsContraction(after string) bool {
 			}
 			end += size
 		}
-		tok := line[pos:end]
-		if word, hasSemi := strings.CutSuffix(tok, ";"); hasSemi {
-			return isLowerASCIIWord(word) && isLowerProseClause(line[end:])
-		}
+		tok := strings.TrimRight(line[pos:end], ";,")
 		if !isLowerASCIIWord(tok) {
 			return false
 		}
@@ -3678,8 +3681,7 @@ func proseFollowsContraction(after string) bool {
 }
 
 // startsLaterConstructAt reports whether s begins with a Bearer credential, a
-// quoted key-value pair, an unspaced key-value pair or a standalone sensitive
-// key-value pair.
+// quoted key-value pair, or a sensitive key-value pair.
 func startsLaterConstructAt(s string) bool {
 	if len(s) > len("bearer") && strings.EqualFold(s[:len("bearer")], "bearer") {
 		if sp := skipHorizDelimSpace(s, len("bearer")); sp > len("bearer") && valueStartsAt(s, sp, false, 0) {
@@ -3689,7 +3691,7 @@ func startsLaterConstructAt(s string) bool {
 			}
 		}
 	}
-	if startsQuotedKeyWithValue(s) || startsPlainPair(s, 0) {
+	if startsQuotedKeyWithValue(s) {
 		return true
 	}
 	kind, _ := afterClosedQuotePair(s, 0, 0)
@@ -3702,24 +3704,6 @@ func isLowerASCIIWord(w string) bool {
 	}
 	for i := 0; i < len(w); i++ {
 		if w[i] < 'a' || w[i] > 'z' {
-			return false
-		}
-	}
-	return true
-}
-
-func isLowerProseClause(s string) bool {
-	at := skipHorizDelimSpace(s, 0)
-	if at == 0 || at >= len(s) {
-		return false
-	}
-	clause := strings.TrimRight(s[at:], ".!?")
-	fields := strings.FieldsFunc(clause, isDelimSpace)
-	if len(fields) == 0 {
-		return false
-	}
-	for _, f := range fields {
-		if !isLowerASCIIWord(f) {
 			return false
 		}
 	}
@@ -3923,6 +3907,9 @@ func isColonContractionApostrophe(s string, pos int) bool {
 		return false
 	}
 	cEnd := pos + 1 + n
+	for cEnd < len(s) && (s[cEnd] == '}' || s[cEnd] == ']') {
+		cEnd++
+	}
 	if cEnd < len(s) {
 		r, _ := utf8.DecodeRuneInString(s[cEnd:])
 		if !isDelimSpace(r) && !strings.ContainsRune(",;&", r) {
@@ -3931,13 +3918,10 @@ func isColonContractionApostrophe(s string, pos int) bool {
 	}
 	q := quotedValueRe.FindString(s[pos:])
 	if q == "" || strings.ContainsAny(q, "\r\n") {
-		return proseFollowsContraction(s[cEnd:])
+		return laterConstructFollowsContraction(s[cEnd:])
 	}
 	inner, _ := unquoteValue(q)
-	if opensLaterConstruct(s, pos, len(q), 1, inner) {
-		return true
-	}
-	return !quotedValueEnds(s[pos:], len(q), 0) && isProseContractions(s, pos-1, pos, cEnd, pos+len(q)-1)
+	return opensLaterConstruct(s, pos, len(q), 1, inner)
 }
 
 // opensPrefixedString reports whether the single quote at s[pos], between two

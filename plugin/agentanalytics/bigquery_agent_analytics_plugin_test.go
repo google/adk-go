@@ -3164,18 +3164,45 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			text: `DB_PASSWORD="benign"GITHUB_TOKEN="SECRET123"`,
 			want: `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`,
 		},
+		{
+			name: "closed shell password with semicolon between contraction words",
+			text: `export DB_PASSWORD=a:'s correct staple SECRET123; the user's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "closed shell password with semicolon and following command",
+			text: `export DB_PASSWORD=a:'s correct; SECRET123 battery's; echo ok`,
+			want: `export DB_PASSWORD=[REDACTED]; echo ok`,
+		},
+		{
+			name: "unclosed password with semicolon after contraction prefix",
+			text: `password=a:'s correct; SECRET123 battery`,
+			want: `password=[REDACTED]`,
+		},
+		{
+			name: "compound camelCase and dotted keys with trailing separators",
+			text: `DB_PASSWORD_=SECRET123 GITHUB_TOKEN_="SECRET123" OpenAIAPIKey_=SECRET123 stripe.api..key_=SECRET123`,
+			want: `DB_PASSWORD_=[REDACTED] GITHUB_TOKEN_="[REDACTED]" OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED]`,
+		},
+		{
+			name: "YAML nested compound keys with trailing separators",
+			text: "credentials:\n  DB_PASSWORD_: SECRET123\n  stripe.api..key_: SECRET123\n  region: us",
+			want: "credentials:\n  DB_PASSWORD_:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			var errs callbackErrors
 			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
 			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
-			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, errors.New(tt.text)))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, map[string]any{"input": tt.text}, errors.New(tt.text)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{Model: "gemini-test"}, errors.New(tt.text)))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
 			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, tt.want)
@@ -3183,12 +3210,23 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, tt.want)
 			}
+			toolStartRow := onlyRowOfType(t, rows, EventToolStarting)
+			if got, _ := lookup(jsonObjectColumn(t, toolStartRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, tt.want)
+			}
 			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
 			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != tt.want {
 				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, tt.want)
 			}
-			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+			toolErrRow := onlyRowOfType(t, rows, EventToolError)
+			if got := toolErrRow["error_message"]; got != tt.want {
 				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			if got, _ := lookup(jsonObjectColumn(t, toolErrRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, tt.want)
+			}
+			if got := onlyRowOfType(t, rows, EventLLMError)["error_message"]; got != tt.want {
+				t.Errorf("LLM_ERROR error_message = %v, want %q", got, tt.want)
 			}
 			for _, row := range rows {
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
@@ -3218,7 +3256,7 @@ func TestRedactionRegressions(t *testing.T) {
 	}{
 		{"dotted value that ends in a compound key name", "password=Summer.2024Password: dial tcp", "Summer.2024Password", "password=[REDACTED] tcp"},
 		{"quote inside a bare value before another pair", "token=abc:'s note password='SECRET VALUE' rest", "SECRET VALUE", "token=[REDACTED] note password='[REDACTED]' rest"},
-		{"quote inside a bare value before prose", "token=abc:'s scope missing; the user's request", "abc", "token=[REDACTED] scope missing; the user's request"},
+		{"quote inside an outer-quoted bare value before prose", `failed: "token=abc:'s"; the user's request`, "abc", `failed: "token=[REDACTED]; the user's request`},
 		{"dotted OAuth name", "oauth2.authorization.code=SYNTHETIC_OAUTH_CODE", "SYNTHETIC_OAUTH_CODE", "oauth2.authorization.code=[REDACTED]"},
 		{"dotted credential name", "stripe.api.key=SYNTHETIC_STRIPE_KEY", "SYNTHETIC_STRIPE_KEY", "stripe.api.key=[REDACTED]"},
 		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
@@ -3264,6 +3302,10 @@ func TestRedactionRegressions(t *testing.T) {
 		{"plus-continued quoted credential value", `export DB_PASSWORD="prefix"+SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export DB_PASSWORD=[REDACTED]`},
 		{"slash-continued quoted credential value", `export "DB_PASSWORD"="prefix"/SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export "DB_PASSWORD"=[REDACTED]`},
 		{"adjacent compound credential assignments preserve both keys", `DB_PASSWORD="benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, "SYNTHETIC_FOLLOWING_6401", `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		{"closed shell password with semicolon between contraction words", `export DB_PASSWORD=a:'s correct staple horse; the user's`, "staple horse", `export DB_PASSWORD=[REDACTED]`},
+		{"closed shell password with semicolon before following command", `export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok`, "staple horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed shell password with semicolon after contraction prefix", `password=a:'s correct; horse battery`, "horse battery", `password=[REDACTED]`},
+		{"trailing separator compound keys beside trailing separator cursors", `page_token_=cursor-1 DB_PASSWORD_=SYNTHETIC_CREDENTIAL_7319 OpenAIAPIKey_=SYNTHETIC_CREDENTIAL_7319 stripe.api..key_=SYNTHETIC_CREDENTIAL_7319 next.page.token_=cursor-2`, "SYNTHETIC_CREDENTIAL_7319", `page_token_=cursor-1 DB_PASSWORD_=[REDACTED] OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED] next.page.token_=cursor-2`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)

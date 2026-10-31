@@ -1235,7 +1235,9 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 		{`x 'password=abc:':{"k": "R7_SYNTHETIC_CREDENTIAL_9327"}`, `x 'password=[REDACTED]`},
 		{`failed: "password=abc:{\"k\":\"R7_SYNTHETIC_CREDENTIAL_9327\"}"`, `failed: "password=[REDACTED]`},
 		{`token=abc:'s note password='SECRET VALUE' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
-		{`token=abc:'s scope missing; the user's request`, `token=[REDACTED] scope missing; the user's request`},
+		{`token=abc:'s scope missing; the user's request`, `token=[REDACTED] request`},
+		{`failed: "token=abc:'s"; the user's request`, `failed: "token=[REDACTED]; the user's request`},
+		{`failed: {token=abc:'s}; the user's request`, `failed: {token=[REDACTED]}; the user's request`},
 		// Nor does it open a value when its closing quote opens the value of
 		// a later key, sensitive or not.
 		{`token=abc:'s label=' x'`, `token=[REDACTED] label=' x'`},
@@ -1630,9 +1632,12 @@ func TestScrubTextPatterns_NestedAndConcatenatedQuotes(t *testing.T) {
 		{`token=a:'x'" R8_SYNTHETIC_SECRET_4800"`, `token=[REDACTED]`},
 		{`token=a:'x'"R8_SYNTHETIC_SECRET_4800 x"`, `token=[REDACTED]`},
 		{`token=a:"x"' R8_SYNTHETIC_SECRET_4800'`, `token=[REDACTED]`},
-		// The apostrophes of prose after the value are not quotes, and no
-		// credential follows the value, so the prose is kept.
-		{`token=abc:'s missing; the user's request`, `token=[REDACTED] missing; the user's request`},
+		// An outer quote or bracket closing before a clause delimiter keeps
+		// following prose outside the credential, whereas an unenclosed
+		// semicolon between apostrophes stays inside the credential span.
+		{`failed: "token=abc:'s"; the user's request`, `failed: "token=[REDACTED]; the user's request`},
+		{`failed: {token=abc:'s}; the user's request`, `failed: {token=[REDACTED]}; the user's request`},
+		{`token=abc:'s missing; the user's request`, `token=[REDACTED] request`},
 		{`token=abc:'s note password='x' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
 		{`token=abc:'s note Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `token=[REDACTED] note Bearer [REDACTED]`},
 		{`token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, `token=[REDACTED] note 'password':[REDACTED]`},
@@ -1895,6 +1900,7 @@ func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 	build([]string{"", "oauth", "OAuth2", "oauth_client", "status", "xoauth", "code"}, []string{"code", "Code", "codes", "xcode"}, "", 3)
 	build([]string{"", "stripe", "jwt", "aws", "x", "goog", "google", "api", "private", "secret", "access", "auth", "code"}, []string{"key", "Key", "id", "verifier", "code", "token"}, "", 3)
 	build([]string{"", "page", "next", "prev", "previous", "fb", "home", "x"}, []string{"token", "Token", "page_token", "next_page_token", "prev_page_token", "previous_page_token", "nextPageToken"}, "", 3)
+	build([]string{"", "stripe", "api", "private", "secret", "auth", "code", "page", "next", "fb", "x"}, []string{"key_", "Key_", "verifier..", "code_", "token_", "Token--", "page_token_", "next_page_token_", "nextPageToken."}, "", 2)
 	sensitive := 0
 	for _, name := range names {
 		want := isSensitiveKey(name)
@@ -2314,6 +2320,24 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
+		{
+			"repeated camelCase keys with long trailing separator runs", func(n int) string {
+				return strings.Repeat("OpenAIAPIKey"+strings.Repeat("_", 150)+"=v ", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
+			"repeated compound keys with mixed trailing separators through an error", func(n int) string {
+				return strings.Repeat("stripe.api..key_.-=v ", n)
+			},
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+		},
+		{
+			"repeated semicolon-containing contraction credentials", func(n int) string {
+				return strings.Repeat("export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1500,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2413,8 +2437,17 @@ func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
 func TestScrubTextPatterns_JoinedContractionShapedCredentials(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		{`export DB_PASSWORD=a:'s correct horse battery's`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=a:'s correct staple horse; the user's`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=a:'s correct; horse battery's`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=a:'s correct; horse battery's && echo 'ok'`, `export DB_PASSWORD=[REDACTED] && echo 'ok'`},
+		{`export DB_PASSWORD=a:'s part1; part2; the user's+tail`, `export DB_PASSWORD=[REDACTED]`},
+		{`cmd="export DB_PASSWORD=a:'s correct staple horse; the user's"`, `cmd="export DB_PASSWORD=[REDACTED]`},
 		{`password=a:'s prefix CORRECTHORSE's`, `password=[REDACTED]`},
 		{`password=a:'s correct horse battery`, `password=[REDACTED]`},
+		{`password=a:'s correct; horse battery`, `password=[REDACTED]`},
+		{`password=a:'s; horse battery`, `password=[REDACTED]`},
+		{`password=a:'s val=SYNTHETIC_CREDENTIAL_6301`, `password=[REDACTED]`},
 		{`export DB_PASSWORD=a:'d correct horse battery'd`, `export DB_PASSWORD=[REDACTED]`},
 		{`export DB_PASSWORD=a:'re correct horse battery're rest`, `export DB_PASSWORD=[REDACTED] rest`},
 		{`password=a: 's missing; the SYNTHETIC_CREDENTIAL_6301's request`, `password=[REDACTED] request`},
@@ -2422,12 +2455,17 @@ func TestScrubTextPatterns_JoinedContractionShapedCredentials(t *testing.T) {
 		{`export DB_PASSWORD=a:'s missing; the user's+SYNTHETIC_CREDENTIAL_6301`, `export DB_PASSWORD=[REDACTED]`},
 		{`password=a:'s bearer of bad news`, `password=[REDACTED]`},
 		{`password=a:'s SYNTHETIC_CREDENTIAL_6301; retry later`, `password=[REDACTED]`},
-		// Verified outer-prose boundaries and following constructs stay intact.
-		{`token=abc:'s scope missing; the user's request`, `token=[REDACTED] scope missing; the user's request`},
-		{`token=abc:'s; the user's request`, `token=[REDACTED]; the user's request`},
-		{`token=abc:'s scope missing; retry later`, `token=[REDACTED] scope missing; retry later`},
+		// Outer quote or bracket context closing before ";" preserves outer prose,
+		// and independent following sensitive constructs stay separated.
+		{`failed: "token=abc:'s"; the user's request`, `failed: "token=[REDACTED]; the user's request`},
+		{`failed: "token=abc:'s"; retry later`, `failed: "token=[REDACTED]; retry later`},
+		{`failed: {token=abc:'s}; the user's request`, `failed: {token=[REDACTED]}; the user's request`},
+		{`failed: [token=abc:'s]; retry later`, `failed: [token=[REDACTED]]; retry later`},
+		{`failed: {token=abc:'s}; Bearer ' SYNTHETIC_CREDENTIAL_6301'`, `failed: {token=[REDACTED]}; Bearer [REDACTED]`},
+		{`token=abc:'s; Bearer ' SYNTHETIC_CREDENTIAL_6301'`, `token=[REDACTED]; Bearer [REDACTED]`},
 		{`token=abc:'s note password='SYNTHETIC_CREDENTIAL_6301' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
 		{`token=abc:'s note Bearer ' SYNTHETIC_CREDENTIAL_6301 SYNTHETIC_CREDENTIAL_6302'suffix`, `token=[REDACTED] note Bearer [REDACTED]`},
+		{`token=abc:'s DB_PASSWORD=SYNTHETIC_CREDENTIAL_6301`, `token=[REDACTED] DB_PASSWORD=[REDACTED]`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
 	}
@@ -2465,5 +2503,121 @@ func TestScrubTextPatterns_PunctuationContinuedQuotedValues(t *testing.T) {
 		{`password="SYNTHETIC_CREDENTIAL_91827"?`, `password="[REDACTED]"?`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+}
+
+// TestTrailingSeparatorKeyPolicyAgreement checks that structured maps, structs,
+// free text, raw text, error messages, and plain errors agree on key names with
+// trailing "_", "-" and "." separators (including compound, camelCase, acronym,
+// dotted, state-prefixed, and oversized keys) while preserving counters,
+// pagination cursors, and non-credential names with trailing separators.
+func TestTrailingSeparatorKeyPolicyAgreement(t *testing.T) {
+	const secret = "SYNTHETIC_CREDENTIAL_7319"
+	sensitiveNames := []string{
+		"DB_PASSWORD_",
+		"GITHUB_TOKEN_",
+		"OpenAIAPIKey_",
+		"stripe.api..key_",
+		"DB_PASSWORD___",
+		"GITHUB_TOKEN---",
+		"DB_PASSWORD.",
+		"OpenAIAPIKey_.-",
+		"OpenAIAPI_Key_",
+		"OpenAI.APIKey_",
+		"stripe.api..key.._",
+		"stripeApi..key____",
+		"awsSecretAccessKey_",
+		"fb.page_token_",
+		"foo.auth..code_",
+		"user:DB_PASSWORD_",
+		"app:api_key_",
+		"_password_",
+		"---token___",
+		"OpenAIAPIKey" + strings.Repeat("_", 150),
+		strings.Repeat("x_", 70) + "PASSWORD_",
+	}
+	for _, name := range sensitiveNames {
+		if !isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = false, want true", name)
+		}
+		gotMap, _, err := SmartTruncate(map[string]string{name: secret}, 10000)
+		if err != nil || strings.Contains(string(gotMap), secret) || !strings.Contains(string(gotMap), redactedValue) {
+			t.Errorf("SmartTruncate(map[%q]) = (%s, %v), want redacted value", name, gotMap, err)
+		}
+		checkAllRedactionPaths(t, name+"="+secret, name+"=[REDACTED]")
+		checkAllRedactionPaths(t, `export `+name+`="`+secret+`"`, `export `+name+`="[REDACTED]"`)
+		checkAllRedactionPaths(t, "failed: "+name+": "+secret+" retry", "failed: "+name+":[REDACTED] retry")
+		checkAllRedactionPaths(t, `failed: "`+name+`": "`+secret+`"`, `failed: "`+name+`":"[REDACTED]"`)
+		checkAllRedactionPaths(t, `failed: '`+name+`': '`+secret+`'`, `failed: '`+name+`':'[REDACTED]'`)
+		checkRedactionPaths(t, `{"`+name+`":"`+secret+`","~ok":"1"}`, `{"`+name+`":"[REDACTED]","~ok":"1"}`)
+		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:\n  "+name+":[REDACTED]\n  region: us")
+	}
+
+	// Leading-dot standalone and camelCase keys preserve the leading dot in text.
+	for _, name := range []string{".api_key_", "...api_key...", ".OpenAIAPIKey_"} {
+		if !isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = false, want true", name)
+		}
+		checkAllRedactionPaths(t, name+"="+secret, name+"=[REDACTED]")
+		checkRedactionPaths(t, `{"`+name+`":"`+secret+`"}`, `{"`+name+`":"[REDACTED]"}`)
+		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:\n  "+name+":[REDACTED]\n  region: us")
+	}
+
+	// Adjacent compound pairs with trailing separators preserve both keys.
+	checkAllRedactionPaths(t, `DB_PASSWORD_="benign"GITHUB_TOKEN_="`+secret+`"`, `DB_PASSWORD_="[REDACTED]"GITHUB_TOKEN_="[REDACTED]"`)
+	checkAllRedactionPaths(t, `DB_PASSWORD_="benign"stripe.api..key_="`+secret+`"`, `DB_PASSWORD_="[REDACTED]"stripe.api..key_="[REDACTED]"`)
+
+	// Struct fields and json tags with trailing separators agree with text/map policy.
+	type trailingSepRecord struct {
+		DB_PASSWORD_  string
+		OpenAIAPIKey_ string
+		StripeKey     string `json:"stripe.api..key_"`
+		PageToken_    string `json:"page_token_"`
+		TokenCount_   int    `json:"token_count_"`
+	}
+	gotStruct, _, err := SmartTruncate(trailingSepRecord{
+		DB_PASSWORD_:  secret,
+		OpenAIAPIKey_: secret,
+		StripeKey:     secret,
+		PageToken_:    "cursor-42",
+		TokenCount_:   7,
+	}, 10000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(trailingSepRecord) error = %v", err)
+	}
+	if strings.Contains(string(gotStruct), secret) {
+		t.Errorf("SmartTruncate(trailingSepRecord) leaked %s: %s", secret, gotStruct)
+	}
+	if !strings.Contains(string(gotStruct), `"page_token_":"cursor-42"`) || !strings.Contains(string(gotStruct), `"token_count_":7`) {
+		t.Errorf("SmartTruncate(trailingSepRecord) over-redacted cursor/counter: %s", gotStruct)
+	}
+
+	// Non-credential keys, counters, OAuth non-code suffixes, and pagination cursors
+	// with trailing separators stay unredacted across structured and text paths.
+	for _, name := range []string{
+		"page_token_",
+		"next_page_token_",
+		"next-page-token-",
+		"prev..page..token..",
+		"x.next.page.token_",
+		"nextPageToken.",
+		"token_count_",
+		"prompt_tokens_",
+		"max_output_tokens_",
+		"method_signature_",
+		"status..code_",
+		"oauth2Config.code_",
+		"my.api..key.file_",
+		"mypassword_",
+	} {
+		if isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = true, want false", name)
+		}
+		gotMap, _, err := SmartTruncate(map[string]string{name: "kept-value"}, 10000)
+		if err != nil || !strings.Contains(string(gotMap), "kept-value") {
+			t.Errorf("SmartTruncate(map[%q]) = (%s, %v), want kept-value preserved", name, gotMap, err)
+		}
+		in := name + "=kept-value"
+		checkRedactionPaths(t, in, in)
 	}
 }
