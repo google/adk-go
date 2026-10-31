@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
@@ -31,6 +32,7 @@ import (
 
 type artifactAggregation struct {
 	parts      []*genai.Part
+	builder    strings.Builder
 	citations  *genai.CitationMetadata
 	grounding  *genai.GroundingMetadata
 	customMeta map[string]any
@@ -135,15 +137,21 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 					lastPart := agg.parts[len(agg.parts)-1]
 					// check if last part is a text block of the same 'Thought' type
 					if lastPart.Text != "" && lastPart.Thought == part.Thought {
-						lastPart.Text += part.Text
+						if agg.builder.Len() == 0 {
+							agg.builder.WriteString(lastPart.Text)
+						}
+						agg.builder.WriteString(part.Text)
+						lastPart.Text = agg.builder.String()
 						continue
 					}
 				}
+				agg.builder.Reset()
 				agg.parts = append(agg.parts, &genai.Part{
 					Text:    part.Text,
 					Thought: part.Thought,
 				})
 			} else {
+				agg.builder.Reset()
 				agg.parts = append(agg.parts, part)
 			}
 		}
