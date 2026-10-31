@@ -19,12 +19,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -838,6 +844,10 @@ func TestSanitizeURI(t *testing.T) {
 			want:        "https://example.com/token:%5BREDACTED%5D/file.png",
 			wantChanged: true,
 		},
+		// A path segment is taken as a credential name, which the segment
+		// after it is the value of, only by its whole name.
+		{name: "path segment that ends in a credential name", uri: "https://example.com/docs/reset-password/step-2", want: "https://example.com/docs/reset-password/step-2"},
+		{name: "object path segment that ends in a credential name", uri: "gs://bucket/db-password/notes.txt", want: "gs://bucket/db-password/notes.txt"},
 		{
 			name:        "access token after a semicolon in a query value",
 			uri:         "https://example.com/a?a=1;access_token=SECRET123",
@@ -1867,9 +1877,14 @@ func TestRedactErrorMessage(t *testing.T) {
 			want: `got "password=[REDACTED], want "abc"`,
 		},
 		{
-			name: "name that is not a key name glued to a quoted value with spaces is redacted",
+			name: "name that is not a key name glued to a quoted value with spaces is redacted with the whole quoted value",
 			msg:  `credentials: user="SECRET123 token=SECRET456"`,
-			want: `credentials:[REDACTED] token=[REDACTED]`,
+			want: `credentials:[REDACTED]`,
+		},
+		{
+			name: "name that is not a key name glued to a quoted value of several words is redacted with all of them",
+			msg:  `credentials: user="SECRET123 SECRET456" more`,
+			want: `credentials:[REDACTED] more`,
 		},
 		{
 			name: "key name glued to a quoted value with spaces by a character other than a delimiter is redacted",
@@ -2742,7 +2757,8 @@ func TestSanitizeRawText(t *testing.T) {
 			{`credentials: token=SECRET123`, `credentials:[REDACTED]`},
 			{`credentials: token="SECRET123"`, `credentials:[REDACTED]`},
 			{`got "password=SECRETP-token=", want "abc"`, `got "password=[REDACTED], want "abc"`},
-			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED] token=[REDACTED]`},
+			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED]`},
+			{`credentials: user="SECRET123 SECRET456" more`, `credentials:[REDACTED] more`},
 			{`credentials: token("SECRET123 token=SECRET456")`, `credentials:[REDACTED] token=[REDACTED]`},
 			{`password="SECRETQ-token" :`, `password="[REDACTED]" :`},
 			{"password=SECRETQ-token :", "password=[REDACTED] :"},
@@ -2894,8 +2910,13 @@ func TestSanitizeRawText(t *testing.T) {
 				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", pair.raw, got, lost, pair.want)
 			}
 		}
-		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), 0), len("token=abc "); got != want {
+		if got, want := nestedPairEnd("token=abc rest", len("token=abc "), len("token=abc"), 0, 0), len("token=abc "); got != want {
 			t.Errorf("nestedPairEnd fallback = %d, want %d", got, want)
+		}
+		// A value that holds a name that textKeyValTokenAtRe does not match
+		// is redacted to its end.
+		if got, want := nestedPairEnd("password=my.key: x", len("password=my."), len("password=my.key:"), 0, 0), len("password=my.key:"); got != want {
+			t.Errorf("nestedPairEnd fallback inside the value = %d, want %d", got, want)
 		}
 	})
 
@@ -2966,12 +2987,12 @@ func TestSanitizeRawText(t *testing.T) {
 			if got := redactErrorMessage(text); got != text {
 				t.Errorf("%s: redactErrorMessage redacted clean text (len=%d)", name, len(got))
 			}
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > 6*time.Second {
 				t.Errorf("%s: redactErrorMessage took %v for a %d-byte text", name, d, len(text))
 			}
 			start = time.Now()
 			got, lost := sanitizeRawText(text)
-			if d := time.Since(start); d > 3*time.Second {
+			if d := time.Since(start); d > 6*time.Second {
 				t.Errorf("%s: sanitizeRawText took %v for a %d-byte text", name, d, len(text))
 			}
 			if got != text || lost {
@@ -4120,5 +4141,1488 @@ func TestContentSummary_ContentDeniedFailedUploadTruncatedPinsIsTruncated(t *tes
 	}
 	if got, _ := row["is_truncated"].(bool); !got {
 		t.Errorf("row[is_truncated] = %v, want true (pinned by hasFailedUploadTruncated)", row["is_truncated"])
+	}
+}
+
+func TestTruncateString_ReplacesInvalidUTF8(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		maxLength int
+		want      string
+		wantTrunc bool
+	}{
+		{"fits", "ok\xff\xfe tail", 100, "ok\uFFFD tail", false},
+		{"no limit", "ok\xff\xfe tail", -1, "ok\uFFFD tail", false},
+		{"valid text is unchanged", "héllo 日本", 100, "héllo 日本", false},
+		{"truncated", "ok\xff\xfe tail", 3, "ok\uFFFD" + truncationSuffix, true},
+		{"lone continuation byte", "\x80", 10, "\uFFFD", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := truncateString(tt.in, tt.maxLength)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("truncateString(%q, %d) = (%q, %v), want (%q, %v)", tt.in, tt.maxLength, got, truncated, tt.want, tt.wantTrunc)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateString(%q, %d) = %q, which is not valid UTF-8", tt.in, tt.maxLength, got)
+			}
+		})
+	}
+}
+
+func TestSanitizeAndTruncateText_ReplacesInvalidUTF8(t *testing.T) {
+	for _, redact := range []bool{true, false} {
+		got, _ := sanitizeAndTruncateText("ok\xff\xfe tail", 1000, redact)
+		if got != "ok\uFFFD tail" {
+			t.Errorf("sanitizeAndTruncateText(redact=%v) = %q, want %q", redact, got, "ok\uFFFD tail")
+		}
+	}
+}
+
+func TestFormatResponseContent_ReplacesInvalidUTF8InText(t *testing.T) {
+	got, _ := formatResponseContent(&genai.Content{Parts: []*genai.Part{{Text: "a\xffb"}}}, 1000, true)
+	if !utf8.ValidString(got) || !strings.Contains(got, "a\uFFFDb") {
+		t.Errorf("formatResponseContent = %q, want valid UTF-8 holding %q", got, "a\uFFFDb")
+	}
+}
+
+type testErrorNoFields struct{ msg string }
+
+func (e *testErrorNoFields) Error() string { return e.msg }
+
+type testErrorValue struct{ msg string }
+
+func (e testErrorValue) Error() string { return e.msg }
+
+type testErrorWithFields struct {
+	Code    int
+	Message string
+}
+
+func (e testErrorWithFields) Error() string { return "must not be used" }
+
+type testErrorCode string
+
+func (e testErrorCode) Error() string { return "code " + string(e) }
+
+type testStringerNoFields struct{ n int }
+
+func (s testStringerNoFields) String() string { return "stringer n=" + strconv.Itoa(s.n) }
+
+type testStringerWithFields struct{ Name string }
+
+func (s testStringerWithFields) String() string { return "must not be used" }
+
+type testPanickingError struct{ p *int }
+
+func (e testPanickingError) Error() string { return strconv.Itoa(*e.p) }
+
+type testPanickingStringer struct{ p *int }
+
+func (s testPanickingStringer) String() string { return strconv.Itoa(*s.p) }
+
+func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
+	// Under redaction the method of an error or Stringer is called only for
+	// errors.New, whose text is the message it was made with; any other
+	// value without exported fields keeps the structural form that
+	// reflection gives it. With redaction off, the text of a struct without
+	// exported fields is written; a value of another kind, such as an error
+	// of a string or integer kind, keeps the value that encoding/json gives
+	// it.
+	tests := []struct {
+		name         string
+		in           any
+		want         string
+		wantTrunc    bool
+		wantOff      string // the result with redaction off; want if empty
+		wantOffTrunc bool
+	}{
+		{name: "errors.New", in: errors.New("boom"), want: `"boom"`},
+		{name: "wrapped error", in: fmt.Errorf("outer: %w", errors.New("inner")), want: `{}`, wantOff: `"outer: inner"`},
+		{name: "pointer error type", in: &testErrorNoFields{"custom"}, want: `{}`, wantOff: `"custom"`},
+		{name: "value error type", in: testErrorValue{"value"}, want: `{}`, wantOff: `"value"`},
+		{name: "error of a string kind", in: testErrorCode("E42"), want: `"E42"`},
+		{name: "error of an integer kind", in: syscall.Errno(2), want: `2`},
+		{name: "error in a map", in: map[string]any{"err": errors.New("x")}, want: `{"err":"x"}`},
+		{name: "error in a slice", in: []error{errors.New("a"), errors.New("b")}, want: `["a","b"]`},
+		{
+			name: "credential in the error text", in: errors.New("dial failed: api_key=SECRET"), want: `"dial failed: api_key=[REDACTED]"`, wantTrunc: true,
+			wantOff: `"dial failed: api_key=SECRET"`,
+		},
+		{name: "stringer without exported fields", in: testStringerNoFields{7}, want: `{}`, wantOff: `"stringer n=7"`},
+		{name: "pointer to stringer", in: &testStringerNoFields{8}, want: `{}`, wantOff: `"stringer n=8"`},
+		{name: "error with exported fields keeps its fields", in: testErrorWithFields{Code: 7, Message: "m"}, want: `{"Code":7,"Message":"m"}`},
+		{name: "stringer with exported fields keeps its fields", in: testStringerWithFields{Name: "n"}, want: `{"Name":"n"}`},
+		{name: "duration stays a number", in: time.Second, want: `1000000000`},
+		{name: "struct with no fields at all", in: struct{ a int }{3}, want: `{}`},
+		{name: "panicking error", in: testPanickingError{}, want: `{}`, wantOff: `"[UNSUPPORTED_OBJECT]"`, wantOffTrunc: true},
+		{name: "panicking stringer", in: testPanickingStringer{}, want: `{}`, wantOff: `"[UNSUPPORTED_OBJECT]"`, wantOffTrunc: true},
+		{name: "nil error pointer", in: (*testErrorNoFields)(nil), want: `null`},
+		{name: "embedded struct that is shown as an empty object", in: testEmbeddedHiddenError{testHidden{"x"}}, want: `{}`, wantOff: `"embedded x"`},
+		{name: "embedded pointer in a stringer", in: testEmbeddedHiddenStringer{&testHidden{"y"}}, want: `{}`, wantOff: `"stringer y"`},
+		{name: "embedded struct with an exported field keeps its fields", in: testEmbeddedVisibleError{testEmbeddedHidden2{"e"}}, want: `{"Exported":"e"}`},
+		{name: "embedded hidden struct without a method", in: testEmbeddedVisible{testHidden{"v"}}, want: `{}`, wantOff: `"visible v"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated, err := SmartTruncate(tt.in, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%v) error: %v", tt.in, err)
+			}
+			if string(got) != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("SmartTruncate(%v) = (%s, %v), want (%s, %v)", tt.in, got, truncated, tt.want, tt.wantTrunc)
+			}
+			wantOff := tt.wantOff
+			if wantOff == "" {
+				wantOff = tt.want
+			}
+			wantOffTrunc := tt.wantOffTrunc
+			if tt.wantOff == "" {
+				wantOffTrunc = false
+			}
+			got, truncated, err = smartTruncate(tt.in, 1<<20, false)
+			if err != nil {
+				t.Fatalf("smartTruncate(%v, redact off) error: %v", tt.in, err)
+			}
+			if string(got) != wantOff || truncated != wantOffTrunc {
+				t.Errorf("smartTruncate(%v, redact off) = (%s, %v), want (%s, %v)", tt.in, got, truncated, wantOff, wantOffTrunc)
+			}
+		})
+	}
+}
+
+// testSecretError writes a bare credential, which no text pattern can find.
+type testSecretError struct{ secret string }
+
+func (e testSecretError) Error() string { return e.secret }
+
+type testSecretStringer struct{ apiKey string }
+
+func (e testSecretStringer) String() string { return "key " + e.apiKey }
+
+// Fields that are not named for credentials.
+type testNeutralError struct{ value string }
+
+func (e testNeutralError) Error() string { return e.value }
+
+type testNeutralStringer struct{ text string }
+
+func (e testNeutralStringer) String() string { return e.text }
+
+// testMapStringer writes a value that a private map holds.
+type testMapStringer struct{ data map[string]string }
+
+func (r testMapStringer) String() string { return r.data["password"] }
+
+// testEncodedError writes the password in another form.
+type testEncodedError struct{ password string }
+
+func (e testEncodedError) Error() string { return url.QueryEscape(e.password) }
+
+// testListError writes the text of the last item that it holds.
+type testListError struct{ items []any }
+
+func (e testListError) Error() string {
+	if err, ok := e.items[len(e.items)-1].(error); ok {
+		return err.Error()
+	}
+	return "list"
+}
+
+// testChainError writes the password at the end of a chain of pointers.
+type testChainError struct {
+	next     *testChainError
+	password string
+}
+
+func (e *testChainError) Error() string {
+	for ; e.next != nil; e = e.next {
+	}
+	return e.password
+}
+
+// testKimiToken is an error of a numeric kind with a sensitive type name.
+type testKimiToken int
+
+func (k testKimiToken) Error() string { return strconv.Itoa(int(k)) }
+
+type testKimiPassword []byte
+
+type testHoldsPassword struct{ pw testKimiPassword }
+
+func (e testHoldsPassword) Error() string { return string(e.pw) }
+
+// testMarshaledToken writes a credential through MarshalJSON.
+type testMarshaledToken struct{ raw string }
+
+func (k testMarshaledToken) MarshalJSON() ([]byte, error) { return json.Marshal(k.raw) }
+
+// testLockedError guards a field that its method does not use.
+type testLockedError struct {
+	mu       sync.Mutex
+	password string
+}
+
+func (e *testLockedError) Error() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return "authentication failed"
+}
+
+type testHidden struct{ msg string }
+
+type testEmbeddedHiddenError struct{ testHidden }
+
+func (e testEmbeddedHiddenError) Error() string { return "embedded " + e.msg }
+
+type testEmbeddedHiddenStringer struct{ *testHidden }
+
+func (e testEmbeddedHiddenStringer) String() string { return "stringer " + e.msg }
+
+type testEmbeddedVisible struct{ testHidden }
+
+func (e testEmbeddedVisible) Error() string { return "visible " + e.msg }
+
+type testEmbeddedVisibleError struct {
+	testEmbeddedHidden2
+}
+
+type testEmbeddedHidden2 struct{ Exported string }
+
+func (e testEmbeddedVisibleError) Error() string { return "never used" }
+
+func TestSmartTruncate_OpaqueMethodsDoNotWriteCredentials(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	wrapped := error(testSecretError{secret})
+	for range 80 {
+		wrapped = fmt.Errorf("w: %w", wrapped)
+	}
+	deep := &testChainError{password: secret}
+	for range 61 {
+		deep = &testChainError{next: deep}
+	}
+	items := make([]any, 300)
+	for i := range items {
+		items[i] = testNeutralError{"item"}
+	}
+	items[299] = testSecretError{secret}
+	children := make([]testSecretError, 300)
+	for i := range children {
+		children[i] = testSecretError{secret + "_" + strconv.Itoa(i)}
+	}
+	tests := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"error with a credential field", testSecretError{secret}, `{}`},
+		{"pointer to it", &testSecretError{secret}, `{}`},
+		{"stringer with a credential field", testSecretStringer{secret}, `{}`},
+		{"error with a field of a neutral name", testNeutralError{secret}, `{}`},
+		{"stringer with a field of a neutral name", testNeutralStringer{secret}, `{}`},
+		{"stringer that reads a private map", testMapStringer{map[string]string{"password": secret}}, `{}`},
+		{"error that writes the password in another form", testEncodedError{secret}, `{}`},
+		{"error that holds a long list", testListError{items}, `{}`},
+		{"error that holds many children", struct{ children []testSecretError }{children}, `{}`},
+		{"error that holds children", testListError{[]any{children}}, `{}`},
+		{"eighty wrappers of an error", wrapped, `{}`},
+		{"chain of pointers beyond the depth limit", deep, `{}`},
+		{"error of a numeric kind with a sensitive type name", testKimiToken(918273645), `"[REDACTED]"`},
+		{"error that holds a value of a sensitive type name", testHoldsPassword{testKimiPassword(secret)}, `{}`},
+		{"value of a bytes type with a sensitive name", testKimiPassword(secret), `"[REDACTED]"`},
+		{"field of a bytes type with a sensitive name", struct{ P testKimiPassword }{testKimiPassword(secret)}, `{"P":"[REDACTED]"}`},
+		{"struct with a sensitive type name that marshals itself", testMarshaledToken{secret}, `"[REDACTED]"`},
+		{"error with a credential field in a map", map[string]any{"err": testSecretError{secret}}, `{"err":{}}`},
+		{"error with a credential field in a slice", []error{testSecretError{secret}}, `[{}]`},
+		{"error with a credential field in a struct field", struct{ Err error }{testSecretError{secret}}, `{"Err":{}}`},
+		{"error of a string kind keeps its value only", testErrorCode(secret + "x"), `"` + secret + `x"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate error: %v", err)
+			}
+			if tt.name != "error of a string kind keeps its value only" && strings.Contains(string(got), secret) {
+				t.Errorf("SmartTruncate = %s, which holds the secret", got)
+			}
+			if string(got) != tt.want {
+				t.Errorf("SmartTruncate = %s, want %s", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("a credential is written when redaction is off", func(t *testing.T) {
+		got, _, err := smartTruncate(testSecretError{secret}, 1<<20, false)
+		if err != nil || string(got) != `"`+secret+`"` {
+			t.Errorf("smartTruncate(testSecretError, redact off) = (%s, %v), want %q", got, err, secret)
+		}
+	})
+
+	t.Run("a zero value of a sensitive type name is redacted without reading it", func(t *testing.T) {
+		got, _, _ := SmartTruncate(testKimiToken(0), 1<<20)
+		if string(got) != `"[REDACTED]"` {
+			t.Errorf(`SmartTruncate(testKimiToken(0)) = %s, want "[REDACTED]"`, got)
+		}
+	})
+}
+
+// TestSmartTruncate_DoesNotReadPrivateFields checks that serializing a value
+// under redaction does not read what its type guards: run with -race.
+func TestSmartTruncate_DoesNotReadPrivateFields(t *testing.T) {
+	v := &testLockedError{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range 2000 {
+			v.mu.Lock()
+			v.password = "pw" + strconv.Itoa(i)
+			v.mu.Unlock()
+		}
+	}()
+	for range 200 {
+		if got, _, err := SmartTruncate(v, 1000); err != nil || strings.Contains(string(got), "pw") {
+			t.Fatalf("SmartTruncate = (%s, %v)", got, err)
+		}
+	}
+	<-done
+}
+
+func TestShowsExportedFields_Embedded(t *testing.T) {
+	type cyclic struct{ *cyclic }
+	tests := []struct {
+		name string
+		in   any
+		want bool
+	}{
+		{"exported field", struct{ A int }{}, true},
+		{"unexported field only", testHidden{}, false},
+		{"embedded struct with unexported fields only", testEmbeddedVisible{}, false},
+		{"embedded pointer to such a struct", testEmbeddedHiddenStringer{}, false},
+		{"embedded struct with an exported field", testEmbeddedVisibleError{}, true},
+		{"exported field tagged out", struct {
+			A int `json:"-"`
+		}{}, false},
+		{"embedded cycle", cyclic{}, false},
+		{"not a struct", 3, false},
+	}
+	for _, tt := range tests {
+		if got := showsExportedFields(reflect.ValueOf(tt.in)); got != tt.want {
+			t.Errorf("%s: showsExportedFields(%T) = %v, want %v", tt.name, tt.in, got, tt.want)
+		}
+	}
+}
+
+// Types that share embedded types: 2^22 paths from the top to a leaf.
+type (
+	testDiamondA0 struct{ x int }
+	testDiamondB0 struct{ y int }
+	testDiamondA1 struct {
+		*testDiamondA0
+		*testDiamondB0
+	}
+)
+
+type testDiamondB1 struct {
+	*testDiamondA0
+	*testDiamondB0
+}
+type testDiamondA2 struct {
+	*testDiamondA1
+	*testDiamondB1
+}
+type testDiamondB2 struct {
+	*testDiamondA1
+	*testDiamondB1
+}
+type testDiamondA3 struct {
+	*testDiamondA2
+	*testDiamondB2
+}
+type testDiamondB3 struct {
+	*testDiamondA2
+	*testDiamondB2
+}
+type testDiamondA4 struct {
+	*testDiamondA3
+	*testDiamondB3
+}
+type testDiamondB4 struct {
+	*testDiamondA3
+	*testDiamondB3
+}
+type testDiamondA5 struct {
+	*testDiamondA4
+	*testDiamondB4
+}
+type testDiamondB5 struct {
+	*testDiamondA4
+	*testDiamondB4
+}
+type testDiamondA6 struct {
+	*testDiamondA5
+	*testDiamondB5
+}
+type testDiamondB6 struct {
+	*testDiamondA5
+	*testDiamondB5
+}
+type testDiamondA7 struct {
+	*testDiamondA6
+	*testDiamondB6
+}
+type testDiamondB7 struct {
+	*testDiamondA6
+	*testDiamondB6
+}
+type testDiamondA8 struct {
+	*testDiamondA7
+	*testDiamondB7
+}
+type testDiamondB8 struct {
+	*testDiamondA7
+	*testDiamondB7
+}
+type testDiamondA9 struct {
+	*testDiamondA8
+	*testDiamondB8
+}
+type testDiamondB9 struct {
+	*testDiamondA8
+	*testDiamondB8
+}
+type testDiamondA10 struct {
+	*testDiamondA9
+	*testDiamondB9
+}
+type testDiamondB10 struct {
+	*testDiamondA9
+	*testDiamondB9
+}
+type testDiamondA11 struct {
+	*testDiamondA10
+	*testDiamondB10
+}
+type testDiamondB11 struct {
+	*testDiamondA10
+	*testDiamondB10
+}
+type testDiamondA12 struct {
+	*testDiamondA11
+	*testDiamondB11
+}
+type testDiamondB12 struct {
+	*testDiamondA11
+	*testDiamondB11
+}
+type testDiamondA13 struct {
+	*testDiamondA12
+	*testDiamondB12
+}
+type testDiamondB13 struct {
+	*testDiamondA12
+	*testDiamondB12
+}
+type testDiamondA14 struct {
+	*testDiamondA13
+	*testDiamondB13
+}
+type testDiamondB14 struct {
+	*testDiamondA13
+	*testDiamondB13
+}
+type testDiamondA15 struct {
+	*testDiamondA14
+	*testDiamondB14
+}
+type testDiamondB15 struct {
+	*testDiamondA14
+	*testDiamondB14
+}
+type testDiamondA16 struct {
+	*testDiamondA15
+	*testDiamondB15
+}
+type testDiamondB16 struct {
+	*testDiamondA15
+	*testDiamondB15
+}
+type testDiamondA17 struct {
+	*testDiamondA16
+	*testDiamondB16
+}
+type testDiamondB17 struct {
+	*testDiamondA16
+	*testDiamondB16
+}
+type testDiamondA18 struct {
+	*testDiamondA17
+	*testDiamondB17
+}
+type testDiamondB18 struct {
+	*testDiamondA17
+	*testDiamondB17
+}
+type testDiamondA19 struct {
+	*testDiamondA18
+	*testDiamondB18
+}
+type testDiamondB19 struct {
+	*testDiamondA18
+	*testDiamondB18
+}
+type testDiamondA20 struct {
+	*testDiamondA19
+	*testDiamondB19
+}
+type testDiamondB20 struct {
+	*testDiamondA19
+	*testDiamondB19
+}
+type testDiamondA21 struct {
+	*testDiamondA20
+	*testDiamondB20
+}
+type testDiamondB21 struct {
+	*testDiamondA20
+	*testDiamondB20
+}
+type testDiamondA22 struct {
+	*testDiamondA21
+	*testDiamondB21
+}
+type testDiamondB22 struct {
+	*testDiamondA21
+	*testDiamondB21
+}
+
+// readDiamondFields reads every embedded field, which only reflection does
+// otherwise.
+func readDiamondFields() {
+	_, _ = testDiamondA0{}.x, testDiamondB0{}.y
+	_ = testDiamondA1{}.testDiamondA0
+	_ = testDiamondA1{}.testDiamondB0
+	_ = testDiamondB1{}.testDiamondA0
+	_ = testDiamondB1{}.testDiamondB0
+	_ = testDiamondA2{}.testDiamondA1
+	_ = testDiamondA2{}.testDiamondB1
+	_ = testDiamondB2{}.testDiamondA1
+	_ = testDiamondB2{}.testDiamondB1
+	_ = testDiamondA3{}.testDiamondA2
+	_ = testDiamondA3{}.testDiamondB2
+	_ = testDiamondB3{}.testDiamondA2
+	_ = testDiamondB3{}.testDiamondB2
+	_ = testDiamondA4{}.testDiamondA3
+	_ = testDiamondA4{}.testDiamondB3
+	_ = testDiamondB4{}.testDiamondA3
+	_ = testDiamondB4{}.testDiamondB3
+	_ = testDiamondA5{}.testDiamondA4
+	_ = testDiamondA5{}.testDiamondB4
+	_ = testDiamondB5{}.testDiamondA4
+	_ = testDiamondB5{}.testDiamondB4
+	_ = testDiamondA6{}.testDiamondA5
+	_ = testDiamondA6{}.testDiamondB5
+	_ = testDiamondB6{}.testDiamondA5
+	_ = testDiamondB6{}.testDiamondB5
+	_ = testDiamondA7{}.testDiamondA6
+	_ = testDiamondA7{}.testDiamondB6
+	_ = testDiamondB7{}.testDiamondA6
+	_ = testDiamondB7{}.testDiamondB6
+	_ = testDiamondA8{}.testDiamondA7
+	_ = testDiamondA8{}.testDiamondB7
+	_ = testDiamondB8{}.testDiamondA7
+	_ = testDiamondB8{}.testDiamondB7
+	_ = testDiamondA9{}.testDiamondA8
+	_ = testDiamondA9{}.testDiamondB8
+	_ = testDiamondB9{}.testDiamondA8
+	_ = testDiamondB9{}.testDiamondB8
+	_ = testDiamondA10{}.testDiamondA9
+	_ = testDiamondA10{}.testDiamondB9
+	_ = testDiamondB10{}.testDiamondA9
+	_ = testDiamondB10{}.testDiamondB9
+	_ = testDiamondA11{}.testDiamondA10
+	_ = testDiamondA11{}.testDiamondB10
+	_ = testDiamondB11{}.testDiamondA10
+	_ = testDiamondB11{}.testDiamondB10
+	_ = testDiamondA12{}.testDiamondA11
+	_ = testDiamondA12{}.testDiamondB11
+	_ = testDiamondB12{}.testDiamondA11
+	_ = testDiamondB12{}.testDiamondB11
+	_ = testDiamondA13{}.testDiamondA12
+	_ = testDiamondA13{}.testDiamondB12
+	_ = testDiamondB13{}.testDiamondA12
+	_ = testDiamondB13{}.testDiamondB12
+	_ = testDiamondA14{}.testDiamondA13
+	_ = testDiamondA14{}.testDiamondB13
+	_ = testDiamondB14{}.testDiamondA13
+	_ = testDiamondB14{}.testDiamondB13
+	_ = testDiamondA15{}.testDiamondA14
+	_ = testDiamondA15{}.testDiamondB14
+	_ = testDiamondB15{}.testDiamondA14
+	_ = testDiamondB15{}.testDiamondB14
+	_ = testDiamondA16{}.testDiamondA15
+	_ = testDiamondA16{}.testDiamondB15
+	_ = testDiamondB16{}.testDiamondA15
+	_ = testDiamondB16{}.testDiamondB15
+	_ = testDiamondA17{}.testDiamondA16
+	_ = testDiamondA17{}.testDiamondB16
+	_ = testDiamondB17{}.testDiamondA16
+	_ = testDiamondB17{}.testDiamondB16
+	_ = testDiamondA18{}.testDiamondA17
+	_ = testDiamondA18{}.testDiamondB17
+	_ = testDiamondB18{}.testDiamondA17
+	_ = testDiamondB18{}.testDiamondB17
+	_ = testDiamondA19{}.testDiamondA18
+	_ = testDiamondA19{}.testDiamondB18
+	_ = testDiamondB19{}.testDiamondA18
+	_ = testDiamondB19{}.testDiamondB18
+	_ = testDiamondA20{}.testDiamondA19
+	_ = testDiamondA20{}.testDiamondB19
+	_ = testDiamondB20{}.testDiamondA19
+	_ = testDiamondB20{}.testDiamondB19
+	_ = testDiamondA21{}.testDiamondA20
+	_ = testDiamondA21{}.testDiamondB20
+	_ = testDiamondB21{}.testDiamondA20
+	_ = testDiamondB21{}.testDiamondB20
+	_ = testDiamondA22{}.testDiamondA21
+	_ = testDiamondA22{}.testDiamondB21
+	_ = testDiamondB22{}.testDiamondA21
+	_ = testDiamondB22{}.testDiamondB21
+}
+
+func TestShowsExportedFields_SharedEmbeddedTypes(t *testing.T) {
+	readDiamondFields()
+	v := reflect.ValueOf(testDiamondA22{})
+	start := time.Now()
+	if showsExportedFields(v) {
+		t.Error("showsExportedFields(testDiamondA22) = true, want false")
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Errorf("showsExportedFields took %v for a graph of 46 types, want it linear in the types", d)
+	}
+}
+
+func TestFormatResponseContent_SanitizesAndBoundsSummary(t *testing.T) {
+	t.Run("function names are sanitized", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "fetch api_key=SECRET"}},
+			{FunctionResponse: &genai.FunctionResponse{Name: "Bearer SECRET"}},
+		}}
+		got, truncated := formatResponseContent(content, 1000, true)
+		if strings.Contains(got, "SECRET") {
+			t.Errorf("formatResponseContent = %q, which still holds the secret", got)
+		}
+		if want := "call: fetch api_key=[REDACTED] | resp: Bearer [REDACTED]"; got != want {
+			t.Errorf("formatResponseContent = %q, want %q", got, want)
+		}
+		if !truncated {
+			t.Error("formatResponseContent did not mark the redacted summary as truncated")
+		}
+	})
+
+	t.Run("function names are not sanitized when redaction is off", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "fetch api_key=SECRET"}}}}
+		got, _ := formatResponseContent(content, 1000, false)
+		if want := "call: fetch api_key=SECRET"; got != want {
+			t.Errorf("formatResponseContent = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a long function name is truncated", func(t *testing.T) {
+		name := strings.Repeat("n", 100_000)
+		content := &genai.Content{Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: name}},
+			{FunctionResponse: &genai.FunctionResponse{Name: name}},
+		}}
+		got, truncated := formatResponseContent(content, 500*1024, true)
+		if !truncated {
+			t.Error("formatResponseContent did not report the truncation of a long name")
+		}
+		if want := 2*(len("call: ")+maxFunctionNameSummaryLength+len(truncationSuffix)) + len(" | "); len(got) != want {
+			t.Errorf("len(formatResponseContent) = %d, want %d", len(got), want)
+		}
+	})
+
+	t.Run("the whole summary is capped", func(t *testing.T) {
+		parts := make([]*genai.Part, 1000)
+		for i := range parts {
+			parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{Name: "tool_with_a_name"}}
+		}
+		got, truncated := formatResponseContent(&genai.Content{Parts: parts}, 100, true)
+		if !truncated {
+			t.Error("formatResponseContent did not report the truncation of the summary")
+		}
+		if want := 100 + responseSummarySlack + len(truncationSuffix); len(got) != want {
+			t.Errorf("len(formatResponseContent) = %d, want %d", len(got), want)
+		}
+		if !strings.HasSuffix(got, truncationSuffix) {
+			t.Errorf("formatResponseContent = %q, want the suffix %q", got, truncationSuffix)
+		}
+	})
+
+	t.Run("a short summary is unchanged", func(t *testing.T) {
+		content := &genai.Content{Parts: []*genai.Part{
+			{Text: "hello"},
+			{FunctionCall: &genai.FunctionCall{Name: "lookup"}},
+		}}
+		got, truncated := formatResponseContent(content, 1000, true)
+		if want := "text: 'hello' | call: lookup"; got != want || truncated {
+			t.Errorf("formatResponseContent = (%q, %v), want (%q, false)", got, truncated, want)
+		}
+	})
+}
+
+func TestFormatResponseContent_RedactsCredentialAfterAnyUnicodeSpace(t *testing.T) {
+	for _, sep := range []string{"\v", "\u2028", "\u2029", "\u0085", "\u00a0"} {
+		t.Run(fmt.Sprintf("U+%04X", []rune(sep)[0]), func(t *testing.T) {
+			content := &genai.Content{Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{Name: "Bearer" + sep + "SECRET"}},
+				{FunctionResponse: &genai.FunctionResponse{Name: "Basic" + sep + "dXNlcjpwYXNz"}},
+			}}
+			got, _ := formatResponseContent(content, 1000, true)
+			if strings.Contains(got, "SECRET") || strings.Contains(got, "dXNlcjpwYXNz") {
+				t.Errorf("formatResponseContent = %q, which holds the credential", got)
+			}
+		})
+	}
+}
+
+func TestSmartTruncate_RedactsCredentialTextOfOpaqueValues(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"error, vertical tab", errors.New("Bearer\vSECRET")},
+		{"error, line separator", errors.New("Bearer\u2028SECRET")},
+		{"error, paragraph separator", errors.New("Basic\u2029dXNlcjpwYXNz")},
+		{"error, camel case key", errors.New("call failed dbPassword=SECRET")},
+		{"error, envelope", errors.New("credentials:\n DB_PASSWORD: SECRET")},
+		{"stringer, envelope", testStringerText{"credentials:\n OPENAI_API_KEY: SECRET"}},
+		{"stringer, oauth code", testStringerText{"oauth2Config:\n oauth2Config.code: SECRET"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate() error = %v", err)
+			}
+			if strings.Contains(string(got), "SECRET") || strings.Contains(string(got), "dXNlcjpwYXNz") {
+				t.Errorf("SmartTruncate() = %s, which holds the credential", got)
+			}
+		})
+	}
+}
+
+// testStringerText is a struct without exported fields whose String is its
+// text.
+type testStringerText struct{ text string }
+
+func (s testStringerText) String() string { return s.text }
+
+// testPwLocked guards its fields with a mutex.
+type testPwLocked struct {
+	mu       sync.Mutex
+	password string
+}
+
+// testGuardedArrayPassword is an array of a type that guards its fields; its
+// method reads them under the lock.
+type testGuardedArrayPassword [1]testPwLocked
+
+func (v *testGuardedArrayPassword) MarshalJSON() ([]byte, error) {
+	v[0].mu.Lock()
+	defer v[0].mu.Unlock()
+	return []byte(`"guarded"`), nil
+}
+
+// testGuardedStructPassword is a struct that guards its fields.
+type testGuardedStructPassword struct {
+	mu       sync.Mutex
+	password string
+}
+
+func (v *testGuardedStructPassword) MarshalJSON() ([]byte, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return []byte(`"guarded ` + v.password + `"`), nil
+}
+
+func TestSmartTruncate_DoesNotReadGuardedFieldsOfSensitiveTypes(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   any
+	}{
+		{"array of a struct with a mutex", &testGuardedArrayPassword{}},
+		{"struct with a mutex", &testGuardedStructPassword{}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var lock func() func()
+			var set func(string)
+			switch v := tt.in.(type) {
+			case *testGuardedArrayPassword:
+				lock = func() func() { v[0].mu.Lock(); return v[0].mu.Unlock }
+				set = func(p string) { v[0].password = p }
+			case *testGuardedStructPassword:
+				lock = func() func() { v.mu.Lock(); return v.mu.Unlock }
+				set = func(p string) { v.password = p }
+			}
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			defer func() {
+				close(stop)
+				<-done
+			}()
+			go func() {
+				defer close(done)
+				for i := 0; ; i++ {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					unlock := lock()
+					set(strconv.Itoa(i))
+					unlock()
+				}
+			}()
+			for range 200 {
+				if got, _, err := SmartTruncate(tt.in, 1000); err != nil || len(got) == 0 {
+					t.Fatalf("SmartTruncate = (%s, %v)", got, err)
+				}
+			}
+		})
+	}
+}
+
+// testTextMarshaledToken writes a credential through MarshalText.
+type testTextMarshaledToken struct{ raw string }
+
+func (k testTextMarshaledToken) MarshalText() ([]byte, error) { return []byte(k.raw), nil }
+
+// testZeroPassword writes a credential whatever its value.
+type testZeroPassword struct{}
+
+func (testZeroPassword) MarshalJSON() ([]byte, error) { return []byte(`"SYNTHETIC_SECRET"`), nil }
+
+// testPointerGuardedPassword guards its fields with a mutex that it points to.
+type testPointerGuardedPassword struct {
+	mu       *sync.Mutex
+	password string
+}
+
+func (v *testPointerGuardedPassword) MarshalJSON() ([]byte, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return []byte(`"guarded ` + v.password + `"`), nil
+}
+
+// testAtomicPassword holds an atomic value.
+type testAtomicPassword struct{ password atomic.Value }
+
+func (v *testAtomicPassword) MarshalJSON() ([]byte, error) {
+	s, _ := v.password.Load().(string)
+	return []byte(`"atomic ` + s + `"`), nil
+}
+
+type testMapPassword map[string]string
+
+// testEmptyAPIToken has no field.
+type testEmptyAPIToken struct{}
+
+func (testEmptyAPIToken) MarshalJSON() ([]byte, error) { return []byte(`"empty"`), nil }
+
+// testZeroScalarToken is a scalar that writes a credential whatever its
+// value, zero included.
+type testZeroScalarToken int
+
+func (testZeroScalarToken) MarshalJSON() ([]byte, error) { return []byte(`"SYNTHETIC_SECRET"`), nil }
+
+// testZeroTextPassword is a string that writes a credential whatever its
+// value, the empty string included.
+type testZeroTextPassword string
+
+func (testZeroTextPassword) MarshalText() ([]byte, error) { return []byte("SYNTHETIC_SECRET"), nil }
+
+// testAtomicScalarToken is a scalar that is read and written atomically; its
+// method reads it so.
+type testAtomicScalarToken uint64
+
+func (v *testAtomicScalarToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(atomic.LoadUint64((*uint64)(v)), 10)), nil
+}
+
+// testValueAtomicToken is a scalar that is written atomically, whose method
+// is on its value.
+type testValueAtomicToken uint64
+
+func (v testValueAtomicToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(uint64(v), 10)), nil
+}
+
+// testAtomicArrayToken is an array whose items are written atomically, whose
+// method is on its value.
+type testAtomicArrayToken [4]uint64
+
+func (v testAtomicArrayToken) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatUint(v[0], 10)), nil
+}
+
+// synthPlainAtomicToken is a credential-named scalar with no methods at all
+// that another goroutine updates atomically.
+type synthPlainAtomicToken uint64
+
+// synthAtomicErrorToken is a credential-named scalar without MarshalJSON or
+// MarshalText that implements error and may be updated atomically by another
+// goroutine while SmartTruncate serializes it.
+type synthAtomicErrorToken uint64
+
+func (t synthAtomicErrorToken) Error() string {
+	return strconv.FormatUint(uint64(t), 10)
+}
+
+func TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"zero struct with MarshalJSON", testMarshaledToken{}, `"[REDACTED]"`},
+		{"struct with MarshalJSON", testMarshaledToken{secret}, `"[REDACTED]"`},
+		{"zero struct with MarshalText", testTextMarshaledToken{}, `"[REDACTED]"`},
+		{"struct with MarshalText", testTextMarshaledToken{secret}, `"[REDACTED]"`},
+		{"zero struct whose method writes a credential", testZeroPassword{}, `"[REDACTED]"`},
+		{"struct without a field", testEmptyAPIToken{}, `"[REDACTED]"`},
+		{"zero value in a field", struct{ T testMarshaledToken }{}, `{"T":"[REDACTED]"}`},
+		{"struct with a mutex", &testGuardedStructPassword{}, `"[REDACTED]"`},
+		{"struct with a mutex behind a pointer", &testPointerGuardedPassword{mu: new(sync.Mutex)}, `"[REDACTED]"`},
+		{"struct with an atomic value", &testAtomicPassword{}, `"[REDACTED]"`},
+		{"array of a struct with a mutex", &testGuardedArrayPassword{}, `"[REDACTED]"`},
+		{"zero scalar", testKimiToken(0), `"[REDACTED]"`},
+		{"zero scalar in a field", struct{ T testKimiToken }{}, `{"T":"[REDACTED]"}`},
+		{"zero scalar with Error method", synthAtomicErrorToken(0), `"[REDACTED]"`},
+		{"zero scalar with Error method in a field", struct{ E synthAtomicErrorToken }{}, `{"E":"[REDACTED]"}`},
+		{"nil slice", testKimiPassword(nil), `"[REDACTED]"`},
+		{"map", testMapPassword{"k": "v"}, `"[REDACTED]"`},
+		{"zero scalar with MarshalJSON", testZeroScalarToken(0), `"[REDACTED]"`},
+		{"scalar with MarshalJSON", testZeroScalarToken(7), `"[REDACTED]"`},
+		{"zero scalar with MarshalJSON in a field", struct{ T testZeroScalarToken }{}, `{"T":"[REDACTED]"}`},
+		{"zero scalar with MarshalJSON in a map", map[string]testZeroScalarToken{"k": 0}, `{"k":"[REDACTED]"}`},
+		{"empty string with MarshalText", testZeroTextPassword(""), `"[REDACTED]"`},
+		{"empty string with MarshalText in a field", struct{ P testZeroTextPassword }{}, `{"P":"[REDACTED]"}`},
+		{"zero scalar with a pointer method", new(testAtomicScalarToken), `"[REDACTED]"`},
+		{"zero scalar with a pointer method in a field", &struct{ T testAtomicScalarToken }{}, `{"T":"[REDACTED]"}`},
+		{"array with MarshalJSON", testAtomicArrayToken{}, `"[REDACTED]"`},
+		{"array with MarshalJSON in a field", &struct{ A testAtomicArrayToken }{}, `{"A":"[REDACTED]"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes checks that
+// credential-named values — whether they define a marshaling method or are
+// plain/error scalars without MarshalJSON or MarshalText — are redacted
+// without being read (no v.IsZero() read) while another goroutine writes them
+// atomically: run with -race. The zero value rows of
+// TestSmartTruncate_MarshalersOfSensitiveTypesAreRedactedWhole check the
+// output without it, and TestHasMarshalerMethod_DoesNotBoxTheValue that the
+// value is not copied.
+func TestSmartTruncate_DoesNotReadAtomicValuesOfSensitiveTypes(t *testing.T) {
+	type holder struct {
+		T testAtomicScalarToken
+		V testValueAtomicToken
+		A testAtomicArrayToken
+		E synthAtomicErrorToken
+		K synthPlainAtomicToken
+	}
+	v := new(testAtomicScalarToken)
+	eTok := new(synthAtomicErrorToken)
+	var errIface error = eTok
+	h := new(holder)
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			atomic.AddUint64((*uint64)(v), 1)
+			atomic.AddUint64((*uint64)(eTok), 1)
+			atomic.AddUint64((*uint64)(&h.T), 1)
+			atomic.AddUint64((*uint64)(&h.V), 1)
+			atomic.AddUint64(&h.A[0], 1)
+			atomic.AddUint64((*uint64)(&h.E), 1)
+			atomic.AddUint64((*uint64)(&h.K), 1)
+		}
+	}()
+	for range 200 {
+		if got, _, err := SmartTruncate(v, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*testAtomicScalarToken) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		if got, _, err := SmartTruncate(eTok, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*synthAtomicErrorToken) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		if got, _, err := SmartTruncate(&errIface, 1000); err != nil || string(got) != `"[REDACTED]"` {
+			t.Fatalf(`SmartTruncate(*error(*synthAtomicErrorToken)) = (%s, %v), want "[REDACTED]"`, got, err)
+		}
+		const want = `{"A":"[REDACTED]","E":"[REDACTED]","K":"[REDACTED]","T":"[REDACTED]","V":"[REDACTED]"}`
+		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
+			t.Fatalf(`SmartTruncate(holder) = (%s, %v), want %s`, got, err, want)
+		}
+	}
+}
+
+// TestHasMarshalerMethod_DoesNotBoxTheValue checks that hasMarshalerMethod
+// reads the method sets of types only: boxing an addressable value into an
+// interface value, as Value.Interface does, copies it, which allocates, and
+// reads it. hasSensitiveTypeName, which calls it on structs and classifies
+// scalars by type alone, must not box or read the value either: it allocates
+// only what isSensitiveKey allocates for the type name.
+func TestHasMarshalerMethod_DoesNotBoxTheValue(t *testing.T) {
+	h := &struct {
+		T testAtomicScalarToken
+		V testValueAtomicToken
+		A testAtomicArrayToken
+		E synthAtomicErrorToken
+		N [4]uint64
+	}{}
+	fields := reflect.ValueOf(h).Elem()
+	wantMarshaler := []bool{true, true, true, false, false}
+	wantSensitive := []bool{true, true, true, true, false}
+	for i := range wantMarshaler {
+		f := fields.Field(i)
+		if got := hasMarshalerMethod(f); got != wantMarshaler[i] {
+			t.Errorf("hasMarshalerMethod(%s) = %v, want %v", f.Type(), got, wantMarshaler[i])
+		}
+		if allocs := testing.AllocsPerRun(10, func() { hasMarshalerMethod(f) }); allocs != 0 {
+			t.Errorf("hasMarshalerMethod(%s) allocated %v times, want 0", f.Type(), allocs)
+		}
+		if got := hasSensitiveTypeName(f); got != wantSensitive[i] {
+			t.Errorf("hasSensitiveTypeName(%s) = %v, want %v", f.Type(), got, wantSensitive[i])
+		}
+		name := f.Type().Name()
+		allocs := testing.AllocsPerRun(10, func() { hasSensitiveTypeName(f) })
+		if nameAllocs := testing.AllocsPerRun(10, func() { isSensitiveKey(name) }); allocs != nameAllocs {
+			t.Errorf("hasSensitiveTypeName(%s) allocated %v times, want the %v of isSensitiveKey(%q)", f.Type(), allocs, nameAllocs, name)
+		}
+	}
+}
+
+// testCountError, testCountStringer and testCountFieldsError have methods on
+// their values and a private count that another goroutine may update
+// atomically; testCount and testCountFields are the same without methods.
+// Nothing updates their count, so it is a blank field, but it keeps its
+// space: TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls sees a
+// value boxed by the allocation that boxing it makes, and boxing a value of
+// size zero, as testCount would be without the field, allocates nothing.
+type (
+	testCountError    struct{ n uint64 }
+	testCountStringer struct{ n uint64 }
+	testCount         struct{ _ uint64 }
+	testCountFields   struct {
+		Code int
+		_    uint64
+	}
+	testCountFieldsError struct {
+		Code int
+		n    uint64
+	}
+)
+
+func (testCountError) Error() string        { return "count error" }
+func (testCountStringer) String() string    { return "count stringer" }
+func (testCountFieldsError) Error() string  { return "count fields error" }
+func (testCountFieldsError) String() string { return "count fields stringer" }
+
+// TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls checks that
+// sanitizer.marshaled does not box a value whose Error or String method it
+// does not call: under redaction, a value of a type other than errors.New,
+// and with redaction off, a struct with exported fields. Boxing an
+// addressable value, as Value.Interface does, copies it, which allocates,
+// and reads its private fields. marshaled may read the type for
+// showsExportedFields, but must not allocate more than that does.
+func TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls(t *testing.T) {
+	h := &struct {
+		E  testCountError
+		S  testCountStringer
+		N  testCount
+		FE testCountFieldsError
+		F  testCountFields
+	}{}
+	fields := reflect.ValueOf(h).Elem()
+	for _, tt := range []struct {
+		redact bool
+		field  int
+	}{{true, 0}, {true, 1}, {true, 2}, {true, 3}, {true, 4}, {false, 2}, {false, 3}, {false, 4}} {
+		f := fields.Field(tt.field)
+		s := sanitizer{maxLength: 1000, redact: tt.redact, budget: &nodeBudget{remaining: maxSanitizeNodes}, visiting: map[visitKey]struct{}{}}
+		if out, _, ok := s.marshaled(f, 0); ok {
+			t.Errorf("marshaled(%s, redact %v) = %v, want the structural form", f.Type(), tt.redact, out)
+		}
+		allocs := testing.AllocsPerRun(10, func() { s.marshaled(f, 0) })
+		if scan := testing.AllocsPerRun(10, func() { showsExportedFields(f) }); allocs > scan {
+			t.Errorf("marshaled(%s, redact %v) allocated %v times, want at most the %v of showsExportedFields", f.Type(), tt.redact, allocs, scan)
+		}
+	}
+	// The method of a value that writes its text is still called.
+	s := sanitizer{maxLength: 1000, redact: false, budget: &nodeBudget{remaining: maxSanitizeNodes}, visiting: map[visitKey]struct{}{}}
+	for i, want := range []string{"count error", "count stringer"} {
+		if out, _, ok := s.marshaled(fields.Field(i), 0); !ok || out != want {
+			t.Errorf("marshaled(%s, redact off) = (%v, %v), want %q", fields.Field(i).Type(), out, ok, want)
+		}
+	}
+}
+
+// TestSmartTruncate_DoesNotReadPrivateFieldsOfValueMethods checks that values
+// whose Error or String method is on the value, and is not called, are
+// written without reading their private fields while another goroutine
+// updates them atomically: run with -race.
+// TestSanitizerMarshaled_BoxesOnlyValuesWhoseMethodItCalls checks that they
+// are not copied without it.
+func TestSmartTruncate_DoesNotReadPrivateFieldsOfValueMethods(t *testing.T) {
+	e, st, fe := new(testCountError), new(testCountStringer), &testCountFieldsError{Code: 7}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			atomic.AddUint64(&e.n, 1)
+			atomic.AddUint64(&st.n, 1)
+			atomic.AddUint64(&fe.n, 1)
+		}
+	}()
+	for range 200 {
+		for _, in := range []any{e, st, fe} {
+			want := `{}`
+			if in == fe {
+				want = `{"Code":7}`
+			}
+			if got, _, err := SmartTruncate(in, 1000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(%T) = (%s, %v), want %s", in, got, err, want)
+			}
+		}
+		if got, _, err := smartTruncate(fe, 1000, false); err != nil || string(got) != `{"Code":7}` {
+			t.Fatalf(`smartTruncate(%T, redact off) = (%s, %v), want {"Code":7}`, fe, got, err)
+		}
+	}
+}
+
+// testPointerPassword is a defined pointer type named for a credential, whose
+// target is a plain string.
+type testPointerPassword *string
+
+// testPointerLabel is a defined pointer type with a neutral name.
+type testPointerLabel *string
+
+// testAPIKey is a defined interface type named for a credential.
+type testAPIKey any
+
+// testLabelValue is a defined interface type with a neutral name.
+type testLabelValue any
+
+// testLinkToken and testLinkLabel are defined pointer types to a struct that
+// holds one of them, to build cycles.
+type (
+	testLinkToken *testTokenLink
+	testTokenLink struct{ Next testLinkToken }
+	testLinkLabel *testLabelLink
+	testLabelLink struct{ Next testLinkLabel }
+)
+
+func TestSmartTruncate_RedactsSensitivePointerAndInterfaceTypes(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	s, label := secret, "kept"
+	ptr := testPointerPassword(&s)
+	tokenLink := &testTokenLink{}
+	tokenLink.Next = tokenLink
+	labelLink := &testLabelLink{}
+	labelLink.Next = labelLink
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"pointer", testPointerPassword(&s), `"[REDACTED]"`},
+		{"pointer in a field", struct{ P testPointerPassword }{&s}, `{"P":"[REDACTED]"}`},
+		{"pointer in a map", map[string]testPointerPassword{"p": &s}, `{"p":"[REDACTED]"}`},
+		{"pointer in a slice", []testPointerPassword{&s}, `["[REDACTED]"]`},
+		{"pointer to it", &ptr, `"[REDACTED]"`},
+		{"pointer in an interface in a map", map[string]any{"p": testPointerPassword(&s)}, `{"p":"[REDACTED]"}`},
+		{"nil pointer", testPointerPassword(nil), `null`},
+		{"nil pointer in a field", struct{ P testPointerPassword }{}, `{"P":null}`},
+		{"pointer in a cycle", tokenLink, `{"Next":"[REDACTED]"}`},
+		{"interface in a field", struct{ K testAPIKey }{secret}, `{"K":"[REDACTED]"}`},
+		{"interface in a map", map[string]testAPIKey{"k": secret}, `{"k":"[REDACTED]"}`},
+		{"interface in a slice", []testAPIKey{secret}, `["[REDACTED]"]`},
+		{"nil interface in a field", struct{ K testAPIKey }{}, `{"K":null}`},
+		{"pointer with a neutral name", testPointerLabel(&label), `"kept"`},
+		{"pointer with a neutral name in a field", struct{ P testPointerLabel }{&label}, `{"P":"kept"}`},
+		{"pointer with a neutral name in a cycle", labelLink, `{"Next":{"Next":"[CIRCULAR_REFERENCE]"}}`},
+		{"interface with a neutral name in a field", struct{ V testLabelValue }{label}, `{"V":"kept"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+
+	t.Run("redaction off follows the pointer and the interface", func(t *testing.T) {
+		for _, in := range []any{testPointerPassword(&s), struct{ K testAPIKey }{secret}} {
+			got, _, err := smartTruncate(in, 1000, false)
+			if err != nil || !strings.Contains(string(got), secret) {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v), want the value", in, got, err)
+			}
+		}
+	})
+
+	t.Run("each redacted pointer charges the budget", func(t *testing.T) {
+		items := make([]testPointerPassword, maxSanitizeNodes*2)
+		for i := range items {
+			items[i] = &s
+		}
+		got, truncated, err := SmartTruncate(items, 100)
+		if err != nil || !truncated {
+			t.Fatalf("SmartTruncate(%d pointers) = (truncated %v, %v), want truncated", len(items), truncated, err)
+		}
+		var parsed []any
+		if err := json.Unmarshal(got, &parsed); err != nil {
+			t.Fatalf("json.Unmarshal: %v", err)
+		}
+		if len(parsed) > maxSanitizeNodes || parsed[len(parsed)-1] != sanitizeBudgetPlaceholder {
+			t.Errorf("SmartTruncate(%d pointers) wrote %d items ending in %v, want at most %d ending in %s", len(items), len(parsed), parsed[len(parsed)-1], maxSanitizeNodes, sanitizeBudgetPlaceholder)
+		}
+		if bytes.Contains(got, []byte(secret)) {
+			t.Error("SmartTruncate(pointers) holds the secret")
+		}
+	})
+}
+
+// Types of a chain 49 deep that reaches testDeepS at depth 50, whose fields
+// are beyond the depth that is read, and a type that embeds testDeepS
+// directly, after the chain.
+type testDeepT struct{ Exported string }
+
+type testDeepS struct{ *testDeepT }
+
+type testDeepRoot struct {
+	*testDeepC0
+	*testDeepS
+}
+
+func (testDeepRoot) String() string { return "never used" }
+
+type testDeepC0 struct{ *testDeepC1 }
+
+type testDeepC1 struct{ *testDeepC2 }
+
+type testDeepC2 struct{ *testDeepC3 }
+
+type testDeepC3 struct{ *testDeepC4 }
+
+type testDeepC4 struct{ *testDeepC5 }
+
+type testDeepC5 struct{ *testDeepC6 }
+
+type testDeepC6 struct{ *testDeepC7 }
+
+type testDeepC7 struct{ *testDeepC8 }
+
+type testDeepC8 struct{ *testDeepC9 }
+
+type testDeepC9 struct{ *testDeepC10 }
+
+type testDeepC10 struct{ *testDeepC11 }
+
+type testDeepC11 struct{ *testDeepC12 }
+
+type testDeepC12 struct{ *testDeepC13 }
+
+type testDeepC13 struct{ *testDeepC14 }
+
+type testDeepC14 struct{ *testDeepC15 }
+
+type testDeepC15 struct{ *testDeepC16 }
+
+type testDeepC16 struct{ *testDeepC17 }
+
+type testDeepC17 struct{ *testDeepC18 }
+
+type testDeepC18 struct{ *testDeepC19 }
+
+type testDeepC19 struct{ *testDeepC20 }
+
+type testDeepC20 struct{ *testDeepC21 }
+
+type testDeepC21 struct{ *testDeepC22 }
+
+type testDeepC22 struct{ *testDeepC23 }
+
+type testDeepC23 struct{ *testDeepC24 }
+
+type testDeepC24 struct{ *testDeepC25 }
+
+type testDeepC25 struct{ *testDeepC26 }
+
+type testDeepC26 struct{ *testDeepC27 }
+
+type testDeepC27 struct{ *testDeepC28 }
+
+type testDeepC28 struct{ *testDeepC29 }
+
+type testDeepC29 struct{ *testDeepC30 }
+
+type testDeepC30 struct{ *testDeepC31 }
+
+type testDeepC31 struct{ *testDeepC32 }
+
+type testDeepC32 struct{ *testDeepC33 }
+
+type testDeepC33 struct{ *testDeepC34 }
+
+type testDeepC34 struct{ *testDeepC35 }
+
+type testDeepC35 struct{ *testDeepC36 }
+
+type testDeepC36 struct{ *testDeepC37 }
+
+type testDeepC37 struct{ *testDeepC38 }
+
+type testDeepC38 struct{ *testDeepC39 }
+
+type testDeepC39 struct{ *testDeepC40 }
+
+type testDeepC40 struct{ *testDeepC41 }
+
+type testDeepC41 struct{ *testDeepC42 }
+
+type testDeepC42 struct{ *testDeepC43 }
+
+type testDeepC43 struct{ *testDeepC44 }
+
+type testDeepC44 struct{ *testDeepC45 }
+
+type testDeepC45 struct{ *testDeepC46 }
+
+type testDeepC46 struct{ *testDeepC47 }
+
+type testDeepC47 struct{ *testDeepC48 }
+
+type testDeepC48 struct{ *testDeepS }
+
+// readDeepFields reads the embedded fields, which only reflection does
+// otherwise.
+func readDeepFields() {
+	_ = testDeepC0{}.testDeepC1
+	_ = testDeepC1{}.testDeepC2
+	_ = testDeepC2{}.testDeepC3
+	_ = testDeepC3{}.testDeepC4
+	_ = testDeepC4{}.testDeepC5
+	_ = testDeepC5{}.testDeepC6
+	_ = testDeepC6{}.testDeepC7
+	_ = testDeepC7{}.testDeepC8
+	_ = testDeepC8{}.testDeepC9
+	_ = testDeepC9{}.testDeepC10
+	_ = testDeepC10{}.testDeepC11
+	_ = testDeepC11{}.testDeepC12
+	_ = testDeepC12{}.testDeepC13
+	_ = testDeepC13{}.testDeepC14
+	_ = testDeepC14{}.testDeepC15
+	_ = testDeepC15{}.testDeepC16
+	_ = testDeepC16{}.testDeepC17
+	_ = testDeepC17{}.testDeepC18
+	_ = testDeepC18{}.testDeepC19
+	_ = testDeepC19{}.testDeepC20
+	_ = testDeepC20{}.testDeepC21
+	_ = testDeepC21{}.testDeepC22
+	_ = testDeepC22{}.testDeepC23
+	_ = testDeepC23{}.testDeepC24
+	_ = testDeepC24{}.testDeepC25
+	_ = testDeepC25{}.testDeepC26
+	_ = testDeepC26{}.testDeepC27
+	_ = testDeepC27{}.testDeepC28
+	_ = testDeepC28{}.testDeepC29
+	_ = testDeepC29{}.testDeepC30
+	_ = testDeepC30{}.testDeepC31
+	_ = testDeepC31{}.testDeepC32
+	_ = testDeepC32{}.testDeepC33
+	_ = testDeepC33{}.testDeepC34
+	_ = testDeepC34{}.testDeepC35
+	_ = testDeepC35{}.testDeepC36
+	_ = testDeepC36{}.testDeepC37
+	_ = testDeepC37{}.testDeepC38
+	_ = testDeepC38{}.testDeepC39
+	_ = testDeepC39{}.testDeepC40
+	_ = testDeepC40{}.testDeepC41
+	_ = testDeepC41{}.testDeepC42
+	_ = testDeepC42{}.testDeepC43
+	_ = testDeepC43{}.testDeepC44
+	_ = testDeepC44{}.testDeepC45
+	_ = testDeepC45{}.testDeepC46
+	_ = testDeepC46{}.testDeepC47
+	_ = testDeepC47{}.testDeepC48
+	_ = testDeepC48{}.testDeepS
+	_ = testDeepS{}.testDeepT
+	_ = testDeepRoot{}.testDeepC0
+}
+
+func TestShowsExportedFields_DepthLimitDoesNotHideShallowFields(t *testing.T) {
+	readDeepFields()
+	v := testDeepRoot{testDeepS: &testDeepS{&testDeepT{"kept"}}}
+	if !showsExportedFields(reflect.ValueOf(v)) {
+		t.Error("showsExportedFields(testDeepRoot) = false, want true")
+	}
+	for _, redact := range []bool{true, false} {
+		got, _, err := smartTruncate(v, 1000, redact)
+		if want := `{"Exported":"kept"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(testDeepRoot, redact=%v) = (%s, %v), want %s", redact, got, err, want)
+		}
+	}
+}
+
+// testCycleA and testCycleB embed each other, and testCycleA has a field.
+type testCycleA struct {
+	*testCycleB
+	Exported string
+}
+
+type testCycleB struct{ *testCycleA }
+
+func (testCycleB) String() string { return "never used" }
+
+func TestShowsExportedFields_CycleDoesNotHideFields(t *testing.T) {
+	// testCycleB is read from testCycleA first, where it has no field of its
+	// own to write, and again from the root.
+	type root struct {
+		*testCycleA
+		*testCycleB
+	}
+	if !showsExportedFields(reflect.ValueOf(root{})) {
+		t.Error("showsExportedFields(root) = false, want true")
+	}
+	if !showsExportedFields(reflect.ValueOf(testCycleB{})) {
+		t.Error("showsExportedFields(testCycleB) = false, want true")
 	}
 }

@@ -27,6 +27,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -34,6 +35,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -3142,18 +3144,65 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			text: `failed: {Credentials:token=" SECRET123"}`,
 			want: `failed: {Credentials:token="[REDACTED]"}`,
 		},
+		{
+			name: "credential keys with repeated and mixed separators",
+			text: "failed: api__key=SECRET123 stripe.api..key=SECRET123 OPENAI_API__KEY=SECRET123 foo.auth..code=SECRET123",
+			want: "failed: api__key=[REDACTED] stripe.api..key=[REDACTED] OPENAI_API__KEY=[REDACTED] foo.auth..code=[REDACTED]",
+		},
+		{
+			name: "joined shell password containing contraction-shaped words",
+			text: `export DB_PASSWORD=a:'s correct SECRET123 battery's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "quoted credential continued by plus sign",
+			text: `export DB_PASSWORD="prefix"+SECRET123`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "adjacent compound credential assignments",
+			text: `DB_PASSWORD="benign"GITHUB_TOKEN="SECRET123"`,
+			want: `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`,
+		},
+		{
+			name: "closed shell password with semicolon between contraction words",
+			text: `export DB_PASSWORD=a:'s correct staple SECRET123; the user's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "closed shell password with semicolon and following command",
+			text: `export DB_PASSWORD=a:'s correct; SECRET123 battery's; echo ok`,
+			want: `export DB_PASSWORD=[REDACTED]; echo ok`,
+		},
+		{
+			name: "unclosed password with semicolon after contraction prefix",
+			text: `password=a:'s correct; SECRET123 battery`,
+			want: `password=[REDACTED]`,
+		},
+		{
+			name: "compound camelCase and dotted keys with trailing separators",
+			text: `DB_PASSWORD_=SECRET123 GITHUB_TOKEN_="SECRET123" OpenAIAPIKey_=SECRET123 stripe.api..key_=SECRET123`,
+			want: `DB_PASSWORD_=[REDACTED] GITHUB_TOKEN_="[REDACTED]" OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED]`,
+		},
+		{
+			name: "YAML nested compound keys with trailing separators",
+			text: "credentials:\n  DB_PASSWORD_: SECRET123\n  stripe.api..key_: SECRET123\n  region: us",
+			want: "credentials:\n  DB_PASSWORD_:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			var errs callbackErrors
 			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
 			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
-			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, errors.New(tt.text)))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, map[string]any{"input": tt.text}, errors.New(tt.text)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{Model: "gemini-test"}, errors.New(tt.text)))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
 			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, tt.want)
@@ -3161,14 +3210,295 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, tt.want)
 			}
+			toolStartRow := onlyRowOfType(t, rows, EventToolStarting)
+			if got, _ := lookup(jsonObjectColumn(t, toolStartRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, tt.want)
+			}
 			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
 			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != tt.want {
 				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, tt.want)
 			}
-			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+			toolErrRow := onlyRowOfType(t, rows, EventToolError)
+			if got := toolErrRow["error_message"]; got != tt.want {
 				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
 			}
+			if got, _ := lookup(jsonObjectColumn(t, toolErrRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, tt.want)
+			}
+			if got := onlyRowOfType(t, rows, EventLLMError)["error_message"]; got != tt.want {
+				t.Errorf("LLM_ERROR error_message = %v, want %q", got, tt.want)
+			}
 			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactionRegressions checks, through the user message and model error
+// callbacks, that a dotted value that ends in a compound key name, which is
+// redacted with the value after that name, a quote inside a bare value, a
+// dotted OAuth or credential name in free text, a quote after a Python
+// string prefix, a dotted page access token, including one after a long run
+// of dots, and a quoted credential that its closing quote runs into, whether
+// padding, a letter, another quote, a name and a delimiter, a port or the next
+// pair, of one word or of several that start with whitespace, or joined to a
+// string of the other kind of quote, as a shell joins them, keep their
+// credentials out of content_parts and error_message, and that a quote inside
+// a bare value does not extend it over the next pair or the prose after it,
+// nor is a dotted pagination cursor or the pair that follows a quoted
+// credential redacted with it.
+func TestRedactionRegressions(t *testing.T) {
+	for _, tt := range []struct {
+		name, in, secret, want string
+	}{
+		{"dotted value that ends in a compound key name", "password=Summer.2024Password: dial tcp", "Summer.2024Password", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before another pair", "token=abc:'s note password='SECRET VALUE' rest", "SECRET VALUE", "token=[REDACTED] note password='[REDACTED]' rest"},
+		{"quote inside an outer-quoted bare value before prose", `failed: "token=abc:'s"; the user's request`, "abc", `failed: "token=[REDACTED]; the user's request`},
+		{"dotted OAuth name", "oauth2.authorization.code=SYNTHETIC_OAUTH_CODE", "SYNTHETIC_OAUTH_CODE", "oauth2.authorization.code=[REDACTED]"},
+		{"dotted credential name", "stripe.api.key=SYNTHETIC_STRIPE_KEY", "SYNTHETIC_STRIPE_KEY", "stripe.api.key=[REDACTED]"},
+		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before a pair of another key", "token=abc:'s id=' 123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "token=[REDACTED] id=' 123' password=[REDACTED]"},
+		{"quote after a Python string prefix", "b'note=123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "b'note=123' password=[REDACTED]"},
+		{"bearer token padded with a key name and a delimiter", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"bearer token that a letter runs into", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"shell value that a word runs into", `export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, "R8_SYNTHETIC_CREDENTIAL_49173", `export "DB_PASSWORD"=[REDACTED]`},
+		{"dotted page access tokens", "fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN home.page_token: SYNTHETIC_PAGE_ACCESS_TOKEN", "SYNTHETIC_PAGE_ACCESS_TOKEN", "fb.page_token=[REDACTED] home.page_token:[REDACTED]"},
+		{"dotted cursors beside a dotted page access token", "x.next.page.token=cursor-1 fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN prev.page.token: cursor-0", "SYNTHETIC_PAGE_ACCESS_TOKEN", "x.next.page.token=cursor-1 fb.page_token=[REDACTED] prev.page.token: cursor-0"},
+		{"nested quoted value that a letter runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800"x`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested quoted value that a quote runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800""`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested single-quoted value that a letter runs into", `token=a: 'prefix R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
+		{"quoted value before the pair of a credential key", `password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token="[REDACTED]" rest`},
+		{"quoted value before the pair of another key", `password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"user="bob" rest`},
+		{"bearer token of several words that a letter runs into", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
+		{"shell value of several words that a letter runs into", `export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `export "DB_PASSWORD"=[REDACTED]`},
+		{"JSON key value of several words that a letter runs into", `failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `failed: "password":"[REDACTED]"`},
+		{"quoted value that a name and a port run into", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED]"},
+		{"quoted value that a name and a delimiter run into", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802= rest`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED] rest"},
+		{"nested quoted value after a contraction that a letter runs into", `token=a:'s R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
+		{"value joined from strings of both kinds of quote", `DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", `DB_PASSWORD='[REDACTED]'`},
+		{"quoted value that a string of the other kind is joined to", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED]"},
+		{"dotted page access token after a long run of dots", "a" + strings.Repeat(".", 200) + "page_token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "a" + strings.Repeat(".", 200) + "page_token=[REDACTED]"},
+		{"quoted value followed by standalone key and spaced value", `password="benign"token: R8_SYNTHETIC_SECRET_4700`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token:[REDACTED]`},
+		{"quoted value followed by standalone key and quoted multi-word value", `password="benign"token: "R8_SYNTHETIC_SECRET_4700 R8_SYNTHETIC_SECRET_4701"`, "R8_SYNTHETIC_SECRET_4701", `password="[REDACTED]"token:"[REDACTED]"`},
+		{"quoted value followed by compound credential tail and port", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, "R8_SYNTHETIC_TAIL_TOKEN", "password=[REDACTED]"},
+		{"space-led multi-word bearer token before quoted prose", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired in "prod"`, "R8_SYNTHETIC_SECRET_4801", `Bearer [REDACTED] in "prod"`},
+		{"space-led multi-word value inside single-quoted shell command", `cmd='export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"'`, "R8_SYNTHETIC_SECRET_4801", `cmd='export "DB_PASSWORD"=[REDACTED]; echo "done"'`},
+		{"nested contraction-like single-quoted credential running into 's", `token=a:'s R8_SECRET_ABCD's`, "R8_SECRET_ABCD", "token=[REDACTED]"},
+		{"bearer value ending in key delimiter before quoted second value", `Bearer "R8_SYNTHETIC_SECRET_4800_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
+		{"bare value ending in nested single-quoted key delimiter before quoted value", `password=a:'x_token=' "R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "password=[REDACTED]"},
+		{"joined unclosed quote with multi-word tail", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, "R8_SYNTHETIC_SECRET_4802", "password=[REDACTED]"},
+		{"prose apostrophe after colon before bearer credential", `token=abc:'s note Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note Bearer [REDACTED]`},
+		{"prose apostrophe after colon before single-quoted key", `token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note 'password':[REDACTED]`},
+		{"two-word page access token before long separator run", "fb.page" + strings.Repeat(".", 130) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 130) + "token=[REDACTED]"},
+		{"two-word page access token cut inside page by bound", "fb.page" + strings.Repeat(".", 125) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 125) + "token=[REDACTED]"},
+		{"repeated underscore credential key in free text", "api__key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "api__key=[REDACTED]"},
+		{"repeated dot compound credential key in free text", "stripe.api..key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "stripe.api..key=[REDACTED]"},
+		{"repeated dot auth code key in free text", "foo.auth..code=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "foo.auth..code=[REDACTED]"},
+		{"joined shell password with contraction-like words", `export DB_PASSWORD=a:'s correct horse battery's`, "correct horse", `export DB_PASSWORD=[REDACTED]`},
+		{"unclosed shell password after contraction-like prefix", `password=a:'s correct horse battery`, "correct horse", `password=[REDACTED]`},
+		{"plus-continued quoted credential value", `export DB_PASSWORD="prefix"+SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export DB_PASSWORD=[REDACTED]`},
+		{"slash-continued quoted credential value", `export "DB_PASSWORD"="prefix"/SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export "DB_PASSWORD"=[REDACTED]`},
+		{"adjacent compound credential assignments preserve both keys", `DB_PASSWORD="benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, "SYNTHETIC_FOLLOWING_6401", `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		{"closed shell password with semicolon between contraction words", `export DB_PASSWORD=a:'s correct staple horse; the user's`, "staple horse", `export DB_PASSWORD=[REDACTED]`},
+		{"closed shell password with semicolon before following command", `export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok`, "staple horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed shell password with semicolon after contraction prefix", `password=a:'s correct; horse battery`, "horse battery", `password=[REDACTED]`},
+		{"trailing separator compound keys beside trailing separator cursors", `page_token_=cursor-1 DB_PASSWORD_=SYNTHETIC_CREDENTIAL_7319 OpenAIAPIKey_=SYNTHETIC_CREDENTIAL_7319 stripe.api..key_=SYNTHETIC_CREDENTIAL_7319 next.page.token_=cursor-2`, "SYNTHETIC_CREDENTIAL_7319", `page_token_=cursor-1 DB_PASSWORD_=[REDACTED] OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED] next.page.token_=cursor-2`},
+		{"outer curly bracket around quoted shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; }`},
+		{"outer curly bracket around quoted password with inner closer and suffix", `failed: {password=a:'s} R12_SYNTHETIC_90517'suffix}`, "suffix", `failed: {password=[REDACTED]}`},
+		{"outer square bracket around quoted shell password with inner closer", `command: [ export DB_PASSWORD=a:'s] R12_SYNTHETIC_90517'; ]`, "R12_SYNTHETIC_90517", `command: [ export DB_PASSWORD=[REDACTED]; ]`},
+		{"outer curly bracket around unclosed shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]`},
+		{"outer curly bracket around quoted shell password before following command", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; echo ok; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; echo ok; }`},
+		{"intra-word underscore split compound password key", `DB_PASS_WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS_WORD=[REDACTED]`},
+		{"intra-word underscore split camelCase password key", `failed: dbPass_Word: R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `failed: dbPass_Word:[REDACTED]`},
+		{"intra-word underscore split dotted API key in JSON", `failed: {"stripe.api.k_ey": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {"stripe.api.k_ey":"[REDACTED]"}`},
+		{"intra-word double underscore split compound password key", `DB_PASS__WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS__WORD=[REDACTED]`},
+		{"intra-word split compound password key in YAML", "creds:\n  DB_PASS_WORD: R12_SYNTHETIC_90517", "R12_SYNTHETIC_90517", "creds:\n  DB_PASS_WORD:[REDACTED]"},
+		{"space-padded compound password key in JSON", `failed: {" DB_PASSWORD ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" DB_PASSWORD ":"[REDACTED]"}`},
+		{"space-padded camelCase password key in JSON", `failed: {" dbPassword ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" dbPassword ":"[REDACTED]"}`},
+		{"tab-padded compound password key in single-quoted dict", "failed: {'\tDB_PASSWORD\t': 'R12_SYNTHETIC_90517'}", "R12_SYNTHETIC_90517", "failed: {'\tDB_PASSWORD\t':'[REDACTED]'}"},
+		{"joined Bearer fragment inside contraction-led shell password", `export DB_PASSWORD=a:'s correct; horse Bearer '"R12_SYNTHETIC_7319"`, "correct; horse", `export DB_PASSWORD=[REDACTED]`},
+		{"joined single-quoted Bearer fragment inside shell password", `export DB_PASSWORD='my Bearer ''R12_SYNTHETIC_7319'; echo ok`, "R12_SYNTHETIC_7319", `export DB_PASSWORD='[REDACTED]'; echo ok`},
+		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]; echo 'done'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 5)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") {
+					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("%q: missing event row %s (seen %v)", tt.in, wantEvent, seen)
+				}
+			}
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			toolMsg, _ := onlyRowOfType(t, rows, EventToolError)["error_message"].(string)
+			msg, _ := onlyRowOfType(t, rows, EventLLMError)["error_message"].(string)
+			if strings.Contains(text, tt.secret) || strings.Contains(toolMsg, tt.secret) || strings.Contains(msg, tt.secret) {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, which hold %q", tt.in, text, toolMsg, msg, tt.secret)
+			}
+			if text != tt.want || toolMsg != tt.want || msg != tt.want {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, want %q", tt.in, text, toolMsg, msg, tt.want)
+			}
+		})
+	}
+}
+
+// TestUserinfoUserName checks that the user name of a url.Userinfo in a tool
+// argument, which may be the credential itself, as the token of a
+// token-authenticated git remote is, is redacted from a Go value as from a
+// string.
+func TestUserinfoUserName(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{"user name only", url.User("SECRETTOKEN")},
+		{"user name with a password", url.UserPassword("SECRETTOKEN", "x-oauth-basic")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			u := &url.URL{Scheme: "https", Host: "github.com", Path: "/o/r", User: tt.user}
+			var errs callbackErrors
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "clone"}, map[string]any{"remote": u, "remote_url": u.String()}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			b, _ := json.Marshal(jsonObjectColumn(t, onlyRowOfType(t, collectRows(t, requests, untilInvocationEnd), EventToolStarting), "content"))
+			if strings.Contains(string(b), "SECRETTOKEN") {
+				t.Errorf("content = %s, which holds the user name", b)
+			}
+		})
+	}
+}
+
+// guardedJob is an error whose Error method, promoted from the error it
+// embeds, is on the value, and whose other fields another goroutine updates
+// under a lock.
+type guardedJob struct {
+	error
+	mu       sync.Mutex
+	attempts int
+}
+
+// statusText is fmt.Stringer under an unexported name, so that a struct that
+// embeds it has no exported field.
+type statusText interface{ String() string }
+
+// guardedStatus is a fmt.Stringer like guardedJob.
+type guardedStatus struct {
+	statusText
+	mu      sync.Mutex
+	updates int
+}
+
+// TestFormatterDoesNotCopyGuardedState checks that writing a tool result
+// that holds pointers to values whose Error or String method is on the value
+// does not copy the values, which reads the fields that another goroutine
+// updates under a lock, with redaction on or off: run with -race.
+func TestFormatterDoesNotCopyGuardedState(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		disable    bool
+		job, state string
+	}{
+		{"redaction on", false, `{}`, `{}`},
+		{"redaction off", true, `"job failed"`, `"1s"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &guardedJob{error: errors.New("job failed")}
+			s := &guardedStatus{statusText: time.Second}
+			stop, done := make(chan struct{}), make(chan struct{})
+			defer func() {
+				close(stop)
+				<-done
+			}()
+			go func() {
+				defer close(done)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						j.mu.Lock()
+						j.attempts++
+						j.mu.Unlock()
+						s.mu.Lock()
+						s.updates++
+						s.mu.Unlock()
+					}
+				}
+			}()
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.DisableSensitiveKeyRedaction = tt.disable })
+			for range 20 {
+				if _, err := p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{}, map[string]any{"job": j, "status": s}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.AfterRunCallback()(mCtx)
+			rows := rowsOfType(collectRows(t, requests, untilInvocationEnd), EventToolCompleted)
+			if len(rows) != 20 {
+				t.Fatalf("got %d TOOL_COMPLETED rows, want 20", len(rows))
+			}
+			for _, row := range rows {
+				content := jsonObjectColumn(t, row, "content")
+				checkJSONAt(t, content, tt.job, "result", "job")
+				checkJSONAt(t, content, tt.state, "result", "status")
+			}
+		})
+	}
+}
+
+// TestEscapedWhitespaceAfterBearerInJSONText checks that a Bearer token after
+// a Unicode space in JSON text, which the text writes as an escape or which
+// the text is written back with as an escape, is kept out of every row, as a
+// text part, a string tool argument or an error message.
+func TestEscapedWhitespaceAfterBearerInJSONText(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	for _, tt := range []struct{ name, text string }{
+		{"escaped no-break space", `{"h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"escaped ideographic space", `{"h":"Bearer\u3000SYNTHETIC_SECRET"}`},
+		{"escaped line separator", `{"h":"Bearer\u2028SYNTHETIC_SECRET"}`},
+		{"escaped no-break space beside a redacted key", `{"password":"x","h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"raw line separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2028SYNTHETIC_SECRET\"}"},
+		{"raw paragraph separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2029SYNTHETIC_SECRET\"}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			for _, row := range collectRows(t, requests, untilInvocationEnd) {
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
 					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
 				}
@@ -3206,8 +3536,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 		wantContent string
 		// wantResponse is the AGENT_RESPONSE content.response, if it is not
 		// "text: '" + the content + "'". The response is redacted again
-		// once the text is quoted, and a redacted value that runs to the
-		// end of the text then also takes the closing "'".
+		// once the text is quoted, and a multiline redacted value whose
+		// newline resets quote tracking then also takes the closing "'".
 		wantResponse string
 	}{
 		{
@@ -3221,10 +3551,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `login failed: password="[REDACTED]"`,
 		},
 		{
-			name:         "API key before a wrapped error",
-			text:         "api_key=prodSECRET123-api-key: permission denied",
-			want:         "api_key=[REDACTED]",
-			wantResponse: "text: 'api_key=[REDACTED]",
+			name: "API key before a wrapped error",
+			text: "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
 		},
 		{
 			name: "token in prose",
@@ -3252,10 +3581,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `password="[REDACTED]" tcp`,
 		},
 		{
-			name:         "temp: key on the line of credentials",
-			text:         "credentials: temp:foo: SECRET123",
-			want:         "credentials:[REDACTED]",
-			wantResponse: "text: 'credentials:[REDACTED]",
+			name: "temp: key on the line of credentials",
+			text: "credentials: temp:foo: SECRET123",
+			want: "credentials:[REDACTED]",
 		},
 		{
 			name:         "temp: key on an indented line under credentials",
@@ -3540,11 +3868,10 @@ func TestValueEndingInKeyName(t *testing.T) {
 			wantContent: redactedSensitiveTextPlaceholder,
 		},
 		{
-			name:         "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
-			text:         "failed: {Password:abc-token: }\bSECRET123",
-			want:         "failed: {Password:[REDACTED]",
-			wantContent:  "failed: {Password:[REDACTED]",
-			wantResponse: "text: 'failed: {Password:[REDACTED]",
+			name:        "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			text:        "failed: {Password:abc-token: }\bSECRET123",
+			want:        "failed: {Password:[REDACTED]",
+			wantContent: "failed: {Password:[REDACTED]",
 		},
 		{
 			name:        "Go struct field ending in key name followed by space, backspace byte and closing brace",
@@ -3732,23 +4059,31 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 	}
 
 	t.Run("file URI", func(t *testing.T) {
-		const uri = "https://example.com/search?q=basic%20recipes"
-		p, requests, mCtx := setupTestPlugin(t)
-		var errs callbackErrors
-		errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
-			Role:  "user",
-			Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
-		}))
-		errs.check(t)
-		p.AfterRunCallback()(mCtx)
+		for _, uri := range []string{
+			"https://example.com/search?q=basic%20recipes",
+			// Path segments that end in a credential name, but are not one.
+			"https://example.com/docs/reset-password/step-2",
+			"gs://bucket/db-password/notes.txt",
+		} {
+			t.Run(uri, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				var errs callbackErrors
+				errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
+				}))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
 
-		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-		userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
-		if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
-			t.Errorf("content_parts = %v, want uri %q", parts, uri)
-		}
-		if got := userRow["is_truncated"]; got != false {
-			t.Errorf("is_truncated = %v, want false", got)
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
+					t.Errorf("content_parts = %v, want uri %q", parts, uri)
+				}
+				if got := userRow["is_truncated"]; got != false {
+					t.Errorf("is_truncated = %v, want false", got)
+				}
+			})
 		}
 	})
 

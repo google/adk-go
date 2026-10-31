@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -55,6 +56,14 @@ const (
 	maxContainerAlloc = 1024
 )
 
+// maxFunctionNameSummaryLength bounds, in runes, the function name that a
+// response summary shows for a function call or response part.
+const maxFunctionNameSummaryLength = 256
+
+// responseSummarySlack is the number of runes by which a response summary may
+// exceed the maximum content length, which bounds each of its pieces.
+const responseSummarySlack = 4096
+
 type nodeBudget struct {
 	remaining int
 }
@@ -70,6 +79,8 @@ func (b *nodeBudget) take() bool {
 var (
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
+	errorType         = reflect.TypeFor[error]()
+	stringerType      = reflect.TypeFor[fmt.Stringer]()
 	jsonNumberType    = reflect.TypeFor[json.Number]()
 )
 
@@ -461,9 +472,13 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 			piece = "text: '" + text + "'"
 			isText = true
 		case part.FunctionCall != nil:
-			piece = "call: " + part.FunctionCall.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionCall.Name, maxFunctionNameSummaryLength, redact)
+			piece = "call: " + name
 		case part.FunctionResponse != nil:
-			piece = "resp: " + part.FunctionResponse.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionResponse.Name, maxFunctionNameSummaryLength, redact)
+			piece = "resp: " + name
 		case part.ExecutableCode != nil:
 			var code string
 			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
@@ -498,8 +513,12 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 		truncated = truncated || p.truncated
 	}
 	joined := strings.Join(active, " | ")
-	if m.isResponse {
-		return joined, truncated
+	if m.isResponse && maxLength >= 0 {
+		// Each piece is already bounded by maxLength, so the slack only
+		// leaves room for the "text: '...'" wrapper and the separators of a
+		// few short pieces. It keeps a response with many large parts from
+		// growing to a multiple of maxLength.
+		maxLength += responseSummarySlack
 	}
 	summary, t := truncateString(joined, maxLength)
 	return summary, truncated || t
@@ -720,6 +739,12 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 			}
 			return nil, false
 		}
+		// A value of a defined interface type is read by its type name
+		// before the value that it holds, which has a name of its own, as
+		// for a pointer below.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
+		}
 		v = v.Elem()
 	}
 	if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
@@ -731,6 +756,13 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	if v.Kind() == reflect.Pointer {
 		if depth >= maxSanitizeDepth {
 			return maxDepthPlaceholder, true
+		}
+		// A defined pointer type, such as type APIKey *string, may be the
+		// only part of a value that is named for a credential: what it
+		// points to, here a plain string, is not. Its name is read before
+		// the pointer is followed, which loses it.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
 		}
 		key := visitKey{ptr: v.Pointer(), typ: v.Type()}
 		if !s.enter(key) {
@@ -747,6 +779,9 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	}
 	if v.Type() == jsonNumberType {
 		return s.number(v.String())
+	}
+	if s.redact && hasSensitiveTypeName(v) {
+		return redactedValue, true
 	}
 	if out, truncated, ok := s.marshaled(v, depth); ok {
 		return out, truncated
@@ -797,6 +832,58 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 		// JSON form.
 		return unsupportedObjPlaceholder, true
 	}
+}
+
+// hasSensitiveTypeName reports whether v is a value of a named type that
+// is named for a credential, such as a Token or a type ending in Password,
+// and may write it: whatever its kind, a value of such a type may be a
+// credential in a form that nothing else would tell, such as the digits of an
+// int or the bytes of a slice. Every non-struct value of such a type (maps,
+// slices, arrays, pointers, interfaces and all scalars, whether zero or not
+// and whether or not they define MarshalJSON or MarshalText) is redacted whole
+// from its type alone without reading v, because another goroutine may update
+// the value atomically or under a lock. A struct with MarshalJSON or
+// MarshalText is redacted whole too (looked up on the types only; see
+// hasMarshalerMethod), whereas a struct without such a method is shown by its
+// exported fields, which are redacted by name without reading unexported ones.
+func hasSensitiveTypeName(v reflect.Value) bool {
+	name := v.Type().Name()
+	if name == "" || !isSensitiveKey(name) {
+		return false
+	}
+	if v.Kind() == reflect.Struct {
+		return hasMarshalerMethod(v)
+	}
+	return true
+}
+
+// hasMarshalerMethod reports whether encoding/json would write v with a
+// MarshalJSON or MarshalText method: the type of v has one, or v is
+// addressable and its pointer type has one. Only the method sets of the
+// types are read, not v (see hasMethod).
+func hasMarshalerMethod(v reflect.Value) bool {
+	return hasMethod(v, jsonMarshalerType) || hasMethod(v, textMarshalerType)
+}
+
+// hasMethod reports whether v has the methods of iface as implementer finds
+// them: the type of v has them, or v is addressable and its pointer type
+// has them. Only the method sets of the types are read, not v: unlike
+// implementer, it boxes nothing into an interface value, and a value that
+// is boxed without its address is copied, and so read.
+func hasMethod(v reflect.Value, iface reflect.Type) bool {
+	if v.Type().Implements(iface) {
+		return true
+	}
+	return v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface)
+}
+
+// redacted stands in for a value that is redacted whole, as one node of the
+// budget.
+func (s *sanitizer) redacted() (any, bool) {
+	if !s.budget.take() {
+		return sanitizeBudgetPlaceholder, true
+	}
+	return redactedValue, true
 }
 
 func (s *sanitizer) enter(key visitKey) bool {
@@ -898,19 +985,213 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		out, truncated = s.stringValue(string(b), depth)
 		return out, truncated, true
 	}
+	// url.Userinfo implements fmt.Stringer and writes its user name and
+	// password with String(); redact it before any generic Stringer
+	// fallback.
+	if v.Kind() == reflect.Struct && v.Type() == userinfoType {
+		return s.redactUserinfo(v, depth)
+	}
+	// A struct that reflection would show as an empty object, because its
+	// fields are unexported, writes the text it has for itself instead, but
+	// only when redaction is off, or the value is of a standard library
+	// error type whose text is the message it was made with. Under redaction
+	// the method of any other type is not called: it can write a credential
+	// that no pattern can tell from prose (a bare value, a transformed
+	// password, a field of any name), and the sanitizer cannot read the
+	// private fields of a type to find it, which also bypasses the locks that
+	// protect them. Such a value keeps the structural form that reflection
+	// gives it, as in adk-python's fallback for unknown types, which does not
+	// call str or repr either. A value of any other kind, such as the number
+	// of a syscall.Errno or the string of a defined string type, keeps its
+	// value as encoding/json writes it, whether redaction is on or off. Maps,
+	// slices and arrays are never intercepted here, even if they implement
+	// error or fmt.Stringer, because their structural traversal (walkMap,
+	// walkSlice) already produces a safely redacted representation that the
+	// String() or Error() text would discard. The value is boxed into an
+	// interface value (see implementer) only when its method is to be called,
+	// and then by its address when it has one: boxing the value itself copies
+	// it, so it reads the private fields too, while another goroutine may
+	// write them atomically or under a lock; until then only the method sets
+	// of the types are read (see hasMethod).
+	if !isContainerKind(v.Kind()) {
+		if (!s.redact || isPlainErrorType(v.Type())) && v.Kind() == reflect.Struct && hasMethod(v, errorType) && !showsExportedFields(v) {
+			if m, found := implementer(v, errorType); found {
+				return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
+			}
+		}
+		if !s.redact && v.Kind() == reflect.Struct && hasMethod(v, stringerType) && !showsExportedFields(v) {
+			if m, found := implementer(v, stringerType); found {
+				return s.textOf(func() (string, error) { return stringerText(m.(fmt.Stringer)) }, depth)
+			}
+		}
+	}
 	return nil, false, false
 }
 
-// implementer returns v, or its address when only the pointer type has the
-// method, as an interface value implementing iface.
-func implementer(v reflect.Value, iface reflect.Type) (any, bool) {
-	if v.Type().Implements(iface) && v.CanInterface() {
-		return v.Interface(), true
+// plainErrorType is the standard library error type whose text is the
+// message it was made with, and whose method calls nothing else: the type of
+// errors.New, which fmt.Errorf also returns without %w. The text of such an
+// error is a string like any other, scrubbed for credential patterns. The
+// type of fmt.Errorf with %w is not plain: its message holds the text that
+// the Error method of the error it wraps wrote when it was made, which is the
+// output of an arbitrary method.
+var plainErrorType = reflect.TypeOf(errors.New("x")).Elem()
+
+// isPlainErrorType reports whether t is plainErrorType, or a pointer to it.
+func isPlainErrorType(t reflect.Type) bool {
+	if t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
+	return t == plainErrorType
+}
+
+// textOf sanitizes the text that get returns, or stands in for it with a
+// placeholder if get fails.
+func (s *sanitizer) textOf(get func() (string, error), depth int) (out any, truncated, ok bool) {
+	text, err := get()
+	if err != nil {
+		return unsupportedObjPlaceholder, true, true
+	}
+	out, truncated = s.stringValue(text, depth)
+	return out, truncated, true
+}
+
+// errorText returns err.Error(), turning a panic of the method into an error.
+func errorText(err error) (text string, rerr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rerr = errors.New("error method panicked")
+		}
+	}()
+	return err.Error(), nil
+}
+
+// stringerText returns m.String(), turning a panic of the method into an error.
+func stringerText(m fmt.Stringer) (text string, rerr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			rerr = errors.New("string method panicked")
+		}
+	}()
+	return m.String(), nil
+}
+
+// showsExportedFields reports whether v is a struct that encoding/json would
+// encode with at least one field: an exported field, or a field of an
+// embedded struct, which is promoted, as walkStruct reads them. A struct with
+// no such field, such as one whose fields are unexported or that only embeds
+// such a struct, is shown as an empty object. For any other kind of value it
+// is false.
+func showsExportedFields(v reflect.Value) bool {
+	if v.Kind() != reflect.Struct {
+		return false
+	}
+	sc := fieldScan{visiting: map[reflect.Type]bool{}, noFieldsAt: map[reflect.Type]int{}}
+	return sc.shows(v.Type(), 0)
+}
+
+// maxFieldScanTypes bounds the struct types that showsExportedFields enters.
+// A scan that reaches it reports that the struct shows fields, which only
+// keeps the structural form of the value.
+const maxFieldScanTypes = 1 << 14
+
+// fieldScan reads the struct types that a struct embeds, for showsExportedFields.
+type fieldScan struct {
+	// visiting holds the types that are being read, so that a type that
+	// embeds itself is read once.
+	visiting map[reflect.Type]bool
+	// noFieldsAt holds the least depth at which a type was read and had no
+	// field written. It is read again at a lesser depth, where fewer of its
+	// embedded types are beyond maxSanitizeDepth, but not at a greater one,
+	// so a graph of types that share embedded types is read in the time of
+	// its distinct types, not of its paths. A type cut short only by one that
+	// is being read has none either way, since the scan ends at the first
+	// field written.
+	noFieldsAt map[reflect.Type]int
+	types      int
+}
+
+// shows reports whether the struct type t has a field that walkStruct writes.
+func (sc *fieldScan) shows(t reflect.Type, depth int) bool {
+	if depth > maxSanitizeDepth || sc.visiting[t] {
+		return false
+	}
+	if d, ok := sc.noFieldsAt[t]; ok && depth >= d {
+		return false
+	}
+	if sc.types++; sc.types > maxFieldScanTypes {
+		return true
+	}
+	sc.visiting[t] = true
+	defer delete(sc.visiting, t)
+	for i := range t.NumField() {
+		f := t.Field(i)
+		name, _, skip := parseJSONTag(f)
+		if skip {
+			continue
+		}
+		if f.Anonymous && name == "" && isStructOrStructPointer(f.Type) {
+			ft := f.Type
+			if ft.Kind() == reflect.Pointer {
+				ft = ft.Elem()
+			}
+			if sc.shows(ft, depth+1) {
+				return true
+			}
+			continue
+		}
+		if f.IsExported() {
+			return true
+		}
+	}
+	sc.noFieldsAt[t] = depth
+	return false
+}
+
+// isContainerKind reports whether k is a kind whose structural traversal
+// (walkMap, walkSlice) produces a safely redacted representation, so the
+// error/Stringer text fallback must not intercept it.
+func isContainerKind(k reflect.Kind) bool {
+	return k == reflect.Map || k == reflect.Slice || k == reflect.Array
+}
+
+// userinfoType is the type of the password-bearing URL userinfo.
+var userinfoType = reflect.TypeFor[url.Userinfo]()
+
+// redactUserinfo returns a representation of the url.Userinfo v. Under
+// redaction, one that holds a user name or a password is replaced whole with
+// the redaction placeholder, as sanitizeURI replaces a URI that has user
+// information: the user name may be the credential itself, as in a git
+// remote that authenticates with a token (https://TOKEN@github.com/o/r).
+// With redaction off, or when it is empty, it is written as its String text.
+func (s *sanitizer) redactUserinfo(v reflect.Value, depth int) (any, bool, bool) {
+	if !v.CanInterface() {
+		return redactedValue, false, true
+	}
+	u := v.Interface().(url.Userinfo)
+	if _, hasPassword := u.Password(); s.redact && (hasPassword || u.Username() != "") {
+		return redactedValue, false, true
+	}
+	out, truncated := s.stringValue(u.String(), depth)
+	return out, truncated, true
+}
+
+// implementer returns v as an interface value implementing iface: the
+// address of v, when v is addressable and the pointer type has the methods,
+// or else v itself. The address is tried first because boxing v itself
+// copies it, which reads all of its fields, the unexported ones included,
+// while another goroutine may write them under a lock or atomically; boxing
+// the address reads none of them, and the method set of the pointer type
+// holds the methods of the value type too. A method with a value receiver
+// still copies the value when it is called, as any call of it does.
+func implementer(v reflect.Value, iface reflect.Type) (any, bool) {
 	if v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface) {
 		if a := v.Addr(); a.CanInterface() {
 			return a.Interface(), true
 		}
+	}
+	if v.Type().Implements(iface) && v.CanInterface() {
+		return v.Interface(), true
 	}
 	return nil, false
 }
@@ -1175,8 +1456,12 @@ func isEmptyValue(v reflect.Value) bool {
 }
 
 // truncateString shortens s to maxLength runes followed by truncationSuffix.
-// A negative maxLength means no limit.
+// A negative maxLength means no limit. A run of bytes that is not valid UTF-8
+// is replaced with one U+FFFD.
 func truncateString(s string, maxLength int) (string, bool) {
+	// Invalid UTF-8 is replaced whatever the length of s, so that it never
+	// reaches a BigQuery string column or a JSON document.
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if maxLength < 0 {
 		return s, false
 	}
