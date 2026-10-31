@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -780,7 +781,7 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	if v.Type() == jsonNumberType {
 		return s.number(v.String())
 	}
-	if s.redact && hasSensitiveTypeName(v) {
+	if s.redact && redactsWhole(v) {
 		return redactedValue, true
 	}
 	if out, truncated, ok := s.marshaled(v, depth); ok {
@@ -845,7 +846,9 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 // the value atomically or under a lock. A struct with MarshalJSON or
 // MarshalText is redacted whole too (looked up on the types only; see
 // hasMarshalerMethod), whereas a struct without such a method is shown by its
-// exported fields, which are redacted by name without reading unexported ones.
+// exported fields, which are redacted by name without reading unexported ones;
+// nor does omitzero read them, which it would do to tell whether a field that
+// holds such a struct is zero (see walkStruct).
 func hasSensitiveTypeName(v reflect.Value) bool {
 	name := v.Type().Name()
 	if name == "" || !isSensitiveKey(name) {
@@ -855,6 +858,141 @@ func hasSensitiveTypeName(v reflect.Value) bool {
 		return hasMarshalerMethod(v)
 	}
 	return true
+}
+
+// redactsWhole reports whether v is redacted whole from its type alone,
+// without reading it: its type is named for a credential (see
+// hasSensitiveTypeName), or it is a struct that may write itself with a
+// method promoted from such a type (see promotesSensitiveMarshaler).
+func redactsWhole(v reflect.Value) bool {
+	return hasSensitiveTypeName(v) || promotesSensitiveMarshaler(v)
+}
+
+// promotesSensitiveMarshaler reports whether v is a struct that
+// encoding/json would write with a MarshalJSON or MarshalText method (see
+// hasMarshalerMethod) while it embeds, directly or through embedded structs,
+// a field of a type named for a credential that has such a method. The
+// method may be the one promoted from that field, which writes what a value
+// of the credential type writes, whatever the outer type is named; and
+// reflection cannot tell a promoted method from one that the outer type
+// declares, so such a value is redacted whole, as a value of the embedded
+// type is. Only the types are read, not v.
+func promotesSensitiveMarshaler(v reflect.Value) bool {
+	return v.Kind() == reflect.Struct && hasMarshalerMethod(v) && embedsSensitiveMarshaler(v.Type(), nil)
+}
+
+// embedsSensitiveMarshaler reports whether the struct type t embeds,
+// directly or through embedded structs, a field of a type named for a
+// credential whose value or pointer type has a MarshalJSON or MarshalText
+// method, or a field of an interface type that has such a method, as
+// json.Marshaler and encoding.TextMarshaler do: the method of such an
+// interface field is promoted from whatever value the field holds, which may
+// be a credential, and only the types are read, so that it is looked at
+// whether the field is nil or not. Methods are promoted whatever the json tag
+// of the field, so every embedded field is looked at. seen holds the embedded
+// struct types already looked at, so that a type that embeds a pointer to
+// itself is looked at once; it is made when the first embedded struct is
+// found.
+func embedsSensitiveMarshaler(t reflect.Type, seen map[reflect.Type]bool) bool {
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !f.Anonymous {
+			continue
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Interface && (ft.Implements(jsonMarshalerType) || ft.Implements(textMarshalerType)) {
+			return true
+		}
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if name := ft.Name(); name != "" && isSensitiveKey(name) && typeHasMarshalerMethod(ft) {
+			return true
+		}
+		if ft.Kind() != reflect.Struct || seen[ft] {
+			continue
+		}
+		if seen == nil {
+			seen = map[reflect.Type]bool{t: true}
+		}
+		seen[ft] = true
+		if embedsSensitiveMarshaler(ft, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeHasMarshalerMethod reports whether t or its pointer type has a
+// MarshalJSON or MarshalText method.
+func typeHasMarshalerMethod(t reflect.Type) bool {
+	pt := reflect.PointerTo(t)
+	return t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
+		pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+}
+
+// zeroCheck tells what reflect.Value.IsZero, which omitzero calls, would
+// read of a value of a type: IsZero reads every array element and every
+// struct field, exported or not, at any depth, and of a pointer, map, slice,
+// interface, channel or function only whether it is nil, not what it refers
+// to.
+type zeroCheck struct {
+	// credential reports whether IsZero would read a value of a type named
+	// for a credential, of any kind (see hasSensitiveTypeName), or of a
+	// struct that may write itself with a method promoted from such a type
+	// (see embedsSensitiveMarshaler): the type is such a type, or holds one
+	// in an array element or a struct field.
+	credential bool
+	// unexported reports whether IsZero would read an unexported struct
+	// field: the type is a struct with one, or holds one in an array
+	// element or a struct field.
+	unexported bool
+}
+
+// zeroChecks caches the zeroCheck of each type, by reflect.Type.
+var zeroChecks sync.Map
+
+// zeroCheckOf returns the zeroCheck of t. It looks into array elements and
+// struct fields only, as IsZero does; a type holds itself only through a
+// pointer, map, slice, interface, channel or function, which it does not look
+// into, so it never meets t again. It reads only types, not values.
+func zeroCheckOf(t reflect.Type) zeroCheck {
+	if c, ok := zeroChecks.Load(t); ok {
+		return c.(zeroCheck)
+	}
+	var c zeroCheck
+	if name := t.Name(); name != "" && isSensitiveKey(name) {
+		c.credential = true
+	}
+	switch t.Kind() {
+	case reflect.Array:
+		if t.Len() > 0 {
+			e := zeroCheckOf(t.Elem())
+			c.credential = c.credential || e.credential
+			c.unexported = e.unexported
+		}
+	case reflect.Struct:
+		if typeHasMarshalerMethod(t) && embedsSensitiveMarshaler(t, nil) {
+			c.credential = true
+		}
+		for i := range t.NumField() {
+			f := t.Field(i)
+			e := zeroCheckOf(f.Type)
+			c.credential = c.credential || e.credential
+			c.unexported = c.unexported || !f.IsExported() || e.unexported
+		}
+	}
+	zeroChecks.Store(t, c)
+	return c
+}
+
+// readsRedactedToCheckZero reports whether reflect.Value.IsZero, which
+// omitzero calls, would read, of a struct field of type t named name, a value
+// of a credential type (see zeroCheck), or unexported state while the field
+// is redacted by its name.
+func readsRedactedToCheckZero(t reflect.Type, name string) bool {
+	c := zeroCheckOf(t)
+	return c.credential || c.unexported && isSensitiveKey(name)
 }
 
 // hasMarshalerMethod reports whether encoding/json would write v with a
@@ -1361,7 +1499,40 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 					continue
 				}
 				seenNames[name] = true
-				if (opts.omitEmpty && isEmptyValue(fv)) || (opts.omitZero && fv.IsZero()) {
+				// A field that is redacted whole from its type is not read
+				// (see redactsWhole), so omitempty and omitzero, which would
+				// read it to tell whether it is empty, do not apply to it:
+				// another goroutine may update it atomically or under a lock.
+				// It is written as [REDACTED], empty or not, where
+				// encoding/json would omit it when empty.
+				if (opts.omitEmpty || opts.omitZero) && s.redact && redactsWhole(fv) {
+					if !s.budget.take() {
+						out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+						truncated = true
+						budgetStopped = true
+						break
+					}
+					out[name] = redactedValue
+					truncated = true
+					continue
+				}
+				if opts.omitEmpty && isEmptyValue(fv) {
+					continue
+				}
+				// omitzero reads the whole field, as reflect.Value.IsZero
+				// does (see zeroCheck), so it does not apply either to a
+				// field that holds, itself or in an array element or a
+				// struct field at any depth, a value of a credential-named
+				// type, as [2]APIToken and struct{ T APIToken } do, whether
+				// that value is redacted whole or written by its exported
+				// fields, as a credential-named struct without a marshaler
+				// is, or a struct that may write itself with a marshaler
+				// promoted from a credential (see zeroCheck), nor to a field
+				// redacted by its name that holds unexported state, as an
+				// atomic.Pointer[string] named Token does. Such a field is
+				// written, zero or not. Any other omitzero field is read by
+				// IsZero, unexported fields too, as encoding/json reads it.
+				if opts.omitZero && !(s.redact && readsRedactedToCheckZero(f.Type, name)) && fv.IsZero() {
 					continue
 				}
 				if s.redact && isSensitiveKey(name) {

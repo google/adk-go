@@ -3256,7 +3256,9 @@ func TestRedactionRegressions(t *testing.T) {
 	}{
 		{"dotted value that ends in a compound key name", "password=Summer.2024Password: dial tcp", "Summer.2024Password", "password=[REDACTED] tcp"},
 		{"quote inside a bare value before another pair", "token=abc:'s note password='SECRET VALUE' rest", "SECRET VALUE", "token=[REDACTED] note password='[REDACTED]' rest"},
-		{"quote inside an outer-quoted bare value before prose", `failed: "token=abc:'s"; the user's request`, "abc", `failed: "token=[REDACTED]; the user's request`},
+		// The secret is xyz rather than abc, which the hexadecimal IDs in a
+		// row may hold, so that the check below does not find it there.
+		{"quote inside an outer-quoted bare value before prose", `failed: "token=xyz:'s"; the user's request`, "xyz", `failed: "token=[REDACTED]; the user's request`},
 		{"dotted OAuth name", "oauth2.authorization.code=SYNTHETIC_OAUTH_CODE", "SYNTHETIC_OAUTH_CODE", "oauth2.authorization.code=[REDACTED]"},
 		{"dotted credential name", "stripe.api.key=SYNTHETIC_STRIPE_KEY", "SYNTHETIC_STRIPE_KEY", "stripe.api.key=[REDACTED]"},
 		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
@@ -3322,6 +3324,21 @@ func TestRedactionRegressions(t *testing.T) {
 		{"joined Bearer fragment inside contraction-led shell password", `export DB_PASSWORD=a:'s correct; horse Bearer '"R12_SYNTHETIC_7319"`, "correct; horse", `export DB_PASSWORD=[REDACTED]`},
 		{"joined single-quoted Bearer fragment inside shell password", `export DB_PASSWORD='my Bearer ''R12_SYNTHETIC_7319'; echo ok`, "R12_SYNTHETIC_7319", `export DB_PASSWORD='[REDACTED]'; echo ok`},
 		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]; echo 'done'`},
+		{"state-prefixed temp key in a single-quoted dict", `failed: {'user:temp:scratch': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {'user:temp:scratch':'[REDACTED]'}`},
+		{"padded temp key that holds a delimiter in a single-quoted dict", `failed: {' temp:a=b ': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {' temp:a=b ':'[REDACTED]'}`},
+		{"padded key with whitespace after its state prefix", `failed: {" user: DB_PASSWORD ": "R13_SYNTHETIC_52816"}`, "R13_SYNTHETIC_52816", `failed: {" user: DB_PASSWORD ":"[REDACTED]"}`},
+		{"temp key that ends in a delimiter in a single-quoted dict", `failed: {'temp:a=': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {'temp:a=':'[REDACTED]'}`},
+		{"padded quoted temp key after a contraction", `token=abc:'s note ' temp:a=b ': ' R13_SYNTHETIC_52816'`, "R13_SYNTHETIC_52816", `token=[REDACTED] note ' temp:a=b ':'[REDACTED]'`},
+		{"quote joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='"R13_SYNTHETIC_52816"; echo ok`, "R13_SYNTHETIC_52816", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"empty quoted part joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='""R13_SYNTHETIC_52816; echo ok`, "R13_SYNTHETIC_52816", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"quoted part joined inside a bare shell value", `export DB_PASSWORD=pre"correct horse R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"quoted parts joined inside a bare shell value", `export DB_PASSWORD=pre'correct horse'"R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed quoted part joined inside a bare shell value", `export DB_PASSWORD=pre"correct horse R13_SYNTHETIC_52816`, "horse", `export DB_PASSWORD=[REDACTED]`},
+		{"quoted part joined inside a bare shell value before a pair", `export DB_PASSWORD=pre"correct horse"token=R13_SYNTHETIC_52816; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]token=[REDACTED]; echo ok`},
+		{"single-quoted part that starts with whitespace joined to a bare shell value", `export DB_PASSWORD=pre' correct horse R13_SYNTHETIC_52816'; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed quoted part that starts with whitespace joined to a bare shell value", `export DB_PASSWORD=pre" correct horse R13_SYNTHETIC_52816`, "horse", `export DB_PASSWORD=[REDACTED]`},
+		{"quoted part joined inside a bare shell value before a quoted key", `export DB_PASSWORD=pre"correct horse""token": "R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]"token":"[REDACTED]"; echo ok`},
+		{"cursor keys with split direction words beside a page access token", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=R13_SYNTHETIC_52816`, "R13_SYNTHETIC_52816", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=[REDACTED]`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
@@ -3340,7 +3357,7 @@ func TestRedactionRegressions(t *testing.T) {
 			for _, row := range rows {
 				et := fmt.Sprint(row["event_type"])
 				seen[et] = true
-				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") {
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") {
 					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
 				}
 			}

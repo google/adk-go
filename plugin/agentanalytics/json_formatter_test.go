@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -1122,9 +1123,11 @@ func TestRedactErrorMessage(t *testing.T) {
 		{
 			name: "embedded JSON with equals sign in quoted temp key redacts the value",
 			msg:  `failed: {"temp:cache=foo": "SYNTHETIC_SECRET"}`,
-			// As in adk-python, the key=value pass reads "temp:cache" as the
-			// key and redacts the rest of the text up to "}" as its value.
-			want: `failed: {"temp:cache=[REDACTED]}`,
+			// The quoted key, whose name holds "=", is read whole, as in a
+			// map, rather than as the pair temp:cache=foo of the bare
+			// key=value text, which would redact the closing quote of the
+			// key with the value.
+			want: `failed: {"temp:cache=foo":"[REDACTED]"}`,
 		},
 		{
 			name: "bare password with escaped double quote in quoted value redacts the whole value",
@@ -1889,7 +1892,7 @@ func TestRedactErrorMessage(t *testing.T) {
 		{
 			name: "key name glued to a quoted value with spaces by a character other than a delimiter is redacted",
 			msg:  `credentials: token("SECRET123 token=SECRET456")`,
-			want: `credentials:[REDACTED] token=[REDACTED]`,
+			want: `credentials:[REDACTED])`,
 		},
 		{
 			name: "nested password in YAML whose quoted value has leading whitespace is kept and its value redacted",
@@ -2759,7 +2762,7 @@ func TestSanitizeRawText(t *testing.T) {
 			{`got "password=SECRETP-token=", want "abc"`, `got "password=[REDACTED], want "abc"`},
 			{`credentials: user="SECRET123 token=SECRET456"`, `credentials:[REDACTED]`},
 			{`credentials: user="SECRET123 SECRET456" more`, `credentials:[REDACTED] more`},
-			{`credentials: token("SECRET123 token=SECRET456")`, `credentials:[REDACTED] token=[REDACTED]`},
+			{`credentials: token("SECRET123 token=SECRET456")`, `credentials:[REDACTED])`},
 			{`password="SECRETQ-token" :`, `password="[REDACTED]" :`},
 			{"password=SECRETQ-token :", "password=[REDACTED] :"},
 			{"password=SECRETP-token\t:", "password=[REDACTED]\t:"},
@@ -5624,5 +5627,443 @@ func TestShowsExportedFields_CycleDoesNotHideFields(t *testing.T) {
 	}
 	if !showsExportedFields(reflect.ValueOf(testCycleB{})) {
 		t.Error("showsExportedFields(testCycleB) = false, want true")
+	}
+}
+
+// TestSmartTruncate_DoesNotReadOmitTaggedFieldsOfSensitiveTypes checks that
+// a field of a credential-named type tagged omitempty or omitzero is written
+// as [REDACTED], empty or not, without being read to tell whether it is
+// empty, while another goroutine writes it atomically: run with -race.
+// encoding/json would omit it when empty, but telling so reads it. A field of
+// another type keeps its omit option.
+func TestSmartTruncate_DoesNotReadOmitTaggedFieldsOfSensitiveTypes(t *testing.T) {
+	type tagged struct {
+		T testAtomicScalarToken `json:"t,omitempty"`
+		V testValueAtomicToken  `json:"v,omitzero"`
+		A testAtomicArrayToken  `json:"a,omitzero"`
+		E synthAtomicErrorToken `json:"e,omitempty"`
+		K synthPlainAtomicToken `json:"k,omitempty,omitzero"`
+		N uint64                `json:"n,omitempty"`
+	}
+	const want = `{"a":"[REDACTED]","e":"[REDACTED]","k":"[REDACTED]","t":"[REDACTED]","v":"[REDACTED]"}`
+	for _, in := range []any{
+		tagged{},
+		&tagged{},
+		tagged{T: 1, V: 2, A: testAtomicArrayToken{3}, E: 4, K: 5},
+	} {
+		if got, truncated, err := SmartTruncate(in, 1000); err != nil || string(got) != want || !truncated {
+			t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", in, got, truncated, err, want)
+		}
+	}
+	type refs struct {
+		P testPointerPassword `json:"p,omitempty"`
+		M testMapPassword     `json:"m,omitempty"`
+		K testAPIKey          `json:"k,omitzero"`
+	}
+	const wantRefs = `{"k":"[REDACTED]","m":"[REDACTED]","p":"[REDACTED]"}`
+	if got, truncated, err := SmartTruncate(refs{}, 1000); err != nil || string(got) != wantRefs || !truncated {
+		t.Errorf("SmartTruncate(refs{}) = (%s, %v, %v), want (%s, true, nil)", got, truncated, err, wantRefs)
+	}
+
+	// The fields are not empty, so that the output is the same whether or not
+	// they are read to tell so: only -race tells.
+	h := &tagged{T: 1, V: 1, A: testAtomicArrayToken{1}, E: 1, K: 1}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			atomic.AddUint64((*uint64)(&h.T), 1)
+			atomic.AddUint64((*uint64)(&h.V), 1)
+			atomic.AddUint64(&h.A[0], 1)
+			atomic.AddUint64((*uint64)(&h.E), 1)
+			atomic.AddUint64((*uint64)(&h.K), 1)
+		}
+	}()
+	for range 1000 {
+		if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
+			t.Fatalf("SmartTruncate(*tagged) = (%s, %v), want %s", got, err, want)
+		}
+	}
+}
+
+// testPromotedJSONMarshaler embeds a credential-named type whose MarshalJSON
+// method it promotes, so encoding/json writes it with that method.
+type testPromotedJSONMarshaler struct {
+	testMarshaledToken
+	X string `json:"x"`
+}
+
+// testPromotedTextMarshaler promotes the MarshalText method of a
+// credential-named type.
+type testPromotedTextMarshaler struct {
+	testTextMarshaledToken
+}
+
+// testPromotedPointerMarshaler promotes the MarshalJSON method of a
+// credential-named type through an embedded pointer.
+type testPromotedPointerMarshaler struct {
+	*testMarshaledToken
+}
+
+// testPromotedTaggedMarshaler promotes the MarshalJSON method of a
+// credential-named type whose embedded field has a json tag: methods are
+// promoted whatever the tag.
+type testPromotedTaggedMarshaler struct {
+	testMarshaledToken `json:"tok"`
+}
+
+// testPromotedScalarMarshaler promotes the MarshalJSON method of a
+// credential-named scalar.
+type testPromotedScalarMarshaler struct {
+	testZeroScalarToken
+}
+
+// testPromotedPointerReceiverMarshaler embeds a credential-named scalar whose
+// MarshalJSON method has a pointer receiver, so that a pointer to the struct
+// promotes the method and a struct value that is not addressable does not,
+// and encoding/json writes the value field by field without the embedded
+// scalar.
+type testPromotedPointerReceiverMarshaler struct {
+	testAtomicScalarToken
+	Name string `json:"name"`
+}
+
+// testTwicePromotedMarshaler promotes the method through two embedded
+// structs.
+type testTwicePromotedMarshaler struct {
+	testPromotedJSONMarshaler
+	Y string `json:"y"`
+}
+
+// testOwnMarshalerOverPromoted declares a MarshalJSON method of its own over
+// the one that it would promote. Reflection cannot tell the two apart, so it
+// is redacted whole too.
+type testOwnMarshalerOverPromoted struct {
+	testMarshaledToken
+}
+
+func (testOwnMarshalerOverPromoted) MarshalJSON() ([]byte, error) { return []byte(`"own"`), nil }
+
+// testSelfEmbeddingTime embeds a pointer to itself and a type with a
+// MarshalJSON method that is not named for a credential.
+type testSelfEmbeddingTime struct {
+	*testSelfEmbeddingTime
+	time.Time
+}
+
+// TestSmartTruncate_PromotedMarshalersOfSensitiveTypesAreRedactedWhole checks
+// that a struct whose MarshalJSON or MarshalText method may be promoted from
+// an embedded field of a credential-named type is redacted whole, whatever
+// the struct is named, as a value of the embedded type is, rather than
+// written with the method, which writes the credential. A struct value that
+// a pointer-receiver method is not promoted to is written field by field
+// without the embedded credential, as encoding/json writes it. A struct that
+// embeds a marshaler not named for a credential is written with it as before.
+func TestSmartTruncate_PromotedMarshalersOfSensitiveTypesAreRedactedWhole(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	tok := testMarshaledToken{raw: secret}
+	for _, v := range []any{
+		testPromotedJSONMarshaler{},
+		testPromotedTextMarshaler{},
+		testPromotedPointerMarshaler{},
+		testPromotedTaggedMarshaler{},
+		testPromotedScalarMarshaler{},
+		testPromotedPointerReceiverMarshaler{},
+		testTwicePromotedMarshaler{},
+		testOwnMarshalerOverPromoted{},
+		testSelfEmbeddingTime{},
+	} {
+		if name := reflect.TypeOf(v).Name(); isSensitiveKey(name) {
+			t.Fatalf("type %s is named for a credential; the test needs one that is not", name)
+		}
+	}
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"promoted MarshalJSON", testPromotedJSONMarshaler{tok, "x"}, `"[REDACTED]"`},
+		{"promoted MarshalJSON behind a pointer", &testPromotedJSONMarshaler{tok, "x"}, `"[REDACTED]"`},
+		{"zero value with a promoted MarshalJSON", testPromotedJSONMarshaler{}, `"[REDACTED]"`},
+		{"promoted MarshalText", testPromotedTextMarshaler{testTextMarshaledToken{raw: secret}}, `"[REDACTED]"`},
+		{"method promoted through an embedded pointer", testPromotedPointerMarshaler{&tok}, `"[REDACTED]"`},
+		{"method promoted from a tagged embedded field", testPromotedTaggedMarshaler{tok}, `"[REDACTED]"`},
+		{"method promoted from a scalar", testPromotedScalarMarshaler{7}, `"[REDACTED]"`},
+		{"pointer-receiver method promoted behind a pointer", &testPromotedPointerReceiverMarshaler{7, "bob"}, `"[REDACTED]"`},
+		{"pointer-receiver method not promoted to a value", testPromotedPointerReceiverMarshaler{7, "bob"}, `{"name":"bob"}`},
+		{"method promoted twice", testTwicePromotedMarshaler{testPromotedJSONMarshaler{tok, "x"}, "y"}, `"[REDACTED]"`},
+		{"own method over a promoted one", testOwnMarshalerOverPromoted{tok}, `"[REDACTED]"`},
+		{"in a field", struct{ F testPromotedJSONMarshaler }{testPromotedJSONMarshaler{tok, "x"}}, `{"F":"[REDACTED]"}`},
+		{"in a map", map[string]any{"k": testPromotedJSONMarshaler{tok, "x"}}, `{"k":"[REDACTED]"}`},
+		{"in a slice", []testPromotedTextMarshaler{{testTextMarshaledToken{raw: secret}}}, `["[REDACTED]"]`},
+		{"zero value in a field tagged omitzero", struct {
+			F testPromotedJSONMarshaler `json:"f,omitzero"`
+		}{}, `{"f":"[REDACTED]"}`},
+		// A marshaler not named for a credential writes itself as before.
+		{"embedded time", struct{ time.Time }{time.Unix(0, 0).UTC()}, `"1970-01-01T00:00:00Z"`},
+		{"embedded pointer to itself and time", testSelfEmbeddingTime{&testSelfEmbeddingTime{}, time.Unix(0, 0).UTC()}, `"1970-01-01T00:00:00Z"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+}
+
+// testOmitAPIToken is a credential-named scalar that another goroutine may
+// write atomically.
+type testOmitAPIToken uint64
+
+// testLockedSessionToken is a credential-named struct without a marshaler,
+// which is written by its exported fields, whose unexported state a mutex
+// guards.
+type testLockedSessionToken struct {
+	mu  sync.Mutex
+	raw uint64
+	ID  string `json:"id"`
+}
+
+// testOmitInner is a struct not named for a credential that holds a field
+// of a credential-named type.
+type testOmitInner struct{ T testOmitAPIToken }
+
+// runWhileWriting calls f while another goroutine calls write over and over.
+func runWhileWriting(write, f func()) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			write()
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	f()
+}
+
+// checkSensitiveTypeNames fails the test unless each of the types is named
+// for a credential.
+func checkSensitiveTypeNames(t *testing.T, types ...reflect.Type) {
+	t.Helper()
+	for _, typ := range types {
+		if name := typ.Name(); !isSensitiveKey(name) {
+			t.Fatalf("type %s is not named for a credential; the test needs one that is", name)
+		}
+	}
+}
+
+// TestSmartTruncate_OmitZeroDoesNotReadCredentialArraysOrStructFields checks
+// that omitzero, which reads a whole field to tell whether it is zero (see
+// zeroCheck), does not apply to a field that holds values of a
+// credential-named type in array elements or struct fields: the field is
+// written, zero or not, so that its output does not tell whether the
+// credential is zero, and it is not read while another goroutine writes the
+// credential atomically. Run with -race: the array is larger than 1024 bytes,
+// so that IsZero would read it with instrumented code rather than with the
+// memequal of the runtime.
+func TestSmartTruncate_OmitZeroDoesNotReadCredentialArraysOrStructFields(t *testing.T) {
+	checkSensitiveTypeNames(t, reflect.TypeFor[testOmitAPIToken]())
+	type holder struct {
+		Big   [200]testOmitAPIToken `json:"big,omitzero"`
+		One   [1]testOmitAPIToken   `json:"one,omitzero"`
+		Inner testOmitInner         `json:"inner,omitzero"`
+		Deep  [1]testOmitInner      `json:"deep,omitzero"`
+	}
+	if size := reflect.TypeOf(holder{}.Big).Size(); size <= 1024 {
+		t.Fatalf("size of Big = %d, want more than 1024", size)
+	}
+	want := `{"big":[` + strings.Repeat(`"[REDACTED]",`, 199) + `"[REDACTED]"],"deep":[{"T":"[REDACTED]"}],"inner":{"T":"[REDACTED]"},"one":["[REDACTED]"]}`
+	set := &holder{One: [1]testOmitAPIToken{7}, Inner: testOmitInner{7}, Deep: [1]testOmitInner{{7}}}
+	set.Big[0] = 7
+	for _, in := range []any{holder{}, &holder{}, set} {
+		if got, _, err := SmartTruncate(in, 10000); err != nil || string(got) != want {
+			t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", in, got, err, want)
+		}
+	}
+
+	// The credentials are not zero, so that the output is the same whether
+	// or not they are read to tell so: only -race tells.
+	h := &holder{One: [1]testOmitAPIToken{7}, Inner: testOmitInner{7}, Deep: [1]testOmitInner{{7}}}
+	h.Big[0] = 7
+	runWhileWriting(func() {
+		atomic.AddUint64((*uint64)(&h.Big[0]), 1)
+		atomic.AddUint64((*uint64)(&h.One[0]), 1)
+		atomic.AddUint64((*uint64)(&h.Inner.T), 1)
+		atomic.AddUint64((*uint64)(&h.Deep[0].T), 1)
+	}, func() {
+		for range 1000 {
+			if got, _, err := SmartTruncate(h, 10000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+			}
+		}
+	})
+}
+
+// TestSmartTruncate_OmitZeroDoesNotReadLockedCredentialStructs checks that
+// omitzero does not apply to a field of a credential-named struct without a
+// marshaler, which is written by its exported fields without reading its
+// unexported ones: telling whether it is zero would read the state that its
+// mutex guards while another goroutine writes it. Run with -race.
+func TestSmartTruncate_OmitZeroDoesNotReadLockedCredentialStructs(t *testing.T) {
+	checkSensitiveTypeNames(t, reflect.TypeFor[testLockedSessionToken]())
+	type holder struct {
+		S testLockedSessionToken `json:"s,omitzero"`
+	}
+	const want = `{"s":{"id":""}}`
+	if got, _, err := SmartTruncate(&holder{}, 1000); err != nil || string(got) != want {
+		t.Errorf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+	}
+	// The state is not zero, so that the output is the same whether or not
+	// it is read to tell so: only -race tells.
+	h := &holder{}
+	h.S.raw = 1
+	runWhileWriting(func() {
+		h.S.mu.Lock()
+		h.S.raw++
+		h.S.mu.Unlock()
+	}, func() {
+		for range 1000 {
+			if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+			}
+		}
+	})
+}
+
+// TestSmartTruncate_OmitZeroDoesNotReadStateOfFieldsRedactedByName checks
+// that omitzero does not apply to a field redacted by its name whose type
+// holds unexported state, as an atomic.Pointer[string] named Token does:
+// telling whether it is zero would read the pointer while another goroutine
+// stores it. Run with -race. A string field named for a credential keeps its
+// omit options, as in encoding/json, and so does an omitzero field of a type
+// that is not named for a credential, which IsZero reads whole, unexported
+// fields too, as encoding/json does.
+func TestSmartTruncate_OmitZeroDoesNotReadStateOfFieldsRedactedByName(t *testing.T) {
+	type holder struct {
+		Token atomic.Pointer[string] `json:",omitzero"`
+	}
+	const want = `{"Token":"[REDACTED]"}`
+	if got, _, err := SmartTruncate(&holder{}, 1000); err != nil || string(got) != want {
+		t.Errorf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+	}
+	// The pointer is never nil, so that the output is the same whether or
+	// not it is read to tell so: only -race tells.
+	h := &holder{}
+	first, second := "SYNTHETIC_SECRET_1", "SYNTHETIC_SECRET_2"
+	h.Token.Store(&first)
+	runWhileWriting(func() {
+		h.Token.Store(&second)
+		h.Token.Store(&first)
+	}, func() {
+		for range 1000 {
+			if got, _, err := SmartTruncate(h, 1000); err != nil || string(got) != want {
+				t.Fatalf("SmartTruncate(*holder) = (%s, %v), want %s", got, err, want)
+			}
+		}
+	})
+
+	type plain struct {
+		Token    string    `json:"token,omitempty"`
+		Password string    `json:"password,omitzero"`
+		When     time.Time `json:"when,omitzero"`
+		Note     string    `json:"note,omitempty"`
+	}
+	for _, tt := range []struct {
+		in   plain
+		want string
+	}{
+		{plain{}, `{}`},
+		{plain{"a", "b", time.Unix(0, 0).UTC(), "n"}, `{"note":"n","password":"[REDACTED]","token":"[REDACTED]","when":"1970-01-01T00:00:00Z"}`},
+	} {
+		if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != tt.want {
+			t.Errorf("SmartTruncate(%+v) = (%s, %v), want %s", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+// testEmbedsJSONMarshaler embeds the json.Marshaler interface, whose
+// MarshalJSON method it promotes from whatever value the field holds.
+type testEmbedsJSONMarshaler struct{ json.Marshaler }
+
+// testEmbedsTextMarshaler embeds the encoding.TextMarshaler interface.
+type testEmbedsTextMarshaler struct{ encoding.TextMarshaler }
+
+// TestSmartTruncate_EmbeddedMarshalerInterfacesAreRedactedWhole checks that
+// a struct that embeds json.Marshaler or encoding.TextMarshaler, whose method
+// it promotes from whatever value the field holds, which may be of a
+// credential-named type, is redacted whole from its type, as a struct that
+// embeds a credential-named marshaler is, without calling the method: whether
+// the field holds a credential, a harmless value or nothing, and whether the
+// struct is a value, behind a pointer or in a field. Without redaction, it is
+// written with the method, as encoding/json writes it.
+func TestSmartTruncate_EmbeddedMarshalerInterfacesAreRedactedWhole(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	tok := testMarshaledToken{raw: secret}
+	text := testTextMarshaledToken{raw: secret}
+	for _, v := range []any{testEmbedsJSONMarshaler{}, testEmbedsTextMarshaler{}} {
+		if name := reflect.TypeOf(v).Name(); isSensitiveKey(name) {
+			t.Fatalf("type %s is named for a credential; the test needs one that is not", name)
+		}
+	}
+	for _, tt := range []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"embedded json.Marshaler", testEmbedsJSONMarshaler{tok}, `"[REDACTED]"`},
+		{"embedded json.Marshaler behind a pointer", &testEmbedsJSONMarshaler{tok}, `"[REDACTED]"`},
+		{"embedded json.Marshaler that holds a pointer", testEmbedsJSONMarshaler{&tok}, `"[REDACTED]"`},
+		{"embedded encoding.TextMarshaler", testEmbedsTextMarshaler{text}, `"[REDACTED]"`},
+		{"embedded encoding.TextMarshaler behind a pointer", &testEmbedsTextMarshaler{text}, `"[REDACTED]"`},
+		{"in a field", struct {
+			Inner testEmbedsJSONMarshaler
+			Name  string
+		}{testEmbedsJSONMarshaler{tok}, "n"}, `{"Inner":"[REDACTED]","Name":"n"}`},
+		{"in a map", map[string]any{"k": testEmbedsTextMarshaler{text}}, `{"k":"[REDACTED]"}`},
+		{"nil in a field tagged omitzero", struct {
+			Inner testEmbedsTextMarshaler `json:"inner,omitzero"`
+		}{}, `{"inner":"[REDACTED]"}`},
+		{"nil in an array tagged omitzero", struct {
+			Inner [1]testEmbedsJSONMarshaler `json:"inner,omitzero"`
+		}{}, `{"inner":["[REDACTED]"]}`},
+		{"harmless value", testEmbedsJSONMarshaler{json.RawMessage(`"harmless"`)}, `"[REDACTED]"`},
+		{"nil json.Marshaler", testEmbedsJSONMarshaler{}, `"[REDACTED]"`},
+		{"nil encoding.TextMarshaler", testEmbedsTextMarshaler{}, `"[REDACTED]"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := SmartTruncate(tt.in, 1000)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+		})
+	}
+	for _, in := range []any{testEmbedsJSONMarshaler{tok}, testEmbedsTextMarshaler{text}} {
+		want, err := json.Marshal(in)
+		if err != nil {
+			t.Fatalf("json.Marshal(%T) error: %v", in, err)
+		}
+		if got, _, err := smartTruncate(in, 1000, false); err != nil || string(got) != string(want) || !strings.Contains(string(got), secret) {
+			t.Errorf("smartTruncate(%T, redact=false) = (%s, %v), want %s", in, got, err, want)
+		}
 	}
 }
