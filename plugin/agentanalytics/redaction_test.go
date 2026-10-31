@@ -1493,7 +1493,17 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`password="benign"user="bob"token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"user="bob"token="[REDACTED]"`},
 		{"password=\"benign\"\ttoken=\"R8_SYNTHETIC_SECRET_4700\"", "password=\"[REDACTED]\"\ttoken=\"[REDACTED]\""},
 		{`password="benign"a.b=c token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"a.b=c token="[REDACTED]"`},
-		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN=SYNTHETIC_FOLLOWING_6401 rest`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN=[REDACTED] rest`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN:"SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN:"[REDACTED]"`},
+		{`DB_PASSWORD="benign"GITHUB_TOKEN:'SYNTHETIC_FOLLOWING_6401'`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN:'[REDACTED]'`},
+		{`DB_PASSWORD="benign"dbPassword="SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"dbPassword="[REDACTED]"`},
+		{`DB_PASSWORD="benign"stripe.api.key="SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"stripe.api.key="[REDACTED]"`},
+		{`OPENAI_API__KEY="benign"stripe.api..key="SYNTHETIC_FOLLOWING_6401"`, `OPENAI_API__KEY="[REDACTED]"stripe.api..key="[REDACTED]"`},
+		{`DB_PASSWORD="benign"fb.page_token="SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"fb.page_token="[REDACTED]"`},
+		{`DB_PASSWORD="benign"next.page.token="cursor-1"`, `DB_PASSWORD="[REDACTED]"next.page.token="cursor-1"`},
+		{`Bearer "benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, `Bearer [REDACTED]GITHUB_TOKEN="[REDACTED]"`},
+		{`failed: "password": "benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, `failed: "password":"[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
 		{"DB_PASSWORD=\"benign\"\nGITHUB_TOKEN=\"R8_SYNTHETIC_SECRET_4700\"", "DB_PASSWORD=\"[REDACTED]\"\nGITHUB_TOKEN=\"[REDACTED]\""},
 		// Standalone sensitive keys after a closed quote with whitespace after
 		// ":" or "=", and compound credential tails ending in a key suffix.
@@ -1714,9 +1724,10 @@ func TestScrubTextPatterns_DottedCredentialNames(t *testing.T) {
 		{`x "api.key": "R7_SYNTHETIC_CREDENTIAL_9327"`, `x "api.key":"[REDACTED]"`},
 		{"password=my.stripe.api.key: R7_SYNTHETIC_CREDENTIAL_9327 tcp", "password=[REDACTED] tcp"},
 		{"password=my.stripe_api.key: R7_SYNTHETIC_CREDENTIAL_9327 tcp", "password=[REDACTED] tcp"},
-		// A value that ends in a compound key name that the text patterns
-		// do not read, as in api..key, is redacted to its end.
-		{"password=R7_SYNTHETIC_CREDENTIAL_9327.API..key: dial tcp", "password=[REDACTED] dial tcp"},
+		// A value that ends in a compound key name with repeated dots, as in
+		// API..key, is redacted together with the value of the pair it starts.
+		{"password=R7_SYNTHETIC_CREDENTIAL_9327.API..key: dial tcp", "password=[REDACTED] tcp"},
+		{`password=R7_SYNTHETIC_CREDENTIAL_9327.API..key: "R7_SYNTHETIC_SECRET_1 R7_SYNTHETIC_SECRET_2"`, "password=[REDACTED]"},
 		// Dotted names that are not credential names are kept.
 		{"my.api.key.file=/path access.id=7 status.code=200", "my.api.key.file=/path access.id=7 status.code=200"},
 	} {
@@ -1862,13 +1873,12 @@ func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
 
 // TestScrubTextPatterns_DottedNamesAgreeWithMapKeys checks that a dotted name
 // has its value redacted in text exactly when isSensitiveKey redacts the
-// value of a map key of that name, for names of up to four dotted words:
-// dotted OAuth names, names made of the words of credential names and
-// others, as in stripe.api.key or x.goog.api.key, and names that end in a
-// page token or in a pagination cursor, as fb.page_token, the access token
-// of a page, and x.next.page.token, a cursor, do. It leaves out the names
-// with an empty dotted word that are not OAuth names, as in api..key, which
-// text does not read as a credential name.
+// value of a map key of that name, for names of up to four dotted words
+// (including empty segments from repeated dots, as in api..key): dotted OAuth
+// names, names made of the words of credential names and others, as in
+// stripe.api.key, stripe.api..key or x.goog.api.key, and names that end in a
+// page token or in a pagination cursor, as fb.page_token, the access token of
+// a page, and x.next.page.token, a cursor, do.
 func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 	var names []string
 	var build func(words, lasts []string, prefix string, n int)
@@ -1883,8 +1893,8 @@ func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 		}
 	}
 	build([]string{"", "oauth", "OAuth2", "oauth_client", "status", "xoauth", "code"}, []string{"code", "Code", "codes", "xcode"}, "", 3)
-	build([]string{"stripe", "jwt", "aws", "x", "goog", "google", "api", "private", "secret", "access", "auth", "code"}, []string{"key", "Key", "id", "verifier", "code", "token"}, "", 3)
-	build([]string{"page", "next", "prev", "previous", "fb", "home", "x"}, []string{"token", "Token", "page_token", "next_page_token", "prev_page_token", "previous_page_token", "nextPageToken"}, "", 3)
+	build([]string{"", "stripe", "jwt", "aws", "x", "goog", "google", "api", "private", "secret", "access", "auth", "code"}, []string{"key", "Key", "id", "verifier", "code", "token"}, "", 3)
+	build([]string{"", "page", "next", "prev", "previous", "fb", "home", "x"}, []string{"token", "Token", "page_token", "next_page_token", "prev_page_token", "previous_page_token", "nextPageToken"}, "", 3)
 	sensitive := 0
 	for _, name := range names {
 		want := isSensitiveKey(name)
@@ -1924,7 +1934,7 @@ func TestNestedKeyName_StatePrefix(t *testing.T) {
 		{"prefixed dotted camel key", "secretPrefix.dbPassword", false, valueEndingInKeyName, 13},
 		{"dotted multi-word key", "my.stripe_api.key", false, valueEndingInKeyName, 3},
 		{"dotted credential name on a line", "stripe.api.key", true, nestedKey, 7},
-		{"dotted name that text does not read", "R7.API..key", false, valueEndingInKeyName, 8},
+		{"dotted credential name with repeated dots", "R7.API..key", false, valueEndingInKeyName, 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2280,6 +2290,30 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
+		{
+			"repeated camelCase keys with long separator runs", func(n int) string {
+				return strings.Repeat("stripeApi"+strings.Repeat(".", 150)+"key=v ", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
+			"repeated multi-separator credential keys through an error", func(n int) string {
+				return strings.Repeat("stripe.api..key=v ", n)
+			},
+			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+		},
+		{
+			"repeated punctuation-continued quoted values", func(n int) string {
+				return strings.Repeat(`export DB_PASSWORD="a"+b `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated adjacent compound credential pairs", func(n int) string {
+				return strings.Repeat(`DB_PASSWORD="a"GITHUB_TOKEN="b" `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2304,5 +2338,132 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 				t.Errorf("scrubbing %d repeats took %v, want well under 4s", tt.n, dl)
 			}
 		})
+	}
+}
+
+// TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys checks that credential
+// names written with repeated or mixed "_", "-" and "." separators inside the
+// name (including camelCase and acronym prefixes) are redacted in free text
+// across all paths just as isSensitiveKey redacts them as structured map keys,
+// while non-credential names and pagination cursors remain preserved.
+func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
+	sensitiveNames := []string{
+		"api__key",
+		"api..key",
+		"api--key",
+		"api._-key",
+		"private..key",
+		"stripe.api..key",
+		"OPENAI_API__KEY",
+		"stripe.api--key",
+		"foo.private..key",
+		"foo.auth..code",
+		"aws..secret..access..key",
+		"x..goog__api--key",
+		"client.-_secret",
+		"code...verifier",
+		"google...access...id",
+		"stripeApi..key",
+		"OpenAIAPI__Key",
+		"OpenAIAPI..key",
+		"OpenAIAPI-Key",
+		"stripeApi" + strings.Repeat(".", 200) + "key",
+		"user:api__key",
+		"app:private..key",
+	}
+	for _, name := range sensitiveNames {
+		if !isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = false, want true", name)
+		}
+		checkAllRedactionPaths(t, name+"=SYNTHETIC_CREDENTIAL_6301", name+"=[REDACTED]")
+		checkAllRedactionPaths(t, "failed: "+name+": SYNTHETIC_CREDENTIAL_6301 retry", "failed: "+name+":[REDACTED] retry")
+		checkAllRedactionPaths(t, `failed: "`+name+`": "SYNTHETIC_CREDENTIAL_6301"`, `failed: "`+name+`":"[REDACTED]"`)
+	}
+	for _, tt := range []struct{ in, want string }{
+		{`{"api__key":"SYNTHETIC_CREDENTIAL_6301","note":"ok"}`, `{"api__key":"[REDACTED]","note":"ok"}`},
+		{"credentials:\n  stripe.api..key: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:\n  stripe.api..key:[REDACTED]\n  region: us"},
+		{"credentials:\n  foo.auth..code: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:\n  foo.auth..code:[REDACTED]\n  region: us"},
+	} {
+		checkRedactionPaths(t, tt.in, tt.want)
+	}
+	for _, name := range []string{
+		"oauth..config.codes",
+		"status..code",
+		"access..id",
+		"api.x.key",
+		"my.api..key.file",
+		"page..token",
+		"next..page..token",
+		"prev__page--token",
+		"x.next..page__token",
+	} {
+		if isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = true, want false", name)
+		}
+		in := name + "=kept-value"
+		checkRedactionPaths(t, in, in)
+	}
+}
+
+// TestScrubTextPatterns_JoinedContractionShapedCredentials checks that joined,
+// quoted or unclosed credential assignments containing contraction-shaped words
+// are redacted across their entire credential span rather than truncated at an
+// apostrophe, while preserving independent outer prose clauses and following
+// key-value or Bearer constructs.
+func TestScrubTextPatterns_JoinedContractionShapedCredentials(t *testing.T) {
+	for _, tt := range []struct{ in, want string }{
+		{`export DB_PASSWORD=a:'s correct horse battery's`, `export DB_PASSWORD=[REDACTED]`},
+		{`password=a:'s prefix CORRECTHORSE's`, `password=[REDACTED]`},
+		{`password=a:'s correct horse battery`, `password=[REDACTED]`},
+		{`export DB_PASSWORD=a:'d correct horse battery'd`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=a:'re correct horse battery're rest`, `export DB_PASSWORD=[REDACTED] rest`},
+		{`password=a: 's missing; the SYNTHETIC_CREDENTIAL_6301's request`, `password=[REDACTED] request`},
+		{`export DB_PASSWORD=a:'s part1; SYNTHETIC_CREDENTIAL_6301's`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=a:'s missing; the user's+SYNTHETIC_CREDENTIAL_6301`, `export DB_PASSWORD=[REDACTED]`},
+		{`password=a:'s bearer of bad news`, `password=[REDACTED]`},
+		{`password=a:'s SYNTHETIC_CREDENTIAL_6301; retry later`, `password=[REDACTED]`},
+		// Verified outer-prose boundaries and following constructs stay intact.
+		{`token=abc:'s scope missing; the user's request`, `token=[REDACTED] scope missing; the user's request`},
+		{`token=abc:'s; the user's request`, `token=[REDACTED]; the user's request`},
+		{`token=abc:'s scope missing; retry later`, `token=[REDACTED] scope missing; retry later`},
+		{`token=abc:'s note password='SYNTHETIC_CREDENTIAL_6301' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
+		{`token=abc:'s note Bearer ' SYNTHETIC_CREDENTIAL_6301 SYNTHETIC_CREDENTIAL_6302'suffix`, `token=[REDACTED] note Bearer [REDACTED]`},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+}
+
+// TestScrubTextPatterns_PunctuationContinuedQuotedValues checks that a closing
+// quote immediately followed by a punctuation continuation (+, -, /, ., @, %,
+// !, ?, =, :, \, etc.) is consumed as part of the credential value across all
+// paths, while genuine delimiters and enclosing punctuation boundaries remain
+// intact.
+func TestScrubTextPatterns_PunctuationContinuedQuotedValues(t *testing.T) {
+	for _, op := range []string{"+", "-", "/", ".", "..", "@", "%", "!", "?", "=", ":", `\`, `\n`, `\\`, "~", "|"} {
+		checkAllRedactionPaths(t, `export DB_PASSWORD="prefix"`+op+`SYNTHETIC_CREDENTIAL_91827`, `export DB_PASSWORD=[REDACTED]`)
+		checkAllRedactionPaths(t, `export DB_PASSWORD='prefix'`+op+`SYNTHETIC_CREDENTIAL_91827`, `export DB_PASSWORD=[REDACTED]`)
+		checkAllRedactionPaths(t, `export "DB_PASSWORD"="prefix"`+op+`SYNTHETIC_CREDENTIAL_91827`, `export "DB_PASSWORD"=[REDACTED]`)
+		checkAllRedactionPaths(t, `failed: "password": "prefix"`+op+`SYNTHETIC_CREDENTIAL_91827`, `failed: "password":"[REDACTED]"`)
+		checkAllRedactionPaths(t, `Bearer "prefix"`+op+`SYNTHETIC_CREDENTIAL_91827`, `Bearer [REDACTED]`)
+		checkAllRedactionPaths(t, `password=a="prefix"`+op+`SYNTHETIC_CREDENTIAL_91827`, `password=[REDACTED]`)
+	}
+	for _, tt := range []struct{ in, want string }{
+		{`export DB_PASSWORD="prefix"+"SYNTHETIC_CREDENTIAL_91827"`, `export DB_PASSWORD="[REDACTED]"`},
+		{`export DB_PASSWORD="prefix"+'SYNTHETIC_CREDENTIAL_91827 tail'`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD='prefix'/"SYNTHETIC_CREDENTIAL_91827"`, `export DB_PASSWORD=[REDACTED]`},
+		{`failed: {'api_key': 'prefix'@SYNTHETIC_CREDENTIAL_91827}`, `failed: {'api_key':[REDACTED]}`},
+		{`(password="prefix")+SYNTHETIC_CREDENTIAL_91827`, `(password=[REDACTED]`},
+		// Verified delimiters and enclosing brackets/sentence punctuation.
+		{`export DB_PASSWORD="SYNTHETIC_CREDENTIAL_91827"; echo ok`, `export DB_PASSWORD="[REDACTED]"; echo ok`},
+		{`password="SYNTHETIC_CREDENTIAL_91827", user="bob"`, `password="[REDACTED]", user="bob"`},
+		{`password="SYNTHETIC_CREDENTIAL_91827"&user=bob`, `password="[REDACTED]"&user=bob`},
+		{`(password="SYNTHETIC_CREDENTIAL_91827")`, `(password="[REDACTED]")`},
+		{`failed: [password="SYNTHETIC_CREDENTIAL_91827"]`, `failed: [password="[REDACTED]"]`},
+		{`failed: {Password:"SYNTHETIC_CREDENTIAL_91827"}.`, `failed: {Password:"[REDACTED]"}.`},
+		{`password="SYNTHETIC_CREDENTIAL_91827": dial tcp`, `password="[REDACTED]": dial tcp`},
+		{`password="SYNTHETIC_CREDENTIAL_91827"! retry`, `password="[REDACTED]"! retry`},
+		{`password="SYNTHETIC_CREDENTIAL_91827"?`, `password="[REDACTED]"?`},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
 	}
 }

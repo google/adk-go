@@ -3144,6 +3144,26 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			text: `failed: {Credentials:token=" SECRET123"}`,
 			want: `failed: {Credentials:token="[REDACTED]"}`,
 		},
+		{
+			name: "credential keys with repeated and mixed separators",
+			text: "failed: api__key=SECRET123 stripe.api..key=SECRET123 OPENAI_API__KEY=SECRET123 foo.auth..code=SECRET123",
+			want: "failed: api__key=[REDACTED] stripe.api..key=[REDACTED] OPENAI_API__KEY=[REDACTED] foo.auth..code=[REDACTED]",
+		},
+		{
+			name: "joined shell password containing contraction-shaped words",
+			text: `export DB_PASSWORD=a:'s correct SECRET123 battery's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "quoted credential continued by plus sign",
+			text: `export DB_PASSWORD="prefix"+SECRET123`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "adjacent compound credential assignments",
+			text: `DB_PASSWORD="benign"GITHUB_TOKEN="SECRET123"`,
+			want: `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3236,6 +3256,14 @@ func TestRedactionRegressions(t *testing.T) {
 		{"prose apostrophe after colon before single-quoted key", `token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note 'password':[REDACTED]`},
 		{"two-word page access token before long separator run", "fb.page" + strings.Repeat(".", 130) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 130) + "token=[REDACTED]"},
 		{"two-word page access token cut inside page by bound", "fb.page" + strings.Repeat(".", 125) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 125) + "token=[REDACTED]"},
+		{"repeated underscore credential key in free text", "api__key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "api__key=[REDACTED]"},
+		{"repeated dot compound credential key in free text", "stripe.api..key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "stripe.api..key=[REDACTED]"},
+		{"repeated dot auth code key in free text", "foo.auth..code=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "foo.auth..code=[REDACTED]"},
+		{"joined shell password with contraction-like words", `export DB_PASSWORD=a:'s correct horse battery's`, "correct horse", `export DB_PASSWORD=[REDACTED]`},
+		{"unclosed shell password after contraction-like prefix", `password=a:'s correct horse battery`, "correct horse", `password=[REDACTED]`},
+		{"plus-continued quoted credential value", `export DB_PASSWORD="prefix"+SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export DB_PASSWORD=[REDACTED]`},
+		{"slash-continued quoted credential value", `export "DB_PASSWORD"="prefix"/SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export "DB_PASSWORD"=[REDACTED]`},
+		{"adjacent compound credential assignments preserve both keys", `DB_PASSWORD="benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, "SYNTHETIC_FOLLOWING_6401", `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
