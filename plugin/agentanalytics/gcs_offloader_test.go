@@ -6797,6 +6797,23 @@ func TestBatchProcessor_ObjectPathCachesEffectivePrefix(t *testing.T) {
 			wantPath := gcsObjectPath(tc.prefix, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
 			doubleNormalizedPath := gcsObjectPath(wantClean, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt")
 
+			// objectPath must keep using the prefix that NewBatchProcessor
+			// resolved, even an empty one, instead of cleaning
+			// Config.GCSPathPrefix again. The path and allocation checks below
+			// cannot tell for the slash-only prefix: cleaning it again scans the
+			// whole prefix but allocates nothing and yields the same path. So
+			// replace the raw prefix with a distinct one and expect the same path.
+			const sentinel = "must-not-re-read-after-construction"
+			if gcsObjectPath(sentinel, ts, "trace-1", "span-1", "event-1", 0, 0, ".txt") == wantPath {
+				t.Fatalf("sentinel prefix %q gives wantPath %q, so replacing the raw prefix with it proves nothing", sentinel, wantPath)
+			}
+			bp.config.GCSPathPrefix = sentinel
+			if got := bp.objectPath(row, upload); got != wantPath {
+				t.Errorf("bp.objectPath() after replacing Config.GCSPathPrefix with %q = %q, want %q from the prefix resolved at construction", sentinel, got, wantPath)
+			}
+			// Restore the raw prefix, which the allocation checks below measure.
+			bp.config.GCSPathPrefix = tc.prefix
+
 			for i := range 3 {
 				got := bp.objectPath(row, upload)
 				if got != wantPath {
