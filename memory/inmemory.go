@@ -17,6 +17,7 @@ package memory
 import (
 	"cmp"
 	"context"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -76,44 +77,9 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 	var values []value
 
 	for event := range curSession.Events().All() {
-		if event.LLMResponse.Content == nil {
-			continue
+		if v, ok := eventToValue(event); ok {
+			values = append(values, v)
 		}
-
-		// Thought parts are the model's reasoning, not conversation, so they are
-		// neither searched nor returned, as in adk-python.
-		words := make(map[string]struct{})
-		var texts []string
-		var visibleParts []*genai.Part
-		for _, part := range event.LLMResponse.Content.Parts {
-			if part == nil || part.Thought {
-				continue
-			}
-			visibleParts = append(visibleParts, part)
-			if part.Text == "" {
-				continue
-			}
-
-			maps.Copy(words, extractWords(part.Text))
-			texts = append(texts, part.Text)
-		}
-
-		if len(words) == 0 {
-			continue
-		}
-
-		content := *event.LLMResponse.Content
-		content.Parts = visibleParts
-
-		values = append(values, value{
-			id:             event.ID,
-			content:        &content,
-			author:         event.Author,
-			timestamp:      event.Timestamp,
-			customMetadata: event.CustomMetadata,
-			words:          words,
-			textLower:      strings.ToLower(strings.Join(texts, " ")),
-		})
 	}
 
 	k := key{
@@ -136,6 +102,119 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 		v.sessionOrder = append(v.sessionOrder, sid)
 	}
 	v.sessions[sid] = values
+	return nil
+}
+
+func eventToValue(event *session.Event) (value, bool) {
+	if event.LLMResponse.Content == nil {
+		return value{}, false
+	}
+
+	// Thought parts are the model's reasoning, not conversation, so they are
+	// neither searched nor returned, as in adk-python.
+	words := make(map[string]struct{})
+	var texts []string
+	var visibleParts []*genai.Part
+	for _, part := range event.LLMResponse.Content.Parts {
+		if part == nil || part.Thought {
+			continue
+		}
+		visibleParts = append(visibleParts, part)
+		if part.Text == "" {
+			continue
+		}
+
+		maps.Copy(words, extractWords(part.Text))
+		texts = append(texts, part.Text)
+	}
+
+	if len(words) == 0 {
+		return value{}, false
+	}
+
+	content := *event.LLMResponse.Content
+	content.Parts = visibleParts
+
+	return value{
+		id:             event.ID,
+		content:        &content,
+		author:         event.Author,
+		timestamp:      event.Timestamp,
+		customMetadata: event.CustomMetadata,
+		words:          words,
+		textLower:      strings.ToLower(strings.Join(texts, " ")),
+	}, true
+}
+
+var _ AddEventsToMemoryer = (*inMemoryService)(nil)
+
+func (s *inMemoryService) AddEventsToMemory(ctx context.Context, req *AddEventsToMemoryRequest) error {
+	if req == nil {
+		return errors.New("memory: AddEventsToMemory request is nil")
+	}
+	if req.AppName == "" || req.UserID == "" {
+		return errors.New("memory: AddEventsToMemory requires AppName and UserID")
+	}
+	// Convert the events into values before taking the lock: the conversion is
+	// pure and only the per-user write contends, so keeping it out of the
+	// critical section avoids blocking other tenants (and matches
+	// AddSessionToMemory, which builds its values before acquiring the lock).
+	newValues := make([]value, 0, len(req.Events))
+	for _, event := range req.Events {
+		if v, ok := eventToValue(event); ok {
+			newValues = append(newValues, v)
+		}
+	}
+	if len(newValues) == 0 {
+		return nil
+	}
+
+	k := key{
+		appName: req.AppName,
+		userID:  req.UserID,
+	}
+	sid := sessionID(req.SessionID)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, ok := s.store[k]
+	if !ok {
+		v = &userMemories{sessions: make(map[sessionID][]value)}
+		s.store[k] = v
+	}
+	existing := v.sessions[sid]
+	// A newly seen session takes a slot in the insertion order, as in
+	// AddSessionToMemory, so searches observe sessions and events in the order
+	// they first appeared.
+	if _, ok := v.sessions[sid]; !ok {
+		v.sessionOrder = append(v.sessionOrder, sid)
+	}
+
+	// Dedup on the event ID so repeated calls with overlapping events are
+	// idempotent. An empty ID has no stable identity to dedup on, so such
+	// events are never skipped and never claim the "" slot: this keeps the
+	// behavior of AddSessionToMemory for ID-less events, which stores every
+	// event it is given rather than collapsing them.
+	seen := make(map[string]struct{}, len(existing)+len(newValues))
+	for _, stored := range existing {
+		if stored.id != "" {
+			seen[stored.id] = struct{}{}
+		}
+	}
+	for _, nv := range newValues {
+		if nv.id == "" {
+			existing = append(existing, nv)
+			continue
+		}
+		if _, dup := seen[nv.id]; dup {
+			continue
+		}
+		seen[nv.id] = struct{}{}
+		existing = append(existing, nv)
+	}
+
+	v.sessions[sid] = existing
 	return nil
 }
 
