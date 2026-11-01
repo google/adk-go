@@ -30,6 +30,9 @@ var (
 	customMetaTaskIDKey    = ToADKMetaKey("task_id")
 	customMetaContextIDKey = ToADKMetaKey("context_id")
 
+	metadataInvocationIDKey    = ToA2AMetaKey("invocation_id")
+	metadataAuthorKey          = ToA2AMetaKey("author")
+	metadataBranchKey          = ToA2AMetaKey("branch")
 	metadataEscalateKey        = ToA2AMetaKey("escalate")
 	metadataTransferToAgentKey = ToA2AMetaKey("transfer_to_agent")
 	metadataErrorCodeKey       = ToA2AMetaKey("error_code")
@@ -88,14 +91,14 @@ func toEventMeta(meta invocationMeta, event *session.Event) (map[string]any, err
 	result := make(map[string]any)
 	maps.Copy(result, meta.eventMeta)
 
-	for k, v := range map[string]string{
-		"invocation_id": event.InvocationID,
-		"author":        event.Author,
-		"branch":        event.Branch,
-	} {
-		if v != "" {
-			result[ToA2AMetaKey(k)] = v
-		}
+	if event.InvocationID != "" {
+		result[metadataInvocationIDKey] = event.InvocationID
+	}
+	if event.Author != "" {
+		result[metadataAuthorKey] = event.Author
+	}
+	if event.Branch != "" {
+		result[metadataBranchKey] = event.Branch
 	}
 
 	if err := addMeta(result, metadataCitationKey, event.CitationMetadata); err != nil {
@@ -186,7 +189,7 @@ func TransferToAgentFromMeta(meta map[string]any) (agentName string, ok bool) {
 	return agentName, ok
 }
 
-func addMeta(result map[string]any, key string, data any) error {
+func addMeta[T any](result map[string]any, key string, data *T) error {
 	if data == nil {
 		return nil
 	}

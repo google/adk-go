@@ -2262,3 +2262,93 @@ func TestIsLoopbackHost(t *testing.T) {
 		})
 	}
 }
+
+func TestRunProcessorCallbacksEquivalence(t *testing.T) {
+	ic := newInvocationContext(t, []*session.Event{newUserHello()})
+	req := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))}
+	sampleEvent := &session.Event{Author: "remote", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}}
+	overrideEvent := &session.Event{Author: "override"}
+	sampleErr := errors.New("boom")
+
+	configs := []struct {
+		name string
+		cfg  A2AConfig
+	}{
+		{name: "no callbacks", cfg: A2AConfig{}},
+		{
+			name: "pass-through callbacks",
+			cfg: A2AConfig{
+				BeforeRequestCallbacks: []BeforeA2ARequestCallback{
+					func(agent.Context, *a2a.SendMessageRequest) (*session.Event, error) { return nil, nil },
+				},
+				AfterRequestCallbacks: []AfterA2ARequestCallback{
+					func(agent.Context, *a2a.SendMessageRequest, *session.Event, error) (*session.Event, error) {
+						return nil, nil
+					},
+				},
+			},
+		},
+		{
+			name: "short-circuit callbacks",
+			cfg: A2AConfig{
+				BeforeRequestCallbacks: []BeforeA2ARequestCallback{
+					func(agent.Context, *a2a.SendMessageRequest) (*session.Event, error) { return overrideEvent, nil },
+				},
+				AfterRequestCallbacks: []AfterA2ARequestCallback{
+					func(agent.Context, *a2a.SendMessageRequest, *session.Event, error) (*session.Event, error) {
+						return overrideEvent, sampleErr
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range configs {
+		t.Run(tc.name, func(t *testing.T) {
+			proc := newRunProcessor(tc.cfg, req)
+			gotB, gotBErr := proc.runBeforeA2ARequestCallbacks(ic)
+			wantB, wantBErr := referenceRunBeforeCallbacks(proc, ic)
+			if diff := cmp.Diff(wantB, gotB); diff != "" || !errors.Is(gotBErr, wantBErr) {
+				t.Errorf("before callback mismatch: got (%v, %v), want (%v, %v)", gotB, gotBErr, wantB, wantBErr)
+			}
+
+			for _, in := range []struct {
+				ev  *session.Event
+				err error
+			}{
+				{nil, nil},
+				{sampleEvent, nil},
+				{nil, sampleErr},
+			} {
+				gotA, gotAErr := proc.runAfterA2ARequestCallbacks(ic, in.ev, in.err)
+				wantA, wantAErr := referenceRunAfterCallbacks(proc, ic, in.ev, in.err)
+				if diff := cmp.Diff(wantA, gotA); diff != "" || !errors.Is(gotAErr, wantAErr) {
+					t.Errorf("after callback mismatch: got (%v, %v), want (%v, %v)", gotA, gotAErr, wantA, wantAErr)
+				}
+			}
+		})
+	}
+}
+
+func referenceRunBeforeCallbacks(p *a2aAgentRunProcessor, ctx agent.InvocationContext) (*session.Event, error) {
+	cctx := icontext.NewCallbackContext(ctx)
+	for _, callback := range p.config.BeforeRequestCallbacks {
+		if cbResp, cbErr := callback(cctx, p.request); cbResp != nil || cbErr != nil {
+			return cbResp, cbErr
+		}
+	}
+	return nil, nil
+}
+
+func referenceRunAfterCallbacks(p *a2aAgentRunProcessor, ctx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
+	if resp == nil && err == nil {
+		return nil, nil
+	}
+	cctx := icontext.NewCallbackContext(ctx)
+	for _, callback := range p.config.AfterRequestCallbacks {
+		if cbEvent, cbErr := callback(cctx, p.request, resp, err); cbEvent != nil || cbErr != nil {
+			return cbEvent, cbErr
+		}
+	}
+	return nil, nil
+}

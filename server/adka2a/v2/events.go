@@ -23,6 +23,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -32,6 +33,17 @@ func NewRemoteAgentEvent(ctx agent.InvocationContext) *session.Event {
 	event.Author = ctx.Agent().Name()
 	event.Branch = ctx.Branch()
 	return event
+}
+
+func newRemoteAgentEventNoDeltas(ctx agent.InvocationContext) *session.Event {
+	invocationID := ctx.InvocationID()
+	return &session.Event{
+		ID:           platform.NewUUID(ctx),
+		InvocationID: invocationID,
+		Timestamp:    platform.Now(ctx),
+		Author:       ctx.Agent().Name(),
+		Branch:       ctx.Branch(),
+	}
 }
 
 // EventToMessage converts the provided session event to A2A message.
@@ -203,7 +215,7 @@ func messageToEvent(ctx agent.InvocationContext, msg *a2a.Message, partConverter
 		}
 	}
 
-	event := NewRemoteAgentEvent(ctx)
+	event := newRemoteAgentEventNoDeltas(ctx)
 	if len(parts) > 0 {
 		event.Content = genai.NewContentFromParts(parts, toGenAIRole(msg.Role))
 	}
@@ -227,7 +239,7 @@ func artifactUpdateEventToEvent(ctx agent.InvocationContext, update *a2a.TaskArt
 		return nil, fmt.Errorf("failed to convert artifact parts: %w", err)
 	}
 
-	event := NewRemoteAgentEvent(ctx)
+	event := newRemoteAgentEventNoDeltas(ctx)
 	event.Content = genai.NewContentFromParts(filterNilParts(allParts), genai.RoleModel)
 	event.LongRunningToolIDs = getLongRunningToolIDs(update.Artifact.Parts, allParts)
 	return event, nil
@@ -252,7 +264,7 @@ func taskToEvent(ctx agent.InvocationContext, task *a2a.Task, partConverter A2AP
 		longRunningToolIDs = append(longRunningToolIDs, lrtIDs...)
 	}
 
-	event := NewRemoteAgentEvent(ctx)
+	event := newRemoteAgentEventNoDeltas(ctx)
 
 	convertedStatusMsg, err := convertStatusMessage(ctx, task, task.Status, partConverter)
 	if err != nil {
@@ -291,7 +303,7 @@ func finalTaskStatusUpdateToEvent(ctx agent.InvocationContext, update *a2a.TaskS
 		return nil, nil
 	}
 
-	event := NewRemoteAgentEvent(ctx)
+	event := newRemoteAgentEventNoDeltas(ctx)
 
 	convertedStatusMsg, err := convertStatusMessage(ctx, update, update.Status, partConverter)
 	if err != nil {

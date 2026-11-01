@@ -16,7 +16,9 @@ package adka2a
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -788,5 +791,239 @@ func TestTransferToAgentFromMeta(t *testing.T) {
 	meta := map[string]any{metadataTransferToAgentKey: "a-2"}
 	if got, ok := TransferToAgentFromMeta(meta); !ok || got != "a-2" {
 		t.Errorf("TransferToAgentFromMeta(meta) = (%q, %v), want (\"a-2\", true)", got, ok)
+	}
+}
+
+func TestToSessionEventWithPartsEquivalence(t *testing.T) {
+	taskID, contextID := a2a.TaskID("task-eq-1"), "ctx-eq-1"
+	a2aAgent, err := agent.New(agent.Config{Name: "eq_agent"})
+	if err != nil {
+		t.Fatalf("agent.New failed: %v", err)
+	}
+
+	inputs := []struct {
+		name  string
+		event a2a.Event
+	}{
+		{
+			name: "message",
+			event: &a2a.Message{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Role:      a2a.MessageRoleAgent,
+				Parts:     a2a.ContentParts{a2a.NewTextPart("hello")},
+				Metadata:  map[string]any{metadataEscalateKey: true},
+			},
+		},
+		{
+			name: "artifact update partial",
+			event: &a2a.TaskArtifactUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Artifact:  &a2a.Artifact{ID: "art-1", Parts: a2a.ContentParts{a2a.NewTextPart("delta")}},
+				Append:    true,
+			},
+		},
+		{
+			name: "task completed",
+			event: &a2a.Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Artifacts: []*a2a.Artifact{{ID: "art-1", Parts: a2a.ContentParts{a2a.NewTextPart("answer")}}},
+				Status:    a2a.TaskStatus{State: a2a.TaskStateCompleted},
+			},
+		},
+		{
+			name: "working status update with message",
+			event: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateWorking,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("thinking")),
+				},
+			},
+		},
+		{
+			name: "final status update failed",
+			event: &a2a.TaskStatusUpdateEvent{
+				TaskID:    taskID,
+				ContextID: contextID,
+				Status: a2a.TaskStatus{
+					State:   a2a.TaskStateFailed,
+					Message: a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("boom")),
+				},
+			},
+		},
+	}
+
+	for _, tc := range inputs {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCtx, gotOrder := newRecordingInvocationContext(t, a2aAgent)
+			wantCtx, wantOrder := newRecordingInvocationContext(t, a2aAgent)
+
+			got, gotErr := ToSessionEventWithParts(gotCtx, tc.event, nil)
+			want, wantErr := referenceToSessionEventWithParts(wantCtx, tc.event, nil)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("error = %v, want %v", gotErr, wantErr)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("ToSessionEventWithParts mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(*wantOrder, *gotOrder); diff != "" {
+				t.Errorf("platform call order mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func newRecordingInvocationContext(t *testing.T, agnt agent.Agent) (agent.InvocationContext, *[]string) {
+	t.Helper()
+	var calls []string
+	seq := 0
+	base := platform.WithUUIDProvider(t.Context(), func() string {
+		seq++
+		calls = append(calls, fmt.Sprintf("uuid:%d", seq))
+		return fmt.Sprintf("uuid-%d", seq)
+	})
+	base = platform.WithTimeProvider(base, func() time.Time {
+		seq++
+		calls = append(calls, fmt.Sprintf("time:%d", seq))
+		return time.Unix(1700000000+int64(seq), 0).UTC()
+	})
+	return icontext.NewInvocationContext(base, icontext.InvocationContextParams{
+		Branch: "main",
+		Agent:  agnt,
+	}), &calls
+}
+
+func referenceToSessionEventWithParts(ctx agent.InvocationContext, event a2a.Event, partConverter A2APartConverter) (*session.Event, error) {
+	if partConverter == nil {
+		partConverter = func(_ context.Context, _ a2a.Event, part *a2a.Part) (*genai.Part, error) {
+			return ToGenAIPart(part)
+		}
+	}
+	switch v := event.(type) {
+	case *a2a.Task:
+		var parts []*genai.Part
+		var lrtIDs []string
+		for _, artifact := range v.Artifacts {
+			allParts, err := convertParts(ctx, v, artifact.Parts, partConverter)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, filterNilParts(allParts)...)
+			lrtIDs = append(lrtIDs, getLongRunningToolIDs(artifact.Parts, allParts)...)
+		}
+		ev := NewRemoteAgentEvent(ctx)
+		statusMsg, err := convertStatusMessage(ctx, v, v.Status, partConverter)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, statusMsg.parts...)
+		lrtIDs = append(lrtIDs, statusMsg.longRunningToolIDs...)
+		if v.Status.State == a2a.TaskStateFailed {
+			if statusMsg.errorMessage != "" {
+				ev.ErrorMessage = statusMsg.errorMessage
+			} else {
+				ev.ErrorMessage = "a2a task failed"
+			}
+		}
+		isTerminal := v.Status.State.Terminal() || v.Status.State == a2a.TaskStateInputRequired
+		if len(parts) == 0 && !isTerminal {
+			return nil, nil
+		}
+		if len(parts) > 0 {
+			ev.Content = genai.NewContentFromParts(parts, genai.RoleModel)
+		}
+		if v.Status.State == a2a.TaskStateInputRequired {
+			ev.LongRunningToolIDs = lrtIDs
+		}
+		if err := processA2AMeta(v, ev); err != nil {
+			return nil, err
+		}
+		ev.TurnComplete = isTerminal
+		return ev, nil
+
+	case *a2a.Message:
+		var parts []*genai.Part
+		for _, part := range v.Parts {
+			gp, err := partConverter(ctx, v, part)
+			if err != nil {
+				return nil, err
+			}
+			if gp != nil {
+				parts = append(parts, gp)
+			}
+		}
+		ev := NewRemoteAgentEvent(ctx)
+		if len(parts) > 0 {
+			ev.Content = genai.NewContentFromParts(parts, toGenAIRole(v.Role))
+		}
+		if err := processA2AMeta(v, ev); err != nil {
+			return nil, err
+		}
+		ev.TurnComplete = true
+		return ev, nil
+
+	case *a2a.TaskArtifactUpdateEvent:
+		allParts, err := convertParts(ctx, v, v.Artifact.Parts, partConverter)
+		if err != nil {
+			return nil, err
+		}
+		ev := NewRemoteAgentEvent(ctx)
+		ev.Content = genai.NewContentFromParts(filterNilParts(allParts), genai.RoleModel)
+		ev.LongRunningToolIDs = getLongRunningToolIDs(v.Artifact.Parts, allParts)
+		if err := processA2AMeta(v, ev); err != nil {
+			return nil, err
+		}
+		if partial, ok := v.Metadata[metadataPartialKey].(bool); ok {
+			ev.Partial = partial
+		} else {
+			ev.Partial = v.Append || !v.LastChunk
+		}
+		return ev, nil
+
+	case *a2a.TaskStatusUpdateEvent:
+		if v.Status.State.Terminal() || v.Status.State == a2a.TaskStateInputRequired {
+			ev := NewRemoteAgentEvent(ctx)
+			statusMsg, err := convertStatusMessage(ctx, v, v.Status, partConverter)
+			if err != nil {
+				return nil, err
+			}
+			if len(statusMsg.parts) > 0 {
+				ev.Content = genai.NewContentFromParts(statusMsg.parts, genai.RoleModel)
+			}
+			ev.LongRunningToolIDs = statusMsg.longRunningToolIDs
+			if v.Status.State == a2a.TaskStateFailed {
+				if statusMsg.errorMessage != "" {
+					ev.ErrorMessage = statusMsg.errorMessage
+				} else {
+					ev.ErrorMessage = "a2a task failed"
+				}
+			}
+			if err := processA2AMeta(v, ev); err != nil {
+				return nil, err
+			}
+			ev.TurnComplete = true
+			return ev, nil
+		}
+		ev, err := referenceToSessionEventWithParts(ctx, v.Status.Message, partConverter)
+		if err != nil || ev == nil {
+			return ev, err
+		}
+		ev.TurnComplete = false
+		if err := processA2AMeta(v, ev); err != nil {
+			return nil, err
+		}
+		for _, p := range ev.Content.Parts {
+			if p.Text != "" {
+				p.Thought = true
+			}
+		}
+		ev.Partial = true
+		return ev, nil
+	default:
+		return nil, fmt.Errorf("unknown event type: %T", v)
 	}
 }

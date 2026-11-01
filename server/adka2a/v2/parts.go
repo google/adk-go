@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
@@ -153,7 +154,7 @@ func toA2AFilePart(v *genai.Part) (*a2a.Part, error) {
 
 func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (*a2a.Part, error) {
 	if part.CodeExecutionResult != nil {
-		data, err := converters.ToMapStructure(part.CodeExecutionResult)
+		data, err := codeExecutionResultToMap(part.CodeExecutionResult)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +174,7 @@ func toA2ADataPart(part *genai.Part, longRunningToolIDs []string) (*a2a.Part, er
 	}
 
 	if part.ExecutableCode != nil {
-		data, err := converters.ToMapStructure(part.ExecutableCode)
+		data, err := executableCodeToMap(part.ExecutableCode)
 		if err != nil {
 			return nil, err
 		}
@@ -283,12 +284,25 @@ func toGenAIFilePart(part *a2a.Part) (*genai.Part, error) {
 
 func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 	data := part.Data()
+	adkMetaType := part.Metadata[a2aDataPartMetaTypeKey]
+	if dataMap, ok := data.(map[string]any); ok {
+		switch adkMetaType {
+		case a2aDataPartTypeCodeExecResult:
+			if cer, ok := mapToCodeExecutionResult(dataMap); ok {
+				return &genai.Part{CodeExecutionResult: cer}, nil
+			}
+		case a2aDataPartTypeCodeExecutableCode:
+			if ec, ok := mapToExecutableCode(dataMap); ok {
+				return &genai.Part{ExecutableCode: ec}, nil
+			}
+		}
+	}
+
 	bytes, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
 
-	adkMetaType := part.Metadata[a2aDataPartMetaTypeKey]
 	switch adkMetaType {
 	case a2aDataPartTypeCodeExecResult:
 		var val genai.CodeExecutionResult
@@ -328,4 +342,86 @@ func toGenAIDataPart(part *a2a.Part) (*genai.Part, error) {
 
 		return &genai.Part{InlineData: &genai.Blob{Data: jsonData, MIMEType: "text/plain"}}, nil
 	}
+}
+
+func codeExecutionResultToMap(cer *genai.CodeExecutionResult) (map[string]any, error) {
+	if !utf8.ValidString(string(cer.Outcome)) || !utf8.ValidString(cer.Output) || !utf8.ValidString(cer.ID) {
+		return converters.ToMapStructure(cer)
+	}
+	out := make(map[string]any, 3)
+	if cer.Outcome != "" {
+		out["outcome"] = string(cer.Outcome)
+	}
+	if cer.Output != "" {
+		out["output"] = cer.Output
+	}
+	if cer.ID != "" {
+		out["id"] = cer.ID
+	}
+	return out, nil
+}
+
+func mapToCodeExecutionResult(data map[string]any) (*genai.CodeExecutionResult, bool) {
+	cer := &genai.CodeExecutionResult{}
+	for k, v := range data {
+		if v == nil {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok || !utf8.ValidString(s) {
+			return nil, false
+		}
+		switch k {
+		case "outcome":
+			cer.Outcome = genai.Outcome(s)
+		case "output":
+			cer.Output = s
+		case "id":
+			cer.ID = s
+		default:
+			return nil, false
+		}
+	}
+	return cer, true
+}
+
+func executableCodeToMap(ec *genai.ExecutableCode) (map[string]any, error) {
+	if !utf8.ValidString(ec.Code) || !utf8.ValidString(string(ec.Language)) || !utf8.ValidString(ec.ID) {
+		return converters.ToMapStructure(ec)
+	}
+	out := make(map[string]any, 3)
+	if ec.Code != "" {
+		out["code"] = ec.Code
+	}
+	if ec.Language != "" {
+		out["language"] = string(ec.Language)
+	}
+	if ec.ID != "" {
+		out["id"] = ec.ID
+	}
+	return out, nil
+}
+
+func mapToExecutableCode(data map[string]any) (*genai.ExecutableCode, bool) {
+	ec := &genai.ExecutableCode{}
+	for k, v := range data {
+		if v == nil {
+			continue
+		}
+		s, ok := v.(string)
+		if !ok || !utf8.ValidString(s) {
+			return nil, false
+		}
+		switch k {
+		case "code":
+			ec.Code = s
+		case "language":
+			ec.Language = genai.Language(s)
+		case "id":
+			ec.ID = s
+		default:
+			return nil, false
+		}
+	}
+	return ec, true
 }

@@ -15,12 +15,16 @@
 package adka2a
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -160,4 +164,175 @@ func TestMetadataTwoWayConversion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestToEventMetaAndArtifactMakerEquivalence(t *testing.T) {
+	invMeta := invocationMeta{
+		userID:    "user-1",
+		sessionID: "sess-1",
+		agentName: "agent-1",
+		eventMeta: map[string]any{
+			ToA2AMetaKey("app_name"):   "app-1",
+			ToA2AMetaKey("user_id"):    "user-1",
+			ToA2AMetaKey("session_id"): "sess-1",
+		},
+	}
+
+	cases := []struct {
+		name  string
+		event *session.Event
+	}{
+		{
+			name:  "empty event with typed nil metadata pointers",
+			event: &session.Event{},
+		},
+		{
+			name: "partial chunk with invocation author branch",
+			event: &session.Event{
+				InvocationID: "inv-42",
+				Author:       "agent-1",
+				Branch:       "root.agent-1",
+				LLMResponse: model.LLMResponse{
+					Partial: true,
+					Content: genai.NewContentFromText("chunk", genai.RoleModel),
+				},
+			},
+		},
+		{
+			name: "non-nil zero metadata structs",
+			event: &session.Event{
+				InvocationID: "inv-zero",
+				LLMResponse: model.LLMResponse{
+					CitationMetadata:  &genai.CitationMetadata{},
+					GroundingMetadata: &genai.GroundingMetadata{},
+					UsageMetadata:     &genai.GenerateContentResponseUsageMetadata{},
+				},
+			},
+		},
+		{
+			name: "populated metadata and error code with unicode",
+			event: &session.Event{
+				InvocationID: "inv-full",
+				Author:       "autor-żółć",
+				Branch:       "gałąź.1",
+				LLMResponse: model.LLMResponse{
+					ErrorCode: "429",
+					CitationMetadata: &genai.CitationMetadata{
+						Citations: []*genai.Citation{{Title: "Źródło", URI: "https://example.com"}},
+					},
+					GroundingMetadata: &genai.GroundingMetadata{
+						WebSearchQueries: []string{"zapytanie"},
+					},
+					UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+						PromptTokenCount:     100,
+						CandidatesTokenCount: 50,
+						TotalTokenCount:      150,
+					},
+					CustomMetadata: map[string]any{"klucz": "wartość"},
+				},
+				Actions: session.EventActions{Escalate: true},
+			},
+		},
+	}
+
+	reqCtx := &a2asrv.ExecutorContext{TaskID: "task-1", ContextID: "ctx-1"}
+	ignoreArtifactID := cmpopts.IgnoreFields(a2a.Artifact{}, "ID")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotMeta, gotErr := toEventMeta(invMeta, tc.event)
+			wantMeta, wantErr := referenceToEventMeta(invMeta, tc.event)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("toEventMeta error = %v, want %v", gotErr, wantErr)
+			}
+			if diff := cmp.Diff(wantMeta, gotMeta); diff != "" {
+				t.Errorf("toEventMeta mismatch (-want +got):\n%s", diff)
+			}
+
+			maker := newArtifactMaker(reqCtx)
+			refMaker := newArtifactMaker(reqCtx)
+			parts := []*a2a.Part{a2a.NewTextPart("part")}
+
+			gotArt, err := maker.transform(tc.event, parts, gotMeta)
+			if err != nil {
+				t.Fatalf("maker.transform failed: %v", err)
+			}
+			wantArt, err := referenceArtifactMakerTransform(refMaker, tc.event, parts, wantMeta)
+			if err != nil {
+				t.Fatalf("referenceArtifactMakerTransform failed: %v", err)
+			}
+			if diff := cmp.Diff(wantArt, gotArt, ignoreArtifactID); diff != "" {
+				t.Errorf("artifactMaker.transform mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func referenceToEventMeta(meta invocationMeta, event *session.Event) (map[string]any, error) {
+	result := make(map[string]any)
+	maps.Copy(result, meta.eventMeta)
+
+	for k, v := range map[string]string{
+		"invocation_id": event.InvocationID,
+		"author":        event.Author,
+		"branch":        event.Branch,
+	} {
+		if v != "" {
+			result[ToA2AMetaKey(k)] = v
+		}
+	}
+
+	if err := referenceAddMeta(result, metadataCitationKey, event.CitationMetadata); err != nil {
+		return nil, err
+	}
+	if err := referenceAddMeta(result, metadataGroundingKey, event.GroundingMetadata); err != nil {
+		return nil, err
+	}
+	if err := referenceAddMeta(result, metadataUsageKey, event.UsageMetadata); err != nil {
+		return nil, err
+	}
+	if event.CustomMetadata != nil {
+		result[metadataCustomMetaKey] = event.CustomMetadata
+	}
+	if event.LLMResponse.ErrorCode != "" {
+		result[metadataErrorCodeKey] = event.LLMResponse.ErrorCode
+	}
+
+	return result, nil
+}
+
+func referenceAddMeta(result map[string]any, key string, data any) error {
+	if data == nil {
+		return nil
+	}
+	v, err := converters.ToMapStructure(data)
+	if err != nil {
+		return err
+	}
+	if v == nil {
+		return nil
+	}
+	result[key] = v
+	return nil
+}
+
+func referenceArtifactMakerTransform(m *artifactMaker, event *session.Event, parts []*a2a.Part, meta map[string]any) (*a2a.TaskArtifactUpdateEvent, error) {
+	result := a2a.NewArtifactEvent(m.reqCtx, parts...)
+	if artifactID, ok := m.lastAgentPartialArtifact[event.Author]; ok {
+		result.Artifact.ID = artifactID
+		result.Append = event.Partial
+	}
+	result.LastChunk = !event.Partial
+	if event.Partial {
+		m.lastAgentPartialArtifact[event.Author] = result.Artifact.ID
+	} else {
+		delete(m.lastAgentPartialArtifact, event.Author)
+	}
+	if len(meta) > 0 {
+		if result.Artifact.Metadata == nil {
+			result.Artifact.Metadata = make(map[string]any)
+		}
+		maps.Copy(result.Artifact.Metadata, meta)
+	}
+	return result, nil
 }

@@ -206,6 +206,9 @@ func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext
 }
 
 func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.InvocationContext) (*session.Event, error) {
+	if len(p.config.BeforeRequestCallbacks) == 0 {
+		return nil, nil
+	}
 	cctx := icontext.NewCallbackContext(ctx)
 	for _, callback := range p.config.BeforeRequestCallbacks {
 		if cbResp, cbErr := callback(cctx, p.request); cbResp != nil || cbErr != nil {
@@ -217,6 +220,9 @@ func (p *a2aAgentRunProcessor) runBeforeA2ARequestCallbacks(ctx agent.Invocation
 
 func (p *a2aAgentRunProcessor) runAfterA2ARequestCallbacks(ctx agent.InvocationContext, resp *session.Event, err error) (*session.Event, error) {
 	if resp == nil && err == nil {
+		return nil, nil
+	}
+	if len(p.config.AfterRequestCallbacks) == 0 {
 		return nil, nil
 	}
 	cctx := icontext.NewCallbackContext(ctx)

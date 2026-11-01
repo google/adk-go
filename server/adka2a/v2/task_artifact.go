@@ -55,9 +55,10 @@ func (m *artifactMaker) transform(event *session.Event, parts []*a2a.Part, meta 
 
 	if len(meta) > 0 {
 		if result.Artifact.Metadata == nil {
-			result.Artifact.Metadata = make(map[string]any)
+			result.Artifact.Metadata = meta
+		} else {
+			maps.Copy(result.Artifact.Metadata, meta)
 		}
-		maps.Copy(result.Artifact.Metadata, meta)
 	}
 
 	return result, nil
