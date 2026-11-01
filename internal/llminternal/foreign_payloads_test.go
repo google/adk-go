@@ -101,3 +101,69 @@ func TestConvertForeignEvent_RetainsPayloadParts(t *testing.T) {
 		}
 	}
 }
+
+func TestConvertForeignEvent_DropsThoughtPayloadParts(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		part *genai.Part
+	}{
+		{"inline data", &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}},
+		{"file data", &genai.Part{FileData: &genai.FileData{FileURI: "gs://test/image"}}},
+		{"executable code", &genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "1 + 1"}}},
+		{"code result", &genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Output: "2"}}},
+		{"server tool call", &genai.Part{ToolCall: &genai.ToolCall{ID: "call", Args: map[string]any{"input": "test"}}}},
+		{"server tool response", &genai.Part{ToolResponse: &genai.ToolResponse{ID: "call", Response: map[string]any{"output": "test"}}}},
+		{"audio transcription", &genai.Part{AudioTranscription: &genai.Transcription{Text: "spoken answer"}}},
+	} {
+		for _, text := range []string{"", "private reasoning"} {
+			for _, mixed := range []bool{false, true} {
+				name := tc.name + " without text"
+				if text != "" {
+					name = tc.name + " with text"
+				}
+				if mixed {
+					name += " beside public payload"
+				}
+				t.Run(name, func(t *testing.T) {
+					thought := *tc.part
+					thought.Thought = true
+					thought.Text = text
+					parts := []*genai.Part{&thought}
+					var want []*genai.Part
+					if mixed {
+						public := *tc.part
+						parts = append(parts, &genai.Part{Text: "public answer"}, &public)
+						want = []*genai.Part{{Text: "For context:"}, {Text: "[otherAgent] said: public answer"}, &public}
+					}
+					event := &session.Event{
+						Author: "otherAgent",
+						LLMResponse: model.LLMResponse{Content: &genai.Content{
+							Role: "model", Parts: parts,
+						}},
+					}
+					before, err := json.Marshal(event)
+					if err != nil {
+						t.Fatal("could not snapshot the stored event")
+					}
+					got := llminternal.ConvertForeignEvent(event)
+					if !mixed {
+						if got != nil {
+							t.Error("foreign thought-only payload was relayed")
+						}
+					} else if got == nil || got.Content == nil || !cmp.Equal(got.Content.Parts, want) {
+						t.Error("foreign conversion did not retain only the public payloads")
+					}
+					after, err := json.Marshal(event)
+					if err != nil {
+						t.Fatal("could not snapshot the stored event after conversion")
+					}
+					if !cmp.Equal(before, after) {
+						t.Error("foreign conversion modified the stored event")
+					}
+				})
+			}
+		}
+	}
+}
