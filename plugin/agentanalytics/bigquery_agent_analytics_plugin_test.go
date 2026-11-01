@@ -3323,7 +3323,7 @@ func TestRedactionRegressions(t *testing.T) {
 		{"tab-padded compound password key in single-quoted dict", "failed: {'\tDB_PASSWORD\t': 'R12_SYNTHETIC_90517'}", "R12_SYNTHETIC_90517", "failed: {'\tDB_PASSWORD\t':'[REDACTED]'}"},
 		{"joined Bearer fragment inside contraction-led shell password", `export DB_PASSWORD=a:'s correct; horse Bearer '"R12_SYNTHETIC_7319"`, "correct; horse", `export DB_PASSWORD=[REDACTED]`},
 		{"joined single-quoted Bearer fragment inside shell password", `export DB_PASSWORD='my Bearer ''R12_SYNTHETIC_7319'; echo ok`, "R12_SYNTHETIC_7319", `export DB_PASSWORD='[REDACTED]'; echo ok`},
-		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]; echo 'done'`},
+		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]'; echo 'done'`},
 		{"state-prefixed temp key in a single-quoted dict", `failed: {'user:temp:scratch': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {'user:temp:scratch':'[REDACTED]'}`},
 		{"padded temp key that holds a delimiter in a single-quoted dict", `failed: {' temp:a=b ': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {' temp:a=b ':'[REDACTED]'}`},
 		{"padded key with whitespace after its state prefix", `failed: {" user: DB_PASSWORD ": "R13_SYNTHETIC_52816"}`, "R13_SYNTHETIC_52816", `failed: {" user: DB_PASSWORD ":"[REDACTED]"}`},
@@ -3352,6 +3352,38 @@ func TestRedactionRegressions(t *testing.T) {
 		{"comma-bearing temp key in a single-quoted dict", `failed: {'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'temp:a,b':'[REDACTED]'}`},
 		{"state-prefixed comma-bearing temp key in a single-quoted dict", `failed: {'user:temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'user:temp:a,b':'[REDACTED]'}`},
 		{"comma-bearing temp key after another dict entry", `failed: {'label': 'keep', 'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'label': 'keep', 'temp:a,b':'[REDACTED]'}`},
+		{"contraction-like opening in single-quoted shell part", `export DB_PASSWORD=pre's R15_CONTRACTION_S'; echo ok`, "R15_CONTRACTION_S", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"newline immediately after opening single quote in shell part", "export DB_PASSWORD=pre'\nR15_MULTILINE_INITIAL'; echo ok", "R15_MULTILINE_INITIAL", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"CRLF immediately after opening single quote in shell part", "export DB_PASSWORD=pre'\r\nR15_MULTILINE_INITIAL'; echo ok", "R15_MULTILINE_INITIAL", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"later single-quoted fragment after quoted prefix and bare text", `export DB_PASSWORD="a"pre'correct horse ASTRA_SYNTHETIC_935817'suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"three-part bare and single-quoted shell credential", `DB_PASSWORD=pre'a b'mid'correct horse ASTRA_SYNTHETIC_935817'end`, "ASTRA_SYNTHETIC_935817", `DB_PASSWORD=[REDACTED]`},
+		{"unclosed later single-quoted shell fragment", `export DB_PASSWORD="a"pre'correct horse ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]`},
+		{"sensitive inner label with attached bare suffix", `export DB_PASSWORD=pre'correct ASTRA_SYNTHETIC_935817 token='suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"double-quoted sensitive inner label with attached bare suffix", `export DB_PASSWORD=pre"correct ASTRA_SYNTHETIC_935817 token="suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"contraction-led sensitive inner label with attached bare suffix", `export DB_PASSWORD=a:'s note ASTRA_SYNTHETIC_935817 token='suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"brace-bearing temp key in a single-quoted dict", `failed: {'temp:cache/{user}': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'temp:cache/{user}':'[REDACTED]'}`},
+		{"state-prefixed brace-bearing temp key in a single-quoted dict", `failed: {'user:temp:a}b': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'user:temp:a}b':'[REDACTED]'}`},
+		{"brace-bearing temp key after another dict entry", `failed: {'label': 'keep', 'temp:cache/{user}': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'label': 'keep', 'temp:cache/{user}':'[REDACTED]'}`},
+		{"non-counter token_hint after quoted password", `DB_PASSWORD="a"token_hint=ASTRA_SYNTHETIC_935817`, "ASTRA_SYNTHETIC_935817", `DB_PASSWORD=[REDACTED]`},
+		{"non-counter my_tokens after placeholder", `password=[REDACTED]"my_tokens": "ASTRA_SYNTHETIC_935817"`, "ASTRA_SYNTHETIC_935817", `password=[REDACTED]`},
+		{"non-counter token_note after single-quoted shell part", `export DB_PASSWORD=pre'x y'token_note=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"plural access_tokens after quoted password", `export DB_PASSWORD="a"access_tokens=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"non-numeric token_count after quoted password", `export DB_PASSWORD="a"token_count=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"inter-string prose after quoted key following placeholder", `password=[REDACTED]"token": " for user "ASTRA_SYNTHETIC_935817"`, "ASTRA_SYNTHETIC_935817", `password=[REDACTED]"token":"[REDACTED]"`},
+		{"single-word contraction-led single-quoted Bearer token", `Bearer pre's_ASTRA_SYNTHETIC_935817'`, "ASTRA_SYNTHETIC_935817", `Bearer [REDACTED]`},
+		{"contraction-led multiline single-quoted shell password", "export DB_PASSWORD=pre's\nASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"later multiline single-quoted shell fragment", "export DB_PASSWORD=\"a\"pre'\nASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"outer-quoted Bearer splice before second shell secret", `curl -H 'x: Bearer abc'"ASTRA_SYNTHETIC_935817"; export DB_PASSWORD=pre' ASTRA_SECOND_935817'; echo ok`, "ASTRA_SECOND_935817", `curl -H 'x: Bearer [REDACTED]'; export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"multiline contraction-led URL shell password", "export DB_PASSWORD=\"a\"pre's\nhttps://host:8080/ASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"multiline contraction-led joined-tail shell password with colon", "export DB_PASSWORD=pre's\nhost:ASTRA_SYNTHETIC_935817'tail; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"bare temp key with opening brace", "temp:a{b=ASTRA_SYNTHETIC_935817", "ASTRA_SYNTHETIC_935817", "temp:a{b=[REDACTED]"},
+		{"unclosed single-quoted temp key with opening brace", "failed: {'temp:a{b: 'ASTRA_SYNTHETIC_935817'}", "ASTRA_SYNTHETIC_935817", "failed: {'temp:a{b:'[REDACTED]'}"},
+		{"multiline contraction shell splice with inner single quotes", "export DB_PASSWORD=pre's\nfoo='bar' ASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"escaped quote before joined quote in Bearer header", `curl -H 'x: Bearer abc\'"ASTRA_SYNTHETIC_935817"; export DB_PASSWORD=pre' ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `curl -H 'x: Bearer [REDACTED]'; export DB_PASSWORD=[REDACTED]`},
+		{"glued suffix after outer-quoted Bearer before second Bearer", `x='Bearer ASTRA_SYNTHETIC_935817'x y='Bearer ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `x='Bearer [REDACTED]' y='Bearer [REDACTED]'`},
+		{"glued single-quote suffix after bare Bearer before second Bearer", `Bearer ASTRA_SYNTHETIC_935817'x1 y='Bearer ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `Bearer [REDACTED] y='Bearer [REDACTED]'`},
+		{"joined single-quoted suffix inside double-quoted Bearer command", `echo "Bearer abc'ASTRA_SYNTHETIC_935817'" more`, "ASTRA_SYNTHETIC_935817", `echo "Bearer [REDACTED]" more`},
+		{"multiline double-quoted joined shell password with bare suffix", "export DB_PASSWORD=pre\"\nASTRA_SYNTHETIC_935817\"end; echo ok", "ASTRA_SYNTHETIC_935817", "export DB_PASSWORD=[REDACTED]; echo ok"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
@@ -3370,7 +3402,7 @@ func TestRedactionRegressions(t *testing.T) {
 			for _, row := range rows {
 				et := fmt.Sprint(row["event_type"])
 				seen[et] = true
-				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") || strings.Contains(s, "R14_") {
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") || strings.Contains(s, "R14_") || strings.Contains(s, "R15_") || strings.Contains(s, "ASTRA_SYNTHETIC_") {
 					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
 				}
 			}
