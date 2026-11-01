@@ -16,6 +16,7 @@ package workflowinternal
 
 import (
 	"fmt"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -31,6 +32,9 @@ import (
 type SingleTurnTool struct {
 	agent           agent.Agent
 	funcDeclaration *genai.FunctionDeclaration
+	nodeOnce        sync.Once
+	node            *workflow.AgentNode
+	nodeErr         error
 }
 
 func NewSingleTurnTool(a agent.Agent) (tool.Tool, error) {
@@ -71,7 +75,7 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		nodeInput = margs["request"]
 	}
 
-	node, err := workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
+	node, err := t.agentNode()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
 	}
@@ -82,6 +86,13 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 	}
 
 	return map[string]any{"result": result}, nil
+}
+
+func (t *SingleTurnTool) agentNode() (*workflow.AgentNode, error) {
+	t.nodeOnce.Do(func() {
+		t.node, t.nodeErr = workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
+	})
+	return t.node, t.nodeErr
 }
 
 // Declaration returns the function declaration for the wrapped agent.

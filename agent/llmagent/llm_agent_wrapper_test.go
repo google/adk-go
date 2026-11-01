@@ -1505,6 +1505,76 @@ func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
 	}
 }
 
+func TestTaskAgentTool_ReusesAgentNode(t *testing.T) {
+	t.Parallel()
+	const (
+		coordName = "coord"
+		taskName  = "doer"
+	)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:        taskName,
+		Description: "Solves a delegated task.",
+		Model:       &recordingLLM{},
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(task): %v", err)
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      coordName,
+		Model:     &recordingLLM{},
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{taskAgent},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	svc := session.InMemoryService()
+	createResp, err := svc.Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		t.Fatalf("session.Create: %v", err)
+	}
+	pendingFCEvent := session.NewEvent(t.Context(), "inv-prior")
+	pendingFCEvent.Author = coordName
+	pendingFCEvent.LLMResponse = model.LLMResponse{
+		Content: fcContent("fc-reuse-1", taskName, map[string]any{"request": "do work"}),
+	}
+	if err := svc.AppendEvent(t.Context(), createResp.Session, pendingFCEvent); err != nil {
+		t.Fatalf("AppendEvent(pending FC): %v", err)
+	}
+
+	rec := &recordingTaskSubScheduler{}
+	var ss agent.DynamicSubScheduler = rec
+	ic := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:        coord,
+		Session:      createResp.Session,
+		UserContent:  genai.NewContentFromText("resume", "user"),
+		InvocationID: "inv-reuse",
+	})
+	ctx := agent.NewContext(ic).WithDelta(&agent.CommonContextDelta{
+		SubScheduler: &ss,
+	})
+
+	for i := range 3 {
+		for _, err := range llmagent.RunLLMAgentAsNode(coord, ctx, nil) {
+			if err != nil {
+				t.Fatalf("run %d: RunLLMAgentAsNode: %v", i, err)
+			}
+		}
+	}
+	if len(rec.children) != 3 {
+		t.Fatalf("recorded %d children, want 3", len(rec.children))
+	}
+	for i := 1; i < len(rec.children); i++ {
+		if rec.children[i] != rec.children[0] {
+			t.Errorf("child[%d] = %p, want same *workflow.AgentNode %p", i, rec.children[i], rec.children[0])
+		}
+	}
+}
+
 func BenchmarkRunLLMAgentAsNode_ChatTaskDelegation(b *testing.B) {
 	const (
 		coordName = "coord"
@@ -1576,5 +1646,15 @@ func BenchmarkRunLLMAgentAsNode_ChatTaskDelegation(b *testing.B) {
 type benchTaskSubScheduler struct{ agent.DynamicSubScheduler }
 
 func (benchTaskSubScheduler) RunNode(child, input, opts any) (any, error) {
+	return "done", nil
+}
+
+type recordingTaskSubScheduler struct {
+	agent.DynamicSubScheduler
+	children []any
+}
+
+func (r *recordingTaskSubScheduler) RunNode(child, input, opts any) (any, error) {
+	r.children = append(r.children, child)
 	return "done", nil
 }

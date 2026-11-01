@@ -340,6 +340,40 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	}
 }
 
+func TestSingleTurnTool_ReusesAgentNode(t *testing.T) {
+	a := newLLMAgent(t, agentName, agentDesc, nil)
+	st := newSingleTurnTool(t, a)
+
+	rec := &recordingSubScheduler{}
+	var ss agent.DynamicSubScheduler = rec
+	baseCtx := agent.NewContext(&fakeInvocationContext{Context: t.Context()}).WithDelta(&agent.CommonContextDelta{
+		SubScheduler: &ss,
+	})
+	toolCtx := agent.NewToolContext(baseCtx, "fc-id", &session.EventActions{}, nil)
+
+	for i := range 3 {
+		got, err := st.Run(toolCtx, map[string]any{"request": "hello"})
+		if err != nil {
+			t.Fatalf("call %d: st.Run() err = %v", i, err)
+		}
+		if diff := cmp.Diff(map[string]any{"result": "world"}, got); diff != "" {
+			t.Fatalf("call %d: result diff (-want +got):\n%s", i, diff)
+		}
+	}
+	if len(rec.children) != 3 {
+		t.Fatalf("recorded %d children, want 3", len(rec.children))
+	}
+	first, ok := rec.children[0].(*workflow.AgentNode)
+	if !ok || first == nil {
+		t.Fatalf("first child = %T (%v), want non-nil *workflow.AgentNode", rec.children[0], rec.children[0])
+	}
+	for i := 1; i < len(rec.children); i++ {
+		if rec.children[i] != first {
+			t.Errorf("child[%d] = %p, want same *workflow.AgentNode %p", i, rec.children[i], first)
+		}
+	}
+}
+
 func BenchmarkSingleTurnToolRun(b *testing.B) {
 	a := newLLMAgent(b, agentName, agentDesc, nil)
 	st := newSingleTurnTool(b, a)
@@ -363,6 +397,16 @@ func BenchmarkSingleTurnToolRun(b *testing.B) {
 type benchSubScheduler struct{ agent.DynamicSubScheduler }
 
 func (benchSubScheduler) RunNode(child, input, opts any) (any, error) {
+	return "world", nil
+}
+
+type recordingSubScheduler struct {
+	agent.DynamicSubScheduler
+	children []any
+}
+
+func (r *recordingSubScheduler) RunNode(child, input, opts any) (any, error) {
+	r.children = append(r.children, child)
 	return "world", nil
 }
 

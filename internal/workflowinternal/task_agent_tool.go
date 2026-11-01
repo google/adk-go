@@ -17,6 +17,7 @@ package workflowinternal
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"google.golang.org/genai"
 
@@ -26,11 +27,15 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/toolutils"
+	"google.golang.org/adk/v2/workflow"
 )
 
 type TaskAgentTool struct {
 	agent           agent.Agent
 	funcDeclaration *genai.FunctionDeclaration
+	nodeOnce        sync.Once
+	node            *workflow.AgentNode
+	nodeErr         error
 }
 
 func NewTaskAgentTool(curAgent agent.Agent) (tool.Tool, error) {
@@ -42,6 +47,17 @@ func NewTaskAgentTool(curAgent agent.Agent) (tool.Tool, error) {
 		agent:           curAgent,
 		funcDeclaration: createTaskAgentFuncDeclaration(curAgent),
 	}, nil
+}
+
+func (t *TaskAgentTool) Agent() agent.Agent {
+	return t.agent
+}
+
+func (t *TaskAgentTool) AgentNode() (*workflow.AgentNode, error) {
+	t.nodeOnce.Do(func() {
+		t.node, t.nodeErr = workflow.NewAgentNode(t.agent, workflow.NodeConfig{})
+	})
+	return t.node, t.nodeErr
 }
 
 func (t *TaskAgentTool) Declaration() *genai.FunctionDeclaration {

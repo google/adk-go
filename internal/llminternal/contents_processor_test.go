@@ -1973,6 +1973,50 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 	}
 }
 
+func TestContentsRequestProcessor_TranscriptionAccumulation(t *testing.T) {
+	const agentName = "agent"
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  agentName,
+		Model: &testModel{},
+	}))
+	events := []*session.Event{
+		// Single input transcription (k=1 fast path).
+		{Author: "user", LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "single input"}}},
+		// Consecutive output transcriptions with unicode segments.
+		{Author: agentName, LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "part 1 "}}},
+		{Author: agentName, LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "part 2 🚀"}}},
+		// Consecutive input transcriptions.
+		{Author: "user", LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "alpha "}}},
+		{Author: "user", LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "beta "}}},
+		{Author: "user", LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "gamma"}}},
+		// Single output transcription followed by user content.
+		{Author: agentName, LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "single output"}}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("done", "user")}},
+	}
+
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:   testAgent,
+		Session: &fakeSession{events: events},
+	})
+	req := &model.LLMRequest{}
+	for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+		if err != nil {
+			t.Fatalf("ContentsRequestProcessor failed: %v", err)
+		}
+	}
+
+	want := []*genai.Content{
+		genai.NewContentFromText("single input", "user"),
+		genai.NewContentFromText("part 1 part 2 🚀", "model"),
+		genai.NewContentFromText("alpha beta gamma", "user"),
+		genai.NewContentFromText("single output", "model"),
+		genai.NewContentFromText("done", "user"),
+	}
+	if diff := cmp.Diff(want, req.Contents); diff != "" {
+		t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func BenchmarkContentsRequestProcessorTranscriptions(b *testing.B) {
 	chunkText := strings.Repeat("a", 100)
 	testAgent := utils.Must(llmagent.New(llmagent.Config{

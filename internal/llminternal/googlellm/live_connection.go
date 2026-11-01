@@ -32,8 +32,8 @@ type LiveConnection struct {
 
 	modelName               string
 	backend                 genai.Backend
-	inputTranscriptionText  string
-	outputTranscriptionText string
+	inputTranscriptionText  strings.Builder
+	outputTranscriptionText strings.Builder
 	bufferedResponses       []*model.LLMResponse
 }
 
@@ -222,38 +222,38 @@ func (c *LiveConnection) Recv(ctx context.Context) (*model.LLMResponse, error) {
 
 		if content.InputTranscription != nil {
 			resp.InputTranscription = content.InputTranscription
-			c.inputTranscriptionText += content.InputTranscription.Text
+			c.inputTranscriptionText.WriteString(content.InputTranscription.Text)
 			resp.Partial = true // Mark chunks as partial so they are not saved to session
 		}
 		if content.OutputTranscription != nil {
 			resp.OutputTranscription = content.OutputTranscription
-			c.outputTranscriptionText += content.OutputTranscription.Text
+			c.outputTranscriptionText.WriteString(content.OutputTranscription.Text)
 			resp.Partial = true // Mark chunks as partial so they are not saved to session
 		}
 
 		// Handle transcription finalization on completion signals
 		if content.TurnComplete || content.Interrupted {
-			if c.inputTranscriptionText != "" || c.outputTranscriptionText != "" {
-				if c.inputTranscriptionText != "" {
+			if c.inputTranscriptionText.Len() > 0 || c.outputTranscriptionText.Len() > 0 {
+				if c.inputTranscriptionText.Len() > 0 {
 					inputResp := &model.LLMResponse{
 						Partial: false,
 						InputTranscription: &genai.Transcription{
-							Text:     c.inputTranscriptionText,
+							Text:     c.inputTranscriptionText.String(),
 							Finished: true,
 						},
 					}
-					c.inputTranscriptionText = ""
+					c.inputTranscriptionText.Reset()
 					c.bufferedResponses = append(c.bufferedResponses, inputResp)
 				}
-				if c.outputTranscriptionText != "" {
+				if c.outputTranscriptionText.Len() > 0 {
 					outputResp := &model.LLMResponse{
 						Partial: false,
 						OutputTranscription: &genai.Transcription{
-							Text:     c.outputTranscriptionText,
+							Text:     c.outputTranscriptionText.String(),
 							Finished: true,
 						},
 					}
-					c.outputTranscriptionText = ""
+					c.outputTranscriptionText.Reset()
 					c.bufferedResponses = append(c.bufferedResponses, outputResp)
 				}
 

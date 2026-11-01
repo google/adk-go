@@ -327,13 +327,14 @@ func executeSearch(
 func buildItems(catalog []tool.Tool) []ranksearch.Item {
 	items := make([]ranksearch.Item, 0, len(catalog))
 	for _, t := range catalog {
-		if !callable(t) || t.Name() == ToolName {
+		decl := callableDeclaration(t)
+		if decl == nil || t.Name() == ToolName {
 			continue
 		}
 		items = append(items, ranksearch.Item{
 			Name:        t.Name(),
 			Description: t.Description(),
-			Tokens:      ranksearch.BuildTokens(t.Name(), t.Description(), argTokens(t)...),
+			Tokens:      ranksearch.BuildTokens(t.Name(), t.Description(), argTokens(decl)...),
 		})
 	}
 	return items
@@ -346,24 +347,22 @@ type declarer interface {
 	Declaration() *genai.FunctionDeclaration
 }
 
-// callable reports whether t packs itself into a request and declares a
-// function, which the model needs before it can call t.
-func callable(t tool.Tool) bool {
+// callableDeclaration returns t's declaration when t packs itself into a
+// request and declares a function, which the model needs before it can call t.
+func callableDeclaration(t tool.Tool) *genai.FunctionDeclaration {
 	if _, ok := t.(requestProcessor); !ok {
-		return false
+		return nil
 	}
-	d, ok := t.(declarer)
-	return ok && d.Declaration() != nil
-}
-
-// argTokens returns a tool's argument names and descriptions for inclusion in
-// its search token bag. Tools without a Declaration contribute nothing.
-func argTokens(t tool.Tool) []string {
 	d, ok := t.(declarer)
 	if !ok {
 		return nil
 	}
-	decl := d.Declaration()
+	return d.Declaration()
+}
+
+// argTokens returns a declaration's argument names and descriptions for
+// inclusion in a tool's search token bag.
+func argTokens(decl *genai.FunctionDeclaration) []string {
 	if decl == nil {
 		return nil
 	}

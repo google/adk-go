@@ -462,7 +462,7 @@ func safeCanonicalToolsDict(a agent.Agent) map[string]tool.Tool {
 	return out
 }
 
-func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.Context) (any, error) {
+func dispatchTaskFC(parentAgent agent.Agent, toolsDict map[string]tool.Tool, fc *genai.FunctionCall, ctx agent.Context) (any, error) {
 	if fc == nil {
 		return nil, fmt.Errorf("dispatchTaskFC: nil function call")
 	}
@@ -470,7 +470,15 @@ func dispatchTaskFC(parentAgent agent.Agent, fc *genai.FunctionCall, ctx agent.C
 	if target == nil {
 		return nil, fmt.Errorf("dispatchTaskFC: task target agent %q not found", fc.Name)
 	}
-	node, err := workflow.NewAgentNode(target, workflow.NodeConfig{})
+	var (
+		node *workflow.AgentNode
+		err  error
+	)
+	if taskTool, ok := toolsDict[fc.Name].(*workflowinternal.TaskAgentTool); ok && taskTool.Agent() == target {
+		node, err = taskTool.AgentNode()
+	} else {
+		node, err = workflow.NewAgentNode(target, workflow.NodeConfig{})
+	}
 	if err != nil {
 		return nil, fmt.Errorf("dispatchTaskFC: build node for %q: %w", fc.Name, err)
 	}
@@ -566,7 +574,7 @@ func runChat(a agent.Agent, ctx agent.Context, yield func(*session.Event, error)
 	toolsDict := safeCanonicalToolsDict(a)
 
 	dispatchAndYield := func(fc *genai.FunctionCall) (ok bool) {
-		out, err := dispatchTaskFC(a, fc, ctx)
+		out, err := dispatchTaskFC(a, toolsDict, fc, ctx)
 		if err != nil {
 			if errors.Is(err, workflow.ErrNodeInterrupted) {
 				// Task sub-agent paused on a long-running tool

@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -173,45 +174,55 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 
 	// Aggregate transcription events (convert to text parts on the fly)
 	var processedEvents []*session.Event
-	var accumulatedInputTranscription string
-	var accumulatedOutputTranscription string
+	var accumulatedInputTranscription strings.Builder
+	var accumulatedOutputTranscription strings.Builder
 
 	for i := 0; i < len(filtered); i++ {
 		ev := filtered[i]
 		content := utils.Content(ev)
 		if content == nil || len(content.Parts) == 0 {
 			if ev.LLMResponse.InputTranscription != nil && ev.LLMResponse.InputTranscription.Text != "" {
-				accumulatedInputTranscription += ev.LLMResponse.InputTranscription.Text
 				if i != len(filtered)-1 &&
 					filtered[i+1].LLMResponse.InputTranscription != nil &&
 					filtered[i+1].LLMResponse.InputTranscription.Text != "" {
+					accumulatedInputTranscription.WriteString(ev.LLMResponse.InputTranscription.Text)
 					continue
+				}
+				text := ev.LLMResponse.InputTranscription.Text
+				if accumulatedInputTranscription.Len() > 0 {
+					accumulatedInputTranscription.WriteString(text)
+					text = accumulatedInputTranscription.String()
+					accumulatedInputTranscription.Reset()
 				}
 				// Create a new event with content
 				newEv := cloneEvent(ev)
 				newEv.LLMResponse.InputTranscription = nil
 				newEv.LLMResponse.Content = &genai.Content{
 					Role:  genai.RoleUser,
-					Parts: []*genai.Part{{Text: accumulatedInputTranscription}},
+					Parts: []*genai.Part{{Text: text}},
 				}
 				ev = newEv
-				accumulatedInputTranscription = ""
 			} else if ev.LLMResponse.OutputTranscription != nil && ev.LLMResponse.OutputTranscription.Text != "" {
-				accumulatedOutputTranscription += ev.LLMResponse.OutputTranscription.Text
 				if i != len(filtered)-1 &&
 					filtered[i+1].LLMResponse.OutputTranscription != nil &&
 					filtered[i+1].LLMResponse.OutputTranscription.Text != "" {
+					accumulatedOutputTranscription.WriteString(ev.LLMResponse.OutputTranscription.Text)
 					continue
+				}
+				text := ev.LLMResponse.OutputTranscription.Text
+				if accumulatedOutputTranscription.Len() > 0 {
+					accumulatedOutputTranscription.WriteString(text)
+					text = accumulatedOutputTranscription.String()
+					accumulatedOutputTranscription.Reset()
 				}
 				// Create a new event with content
 				newEv := cloneEvent(ev)
 				newEv.LLMResponse.OutputTranscription = nil
 				newEv.LLMResponse.Content = &genai.Content{
 					Role:  "model",
-					Parts: []*genai.Part{{Text: accumulatedOutputTranscription}},
+					Parts: []*genai.Part{{Text: text}},
 				}
 				ev = newEv
-				accumulatedOutputTranscription = ""
 			}
 		}
 		processedEvents = append(processedEvents, ev)

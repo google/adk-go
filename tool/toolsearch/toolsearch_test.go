@@ -1302,6 +1302,42 @@ func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
 	}
 }
 
+func TestBuildItems_EquivalenceAndSingleDeclarationCall(t *testing.T) {
+	c1 := &countingDeclTool{typedParamsTool: typedParamsTool{stubTool{name: "update_note", desc: "modify a note"}}}
+	c2 := &countingDeclTool{typedParamsTool: typedParamsTool{stubTool{name: "create_note", desc: "create a note"}}}
+	catalog := append(makeBenchFunctionTools(t, 5),
+		c1,
+		c2,
+		&stubTool{name: "list_images", desc: "list all images"},
+		&nilDeclarationTool{stubTool{name: "undeclared_tool", desc: "declares nothing"}},
+		&nonPackableStubTool{name: "non_packable_tool", desc: "cannot be called"},
+		geminitool.GoogleSearch{},
+		&stubTool{name: ToolName, desc: "shadow search_tools"},
+	)
+
+	var want []ranksearch.Item
+	for _, tl := range catalog {
+		if tl == nil || tl.Name() == ToolName || callableDeclaration(tl) == nil {
+			continue
+		}
+		want = append(want, ranksearch.Item{
+			Name:        tl.Name(),
+			Description: tl.Description(),
+			Tokens:      ranksearch.BuildTokens(tl.Name(), tl.Description(), argTokens(callableDeclaration(tl))...),
+		})
+	}
+	c1.calls = 0
+	c2.calls = 0
+
+	got := buildItems(catalog)
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("buildItems() mismatch (-want +got):\n%s", diff)
+	}
+	if c1.calls != 1 || c2.calls != 1 {
+		t.Errorf("Declaration() calls = (%d, %d), want (1, 1)", c1.calls, c2.calls)
+	}
+}
+
 func BenchmarkBuildItems(b *testing.B) {
 	for _, n := range []int{50, 500} {
 		catalog := makeBenchFunctionTools(b, n)
@@ -1350,4 +1386,14 @@ func makeBenchFunctionTools(tb testing.TB, n int) []tool.Tool {
 		tools[i] = ft
 	}
 	return tools
+}
+
+type countingDeclTool struct {
+	typedParamsTool
+	calls int
+}
+
+func (t *countingDeclTool) Declaration() *genai.FunctionDeclaration {
+	t.calls++
+	return t.typedParamsTool.Declaration()
 }
