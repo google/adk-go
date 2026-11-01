@@ -736,8 +736,9 @@ func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context,
 		rotatedInBatch = new(bool)
 	}
 	record := b.buildRecordBatch(batch)
+	var batchBytes []byte
 	if len(batch) > 1 {
-		batchBytes := serializeRecord(record, b.config.Logger)
+		batchBytes = serializeRecord(record, b.config.Logger)
 		if batchBytes != nil && b.streamWriter.serializedRequestSize(batchBytes, record.NumRows()) > b.serializedAppendRequestByteLimit() {
 			record.Release()
 			mid := len(batch) / 2
@@ -751,7 +752,7 @@ func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context,
 	}
 	defer record.Release()
 
-	res, err := b.streamWriter.append(writeCtx, record, rotatedInBatch)
+	res, err := b.streamWriter.append(writeCtx, record, batchBytes, rotatedInBatch)
 	if err != nil {
 		return 0, fmt.Errorf("streamWriter append error: %w", err)
 	}
@@ -1407,7 +1408,11 @@ func (s *streamWriter) serializedRequestSize(batchBytes []byte, numRows int64) i
 	return proto.Size(req)
 }
 
-func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch, rotatedInBatch *bool) (res *storagepb.AppendRowsResponse, err error) {
+// append sends recordBatch on the write stream, retrying according to
+// s.config.RetryConfig. If batchBytes is non-nil, it is used directly as the
+// pre-serialized Arrow RecordBatch payload; otherwise recordBatch is
+// serialized once and reused across retries.
+func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch, batchBytes []byte, rotatedInBatch *bool) (res *storagepb.AppendRowsResponse, err error) {
 	if rotatedInBatch == nil {
 		rotatedInBatch = new(bool)
 	}
@@ -1449,6 +1454,19 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 		}()
 	}
 
+	// A stream that is already open when append begins was opened for an
+	// earlier request, and the server may have ended it since, as it does with
+	// an idle or recycled stream. Even on a stream opened for this request, the
+	// server can close the stream before reading the request, which surfaces
+	// either as io.EOF from Send (with the status drained from Recv) or
+	// directly at Recv. When retries remain, a stream opened for an earlier
+	// request never fails the batch fast on a stream-closing status, and a
+	// stream opened for this request gets one bounded fresh-stream retry
+	// (tracked by freshStreamRetried) before the status is treated as
+	// BigQuery's verdict on the request. reusedStream is cleared as soon as
+	// append opens a stream for this request so that an in-band retry on that
+	// stream does not treat it as opened by an earlier request.
+	reusedStream := s.stream != nil
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -1470,17 +1488,8 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			s.resetStream()
 		}
 
-		// A stream that is still open here was opened before this attempt, usually
-		// for an earlier request, and the server may have ended it since, as it
-		// does with an idle or recycled stream. Even on a newly opened stream,
-		// the server can close the stream before reading any request, which
-		// surfaces either as io.EOF from Send (with the status drained from Recv)
-		// or directly at Recv. When retries remain, a reused stream's status never
-		// fails the batch fast, and a transport status on a newly opened stream
-		// gets one bounded fresh-stream retry (tracked by freshStreamRetried)
-		// before being treated as BigQuery's verdict on the request.
-		reusedStream := s.stream != nil
 		if s.stream == nil {
+			reusedStream = false
 			baseCtx := s.baseCtx
 			if baseCtx == nil || baseCtx.Err() != nil {
 				baseCtx = context.WithoutCancel(ctx)
@@ -1514,10 +1523,12 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			s.streamCancel = streamCancel
 		}
 
-		batchBytes := serializeRecord(recordBatch, s.config.Logger)
 		if batchBytes == nil {
-			lastErr = fmt.Errorf("failed to serialize record batch")
-			continue
+			batchBytes = serializeRecord(recordBatch, s.config.Logger)
+			if batchBytes == nil {
+				lastErr = fmt.Errorf("failed to serialize record batch")
+				continue
+			}
 		}
 
 		req := s.newAppendRowsRequestLocked(batchBytes, recordBatch.NumRows())

@@ -53,16 +53,17 @@ type Logger interface {
 //
 // MaxRetries applies to each AppendRows request. A batch that is too large for
 // one request is split into several that are sent in order (see [Config]); a
-// request that fails is resent on its own, up to MaxRetries times, and the
-// requests that BigQuery already confirmed are not resent. A status that a
-// retry cannot fix, such as PermissionDenied or InvalidArgument, ends the write
-// of the batch without further retries when opening the stream fails with it or
-// BigQuery reports it in an AppendRowsResponse. When it instead ends the
-// stream, the server may not have read the request, so while retries remain the
-// request is resent on a fresh stream: always if an earlier batch opened that
-// stream, and once per request if it was opened for the request, after which
-// the status ends the write. Each such resend uses up one retry and its
-// backoff.
+// request that fails is resent on its own, up to MaxRetries times (plus at most
+// one resend after a stream rotation when [Config.ExactlyOnceDelivery] is
+// enabled), and the requests that BigQuery already confirmed are not resent. A
+// status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
+// ends the write of the batch without further retries when opening the stream
+// fails with it or BigQuery reports it in an AppendRowsResponse. When it
+// instead ends the stream, the server may not have read the request, so while
+// retries remain the request is resent on a fresh stream: always if an earlier
+// request opened that stream, and once per request if it was opened for the
+// request, after which the status ends the write. Each such resend uses up one
+// retry and its backoff.
 //
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff

@@ -7272,6 +7272,20 @@ func TestEstimateRowBytes_CountsNestedContentParts(t *testing.T) {
 	if got := estimateRowBytes(row); got < perRowOverheadBytes+600 {
 		t.Errorf("estimateRowBytes() = %d, want at least %d to cover the strings", got, perRowOverheadBytes+600)
 	}
+
+	emptyParts := make([]map[string]any, 1000)
+	for i := range emptyParts {
+		emptyParts[i] = map[string]any{}
+	}
+	emptyPartsRow := map[string]any{"content_parts": emptyParts}
+	if got, want := estimateRowBytes(emptyPartsRow), perRowOverheadBytes+1000*perContentPartOverheadBytes; got < want {
+		t.Errorf("estimateRowBytes(emptyPartsRow) = %d, want at least %d", got, want)
+	}
+
+	nilPartsRow := map[string]any{"content_parts": make([]map[string]any, 1000)}
+	if got, want := estimateRowBytes(nilPartsRow), perRowOverheadBytes+1000*perContentPartOverheadBytes; got < want {
+		t.Errorf("estimateRowBytes(nilPartsRow) = %d, want at least %d", got, want)
+	}
 }
 
 // TestBatchProcessor_SplitsOversizedBatchAcrossRequests writes 100 rows of
@@ -7351,18 +7365,13 @@ func TestBatchProcessor_SplitsOversizedBatchAcrossRequests(t *testing.T) {
 // sent.
 func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	var (
-		mu       sync.Mutex
-		received []string
+		mu           sync.Mutex
+		receivedReqs []*storagepb.AppendRowsRequest
 	)
 	srv := &scriptedCommittedStreamServer{
 		onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
-			rows := decodeArrowRows(t, req)
-			if len(rows) != 1 {
-				t.Errorf("request %d carries %d rows, want 1", attempt, len(rows))
-				return nil, status.Error(codes.Internal, "unexpected request")
-			}
 			mu.Lock()
-			received = append(received, fmt.Sprint(rows[0]["event_id"]))
+			receivedReqs = append(receivedReqs, proto.Clone(req).(*storagepb.AppendRowsRequest))
 			mu.Unlock()
 			// Confirm the first request; reject every later one.
 			if attempt >= 2 {
@@ -7386,8 +7395,16 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 		t.Errorf("status.Code(err) = %v, want %v", got, codes.PermissionDenied)
 	}
 	mu.Lock()
-	got := append([]string(nil), received...)
+	reqs := slices.Clone(receivedReqs)
 	mu.Unlock()
+	var got []string
+	for i, req := range reqs {
+		rows := decodeArrowRows(t, req)
+		if len(rows) != 1 {
+			t.Fatalf("request %d carries %d rows, want 1", i+1, len(rows))
+		}
+		got = append(got, fmt.Sprint(rows[0]["event_id"]))
+	}
 	// a is confirmed; b is rejected on the reused stream, on the first fresh
 	// stream, and on the bounded fresh-stream retry (stopping before the final
 	// retry); c is never sent.
@@ -7396,6 +7413,128 @@ func TestBatchProcessor_SplitStopsAtFailedRequest(t *testing.T) {
 	}
 	if got := bp.DropStats().AppendFailureDrops; got != 2 {
 		t.Errorf("AppendFailureDrops = %d, want 2 (the rows after the confirmed first request)", got)
+	}
+}
+
+// TestInBandResendThenPermanentStatus checks how an in-band transient
+// AppendRowsResponse.Error followed by a stream-closing permanent status is
+// handled depending on whether the stream was opened by the current request
+// (1 fresh-stream retry -> 3 sends total with MaxRetries=3) or reused from an
+// earlier request (the reused-stream failure does not consume the fresh-stream
+// retry budget -> 4 sends for the second request with MaxRetries=3).
+func TestInBandResendThenPermanentStatus(t *testing.T) {
+	for _, exactlyOnce := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exactlyOnce=%v/stream_opened_by_this_request", exactlyOnce), func(t *testing.T) {
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					if attempt == 1 {
+						return &storagepb.AppendRowsResponse{
+							Response: &storagepb.AppendRowsResponse_Error{
+								Error: &statuspb.Status{Code: int32(codes.Unavailable), Message: "transient in-band"},
+							},
+						}, nil
+					}
+					return nil, status.Error(codes.PermissionDenied, "permission denied")
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+			err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}})
+			if got := status.Code(err); got != codes.PermissionDenied {
+				t.Fatalf("status.Code(writeBatch err) = %v, want %v (err = %v)", got, codes.PermissionDenied, err)
+			}
+			if got := srv.attempts(); got != 3 {
+				t.Fatalf("attempts = %d, want 3 (in-band transient on attempt 1 + stream-level PermissionDenied on attempt 2 + one fresh-stream retry on attempt 3)", got)
+			}
+			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				t.Fatalf("AppendFailureDrops = %d, want 1", got)
+			}
+		})
+
+		t.Run(fmt.Sprintf("exactlyOnce=%v/stream_reused_from_earlier_request", exactlyOnce), func(t *testing.T) {
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					switch attempt {
+					case 1:
+						// First request opens the stream and succeeds.
+						return &storagepb.AppendRowsResponse{}, nil
+					case 2:
+						// Second request reuses that stream and gets an in-band transient error.
+						return &storagepb.AppendRowsResponse{
+							Response: &storagepb.AppendRowsResponse_Error{
+								Error: &statuspb.Status{Code: int32(codes.Unavailable), Message: "transient in-band on reused stream"},
+							},
+						}, nil
+					default:
+						return nil, status.Error(codes.PermissionDenied, "permission denied")
+					}
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, exactlyOnce)
+			if err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "SEED"}}); err != nil {
+				t.Fatalf("seed writeBatch() error = %v, want nil", err)
+			}
+			err := bp.writeBatch(context.Background(), []map[string]any{{"event_type": "X"}})
+			if got := status.Code(err); got != codes.PermissionDenied {
+				t.Fatalf("status.Code(second writeBatch err) = %v, want %v (err = %v)", got, codes.PermissionDenied, err)
+			}
+			if got := srv.attempts() - 1; got != 4 {
+				t.Fatalf("second request attempts = %d, want 4 (in-band transient on reused stream + PermissionDenied on reused stream + fresh-stream attempt + one bounded fresh-stream retry)", got)
+			}
+			if got := bp.DropStats().AppendFailureDrops; got != 1 {
+				t.Fatalf("AppendFailureDrops = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestStreamWriterAppend_UsesPreSerializedBatchBytes verifies that when a
+// non-nil batchBytes slice is passed to streamWriter.append, it sends those
+// pre-serialized bytes without re-serializing recordBatch, and when batchBytes
+// is nil it serializes recordBatch directly.
+func TestStreamWriterAppend_UsesPreSerializedBatchBytes(t *testing.T) {
+	var mu sync.Mutex
+	var captured []*storagepb.AppendRowsRequest
+	srv := &scriptedCommittedStreamServer{
+		onAppend: func(_ int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+			cloned := proto.Clone(req).(*storagepb.AppendRowsRequest)
+			mu.Lock()
+			captured = append(captured, cloned)
+			mu.Unlock()
+			return &storagepb.AppendRowsResponse{}, nil
+		},
+	}
+	bp := newErrorClassificationProcessor(t, srv, false)
+
+	preRecord := bp.buildRecordBatch([]map[string]any{{"event_id": "pre-serialized"}})
+	defer preRecord.Release()
+	preBytes := serializeRecord(preRecord, nil)
+	if len(preBytes) == 0 {
+		t.Fatal("serializeRecord(preRecord) returned empty bytes")
+	}
+
+	fallbackRecord := bp.buildRecordBatch([]map[string]any{{"event_id": "fallback-record"}})
+	defer fallbackRecord.Release()
+
+	if _, err := bp.streamWriter.append(context.Background(), fallbackRecord, preBytes, nil); err != nil {
+		t.Fatalf("append with preBytes error = %v, want nil", err)
+	}
+	if _, err := bp.streamWriter.append(context.Background(), fallbackRecord, nil, nil); err != nil {
+		t.Fatalf("append with nil batchBytes error = %v, want nil", err)
+	}
+
+	mu.Lock()
+	reqs := slices.Clone(captured)
+	mu.Unlock()
+	if len(reqs) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(reqs))
+	}
+	rows0 := decodeArrowRows(t, reqs[0])
+	if got := fmt.Sprint(rows0[0]["event_id"]); got != "pre-serialized" {
+		t.Errorf("first request event_id = %q, want %q (pre-serialized batchBytes must not be re-serialized)", got, "pre-serialized")
+	}
+	rows1 := decodeArrowRows(t, reqs[1])
+	if got := fmt.Sprint(rows1[0]["event_id"]); got != "fallback-record" {
+		t.Errorf("second request event_id = %q, want %q", got, "fallback-record")
 	}
 }
 
@@ -7849,6 +7988,57 @@ func TestBatchProcessor_SplitBatchSharesExactlyOnceRotationBudget(t *testing.T) 
 			mu.Unlock()
 			if diff := cmp.Diff([]int64{1, 1, 1, 1}, gotRows); diff != "" {
 				t.Errorf("rows per AppendRows request mismatch (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run(path.name+"/entry_rotation_on_first_chunk_consumes_batch_rotation_budget", func(t *testing.T) {
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, _ *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					switch attempt {
+					case 1:
+						// First batch fails on Recv with an ambiguous transport error, leaving offsetDesynced = true.
+						return nil, status.Error(codes.Unavailable, "transport lost after send")
+					case 2:
+						// Second batch, chunk 1: rotated on entry (consuming the batch's rotation budget) and succeeds on committed-2.
+						return &storagepb.AppendRowsResponse{}, nil
+					case 3:
+						// Second batch, chunk 2: receives NotFound on committed-2 and must not rotate a second time in the same batch.
+						return nil, status.Error(codes.NotFound, "stream 2 expired")
+					default:
+						return &storagepb.AppendRowsResponse{}, nil
+					}
+				},
+			}
+			bp := newErrorClassificationProcessor(t, srv, true)
+			bp.config.RetryConfig.MaxRetries = 0
+			bp.streamWriter.config.RetryConfig.MaxRetries = 0
+			path.setup(bp)
+
+			if err := bp.writeBatch(context.Background(), []map[string]any{row("seed")}); err == nil {
+				t.Fatal("first writeBatch() error = nil, want transport error")
+			}
+			bp.streamWriter.mu.Lock()
+			desynced := bp.streamWriter.offsetDesynced
+			bp.streamWriter.mu.Unlock()
+			if !desynced {
+				t.Fatal("offsetDesynced = false after ambiguous first batch failure, want true")
+			}
+
+			err := path.write(bp, []map[string]any{row("a"), row("b")})
+			if err == nil || !strings.Contains(err.Error(), "committed write stream already rotated") {
+				t.Fatalf("second batch write error = %v, want already-rotated error on second chunk", err)
+			}
+			if got := srv.attempts(); got != 3 {
+				t.Errorf("AppendRows attempts = %d, want 3", got)
+			}
+			srv.mu.Lock()
+			created := len(srv.createReqs)
+			srv.mu.Unlock()
+			if created != 2 {
+				t.Errorf("CreateWriteStream calls = %d, want 2 (initial stream + 1 entry rotation on chunk 1)", created)
+			}
+			if got := bp.DropStats().AppendFailureDrops; path.countsDrops && got != 2 {
+				t.Errorf("AppendFailureDrops = %d, want 2 (1 from first batch + 1 unconfirmed chunk from second batch)", got)
 			}
 		})
 	}
