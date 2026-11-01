@@ -120,10 +120,11 @@ type GCSUploadRequest struct {
 	// non-empty after trimming leading and trailing '/', Path begins with the
 	// effective prefix followed by "/" — either the '/'-trimmed
 	// Config.GCSPathPrefix verbatim, or its rewritten "<base>~<sha256>" form
-	// when Config.GCSPathPrefix contains '~', control/line-separator
+	// when that '/'-trimmed prefix contains '~', control/line-separator
 	// characters, or invalid UTF-8, starts with the reserved
 	// ".well-known/acme-challenge" segments, or exceeds 750 bytes (see
-	// Config.GCSPathPrefix).
+	// Config.GCSPathPrefix). Every condition is checked after the trimming, so
+	// a 752-byte "/" + 750 bytes + "/" does not exceed the limit.
 	Path string
 	// Data is the raw payload to store in the object.
 	Data []byte
@@ -137,8 +138,8 @@ type GCSUploadRequest struct {
 // The plugin calls UploadContent from several goroutines at the same time.
 // GCSUploadRequest.Path is the object name within the bucket and already begins
 // with the effective prefix derived from Config.GCSPathPrefix: the '/'-trimmed
-// prefix verbatim when valid, or its rewritten "<base>~<sha256>" form when
-// Config.GCSPathPrefix contains '~', control/line-separator characters, or
+// prefix verbatim when valid, or its rewritten "<base>~<sha256>" form when the
+// '/'-trimmed prefix contains '~', control/line-separator characters, or
 // invalid UTF-8, starts with the reserved ".well-known/acme-challenge"
 // segments, or exceeds 750 bytes (see Config.GCSPathPrefix), so raw and
 // rewritten prefix namespaces are strictly disjoint. If UploadContent fails, a

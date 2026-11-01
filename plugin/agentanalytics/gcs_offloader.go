@@ -96,7 +96,11 @@ const (
 
 	// maxGCSObjectNameBytes is Cloud Storage's 1,024-byte UTF-8 object name
 	// limit. maxGCSPrefixBytes and maxPathSegmentBytes bound the prefix and
-	// individual identifier segments so assembled object names stay within
+	// each identifier segment, which keeps the names of the objects that the
+	// plugin uploads at 905 bytes or less (see gcsObjectPathFromCleanPrefix),
+	// but not every name: a direct gcsObjectPath call that combines a long
+	// prefix with long identifiers, or that passes an oversized extension,
+	// assembles a longer name, which gcsObjectPath cuts to
 	// maxGCSObjectNameBytes.
 	maxGCSObjectNameBytes    = 1024
 	maxGCSPrefixBytes        = 750
@@ -320,9 +324,10 @@ func pathSegment(id, fallback string) string {
 // object names and recommends avoiding the control characters that XML 1.0
 // does not allow; control characters (U+0000 to U+001F and U+007F to U+009F,
 // including U+0085) and the Unicode line and paragraph separators (U+2028 and
-// U+2029) are replaced so names stay printable on one line. Spaces, '=', '\'
-// and other printable Unicode characters are kept here, except '~', which
-// cleanGCSPrefix reserves as the hash-suffix delimiter.
+// U+2029) are replaced so names stay printable on one line. It reports false
+// for spaces, '=', '\', '~' and other printable Unicode characters. '~' is
+// reserved as the hash-suffix delimiter, but cleanGCSPrefixWithReason and
+// sanitizeExtension check for it themselves.
 func isUnsafeGCSPrefixRune(r rune) bool {
 	return r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
 		r == '\u2028' || r == '\u2029'

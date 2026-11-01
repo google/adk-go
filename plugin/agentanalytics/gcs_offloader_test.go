@@ -6144,9 +6144,10 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 				t.Errorf("ext %q: gotB = %q, want %q (full SHA-256 of uncapped name)", ext, gotB, wantB)
 			}
 		}
-		// Only an oversized extension passed in directly reaches the cap on the
-		// whole name. The capped name ends in the hash of the whole uncapped
-		// name, so names that differ only after the cut stay apart.
+		// An oversized extension passed in directly reaches the cap on the
+		// whole name even with a short prefix and short identifiers. The
+		// capped name ends in the hash of the whole uncapped name, so names
+		// that differ only after the cut stay apart.
 		for _, ext := range []string{"." + strings.Repeat("x", 1100), "." + strings.Repeat("x", 1099) + "y"} {
 			uncapped := "logs/2026-03-04/trace/span_event_c0_p0" + ext
 			want := uncapped[:wantObjectLimit-wantHashSuffixLen] + pathSegmentHashSuffix(uncapped)
