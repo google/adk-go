@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 
@@ -47,12 +48,24 @@ import (
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 	"google.golang.org/genai"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 )
+
+// resolveUploads calls resolveUploadsForBatch with canDefer enabled for unit
+// tests that exercise upload resolution directly.
+func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+	b.resolveUploadsForBatch(ctx, uploadResolveOptions{
+		pauseOnCallerDeadline: pauseOnCallerDeadline,
+		canDefer:              true,
+	}, batch)
+}
 
 // fakeStorage is a fake of the Cloud Storage JSON API. It handles the
 // multipart object uploads that the storage client makes, and keeps the
@@ -507,6 +520,16 @@ func imageContent(data ...byte) *genai.Content {
 	return &genai.Content{Role: "user", Parts: []*genai.Part{{InlineData: &genai.Blob{MIMEType: "image/png", Data: data}}}}
 }
 
+// imageContents returns n messages with one PNG part each, so that a row
+// queued for them has n uploads.
+func imageContents(n int) []*genai.Content {
+	contents := make([]*genai.Content, n)
+	for i := range contents {
+		contents[i] = imageContent(1, 2, 3)
+	}
+	return contents
+}
+
 // queuedRow returns the row that the plugin queues for contents, which are
 // numbered from 0 as the messages of a request are, with the ids that the
 // names of objects are made of.
@@ -589,6 +612,12 @@ func TestResolveUploads_RewritesTheEntries(t *testing.T) {
 	}
 	if _, ok := row[rawPartsKey]; ok {
 		t.Errorf("the row still has %q; it is not a column", rawPartsKey)
+	}
+	// On a successful resolution with no deferred uploads left, resolveUploads
+	// cleans up the deferredUploadsKey from the row before the caller settles
+	// the batch (releaseBatchUploads / clearDeferredUploads).
+	if _, ok := row[deferredUploadsKey]; ok {
+		t.Errorf("the row still has %q after resolveUploads; empty deferred state must be cleaned up", deferredUploadsKey)
 	}
 	wantCalls := []uploadAttempt{
 		{Path: "logs/2026-03-04/trace1/span1_event1_c0_p0.txt", ContentType: "text/plain; charset=utf-8", Data: []byte(text)},
@@ -723,6 +752,10 @@ func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
 			}
 
 			bp.resolveUploads(ctx, false, []map[string]any{row})
+			// This test never requeues. Drop a deferred upload the way a
+			// successful write does; that is what logs it. Other failures
+			// were already logged.
+			bp.clearDeferredUploads([]map[string]any{row})
 
 			if diff := cmp.Diff(want, row[columnContentParts]); diff != "" {
 				t.Errorf("content_parts changed (-want +got):\n%s", diff)
@@ -846,6 +879,12 @@ func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
 	}
 	if _, ok := row[rawPartsKey]; ok {
 		t.Errorf("the row still has %q; it is not a column", rawPartsKey)
+	}
+	// On a successful resolution with no deferred uploads left, resolveUploads
+	// cleans up the deferredUploadsKey from the row before the caller settles
+	// the batch (releaseBatchUploads / clearDeferredUploads).
+	if _, ok := row[deferredUploadsKey]; ok {
+		t.Errorf("the row still has %q after resolveUploads; empty deferred state must be cleaned up", deferredUploadsKey)
 	}
 	// No upload is attempted, so none fails.
 	if got := logger.String(); got != "" {
@@ -2638,6 +2677,151 @@ func TestGCSOffloading_RunEndsStopWaitingOnceStorageTimesOut(t *testing.T) {
 	}
 }
 
+func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		stalledBatch   int
+		partialSuccess bool
+		uploadDelay    time.Duration
+	}{
+		{name: "partial outage in first batch", partialSuccess: true, uploadDelay: 100 * time.Millisecond},
+		{name: "outage in later batch", stalledBatch: 1, uploadDelay: 100 * time.Millisecond},
+		{name: "partial outage in later batch", stalledBatch: 1, partialSuccess: true, uploadDelay: 100 * time.Millisecond},
+		{name: "outage after slow first batch", stalledBatch: 1, uploadDelay: 2800 * time.Millisecond},
+		{name: "partial outage after slow first batch", stalledBatch: 1, partialSuccess: true, uploadDelay: 2800 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+					if int(req.Data[0])/2 < tt.stalledBatch || (tt.partialSuccess && req.Data[0]%2 == 0) {
+						time.Sleep(tt.uploadDelay)
+						return nil
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}}
+				cfg := DefaultConfig()
+				cfg.BatchSize = 2
+				cfg.Logger = &recordingLogger{}
+				cfg.GCSOffloader = off
+				bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer bp.Close()
+				stream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}, sendDelay: 100 * time.Millisecond}
+				bp.streamWriter.stream = stream
+				opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50, reserveBytes: bp.tryReserveUploadBytes}
+				const rowCount = 16
+				for i := range rowCount {
+					row := queuedRow(opts, imageContent(byte(i)))
+					row["event_type"] = EventLLMRequest
+					bp.queue <- row
+				}
+
+				start := time.Now()
+				bp.flushRunEnd()
+				if elapsed := time.Since(start); elapsed > cfg.ShutdownTimeout {
+					t.Errorf("run-end flush took %v, exceeds %v", elapsed, cfg.ShutdownTimeout)
+				}
+				if got, want := len(off.uploads()), 2*(tt.stalledBatch+1); got != want {
+					t.Errorf("upload attempts = %d, want %d; later batches must skip stalled storage", got, want)
+				}
+				var rows []map[string]any
+				for _, req := range stream.requests() {
+					rows = append(rows, decodeArrowRows(t, req)...)
+				}
+				if len(rows) != rowCount {
+					t.Fatalf("persisted rows = %d, want %d", len(rows), rowCount)
+				}
+				for i, row := range rows {
+					wantMode := storageModeInline
+					if i/2 < tt.stalledBatch || (i/2 == tt.stalledBatch && tt.partialSuccess && i%2 == 0) {
+						wantMode = storageModeGCSReference
+					}
+					if contentPartsOf(t, row)[0]["storage_mode"] != wantMode {
+						t.Errorf("row %d has incorrect storage mode, want %s", i, wantMode)
+					}
+				}
+				if got := bp.pendingUploadBytes.Load(); got != 0 {
+					t.Errorf("pending upload bytes = %d, want 0", got)
+				}
+			})
+		})
+	}
+}
+
+// TestGCSOffloading_RunEndOwnDeadlineErrorBeforeTheDeadlineDoesNotPause runs
+// a run-end flush under the default 10s ShutdownTimeout whose first batch's
+// BigQuery write takes 7s, so that the next batch starts with 3s left, enough
+// for its deadline to pause the uploads, and has 1.5s for its two uploads.
+// One upload fails after 1.2s, more than three quarters of that time, with a
+// deadline error of its own, such as a custom offloader's per-request
+// timeout, while that deadline has not passed yet; the other succeeds once
+// the deadline has ended the uploads. The deadline cut no upload short, and
+// an upload succeeded, so the uploads are not paused, and the next batch,
+// which a later run-end flush writes, uploads its part.
+func TestGCSOffloading_RunEndOwnDeadlineErrorBeforeTheDeadlineDoesNotPause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+			switch req.Data[0] {
+			case 1:
+				time.Sleep(1200 * time.Millisecond)
+				return context.DeadlineExceeded
+			case 2:
+				<-ctx.Done()
+			}
+			return nil
+		}}
+		cfg := DefaultConfig()
+		cfg.BatchSize = 2
+		cfg.Logger = &recordingLogger{}
+		cfg.GCSOffloader = off
+		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer bp.Close()
+		writes := 0
+		stream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}, onSend: func() {
+			writes++
+			if writes == 1 {
+				time.Sleep(7 * time.Second)
+			}
+		}}
+		bp.streamWriter.stream = stream
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50, reserveBytes: bp.tryReserveUploadBytes}
+		bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
+		bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
+		for i := byte(1); i <= 2; i++ {
+			row := queuedRow(opts, imageContent(i))
+			row["event_type"] = EventLLMRequest
+			bp.queue <- row
+		}
+		bp.flushRunEnd()
+		if got := len(off.uploads()); got != 2 {
+			t.Fatalf("upload attempts = %d, want 2", got)
+		}
+		if bp.uploadCooldownUntil.Load() != 0 {
+			t.Error("an upload that failed with a deadline error of its own before the deadline paused the uploads")
+		}
+
+		next := queuedRow(opts, imageContent(3))
+		next["event_type"] = EventLLMRequest
+		bp.queue <- next
+		bp.flushRunEnd()
+		if got := len(off.uploads()); got != 3 {
+			t.Errorf("upload attempts after the next flush = %d, want 3", got)
+		}
+		if got := contentPartsOf(t, next)[0]["storage_mode"]; got != storageModeGCSReference {
+			t.Errorf("next batch storage_mode = %v, want %s", got, storageModeGCSReference)
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pending upload bytes = %d, want 0", got)
+		}
+	})
+}
+
 // TestGCSOffloading_CloseDuringStorageStallKeepsRows checks that a Cloud
 // Storage outage does not cost BigQuery rows on any flush path. The flush of a
 // tick is stuck waiting for Cloud Storage while more rows queue up behind it,
@@ -2892,7 +3076,11 @@ func TestResolveUploads_BatchTimeoutCooldown(t *testing.T) {
 // TestResolveUploads_DeadlinesPauseTheUploads checks which ways of ending the
 // uploads of a batch show that Cloud Storage is stalled, and so make the
 // batches after it fall back without calling the offloader, and which show
-// nothing about Cloud Storage.
+// nothing about Cloud Storage. It also checks which of them keep the part that
+// they cut short on its row, for a retry if the batch is deferred. Neither the
+// time that an upload is counted as having run, nor which deadline is counted
+// as having ended the uploads, depends on how soon the offloader returns once
+// its context is done.
 func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2904,12 +3092,47 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 		// partialSuccess makes the first of two uploads in the batch succeed
 		// before the second stalls until the deadline.
 		partialSuccess bool
+		// firstUploadTakes is how long that first upload takes to succeed,
+		// and maxConcurrent is Config.GCSMaxConcurrentUploads.
+		firstUploadTakes time.Duration
+		maxConcurrent    int
+		// uploads is how many uploads the first batch has, when that is not
+		// one (or two with partialSuccess). When failAfter is set, an upload
+		// that stalls fails with an error of its own after that long, unless
+		// its context ends first. When returnLag is set, an upload that its
+		// context ended returns that long after the context is done.
+		uploads   int
+		failAfter time.Duration
+		returnLag time.Duration
 		// newCtx returns the context that the first batch is resolved under.
 		newCtx func(t *testing.T) context.Context
-		// wantCalls is how many uploads the first batch starts, and
-		// wantPaused whether the batch after it then skips Cloud Storage.
+		// wantCalls (or [minCalls, maxCalls] when set) is how many uploads the
+		// first batch starts, wantPaused whether the batch after it then skips
+		// Cloud Storage, and wantKept whether the first batch keeps the part
+		// that it cut short.
 		wantCalls  int
+		minCalls   int
+		maxCalls   int
 		wantPaused bool
+		wantKept   bool
+		// wantKeptCount overrides wantKept when a batch keeps more than one
+		// part. firstUploadURI overrides the URI returned by the first upload
+		// when it succeeds; firstUploadErr makes the first upload fail at once
+		// with that error; afterDoneErr overrides the error returned once ctx
+		// is done, and returnCause returns context.Cause(ctx) instead of
+		// ctx.Err().
+		wantKeptCount    int
+		firstUploadURI   string
+		firstUploadErr   error
+		afterDoneErr     error
+		returnCause      bool
+		wantLogSubstring string
+		// firstUploadErrAfter delays the failure of the first upload with
+		// firstUploadErr by that long, during which its context is still
+		// live, and succeedOnceDone makes an upload that waits for its
+		// context to be done return success then.
+		firstUploadErrAfter time.Duration
+		succeedOnceDone     bool
 	}{
 		{
 			name:          "the upload timeout runs out",
@@ -2922,8 +3145,12 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			name:                  "a fresh deadline of the caller runs out before the upload timeout",
 			uploadTimeout:         time.Minute,
 			pauseOnCallerDeadline: true,
+			// No upload of the batch succeeds, so its deadline pauses the
+			// uploads, whether or not the upload that it cut short had run
+			// long enough to count as stalled; the deadline is long enough
+			// to leave room for a late start.
 			newCtx: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 				t.Cleanup(cancel)
 				return ctx
 			},
@@ -2941,6 +3168,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			},
 			wantCalls:  1,
 			wantPaused: false,
+			wantKept:   true,
 		},
 		{
 			name:                  "an upload succeeds before the deadline runs out on another",
@@ -2956,12 +3184,126 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			uploadTimeout:         time.Minute,
 			pauseOnCallerDeadline: true,
 			partialSuccess:        true,
+			// As above, the deadline leaves room for a late start.
 			newCtx: func(t *testing.T) context.Context {
-				ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 				t.Cleanup(cancel)
 				return ctx
 			},
 			wantCalls:  2,
+			wantPaused: true,
+		},
+		{
+			name:                  "a fresh deadline of the caller cuts short an upload that ran for 60% of it",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: true,
+			partialSuccess:        true,
+			// The first upload holds the only slot for 200ms of the 500ms
+			// deadline, so the second runs for at most 300ms of it, less than
+			// three quarters (375ms).
+			firstUploadTakes: 200 * time.Millisecond,
+			maxConcurrent:    1,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  2,
+			wantPaused: false,
+			wantKept:   true,
+		},
+		{
+			name:                  "a fresh deadline of the caller cuts short an upload that ran for 85% of it",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: true,
+			partialSuccess:        true,
+			// The first upload holds the only slot for 180ms of the 1200ms
+			// deadline, so the second runs for about 1020ms of it, more than
+			// three quarters (900ms) while still below seven eighths (1050ms).
+			firstUploadTakes: 180 * time.Millisecond,
+			maxConcurrent:    1,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  2,
+			wantPaused: true,
+		},
+		{
+			name:                  "a fresh deadline of the caller cuts short an upload that ran for 60% of it, and the offloader returns late",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: true,
+			partialSuccess:        true,
+			// As in the 60% case, but the offloader returns 150ms after the
+			// deadline, so the second upload takes 450ms from its start to its
+			// return, more than three quarters (375ms) of the deadline. What
+			// counts is the 300ms that it ran before the deadline.
+			firstUploadTakes: 200 * time.Millisecond,
+			maxConcurrent:    1,
+			returnLag:        150 * time.Millisecond,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  2,
+			wantPaused: false,
+			wantKept:   true,
+		},
+		{
+			name:                  "uploads fail with errors until a fresh deadline of the caller runs out",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: true,
+			// Each upload fails after 200ms, well short of three quarters
+			// (750ms) of the 1s deadline, so the deadline cuts uploads short
+			// with none having stalled and none having succeeded.
+			uploads:       7,
+			failAfter:     200 * time.Millisecond,
+			maxConcurrent: 1,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			minCalls:   2,
+			maxCalls:   6,
+			wantPaused: true,
+		},
+		{
+			name:          "the upload timeout runs out before a deadline of the caller, and the offloader returns after both",
+			uploadTimeout: 300 * time.Millisecond,
+			// The upload timeout ends the stalled upload 200ms before the
+			// 500ms deadline, but the offloader returns 300ms later, 100ms
+			// after the deadline. It is still the upload timeout that ended
+			// the upload: it pauses the uploads, and the upload is not kept.
+			returnLag: 300 * time.Millisecond,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  1,
+			wantPaused: true,
+		},
+		{
+			name:                  "the upload timeout runs out before a deadline of the caller, and an upload that succeeds returns after both",
+			uploadTimeout:         100 * time.Millisecond,
+			pauseOnCallerDeadline: true,
+			partialSuccess:        true,
+			// The first upload takes 800ms to succeed, whatever its context
+			// says, so the second one does not start. The upload timeout ended
+			// the uploads 500ms before the 600ms deadline, so the second
+			// upload is not kept for a retry, though the deadline has passed
+			// by the time that the first upload returns.
+			firstUploadTakes: 800 * time.Millisecond,
+			maxConcurrent:    1,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  1,
 			wantPaused: false,
 		},
 		{
@@ -2976,6 +3318,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			},
 			wantCalls:  1,
 			wantPaused: false,
+			wantKept:   true,
 		},
 		{
 			name:                  "the context is canceled on arrival",
@@ -2988,6 +3331,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			},
 			wantCalls:  0,
 			wantPaused: false,
+			wantKept:   true,
 		},
 		{
 			name:                  "the deadline of the context has passed on arrival",
@@ -3000,33 +3344,203 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			},
 			wantCalls:  0,
 			wantPaused: false,
+			wantKept:   true,
+		},
+		{
+			name:                  "an offloader returns a non-context error once a depleted deadline of the caller runs out",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: false,
+			afterDoneErr:          errors.New("opaque transport error"),
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  1,
+			wantPaused: false,
+			wantKept:   true,
+		},
+		{
+			name:                  "an upload fails early with a non-context error and another is cut short by a depleted deadline",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: false,
+			uploads:               2,
+			firstUploadErr:        errors.New("early failure"),
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:     2,
+			wantPaused:    false,
+			wantKeptCount: 2,
+		},
+		{
+			name:             "the upload timeout runs out and the offloader returns the context cause",
+			uploadTimeout:    100 * time.Millisecond,
+			returnCause:      true,
+			newCtx:           func(*testing.T) context.Context { return context.Background() },
+			wantCalls:        1,
+			wantPaused:       true,
+			wantLogSubstring: "context deadline exceeded; keeping the part inline",
+		},
+		{
+			name:                  "depleted caller deadline drops succeeded non-gs URI upload and keeps cut-short upload",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: false,
+			partialSuccess:        true,
+			uploads:               2,
+			firstUploadURI:        "https://example.com/not-gs",
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:     2,
+			wantPaused:    false,
+			wantKept:      true,
+			wantKeptCount: 1,
+		},
+		{
+			name:                  "live caller context does not keep upload when offloader returns immediate DeadlineExceeded",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: false,
+			uploads:               1,
+			firstUploadErr:        context.DeadlineExceeded,
+			newCtx:                func(*testing.T) context.Context { return context.Background() },
+			wantCalls:             1,
+			wantPaused:            false,
+			wantKept:              false,
+			wantKeptCount:         0,
+		},
+		{
+			name:                  "an upload fails with a deadline error of its own before a fresh deadline of the caller, and another succeeds once that deadline ends the uploads",
+			uploadTimeout:         time.Minute,
+			pauseOnCallerDeadline: true,
+			// The first upload fails after 800ms of the 1s deadline, more than
+			// three quarters (750ms) of it, but with a deadline error of its
+			// own, such as a per-request timeout, while its context is live:
+			// the deadline did not cut it short. The second succeeds once the
+			// deadline has passed, so the deadline ended the uploads and an
+			// upload succeeded, which pauses nothing. The failed upload is kept
+			// for a retry, as any upload that returned an error once the
+			// deadline ended the uploads is.
+			uploads:             2,
+			firstUploadErr:      context.DeadlineExceeded,
+			firstUploadErrAfter: 800 * time.Millisecond,
+			succeedOnceDone:     true,
+			newCtx: func(t *testing.T) context.Context {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantCalls:  2,
+			wantPaused: false,
+			wantKept:   true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stalled atomic.Bool
 			var callCount atomic.Int32
+			var firstCallPath atomic.Pointer[string]
 			stalled.Store(true)
-			off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-				if tt.partialSuccess && callCount.Add(1) == 1 {
-					return nil
-				}
-				if stalled.Load() {
+			off := &fakeOffloader{
+				hook: func(ctx context.Context, req GCSUploadRequest) error {
+					if !stalled.Load() {
+						return nil
+					}
+					call := callCount.Add(1)
+					if call == 1 {
+						path := req.Path
+						firstCallPath.Store(&path)
+					}
+					if tt.partialSuccess && call == 1 {
+						time.Sleep(tt.firstUploadTakes)
+						return nil
+					}
+					if tt.firstUploadErr != nil && call == 1 {
+						time.Sleep(tt.firstUploadErrAfter)
+						return tt.firstUploadErr
+					}
+					if tt.failAfter > 0 {
+						select {
+						case <-time.After(tt.failAfter):
+							return errors.New("storage unavailable")
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
 					<-ctx.Done()
+					time.Sleep(tt.returnLag)
+					if tt.returnCause {
+						return context.Cause(ctx)
+					}
+					if tt.afterDoneErr != nil {
+						return tt.afterDoneErr
+					}
+					if tt.succeedOnceDone {
+						return nil
+					}
 					return ctx.Err()
-				}
-				return nil
-			}}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, Logger: &recordingLogger{}}}
+				},
+				uri: func(req GCSUploadRequest) string {
+					if p := firstCallPath.Load(); stalled.Load() && tt.firstUploadURI != "" && p != nil && req.Path == *p {
+						return tt.firstUploadURI
+					}
+					return "gs://fake-bucket/" + req.Path
+				},
+			}
+			logger := &recordingLogger{}
+			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, GCSMaxConcurrentUploads: tt.maxConcurrent, Logger: logger}}
 			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}
 
 			firstContents := []*genai.Content{imageContent(1)}
 			if tt.partialSuccess {
 				firstContents = []*genai.Content{imageContent(1), imageContent(2)}
 			}
-			bp.resolveUploads(tt.newCtx(t), tt.pauseOnCallerDeadline, []map[string]any{queuedRow(opts, firstContents...)})
-			if got := len(off.uploads()); got != tt.wantCalls {
-				t.Fatalf("the first batch started %d uploads, want %d", got, tt.wantCalls)
+			if tt.uploads > 0 {
+				firstContents = nil
+				for range tt.uploads {
+					firstContents = append(firstContents, imageContent(1))
+				}
+			}
+			first := queuedRow(opts, firstContents...)
+			bp.resolveUploads(tt.newCtx(t), tt.pauseOnCallerDeadline, []map[string]any{first})
+			firstCalls := len(off.uploads())
+			minCalls, maxCalls := tt.minCalls, tt.maxCalls
+			if minCalls == 0 && maxCalls == 0 {
+				minCalls, maxCalls = tt.wantCalls, tt.wantCalls
+			}
+			if firstCalls < minCalls || firstCalls > maxCalls {
+				t.Fatalf("the first batch started %d uploads, want [%d, %d]", firstCalls, minCalls, maxCalls)
+			}
+			// A batch that keeps cut-short parts keeps wantKeptCount when set,
+			// or one part when wantKept is true.
+			wantKept := tt.wantKeptCount
+			if wantKept == 0 && tt.wantKept {
+				wantKept = 1
+			}
+			var kept int
+			if d, ok := first[deferredUploadsKey].(*deferredRowUploads); ok {
+				kept = len(d.pending)
+			}
+			if kept != wantKept {
+				t.Errorf("the first batch kept %d parts for a retry, want %d", kept, wantKept)
+			}
+			if !tt.wantKept && tt.wantKeptCount == 0 {
+				if _, hasKept := first[deferredUploadsKey]; hasKept {
+					t.Fatalf("expected no deferredUploadsKey on row when wantKept=false")
+				}
+			}
+			if tt.wantLogSubstring != "" {
+				gotLog := logger.String()
+				if !strings.Contains(gotLog, tt.wantLogSubstring) {
+					t.Errorf("log = %q, want substring %q", gotLog, tt.wantLogSubstring)
+				}
+				if strings.Contains(gotLog, "error type") {
+					t.Errorf("log = %q, must not fall back to generic error type summary", gotLog)
+				}
 			}
 
 			// Cloud Storage is back by the time that the next batch is
@@ -3036,9 +3550,9 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 			bp.resolveUploads(context.Background(), false, []map[string]any{next})
 
 			part := contentPartsOf(t, next)[0]
-			wantCalls, wantMode, wantText := tt.wantCalls+1, "GCS_REFERENCE", "[MEDIA OFFLOADED]"
+			wantCalls, wantMode, wantText := firstCalls+1, "GCS_REFERENCE", "[MEDIA OFFLOADED]"
 			if tt.wantPaused {
-				wantCalls, wantMode, wantText = tt.wantCalls, "INLINE", uploadFailedText
+				wantCalls, wantMode, wantText = firstCalls, "INLINE", uploadFailedText
 			}
 			if got := len(off.uploads()); got != wantCalls {
 				t.Errorf("the offloader was called %d times in all, want %d", got, wantCalls)
@@ -3335,29 +3849,13 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 
 func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *testing.T) {
 	ctx := context.Background()
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
 	requests := make(chan *storagepb.AppendRowsRequest, 16)
-	storagepb.RegisterBigQueryWriteServer(srv, &delayedBigQueryWriteServer{
-		delay:    600 * time.Millisecond,
+	// serverDelay stays 0 for the warm-up write below.
+	var serverDelay atomic.Int64
+	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
+		delay:    &serverDelay,
 		requests: requests,
 	})
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writeClient.Close() })
 
 	// Only the second batch has an upload, and that upload stalls until its context expires.
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
@@ -3368,7 +3866,7 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	cfg := DefaultConfig()
 	cfg.BatchSize = 1
 	cfg.BatchFlushIntv = time.Hour
-	cfg.ShutdownTimeout = time.Second
+	cfg.ShutdownTimeout = 2 * time.Second
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
@@ -3377,13 +3875,22 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	if err != nil {
 		t.Fatalf("NewBatchProcessor: %v", err)
 	}
-	bp.Start()
-	defer bp.Close()
+	t.Cleanup(bp.Close)
 
-	// Batch 0: no upload, takes 600ms in AppendRows, leaving ~400ms of the 1s ShutdownTimeout.
+	// Open the connection and the write stream first, so that setting them up
+	// does not use up the run-end budget below.
+	warmCtx, cancelWarm := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventUserMessageReceived}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+	serverDelay.Store(int64(time.Second))
+
+	// Batch 0: no upload, takes 1s in AppendRows, leaving ~1s of the 2s ShutdownTimeout.
 	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
-	// Batch 1: has an image upload; its uploadCtx must be capped at half the remaining ~400ms (~200ms),
-	// not half of the initial ShutdownTimeout (500ms).
+	// Batch 1: has an image upload; its uploadCtx must be capped at half the remaining ~1s (~500ms),
+	// not half of the initial ShutdownTimeout (1s).
 	row2 := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
 	row2["event_type"] = EventLLMRequest
 	bp.queue <- row2
@@ -3394,15 +3901,112 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	if len(uploads) != 1 {
 		t.Fatalf("got %d upload attempts, want 1", len(uploads))
 	}
-	if !uploads[0].HasDeadline || uploads[0].Remaining < 100*time.Millisecond || uploads[0].Remaining > 300*time.Millisecond {
-		t.Errorf("second batch upload context remaining = %v (hasDeadline=%v), want in [100ms, 300ms] (half of remaining ~400ms budget)", uploads[0].Remaining, uploads[0].HasDeadline)
+	if !uploads[0].HasDeadline || uploads[0].Remaining < 200*time.Millisecond || uploads[0].Remaining > 700*time.Millisecond {
+		t.Errorf("second batch upload context remaining = %v (hasDeadline=%v), want in [200ms, 700ms] (half of remaining ~1s budget)", uploads[0].Remaining, uploads[0].HasDeadline)
 	}
-	if bp.uploadCooldownUntil.Load() != 0 {
-		t.Errorf("uploadCooldownUntil = %d, want 0 (depleted second-batch deadline must not pause storage)", bp.uploadCooldownUntil.Load())
+	if bp.uploadCooldownUntil.Load() == 0 {
+		t.Error("uploadCooldownUntil = 0, want non-zero (the second batch started with more than a quarter of ShutdownTimeout left, and its upload stalled for all of the batch's upload time)")
 	}
 }
 
-func TestGCSOffloading_FlushRunEndFirstUploadBatchAfterEmptyBatchPausesStalledStorage(t *testing.T) {
+func TestGCSOffloading_FlushRunEndPausesBatchStartingWithThirtyPercentBudget(t *testing.T) {
+	ctx := context.Background()
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	// serverDelay stays 0 for the warm-up write below (request 1).
+	var serverDelay atomic.Int64
+	writeClient := newScriptedWriteClient(t, &dynamicDelayBigQueryWriteServer{
+		delay:    &serverDelay,
+		requests: requests,
+	})
+
+	var stalled atomic.Bool
+	stalled.Store(true)
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		// Batch 0's 1.4s BigQuery write (request 2) has already completed;
+		// clear the server delay so Batch 1's inline fallback row (request 3)
+		// writes within what remains of ShutdownTimeout.
+		serverDelay.Store(0)
+		if stalled.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = logger
+
+	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(bp.Close)
+
+	// Open the connection and the write stream first (request 1, 0 delay), so
+	// setting them up does not consume the run-end budget below.
+	warmCtx, cancelWarm := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventUserMessageReceived}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+	serverDelay.Store(int64(1400 * time.Millisecond))
+
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 32 * 1024, reserveBytes: bp.tryReserveUploadBytes}
+	// Batch 0: inline text below the 32 KiB offload threshold (no uploads);
+	// request 2 sleeps 1.4s, leaving ~600ms (~30% of the 2s ShutdownTimeout,
+	// above 1/4 = 500ms and below 3/8 = 750ms) when Batch 1 starts.
+	row0 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "batch-0-inline"}}})
+	row0["event_type"] = EventUserMessageReceived
+	row0[eventIDField] = "batch-0-inline"
+	bp.queue <- row0
+
+	// Batch 1: 40 KiB upload stalling for its ~300ms half-remaining window.
+	row1 := queuedRow(opts, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: strings.Repeat("b", 40*1024)}}})
+	row1["event_type"] = EventLLMRequest
+	row1[eventIDField] = "batch-1-upload"
+	bp.queue <- row1
+
+	bp.flushRunEnd()
+
+	if got := len(off.uploads()); got != 1 {
+		t.Fatalf("got %d upload attempts, want 1", got)
+	}
+	if bp.uploadCooldownUntil.Load() == 0 {
+		t.Error("uploadCooldownUntil = 0, want non-zero (Batch 1 started with ~30% of ShutdownTimeout left, above the 1/4 threshold, and its upload stalled)")
+	}
+	if got := len(bp.deferredBatch); got != 0 {
+		t.Fatalf("deferredBatch length = %d, want 0", got)
+	}
+	for i, wantID := range []string{"batch-0-inline", "batch-1-upload"} {
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) != 1 || rows[0][eventIDField] != wantID {
+				summaries := make([]string, len(rows))
+				for j, row := range rows {
+					parts, _ := row[columnContentParts].([]map[string]any)
+					summaries[j] = fmt.Sprintf("{event_id:%q parts:%d}", fmt.Sprint(row[eventIDField]), len(parts))
+				}
+				t.Fatalf("request %d got %d rows %v, want 1 row with event_id %q", i+2, len(rows), summaries, wantID)
+			}
+			if i == 1 {
+				if mode := contentPartsOf(t, rows[0])[0]["storage_mode"]; mode != "INLINE" {
+					t.Errorf("request 3 part storage_mode = %v, want INLINE", mode)
+				}
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for request %d (%s)", i+2, wantID)
+		}
+	}
+}
+
+func TestGCSOffloading_FlushRunEndBatchAfterEmptyBatchPausesStalledStorage(t *testing.T) {
 	ctx := context.Background()
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -3450,8 +4054,8 @@ func TestGCSOffloading_FlushRunEndFirstUploadBatchAfterEmptyBatchPausesStalledSt
 
 	// Batch 0 has no uploads and completes AppendRows in 10ms (~990ms of 1s remaining).
 	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
-	// Batch 1 is the first batch with uploads while the run-end budget is still fresh;
-	// when storage stalls until Batch 1's ~495ms upload deadline, cooldown must be armed.
+	// Batch 1 starts with more than a quarter of the run-end budget left; when
+	// storage stalls until Batch 1's ~495ms upload deadline, cooldown must be armed.
 	row2 := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
 	row2["event_type"] = EventLLMRequest
 	bp.queue <- row2
@@ -3459,15 +4063,20 @@ func TestGCSOffloading_FlushRunEndFirstUploadBatchAfterEmptyBatchPausesStalledSt
 	bp.flushRunEnd()
 
 	if bp.uploadCooldownUntil.Load() == 0 {
-		t.Fatalf("uploadCooldownUntil = 0, want non-zero when the first batch with uploads stalls under a fresh run-end budget")
+		t.Fatalf("uploadCooldownUntil = 0, want non-zero when storage stalls for all of the upload time of a batch that starts with more than a quarter of the run-end budget left")
 	}
 }
 
 func probeRow(t *testing.T, contents ...*genai.Content) map[string]any {
 	t.Helper()
-	parts := &partsCollector{opts: partsOptions{maxLen: 50, offload: true, inlineLimit: 10}}
+	return probeRowWithOptions(t, partsOptions{maxLen: 50, offload: true, inlineLimit: 10}, contents...)
+}
+
+func probeRowWithOptions(t *testing.T, opts partsOptions, contents ...*genai.Content) map[string]any {
+	t.Helper()
+	parts := &partsCollector{opts: opts}
 	req := &model.LLMRequest{Contents: contents}
-	content, contentTruncated, builder := buildLLMRequestContent(req, 50, false, false, parts)
+	content, contentTruncated, builder := buildLLMRequestContent(req, opts.maxLen, false, false, parts)
 	b, err := json.Marshal(content)
 	if err != nil {
 		t.Fatal(err)
@@ -3656,6 +4265,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		reserveBytes: bp.tryReserveUploadBytes,
 	}
 	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row1[eventIDField] = "ev-requeue"
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after row1 reservation = %d, want 64", got)
 	}
@@ -3676,9 +4286,28 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		t.Fatal("tryReserveUploadBytes(1) succeeded while 64/64 bytes were held by deferred upload")
 	}
 
+	// Nothing has been requeued or dropped yet, so the failure is not logged.
+	if logger.contains("GCS upload failed for event ev-requeue") {
+		t.Fatalf("failure logged before requeueDeferredUploads:\n%s", logger)
+	}
+
 	// Requeuing the deferred upload for the next flush must keep the existing
 	// 64-byte reservation without double-counting it to 128 bytes.
 	bp.requeueDeferredUploads([]map[string]any{row1})
+	retryLines, plainLines := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-requeue") {
+			continue
+		}
+		if strings.Contains(line, "pending retry on next flush") {
+			retryLines++
+		} else if strings.Contains(line, "GCS upload failed") {
+			plainLines++
+		}
+	}
+	if retryLines != 1 || plainLines != 0 {
+		t.Fatalf("requeueDeferredUploads retry lines = %d, plain lines = %d, want 1 and 0:\n%s", retryLines, plainLines, logger)
+	}
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after requeueDeferredUploads = %d, want 64 (must not exceed cap 64)", got)
 	}
@@ -3694,6 +4323,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 	// Verify clearDeferredUploads also releases deferred bytes when a batch's
 	// BigQuery write succeeds and the deferred uploads are discarded.
 	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row2[eventIDField] = "ev-discard"
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes after row2 reservation = %d, want 64", got)
 	}
@@ -3704,9 +4334,26 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 	if got := bp.pendingUploadBytes.Load(); got != 64 {
 		t.Fatalf("pendingUploadBytes while row2 upload is deferred = %d, want 64", got)
 	}
+	if logger.contains("GCS upload failed for event ev-discard") {
+		t.Fatalf("discarded upload logged before clearDeferredUploads:\n%s", logger)
+	}
 	bp.clearDeferredUploads([]map[string]any{row2})
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
 		t.Fatalf("pendingUploadBytes after clearDeferredUploads = %d, want 0", got)
+	}
+	discardPlain, discardRetry := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-discard") {
+			continue
+		}
+		if strings.Contains(line, "pending retry") {
+			discardRetry++
+		} else if strings.Contains(line, "GCS upload failed") {
+			discardPlain++
+		}
+	}
+	if discardPlain != 1 || discardRetry != 0 {
+		t.Errorf("clearDeferredUploads plain lines = %d, retry lines = %d, want 1 and 0:\n%s", discardPlain, discardRetry, logger)
 	}
 }
 
@@ -3830,8 +4477,138 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 	if got := contentPartsOf(t, rows[0])[0]["text"]; got != uploadFailedText {
 		t.Errorf("part text = %v, want %q", got, uploadFailedText)
 	}
-	if !logger.contains("GCS upload failed for event ev-close-fail") {
-		t.Errorf("expected GCS upload failure logged under Close caller deadline, got:\n%s", logger)
+	closePlain, closeRetry := 0, 0
+	for line := range strings.SplitSeq(logger.String(), "\n") {
+		if !strings.Contains(line, "event ev-close-fail") {
+			continue
+		}
+		if strings.Contains(line, "pending retry") {
+			closeRetry++
+		} else if strings.Contains(line, "GCS upload failed") {
+			closePlain++
+		}
+	}
+	if closePlain != 1 || closeRetry != 0 {
+		t.Errorf("Close plain lines = %d, retry lines = %d, want 1 and 0:\n%s", closePlain, closeRetry, logger)
+	}
+}
+
+// TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes checks that
+// Close's early-drop branch releases the pending upload reservations before
+// logging the warning, so that a Logger that panics on the warning cannot leak
+// them. It queues three 16-byte pending uploads in a single batch that hits
+// the rotation-cooldown early-drop branch, uses an always-panicking Logger,
+// calls Close, recovers the panic, and asserts that pendingUploadBytes is 0.
+func TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes(t *testing.T) {
+	ctx := context.Background()
+	off := &fakeOffloader{}
+	quietLogger := &recordingLogger{}
+	cfg := exactlyOnceTestConfig()
+	cfg.BatchFlushIntv = time.Hour
+	cfg.BatchSize = 100
+	cfg.GCSOffloader = off
+	cfg.Logger = quietLogger
+	cfg.ShutdownTimeout = 5 * time.Second
+	srv := &scriptedCommittedStreamServer{
+		onAppend: func(int, *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+			return nil, status.Error(codes.OutOfRange, "offset beyond end")
+		},
+	}
+	bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor() error = %v", err)
+	}
+
+	// Establish rotation cooldown before Close so the 3 upload rows form
+	// a batch that hits the cooldown early-drop branch immediately.
+	if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "B1"}}); err == nil {
+		t.Fatal("writeBatch(B1) error = nil, want an offset error")
+	}
+	if !bp.streamWriter.isRotationInCooldown() {
+		t.Fatal("rotation is not paused after the freshly rotated stream rejected the batch")
+	}
+
+	// Switch to the panicking Logger for Close.
+	bp.config.Logger = alwaysPanicLogger{}
+
+	batch := uploadRows(bp, 3)
+	for _, row := range batch {
+		bp.queue <- row
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes before Close = %d, want 48", got)
+	}
+
+	// Close's early-drop branch logs a warning that the panicking Logger
+	// turns into a panic; the panic is recovered, and the reservations
+	// must already have been released.
+	r := panicValue(func() { bp.Close() })
+	if r == nil {
+		t.Fatal("Close did not panic on the logger's warning")
+	}
+	if msg := fmt.Sprint(r); !strings.Contains(msg, "committed write stream rotation in cooldown") {
+		t.Errorf("panic = %q, want it to contain the cooldown warning", msg)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after Close panicked on the early-drop warning = %d, want 0", got)
+	}
+}
+
+func TestGCSOffloading_CloseLogsFinalFailureOfBackgroundFlushUploadItCancels(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 8)
+	wc := newScriptedWriteClient(t, &fakeBigQueryWriteServer{requests: requests})
+
+	started := make(chan struct{})
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &recordingLogger{}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.GCSUploadTimeout = 5 * time.Second
+	cfg.GCSOffloader = off
+	cfg.Logger = logger
+	bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	bp.Start()
+
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
+	row["event_type"] = EventLLMRequest
+	row[eventIDField] = "ev-bg"
+	bp.Append(row) // reaches BatchSize, so a background flush starts uploading
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upload did not start")
+	}
+	bp.Close() // cancels the in-flight upload of the background flush
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 1 })
+	if got := contentPartsOf(t, rows[0])[0]["text"]; got != uploadFailedText {
+		t.Errorf("part text = %v, want %q", got, uploadFailedText)
+	}
+	var lines []string
+	for _, l := range uploadFailureLines(logger) {
+		if strings.Contains(l, "ev-bg") {
+			lines = append(lines, l)
+		}
+	}
+	want := "agentanalytics: GCS upload failed for event ev-bg part 0 (3 bytes): context canceled; keeping the part inline"
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("upload failure lines = %q, want [%q]", lines, want)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes = %d, want 0", got)
 	}
 }
 
@@ -3839,29 +4616,36 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
+	logger := &recordingLogger{}
+	// loggedDuringResolve records whether the failure of row 2's upload was
+	// already logged when row 2's write reached BigQuery, which is after
+	// resolveUploadsForBatch returned and before the write returns and
+	// clearDeferredUploads settles the deferred upload.
+	var loggedDuringResolve atomic.Bool
 	requests := make(chan *storagepb.AppendRowsRequest, 16)
-	storagepb.RegisterBigQueryWriteServer(srv, &delayedBigQueryWriteServer{
-		delay:    50 * time.Millisecond,
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
 		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				return 0, nil
+			case 2:
+				// Row 1's 1.6s write leaves at most 400ms, less than a
+				// quarter (500ms) of the 2s ShutdownTimeout, so row 2's
+				// run-end deadline does not pause the uploads
+				// (pauseOnCallerDeadline is false) and its stalled upload is
+				// deferred by resolveUploadsForBatch, then logged as a final
+				// failure by clearDeferredUploads once row 2's write
+				// succeeds.
+				return 1600 * time.Millisecond, nil
+			case 3:
+				loggedDuringResolve.Store(logger.contains("ev-hang"))
+				return 50 * time.Millisecond, nil
+			default:
+				return 50 * time.Millisecond, nil
+			}
+		},
 	})
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
-	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = writeClient.Close() })
 
 	var uploadCount atomic.Int32
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
@@ -3871,11 +4655,10 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	logger := &recordingLogger{}
 	cfg := DefaultConfig()
 	cfg.BatchSize = 1
 	cfg.BatchFlushIntv = time.Hour
-	cfg.ShutdownTimeout = 400 * time.Millisecond
+	cfg.ShutdownTimeout = 2 * time.Second
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
@@ -3885,6 +4668,16 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 		t.Fatalf("NewBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventUserMessageReceived}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
 	bp.Start()
 
 	row1 := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(1, 2, 3))
@@ -3912,6 +4705,19 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 	if !logger.contains("GCS upload failed for event ev-hang") {
 		t.Errorf("expected GCS upload failure logged for second batch, got:\n%s", logger)
 	}
+	if loggedDuringResolve.Load() {
+		t.Error("the failure of row 2's upload was logged before row 2's write, want it deferred")
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil = %d, want 0: row 2's run-end deadline must not pause the uploads", got)
+	}
+	if got := len(bp.deferredBatch); got != 0 {
+		t.Errorf("deferredBatch length = %d, want 0: row 2 was written", got)
+	}
+	// The second batch was written, so its upload is not retried.
+	if logger.contains("pending retry on next flush") {
+		t.Errorf("flushRunEnd logged a retry of an upload of a written batch, got:\n%s", logger)
+	}
 }
 
 type reproPanicLogger struct{}
@@ -3924,13 +4730,112 @@ func (reproPanicLogger) Printf(format string, _ ...any) {
 func (reproPanicLogger) Println(...any) {}
 
 func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T) {
-	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}}
+	newProcessor := func(off GCSContentOffloader, capBytes int64) *BatchProcessor {
+		return &BatchProcessor{
+			config: applyDefaults(Config{
+				GCSOffloader:             off,
+				GCSUploadTimeout:         time.Minute,
+				GCSMaxConcurrentUploads:  2,
+				GCSMaxPendingUploadBytes: capBytes,
+				Logger:                   reproPanicLogger{},
+			}),
+			queue:                 make(chan map[string]any, 4),
+			maxPendingUploadBytes: capBytes,
+		}
+	}
+
+	t.Run("an in-flight log panic after deferring an earlier part", func(t *testing.T) {
+		// The first part waits out the caller deadline and is deferred. The second
+		// returns a non-gs URI, which is logged from applyUpload. That log panics
+		// inside resolveUploads, after the deferred reservation is recorded.
+		secondStarted := make(chan struct{})
+		off := &fakeOffloader{
+			hook: func(ctx context.Context, req GCSUploadRequest) error {
+				if strings.Contains(req.Path, "_c1_p0") {
+					close(secondStarted)
+					return nil
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			uri: func(req GCSUploadRequest) string {
+				if strings.Contains(req.Path, "_c1_p0") {
+					return "https://example.com/not-gs"
+				}
+				return "gs://fake-bucket/" + req.Path
+			},
+		}
+		bp := newProcessor(off, 128)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(bytes.Repeat([]byte{1}, 64)...), imageContent(bytes.Repeat([]byte{2}, 64)...))
+		if got := bp.pendingUploadBytes.Load(); got != 128 {
+			t.Fatalf("pendingUploadBytes after reservation = %d, want 128", got)
+		}
+		if r := panicValue(func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				select {
+				case <-secondStarted:
+				case <-time.After(2 * time.Second):
+				}
+				cancel()
+			}()
+			bp.resolveUploads(ctx, false, []map[string]any{row})
+		}); r == nil {
+			t.Fatal("resolveUploads did not panic")
+		}
+		// The panic leaves flushRunEnd before the batch is requeued, so the deferred
+		// row is gone too. Unwind must release those bytes as well.
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Fatalf("pendingUploadBytes = %d, want 0", got)
+		}
+		if _, ok := row[deferredUploadsKey]; ok {
+			t.Fatal("row still holds deferredUploadsKey after resolveUploads panicked")
+		}
+	})
+
+	t.Run("a deferred upload that is dropped", func(t *testing.T) {
+		var stalled atomic.Bool
+		stalled.Store(true)
+		bp := newProcessor(stallingOffloader(&stalled), 64)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(make([]byte, 64)...))
+		// The deferred upload keeps its reservation, and its failure is not
+		// logged, until it is dropped or requeued.
+		deferUploads(t, bp, []map[string]any{row})
+		if got := bp.pendingUploadBytes.Load(); got != 64 {
+			t.Fatalf("pendingUploadBytes while the upload is deferred = %d, want 64", got)
+		}
+		if r := panicValue(func() { bp.clearDeferredUploads([]map[string]any{row}) }); r == nil {
+			t.Fatal("clearDeferredUploads did not log the failure of the upload that it dropped")
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pendingUploadBytes = %d, want 0", got)
+		}
+	})
+
+	t.Run("a failed upload that is logged at once", func(t *testing.T) {
+		bp := newProcessor(&fakeOffloader{hook: func(context.Context, GCSUploadRequest) error {
+			return errors.New("upload failed")
+		}}, 64)
+		opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+		row := queuedRow(opts, imageContent(make([]byte, 64)...))
+		if r := panicValue(func() { bp.resolveUploads(context.Background(), false, []map[string]any{row}) }); r == nil {
+			t.Fatal("resolveUploads did not log the failed upload")
+		}
+		if got := bp.pendingUploadBytes.Load(); got != 0 {
+			t.Errorf("pendingUploadBytes = %d, want 0", got)
+		}
+	})
+}
+
+func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
 	bp := &BatchProcessor{
 		config: applyDefaults(Config{
-			GCSOffloader:             off,
+			GCSOffloader:             stallingOffloader(&stalled),
 			GCSUploadTimeout:         time.Minute,
 			GCSMaxPendingUploadBytes: 64,
 			Logger:                   reproPanicLogger{},
@@ -3940,13 +4845,971 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 	}
 	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
 	row := queuedRow(opts, imageContent(make([]byte, 64)...))
-	func() {
-		defer func() { _ = recover() }()
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
-		defer cancel()
-		bp.resolveUploads(ctx, false, []map[string]any{row})
-	}()
+	row[eventIDField] = "ev-requeue-panic"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
+	}
+	if r := panicValue(func() {
+		bp.writeRunEndBatchLocked(expiredCtx, false, []map[string]any{row})
+	}); r == nil {
+		t.Fatal("writeRunEndBatchLocked did not panic on requeue log")
+	}
+	if len(bp.deferredBatch) != 1 {
+		t.Fatalf("deferredBatch len = %d, want 1", len(bp.deferredBatch))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after logger panic = %d, want 64", got)
+	}
+	saved := bp.deferredBatch
+	bp.deferredBatch = nil
+	stalled.Store(false)
+	bp.config.Logger = &recordingLogger{}
+	bp.resolveUploads(context.Background(), false, saved)
 	if got := bp.pendingUploadBytes.Load(); got != 0 {
-		t.Errorf("pendingUploadBytes = %d, want 0", got)
+		t.Fatalf("pendingUploadBytes after resolving the saved batch = %d, want 0", got)
+	}
+}
+
+func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
+	// resolveUploads consumed rawPartsKey (releasing the queued payload
+	// reservations) but the deferred upload (deferredUploadsKey) still holds
+	// its 64-byte reservation per row. releaseRowUploads drops a row via
+	// releaseBatchUploads, which releases the deferred reservation before
+	// logging. A panic on the first row's line must not keep the second row's
+	// bytes when it is released separately.
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             stallingOffloader(&stalled),
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 128,
+			Logger:                   reproPanicLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 128,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row1 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row1[eventIDField] = "ev-write-fail-1"
+	row2 := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row2[eventIDField] = "ev-write-fail-2"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row1, row2})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 128 {
+		t.Fatalf("pendingUploadBytes while uploads are deferred = %d, want 128", got)
+	}
+	if r := panicValue(func() {
+		bp.releaseRowUploads(row1)
+		bp.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("write failed"))
+	}); r == nil {
+		t.Fatal("logger did not panic")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes after releasing row1 = %d, want 64", got)
+	}
+	if r := panicValue(func() {
+		bp.releaseRowUploads(row2)
+	}); r == nil {
+		t.Fatal("logger did not panic on row2")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes after releasing row2 = %d, want 0", got)
+	}
+}
+
+type callbackRaceLogger struct {
+	n atomic.Int32
+}
+
+func (l *callbackRaceLogger) Printf(string, ...any) { l.n.Add(1) }
+func (l *callbackRaceLogger) Println(...any)        { l.n.Add(1) }
+
+func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &callbackRaceLogger{}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 64,
+			BatchSize:                1000,
+			Logger:                   logger,
+		}),
+		queue:                 make(chan map[string]any),
+		maxPendingUploadBytes: 64,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes while upload is deferred = %d, want 64", got)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				bp.uploadBudgetWarned.Store(false)
+				bp.tryReserveUploadBytes(1)
+				bp.Append(map[string]any{eventIDField: "drop"})
+			}
+		}
+	}()
+	for range 8 {
+		runtime.Gosched()
+	}
+	bp.releaseRowUploads(row)
+	close(stop)
+	wg.Wait()
+	bp.clearDeferredUploads([]map[string]any{row})
+}
+
+func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	logger := &recordingLogger{}
+	newProcessor := func() *BatchProcessor {
+		return &BatchProcessor{
+			config: applyDefaults(Config{
+				GCSOffloader:             off,
+				GCSUploadTimeout:         time.Minute,
+				GCSMaxPendingUploadBytes: 64,
+				Logger:                   logger,
+			}),
+			queue:                 make(chan map[string]any, 4),
+			maxPendingUploadBytes: 64,
+		}
+	}
+	other, bp := newProcessor(), newProcessor()
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	row[eventIDField] = "ev-shared-logger"
+	expiredCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(expiredCtx, false, []map[string]any{row})
+	cancel()
+
+	other.config.logf("ERROR: Failed to write batch to BigQuery: %v", errors.New("other processor"))
+	bp.releaseRowUploads(row)
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Fatalf("pendingUploadBytes after releaseRowUploads = %d, want 0", got)
+	}
+	bp.clearDeferredUploads([]map[string]any{row})
+	const want = "agentanalytics: GCS upload failed for event ev-shared-logger part 0 (64 bytes): context deadline exceeded; keeping the part inline"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Fatalf("upload failure lines mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T) {
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		<-ctx.Done()
+		return errors.New("custom offloader failure")
+	}}
+	bp := &BatchProcessor{
+		config: applyDefaults(Config{
+			GCSOffloader:             off,
+			GCSUploadTimeout:         time.Minute,
+			GCSMaxPendingUploadBytes: 64,
+			Logger:                   &recordingLogger{},
+		}),
+		queue:                 make(chan map[string]any, 4),
+		maxPendingUploadBytes: 64,
+	}
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	row := queuedRow(opts, imageContent(make([]byte, 64)...))
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	bp.resolveUploads(ctx, false, []map[string]any{row})
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Fatalf("pendingUploadBytes = %d, want 64", got)
+	}
+	if _, ok := row[rawPartsKey]; ok {
+		t.Fatal("rawPartsKey set before requeueDeferredUploads")
+	}
+	bp.requeueDeferredUploads([]map[string]any{row})
+	pending, ok := row[rawPartsKey].([]pendingUpload)
+	if !ok || len(pending) != 1 {
+		t.Fatalf("requeued uploads = %v, want the deferred part", row[rawPartsKey])
+	}
+}
+
+// panicValue calls f and returns the value that it panics with, or nil.
+func panicValue(f func()) (r any) {
+	defer func() { r = recover() }()
+	f()
+	return nil
+}
+
+// stallingOffloader returns an offloader whose uploads wait until their
+// context is done while stalled is set, and succeed otherwise.
+func stallingOffloader(stalled *atomic.Bool) *fakeOffloader {
+	return &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if stalled.Load() {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+}
+
+// uploadRows returns n rows, ev-0 to ev-<n-1>, that each queue a 16-byte
+// image for upload and reserve its bytes in bp.
+func uploadRows(bp *BatchProcessor, n int) []map[string]any {
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	batch := make([]map[string]any, n)
+	for i := range batch {
+		batch[i] = queuedRow(opts, imageContent(make([]byte, 16)...))
+		batch[i][eventIDField] = fmt.Sprintf("ev-%d", i)
+	}
+	return batch
+}
+
+// deferUploads resolves batch under a caller deadline that runs out while the
+// uploads stall, as a run-end flush with a depleted budget does, and checks
+// that every row has its upload deferred and that nothing about the deferred
+// uploads was logged.
+func deferUploads(t *testing.T, bp *BatchProcessor, batch []map[string]any) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if r := panicValue(func() { bp.resolveUploads(ctx, false, batch) }); r != nil {
+		t.Fatalf("resolveUploads logged the failure of a deferred upload: the logger panicked with %v", r)
+	}
+	for i, row := range batch {
+		if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) == 0 {
+			t.Fatalf("row %d has no deferred upload", i)
+		}
+	}
+}
+
+// uploadFailureLines returns the lines of l that report a failed upload.
+func uploadFailureLines(l *recordingLogger) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, line := range l.lines {
+		if strings.Contains(line, "GCS upload failed") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued checks that the
+// failure of an upload that a depleted caller deadline cut short is logged
+// once it is known whether the upload is retried, and only then: as pending a
+// retry if the upload is requeued for the next flush, and as final if it is
+// dropped.
+func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
+	const failure = "agentanalytics: GCS upload failed for event ev-deferred part 0 (3 bytes): context deadline exceeded; keeping the part inline"
+	tests := []struct {
+		name    string
+		settle  func(bp *BatchProcessor, batch []map[string]any)
+		wantLog string
+	}{
+		{
+			name:    "the upload is requeued",
+			settle:  (*BatchProcessor).requeueDeferredUploads,
+			wantLog: failure + " pending retry on next flush",
+		},
+		{
+			name:    "the upload is dropped",
+			settle:  (*BatchProcessor).clearDeferredUploads,
+			wantLog: failure,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stalled atomic.Bool
+			stalled.Store(true)
+			logger := &recordingLogger{}
+			bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: logger}}
+			row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+			row[eventIDField] = "ev-deferred"
+			batch := []map[string]any{row}
+
+			deferUploads(t, bp, batch)
+			if got := uploadFailureLines(logger); len(got) != 0 {
+				t.Errorf("resolveUploads logged %q before it was known whether the deferred upload is retried", got)
+			}
+			tt.settle(bp, batch)
+			if diff := cmp.Diff([]string{tt.wantLog}, uploadFailureLines(logger)); diff != "" {
+				t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred checks
+// that an offloader error that does not wrap context.DeadlineExceeded, returned
+// once a depleted caller deadline has ended the uploads, defers the upload as a
+// deadline error does, so that a requeued batch retries it.
+func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if stalled.Load() {
+			<-ctx.Done()
+			return errors.New("custom timeout error")
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+	row[eventIDField] = "ev-custom"
+	batch := []map[string]any{row}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	bp.resolveUploads(ctx, false, batch)
+	cancel()
+	if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) != 1 {
+		t.Fatalf("the upload that failed with a custom error after the caller deadline ran out was not deferred; log:\n%s", logger)
+	}
+
+	bp.requeueDeferredUploads(batch)
+	if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+		t.Fatalf("the row has %d uploads queued after requeueDeferredUploads, want 1", len(pending))
+	}
+	want := "agentanalytics: GCS upload failed for event ev-custom part 0 (3 bytes): error type *errors.errorString; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+
+	stalled.Store(false)
+	bp.resolveUploads(context.Background(), false, batch)
+	if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("storage_mode after the retry = %v, want GCS_REFERENCE", got)
+	}
+	if got := len(off.uploads()); got != 2 {
+		t.Errorf("the offloader was called %d times, want 2: the cut-short upload and its retry", got)
+	}
+}
+
+// TestClearDeferredUploads_PanickingLoggerReleasesEveryRow checks that the
+// reservations of the deferred uploads of every row of a batch are released
+// before any of their failures is logged, so that a Logger that panics on the
+// first of them leaks none.
+func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	deferUploads(t, bp, batch)
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes while the uploads are deferred = %d, want 48", got)
+	}
+
+	if r := panicValue(func() { bp.clearDeferredUploads(batch) }); r == nil {
+		t.Fatal("clearDeferredUploads did not log the failures of the uploads that it dropped")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 0", got)
+	}
+	for i, row := range batch {
+		if _, ok := row[deferredUploadsKey]; ok {
+			t.Errorf("row %d still holds its deferred uploads", i)
+		}
+	}
+}
+
+// TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow checks that every
+// row of a batch is requeued, keeping the reservations of its uploads, before
+// the failures of the deferred uploads are logged, so that a Logger that
+// panics on the first of them leaves no row without its uploads.
+func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	deferUploads(t, bp, batch)
+
+	if r := panicValue(func() { bp.requeueDeferredUploads(batch) }); r == nil {
+		t.Fatal("requeueDeferredUploads did not log the failures of the uploads that it requeued")
+	}
+	for i, row := range batch {
+		if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+			t.Errorf("row %d has %d uploads queued after the logger panicked, want 1", i, len(pending))
+		}
+		if got := contentPartsOf(t, row)[0]["text"]; got != inlineDataText {
+			t.Errorf("row %d part text = %v, want %q until the upload is retried", i, got, inlineDataText)
+		}
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 48, kept for the retry", got)
+	}
+
+	// The next flush retries every upload and releases the reservations.
+	stalled.Store(false)
+	bp.resolveUploads(context.Background(), false, batch)
+	for i, row := range batch {
+		if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+			t.Errorf("row %d storage_mode after the retry = %v, want GCS_REFERENCE", i, got)
+		}
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the retry = %d, want 0", got)
+	}
+}
+
+// TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow checks that dropping
+// a batch releases the reservations of the payloads still queued on its rows,
+// and of its deferred uploads, before the failures of the deferred uploads are
+// logged, so that a Logger that panics on the first of them leaks nothing.
+func TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 3)
+	// The first two rows have deferred uploads; the last still has its
+	// payload queued.
+	deferUploads(t, bp, batch[:2])
+	if got := bp.pendingUploadBytes.Load(); got != 48 {
+		t.Fatalf("pendingUploadBytes before the batch is dropped = %d, want 48", got)
+	}
+
+	if r := panicValue(func() { bp.releaseBatchUploads(batch) }); r == nil {
+		t.Fatal("releaseBatchUploads did not log the failures of the deferred uploads that it dropped")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 0", got)
+	}
+	for i, row := range batch {
+		for _, key := range []string{rawPartsKey, deferredUploadsKey} {
+			if _, ok := row[key]; ok {
+				t.Errorf("row %d still has %s", i, key)
+			}
+		}
+	}
+}
+
+// TestGCSOffloading_FlushRunEndKeepsDeferredBatchWhenLoggerPanics checks that a
+// run-end flush whose BigQuery write runs out of its budget keeps the batch in
+// deferredBatch before it logs that the batch's deferred uploads are pending a
+// retry, so that a Logger that panics on that line loses neither the batch nor
+// the reservations of its uploads.
+func TestGCSOffloading_FlushRunEndKeepsDeferredBatchWhenLoggerPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	var serverDelay atomic.Int64
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(int32) (time.Duration, error) {
+			return time.Duration(serverDelay.Load()), nil
+		},
+	})
+
+	var stalled atomic.Bool
+	stalled.Store(true)
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = stallingOffloader(&stalled)
+	cfg.Logger = reproPanicLogger{}
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		stalled.Store(false)
+		serverDelay.Store(0)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	serverDelay.Store(int64(800 * time.Millisecond))
+
+	// Batch 0 has no uploads, and its 800ms write leaves ~200ms, less than a
+	// quarter (250ms) of the 1s ShutdownTimeout: batch 1 starts with
+	// pauseOnCallerDeadline false, so its stalled upload is deferred without
+	// pausing uploads, and its 800ms write runs out of the budget, keeping
+	// batch 1 for the next flush.
+	bp.queue <- map[string]any{"event_type": EventUserMessageReceived}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}, imageContent(make([]byte, 64)...))
+	row["event_type"] = EventLLMRequest
+	bp.queue <- row
+
+	if r := panicValue(bp.flushRunEnd); r == nil {
+		t.Fatal("flushRunEnd did not log the failure of the requeued upload")
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil = %d, want 0: the deferred upload must not pause the uploads", got)
+	}
+	if len(bp.deferredBatch) != 1 {
+		t.Fatalf("deferredBatch length after the logger panicked = %d, want 1", len(bp.deferredBatch))
+	}
+	if got := bp.deferredBatch[0]["event_type"]; got != EventLLMRequest {
+		t.Fatalf("deferredBatch[0] event_type = %v, want %s", got, EventLLMRequest)
+	}
+	if pending, _ := row[rawPartsKey].([]pendingUpload); len(pending) != 1 {
+		t.Errorf("the kept row has %d uploads queued, want its deferred upload", len(pending))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 64 {
+		t.Errorf("pendingUploadBytes after the logger panicked = %d, want 64, kept for the retry", got)
+	}
+
+	// Once Cloud Storage and BigQuery recover, the next flush writes the kept
+	// batch, retrying its upload.
+	stalled.Store(false)
+	serverDelay.Store(0)
+	bp.flush()
+	if len(bp.deferredBatch) != 0 {
+		t.Fatalf("deferredBatch length after flush = %d, want 0", len(bp.deferredBatch))
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after flush = %d, want 0", got)
+	}
+
+	// Under at-least-once delivery, the timed-out INLINE attempt for batch 1
+	// may also be recorded before the retried GCS_REFERENCE write.
+	rows := collectRows(t, requests, func(rows []map[string]any) bool {
+		return len(rows) >= 2
+	})
+	if contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"] == "INLINE" {
+		select {
+		case req := <-requests:
+			rows = append(rows, decodeArrowRows(t, req)...)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if len(rows) != 2 && len(rows) != 3 {
+		t.Fatalf("persisted rows = %d, want 2 or 3", len(rows))
+	}
+	if got := rows[0]["event_type"]; got != EventUserMessageReceived {
+		t.Errorf("rows[0] event_type = %v, want %s", got, EventUserMessageReceived)
+	}
+	if len(rows) == 3 {
+		if got := rows[1]["event_type"]; got != EventLLMRequest {
+			t.Errorf("rows[1] event_type = %v, want %s", got, EventLLMRequest)
+		}
+	}
+	if got := rows[len(rows)-1]["event_type"]; got != EventLLMRequest {
+		t.Errorf("last row event_type = %v, want %s", got, EventLLMRequest)
+	}
+	if got := contentPartsOf(t, rows[len(rows)-1])[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("the retried part has storage_mode %v, want GCS_REFERENCE", got)
+	}
+}
+
+// scriptedWriteServer answers each AppendRows request as script says for its
+// number, counting from 1: after a delay, unless the stream ends first, or
+// with an error that ends the stream. If respond is set, the answer is what
+// respond returns for the number, if not nil. It records the requests that it
+// answers.
+type scriptedWriteServer struct {
+	storagepb.UnimplementedBigQueryWriteServer
+	script   func(n int32) (time.Duration, error)
+	respond  func(n int32) *storagepb.AppendRowsResponse
+	count    atomic.Int32
+	requests chan *storagepb.AppendRowsRequest
+}
+
+func (s *scriptedWriteServer) AppendRows(stream storagepb.BigQueryWrite_AppendRowsServer) error {
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		n := s.count.Add(1)
+		delay, err := s.script(n)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-time.After(delay):
+		case <-stream.Context().Done():
+			return stream.Context().Err()
+		}
+		s.requests <- req
+		resp := &storagepb.AppendRowsResponse{}
+		if s.respond != nil {
+			if r := s.respond(n); r != nil {
+				resp = r
+			}
+		}
+		if err := stream.Send(resp); err != nil {
+			return err
+		}
+	}
+}
+
+// TestResolveUploads_CanceledCallerContextDefersUploads checks that an upload
+// that a canceled caller context cuts short without pausing uploads across
+// flushes is deferred, as one that a depleted deadline cuts short is, so that
+// a requeued batch retries it.
+func TestResolveUploads_CanceledCallerContextDefersUploads(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
+	row[eventIDField] = "ev-canceled"
+	batch := []map[string]any{row}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-started
+		cancel()
+	}()
+	bp.resolveUploads(ctx, false, batch)
+	if d, _ := row[deferredUploadsKey].(*deferredRowUploads); d == nil || len(d.pending) != 1 {
+		t.Fatalf("the upload that a canceled caller context cut short was not deferred; log:\n%s", logger)
+	}
+
+	bp.requeueDeferredUploads(batch)
+	want := "agentanalytics: GCS upload failed for event ev-canceled part 0 (3 bytes): context canceled; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+	bp.resolveUploads(context.Background(), false, batch)
+	if got := contentPartsOf(t, row)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("storage_mode after the retry = %v, want GCS_REFERENCE", got)
+	}
+}
+
+// TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush checks that
+// an upload that Close cancels while a run-end flush is uploading is deferred:
+// when the BigQuery write of its batch then runs out of the budget of the
+// flush, the flush requeues the upload, logs it once as pending a retry, and
+// keeps the batch, and Close retries the upload when it writes the batch.
+func TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				// The write of row A leaves ~1.2s of the 3s budget (~600ms
+				// for row B's upload window), leaving margin for Close to
+				// cancel row B's in-flight upload before its upload deadline
+				// expires; because Close's cancellation rather than the
+				// upload deadline ends the upload, it does not pause uploads
+				// and is deferred.
+				return 1800 * time.Millisecond, nil
+			case 2:
+				// The write of the batch of row B outlasts the budget.
+				return time.Minute, nil
+			default:
+				return 0, nil
+			}
+		},
+	})
+	bStarted := make(chan struct{})
+	var bCalls atomic.Int32
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if strings.Contains(req.Path, "_ev-b_") && bCalls.Add(1) == 1 {
+			close(bStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	logger := &recordingLogger{}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 1
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 3 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = logger
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(bp.Close)
+
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a", "ev-b"} {
+		row := queuedRow(opts, imageContent(1, 2, 3))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	// Close cancels the uploads of the run-end flush while the upload of row
+	// B is in flight, and then waits for the flush to finish.
+	closed := make(chan struct{})
+	go func() {
+		<-bStarted
+		bp.Close()
+		close(closed)
+	}()
+	bp.flushRunEnd()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return")
+	}
+
+	rows := collectRows(t, requests, func(rows []map[string]any) bool { return len(rows) >= 2 })
+	var rowB map[string]any
+	for _, row := range rows {
+		if row[eventIDField] == "ev-b" {
+			rowB = row
+		}
+	}
+	if rowB == nil {
+		t.Fatalf("row B was not written; event ids: %v, %v", rows[0][eventIDField], rows[1][eventIDField])
+	}
+	if got := contentPartsOf(t, rowB)[0]["storage_mode"]; got != "GCS_REFERENCE" {
+		t.Errorf("row B storage_mode = %v, want GCS_REFERENCE: Close retries the upload that it canceled", got)
+	}
+	if got := len(off.uploads()); got != 3 {
+		t.Errorf("the offloader was called %d times, want 3: row A, row B, and the retry of row B", got)
+	}
+	want := "agentanalytics: GCS upload failed for event ev-b part 0 (3 bytes): context canceled; keeping the part inline pending retry on next flush"
+	if diff := cmp.Diff([]string{want}, uploadFailureLines(logger)); diff != "" {
+		t.Errorf("upload failure log mismatch (-want +got):\n%s", diff)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after Close = %d, want 0", got)
+	}
+	if got := bp.uploadCooldownUntil.Load(); got != 0 {
+		t.Errorf("uploadCooldownUntil after Close = %d, want 0: canceling an upload must not pause the uploads", got)
+	}
+}
+
+// TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics
+// checks that when BigQuery rejects the write of a run-end batch whose uploads
+// were deferred, flushRunEnd releases the reservations of the deferred uploads
+// of every row of the batch before it logs their failures, so that a Logger
+// that panics on the first of them leaks none.
+func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			switch n {
+			case 1:
+				return 0, nil
+			case 2:
+				// Batch A's 1.6s write leaves less than a quarter (500ms) of
+				// the 2s budget, so batch B's run-end deadline cannot pause
+				// the uploads and its stalled uploads are deferred, while
+				// leaving time for batch B's rejected write.
+				return 1600 * time.Millisecond, nil
+			default:
+				return 0, status.Error(codes.InvalidArgument, "rejected")
+			}
+		},
+	})
+	var closing atomic.Bool
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if !closing.Load() && strings.Contains(req.Path, "_ev-b") {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 3
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = reproPanicLogger{}
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		closing.Store(true)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	// Batch A uploads its rows; batch B has its uploads deferred and its
+	// write rejected, which drops it.
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a0", "ev-a1", "ev-a2", "ev-b0", "ev-b1", "ev-b2"} {
+		row := queuedRow(opts, imageContent(make([]byte, 16)...))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	if r := panicValue(bp.flushRunEnd); r == nil {
+		t.Fatal("flushRunEnd did not log the failures of the deferred uploads of the rejected batch")
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked on the drop path = %d, want 0", got)
+	}
+	if got := len(bp.deferredBatch); got != 0 {
+		t.Errorf("deferredBatch length = %d, want 0: a rejected batch is dropped", got)
+	}
+	if got := bp.DropStats().AppendFailureDrops; got != 3 {
+		t.Errorf("AppendFailureDrops = %d, want 3, the rows of the rejected batch", got)
+	}
+}
+
+// TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics
+// checks that resolveUploads drops the deferred uploads that a caller left
+// unsettled before it takes over the reservations of the payloads queued on
+// the batch, so that a Logger that panics on their failures leaves every
+// reservation with a row that holds it.
+func TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics(t *testing.T) {
+	var stalled atomic.Bool
+	stalled.Store(true)
+	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	batch := uploadRows(bp, 2)
+	// The upload of the second row is deferred and left unsettled, while the
+	// first row still has its payload queued.
+	deferUploads(t, bp, batch[1:])
+	if got := bp.pendingUploadBytes.Load(); got != 32 {
+		t.Fatalf("pendingUploadBytes before the batch is resolved = %d, want 32", got)
+	}
+
+	stalled.Store(false)
+	if r := panicValue(func() { bp.resolveUploads(context.Background(), false, batch) }); r == nil {
+		t.Fatal("resolveUploads did not log the failure of the unsettled deferred upload that it dropped")
+	}
+	// Right after the recovered panic, before the batch is released, the
+	// first row's still-queued payload holds 16 bytes; the second row's
+	// 16-byte stale deferred reservation was released by clearDeferredUploads
+	// inside resolveUploads, so 16 bytes remain reserved, not 32.
+	if got := bp.pendingUploadBytes.Load(); got != 16 {
+		t.Errorf("pendingUploadBytes after the logger panicked, before releaseBatchUploads = %d, want 16", got)
+	}
+	// Dropping the batch releases what its rows still hold, which must be
+	// every reservation that is left.
+	bp.releaseBatchUploads(batch)
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the logger panicked and the batch was dropped = %d, want 0", got)
+	}
+}
+
+// alwaysPanicLogger panics on every line that it is asked to log.
+type alwaysPanicLogger struct{}
+
+func (alwaysPanicLogger) Printf(format string, _ ...any) { panic("logger boom: " + format) }
+func (alwaysPanicLogger) Println(...any)                 { panic("logger boom") }
+
+// TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics
+// checks that when the BigQuery write of a run-end batch whose uploads were
+// deferred panics, as it does when BigQuery answers with an in-band error and
+// the Logger panics on the "BigQuery response" line, the reservations of the
+// deferred uploads are released although they were never settled.
+func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *testing.T) {
+	requests := make(chan *storagepb.AppendRowsRequest, 16)
+	writeClient := newScriptedWriteClient(t, &scriptedWriteServer{
+		requests: requests,
+		script: func(n int32) (time.Duration, error) {
+			if n == 2 {
+				// Batch A's 1.6s write leaves less than a quarter (500ms) of
+				// the 2s budget, so batch B's run-end deadline cannot pause
+				// the uploads and its stalled uploads are deferred, while
+				// leaving time for batch B's rejected write.
+				return 1600 * time.Millisecond, nil
+			}
+			return 0, nil
+		},
+		respond: func(n int32) *storagepb.AppendRowsResponse {
+			if n <= 2 {
+				return nil
+			}
+			return &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_Error{
+					Error: &statuspb.Status{Code: int32(codes.InvalidArgument), Message: "rejected"},
+				},
+			}
+		},
+	})
+	var closing atomic.Bool
+	off := &fakeOffloader{hook: func(ctx context.Context, req GCSUploadRequest) error {
+		if !closing.Load() && strings.Contains(req.Path, "_ev-b") {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	cfg := DefaultConfig()
+	cfg.BatchSize = 3
+	cfg.BatchFlushIntv = time.Hour
+	cfg.ShutdownTimeout = 2 * time.Second
+	cfg.RetryConfig.MaxRetries = 0
+	cfg.GCSOffloader = off
+	cfg.Logger = alwaysPanicLogger{}
+	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	if err != nil {
+		t.Fatalf("NewBatchProcessor: %v", err)
+	}
+	t.Cleanup(func() {
+		closing.Store(true)
+		_ = panicValue(bp.Close)
+	})
+
+	// Warm up the write stream before starting the run-end budget so gRPC
+	// connection and stream setup do not consume ShutdownTimeout.
+	warmCtx, cancelWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWarm()
+	if err := bp.writeBatch(warmCtx, []map[string]any{{"event_type": EventInvocationStarting}}); err != nil {
+		t.Fatalf("warm-up writeBatch: %v", err)
+	}
+	<-requests
+
+	// Batch A uploads its rows; batch B has its three 16-byte uploads
+	// deferred, and its write is answered with an in-band error, whose log
+	// line panics before the deferred uploads are settled.
+	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
+	for _, id := range []string{"ev-a0", "ev-a1", "ev-a2", "ev-b0", "ev-b1", "ev-b2"} {
+		row := queuedRow(opts, imageContent(make([]byte, 16)...))
+		row["event_type"] = EventLLMRequest
+		row[eventIDField] = id
+		bp.queue <- row
+	}
+
+	r := panicValue(bp.flushRunEnd)
+	if s, _ := r.(string); !strings.Contains(s, "BigQuery response") {
+		t.Fatalf("flushRunEnd panicked with %v, want the panic of the BigQuery response log line", r)
+	}
+	if got := bp.pendingUploadBytes.Load(); got != 0 {
+		t.Errorf("pendingUploadBytes after the append panicked = %d, want 0", got)
 	}
 }
