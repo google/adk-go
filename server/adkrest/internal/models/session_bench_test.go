@@ -15,16 +15,100 @@
 package models
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/mitchellh/mapstructure"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
+
+func TestFromSessionEquivalence(t *testing.T) {
+	for _, n := range []int{0, 1, 10, 100} {
+		t.Run(fmt.Sprintf("events=%d", n), func(t *testing.T) {
+			sess := seedBenchSession(t, n)
+			got, gotErr := FromSession(sess)
+			want, wantErr := fromSessionOriginal(sess)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("FromSession() err = %v, want %v", gotErr, wantErr)
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("FromSession() mismatch (-want +got):\n%s", diff)
+			}
+			gotBytes, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantBytes, err := json.Marshal(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotBytes, wantBytes) {
+				t.Fatalf("JSON bytes mismatch:\ngot:  %s\nwant: %s", gotBytes, wantBytes)
+			}
+		})
+	}
+}
+
+func TestSessionIDFromHTTPParametersEquivalence(t *testing.T) {
+	cases := []struct {
+		name string
+		vars map[string]string
+	}{
+		{
+			name: "all parameters present",
+			vars: map[string]string{"app_name": "app1", "user_id": "u1", "session_id": "s1"},
+		},
+		{
+			name: "optional session_id omitted",
+			vars: map[string]string{"app_name": "app1", "user_id": "u1"},
+		},
+		{
+			name: "missing app_name",
+			vars: map[string]string{"user_id": "u1", "session_id": "s1"},
+		},
+		{
+			name: "missing user_id",
+			vars: map[string]string{"app_name": "app1", "session_id": "s1"},
+		},
+		{
+			name: "empty map",
+			vars: map[string]string{},
+		},
+		{
+			name: "nil map",
+			vars: nil,
+		},
+		{
+			name: "extra route vars ignored",
+			vars: map[string]string{"app_name": "app1", "user_id": "u1", "session_id": "s1", "version": "3"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotErr := SessionIDFromHTTPParameters(tc.vars)
+			want, wantErr := sessionIDFromHTTPParametersOriginal(tc.vars)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("err = %v, want %v", gotErr, wantErr)
+			}
+			if gotErr != nil && gotErr.Error() != wantErr.Error() {
+				t.Fatalf("err = %q, want %q", gotErr.Error(), wantErr.Error())
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("SessionID mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
 
 func BenchmarkFromSession(b *testing.B) {
 	for _, n := range []int{100, 1000} {
@@ -64,11 +148,51 @@ func BenchmarkSessionIDFromHTTPParameters(b *testing.B) {
 	}
 }
 
+func fromSessionOriginal(session session.Session) (Session, error) {
+	state := map[string]any{}
+	maps.Insert(state, session.State().All())
+	events := []Event{}
+	for event := range session.Events().All() {
+		events = append(events, FromSessionEvent(*event))
+	}
+	mappedSession := Session{
+		ID:        session.ID(),
+		AppName:   session.AppName(),
+		UserID:    session.UserID(),
+		UpdatedAt: session.LastUpdateTime().Unix(),
+		Events:    events,
+		State:     state,
+	}
+	return mappedSession, mappedSession.Validate()
+}
+
+func sessionIDFromHTTPParametersOriginal(vars map[string]string) (SessionID, error) {
+	var sessionID SessionID
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		WeaklyTypedInput: true,
+		Result:           &sessionID,
+	})
+	if err != nil {
+		return sessionID, err
+	}
+	err = decoder.Decode(vars)
+	if err != nil {
+		return sessionID, err
+	}
+	if sessionID.AppName == "" {
+		return sessionID, fmt.Errorf("app_name parameter is required")
+	}
+	if sessionID.UserID == "" {
+		return sessionID, fmt.Errorf("user_id parameter is required")
+	}
+	return sessionID, nil
+}
+
 var benchText = strings.Repeat("The quick brown fox jumps over the lazy dog. ", 7)
 
-func seedBenchSession(b *testing.B, n int) session.Session {
-	b.Helper()
-	ctx := b.Context()
+func seedBenchSession(tb testing.TB, n int) session.Session {
+	tb.Helper()
+	ctx := tb.Context()
 	svc := session.InMemoryService()
 	created, err := svc.Create(ctx, &session.CreateRequest{
 		AppName:   "app",
@@ -77,7 +201,7 @@ func seedBenchSession(b *testing.B, n int) session.Session {
 		State:     map[string]any{"k1": "v1", "k2": 42},
 	})
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	start := time.Unix(1_700_000_000, 0)
 	for i := 0; i < n; i++ {
@@ -108,12 +232,12 @@ func seedBenchSession(b *testing.B, n int) session.Session {
 			ev.Actions.StateDelta = map[string]any{"turn": i}
 		}
 		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
-			b.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 	resp, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "sess"})
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	return resp.Session
 }

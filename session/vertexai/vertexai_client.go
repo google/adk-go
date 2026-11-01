@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
@@ -1019,6 +1020,14 @@ func createGroundingMetadata(metadata *aiplatformpb.GroundingMetadata) *genai.Gr
 // and keeping callers that pass an absent map (for example a function call
 // that takes no arguments) from failing.
 func toStructPB(value any) (*structpb.Struct, error) {
+	if value == nil {
+		return &structpb.Struct{}, nil
+	}
+	if m, ok := value.(map[string]any); ok {
+		if s, ok := mapToStructPB(m); ok {
+			return s, nil
+		}
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal value: %w", err)
@@ -1031,6 +1040,87 @@ func toStructPB(value any) (*structpb.Struct, error) {
 		return nil, fmt.Errorf("failed to unmarshal JSON data to structpb: %w", err)
 	}
 	return res, nil
+}
+
+const maxExactFloat64Int = 1 << 53
+
+func mapToStructPB(m map[string]any) (*structpb.Struct, bool) {
+	if len(m) == 0 {
+		return &structpb.Struct{}, true
+	}
+	fields := make(map[string]*structpb.Value, len(m))
+	for k, v := range m {
+		if !utf8.ValidString(k) {
+			return nil, false
+		}
+		pv, ok := valueToStructPB(v)
+		if !ok {
+			return nil, false
+		}
+		fields[k] = pv
+	}
+	return &structpb.Struct{Fields: fields}, true
+}
+
+func valueToStructPB(v any) (*structpb.Value, bool) {
+	switch x := v.(type) {
+	case nil:
+		return structpb.NewNullValue(), true
+	case bool:
+		return structpb.NewBoolValue(x), true
+	case string:
+		if !utf8.ValidString(x) {
+			return nil, false
+		}
+		return structpb.NewStringValue(x), true
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return nil, false
+		}
+		return structpb.NewNumberValue(x), true
+	case int:
+		if int64(x) < -maxExactFloat64Int || int64(x) > maxExactFloat64Int {
+			return nil, false
+		}
+		return structpb.NewNumberValue(float64(x)), true
+	case int64:
+		if x < -maxExactFloat64Int || x > maxExactFloat64Int {
+			return nil, false
+		}
+		return structpb.NewNumberValue(float64(x)), true
+	case uint64:
+		if x > maxExactFloat64Int {
+			return nil, false
+		}
+		return structpb.NewNumberValue(float64(x)), true
+	case map[string]any:
+		if x == nil {
+			return structpb.NewNullValue(), true
+		}
+		s, ok := mapToStructPB(x)
+		if !ok {
+			return nil, false
+		}
+		return structpb.NewStructValue(s), true
+	case []any:
+		if x == nil {
+			return structpb.NewNullValue(), true
+		}
+		if len(x) == 0 {
+			return structpb.NewListValue(&structpb.ListValue{}), true
+		}
+		vals := make([]*structpb.Value, len(x))
+		for i, elem := range x {
+			pv, ok := valueToStructPB(elem)
+			if !ok {
+				return nil, false
+			}
+			vals[i] = pv
+		}
+		return structpb.NewListValue(&structpb.ListValue{Values: vals}), true
+	default:
+		return nil, false
+	}
 }
 
 // derefString is a helper to safely dereference string pointers

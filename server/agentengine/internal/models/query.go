@@ -15,9 +15,7 @@
 // package models defines Request / Response models for generic Query and for more focused methods
 package models
 
-// Query is generic JSON format for payload coming from aiplatform. It has Input field which type is specific to a particular class_method.
-// Other models are providing those structures for particular class_methods
+// Query is generic JSON format for payload coming from aiplatform.
 type Query struct {
 	ClassMethod string `json:"class_method"`
-	Input       any    `json:"input"`
 }

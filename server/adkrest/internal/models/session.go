@@ -18,8 +18,6 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/mitchellh/mapstructure"
-
 	"google.golang.org/adk/v2/session"
 )
 
@@ -53,17 +51,10 @@ type SessionID struct {
 }
 
 func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
-	var sessionID SessionID
-	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
-		WeaklyTypedInput: true,
-		Result:           &sessionID,
-	})
-	if err != nil {
-		return sessionID, err
-	}
-	err = decoder.Decode(vars)
-	if err != nil {
-		return sessionID, err
+	sessionID := SessionID{
+		ID:      vars["session_id"],
+		AppName: vars["app_name"],
+		UserID:  vars["user_id"],
 	}
 	if sessionID.AppName == "" {
 		return sessionID, fmt.Errorf("app_name parameter is required")
@@ -77,8 +68,9 @@ func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
 func FromSession(session session.Session) (Session, error) {
 	state := map[string]any{}
 	maps.Insert(state, session.State().All())
-	events := []Event{}
-	for event := range session.Events().All() {
+	eventsSeq := session.Events()
+	events := make([]Event, 0, eventsSeq.Len())
+	for event := range eventsSeq.All() {
 		events = append(events, FromSessionEvent(*event))
 	}
 	mappedSession := Session{

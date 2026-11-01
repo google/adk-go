@@ -106,8 +106,9 @@ func FromSession(sess session.Session) SessionData {
 		stateMap[k] = v
 	}
 
-	evs := []session.Event{}
-	for ev := range sess.Events().All() {
+	eventsSeq := sess.Events()
+	evs := make([]session.Event, 0, eventsSeq.Len())
+	for ev := range eventsSeq.All() {
 		evs = append(evs, *ev)
 	}
 

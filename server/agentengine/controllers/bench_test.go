@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -33,6 +34,73 @@ import (
 	"google.golang.org/adk/v2/server/agentengine/internal/models"
 	"google.golang.org/adk/v2/session"
 )
+
+func TestFromSessionEquivalence(t *testing.T) {
+	for _, n := range []int{0, 1, 10, 100} {
+		t.Run(fmt.Sprintf("events=%d", n), func(t *testing.T) {
+			_, sess := seedBenchAESession(t, n)
+			got := models.FromSession(sess)
+			want := fromSessionAEOriginal(sess)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("FromSession() mismatch (-want +got):\n%s", diff)
+			}
+			gotBytes, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantBytes, err := json.Marshal(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(gotBytes, wantBytes) {
+				t.Fatalf("JSON bytes mismatch:\ngot:  %s\nwant: %s", gotBytes, wantBytes)
+			}
+		})
+	}
+}
+
+func TestQueryDecodeEquivalence(t *testing.T) {
+	payloads := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "valid stream_query",
+			raw:  `{"class_method":"async_stream_query","input":{"user_id":"u","session_id":"s","message":{"role":"user","parts":[{"text":"hello"}]}}}`,
+		},
+		{
+			name: "valid streaming_agent_run_with_events",
+			raw:  `{"class_method":"streaming_agent_run_with_events","input":{"request_json":"{\"user_id\":\"u\"}"}}`,
+		},
+		{
+			name: "input before class_method",
+			raw:  `{"input":{"user_id":"u","nested":[1,true,null,{"k":"v"}]},"class_method":"async_get_session"}`,
+		},
+		{
+			name: "malformed json in input",
+			raw:  `{"class_method":"async_get_session","input":{"user_id":}}`,
+		},
+		{
+			name: "wrong type for class_method",
+			raw:  `{"class_method":123,"input":{"user_id":"u"}}`,
+		},
+	}
+
+	for _, tc := range payloads {
+		t.Run(tc.name, func(t *testing.T) {
+			var got models.Query
+			var want queryOriginal
+			gotErr := json.Unmarshal([]byte(tc.raw), &got)
+			wantErr := json.Unmarshal([]byte(tc.raw), &want)
+			if (gotErr != nil) != (wantErr != nil) {
+				t.Fatalf("err = %v, want %v", gotErr, wantErr)
+			}
+			if got.ClassMethod != want.ClassMethod {
+				t.Fatalf("ClassMethod = %q, want %q", got.ClassMethod, want.ClassMethod)
+			}
+		})
+	}
+}
 
 func BenchmarkFromSession(b *testing.B) {
 	for _, n := range []int{100, 1000} {
@@ -180,6 +248,30 @@ func BenchmarkQueryDecode(b *testing.B) {
 	})
 }
 
+type queryOriginal struct {
+	ClassMethod string `json:"class_method"`
+	Input       any    `json:"input"`
+}
+
+func fromSessionAEOriginal(sess session.Session) models.SessionData {
+	stateMap := make(map[string]any)
+	for k, v := range sess.State().All() {
+		stateMap[k] = v
+	}
+	evs := []session.Event{}
+	for ev := range sess.Events().All() {
+		evs = append(evs, *ev)
+	}
+	return models.SessionData{
+		UserID:         sess.UserID(),
+		LastUpdateTime: float64(sess.LastUpdateTime().UnixNano()) / 1e9,
+		AppName:        sess.AppName(),
+		ID:             sess.ID(),
+		State:          stateMap,
+		Events:         evs,
+	}
+}
+
 type decodeOnlyHandler struct {
 	name   string
 	decode func([]byte) error
@@ -207,9 +299,9 @@ func (w *discardResponseWriter) SetWriteDeadline(time.Time) error {
 
 var aeBenchText = strings.Repeat("The quick brown fox jumps over the lazy dog. ", 7)
 
-func seedBenchAESession(b *testing.B, n int) (session.Service, session.Session) {
-	b.Helper()
-	ctx := b.Context()
+func seedBenchAESession(tb testing.TB, n int) (session.Service, session.Session) {
+	tb.Helper()
+	ctx := tb.Context()
 	svc := session.InMemoryService()
 	created, err := svc.Create(ctx, &session.CreateRequest{
 		AppName:   "app",
@@ -218,7 +310,7 @@ func seedBenchAESession(b *testing.B, n int) (session.Service, session.Session) 
 		State:     map[string]any{"k1": "v1", "k2": 42},
 	})
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	start := time.Unix(1_700_000_000, 0)
 	for i := 0; i < n; i++ {
@@ -249,12 +341,12 @@ func seedBenchAESession(b *testing.B, n int) (session.Service, session.Session) 
 			ev.Actions.StateDelta = map[string]any{"turn": i}
 		}
 		if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
-			b.Fatal(err)
+			tb.Fatal(err)
 		}
 	}
 	resp, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "sess"})
 	if err != nil {
-		b.Fatal(err)
+		tb.Fatal(err)
 	}
 	return svc, resp.Session
 }
