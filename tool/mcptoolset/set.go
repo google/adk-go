@@ -84,8 +84,14 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var client sessionClient
+	if cfg.Auth != nil {
+		client = newCredentialSessions(cfg.Client, transport, cfg.Auth)
+	} else {
+		client = newConnectionRefresher(cfg.Client, transport)
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   client,
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -178,6 +184,12 @@ type Config struct {
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
 	//
+	// With Auth set, each distinct credential the provider resolves gets an
+	// MCP session of its own, so a server that binds sessions to the user who
+	// created them serves every user, while a user-independent credential such
+	// as auth.StaticToken keeps one session. A session idle for 10 minutes is
+	// closed, and at most 64 are kept open unless more are in use at once.
+	//
 	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
 	// than a copy of http.DefaultClient, so the credential never reaches
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
@@ -217,8 +229,15 @@ type Config struct {
 	MetadataProvider MetadataProvider
 }
 
+// sessionClient is the MCP connection a set uses: one shared session, or one
+// per credential when Config.Auth is set.
+type sessionClient interface {
+	MCPClient
+	io.Closer
+}
+
 type set struct {
-	mcpClient                   *connectionRefresher
+	mcpClient                   sessionClient
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider

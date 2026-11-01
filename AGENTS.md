@@ -92,7 +92,7 @@ A change is complete only when all of these pass locally:
   `workflowagents/` holds `loopagent`, `parallelagent`, `sequentialagent`)
 - `runner/`    Execution engine that drives the run loop
 - `workflow/`  Node/graph-based workflow engine for multi-agent apps
-- `model/`     LLM abstraction (`gemini`, `apigee`, `openaimodel`)
+- `model/`     LLM abstraction (`gemini`, `apigee`, `anthropicmodel`, `openaimodel`)
 - `tool/`      Tool/Toolset interface + built-in tools (incl. `skilltoolset/`, `mcptoolset/`)
 - `session/`   Conversation state + events
 - `memory/`, `artifact/`   Long-term memory and file/data services

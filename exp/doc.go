@@ -24,4 +24,8 @@
 //   - [google.golang.org/adk/v2/exp/appinfo]: the app-info endpoint, which
 //     describes an app's agents, instructions and tools, and the web
 //     sublauncher that serves it
+//   - [google.golang.org/adk/v2/exp/classifier]: decision models that answer
+//     typed questions with probability distributions
+//   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
+//     by TypeSafe's Jev decision models
 package exp

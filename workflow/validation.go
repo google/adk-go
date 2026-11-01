@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -27,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/internal/utils"
+	"google.golang.org/adk/v2/internal/workflowroute"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -174,6 +176,9 @@ func validateWorkflow(workflow *graph, schema *jsonschema.Resolved) error {
 		return err
 	}
 	if err := validateStateSchemaConsistency(workflow, schema); err != nil {
+		return err
+	}
+	if err := validateNodeOutgoingEdges(workflow); err != nil {
 		return err
 	}
 	return nil
@@ -522,4 +527,85 @@ func schemasEqualCanonical(a, b *jsonschema.Schema) (bool, error) {
 		return false, err
 	}
 	return bytes.Equal(ac, bc), nil
+}
+
+// validateNodeOutgoingEdges invokes registered node-specific outgoing-edge
+// validators (such as exp/classifier.Node), mirroring adk-python's
+// _validate_node_outgoing_edges.
+func validateNodeOutgoingEdges(g *graph) error {
+	nodes := g.allNodes()
+	slices.SortFunc(nodes, func(a, b Node) int {
+		return strings.Compare(a.Name(), b.Name())
+	})
+	for _, n := range nodes {
+		summary := summarizeOutgoingEdges(g.successorsOf(n))
+		if err := workflowroute.Validate(n, summary); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type multiRouteSummarizer interface {
+	summarizeMultiRoute() []workflowroute.Value
+}
+
+func (r MultiRoute[T]) summarizeMultiRoute() []workflowroute.Value {
+	if len(r) == 0 {
+		return []workflowroute.Value{{Kind: workflowroute.KindOther, Label: "[]"}}
+	}
+	vals := make([]workflowroute.Value, 0, len(r))
+	for _, elem := range r {
+		a := any(elem)
+		if a == nil {
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: "<nil>"})
+			continue
+		}
+		if a == Default {
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: "Default"})
+			continue
+		}
+		switch v := a.(type) {
+		case string:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(v)})
+		case StringRoute:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(string(v))})
+		case bool:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(v)})
+		case BoolRoute:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(bool(v))})
+		case int:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(v)})
+		case IntRoute:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(int(v))})
+		default:
+			vals = append(vals, workflowroute.Value{Kind: workflowroute.KindOther, Label: fmt.Sprintf("%T", a)})
+		}
+	}
+	return vals
+}
+
+func summarizeOutgoingEdges(edges []Edge) workflowroute.OutgoingSummary {
+	var out workflowroute.OutgoingSummary
+	for _, e := range edges {
+		switch r := e.Route.(type) {
+		case nil:
+			out.HasUnrouted = true
+		case StringRoute:
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindString, Label: strconv.Quote(string(r))})
+		case BoolRoute:
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindBool, Label: strconv.FormatBool(bool(r))})
+		case IntRoute:
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindOther, Label: strconv.Itoa(int(r))})
+		case multiRouteSummarizer:
+			out.Routes = append(out.Routes, r.summarizeMultiRoute()...)
+		default:
+			if e.Route == Default {
+				out.HasDefault = true
+				continue
+			}
+			out.Routes = append(out.Routes, workflowroute.Value{Kind: workflowroute.KindOther, Label: fmt.Sprintf("%T", e.Route)})
+		}
+	}
+	return out
 }

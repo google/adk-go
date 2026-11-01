@@ -134,7 +134,8 @@ type partsCollector struct {
 	// redaction.
 	truncated bool
 	// nonUploadTruncated reports truncation from parts other than queued text
-	// uploads, so resolveUploads can recompute is_truncated after uploads run.
+	// uploads, so resolveUploadsForBatch can recompute is_truncated after
+	// uploads run.
 	nonUploadTruncated bool
 }
 
@@ -505,8 +506,8 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 }
 
 // contentSummaryBuilder retains the message/part ordinals of a row that has
-// pending text uploads so resolveUploads can rebuild the content column if any
-// text upload fails.
+// pending text uploads so resolveUploadsForBatch can rebuild the content
+// column if any text upload fails.
 type contentSummaryBuilder struct {
 	isLLMRequest   bool
 	isLLMResponse  bool

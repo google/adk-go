@@ -16,12 +16,17 @@ package workflow
 
 import (
 	"errors"
+	"iter"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/jsonschema-go/jsonschema"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/workflowroute"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestUniqueNames(t *testing.T) {
@@ -890,5 +895,96 @@ func TestStaticSchemaValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type customTestRoute struct{}
+
+func (customTestRoute) Matches(*session.Event) bool { return false }
+
+type customBoolStringer bool
+
+func (customBoolStringer) String() string { return "yes" }
+
+func TestSummarizeOutgoingEdges(t *testing.T) {
+	from := newDummyNode("from")
+	targets := make([]Node, 13)
+	for i := range targets {
+		targets[i] = newDummyNode("n" + strings.Repeat("x", i+1))
+	}
+
+	edges := []Edge{
+		{From: from, To: targets[0]},
+		{From: from, To: targets[1], Route: Default},
+		{From: from, To: targets[2], Route: StringRoute("billing")},
+		{From: from, To: targets[3], Route: BoolRoute(true)},
+		{From: from, To: targets[4], Route: IntRoute(7)},
+		{From: from, To: targets[5], Route: MultiRoute[string]{"a", "b"}},
+		{From: from, To: targets[6], Route: MultiRoute[bool]{false}},
+		{From: from, To: targets[7], Route: MultiRoute[int]{8}},
+		{From: from, To: targets[8], Route: MultiRoute[any]{"dyn", true, nil, Default}},
+		{From: from, To: targets[9], Route: MultiRoute[StringRoute]{"sr"}},
+		{From: from, To: targets[10], Route: MultiRoute[BoolRoute]{true}},
+		{From: from, To: targets[11], Route: MultiRoute[customBoolStringer]{true}},
+		{From: from, To: targets[12], Route: MultiRoute[string]{}},
+	}
+	edges = append(edges, Edge{From: from, To: newDummyNode("custom"), Route: customTestRoute{}})
+
+	got := summarizeOutgoingEdges(edges)
+	want := workflowroute.OutgoingSummary{
+		HasUnrouted: true,
+		HasDefault:  true,
+		Routes: []workflowroute.Value{
+			{Kind: workflowroute.KindString, Label: `"billing"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "7"},
+			{Kind: workflowroute.KindString, Label: `"a"`},
+			{Kind: workflowroute.KindString, Label: `"b"`},
+			{Kind: workflowroute.KindBool, Label: "false"},
+			{Kind: workflowroute.KindOther, Label: "8"},
+			{Kind: workflowroute.KindString, Label: `"dyn"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "<nil>"},
+			{Kind: workflowroute.KindOther, Label: "Default"},
+			{Kind: workflowroute.KindString, Label: `"sr"`},
+			{Kind: workflowroute.KindBool, Label: "true"},
+			{Kind: workflowroute.KindOther, Label: "workflow.customBoolStringer"},
+			{Kind: workflowroute.KindOther, Label: "[]"},
+			{Kind: workflowroute.KindOther, Label: "workflow.customTestRoute"},
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("summarizeOutgoingEdges() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type failingEdgeValidatorNode struct {
+	BaseNode
+}
+
+func (n *failingEdgeValidatorNode) Run(_ agent.Context, _ any) iter.Seq2[*session.Event, error] {
+	return func(func(*session.Event, error) bool) {}
+}
+
+func TestValidateNodeOutgoingEdgesDeterministicOrder(t *testing.T) {
+	workflowroute.Register(func(node any, out workflowroute.OutgoingSummary) error {
+		if fn, ok := node.(*failingEdgeValidatorNode); ok && len(out.Routes) > 0 {
+			return errors.New("edge validation failed for " + fn.Name())
+		}
+		return nil
+	})
+
+	alpha := &failingEdgeValidatorNode{BaseNode: NewBaseNode("alpha", "", NodeConfig{})}
+	zeta := &failingEdgeValidatorNode{BaseNode: NewBaseNode("zeta", "", NodeConfig{})}
+	sink := newDummyNode("sink")
+
+	_, err := New("wf", []Edge{
+		{From: Start, To: zeta},
+		{From: Start, To: alpha},
+		{From: zeta, To: sink, Route: StringRoute("z")},
+		{From: alpha, To: sink, Route: StringRoute("a")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "edge validation failed for alpha") {
+		t.Fatalf("New() error = %v, want deterministic alpha failure first", err)
 	}
 }
