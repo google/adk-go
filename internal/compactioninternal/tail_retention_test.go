@@ -16,10 +16,13 @@ package compactioninternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -1197,4 +1200,48 @@ func TestTailRetentionWindowStaysInsideTheTurnsScope(t *testing.T) {
 	if diff := cmp.Diff([]string{"a1", "a2"}, got); diff != "" {
 		t.Errorf("window (-want +got):\n%s", diff)
 	}
+}
+
+func TestJSONCharsEquivalence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		payload map[string]any
+	}{
+		{name: "nil map", payload: nil},
+		{name: "empty map", payload: map[string]any{}},
+		{name: "ascii fields", payload: map[string]any{"query": "select * from users", "limit": 10, "ok": true}},
+		{name: "multibyte unicode", payload: map[string]any{"pl": "zażółć gęślą jaźni", "jp": "日本語テキスト", "emoji": "🚀🧠✨"}},
+		{name: "html escaping", payload: map[string]any{"html": "<script>alert('x & y')</script>\u2028\u2029"}},
+		{name: "invalid utf8 bytes in string", payload: map[string]any{"bad": "prefix\xff\xfesuffix"}},
+		{name: "nested structures and raw bytes", payload: map[string]any{
+			"nested": map[string]any{"slice": []any{1, "two", nil, false}, "bytes": []byte("hello world")},
+		}},
+		{name: "unmarshalable NaN", payload: map[string]any{"bad": math.NaN()}},
+		{name: "unmarshalable Inf", payload: map[string]any{"bad": math.Inf(1)}},
+		{name: "unmarshalable func", payload: map[string]any{"bad": func() {}}},
+		{name: "100KiB payload", payload: map[string]any{"result": strings.Repeat("αβγd", 25<<10)}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := refJSONChars(tc.payload)
+			got := jsonChars(tc.payload)
+			if got != want {
+				t.Errorf("jsonChars() = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func refJSONChars(v map[string]any) int {
+	if len(v) == 0 {
+		return 0
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return utf8.RuneCount(b)
 }

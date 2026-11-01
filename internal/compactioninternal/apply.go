@@ -246,21 +246,45 @@ func coveredBy(i int, ev *session.Event, k keptRange) bool {
 // the prompt silently rather than loudly. If that ever needs to be made loud,
 // the fix belongs in those two functions, not here.
 func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*session.Event {
-	presentCalls := make(map[string]struct{})
-	presentResponses := make(map[string]struct{})
-	for _, ev := range events {
-		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
-			presentCalls[call.ID] = struct{}{}
+	const localCallLookback = 8
+	var presentCalls map[string]struct{}
+	var orphaned map[string]struct{}
+	for i, ev := range events {
+		c := utils.Content(ev)
+		if c == nil {
+			continue
 		}
-		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
-			presentResponses[resp.ID] = struct{}{}
-		}
-	}
-
-	orphaned := make(map[string]struct{})
-	for id := range presentResponses {
-		if _, ok := presentCalls[id]; !ok && id != "" {
-			orphaned[id] = struct{}{}
+		for _, p := range c.Parts {
+			if p == nil || p.FunctionResponse == nil {
+				continue
+			}
+			id := p.FunctionResponse.ID
+			if id == "" {
+				continue
+			}
+			if presentCalls == nil && hasCallIDInRange(events, max(0, i-localCallLookback), i+1, id) {
+				continue
+			}
+			if presentCalls == nil {
+				presentCalls = make(map[string]struct{})
+				for _, cev := range events {
+					cc := utils.Content(cev)
+					if cc == nil {
+						continue
+					}
+					for _, cp := range cc.Parts {
+						if cp != nil && cp.FunctionCall != nil {
+							presentCalls[cp.FunctionCall.ID] = struct{}{}
+						}
+					}
+				}
+			}
+			if _, ok := presentCalls[id]; !ok {
+				if orphaned == nil {
+					orphaned = make(map[string]struct{})
+				}
+				orphaned[id] = struct{}{}
+			}
 		}
 	}
 	if len(orphaned) == 0 {
@@ -270,7 +294,15 @@ func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*ses
 	// The long-running call events matching the orphaned responses.
 	callEventByID := make(map[string]*session.Event)
 	for _, ev := range sourceEvents {
-		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+		c := utils.Content(ev)
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p == nil || p.FunctionCall == nil {
+				continue
+			}
+			call := p.FunctionCall
 			if _, ok := orphaned[call.ID]; !ok {
 				continue
 			}
@@ -286,11 +318,32 @@ func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*ses
 		return events
 	}
 
+	presentResponses := make(map[string]struct{})
+	for _, ev := range events {
+		c := utils.Content(ev)
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.FunctionResponse != nil {
+				presentResponses[p.FunctionResponse.ID] = struct{}{}
+			}
+		}
+	}
+
 	// Freshest response event per call ID, so a re-injected sibling carries its
 	// final result rather than an intermediate placeholder.
 	finalResponseByID := make(map[string]*session.Event)
 	for _, ev := range sourceEvents {
-		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+		c := utils.Content(ev)
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p == nil || p.FunctionResponse == nil {
+				continue
+			}
+			resp := p.FunctionResponse
 			if prev, ok := finalResponseByID[resp.ID]; !ok || !ev.Timestamp.Before(prev.Timestamp) {
 				finalResponseByID[resp.ID] = ev
 			}
@@ -300,34 +353,61 @@ func recoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*ses
 	result := make([]*session.Event, 0, len(events)+len(callEventByID))
 	reinjected := make(map[string]struct{})
 	for _, ev := range events {
-		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
-			callEvent, ok := callEventByID[resp.ID]
-			if !ok {
-				continue
-			}
-			if _, done := reinjected[resp.ID]; done {
-				continue
-			}
-
-			result = append(result, callEvent)
-
-			// Every call in the recovered event is now present, including the
-			// parallel siblings that came along for the ride.
-			var siblings []*session.Event
-			for _, call := range utils.FunctionCalls(utils.Content(callEvent)) {
-				reinjected[call.ID] = struct{}{}
-				if _, present := presentResponses[call.ID]; present {
+		if c := utils.Content(ev); c != nil {
+			for _, p := range c.Parts {
+				if p == nil || p.FunctionResponse == nil {
 					continue
 				}
-				if sibling, ok := finalResponseByID[call.ID]; ok && !slices.Contains(siblings, sibling) {
-					siblings = append(siblings, sibling)
+				resp := p.FunctionResponse
+				callEvent, ok := callEventByID[resp.ID]
+				if !ok {
+					continue
 				}
+				if _, done := reinjected[resp.ID]; done {
+					continue
+				}
+
+				result = append(result, callEvent)
+
+				// Every call in the recovered event is now present, including the
+				// parallel siblings that came along for the ride.
+				var siblings []*session.Event
+				if cc := utils.Content(callEvent); cc != nil {
+					for _, cp := range cc.Parts {
+						if cp == nil || cp.FunctionCall == nil {
+							continue
+						}
+						call := cp.FunctionCall
+						reinjected[call.ID] = struct{}{}
+						if _, present := presentResponses[call.ID]; present {
+							continue
+						}
+						if sibling, ok := finalResponseByID[call.ID]; ok && !slices.Contains(siblings, sibling) {
+							siblings = append(siblings, sibling)
+						}
+					}
+				}
+				result = append(result, siblings...)
 			}
-			result = append(result, siblings...)
 		}
 		result = append(result, ev)
 	}
 	return result
+}
+
+func hasCallIDInRange(events []*session.Event, start, end int, id string) bool {
+	for i := end - 1; i >= start; i-- {
+		c := utils.Content(events[i])
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p != nil && p.FunctionCall != nil && p.FunctionCall.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RangeRaced reports whether the session gained an event inside summary's range

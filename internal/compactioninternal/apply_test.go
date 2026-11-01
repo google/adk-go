@@ -1158,3 +1158,199 @@ func TestSelectionSkipsASubsumedRecordItsHolesDoNotCover(t *testing.T) {
 		}
 	}
 }
+
+func TestRecoverCompactedFunctionCallsEquivalence(t *testing.T) {
+	t.Parallel()
+
+	longRunningSingle := callEvent("lr1", "inv1", 2, "c1")
+	longRunningSingle.LongRunningToolIDs = []string{"c1"}
+
+	longRunningParallel := multiCallEvent("lr2", "inv1", 2, "c1", "c2", "c3")
+	longRunningParallel.LongRunningToolIDs = []string{"c1", "c2", "c3"}
+
+	distantEvents := make([]*session.Event, 0, 24)
+	distantEvents = append(distantEvents, callEvent("call-far", "inv1", 1, "c-far"))
+	for i := range 20 {
+		distantEvents = append(distantEvents, textEvent(fmt.Sprintf("t%d", i), "inv1", i+2, "filler"))
+	}
+	distantEvents = append(distantEvents, responseEvent("resp-far", "inv1", 25, "c-far"))
+
+	cases := []struct {
+		name         string
+		events       []*session.Event
+		sourceEvents []*session.Event
+	}{
+		{
+			name: "nil slices",
+		},
+		{
+			name:         "empty slices",
+			events:       []*session.Event{},
+			sourceEvents: []*session.Event{},
+		},
+		{
+			name: "nil event and nil part entries",
+			events: []*session.Event{
+				nil,
+				{ID: "empty-content", Timestamp: at(1)},
+				{ID: "nil-part", Timestamp: at(2), LLMResponse: session.Event{}.LLMResponse},
+				newEvent("nil-elem", "inv1", 3, "model", nil, &genai.Part{Text: "ok"}),
+			},
+			sourceEvents: []*session.Event{nil},
+		},
+		{
+			name:         "adjacent matched tool calls",
+			events:       benchCompactedToolEvents(100)[50:],
+			sourceEvents: benchCompactedToolEvents(100),
+		},
+		{
+			name:         "matched call beyond local lookback window",
+			events:       distantEvents,
+			sourceEvents: distantEvents,
+		},
+		{
+			name: "empty call and response IDs",
+			events: []*session.Event{
+				callEvent("c-empty", "inv1", 1, ""),
+				responseEvent("r-empty", "inv1", 2, ""),
+			},
+			sourceEvents: []*session.Event{
+				callEvent("c-empty", "inv1", 1, ""),
+				responseEvent("r-empty", "inv1", 2, ""),
+			},
+		},
+		{
+			name: "orphaned long-running single call recovered",
+			events: []*session.Event{
+				textEvent("s1", "inv1", 3, "summary"),
+				responseEvent("final", "inv2", 6, "c1"),
+			},
+			sourceEvents: []*session.Event{
+				textEvent("a", "inv1", 1, "start"),
+				longRunningSingle,
+				responseEvent("ph", "inv1", 3, "c1"),
+				responseEvent("final", "inv2", 6, "c1"),
+			},
+		},
+		{
+			name: "orphaned parallel long-running call with compacted and surviving siblings",
+			events: []*session.Event{
+				textEvent("s1", "inv1", 5, "summary"),
+				responseEvent("done1", "inv2", 6, "c1"),
+				responseEvent("done3", "inv2", 7, "c3"),
+			},
+			sourceEvents: []*session.Event{
+				textEvent("a", "inv1", 1, "start"),
+				longRunningParallel,
+				responseEvent("ph1", "inv1", 3, "c1"),
+				responseEvent("ph2-early", "inv1", 3, "c2"),
+				responseEvent("done2-late", "inv1", 4, "c2"),
+				responseEvent("ph3", "inv1", 5, "c3"),
+				responseEvent("done1", "inv2", 6, "c1"),
+				responseEvent("done3", "inv2", 7, "c3"),
+			},
+		},
+		{
+			name: "non-long-running orphan left untouched",
+			events: []*session.Event{
+				textEvent("s1", "inv1", 3, "summary"),
+				responseEvent("orphan", "inv2", 5, "c1"),
+			},
+			sourceEvents: []*session.Event{
+				callEvent("call", "inv1", 1, "c1"),
+				responseEvent("orphan", "inv2", 5, "c1"),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			want := refRecoverCompactedFunctionCalls(tc.events, tc.sourceEvents)
+			got := recoverCompactedFunctionCalls(tc.events, tc.sourceEvents)
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("recoverCompactedFunctionCalls() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func refRecoverCompactedFunctionCalls(events, sourceEvents []*session.Event) []*session.Event {
+	presentCalls := make(map[string]struct{})
+	presentResponses := make(map[string]struct{})
+	for _, ev := range events {
+		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+			presentCalls[call.ID] = struct{}{}
+		}
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			presentResponses[resp.ID] = struct{}{}
+		}
+	}
+
+	orphaned := make(map[string]struct{})
+	for id := range presentResponses {
+		if _, ok := presentCalls[id]; !ok && id != "" {
+			orphaned[id] = struct{}{}
+		}
+	}
+	if len(orphaned) == 0 {
+		return events
+	}
+
+	callEventByID := make(map[string]*session.Event)
+	for _, ev := range sourceEvents {
+		for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+			if _, ok := orphaned[call.ID]; !ok {
+				continue
+			}
+			if _, ok := callEventByID[call.ID]; ok {
+				continue
+			}
+			if slices.Contains(ev.LongRunningToolIDs, call.ID) {
+				callEventByID[call.ID] = ev
+			}
+		}
+	}
+	if len(callEventByID) == 0 {
+		return events
+	}
+
+	finalResponseByID := make(map[string]*session.Event)
+	for _, ev := range sourceEvents {
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			if prev, ok := finalResponseByID[resp.ID]; !ok || !ev.Timestamp.Before(prev.Timestamp) {
+				finalResponseByID[resp.ID] = ev
+			}
+		}
+	}
+
+	result := make([]*session.Event, 0, len(events)+len(callEventByID))
+	reinjected := make(map[string]struct{})
+	for _, ev := range events {
+		for _, resp := range utils.FunctionResponses(utils.Content(ev)) {
+			callEvent, ok := callEventByID[resp.ID]
+			if !ok {
+				continue
+			}
+			if _, done := reinjected[resp.ID]; done {
+				continue
+			}
+
+			result = append(result, callEvent)
+
+			var siblings []*session.Event
+			for _, call := range utils.FunctionCalls(utils.Content(callEvent)) {
+				reinjected[call.ID] = struct{}{}
+				if _, present := presentResponses[call.ID]; present {
+					continue
+				}
+				if sibling, ok := finalResponseByID[call.ID]; ok && !slices.Contains(siblings, sibling) {
+					siblings = append(siblings, sibling)
+				}
+			}
+			result = append(result, siblings...)
+		}
+		result = append(result, ev)
+	}
+	return result
+}

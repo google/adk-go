@@ -562,10 +562,16 @@ func summarizerBackend(s compaction.Summarizer) genai.Backend {
 
 // latestInvocationID returns the invocation of the newest event in sess.
 func latestInvocationID(sess session.Session) string {
-	events := collect(sess)
-	for i := len(events) - 1; i >= 0; i-- {
-		if id := events[i].InvocationID; id != "" {
-			return id
+	if sess == nil {
+		return ""
+	}
+	events := sess.Events()
+	if events == nil {
+		return ""
+	}
+	for i := events.Len() - 1; i >= 0; i-- {
+		if ev := events.At(i); ev != nil && ev.InvocationID != "" {
+			return ev.InvocationID
 		}
 	}
 	return ""

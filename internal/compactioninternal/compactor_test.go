@@ -551,3 +551,49 @@ func TestSnapshotCarriesAttachmentPayloads(t *testing.T) {
 		t.Errorf("snapshot dropped attachment content (-want +got):\n%s", diff)
 	}
 }
+
+func TestLatestInvocationIDEquivalence(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		sess session.Session
+	}{
+		{name: "empty session", sess: &staticSession{}},
+		{name: "all empty invocation IDs", sess: &staticSession{events: []*session.Event{
+			textEvent("a", "", 1, "q1"),
+			modelTextEvent("b", "", 2, "a1"),
+		}}},
+		{name: "newest event has invocation ID", sess: &staticSession{events: benchEvents(100)}},
+		{name: "newest events have empty invocation ID", sess: &staticSession{events: []*session.Event{
+			textEvent("a", "inv1", 1, "q1"),
+			textEvent("b", "inv2", 2, "q2"),
+			textEvent("c", "", 3, "bookkeeping"),
+			textEvent("d", "", 4, "bookkeeping-2"),
+		}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			want := refLatestInvocationID(tc.sess)
+			got := latestInvocationID(tc.sess)
+			if got != want {
+				t.Errorf("latestInvocationID() = %q, want %q", got, want)
+			}
+		})
+	}
+	if got := latestInvocationID(nil); got != "" {
+		t.Errorf("latestInvocationID(nil) = %q, want empty", got)
+	}
+}
+
+func refLatestInvocationID(sess session.Session) string {
+	events := collect(sess)
+	for i := len(events) - 1; i >= 0; i-- {
+		if id := events[i].InvocationID; id != "" {
+			return id
+		}
+	}
+	return ""
+}

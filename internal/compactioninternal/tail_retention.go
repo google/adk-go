@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -217,6 +218,24 @@ func TailRetention(ctx context.Context, cfg *compaction.Config, sess session.Ses
 // reported a real prompt token count yet.
 const charsPerToken = 4
 
+type jsonRuneCounter struct {
+	enc   *json.Encoder
+	runes int
+}
+
+func (c *jsonRuneCounter) Write(b []byte) (int, error) {
+	c.runes += utf8.RuneCount(b)
+	return len(b), nil
+}
+
+var jsonRuneCounterPool = sync.Pool{
+	New: func() any {
+		c := &jsonRuneCounter{}
+		c.enc = json.NewEncoder(c)
+		return c
+	},
+}
+
 // jsonChars approximates the rendered size of a tool payload.
 //
 // What reaches the model is a serialized structure, so its JSON length is much
@@ -226,11 +245,17 @@ func jsonChars(v map[string]any) int {
 	if len(v) == 0 {
 		return 0
 	}
-	b, err := json.Marshal(v)
+	c := jsonRuneCounterPool.Get().(*jsonRuneCounter)
+	c.runes = 0
+	err := c.enc.Encode(v)
+	n := c.runes - 1 // exclude the trailing '\n' written by json.Encoder.Encode
+	if err == nil {
+		jsonRuneCounterPool.Put(c)
+	}
 	if err != nil {
 		return 0
 	}
-	return utf8.RuneCount(b)
+	return n
 }
 
 // promptTokenCount returns the most recently observed prompt token count in
