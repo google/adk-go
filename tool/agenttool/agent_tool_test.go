@@ -452,8 +452,16 @@ func TestAgentTool_Run_PendingConfirmationReturnsError(t *testing.T) {
 		t.Fatal("agentTool does not implement FunctionTool")
 	}
 
-	result, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "send 100"})
+	toolCtx := createToolContext(t, child)
+	// Something other than the tool's Config, e.g. a BeforeToolCallback, set
+	// the flag on this call.
+	toolCtx.Actions().SkipSummarization = true
 
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "send 100"})
+
+	if toolCtx.Actions().SkipSummarization {
+		t.Error("SkipSummarization still set; the parent model would never see the error")
+	}
 	if ran {
 		t.Fatal("transfer ran without confirmation")
 	}
@@ -583,8 +591,28 @@ func TestAgentTool_Run_SkipSummarizationPendingErrorReachesParent(t *testing.T) 
 	}
 
 	if got := len(parentLLM.Requests); got != 2 {
-		t.Errorf("parent model requests = %d, want 2 (the second carrying the agent tool's error)", got)
+		t.Fatalf("parent model requests = %d, want 2 (the second carrying the agent tool's error)", got)
 	}
+	if !requestHasFunctionResponseError(parentLLM.Requests[1], "unresolved long-running tool calls") {
+		t.Error("second parent model request does not carry the agent tool's pending-call error")
+	}
+}
+
+func requestHasFunctionResponseError(req *model.LLMRequest, want string) bool {
+	for _, c := range req.Contents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p == nil || p.FunctionResponse == nil {
+				continue
+			}
+			if msg, ok := p.FunctionResponse.Response["error"].(string); ok && strings.Contains(msg, want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // A long-running call whose arguments are streamed without an ID gets a
@@ -638,6 +666,59 @@ func TestAgentTool_Run_StreamedArgsAnsweredLongRunningCallSucceeds(t *testing.T)
 	}
 	if got := result["result"]; got != "job started" {
 		t.Errorf("Run() result = %v, want job started", result)
+	}
+}
+
+// Skipping partial chunks must not drop the final event's ID when a streamed
+// long-running call is never answered.
+func TestAgentTool_Run_StreamedArgsUnansweredLongRunningCallReturnsError(t *testing.T) {
+	start, err := functiontool.New(functiontool.Config{
+		Name:          "start_job",
+		Description:   "Starts a job.",
+		IsLongRunning: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	testLLM := &testutil.MockModel{
+		StreamResponsesCount: 2,
+		Responses: []*genai.Content{
+			{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+			},
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
+					WillContinue: genai.Ptr(false),
+				}}},
+			},
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "jobs_agent",
+		Description: "Starts jobs.",
+		Model:       testLLM,
+		Tools:       []tool.Tool{start},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "start"})
+
+	if err == nil {
+		t.Fatalf("Run() = %v, nil; want an error for the unanswered call", result)
+	}
+	if !strings.Contains(err.Error(), "unresolved long-running tool calls") {
+		t.Errorf("Run() error = %q, want it to report the unresolved call", err)
 	}
 }
 

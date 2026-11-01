@@ -215,11 +215,10 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	if len(pendingIDs) > 0 {
-		// The parent model must see this error, so don't end its turn here.
-		if t.skipSummarization {
-			if actions := toolCtx.Actions(); actions != nil {
-				actions.SkipSummarization = false
-			}
+		// The parent model must see this error, so don't end its turn here,
+		// whatever set SkipSummarization on this call.
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = false
 		}
 		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
 	}
