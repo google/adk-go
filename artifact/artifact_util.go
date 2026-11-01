@@ -106,9 +106,11 @@ func parseArtifactURI(uri string) (parsedArtifactURI, bool) {
 //
 // The app, user, and session segments are not escaped, so a value containing
 // "/" cannot be represented in a reference URI for the reason above. The file
-// name is the final group and is matched greedily, so it does round-trip
-// through parseArtifactURI even though SaveRequest.Validate rejects a file name
-// containing a path separator.
+// name is matched by "(.+)", and the "/versions/{version}" suffix is anchored
+// at the end of the string, so a file name containing "/" round-trips through
+// parseArtifactURI even though SaveRequest.Validate rejects a path separator in
+// a file name. A name containing a newline does not round-trip, because "."
+// does not match "\n", although validateFileName accepts such a name.
 func buildArtifactURI(appName, userID, sessionID, fileName string, version int64) string {
 	if sessionID == "" {
 		return fmt.Sprintf("artifact://apps/%s/users/%s/artifacts/%s/versions/%d", appName, userID, fileName, version)

@@ -304,7 +304,9 @@ type ArtifactVersion struct {
 	CreateTime time.Time
 
 	// MimeType is the media type associated with the stored part. It may be empty
-	// when the part was saved without a media type.
+	// when the part was saved without a media type, or when the stored part is a
+	// reference to another artifact, whose media type is only known once the
+	// reference is loaded.
 	MimeType string
 }
 
