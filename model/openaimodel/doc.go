@@ -61,6 +61,10 @@
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.
 //
+// Responses streams that recover from terminal conversion errors record an
+// "openai.terminal_response_conversion_failed" event on the active OpenTelemetry
+// span, with the error category and no response content.
+//
 // On the Responses API, model reasoning is reported to the caller as thought
 // parts; Chat Completions responses are read for text, refusals and tool calls
 // only. Reasoning is not sent back on a later turn to either API: the
