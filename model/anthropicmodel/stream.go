@@ -40,6 +40,7 @@ func (m *anthropicModel) generateStreaming(
 	}()
 
 	var acc anthropic.Message
+	pendingDeltas := make(map[int64]*blockDeltas)
 	toolInputBuffers := make(map[int64]*strings.Builder)
 
 	for stream.Next() {
@@ -49,7 +50,7 @@ func (m *anthropicModel) generateStreaming(
 		}
 
 		event := stream.Current()
-		if err := acc.Accumulate(event); err != nil {
+		if err := accumulate(&acc, event, pendingDeltas); err != nil {
 			yield(nil, classifyError(err))
 			return
 		}
@@ -105,6 +106,7 @@ func (m *anthropicModel) generateStreaming(
 			}
 		}
 	}
+	flushDeltas(&acc, pendingDeltas)
 
 	if err := stream.Err(); err != nil {
 		yield(nil, classifyError(err))
@@ -129,6 +131,61 @@ func (m *anthropicModel) generateStreaming(
 		return
 	}
 	yield(finalResp, nil)
+}
+
+// blockDeltas buffers the text and thinking deltas of one content block until
+// they are appended to the accumulated message.
+type blockDeltas struct {
+	text, thinking strings.Builder
+}
+
+// accumulate applies event to acc like acc.Accumulate, except that text and
+// thinking deltas are buffered in pending: Accumulate appends each one to its
+// block by string concatenation, copying the whole block per delta. The
+// buffers are appended before every event that may read or replace block
+// text; call flushDeltas before reading block text from acc.
+func accumulate(acc *anthropic.Message, event anthropic.MessageStreamEventUnion, pending map[int64]*blockDeltas) error {
+	switch event.Type {
+	case "content_block_delta":
+		if event.Delta.Type != "text_delta" && event.Delta.Type != "thinking_delta" {
+			return acc.Accumulate(event)
+		}
+		// Accumulate still validates the block index and returns its error; with
+		// the delta blanked it leaves the block unchanged.
+		text, thinking := event.Delta.Text, event.Delta.Thinking
+		event.Delta.Text, event.Delta.Thinking = "", ""
+		if err := acc.Accumulate(event); err != nil {
+			return err
+		}
+		d := pending[event.Index]
+		if d == nil {
+			d = &blockDeltas{}
+			pending[event.Index] = d
+		}
+		if event.Delta.Type == "text_delta" {
+			d.text.WriteString(text)
+		} else {
+			d.thinking.WriteString(thinking)
+		}
+		return nil
+	case "content_block_start", "message_delta":
+		// Neither reads nor replaces the text of existing blocks.
+		return acc.Accumulate(event)
+	default:
+		// content_block_stop and message_stop render block text into the raw
+		// JSON, message_start replaces the blocks.
+		flushDeltas(acc, pending)
+		return acc.Accumulate(event)
+	}
+}
+
+// flushDeltas appends the pending deltas to their content blocks in acc.
+func flushDeltas(acc *anthropic.Message, pending map[int64]*blockDeltas) {
+	for i, d := range pending {
+		acc.Content[i].Text += d.text.String()
+		acc.Content[i].Thinking += d.thinking.String()
+	}
+	clear(pending)
 }
 
 func yieldPartialPart(
