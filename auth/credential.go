@@ -95,7 +95,8 @@ func (c OAuth2Credential) Apply(h http.Header) error {
 }
 
 // WithHeaders wraps inner to also set headers verbatim (overriding inner on
-// conflict) — e.g. x-goog-user-project alongside an OAuth2 token.
+// conflict) — e.g. x-goog-user-project alongside an OAuth2 token. The result
+// has an Unwrap() Credential method that returns inner.
 func WithHeaders(inner Credential, headers map[string]string) Credential {
 	return withHeaders{inner: inner, headers: headers}
 }
@@ -104,6 +105,12 @@ type withHeaders struct {
 	inner   Credential
 	headers map[string]string
 }
+
+// Unwrap returns the credential this wraps, so a caller that needs to inspect
+// the credential itself — a provider reading back the token it issued, say — is
+// not blocked by the wrapper. [errors.As] is not involved; this is the
+// conventional shape for an accessor on a wrapper type.
+func (c withHeaders) Unwrap() Credential { return c.inner }
 
 // Apply implements [Credential].
 func (c withHeaders) Apply(h http.Header) error {

@@ -108,7 +108,7 @@ func setupRouter(router *mux.Router, subrouters ...routers.Router) *mux.Router {
 	return router
 }
 
-// listNonStreamHandlers returnes a list of handlers for non-streaming methods
+// listNonStreamHandlers returns a list of handlers for non-streaming methods
 func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewCreateSessionHandler(config.SessionService, agentEngineID, "async_create_session", "async"),
@@ -118,7 +118,7 @@ func listNonStreamHandlers(config *launcher.Config, agentEngineID string) []meth
 	}
 }
 
-// listStreamHandlers returnes a list of handlers for streaming methods
+// listStreamHandlers returns a list of handlers for streaming methods
 func listStreamHandlers(config *launcher.Config, agentEngineID string) []method.MethodHandler {
 	return []method.MethodHandler{
 		method.NewStreamQueryHandler(config, agentEngineID, "async_stream_query", "async_stream"),

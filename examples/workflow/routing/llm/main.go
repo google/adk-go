@@ -57,7 +57,7 @@ Answer with EXACTLY one word, lowercase, no punctuation: question, exclamation, 
 // routeByClassification turns the classifier's one-word output into a
 // routing event; returning nil suppresses the default terminal event.
 func routeByClassification(ctx agent.Context, input any, emit func(*session.Event) error) (any, error) {
-	// Normalise defensively in case the LLM ignored the one-word
+	// Normalize defensively in case the LLM ignored the one-word
 	// instruction; off-script replies fall through to "statement".
 	category := strings.TrimRight(strings.ToLower(strings.TrimSpace(fmt.Sprint(input))), ".")
 	if category != "question" && category != "exclamation" && category != "statement" {

@@ -380,7 +380,7 @@ func TestParallelWorker_FailFast(t *testing.T) {
 			return "", errors.New("error b")
 		}
 		if input == "c" {
-			// Block until cancelled
+			// Block until canceled
 			<-ctx.Done()
 			atomic.StoreInt32(&workerCCancelled, 1)
 			close(cancelledCh)
@@ -420,11 +420,11 @@ func TestParallelWorker_FailFast(t *testing.T) {
 	case <-cancelledCh:
 		// Good
 	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for worker C to be cancelled")
+		t.Fatal("timeout waiting for worker C to be canceled")
 	}
 
 	if atomic.LoadInt32(&workerCCancelled) != 1 {
-		t.Error("expected worker c to be cancelled")
+		t.Error("expected worker c to be canceled")
 	}
 }
 
@@ -468,7 +468,7 @@ func TestParallelWorker_CancelDuringExecution(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for workers to start before cancelling
+	// Wait for workers to start before canceling
 	<-startedCh
 	<-startedCh
 	cancel()
@@ -496,7 +496,7 @@ func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
 	// jjsasha63's finding on #1239: runWorker's retry-delay select only
 	// calls reportFailure on the "cannot retry or exhausted attempts" path,
 	// not on the `case <-ctx.Done()` arm inside the delay wait. A worker
-	// parked in that delay when the top-level context is cancelled sends
+	// parked in that delay when the top-level context is canceled sends
 	// workerResult{err: ctx.Err()} straight to resCh without ever setting
 	// firstErr, and the aggregation loop only reads res.ev, never res.err,
 	// so a cancellation that lands here is silently dropped: nil error, nil
