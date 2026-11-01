@@ -16,7 +16,10 @@ package compactioninternal
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/session"
 )
@@ -40,6 +43,24 @@ func benchEvents(n int) []*session.Event {
 	return evs
 }
 
+func benchCompactedToolEvents(n int) []*session.Event {
+	evs := make([]*session.Event, 0, n)
+	half := n / 2
+	for i := range half {
+		evs = append(evs, textEvent(fmt.Sprintf("e%d", i), fmt.Sprintf("inv%d", i/2), i+1, "text"))
+	}
+	evs = append(evs, compactionEvent("s1", half+1, 1, half, "summary"))
+	for i := half + 1; i+1 < n; i += 2 {
+		callID := fmt.Sprintf("c%d", i)
+		invID := fmt.Sprintf("inv%d", i/2)
+		evs = append(evs,
+			callEvent(fmt.Sprintf("e%d", i), invID, i+1, callID),
+			responseEvent(fmt.Sprintf("e%d", i+1), invID, i+2, callID),
+		)
+	}
+	return evs
+}
+
 func BenchmarkSelectTailRetentionWindow(b *testing.B) {
 	for _, n := range []int{1000, 4000, 8000, 16000} {
 		evs := benchEvents(n)
@@ -57,6 +78,55 @@ func BenchmarkApply(b *testing.B) {
 		b.Run(fmt.Sprint(n), func(b *testing.B) {
 			for b.Loop() {
 				_ = Apply(evs)
+			}
+		})
+	}
+}
+
+func BenchmarkApplyCompacted(b *testing.B) {
+	for _, n := range []int{100, 1000} {
+		evs := benchCompactedToolEvents(n)
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = Apply(evs)
+			}
+		})
+	}
+}
+
+func BenchmarkEstimateTokensFromContents(b *testing.B) {
+	for _, size := range []int{4 << 10, 100 << 10} {
+		contents := []*genai.Content{
+			{
+				Role: "user",
+				Parts: []*genai.Part{
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:       "c1",
+							Name:     "read_file",
+							Response: map[string]any{"result": strings.Repeat("x", size)},
+						},
+					},
+				},
+			},
+		}
+		b.Run(fmt.Sprintf("%dKiB", size>>10), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = EstimateTokensFromContents(contents)
+			}
+		})
+	}
+}
+
+func BenchmarkLatestInvocationID(b *testing.B) {
+	for _, n := range []int{100, 1000} {
+		sess := &staticSession{events: benchEvents(n)}
+		b.Run(fmt.Sprint(n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				_ = latestInvocationID(sess)
 			}
 		})
 	}
