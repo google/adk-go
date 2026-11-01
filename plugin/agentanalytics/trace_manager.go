@@ -4025,11 +4025,21 @@ func (inv *invocationTrace) settleFinishedLocked() {
 // the subtree of the activation that it reports for, and writes the rows of
 // the activations that failed along their lineage on agentStack, so the
 // activations between the one that carries the cause and the one through
-// which it is read stay too, and the rows do not depend on whether the
-// reading comes as soon as the activations settle or only later. Unlike a
-// failure, the cause keeps no activation once nothing can read it anymore:
-// the activation then retires, as do those above it that the cause kept, as
-// it does with the agent above it when its last call ends before that agent
+// which it is read stay too, and for a failure cause the rows do not depend
+// on whether the reading comes as soon as the activations settle or only
+// later. That includes the cause of a collateral error (see recordedError)
+// whose cancellation started at a parallel branch, as when a parallel agent
+// cancels its other branches: the cause is then that branch's context
+// failure cause, which keeps the activations as above. When such a
+// cancellation started at another stop point, such as a workflow node,
+// spanRecord.openFailureCause does not return the cause and the scan of the
+// unrecovered errors in the body skips the error, so nothing keeps an
+// activation for it, and the rows that failure reporting writes from that
+// cause depend on whether the reading comes before the activation that the
+// error is attributed to retires or only later. Unlike a failure, a failure
+// cause keeps no activation once nothing that is open can read it: the
+// activation then retires, as do those above it that the cause kept, as it
+// does with the agent above it when its last call ends before that agent
 // does. The callbacks that can release such an activation (the end of an
 // agent, of a tool call or of a model call, and a response event, see
 // completeResponse) call it last, once they no longer hold an index into

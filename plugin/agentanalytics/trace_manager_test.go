@@ -23124,8 +23124,15 @@ func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
 // invocation span (see parentFor), and g carries the cause that b, a parallel
 // branch below it whose context a failing sibling canceled, left on it when b
 // ended. Once o's call returns, g is settled, and as no tool call under the
-// invocation span is open, nothing can read the cause anymore (see
-// endToolRunsLocked), so g leaves the late state while o stays open.
+// invocation span is open, nothing that is open can read the cause (see
+// heldByCause and endToolRunsLocked), so g leaves the late state while o
+// stays open. A tool call under the invocation span that starts after o's
+// call returned, as a call of the root agent in RunLive may, finds g
+// already retired, so its end writes no AGENT_ERROR row for g, whereas on a
+// live trace, which retireLateSettledLocked leaves alone, g is still open
+// and the end of such a call writes one. A call that is open when o's call
+// returns keeps g, and the end of the last such call writes the row, as in
+// TestLateCauseHeldWhileRootToolCallOpen.
 func TestLateCauseRetiresWithoutRootToolCall(t *testing.T) {
 	ctx := context.Background()
 	tm := newTraceManager()
