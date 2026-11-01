@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -496,8 +497,17 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		{name: "labels", cfg: &genai.GenerateContentConfig{Labels: map[string]string{"a": "b"}}, want: shared.ErrLabelsNotSupported},
 		{name: "safety settings", cfg: &genai.GenerateContentConfig{SafetySettings: []*genai.SafetySetting{{}}}, want: shared.ErrSafetySettingsNotSupported},
 		{name: "mime type", cfg: &genai.GenerateContentConfig{ResponseMIMEType: "text/csv"}, want: shared.ErrUnsupportedMIMEType},
+		{name: "routing config", cfg: &genai.GenerateContentConfig{RoutingConfig: &genai.GenerationConfigRoutingConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "model selection config", cfg: &genai.GenerateContentConfig{ModelSelectionConfig: &genai.ModelSelectionConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "cached content", cfg: &genai.GenerateContentConfig{CachedContent: "c"}, want: shared.ErrUnsupportedConfigField},
+		{name: "response modalities", cfg: &genai.GenerateContentConfig{ResponseModalities: []string{"AUDIO"}}, want: shared.ErrUnsupportedConfigField},
+		{name: "media resolution", cfg: &genai.GenerateContentConfig{MediaResolution: genai.MediaResolutionLow}, want: shared.ErrUnsupportedConfigField},
 		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "audio timestamp", cfg: &genai.GenerateContentConfig{AudioTimestamp: true}, want: shared.ErrUnsupportedConfigField},
+		{name: "image config", cfg: &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "enhanced civic answers", cfg: &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}, want: shared.ErrUnsupportedConfigField},
+		{name: "model armor config", cfg: &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}, want: shared.ErrUnsupportedConfigField},
+		{name: "audio transcription config", cfg: &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "continuation token", cfg: &genai.GenerateContentConfig{ContinuationToken: []byte("token")}, want: shared.ErrUnsupportedConfigField},
 	}
 	for _, tt := range tests {
@@ -508,6 +518,44 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 			})
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists checks that a
+// set field outside the supported lists is refused by name, whatever genai adds.
+// Dropping a name from a list stands in for a field genai adds later. It swaps
+// package variables, so it must not run in parallel with other tests.
+func TestApplyGenerationConfig_RefusesFieldsOutsideTheSupportedLists(t *testing.T) {
+	savedTop, savedHTTP, savedThinking := supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields
+	t.Cleanup(func() {
+		supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields = savedTop, savedHTTP, savedThinking
+	})
+	supportedConfigFields = slices.DeleteFunc(slices.Clone(savedTop), func(name string) bool { return name == "Temperature" })
+	shared.SupportedHTTPOptionFields = nil
+	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	temp := float32(0.5)
+	timeout := time.Second
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Temperature", &genai.GenerateContentConfig{Temperature: &temp}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &timeout}}},
+		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.field, func(t *testing.T) {
+			_, err := buildParams("m", &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config:   tt.cfg,
+			})
+			if want := shared.ErrUnsupportedConfigField.Error() + ": " + tt.field; !errors.Is(err, shared.ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("err = %v, want %q", err, want)
 			}
 		})
 	}
@@ -563,6 +611,30 @@ func TestApplyGenerationConfig_ResponseFormat(t *testing.T) {
 		body := schema["schema"].(map[string]any)
 		if body["additionalProperties"] != false {
 			t.Error("strict rewriting did not run on the schema")
+		}
+	})
+
+	// OpenAI accepts only ^[a-zA-Z0-9_-]{1,64}$ in the name while genai puts no
+	// constraint on Title, so an illegal title falls back to the default name
+	// and the body keeps the title the caller wrote.
+	t.Run("json schema title that is not a legal format name", func(t *testing.T) {
+		wire := requestWire(t, &model.LLMRequest{
+			Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+			Config: &genai.GenerateContentConfig{ResponseSchema: &genai.Schema{
+				Title: "Weather Report",
+				Type:  genai.TypeObject,
+				Properties: map[string]*genai.Schema{
+					"city": {Type: genai.TypeString},
+				},
+			}},
+		})
+		schema := wire["response_format"].(map[string]any)["json_schema"].(map[string]any)
+		if schema["name"] != shared.DefaultResponseFormatName {
+			t.Errorf("name = %v, want %v", schema["name"], shared.DefaultResponseFormatName)
+		}
+		body := schema["schema"].(map[string]any)
+		if body["title"] != "Weather Report" {
+			t.Errorf("schema title = %v, want the caller's title unchanged", body["title"])
 		}
 	})
 
