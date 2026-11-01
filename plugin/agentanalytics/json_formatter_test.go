@@ -6067,3 +6067,109 @@ func TestSmartTruncate_EmbeddedMarshalerInterfacesAreRedactedWhole(t *testing.T)
 		}
 	}
 }
+
+// testTokenHolder holds a field named for a credential whose type is not
+// named for one, which walkStruct redacts by its name.
+type testTokenHolder struct {
+	Token uint64
+	Label string
+}
+
+// TestSmartTruncate_OmitTagsDoNotReadFieldsRedactedByName checks that a field
+// redacted by its name is written as [REDACTED], zero or not, without being
+// read, whatever its omit option: neither omitempty nor omitzero reads a
+// plain uint64 named Token that another goroutine updates atomically, and
+// omitzero does not read a struct or an array that holds such a field to tell
+// whether it is zero. Run with -race: the race loops keep the values non-zero,
+// so that the output is the same whether or not they are read, and only
+// -race tells. A string field redacted by its name keeps its omit options, as
+// in encoding/json, also inside a struct that omitzero reads, and so do the
+// fields that are not redacted.
+func TestSmartTruncate_OmitTagsDoNotReadFieldsRedactedByName(t *testing.T) {
+	type omitEmptyTagged struct {
+		Token uint64 `json:"token,omitempty"`
+	}
+	type omitZeroTagged struct {
+		Token uint64 `json:"token,omitzero"`
+	}
+	type omitEmptyUnnamed struct {
+		Token uint64 `json:",omitempty"`
+	}
+	type omitZeroUnnamed struct {
+		Token uint64 `json:",omitzero"`
+	}
+	type nested struct {
+		Inner testTokenHolder `json:"inner,omitzero"`
+	}
+	type array struct {
+		Arr [2]testTokenHolder `json:"arr,omitzero"`
+	}
+	type taggedHolder struct {
+		N     uint64 `json:"token"`
+		Label string
+	}
+	type nestedTagged struct {
+		Inner taggedHolder `json:"inner,omitzero"`
+	}
+	oet, ozt, oeu, ozu, n, a, nt := &omitEmptyTagged{}, &omitZeroTagged{}, &omitEmptyUnnamed{}, &omitZeroUnnamed{}, &nested{}, &array{}, &nestedTagged{}
+	for _, tt := range []struct {
+		name  string
+		in    any
+		token *uint64
+		want  string
+	}{
+		{"omitempty", oet, &oet.Token, `{"token":"[REDACTED]"}`},
+		{"omitzero", ozt, &ozt.Token, `{"token":"[REDACTED]"}`},
+		{"omitempty without a name", oeu, &oeu.Token, `{"Token":"[REDACTED]"}`},
+		{"omitzero without a name", ozu, &ozu.Token, `{"Token":"[REDACTED]"}`},
+		{"omitzero struct that holds one", n, &n.Inner.Token, `{"inner":{"Label":"","Token":"[REDACTED]"}}`},
+		{"omitzero array that holds one", a, &a.Arr[1].Token, `{"arr":[{"Label":"","Token":"[REDACTED]"},{"Label":"","Token":"[REDACTED]"}]}`},
+		{"omitzero struct that holds one named by its tag", nt, &nt.Inner.N, `{"inner":{"Label":"","token":"[REDACTED]"}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != tt.want {
+				t.Errorf("SmartTruncate(zero %T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+			}
+			*tt.token = 7
+			runWhileWriting(func() {
+				atomic.AddUint64(tt.token, 1)
+			}, func() {
+				for range 1000 {
+					if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != tt.want {
+						t.Fatalf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, tt.want)
+					}
+				}
+			})
+		})
+	}
+
+	type controls struct {
+		Password string `json:"password,omitempty"`
+		Secret   string `json:"secret,omitzero"`
+		N        uint64 `json:"n,omitempty"`
+		M        uint64 `json:"m,omitzero"`
+		Meta     struct {
+			N uint64
+		} `json:"meta,omitzero"`
+		Auth struct {
+			Token string
+		} `json:"auth,omitzero"`
+	}
+	set := controls{Password: "p", Secret: "s", N: 1, M: 2}
+	set.Meta.N = 3
+	set.Auth.Token = "t"
+	for _, tt := range []struct {
+		in   controls
+		want string
+	}{
+		{controls{}, `{}`},
+		{set, `{"auth":{"Token":"[REDACTED]"},"m":2,"meta":{"N":3},"n":1,"password":"[REDACTED]","secret":"[REDACTED]"}`},
+	} {
+		if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != tt.want {
+			t.Errorf("SmartTruncate(%+v) = (%s, %v), want %s", tt.in, got, err, tt.want)
+		}
+	}
+	if b, err := json.Marshal(controls{}); err != nil || string(b) != `{}` {
+		t.Errorf("json.Marshal(controls{}) = (%s, %v), want {}", b, err)
+	}
+}

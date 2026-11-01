@@ -3273,7 +3273,7 @@ func TestRedactionRegressions(t *testing.T) {
 		{"nested quoted value that a quote runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800""`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
 		{"nested single-quoted value that a letter runs into", `token=a: 'prefix R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
 		{"quoted value before the pair of a credential key", `password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token="[REDACTED]" rest`},
-		{"quoted value before the pair of another key", `password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"user="bob" rest`},
+		{"quoted value joined to the pair of another key", `password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]" rest`},
 		{"bearer token of several words that a letter runs into", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
 		{"shell value of several words that a letter runs into", `export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `export "DB_PASSWORD"=[REDACTED]`},
 		{"JSON key value of several words that a letter runs into", `failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `failed: "password":"[REDACTED]"`},
@@ -3339,6 +3339,19 @@ func TestRedactionRegressions(t *testing.T) {
 		{"unclosed quoted part that starts with whitespace joined to a bare shell value", `export DB_PASSWORD=pre" correct horse R13_SYNTHETIC_52816`, "horse", `export DB_PASSWORD=[REDACTED]`},
 		{"quoted part joined inside a bare shell value before a quoted key", `export DB_PASSWORD=pre"correct horse""token": "R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]"token":"[REDACTED]"; echo ok`},
 		{"cursor keys with split direction words beside a page access token", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=R13_SYNTHETIC_52816`, "R13_SYNTHETIC_52816", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=[REDACTED]`},
+		{"single-quoted part joined inside a bare shell value before a bare suffix", `export DB_PASSWORD=pre'correct horse R14_SYNTHETIC_728109'suffix; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"single-quoted part joined inside a bare shell value before a suffix secret", `export DB_PASSWORD=pre'correct horse R14_SHELL_SUFFIX_SECRET'suffix; echo ok`, "R14_SHELL_SUFFIX_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"single-quoted part whose closing quote stands between letters", `password=pre'a b'c`, "b'c", `password=[REDACTED]`},
+		{"unclosed single-quoted part joined inside a bare shell value", `export DB_PASSWORD=pre'correct horse R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]`},
+		{"bare suffix joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"bare suffix joined to a quoted part that ends in a later label", `export DB_PASSWORD=pre"correct horse label="R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before the pair of another key", `export DB_PASSWORD=[REDACTED]label=R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before a pair with a short key", `export DB_PASSWORD=[REDACTED]x=R14_PLACEHOLDER_SECRET; echo ok`, "R14_PLACEHOLDER_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before a quoted key that is not sensitive", `password=[REDACTED]"x": "R14_PLACEHOLDER_SECRET"`, "R14_PLACEHOLDER_SECRET", `password=[REDACTED]`},
+		{"quoted literal placeholder before the pair of another key", `export DB_PASSWORD="[REDACTED]"x=R14_PLACEHOLDER_SECRET; echo ok`, "R14_PLACEHOLDER_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"comma-bearing temp key in a single-quoted dict", `failed: {'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'temp:a,b':'[REDACTED]'}`},
+		{"state-prefixed comma-bearing temp key in a single-quoted dict", `failed: {'user:temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'user:temp:a,b':'[REDACTED]'}`},
+		{"comma-bearing temp key after another dict entry", `failed: {'label': 'keep', 'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'label': 'keep', 'temp:a,b':'[REDACTED]'}`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
@@ -3357,7 +3370,7 @@ func TestRedactionRegressions(t *testing.T) {
 			for _, row := range rows {
 				et := fmt.Sprint(row["event_type"])
 				seen[et] = true
-				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") {
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") || strings.Contains(s, "R14_") {
 					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
 				}
 			}

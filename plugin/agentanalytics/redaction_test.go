@@ -1495,25 +1495,27 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 // TestScrubTextPatterns_QuotedValueFollowedByKey checks that a quoted value
 // that another key and its delimiter follow at once, as the keys of a shell
 // word or a log line that joins pairs do, is redacted up to its closing quote
-// on every path, and the pair after the quote is read on its own: redacted if
-// its key is a credential name, kept if it is not, and kept whole if it is an
-// ordinary pair. A quote that a word of another kind follows still runs into
-// it, as the padding of base64 text, a bare letter run, digits, a name whose
-// delimiter has no value after it, as in tail= or tail:, or one whose ":" is
-// that of a port or of a URL do: that word is the end of the credential, and
-// is redacted with it.
+// on every path, and the pair after the quote is read on its own if its key
+// is a credential name, whose pair is redacted on its own. A pair or a quoted
+// key whose key is not a credential name is redacted with the value, as a
+// shell joins it to the value into one word, whose credential it may be part
+// of: the pair is no proof that the value ended at the quote. A quote that a
+// word of another kind follows runs into it too, as the padding of base64
+// text, a bare letter run, digits, a name whose delimiter has no value after
+// it, as in tail= or tail:, or one whose ":" is that of a port or of a URL
+// do: that word is the end of the credential, and is redacted with it.
 func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		{`password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, `password="[REDACTED]"token="[REDACTED]" rest`},
-		{`password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, `password="[REDACTED]"user="bob" rest`},
+		{`password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, `password="[REDACTED]" rest`},
 		{`password="R8_SYNTHETIC_SECRET_4700"token="R8_SYNTHETIC_SECRET_4701"`, `password="[REDACTED]"token="[REDACTED]"`},
 		{`password="benign"token=R8_SYNTHETIC_SECRET_4700 rest`, `password="[REDACTED]"token=[REDACTED] rest`},
 		{`password='benign'api_key='R8_SYNTHETIC_SECRET_4700'`, `password='[REDACTED]'api_key='[REDACTED]'`},
-		{`password="benign"user=bob rest`, `password="[REDACTED]"user=bob rest`},
-		{`password="benign"label:"bob" rest`, `password="[REDACTED]"label:"bob" rest`},
-		{`password="benign"user="bob"token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"user="bob"token="[REDACTED]"`},
+		{`password="benign"user=bob rest`, `password=[REDACTED] rest`},
+		{`password="benign"label:"bob" rest`, `password="[REDACTED]" rest`},
+		{`password="benign"user="bob"token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"`},
 		{"password=\"benign\"\ttoken=\"R8_SYNTHETIC_SECRET_4700\"", "password=\"[REDACTED]\"\ttoken=\"[REDACTED]\""},
-		{`password="benign"a.b=c token="R8_SYNTHETIC_SECRET_4700"`, `password="[REDACTED]"a.b=c token="[REDACTED]"`},
+		{`password="benign"a.b=c token="R8_SYNTHETIC_SECRET_4700"`, `password=[REDACTED] token="[REDACTED]"`},
 		{`DB_PASSWORD="benign"GITHUB_TOKEN="R8_SYNTHETIC_SECRET_4700"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
 		{`DB_PASSWORD="benign"GITHUB_TOKEN=SYNTHETIC_FOLLOWING_6401 rest`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN=[REDACTED] rest`},
 		{`DB_PASSWORD="benign"GITHUB_TOKEN:"SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN:"[REDACTED]"`},
@@ -1522,7 +1524,7 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`DB_PASSWORD="benign"stripe.api.key="SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"stripe.api.key="[REDACTED]"`},
 		{`OPENAI_API__KEY="benign"stripe.api..key="SYNTHETIC_FOLLOWING_6401"`, `OPENAI_API__KEY="[REDACTED]"stripe.api..key="[REDACTED]"`},
 		{`DB_PASSWORD="benign"fb.page_token="SYNTHETIC_FOLLOWING_6401"`, `DB_PASSWORD="[REDACTED]"fb.page_token="[REDACTED]"`},
-		{`DB_PASSWORD="benign"next.page.token="cursor-1"`, `DB_PASSWORD="[REDACTED]"next.page.token="cursor-1"`},
+		{`DB_PASSWORD="benign"next.page.token="cursor-1"`, `DB_PASSWORD="[REDACTED]"`},
 		{`Bearer "benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, `Bearer [REDACTED]GITHUB_TOKEN="[REDACTED]"`},
 		{`failed: "password": "benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, `failed: "password":"[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
 		{"DB_PASSWORD=\"benign\"\nGITHUB_TOKEN=\"R8_SYNTHETIC_SECRET_4700\"", "DB_PASSWORD=\"[REDACTED]\"\nGITHUB_TOKEN=\"[REDACTED]\""},
@@ -1538,9 +1540,10 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN= R8_SYNTHETIC_SECRET_4801`, `password=[REDACTED]`},
 		{`Bearer "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, `Bearer [REDACTED]`},
 		{`failed: "password": "R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_PASSWORD:8080`, `failed: "password":"[REDACTED]"`},
-		// The quoted value of a JSON key that another quoted key follows,
-		// whether the keys are credential names or not.
-		{`failed: {"password":"R8_SYNTHETIC_SECRET_4700""user":"bob"}`, `failed: {"password":"[REDACTED]""user":"bob"}`},
+		// The quoted value of a JSON key that another quoted key follows: a
+		// key that is not a credential name is redacted with the value, the
+		// closing brace too, as the JSON-text pass counts no brackets.
+		{`failed: {"password":"R8_SYNTHETIC_SECRET_4700""user":"bob"}`, `failed: {"password":"[REDACTED]"`},
 		{`failed: {"user":"bob""password":"R8_SYNTHETIC_SECRET_4700"}`, `failed: {"user":"bob""password":"[REDACTED]"}`},
 		{`failed: {"password":"benign""token":"R8_SYNTHETIC_SECRET_4700"}`, `failed: {"password":"[REDACTED]""token":"[REDACTED]"}`},
 		// A word that is not a pair runs into the quote: base64 padding, a
@@ -1566,13 +1569,13 @@ func TestScrubTextPatterns_QuotedValueFollowedByKey(t *testing.T) {
 		{`password="x"a:b`, `password=[REDACTED]`},
 		{`password="x"https://example.com/path`, `password=[REDACTED]`},
 		// A name whose delimiter a value follows at once is still a pair: a
-		// credential name is redacted on its own, a ":" starts a pair of
-		// another name only if a quote follows it, and an "=" always does.
-		{`password="x"key=val rest`, `password="[REDACTED]"key=val rest`},
-		{`password="x"url=http://h/p`, `password="[REDACTED]"url=http://h/p`},
-		{`password="x"user="bob" rest`, `password="[REDACTED]"user="bob" rest`},
-		{`password="x"label:"bob"`, `password="[REDACTED]"label:"bob"`},
-		{`password="x"label:'bob'`, `password="[REDACTED]"label:'bob'`},
+		// credential name is redacted on its own, and another name is
+		// redacted with the value, as a shell joins it to the value.
+		{`password="x"key=val rest`, `password=[REDACTED] rest`},
+		{`password="x"url=http://h/p`, `password=[REDACTED]`},
+		{`password="x"user="bob" rest`, `password="[REDACTED]" rest`},
+		{`password="x"label:"bob"`, `password="[REDACTED]"`},
+		{`password="x"label:'bob'`, `password=[REDACTED]`},
 		{`password="x"token:R8_SYNTHETIC_SECRET_4801 rest`, `password="[REDACTED]"token:[REDACTED] rest`},
 		{`password="x"token:'R8_SYNTHETIC_SECRET_4801'`, `password="[REDACTED]"token:'[REDACTED]'`},
 		// A closing quote that a space follows ends the value, as before.
@@ -2477,6 +2480,44 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
 		{
+			"one bare value joined to many single-quoted parts and an unclosed quote", func(n int) string {
+				return "export DB_PASSWORD=pre" + strings.Repeat(`'a b'c`, n) + `'tail`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated bare parts joined to quoted parts that end in later labels", func(n int) string {
+				return strings.Repeat(`DB_PASSWORD=a:'s note label='x `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		// Pairs and quoted keys that are not sensitive, joined to a redacted
+		// value, end no value, so each word is one value read once.
+		{
+			"one word of redacted values before plain pairs", func(n int) string {
+				return strings.Repeat("password=[REDACTED]x=1", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"one word of redacted values before plain quoted keys", func(n int) string {
+				return strings.Repeat(`password=[REDACTED]"x": "1"`, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 1000,
+		},
+		{
+			"one word of quoted values that run on over delimited values", func(n int) string {
+				return strings.Repeat(`password="a"x: "b"`, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
+			"repeated quoted temp keys that hold commas", func(n int) string {
+				return strings.Repeat(`{'temp:a,b': 'x', 'a,b': 'y'} `, n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 2000,
+		},
+		{
 			"repeated quoted arguments after brackets that hold pairs", func(n int) string {
 				return strings.Repeat(`credentials: token("x token=y z") `, n)
 			},
@@ -3043,10 +3084,12 @@ func checkRedactedMap(t *testing.T, key, secret string) {
 // quotedKeyAllowed accepts, so the text paths read it whole and redact its
 // value, quoted or not, rather than redacting part of the key and keeping the
 // value. A state-prefixed key with whitespace after the prefix, such as
-// " user: DB_PASSWORD ", is read whole too. The exceptions are the keys that
-// hold a quote, "\", ",", "}" or a line break, which single-line quoted-key
-// scanning reads as the structure of the text around a key: their values are
-// redacted in maps, structs and valid JSON only.
+// " user: DB_PASSWORD ", is read whole too, and so is a key that holds a
+// comma, as 'temp:a,b' does, whose quotes, not the comma, tell where it ends.
+// The exceptions are the keys that hold a quote, "\", "}" or a line break,
+// which single-line quoted-key scanning reads as the structure of the text
+// around a key: their values are redacted in maps, structs and valid JSON
+// only.
 func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 	const secret = "R13_SYNTHETIC_52816"
 	for _, key := range []string{
@@ -3088,6 +3131,11 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 		"temp:a:b",
 		"user:temp:a=b",
 		"temp:cache=foo",
+		"temp:a,b",
+		"user:temp:a,b",
+		" temp:a,b ",
+		"user: temp:a,b",
+		"temp:,",
 	} {
 		if !isSensitiveKey(key) || !quotedKeyAllowed(key) {
 			t.Errorf("isSensitiveKey(%q), quotedKeyAllowed(%q) = %v, %v, want true, true", key, key, isSensitiveKey(key), quotedKeyAllowed(key))
@@ -3110,6 +3158,14 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 		{`failed: {'temp:a:b': ` + secret + `}`, `failed: {'temp:a:b':[REDACTED]}`},
 		{`failed: {'user:temp:a=b': ` + secret + `}`, `failed: {'user:temp:a=b':[REDACTED]}`},
 		{`failed: {'temp:cache=foo': ` + secret + `}`, `failed: {'temp:cache=foo':[REDACTED]}`},
+		{`failed: {'temp:a,b': ` + secret + `}`, `failed: {'temp:a,b':[REDACTED]}`},
+		{`failed: {"temp:a,b": ` + secret + `}`, `failed: {"temp:a,b":"[REDACTED]"}`},
+		{`failed: {'user:temp:a,b': ` + secret + `}`, `failed: {'user:temp:a,b':[REDACTED]}`},
+		// A comma-bearing key between other entries: the entries around it
+		// keep their keys and values.
+		{`failed: {'label': 'keep', 'temp:a,b': '` + secret + `'}`, `failed: {'label': 'keep', 'temp:a,b':'[REDACTED]'}`},
+		{`failed: {'temp:a,b': '` + secret + `', 'label': 'keep'}`, `failed: {'temp:a,b':'[REDACTED]', 'label': 'keep'}`},
+		{`failed: {"label": "keep", "temp:a,b": "` + secret + `", "x,y": "z"}`, `failed: {"label": "keep", "temp:a,b":"[REDACTED]", "x,y": "z"}`},
 		{`failed: {"temp:a=b": ` + secret + `}`, `failed: {"temp:a=b":"[REDACTED]"}`},
 		{`failed: {"temp:a:b": ` + secret + `}`, `failed: {"temp:a:b":"[REDACTED]"}`},
 		{`failed: {"user:temp:a=b": ` + secret + `}`, `failed: {"user:temp:a=b":"[REDACTED]"}`},
@@ -3132,20 +3188,18 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 		checkAllRedactionPaths(t, tt.in, tt.want)
 	}
 
-	// A key that holds a quote, "\", ",", "}" or a line break is one that
+	// A key that holds a quote, "\", "{", "}" or a line break is one that
 	// isSensitiveKey accepts and quotedKeyAllowed does not: single-line
 	// quoted-key scanning reads those bytes as the structure of the text
-	// around a key, so that the closing quote of one string and the opening
-	// quote of the next, as in {'a': 'b', 'c': 'd'}, are not read as the
-	// quotes of one key. The value of such a key is redacted where it is
-	// read by its key, in maps, structs and valid JSON, but not in text.
-	for _, key := range []string{"temp:a,b", "temp:a}b", "temp:it's", `temp:a"b`, `temp:a\b`, "temp:a\nb", "temp:a\rb", "user: temp:a,b"} {
+	// around a key. The value of such a key is redacted where it is read by
+	// its key, in maps, structs and valid JSON, but not in text.
+	for _, key := range []string{"temp:a}b", "temp:a{b", "temp:a{b c", "temp:a{b,c", "temp:it's", `temp:a"b`, `temp:a\b`, "temp:a\nb", "temp:a\rb"} {
 		if !isSensitiveKey(key) || quotedKeyAllowed(key) {
 			t.Errorf("isSensitiveKey(%q), quotedKeyAllowed(%q) = %v, %v, want true, false", key, key, isSensitiveKey(key), quotedKeyAllowed(key))
 		}
 		checkRedactedMap(t, key, secret)
 	}
-	for _, key := range []string{"temp:a,b", "temp:a}b", "user: temp:a,b"} {
+	for _, key := range []string{"temp:a}b", "temp:a,b", "user: temp:a,b"} {
 		in := `{"` + key + `": "` + secret + `"}`
 		want := `{"` + key + `":"[REDACTED]"}`
 		if got, _ := sanitizeRawText(in); got != want {
@@ -3155,7 +3209,7 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 			t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, want)
 		}
 	}
-	for _, in := range []string{`failed: {'temp:a,b': '` + secret + `'}`, `failed: {"temp:a}b": "` + secret + `"}`} {
+	for _, in := range []string{`failed: {'temp:a}b': '` + secret + `'}`, `failed: {"temp:a}b": "` + secret + `"}`} {
 		checkAllRedactionPaths(t, in, in)
 	}
 
@@ -3207,7 +3261,7 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 			t.Errorf("isSensitiveKey(%q), quotedKeyAllowed(%q) = %v, %v, want false, false", safe, safe, isSensitiveKey(safe), quotedKeyAllowed(safe))
 		}
 	}
-	for _, safe := range []string{"next_page_token", "user: next_page_token", "label", "temp", "user:temp"} {
+	for _, safe := range []string{"next_page_token", "user: next_page_token", "label", "temp", "user:temp", "a,b", "label, x"} {
 		for _, in := range []string{`failed: {"` + safe + `": "kept-value"}`, `failed: {'` + safe + `': 'kept-value'}`} {
 			checkAllRedactionPaths(t, in, in)
 		}
@@ -3216,9 +3270,11 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 
 // TestScrubTextPatterns_ShellJoinedQuoteAfterLaterLabel checks that the
 // closing quote of a quoted part that ends in a later key and its delimiter
-// does not open that key's value when a quote follows it at once: a shell
-// joins the two quoted parts into one word, so the credential they hold is
-// redacted with the value rather than left after it.
+// does not open that key's value when a quote or a bare part follows it at
+// once: a shell joins the parts into one word, so the credential they hold
+// is redacted with the value rather than left after it. Only a later key
+// that is itself sensitive, or one set apart from what follows by
+// whitespace, still opens a pair of its own there.
 func TestScrubTextPatterns_ShellJoinedQuoteAfterLaterLabel(t *testing.T) {
 	const secret = "R13_SYNTHETIC_52816"
 	for _, tt := range []struct{ in, want string }{
@@ -3227,6 +3283,13 @@ func TestScrubTextPatterns_ShellJoinedQuoteAfterLaterLabel(t *testing.T) {
 		{`export DB_PASSWORD=a:"s note label="'` + secret + `'; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{`export DB_PASSWORD=a:'s note label='""` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{`export DB_PASSWORD=" note label="'` + secret + `'; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		// A bare part joined at once to the closing quote belongs to the
+		// same word as well.
+		{`export DB_PASSWORD=a:'s note label='` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre"correct horse label="` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=a:'s note label='` + secret + ` rest`, `export DB_PASSWORD=[REDACTED] rest`},
+		// A sensitive later key still opens its own pair.
+		{`token=abc:'s note password='` + secret + ` VALUE' rest`, `token=[REDACTED] note password='[REDACTED]' rest`},
 		// A later key whose value no quote joins keeps its value, and the
 		// quoted value of a key that starts with a quote of its own is read
 		// as before.
@@ -3251,10 +3314,11 @@ func TestScrubTextPatterns_ShellJoinedQuoteAfterLaterLabel(t *testing.T) {
 // argument that is joined whole up to its closing quote, whatever pairs it
 // holds, so that no closing quote is left in the text without the opening
 // quote that the redacted value took, a closing quote that opens a quoted
-// pair is left to it, the placeholder that a quoted part ends before a pair
-// or a quoted key is kept when the text is scrubbed again, and apostrophes
-// and quotes that close an outer string are read as before, including the
-// second single quote of pre'a b'c, which stands between two letters.
+// pair is left to it, the placeholder that a quoted part ends before a
+// sensitive pair or quoted key is kept when the text is scrubbed again, a
+// pair or a quoted key that is not sensitive is redacted with the value, and
+// a single quote opens a quoted part unless it starts a contraction, so that
+// apostrophes and quotes that close an outer string are read as before.
 func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 	const secret = "R13_SYNTHETIC_52816"
 	for _, tt := range []struct{ in, want string }{
@@ -3289,14 +3353,18 @@ func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 		{"export DB_PASSWORD=pre\" correct\nhorse " + secret + "\" ok", `export DB_PASSWORD=[REDACTED] ok`},
 		{"export DB_PASSWORD=pre\" correct\nhorse\"\"" + secret + "\"; echo ok", `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{"got password=abc\" \nwant \"x\"", "got password=[REDACTED] \nwant \"x\""},
-		// The placeholder that a quoted part ends before a pair or a quoted
-		// key stands for the whole value, so scrubbing the text again
-		// leaves it as it is.
-		{`export DB_PASSWORD=pre"correct horse"label=x; echo ok`, `export DB_PASSWORD=[REDACTED]label=x; echo ok`},
+		// The placeholder that a quoted part ends before a sensitive pair or
+		// quoted key stands for the whole value, so scrubbing the text again
+		// leaves it as it is. A pair or a quoted key that is not sensitive
+		// is a part of the word that a shell joins to the value, and is
+		// redacted with it.
+		{`export DB_PASSWORD=pre"correct horse"label=x; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre"correct horse"label=` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{`export DB_PASSWORD=pre"correct horse"token: ` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]token:[REDACTED]; echo ok`},
 		{`export DB_PASSWORD=pre"correct horse""token": "` + secret + `"; echo ok`, `export DB_PASSWORD=[REDACTED]"token":"[REDACTED]"; echo ok`},
 		{`export DB_PASSWORD=pre"correct horse"'token'='` + secret + `'; echo ok`, `export DB_PASSWORD=[REDACTED]'token'='[REDACTED]'; echo ok`},
-		{`export DB_PASSWORD=pre"correct horse""label": "x"; echo ok`, `export DB_PASSWORD=[REDACTED]"label": "x"; echo ok`},
+		{`export DB_PASSWORD=pre"correct horse""label": "x"; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre"correct horse""label": "` + secret + `"; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
 		// A quote after an opening bracket opens an argument, which is
 		// joined whole, up to and including its closing quote, whatever
 		// pairs it holds: the redacted value never takes the opening quote
@@ -3321,6 +3389,7 @@ func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 		{`got password=abc", want "x"`, `got password=[REDACTED], want "x"`},
 		{`got "password=abc" want "x"`, `got "password=[REDACTED] want "x"`},
 		{`password=abc' OR '1'='1`, `password=[REDACTED] OR '1'='1`},
+		{`SELECT * FROM users WHERE password=abc' AND '1'='1`, `SELECT * FROM users WHERE password=[REDACTED] AND '1'='1`},
 		{`the password=users' wasn't changed`, `the password=[REDACTED] wasn't changed`},
 		{`password=it's Bob's`, `password=[REDACTED] Bob's`},
 		{`password=abc's foo bar's`, `password=[REDACTED] foo bar's`},
@@ -3328,14 +3397,44 @@ func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 		{`the user's password=abc's value`, `the user's password=[REDACTED] value`},
 		{`token=abc"def" next`, `token=[REDACTED] next`},
 		{`export DB_PASSWORD=pre"a b"; echo ok done`, `export DB_PASSWORD=[REDACTED]; echo ok done`},
-		// The cost of reading a single quote between two letters as an
-		// apostrophe: the second single quote of pre'a b'c stands where the
-		// one of it's does, so the value ends at the space, and the b'c that
-		// a shell would join to it is kept.
-		{`password=pre'a b'c R13_after`, `password=[REDACTED] b'c R13_after`},
-		{`password=pre'correct horse'staple`, `password=[REDACTED] horse'staple`},
+		// A single quote inside the bare value that starts no contraction
+		// opens a quoted part, which its closing quote closes wherever that
+		// stands, also between two letters, and the text joined to it runs
+		// on with the value, as a shell joins them; a part that is not
+		// closed runs on to the end of the text. A single quote that ends
+		// the bare value joins the text after its closing quote unless that
+		// quote starts a contraction or follows whitespace.
+		{`password=pre'a b'c R14_after`, `password=[REDACTED] R14_after`},
+		{`password=pre'correct horse'staple`, `password=[REDACTED]`},
+		{`export DB_PASSWORD=pre'correct horse ` + secret + `'suffix; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre'correct horse ` + secret + `'"x"suffix; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre'correct horse ` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + `'suffix; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix; echo 'done'`, `export DB_PASSWORD=[REDACTED]; echo 'done'`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix && echo 'done'`, `export DB_PASSWORD=[REDACTED] && echo 'done'`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix || echo 'fail'`, `export DB_PASSWORD=[REDACTED] || echo 'fail'`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix | tr 'a' 'b'`, `export DB_PASSWORD=[REDACTED] | tr 'a' 'b'`},
+		{`export DB_PASSWORD=pre' correct horse ` + secret + ` 'suffix --label 'ok'`, `export DB_PASSWORD=[REDACTED] --label 'ok'`},
+		{`cmd --password=pre' ` + secret + ` 'suffix --label 'ok'`, `cmd --password=[REDACTED] --label 'ok'`},
+		{`export DB_PASSWORD=pre' part1 'mid'` + secret + `'end`, `export DB_PASSWORD=[REDACTED]`},
+		{`DB_PASSWORD=pre' part1 'mid' ` + secret + ` 'end`, `DB_PASSWORD=[REDACTED]`},
+		{`DB_PASSWORD=pre'   '` + secret, `DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=pre"x y": "` + secret + `"; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`password=a : "x y": "` + secret + `"`, `password=[REDACTED]`},
+		{`password=a = "x y": "` + secret + `"`, `password=[REDACTED]`},
+		{`failed: "Bearer "'x y': '` + secret + `'"`, `failed: "Bearer [REDACTED]`},
+		{`password=" in config, api_key=" "x y": "` + secret + `"`, `password="[REDACTED]"`},
+		{`failed: "password=a:'s note 'temp:` + secret + `': "; retry`, `failed: "password=[REDACTED]`},
+		{`failed: "password=a:'s note Bearer "; retry`, `failed: "password=[REDACTED]`},
+		{`failed: "password=a:'s note token="; retry`, `failed: "password=[REDACTED]`},
+		{`failed: "password=a:'s note 'temp:k': '` + secret + `'"; retry`, `failed: "password=[REDACTED] note 'temp:k':'[REDACTED]'"; retry`},
+		{`password=doesn't work`, `password=[REDACTED] work`},
+		{`the password=users' don't know`, `the password=[REDACTED] don't know`},
+		{`password=chris' laptop's rest`, `password=[REDACTED] laptop's rest`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
+		checkAllRedactionPaths(t, tt.want, tt.want)
 	}
 }
 
@@ -3415,37 +3514,88 @@ func TestSensitivePairSpans_RedactedValueBeforePair(t *testing.T) {
 }
 
 // TestScrubTextPatterns_RedactedPlaceholderBeforePair checks that a value
-// that starts with the redaction placeholder ends with it when a pair or a
-// quoted key follows it at once, whatever the key of that pair is, so that
-// scrubbing again what a scrub wrote, as password=[REDACTED]label=keep for
-// password=pre"a SECRET"label=keep, leaves it as it is, and that a value whose
-// placeholder no pair or quoted key follows is redacted whole. It also pins
-// the cost of that rule that redactedPrefixEnd documents: of a credential
-// that only starts with the placeholder, as password=[REDACTED]x=SECRET does,
-// the pair after the placeholder keeps its value.
+// that starts with the redaction placeholder ends with it when a pair whose
+// value the text patterns redact on its own follows it at once, as a
+// sensitive pair or quoted key does, so that scrubbing again what a scrub
+// wrote, as password=[REDACTED]token=[REDACTED] for password=x"a b"token=y,
+// leaves it as it is. Text can hold the placeholder without any scrub having
+// written it, so it is no proof that a value ended there: a pair or a quoted
+// key that is not sensitive, or whose key only ends in a credential name, is
+// the rest of a credential that a shell reads as one word with the
+// placeholder, quoted or not, and it is redacted with it, as are the words of
+// a value whose placeholder no pair follows.
 func TestScrubTextPatterns_RedactedPlaceholderBeforePair(t *testing.T) {
-	const secret = "R13_SYNTHETIC_52816"
+	const secret = "R14_PLACEHOLDER_SECRET"
 	for _, tt := range []struct{ in, want string }{
-		{`password=pre"a ` + secret + `"label=keep`, `password=[REDACTED]label=keep`},
 		{`password=pre"a b"token=` + secret, `password=[REDACTED]token=[REDACTED]`},
-		{"password=[REDACTED]label=keep", "password=[REDACTED]label=keep"},
 		{"password=[REDACTED]token=[REDACTED]", "password=[REDACTED]token=[REDACTED]"},
 		{"DB_PASSWORD=[REDACTED]token=[REDACTED]", "DB_PASSWORD=[REDACTED]token=[REDACTED]"},
 		{`password=[REDACTED]"token":"[REDACTED]"`, `password=[REDACTED]"token":"[REDACTED]"`},
 		{`password=[REDACTED]'token'='[REDACTED]'`, `password=[REDACTED]'token'='[REDACTED]'`},
 		{"password=[REDACTED]x_token=" + secret, "password=[REDACTED]x_token=[REDACTED]"},
+		{"password=[REDACTED]GITHUB_TOKEN=" + secret, "password=[REDACTED]GITHUB_TOKEN=[REDACTED]"},
 		// No pair or quoted key follows the placeholder.
 		{"password=[REDACTED]x", "password=[REDACTED]"},
 		{"password=[REDACTED]-token=" + secret, "password=[REDACTED]"},
 		{"password=[REDACTED]'" + secret + "'", "password=[REDACTED]"},
 		{"password=[REDACTED]x b=" + secret, "password=[REDACTED] b=" + secret},
-		// The cost: the pair after the placeholder is read on its own,
-		// and its key is not sensitive.
-		{"password=[REDACTED]x=" + secret, "password=[REDACTED]x=" + secret},
-		{"password=[REDACTED]label=" + secret, "password=[REDACTED]label=" + secret},
-		{`password=[REDACTED]"x": "` + secret + `"`, `password=[REDACTED]"x": "` + secret + `"`},
+		// A pair or a quoted key that is not sensitive, or a key that only
+		// ends in a credential name, which the text patterns do not read,
+		// is redacted with the value.
+		{`password=pre"a ` + secret + `"label=keep`, `password=[REDACTED]`},
+		{"password=[REDACTED]label=keep", "password=[REDACTED]"},
+		{"password=[REDACTED]x=" + secret, "password=[REDACTED]"},
+		{"password=[REDACTED]label=" + secret, "password=[REDACTED]"},
+		{`password=[REDACTED]"x": "` + secret + `"`, `password=[REDACTED]`},
+		{`password=[REDACTED]"x y": "` + secret + `"`, `password=[REDACTED]`},
+		{`password=[REDACTED]"x":"` + secret + `"; echo ok`, `password=[REDACTED]; echo ok`},
+		{`password=[REDACTED]Q13password=("` + secret + `")`, `password=[REDACTED]`},
+		{"password=[REDACTED]foo.signature=" + secret, "password=[REDACTED]"},
+		{"export DB_PASSWORD=[REDACTED]label=" + secret + "; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"export DB_PASSWORD=[REDACTED]x=" + secret + "; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{`export DB_PASSWORD=[REDACTED]"label": "` + secret + `"; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=[REDACTED]"label name": "` + secret + `"; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`password=[REDACTED]'temp:a{b c': '` + secret + `'`, `password=[REDACTED]`},
+		{`password=[REDACTED]'temp:a{b,c': '` + secret + `'`, `password=[REDACTED]`},
+		{`export DB_PASSWORD="x"'temp:a{b,c':'` + secret + `'`, `export DB_PASSWORD=[REDACTED]`},
+		{`export DB_PASSWORD=[REDACTED]'temp:` + secret + `':; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD="x"'temp:` + secret + `'=; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=[REDACTED]'temp:` + secret + `':}); echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD=[REDACTED]'temp:` + secret + `'==1; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`failed: "password=[REDACTED]'temp:` + secret + `': "; retry`, `failed: "password=[REDACTED] "; retry`},
+		{`failed: "export DB_PASSWORD='x''temp:` + secret + `': "; retry`, `failed: "export DB_PASSWORD=[REDACTED] "; retry`},
+		{`failed: "export DB_PASSWORD=\"x\"'temp:` + secret + `': "; retry`, `failed: "export DB_PASSWORD=[REDACTED] "; retry`},
+		{`failed: "Bearer [REDACTED]'temp:` + secret + `': "; retry`, `failed: "Bearer [REDACTED] "; retry`},
+		{`failed: 'password=[REDACTED]"temp:` + secret + `": '; retry`, `failed: 'password=[REDACTED] '; retry`},
+		{`failed: "password=[REDACTED]'temp:` + secret + `'="; retry`, `failed: "password=[REDACTED]; retry`},
+		{`failed: "password=[REDACTED]'temp:k': '` + secret + `'"; retry`, `failed: "password=[REDACTED]'temp:k':'[REDACTED]'"; retry`},
+		{`password=[REDACTED]' part1 'mid'` + secret + `'end`, `password=[REDACTED]`},
+		{`Bearer [REDACTED]' part1 'mid'` + secret + `'end`, `Bearer [REDACTED]`},
+		{`Bearer [REDACTED]' correct horse 'suffix && echo 'done'`, `Bearer [REDACTED] && echo 'done'`},
+		{`password=[REDACTED]' correct horse 'suffix --label 'ok'`, `password=[REDACTED] --label 'ok'`},
+		{`password=[REDACTED]("x y"): "` + secret + `"`, `password=[REDACTED]`},
+		{`password=[REDACTED]["x y"]: "` + secret + `"`, `password=[REDACTED]`},
+		{`password=[REDACTED]{"x y"}: "` + secret + `"`, `password=[REDACTED]`},
+		{`got {password=[REDACTED]"x y"}: "` + secret + `"`, `got {password=[REDACTED]`},
+		// The placeholder quoted, alone or with more of the credential.
+		{`export DB_PASSWORD="[REDACTED]x=` + secret + `"; echo ok`, `export DB_PASSWORD="[REDACTED]"; echo ok`},
+		{`export DB_PASSWORD="[REDACTED]"x=` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD="[REDACTED]""x": "` + secret + `"; echo ok`, `export DB_PASSWORD="[REDACTED]"; echo ok`},
+		{`export DB_PASSWORD="[REDACTED]""x y": "` + secret + `"; echo ok`, `export DB_PASSWORD="[REDACTED]"; echo ok`},
+		{`export DB_PASSWORD='[REDACTED]'label=` + secret + `; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD="[REDACTED]"token=` + secret + `; echo ok`, `export DB_PASSWORD="[REDACTED]"token=[REDACTED]; echo ok`},
+		{`export DB_PASSWORD="[REDACTED]"; echo ok`, `export DB_PASSWORD="[REDACTED]"; echo ok`},
+		// A Bearer token that starts with the placeholder.
+		{"Bearer [REDACTED]x=" + secret, "Bearer [REDACTED]"},
+		{`Bearer [REDACTED]"x"="` + secret + `"`, `Bearer [REDACTED]`},
+		{`Bearer [REDACTED]"x": "` + secret + `"`, `Bearer [REDACTED]`},
+		{`Bearer [REDACTED]"x y": "` + secret + `"`, `Bearer [REDACTED]`},
+		{`Bearer [REDACTED]'x'='` + secret + `'`, `Bearer [REDACTED]`},
+		{`Bearer [REDACTED]"api_key"="` + secret + `"`, `Bearer [REDACTED]"api_key"="[REDACTED]"`},
+		{"Bearer [REDACTED]token=" + secret, "Bearer [REDACTED]token=[REDACTED]"},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
+		checkAllRedactionPaths(t, tt.want, tt.want)
 	}
 }
 
