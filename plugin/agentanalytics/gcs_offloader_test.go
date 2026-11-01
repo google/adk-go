@@ -6085,14 +6085,15 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 
 		// With plugin-length hex identifiers (32, 16, and 32 bytes), the longest
 		// int ordinals, and a 17-byte extension from extensionForMIME, a 750-byte
-		// prefix stays at 905 bytes without hitting the whole-name cap. A direct
-		// call with 128-byte identifiers hits the 1024-byte cap while preserving
-		// a safe extension.
+		// prefix stays at most 905 bytes (905 on 64-bit int targets, 887 on 32-bit)
+		// without hitting the whole-name cap. A direct call with 128-byte
+		// identifiers hits the 1024-byte cap while preserving a safe extension.
 		safeExt := ".abcdefghijklmnop"
 		maxPrefix := strings.Repeat("p", 750)
+		wantPluginMax := 865 + 2*len(strconv.Itoa(math.MinInt))
 		gotPluginMax := gcsObjectPath(maxPrefix, ts, strings.Repeat("a", 32), strings.Repeat("b", 16), strings.Repeat("c", 32), math.MinInt, math.MinInt, safeExt)
-		if len(gotPluginMax) != 905 || !strings.HasPrefix(gotPluginMax, maxPrefix+"/") || !strings.HasSuffix(gotPluginMax, safeExt) {
-			t.Errorf("gcsObjectPath with 750-byte prefix and plugin hex IDs = %q (%d bytes), want 905 bytes starting with prefix and ending in %q", gotPluginMax, len(gotPluginMax), safeExt)
+		if len(gotPluginMax) != wantPluginMax || len(gotPluginMax) > 905 || !strings.HasPrefix(gotPluginMax, maxPrefix+"/") || !strings.HasSuffix(gotPluginMax, safeExt) {
+			t.Errorf("gcsObjectPath with 750-byte prefix and plugin hex IDs = %q (%d bytes), want %d bytes (<= 905) starting with prefix and ending in %q", gotPluginMax, len(gotPluginMax), wantPluginMax, safeExt)
 		}
 		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantObjectLimit || !strings.HasSuffix(got, safeExt) {
 			t.Errorf("gcsObjectPath with the longest direct-call parts and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), wantObjectLimit, safeExt)
