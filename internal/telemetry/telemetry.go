@@ -166,6 +166,10 @@ func (r generateContentResult) usage() *genai.GenerateContentResponseUsageMetada
 
 // traceGenerateContentResult records the result of the generate_content operation, including token usage and finish reason.
 func traceGenerateContentResult(span trace.Span, params generateContentResult) {
+	// A span that is not recording drops all of it.
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, params.Error)
 	span.SetAttributes(generateContentResultAttributes(params)...)
 	if captureContentOnSpans() {
@@ -246,6 +250,11 @@ type TraceToolResultParams struct {
 
 // TraceToolResult records the tool execution events.
 func TraceToolResult(span trace.Span, params TraceToolResultParams) {
+	// A span that is not recording drops all of it, the serialized response
+	// included.
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, params.Error)
 
 	attributes := []attribute.KeyValue{
@@ -348,6 +357,11 @@ func StartTrace(ctx context.Context, traceName string) (context.Context, trace.S
 
 // TraceMergedToolCallsResult records the result of the merged tool calls, including status and tool execution events.
 func TraceMergedToolCallsResult(span trace.Span, fnResponseEvent *session.Event, err error) {
+	// A span that is not recording drops all of it, the serialized event
+	// included.
+	if !span.IsRecording() {
+		return
+	}
 	RecordError(span, err)
 	attributes := []attribute.KeyValue{
 		semconv.GenAIOperationNameKey.String(executeToolName),
