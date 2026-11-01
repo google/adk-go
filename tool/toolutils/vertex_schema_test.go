@@ -221,6 +221,36 @@ func TestSanitizeSchemaForVertex_KeepsAnnotationsBesideValidation(t *testing.T) 
 	}
 }
 
+func TestSanitizeSchemaForVertex_WalksDraft07DependencySchemas(t *testing.T) {
+	out := SanitizeSchemaForVertex(map[string]any{
+		"type": "object",
+		"dependencies": map[string]any{
+			"default": map[string]any{
+				"title":       "When default is set",
+				"description": "schema, not the default keyword",
+				"anyOf":       []any{map[string]any{"type": "string"}},
+			},
+			"credit_card": []any{"billing_address"},
+		},
+	}).(map[string]any)
+	deps := out["dependencies"].(map[string]any)
+	schema := deps["default"].(map[string]any)
+	if _, ok := schema["title"]; ok {
+		t.Fatalf("dependency schema named default kept its title: %#v", schema)
+	}
+	if _, ok := schema["description"]; ok {
+		t.Fatalf("dependency schema named default kept its description: %#v", schema)
+	}
+	branches := schema["anyOf"].([]any)
+	if len(branches) != 1 || branches[0].(map[string]any)["type"] != "string" {
+		t.Fatalf("dependency schema anyOf = %#v", schema["anyOf"])
+	}
+	names := deps["credit_card"].([]any)
+	if len(names) != 1 || names[0] != "billing_address" {
+		t.Fatalf("property dependency array = %#v", deps["credit_card"])
+	}
+}
+
 func TestSanitizeSchemaForVertex_BareUnionUnchanged(t *testing.T) {
 	in := &jsonschema.Schema{}
 	if err := json.Unmarshal([]byte(`{"anyOf":[{"type":"string"},{"type":"null"}]}`), in); err != nil {

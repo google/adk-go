@@ -32,8 +32,9 @@ import (
 //
 // Nested schemas are walked. Instance values (const, enum, default,
 // examples) are not. Dictionaries of schemas — properties,
-// patternProperties, $defs, definitions, and dependentSchemas — are walked
-// entry by entry and are not themselves treated as schemas.
+// patternProperties, $defs, definitions, dependentSchemas, and the draft-07
+// dependencies keyword jsonschema-go writes for DependencySchemas — are
+// walked entry by entry and are not themselves treated as schemas.
 // See https://github.com/google/adk-go/issues/1659.
 func SanitizeSchemaForVertex(schema any) any {
 	schema, _ = sanitizeSchemaForVertex(schema)
@@ -186,7 +187,7 @@ func isInstanceValue(key string) bool {
 // treated as the anyOf keyword.
 func isSchemaDictionary(key string) bool {
 	switch key {
-	case "$defs", "definitions", "dependentSchemas", "patternProperties", "properties":
+	case "$defs", "definitions", "dependencies", "dependentSchemas", "patternProperties", "properties":
 		return true
 	default:
 		return false
