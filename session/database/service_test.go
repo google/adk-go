@@ -680,11 +680,11 @@ func TestDatabaseService_Create_LocksSharedStateRows(t *testing.T) {
 // session wrote there and return them in the new session's state.
 func TestDatabaseService_Create_KeepsExistingSharedState(t *testing.T) {
 	s := emptyService(t)
-	if _, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:a": 1, "user:a": 1}}); err != nil {
+	if _, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:a": 1, "user:u": 10}}); err != nil {
 		t.Fatalf("first Create: %v", err)
 	}
 
-	created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:b": 2, "user:b": 2}})
+	created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:b": 2, "user:v": 20}})
 	if err != nil {
 		t.Fatalf("second Create: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestDatabaseService_Create_KeepsExistingSharedState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	want := map[string]float64{"app:a": 1, "user:a": 1, "app:b": 2, "user:b": 2}
+	want := map[string]float64{"app:a": 1, "user:u": 10, "app:b": 2, "user:v": 20}
 	for name, state := range map[string]session.State{"Create": created.Session.State(), "Get": resp.Session.State()} {
 		for key, w := range want {
 			if v, err := state.Get(key); err != nil || fmt.Sprint(v) != fmt.Sprint(w) {
