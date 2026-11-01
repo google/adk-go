@@ -1301,3 +1301,53 @@ func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkBuildItems(b *testing.B) {
+	for _, n := range []int{50, 500} {
+		catalog := makeBenchFunctionTools(b, n)
+		b.Run(fmt.Sprintf("tools=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				items := buildItems(catalog)
+				if len(items) != n {
+					b.Fatalf("len(items) = %d, want %d", len(items), n)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkExecuteSearch(b *testing.B) {
+	for _, n := range []int{50, 500} {
+		base := &staticToolset{tools: makeBenchFunctionTools(b, n)}
+		b.Run(fmt.Sprintf("tools=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				ctx := newToolCtx(newFakeState(nil))
+				out, err := executeSearch(ctx, searchArgs{Query: "document comment"}, base, nil, nil, defaultMaxResults)
+				if err != nil || len(out.Matches) == 0 {
+					b.Fatalf("executeSearch() = (%v, %v), want matches", out, err)
+				}
+			}
+		})
+	}
+}
+
+func makeBenchFunctionTools(tb testing.TB, n int) []tool.Tool {
+	tb.Helper()
+	tools := make([]tool.Tool, n)
+	for i := range n {
+		ft, err := functiontool.New(
+			functiontool.Config{
+				Name:        fmt.Sprintf("tool_%03d", i),
+				Description: fmt.Sprintf("performs domain operation %d on documents", i),
+			},
+			func(_ agent.Context, _ updateNoteArgs) (struct{}, error) { return struct{}{}, nil },
+		)
+		if err != nil {
+			tb.Fatalf("functiontool.New() error = %v", err)
+		}
+		tools[i] = ft
+	}
+	return tools
+}

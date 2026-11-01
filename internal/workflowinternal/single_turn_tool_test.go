@@ -340,7 +340,33 @@ func TestSingleTurnTool_Run_SurvivesContextRewrap(t *testing.T) {
 	}
 }
 
-func newSingleTurnTool(t *testing.T, a agent.Agent) *workflowinternal.SingleTurnTool {
+func BenchmarkSingleTurnToolRun(b *testing.B) {
+	a := newLLMAgent(b, agentName, agentDesc, nil)
+	st := newSingleTurnTool(b, a)
+
+	var ss agent.DynamicSubScheduler = benchSubScheduler{}
+	baseCtx := agent.NewContext(&fakeInvocationContext{Context: b.Context()}).WithDelta(&agent.CommonContextDelta{
+		SubScheduler: &ss,
+	})
+	toolCtx := agent.NewToolContext(baseCtx, "fc-id", &session.EventActions{}, nil)
+	args := map[string]any{"request": "hello"}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		res, err := st.Run(toolCtx, args)
+		if err != nil || res["result"] != "world" {
+			b.Fatalf("st.Run() = (%v, %v), want world", res, err)
+		}
+	}
+}
+
+type benchSubScheduler struct{ agent.DynamicSubScheduler }
+
+func (benchSubScheduler) RunNode(child, input, opts any) (any, error) {
+	return "world", nil
+}
+
+func newSingleTurnTool(t testing.TB, a agent.Agent) *workflowinternal.SingleTurnTool {
 	t.Helper()
 	tt, err := workflowinternal.NewSingleTurnTool(a)
 	if err != nil {
@@ -353,7 +379,7 @@ func newSingleTurnTool(t *testing.T, a agent.Agent) *workflowinternal.SingleTurn
 	return st
 }
 
-func newLLMAgent(t *testing.T, name, description string, inputSchema *genai.Schema) agent.Agent {
+func newLLMAgent(t testing.TB, name, description string, inputSchema *genai.Schema) agent.Agent {
 	t.Helper()
 	a, err := llmagent.New(llmagent.Config{
 		Name:        name,

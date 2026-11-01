@@ -17,6 +17,7 @@ package llminternal_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"slices"
 	"strings"
@@ -1967,6 +1968,43 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			got := req.Contents
 			if diff := cmp.Diff(wantWithContinuation(tc.want), got); diff != "" {
 				t.Errorf("LLMRequest.Contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func BenchmarkContentsRequestProcessorTranscriptions(b *testing.B) {
+	chunkText := strings.Repeat("a", 100)
+	testAgent := utils.Must(llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: &testModel{},
+	}))
+	for _, n := range []int{50, 200} {
+		events := make([]*session.Event, n)
+		for i := range n {
+			events[i] = &session.Event{
+				Author: "user",
+				LLMResponse: model.LLMResponse{
+					InputTranscription: &genai.Transcription{Text: chunkText, Finished: true},
+				},
+			}
+		}
+		ctx := icontext.NewInvocationContext(b.Context(), icontext.InvocationContextParams{
+			Agent:   testAgent,
+			Session: &fakeSession{events: events},
+		})
+		b.Run(fmt.Sprintf("consecutive=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				req := &model.LLMRequest{}
+				for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+					if err != nil {
+						b.Fatal(err)
+					}
+				}
+				if len(req.Contents) != 1 {
+					b.Fatalf("len(req.Contents) = %d, want 1", len(req.Contents))
+				}
 			}
 		})
 	}

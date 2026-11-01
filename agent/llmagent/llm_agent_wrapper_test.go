@@ -1504,3 +1504,77 @@ func TestLlmAgent_New_DoesNotMutateASubAgentsMode(t *testing.T) {
 		t.Errorf("the undeclared sub-agent's mode after building a coordinator = %q, want unset", got)
 	}
 }
+
+func BenchmarkRunLLMAgentAsNode_ChatTaskDelegation(b *testing.B) {
+	const (
+		coordName = "coord"
+		taskName  = "doer"
+		fcID      = "fc-bench-1"
+	)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:        taskName,
+		Description: "Solves a delegated task.",
+		Model:       &recordingLLM{},
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		b.Fatalf("llmagent.New(task): %v", err)
+	}
+	coord, err := llmagent.New(llmagent.Config{
+		Name:      coordName,
+		Model:     &recordingLLM{},
+		Mode:      llmagent.ModeChat,
+		SubAgents: []agent.Agent{taskAgent},
+	})
+	if err != nil {
+		b.Fatalf("llmagent.New(coord): %v", err)
+	}
+
+	svc := session.InMemoryService()
+	createResp, err := svc.Create(b.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "u", SessionID: "s",
+	})
+	if err != nil {
+		b.Fatalf("session.Create: %v", err)
+	}
+	pendingFCEvent := session.NewEvent(b.Context(), "inv-prior")
+	pendingFCEvent.Author = coordName
+	pendingFCEvent.LLMResponse = model.LLMResponse{
+		Content: fcContent(fcID, taskName, map[string]any{"request": "do work"}),
+	}
+	if err := svc.AppendEvent(b.Context(), createResp.Session, pendingFCEvent); err != nil {
+		b.Fatalf("AppendEvent(pending FC): %v", err)
+	}
+
+	var ss agent.DynamicSubScheduler = benchTaskSubScheduler{}
+	ic := icontext.NewInvocationContext(b.Context(), icontext.InvocationContextParams{
+		Agent:        coord,
+		Session:      createResp.Session,
+		UserContent:  genai.NewContentFromText("resume", "user"),
+		InvocationID: "inv-bench",
+	})
+	ctx := agent.NewContext(ic).WithDelta(&agent.CommonContextDelta{
+		SubScheduler: &ss,
+	})
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		count := 0
+		for _, err := range llmagent.RunLLMAgentAsNode(coord, ctx, nil) {
+			if err != nil {
+				b.Fatalf("RunLLMAgentAsNode: %v", err)
+			}
+			count++
+		}
+		if count < 2 {
+			b.Fatalf("events = %d, want >= 2", count)
+		}
+	}
+}
+
+type benchTaskSubScheduler struct{ agent.DynamicSubScheduler }
+
+func (benchTaskSubScheduler) RunNode(child, input, opts any) (any, error) {
+	return "done", nil
+}
