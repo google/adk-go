@@ -15,6 +15,8 @@
 package telemetry
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -80,6 +82,11 @@ func TestConvertersRoundTrip(t *testing.T) {
 					map[string]any{"a": 1.0},
 				},
 			},
+		},
+		{
+			name: "json number beyond float64 keeps its text",
+			val:  json.Number(strings.Repeat("9", 401)),
+			want: strings.Repeat("9", 401),
 		},
 		{
 			name: "fallback for unsupported type",

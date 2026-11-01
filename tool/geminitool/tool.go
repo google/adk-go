@@ -39,7 +39,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
-// New creates  gemini API tool.
+// New creates gemini API tool.
 func New(name, description string, t *genai.Tool) tool.Tool {
 	return &geminiTool{
 		name:        name,

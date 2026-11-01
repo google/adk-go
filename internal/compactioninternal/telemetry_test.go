@@ -299,6 +299,9 @@ func TestCompactionSpanMarksAPanic(t *testing.T) {
 	if spans[0].Status.Code != codes.Error {
 		t.Errorf("span status = %v, want %v: a panicking summarizer must not look healthy", spans[0].Status.Code, codes.Error)
 	}
+	if !slices.ContainsFunc(spans[0].Attributes, func(kv attribute.KeyValue) bool { return kv.Key == "error.type" }) {
+		t.Error("the failed span has no error.type")
+	}
 }
 
 // geminiSummarizer reports a backend the way the real summarizer does.
