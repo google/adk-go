@@ -47,14 +47,16 @@ type Frontmatter struct {
 
 // frontmatterYAML keeps the public Frontmatter representation stable while
 // accepting both the specification's scalar allowed-tools value and the YAML
-// sequence accepted by earlier ADK Go releases.
+// sequence accepted by earlier ADK Go releases. allowed_tools is read as a
+// fallback spelling of allowed-tools, as adk-python's Frontmatter accepts it.
 type frontmatterYAML struct {
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	License       string            `yaml:"license,omitempty"`
-	Compatibility string            `yaml:"compatibility,omitempty"`
-	Metadata      map[string]string `yaml:"metadata,omitempty"`
-	AllowedTools  allowedToolsYAML  `yaml:"allowed-tools,omitempty"`
+	Name                   string            `yaml:"name"`
+	Description            string            `yaml:"description"`
+	License                string            `yaml:"license,omitempty"`
+	Compatibility          string            `yaml:"compatibility,omitempty"`
+	Metadata               map[string]string `yaml:"metadata,omitempty"`
+	AllowedTools           *allowedToolsYAML `yaml:"allowed-tools,omitempty"`
+	AllowedToolsUnderscore *allowedToolsYAML `yaml:"allowed_tools,omitempty"`
 }
 
 type allowedToolsYAML []string
@@ -128,14 +130,21 @@ func splitAllowedTools(value string) ([]string, error) {
 }
 
 func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
-	return &Frontmatter{
+	allowedTools := f.AllowedTools
+	if allowedTools == nil {
+		allowedTools = f.AllowedToolsUnderscore
+	}
+	fm := &Frontmatter{
 		Name:          f.Name,
 		Description:   f.Description,
 		License:       f.License,
 		Compatibility: f.Compatibility,
 		Metadata:      f.Metadata,
-		AllowedTools:  []string(f.AllowedTools),
 	}
+	if allowedTools != nil {
+		fm.AllowedTools = []string(*allowedTools)
+	}
+	return fm
 }
 
 // Parse reads and validates YAML frontmatter from a SKILL.md reader.
@@ -165,8 +174,9 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 		yamlBytes.Write(line)
 	}
 
-	// Keys outside the agentskills.io set are ignored, as adk-python does: a
-	// SKILL.md shared with other agent runtimes carries their keys too.
+	// Keys outside the agentskills.io set are not an error: a SKILL.md shared
+	// with other agent runtimes carries their keys too. Frontmatter has no
+	// field for them, so they are dropped.
 	fmYAML := frontmatterYAML{}
 	if err := yaml.Unmarshal(yamlBytes.Bytes(), &fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
