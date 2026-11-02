@@ -6243,3 +6243,76 @@ func TestSmartTruncate_CredentialFieldNamesBeatMetadataTags(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewPlainErrorRegression(t *testing.T) {
+	sensitiveErrors := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "long shell assignment over 256-byte window",
+			err:  errors.New("export DB_PASSWORD=" + strings.Repeat("a", 300) + "'s syntheticvioletfern's"),
+			want: "export DB_PASSWORD=[REDACTED]",
+		},
+		{
+			name: "multiline outer-quoted curl header with colon on continuation line",
+			err:  errors.New("curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok"),
+			want: "curl -H 'Authorization: [REDACTED]\necho ok",
+		},
+		{
+			name: "Cookie header with multiple attributes",
+			err:  errors.New("Cookie: sid=syntheticvioletfern; preference=light"),
+			want: "Cookie: [REDACTED]",
+		},
+		{
+			name: "unquoted whitespace-folded Authorization header",
+			err:  errors.New("Authorization: Bearer abc\n  syntheticvioletfern\nContent-Type: text/plain"),
+			want: "Authorization: [REDACTED]\nContent-Type: text/plain",
+		},
+	}
+
+	for _, tc := range sensitiveErrors {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _, err := SmartTruncate(tc.err, 1000)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%q) error = %v", tc.err, err)
+			}
+			if strings.Contains(string(b), "syntheticvioletfern") {
+				t.Errorf("SmartTruncate(%q) = %s, leaked secret", tc.err, b)
+			}
+			var got string
+			if err := json.Unmarshal(b, &got); err != nil || got != tc.want {
+				t.Errorf("SmartTruncate(%q) unmarshaled = (%q, %v), want %q", tc.err, got, err, tc.want)
+			}
+
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "run"}
+			if _, err := p.BeforeToolCallback()(mCtx, tl, map[string]any{"err": tc.err}); err != nil {
+				t.Fatalf("BeforeToolCallback error = %v", err)
+			}
+			if _, err := p.AfterToolCallback()(mCtx, tl, map[string]any{"err": tc.err}, map[string]any{"result_err": tc.err}, tc.err); err != nil {
+				t.Fatalf("AfterToolCallback error = %v", err)
+			}
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, "syntheticvioletfern") {
+					t.Errorf("recorded row for %q leaked secret: %s", tc.name, s)
+				}
+			}
+		})
+	}
+
+	t.Run("ordinary non-sensitive error preserved", func(t *testing.T) {
+		plainErr := errors.New("permission denied: dataset not found")
+		b, _, err := SmartTruncate(plainErr, 1000)
+		if err != nil {
+			t.Fatalf("SmartTruncate(%q) error = %v", plainErr, err)
+		}
+		var got string
+		if err := json.Unmarshal(b, &got); err != nil || got != plainErr.Error() {
+			t.Errorf("SmartTruncate(%q) = (%q, %v), want %q", plainErr, got, err, plainErr.Error())
+		}
+	})
+}

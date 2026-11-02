@@ -4378,7 +4378,8 @@ func TestRound16ReviewRegressions(t *testing.T) {
 		{"curl -H \"x-api-key: abc\nSYNTHETIC_CURL_901\"\necho KEEP_LINE_2", "curl -H \"x-api-key: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
 		{"curl -H 'x-api-key: abc\nSYNTHETIC_OUTER_UNCL_901\nHost: example.com", "curl -H 'x-api-key: [REDACTED]\nHost: example.com", true, []string{"SYNTHETIC_OUTER_UNCL_901"}},
 		{"{\"h\": \\\"Authorization: Bearer abc\nSYNTHETIC_INNER_ESC_901\\\"}", "{\"h\": \\\"Authorization: [REDACTED]", false, []string{"SYNTHETIC_INNER_ESC_901"}},
-		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com\"", "req=\"Authorization: [REDACTED]\nHost: example.com\"", true, []string{"SYNTHETIC_REQ_901"}},
+		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com\"", "req=\"Authorization: [REDACTED]", true, []string{"SYNTHETIC_REQ_901"}},
+		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com", "req=\"Authorization: [REDACTED]\nHost: example.com", true, []string{"SYNTHETIC_REQ_901"}},
 		{"Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3", true, []string{"zqsecretb"}},
 		{"Error: couldn't call API (Authorization: Bearer zqsecretbb)\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", "Error: couldn't call API (Authorization: [REDACTED]\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", true, []string{"zqsecretbb"}},
 		{"WARN don't retry; Authorization: Bearer zqsecretbc\n2024-01-01 INFO next ZQKEEP_E", "WARN don't retry; Authorization: [REDACTED]\n2024-01-01 INFO next ZQKEEP_E", true, []string{"zqsecretbc"}},
@@ -4430,6 +4431,155 @@ func TestRound16ReviewRegressions(t *testing.T) {
 		}
 		for _, secret := range tt.secrets {
 			checkNoLeak(t, tt.in, secret)
+		}
+	}
+}
+
+func TestRound17ReviewRegressions(t *testing.T) {
+	for _, n := range []int{255, 256, 257, 300} {
+		for _, tc := range []struct {
+			in, want, secret string
+		}{
+			{
+				"export DB_PASSWORD=" + strings.Repeat("a", n) + "'s syntheticvioletfern's",
+				"export DB_PASSWORD=[REDACTED]",
+				"syntheticvioletfern",
+			},
+			{
+				"export DB_PASSWORD=" + strings.Repeat("a", n) + "'s syntheticvioletfern",
+				"export DB_PASSWORD=[REDACTED]",
+				"syntheticvioletfern",
+			},
+			{
+				"export DB_PASSWORD=" + strings.Repeat("x", n) + "users' violetfern's changed",
+				"export DB_PASSWORD=[REDACTED] changed",
+				"violetfern",
+			},
+			{
+				"export db_password=" + strings.Repeat("a", n) + "'s syntheticvioletfern's",
+				"export db_password=[REDACTED]",
+				"syntheticvioletfern",
+			},
+		} {
+			checkAllRedactionPaths(t, tc.in, tc.want)
+			checkAllRedactionPaths(t, tc.want, tc.want)
+			checkNoLeak(t, tc.in, tc.secret)
+		}
+	}
+
+	for _, tt := range []struct {
+		in      string
+		want    string
+		allPath bool
+		secrets []string
+	}{
+		// Lowercase shell assignments without export and backslash-newline continuations.
+		{"db_password=pre's syntheticvioletfern's", "db_password=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		{"api_key=pre's syntheticvioletfern's", "api_key=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		{"password=pre's syntheticvioletfern's", "password=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		{"export\\\nDB_PASSWORD=pre's syntheticvioletfern's", "export\\\nDB_PASSWORD=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		{"export \\\ndb_password=pre's syntheticvioletfern's", "export \\\ndb_password=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		{"export \\\r\ndb_password=pre's syntheticvioletfern's", "export \\\r\ndb_password=[REDACTED]", true, []string{"syntheticvioletfern"}},
+		// Long ordinary prose controls (>300 bytes before prose contractions/possessives).
+		{strings.Repeat("word ", 70) + "the password=users' wasn't changed", strings.Repeat("word ", 70) + "the password=[REDACTED] wasn't changed", true, nil},
+		{strings.Repeat("a", 300) + " password=it's Bob's", strings.Repeat("a", 300) + " password=[REDACTED] Bob's", true, nil},
+		// Multiline headers: colon-led continuation inside closed outer quote, empty first line, prior-line outer quote.
+		{"curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "curl -H '\nAuthorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H \"\nAuthorization: abc\npart2: syntheticvioletfern\"\necho ok", "curl -H \"\nAuthorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
+		{"{\"h\": \\\"\nAuthorization: abc\nsyntheticvioletfern\\\"}\necho ok", "{\"h\": \\\"\nAuthorization: [REDACTED]\necho ok", false, []string{"syntheticvioletfern"}},
+		// Unquoted RFC 9112 whitespace-folded header continuations.
+		{"Authorization: Bearer abc\n  SYNTHETIC_FOLD_1601\nContent-Type: text/plain", "Authorization: [REDACTED]\nContent-Type: text/plain", true, []string{"SYNTHETIC_FOLD_1601"}},
+		{"Proxy-Authorization: Basic abc\r\n\tSYNTHETIC_FOLD_1602\r\nAccept: */*", "Proxy-Authorization: [REDACTED]\r\nAccept: */*", true, []string{"SYNTHETIC_FOLD_1602"}},
+		{"X-Api-Key: part1\n  SYNTHETIC_FOLD_1603", "X-Api-Key: [REDACTED]", true, []string{"SYNTHETIC_FOLD_1603"}},
+		{"Api-Key: part1\n\tSYNTHETIC_FOLD_1607\nX-Request-Id: 1", "Api-Key: [REDACTED]\nX-Request-Id: 1", true, []string{"SYNTHETIC_FOLD_1607"}},
+		{"X-Goog-Api-Key: part1\n  SYNTHETIC_FOLD_1609\nAccept: application/json", "X-Goog-Api-Key: [REDACTED]\nAccept: application/json", true, []string{"SYNTHETIC_FOLD_1609"}},
+		// Cookie & Set-Cookie headers and JSON fields.
+		{"Cookie: sid=syntheticvioletfern; preference=light", "Cookie: [REDACTED]", true, []string{"syntheticvioletfern", "preference=light"}},
+		{"Cookie: session=SYNTHETIC_COOKIE_1604", "Cookie: [REDACTED]", true, []string{"SYNTHETIC_COOKIE_1604"}},
+		{"Set-Cookie: session=SYNTHETIC_COOKIE_1608; Path=/; HttpOnly", "Set-Cookie: [REDACTED]", true, []string{"SYNTHETIC_COOKIE_1608"}},
+		{"Cookie: sid=part1;\n  part2=SYNTHETIC_COOKIE_FOLD\nAccept: */*", "Cookie: [REDACTED]\nAccept: */*", true, []string{"SYNTHETIC_COOKIE_FOLD"}},
+		{`{"headers":{"Cookie":"SYNTHETIC_COOKIE_1605","Set-Cookie":"SYNTHETIC_COOKIE_1608","Accept":"text/plain"}}`, `{"headers":{"Accept":"text/plain","Cookie":"[REDACTED]","Set-Cookie":"[REDACTED]"}}`, false, []string{"SYNTHETIC_COOKIE_1605", "SYNTHETIC_COOKIE_1608"}},
+		// Unclosed outer quote across subsequent header line before a later paired string.
+		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nContent-Type: application/json\n\n{\"status\": \"ok\"}\nKEEP_AFTER", "req=\"Authorization: [REDACTED]\nContent-Type: application/json\n\n{\"status\": \"ok\"}\nKEEP_AFTER", true, []string{"SYNTHETIC_REQ_901"}},
+		{"req='Authorization: Bearer SYNTHETIC_REQ_901\nContent-Type: application/json\n\nX-Note: 'hello'\nKEEP_AFTER", "req='Authorization: [REDACTED]\nContent-Type: application/json\n\nX-Note: 'hello'\nKEEP_AFTER", true, []string{"SYNTHETIC_REQ_901"}},
+		// Prior-line closed multiline strings and mid-lookback-window closing quotes before an unquoted header.
+		{"msg=\"hello\nworld!\"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"hello\nworld!\"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET"}},
+		{"msg=\"hello\nworld \"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"hello\nworld \"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET"}},
+		{"msg='hello\nworld2'\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus='ok'\nKEEP_AFTER", "msg='hello\nworld2'\nAuthorization: [REDACTED]\nHost: example.com\nstatus='ok'\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET"}},
+		{"msg=\"hello\n\"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"hello\n\"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET"}},
+		{"msg=\"" + strings.Repeat("line_of_prose_text_1234567890\n", 160) + "last_word\"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"" + strings.Repeat("line_of_prose_text_1234567890\n", 160) + "last_word\"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", false, []string{"SYNTHETIC_SECRET"}},
+		// Escaped quotes inside paired double-quoted arguments on the closing line of a multiline header.
+		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_1\" -H \"X-Quote: a\\\"b\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_1"}},
+		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_2\" -d \"{\\\"msg\\\": \\\"a\\\\\\\"b\\\"}\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_2"}},
+		// Unmatched quote on an earlier line before a multiline outer-quoted header.
+		{"Error: unexpected \" in input\ncurl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_1\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_1"}},
+		{"Error: unexpected ' in input\ncurl -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_2'\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H 'Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_2"}},
+		{"Error: unexpected \" in input\ncurl -H \"\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_3\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"\nAuthorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_3"}},
+		{"Error: unexpected \" in input\n{\\\"h\\\": \\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_4\\\"}\necho KEEP_OK", "Error: unexpected \" in input\n{\\\"h\\\": \\\"Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_4"}},
+		{"Error: unexpected \" in input\n\\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_5\\\"\necho KEEP_OK", "Error: unexpected \" in input\n\\\"Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_5"}},
+		{"Error: unexpected ' in input\n{\\'h\\': \\'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_6\\'}\necho KEEP_OK", "Error: unexpected ' in input\n{\\'h\\': \\'Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_6"}},
+		{"Error: unexpected ' in input\n\\'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_7\\'\necho KEEP_OK", "Error: unexpected ' in input\n\\'Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_7"}},
+		{"Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_8\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_8"}},
+		{"Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_9\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_9"}},
+		{"Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_10'\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_10"}},
+		{"Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_11\\\"}\"\necho KEEP_OK", "Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_11"}},
+		{"Error: unexpected \" in input\n{\\\"h\\\": \\\"\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_12\\\"}\necho KEEP_OK", "Error: unexpected \" in input\n{\\\"h\\\": \\\"\nAuthorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_12"}},
+		{"Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_13\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_13"}},
+		// Prior-line closed multiline string and unclosed header quote before a later single-opening-quote header line.
+		{"msg=\"hello\nworld \"\nAuthorization: Bearer SYNTHETIC_SECRET_END_1\nHost: example.com\nX-End: \"\nKEEP_AFTER", "msg=\"hello\nworld \"\nAuthorization: [REDACTED]\nHost: example.com\nX-End: \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_END_1"}},
+		{"req=\"Authorization: Bearer SYNTHETIC_SECRET_END_2\nHost: example.com\nX-End: \"\nKEEP_AFTER", "req=\"Authorization: [REDACTED]\nHost: example.com\nX-End: \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_END_2"}},
+		// Colon-led continuation lines ending with Base64 '=' / '==' padding or trailing ':' before closing quote.
+		{"curl -H \"Authorization: Basic dXNlcjpwYXNz\npart2: c2VjcmV0dG9rZW4=\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"c2VjcmV0dG9rZW4="}},
+		{"curl -H \"Authorization: Bearer part1\npart2: c2VjcmV0==\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"c2VjcmV0=="}},
+		{"curl -H \"Authorization: Basic dXNlcj\npart2: pass:\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"pass:"}},
+		// Column-0 standalone closing quote line of a prior-line multiline literal vs. standalone opener after stray prose quote.
+		{"msg=\"hello\n\"\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_1\nHost: KEEP_TOK\necho \"\nKEEP_AFTER", "msg=\"hello\n\"\nAuthorization: [REDACTED]\nHost: KEEP_TOK\necho \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_COL0_1"}},
+		{"msg='hello\n'\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_2\nHost: KEEP_TOK\necho '\nKEEP_AFTER", "msg='hello\n'\nAuthorization: [REDACTED]\nHost: KEEP_TOK\necho '\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_COL0_2"}},
+		{"Error: unexpected \" in input\n\"\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_3\n   part2\"\necho KEEP_TOK", "Error: unexpected \" in input\n\"\nAuthorization: [REDACTED]\necho KEEP_TOK", true, []string{"SYNTHETIC_SECRET_COL0_3", "part2"}},
+	} {
+		if tt.allPath {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+			checkAllRedactionPaths(t, tt.want, tt.want)
+		} else if got, _ := sanitizeRawText(tt.in); got != tt.want && scrubTextPatterns(tt.in) != tt.want {
+			t.Errorf("scrub(%q) = %q / %q, want %q", tt.in, scrubTextPatterns(tt.in), got, tt.want)
+		}
+		for _, secret := range tt.secrets {
+			checkNoLeak(t, tt.in, secret)
+		}
+	}
+
+	// Verify linear O(N) scaling on multiline outer-quoted headers and prior-line lookback windows.
+	for _, sc := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"multiline_outer_closed",
+			"curl -H 'Authorization: Bearer abc" + strings.Repeat("\nline_of_secret_payload_12345", 8000) + "'",
+			"curl -H 'Authorization: [REDACTED]",
+		},
+		{
+			"multiline_outer_unclosed",
+			"curl -H 'Authorization: Bearer abc" + strings.Repeat("\nline_of_secret_payload_12345", 8000),
+			"curl -H 'Authorization: [REDACTED]",
+		},
+		{
+			"prior_blank_lines_with_tail",
+			"curl -H '" + strings.Repeat("\n", 2000) + "\nAuthorization: Bearer abc\n" + strings.Repeat("x", 256000) + "'",
+			"curl -H '" + strings.Repeat("\n", 2000) + "\nAuthorization: [REDACTED]",
+		},
+	} {
+		start := time.Now()
+		got := scrubTextPatterns(sc.in)
+		elapsed := time.Since(start)
+		if got != sc.want {
+			t.Errorf("%s: got len %d, want len %d", sc.name, len(got), len(sc.want))
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("%s: scrubTextPatterns took %v, want <= 500ms", sc.name, elapsed)
 		}
 	}
 }

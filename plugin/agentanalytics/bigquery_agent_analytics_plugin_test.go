@@ -3406,6 +3406,15 @@ func TestRedactionRegressions(t *testing.T) {
 		{"Round 16: blank continuation line inside outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "zqsecretc", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X"},
 		{"Round 16: nested multiline quoted Authorization header followed by trailing outer-quoted line", "curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "SYNTHETIC_LINE3_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4"},
 		{"Round 16: unicode em-space before nested multiline quoted Authorization header", "curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "SYNTHETIC_EMSPACE_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
+		{"long shell assignment over 256-byte lookbehind window", "export DB_PASSWORD=" + strings.Repeat("a", 300) + "'s syntheticvioletfern's", "syntheticvioletfern", "export DB_PASSWORD=[REDACTED]"},
+		{"lowercase shell assignment without export", "db_password=pre's syntheticvioletfern's", "syntheticvioletfern", "db_password=[REDACTED]"},
+		{"backslash-LF continuation after export", "export\\\nDB_PASSWORD=pre's syntheticvioletfern's", "syntheticvioletfern", "export\\\nDB_PASSWORD=[REDACTED]"},
+		{"colon-led continuation inside closed outer-quoted curl header", "curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]\necho ok"},
+		{"empty first line in outer-quoted curl header", "curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]\necho ok"},
+		{"prior-line outer quote before Authorization header", "curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H '\nAuthorization: [REDACTED]\necho ok"},
+		{"unquoted whitespace-folded Authorization header continuation", "Authorization: Bearer abc\n  syntheticvioletfern\nContent-Type: text/plain", "syntheticvioletfern", "Authorization: [REDACTED]\nContent-Type: text/plain"},
+		{"Cookie header with multiple attributes", "Cookie: sid=syntheticvioletfern; preference=light", "syntheticvioletfern", "Cookie: [REDACTED]"},
+		{"Set-Cookie header with attributes", "Set-Cookie: session=syntheticvioletfern; Path=/; HttpOnly", "syntheticvioletfern", "Set-Cookie: [REDACTED]"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
@@ -3413,14 +3422,21 @@ func TestRedactionRegressions(t *testing.T) {
 			tl := &fakeTool{name: "run"}
 			args := map[string]any{"cmd": tt.in}
 			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-test", Contents: []*genai.Content{textContent("user", tt.in)}}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", tt.in)}, nil))
 			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
 			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
 			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
 			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 			rows := collectRows(t, requests, untilInvocationEnd)
-			seen := make(map[string]bool, 5)
+			seen := make(map[string]bool, 8)
 			for _, row := range rows {
 				et := fmt.Sprint(row["event_type"])
 				seen[et] = true
@@ -3430,10 +3446,13 @@ func TestRedactionRegressions(t *testing.T) {
 			}
 			for _, wantEvent := range []string{
 				string(EventUserMessageReceived),
+				string(EventLLMRequest),
+				string(EventLLMResponse),
 				string(EventToolStarting),
 				string(EventToolCompleted),
 				string(EventToolError),
 				string(EventLLMError),
+				string(EventStateDelta),
 			} {
 				if !seen[wantEvent] {
 					t.Errorf("%q: missing event row %s (seen %v)", tt.in, wantEvent, seen)
