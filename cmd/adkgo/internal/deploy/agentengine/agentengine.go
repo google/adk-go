@@ -100,6 +100,7 @@ var agentEngineCmd = &cobra.Command{
 	Use:   "agentengine",
 	Short: "Deploys the application to Agent Engine.",
 	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
+	Args:  cobra.ExactArgs(0),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		flags.agentEngine.updateEnv = cmd.Flags().Changed("env") || cmd.Flags().Changed("default_env")
 		return flags.deployOnAgentEngine()

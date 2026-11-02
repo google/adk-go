@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"cloud.google.com/go/aiplatform/apiv1beta1/aiplatformpb"
 	"github.com/spf13/cobra"
@@ -26,8 +27,8 @@ import (
 func registerEnvironmentFlags(cmd *cobra.Command, f *agentEngineServiceFlags) {
 	// The Go CLI uses repeated --env flags rather than Python's agent_config
 	// env_vars, as requested in google/adk-go#848.
-	cmd.PersistentFlags().StringArrayVar(&f.env, "env", nil, "Environment variable NAME=VALUE (repeatable). Overrides a default with the same name. On update, replaces the environment together with --default_env.")
-	cmd.PersistentFlags().BoolVar(&f.defaultEnv, "default_env", true, "Include the default Agent Engine environment variables. Explicitly setting this flag replaces the environment on update; omit both environment flags to preserve it.")
+	cmd.PersistentFlags().StringArrayVar(&f.env, "env", nil, "Environment variable NAME=VALUE (repeat --env for each variable). Overrides a default with the same name. On update, replaces the entire environment, including the defaults unless --default_env=false is set.")
+	cmd.PersistentFlags().BoolVar(&f.defaultEnv, "default_env", true, "Include GOOGLE_CLOUD_REGION, NUM_WORKERS=1, GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true and OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true. Use --default_env=false to omit them. Explicitly setting this flag replaces the environment on update; omit both environment flags to preserve it.")
 }
 
 var environmentNamePattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -44,6 +45,9 @@ func (f *deployAgentEngineFlags) environmentVariables() ([]*aiplatformpb.EnvVar,
 		}
 		if seen[name] {
 			return nil, fmt.Errorf("--env entry %d repeats an environment variable name", i+1)
+		}
+		if !utf8.ValidString(value) {
+			return nil, fmt.Errorf("--env entry %d must have a valid UTF-8 value", i+1)
 		}
 		seen[name] = true
 		custom = append(custom, &aiplatformpb.EnvVar{Name: name, Value: value})

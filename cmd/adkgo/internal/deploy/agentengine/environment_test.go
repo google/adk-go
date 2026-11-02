@@ -33,7 +33,7 @@ import (
 )
 
 func environmentCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "agentengine", RunE: agentEngineCmd.RunE, SilenceErrors: true, SilenceUsage: true}
+	cmd := &cobra.Command{Use: "agentengine", Args: agentEngineCmd.Args, RunE: agentEngineCmd.RunE, SilenceErrors: true, SilenceUsage: true}
 	registerEnvironmentFlags(cmd, &flags.agentEngine)
 	return cmd
 }
@@ -63,9 +63,10 @@ func captureEnvironmentOutput(t *testing.T, run func()) string {
 			t.Error(err)
 		}
 	})
-	saved := os.Stdout
+	saved, savedErr := os.Stdout, os.Stderr
 	os.Stdout = f
-	defer func() { os.Stdout = saved }()
+	os.Stderr = f
+	defer func() { os.Stdout, os.Stderr = saved, savedErr }()
 	run()
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
@@ -85,6 +86,7 @@ func TestEnvironmentFlagsRejectInvalidBeforePreparingDeployment(t *testing.T) {
 		"hyphen":         {"--env=INVALID-NAME=DO_NOT_LOG_THIS_VALUE"},
 		"space":          {"--env=INVALID NAME=DO_NOT_LOG_THIS_VALUE"},
 		"duplicate":      {"--env=VALID=DO_NOT_LOG_THIS_VALUE", "--env=VALID=OTHER_PRIVATE_VALUE"},
+		"invalid UTF-8":  {"--env=VALID=DO_NOT_LOG_THIS_VALUE\xff"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			// The invalid entry point also bounds the test if env validation is
@@ -116,6 +118,45 @@ func TestEnvironmentFlagsRejectInvalidBeforePreparingDeployment(t *testing.T) {
 	}
 }
 
+func TestEnvironmentFlagsRejectStrayArguments(t *testing.T) {
+	for name, args := range map[string][]string{
+		"space-separated false": {"--default_env", "false"},
+		"space-separated true":  {"--default_env", "true"},
+		"extra environment":     {"--env", "VALID=accepted", "OTHER=DO_NOT_LOG_THIS_VALUE"},
+		"interspersed argument": {"DO_NOT_LOG_THIS_VALUE", "--env=VALID=accepted"},
+		"after separator":       {"--env=VALID=accepted", "--", "DO_NOT_LOG_THIS_VALUE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetFlags(t, "not-a-go-file")
+			base := flags.build.tempDir
+			cmd := environmentCommand()
+			cmd.SetArgs(args)
+			output := captureEnvironmentOutput(t, func() {
+				err := cmd.Execute()
+				if err == nil {
+					t.Error("Execute() accepted a positional argument")
+				} else if strings.Contains(err.Error(), "DO_NOT_LOG_THIS_VALUE") ||
+					strings.Contains(err.Error(), "false") || strings.Contains(err.Error(), "true") {
+					t.Error("argument error echoed a positional value")
+				}
+			})
+			if strings.Contains(output, "DO_NOT_LOG_THIS_VALUE") {
+				t.Error("CLI printed a positional value")
+			}
+			if flags.source.origEntryPointPath != "" || flags.agentEngine.updateEnv {
+				t.Error("positional argument reached deployment preparation")
+			}
+			entries, err := os.ReadDir(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Error("positional argument created temporary deployment files")
+			}
+		})
+	}
+}
+
 // Requests pass through Cobra, computeFlags, the actual generated gRPC client
 // and completed long-running operations. No Google credentials or live API are
 // used; the server only listens on loopback.
@@ -126,6 +167,7 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 		"GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY":         "true",
 		"OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
 	}
+	defaultOrder := []string{"GOOGLE_CLOUD_REGION", "NUM_WORKERS", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"}
 	tests := []struct {
 		name       string
 		args       []string
@@ -134,13 +176,14 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 		wantUpdate bool
 		wantOrder  []string
 	}{
-		{name: "create defaults", want: defaults},
+		{name: "create defaults", want: defaults, wantOrder: defaultOrder},
 		{name: "create overrides and preserves values", args: []string{"--env=NUM_WORKERS=3", "--env=SERVICE_URL=https://example.test/?a=1,b=2", "--env=_empty="}, want: map[string]string{
 			"GOOGLE_CLOUD_REGION": "test-region", "NUM_WORKERS": "3", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
 			"SERVICE_URL": "https://example.test/?a=1,b=2", "_empty": "",
 		}},
 		{name: "create without defaults", args: []string{"--default_env=false", "--env=lower_case=only-custom"}, want: map[string]string{"lower_case": "only-custom"}},
 		{name: "create empty environment", args: []string{"--default_env=false"}, want: map[string]string{}},
+		{name: "create private and Unicode values", args: []string{"--default_env=false", "--env=PRIVATE_TOKEN=DO_NOT_LOG_THIS_VALUE", "--env=UNICODE=\u2603"}, want: map[string]string{"PRIVATE_TOKEN": "DO_NOT_LOG_THIS_VALUE", "UNICODE": "\u2603"}},
 		{name: "create preserves reference order", args: []string{"--default_env=false", "--env=Z_BASE=5", "--env=A_DERIVED=$(Z_BASE)", "--env=ESCAPED=$$(Z_BASE)", "--env=UNKNOWN=$(MISSING)"}, want: map[string]string{"Z_BASE": "5", "A_DERIVED": "$(Z_BASE)", "ESCAPED": "$$(Z_BASE)", "UNKNOWN": "$(MISSING)"}, wantOrder: []string{"Z_BASE", "A_DERIVED", "ESCAPED", "UNKNOWN"}},
 		{name: "create default override follows its reference", args: []string{"--env=Z_BASE=5", "--env=NUM_WORKERS=$(Z_BASE)"}, want: map[string]string{
 			"GOOGLE_CLOUD_REGION": "test-region", "NUM_WORKERS": "$(Z_BASE)", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true", "Z_BASE": "5",
@@ -150,8 +193,9 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 			"GOOGLE_CLOUD_REGION": "test-region", "NUM_WORKERS": "5", "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY": "true", "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
 		}, wantUpdate: true},
 		{name: "update custom environment", args: []string{"--default_env=false", "--env=ONLY=custom"}, update: true, want: map[string]string{"ONLY": "custom"}, wantUpdate: true},
+		{name: "update private value", args: []string{"--default_env=false", "--env=PRIVATE_TOKEN=DO_NOT_LOG_THIS_VALUE"}, update: true, want: map[string]string{"PRIVATE_TOKEN": "DO_NOT_LOG_THIS_VALUE"}, wantUpdate: true},
 		{name: "update preserves reference order", args: []string{"--default_env=false", "--env=Z_BASE=5", "--env=A_DERIVED=$(Z_BASE)"}, update: true, want: map[string]string{"Z_BASE": "5", "A_DERIVED": "$(Z_BASE)"}, wantUpdate: true, wantOrder: []string{"Z_BASE", "A_DERIVED"}},
-		{name: "update explicitly enables defaults", args: []string{"--default_env=true"}, update: true, want: defaults, wantUpdate: true},
+		{name: "update explicitly enables defaults", args: []string{"--default_env=true"}, update: true, want: defaults, wantUpdate: true, wantOrder: defaultOrder},
 		{name: "update clears environment", args: []string{"--default_env=false"}, update: true, want: map[string]string{}, wantUpdate: true},
 	}
 	for _, tt := range tests {
@@ -168,69 +212,69 @@ func TestEnvironmentDeploymentRequests(t *testing.T) {
 				if err := cmd.Execute(); err == nil || strings.Contains(err.Error(), "--env entry") {
 					t.Fatalf("Execute() error = %v, want the bounded entry-point error", err)
 				}
-			})
-			if strings.Contains(output, "only-custom") || strings.Contains(output, "https://example.test/") {
-				t.Error("CLI printed an environment value")
-			}
-			flags.source.entryPointPath = "main.go"
-			if err := flags.computeFlags(); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(flags.build.archivePath, []byte("test archive"), 0o600); err != nil {
-				t.Fatal(err)
-			}
+				flags.source.entryPointPath = "main.go"
+				if err := flags.computeFlags(); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(flags.build.archivePath, []byte("test archive"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 
-			server := &environmentDeploymentServer{created: make(chan *aiplatformpb.CreateReasoningEngineRequest, 1), updated: make(chan *aiplatformpb.UpdateReasoningEngineRequest, 1)}
-			opts := environmentClientOptions(t, server)
-			var spec *aiplatformpb.ReasoningEngineSpec
-			if tt.update {
-				flags.agentEngine.agentEngineID = "test-engine"
-				if err := flags.gcloudUpdateAgentEngine(opts...); err != nil {
-					t.Fatal(err)
-				}
-				req := <-server.updated
-				wantMask := []string{"spec.source_code_spec", "spec.class_methods"}
-				if tt.wantUpdate {
-					wantMask = append(wantMask, "spec.deployment_spec.env")
-				}
-				if diff := cmp.Diff(wantMask, req.GetUpdateMask().GetPaths()); diff != "" {
-					t.Errorf("update mask mismatch (-want +got):\n%s", diff)
-				}
-				spec = req.GetReasoningEngine().GetSpec()
-				if !tt.wantUpdate && spec.GetDeploymentSpec() != nil {
-					t.Error("update without environment flags changed deployment settings")
-				}
-			} else {
-				if err := flags.gcloudDeployToAgentEngine(opts...); err != nil {
-					t.Fatal(err)
-				}
-				req := <-server.created
-				if req.GetParent() != "projects/test-project/locations/test-region" {
-					t.Errorf("create parent = %q", req.GetParent())
-				}
-				spec = req.GetReasoningEngine().GetSpec()
-			}
-			if string(spec.GetSourceCodeSpec().GetInlineSource().GetSourceArchive()) != "test archive" || len(spec.GetClassMethods()) == 0 {
-				t.Error("environment configuration lost the source archive or class methods")
-			}
-			if tt.want != nil {
-				got := make(map[string]string)
-				var order []string
-				for _, env := range spec.GetDeploymentSpec().GetEnv() {
-					if _, exists := got[env.GetName()]; exists {
-						t.Errorf("request contains duplicate variable %q", env.GetName())
+				server := &environmentDeploymentServer{created: make(chan *aiplatformpb.CreateReasoningEngineRequest, 1), updated: make(chan *aiplatformpb.UpdateReasoningEngineRequest, 1)}
+				opts := environmentClientOptions(t, server)
+				var spec *aiplatformpb.ReasoningEngineSpec
+				if tt.update {
+					flags.agentEngine.agentEngineID = "test-engine"
+					if err := flags.gcloudUpdateAgentEngine(opts...); err != nil {
+						t.Fatal(err)
 					}
-					got[env.GetName()] = env.GetValue()
-					order = append(order, env.GetName())
+					req := <-server.updated
+					wantMask := []string{"spec.source_code_spec", "spec.class_methods"}
+					if tt.wantUpdate {
+						wantMask = append(wantMask, "spec.deployment_spec.env")
+					}
+					if diff := cmp.Diff(wantMask, req.GetUpdateMask().GetPaths()); diff != "" {
+						t.Errorf("update mask mismatch (-want +got):\n%s", diff)
+					}
+					spec = req.GetReasoningEngine().GetSpec()
+					if !tt.wantUpdate && spec.GetDeploymentSpec() != nil {
+						t.Error("update without environment flags changed deployment settings")
+					}
+				} else {
+					if err := flags.gcloudDeployToAgentEngine(opts...); err != nil {
+						t.Fatal(err)
+					}
+					req := <-server.created
+					if req.GetParent() != "projects/test-project/locations/test-region" {
+						t.Errorf("create parent = %q", req.GetParent())
+					}
+					spec = req.GetReasoningEngine().GetSpec()
 				}
-				if diff := cmp.Diff(tt.want, got); diff != "" {
-					t.Errorf("environment mismatch (-want +got):\n%s", diff)
+				if string(spec.GetSourceCodeSpec().GetInlineSource().GetSourceArchive()) != "test archive" || len(spec.GetClassMethods()) == 0 {
+					t.Error("environment configuration lost the source archive or class methods")
 				}
-				if tt.wantOrder != nil {
-					if diff := cmp.Diff(tt.wantOrder, order); diff != "" {
-						t.Errorf("environment order mismatch (-want +got):\n%s", diff)
+				if tt.want != nil {
+					got := make(map[string]string)
+					var order []string
+					for _, env := range spec.GetDeploymentSpec().GetEnv() {
+						if _, exists := got[env.GetName()]; exists {
+							t.Errorf("request contains duplicate variable %q", env.GetName())
+						}
+						got[env.GetName()] = env.GetValue()
+						order = append(order, env.GetName())
+					}
+					if !cmp.Equal(tt.want, got) {
+						t.Errorf("environment mismatch: got %d variables, want %d", len(got), len(tt.want))
+					}
+					if tt.wantOrder != nil {
+						if diff := cmp.Diff(tt.wantOrder, order); diff != "" {
+							t.Errorf("environment order mismatch (-want +got):\n%s", diff)
+						}
 					}
 				}
+			})
+			if strings.Contains(output, "only-custom") || strings.Contains(output, "https://example.test/") || strings.Contains(output, "DO_NOT_LOG_THIS_VALUE") {
+				t.Error("CLI printed an environment value")
 			}
 		})
 	}
