@@ -22,13 +22,13 @@ import (
 	"reflect"
 	"slices"
 	"sort"
-	"strings"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -245,15 +245,15 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			continue
 		}
 
-		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
+			// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 			if p == nil || reflect.ValueOf(*p).IsZero() {
 				return true
 			}
-			if p.FileData != nil && strings.HasPrefix(p.FileData.FileURI, "artifact://") && strings.Contains(p.FileData.FileURI, "/_adk_live/") {
-				return true
-			}
-			return false
+			// The live audio cache records its blobs as artifact:// references
+			// the model cannot resolve, so replaying one turns the URI into
+			// literal user input.
+			return googlellm.IsInternalLiveArtifactPart(p)
 		})
 		if len(content.Parts) == 0 {
 			continue

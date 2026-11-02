@@ -69,7 +69,7 @@ func (c *LiveConnection) SendHistory(ctx context.Context, history []*genai.Conte
 			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "audio/") {
 				continue
 			}
-			if part.FileData != nil && strings.HasPrefix(part.FileData.FileURI, "artifact://") && strings.Contains(part.FileData.FileURI, "/_adk_live/") {
+			if IsInternalLiveArtifactPart(part) {
 				continue
 			}
 			filteredParts = append(filteredParts, part)
