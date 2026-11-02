@@ -73,3 +73,11 @@ type HandlerError struct {
 func (e *HandlerError) Error() string { return e.Err.Error() }
 
 func (e *HandlerError) Unwrap() error { return e.Err }
+
+// PanicError retains a recovered non-streaming tool panic for callbacks. The
+// flow sanitizes it only when constructing the final model-facing response.
+type PanicError struct {
+	Message string
+}
+
+func (e *PanicError) Error() string { return e.Message }

@@ -26,6 +26,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -187,7 +188,7 @@ func (f *functionTool[TArgs, TResults]) Run(ctx agent.Context, args any) (result
 	// TODO: Handle function call request from tc.InvocationContext.
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())
+			err = &toolinternal.PanicError{Message: fmt.Sprintf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())}
 		}
 	}()
 
