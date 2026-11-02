@@ -289,6 +289,113 @@ Begin example
 [user]
 call func
 [model]
+` + "```" + `
+my_tool(arg1='val1')
+` + "```" + `
+[user]
+` + "```" + `
+&{<nil>  []  my_tool map[result:ok]}
+` + "```" + `
+End example
+
+End few-shot
+<EXAMPLES>`,
+		},
+		{
+			name: "FunctionCallExample_NoModel",
+			examples: []*Example{
+				{
+					Input: genai.NewContentFromText("call func", "user"),
+					Output: []*genai.Content{
+						{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "my_tool",
+										Args: map[string]any{"arg1": "val1"},
+									},
+								},
+							},
+						},
+						{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     "my_tool",
+										Response: map[string]any{"result": "ok"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			userContent: genai.NewContentFromText("query", "user"),
+			wantInstruct: `<EXAMPLES>
+Begin few-shot
+The following are examples of user queries and model responses using the available tools.
+
+EXAMPLE 1:
+Begin example
+[user]
+call func
+[model]
+` + "```" + `
+my_tool(arg1='val1')
+` + "```" + `
+[user]
+` + "```" + `
+&{<nil>  []  my_tool map[result:ok]}
+` + "```" + `
+End example
+
+End few-shot
+<EXAMPLES>`,
+		},
+		{
+			name: "FunctionCallExample_NonGemini",
+			examples: []*Example{
+				{
+					Input: genai.NewContentFromText("call func", "user"),
+					Output: []*genai.Content{
+						{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "my_tool",
+										Args: map[string]any{"arg1": "val1"},
+									},
+								},
+							},
+						},
+						{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     "my_tool",
+										Response: map[string]any{"result": "ok"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			userContent: genai.NewContentFromText("query", "user"),
+			model:       "claude-sonnet-4-5",
+			wantInstruct: `<EXAMPLES>
+Begin few-shot
+The following are examples of user queries and model responses using the available tools.
+
+EXAMPLE 1:
+Begin example
+[user]
+call func
+[model]
 ` + "```tool_code" + `
 my_tool(arg1='val1')
 ` + "```" + `
