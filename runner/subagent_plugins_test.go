@@ -194,7 +194,8 @@ func TestRunner_ParentPluginsReachAgentToolSequentialSubAgent(t *testing.T) {
 // Inheriting the parent's plugins for tools must not hand the sub-run's
 // run-level callbacks to the parent's plugins. Those stay with the runner that
 // owns the run, so a guardrail does not see agenttool's synthesized request as
-// a user message and cannot short-circuit the sub-agent.
+// a user message and cannot short-circuit the sub-run from OnUserMessage or
+// BeforeRun. Agent, model and tool callbacks still fire for the sub-agent.
 func TestRunner_ParentPluginsDoNotOwnSubRunCallbacks(t *testing.T) {
 	sub, err := llmagent.New(llmagent.Config{
 		Name:        "sub_agent",
@@ -209,7 +210,7 @@ func TestRunner_ParentPluginsDoNotOwnSubRunCallbacks(t *testing.T) {
 	runParentWithSubAgent(t, sub, p)
 
 	if want := []string{"go"}; !slices.Equal(p.userMsgs, want) {
-		t.Errorf("OnUserMessageCallback saw %d messages, want only the end-user message", len(p.userMsgs))
+		t.Errorf("OnUserMessageCallback saw %q, want %q", p.userMsgs, want)
 	}
 	if p.beforeRuns != 1 {
 		t.Errorf("BeforeRunCallback ran %d times, want 1 (the parent run only)", p.beforeRuns)
@@ -354,5 +355,91 @@ func TestRunner_SeparateRunnerDoesNotInheritContextPlugins(t *testing.T) {
 
 	if slices.Contains(p.beforeAgents, "separate") || slices.Contains(p.beforeModels, "separate") {
 		t.Errorf("parent plugin fired for the separate runner: agents %v, models %v", p.beforeAgents, p.beforeModels)
+	}
+}
+
+// The parent's plugin also fires for the agenttool sub-agent. A judge that its
+// callback runs from there, through its own plugin-less runner, must not
+// inherit the plugin.
+func TestRunner_JudgeInsideAgentToolSubRunDoesNotInheritPlugins(t *testing.T) {
+	judge, err := llmagent.New(llmagent.Config{
+		Name:  "judge",
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("SAFE", "model")}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	judgeRunner, err := runner.New(runner.Config{
+		AppName:           "judge_app",
+		Agent:             judge,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	var mu sync.Mutex
+	var seen []string
+	pl, err := plugin.New(plugin.Config{
+		Name: "llm_judge",
+		AfterModelCallback: func(ctx agent.Context, _ *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+			mu.Lock()
+			seen = append(seen, ctx.AgentName())
+			n := len(seen)
+			mu.Unlock()
+			if n > 5 {
+				return nil, fmt.Errorf("judge callback re-entered %d times", n)
+			}
+			for _, err := range judgeRunner.Run(ctx, "judge-user", fmt.Sprintf("judge-%d", n),
+				genai.NewContentFromText("is this safe?", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	sub, err := llmagent.New(llmagent.Config{
+		Name:        "sub_agent",
+		Description: "does the work",
+		Model:       &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("leaf done", "model")}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	parent, err := llmagent.New(llmagent.Config{
+		Name: "parent",
+		Model: &scriptedModel{responses: []*genai.Content{
+			callContent("sub_agent", map[string]any{"request": "delegated prompt"}),
+			genai.NewContentFromText("all done", "model"),
+		}},
+		Tools: []tool.Tool{agenttool.New(sub, nil)},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             parent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*plugin.Plugin{pl}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if slices.Contains(seen, "judge") {
+		t.Errorf("AfterModelCallback saw %v, want no judge entries", seen)
 	}
 }
