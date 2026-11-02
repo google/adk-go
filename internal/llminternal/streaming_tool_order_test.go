@@ -94,13 +94,15 @@ func TestLiveErrorFollowUpOrder(t *testing.T) {
 		for range seq {
 		}
 	}()
-	select {
-	case first := <-got:
-		if first != "pending" {
-			t.Errorf("first response for call_1 = %q, want pending", first)
+	for _, want := range []string{"pending", "error"} {
+		select {
+		case response := <-got:
+			if response != want {
+				t.Fatalf("response kind = %q, want %q", response, want)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("missing %s response for call_1", want)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("no response for call_1")
 	}
 }
 

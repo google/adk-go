@@ -41,6 +41,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/plugininternal/plugincontext"
 	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
@@ -1713,16 +1714,14 @@ func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool,
 	return nil, fErr
 }
 
-// streamingToolErrorMessage is the FunctionResponse error text for a failed
-// streaming tool. Handler errors and panics get a generic message; errors the
-// framework raises before the handler runs (argument conversion, confirmation
-// required or rejected) keep their own text, as they do for non-streaming tools.
+// streamingToolErrorMessage preserves only framework errors raised before the
+// handler runs. Custom tools need not use ADK's handler wrapper, so unknown
+// errors must also be sanitized, as in adk-python's _live_caller.
 func streamingToolErrorMessage(toolName string, err error) string {
-	var handlerErr *toolinternal.HandlerError
-	if errors.As(err, &handlerErr) {
-		return streamingToolInternalError(toolName)
+	if before, ok := err.(*toolerror.BeforeHandler); ok {
+		return before.Error()
 	}
-	return err.Error()
+	return streamingToolInternalError(toolName)
 }
 
 // streamingToolInternalError is the generic FunctionResponse error text for a
