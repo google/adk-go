@@ -796,8 +796,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 }
 
 // observeRunErrors notifies plugins before yielding each error to the caller.
-// Go's existing runner can continue after an error and still calls AfterRunCallback.
-// Preserve that behavior here, so a plugin can log or clean up after an error even if the caller ignores it and keeps going.
+// It preserves the runner's existing iteration and AfterRunCallback lifecycle.
 func (r *Runner) observeRunErrors(ctx agent.InvocationContext, yield func(*session.Event, error) bool) func(*session.Event, error) bool {
 	return func(event *session.Event, err error) bool {
 		if err != nil {

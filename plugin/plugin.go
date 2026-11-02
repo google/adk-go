@@ -196,15 +196,22 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 // AfterRunCallback is invoked after a run completes.
 type AfterRunCallback func(agent.InvocationContext)
 
-// OnRunErrorCallback is invoked before a runner exposes an error to its caller,
-// once an invocation context exists. It receives the same error as the caller
-// and cannot replace or suppress it. Errors handled within an agent are excluded.
+// OnRunErrorCallback is invoked before Runner.Run or Runner.RunLive exposes an
+// error through its event iterator, or RunLive returns a setup error, once an
+// invocation context exists. It receives the same error as the caller and cannot
+// replace or suppress it. A panic in a callback is recovered; remaining plugins
+// are still notified in registration order and the original error reaches the caller.
 //
 // A run can yield multiple errors if the caller continues reading; each triggers
-// this callback before AfterRunCallback. Stopping iteration alone is not an error.
-// RunLive also invokes this callback for setup errors after its invocation context
-// is created, even when no event iterator is returned. Failures before context
-// creation, such as session lookup errors, do not invoke it.
+// this callback. When AfterRunCallback runs, it follows these notifications.
+// AfterRunCallback does not run if processing or persisting the initial user
+// message fails (including OnUserMessageCallback), or if RunLive setup fails.
+// Plugins must not rely on it to clean up state on those paths.
+//
+// Errors handled within an agent, errors from LiveSession.Send or Close, and
+// failures before context creation (such as session lookup errors) are excluded.
+// Stopping iteration alone is not an error. Deferred cleanup errors that are not
+// exposed to the caller are also excluded.
 //
 // Like other plugin callbacks, it may run concurrently for different invocations.
 type OnRunErrorCallback func(agent.InvocationContext, error)
