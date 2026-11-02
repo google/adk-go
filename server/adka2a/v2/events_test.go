@@ -175,7 +175,7 @@ func TestToSessionEvent(t *testing.T) {
 				},
 				Author:  agentName,
 				Branch:  branch,
-				Actions: session.EventActions{Escalate: true},
+				Actions: session.EventActions{Escalate: true, SkipSummarization: true},
 			},
 		},
 		{
@@ -505,8 +505,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -525,8 +526,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -552,8 +554,9 @@ func TestToSessionEvent(t *testing.T) {
 					CustomMetadata: map[string]any{customMetaTaskIDKey: string(taskID), customMetaContextIDKey: contextID},
 					TurnComplete:   true,
 				},
-				Author: agentName,
-				Branch: branch,
+				Author:  agentName,
+				Branch:  branch,
+				Actions: session.EventActions{SkipSummarization: true},
 			},
 		},
 		{
@@ -788,5 +791,59 @@ func TestTransferToAgentFromMeta(t *testing.T) {
 	meta := map[string]any{metadataTransferToAgentKey: "a-2"}
 	if got, ok := TransferToAgentFromMeta(meta); !ok || got != "a-2" {
 		t.Errorf("TransferToAgentFromMeta(meta) = (%q, %v), want (\"a-2\", true)", got, ok)
+	}
+}
+
+// TestToSessionEvent_terminalTaskIsFinalResponse pins that a finished task is
+// the remote agent's final response even when its artifacts replay the tool
+// calls the peer made, as an ADK peer's do. Without SkipSummarization those
+// function call and response parts make IsFinalResponse report false, so
+// nothing that waits for the final response sees the answer. adk-python sets
+// skip_summarization for a completed, failed or canceled task with parts
+// (to_adk_event.py, convert_a2a_task_to_event).
+func TestToSessionEvent_terminalTaskIsFinalResponse(t *testing.T) {
+	t.Parallel()
+	a2aAgent, err := agent.New(agent.Config{Name: "a2a agent"})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+	toolParts := func() a2a.ContentParts {
+		call := a2a.NewDataPart(map[string]any{"id": "call-1", "name": "get_weather", "args": map[string]any{"city": "Warsaw"}})
+		call.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionCall}
+		resp := a2a.NewDataPart(map[string]any{"id": "call-1", "name": "get_weather", "response": map[string]any{"temp": "20C"}})
+		resp.Metadata = map[string]any{a2aDataPartMetaTypeKey: a2aDataPartTypeFunctionResponse}
+		return a2a.ContentParts{call, resp, a2a.NewTextPart("It is 20C in Warsaw.")}
+	}
+
+	tests := []struct {
+		state     a2a.TaskState
+		wantFinal bool
+	}{
+		{state: a2a.TaskStateCompleted, wantFinal: true},
+		{state: a2a.TaskStateFailed, wantFinal: true},
+		{state: a2a.TaskStateCanceled, wantFinal: true},
+		{state: a2a.TaskStateWorking, wantFinal: false},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.state), func(t *testing.T) {
+			t.Parallel()
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a2aAgent})
+			task := &a2a.Task{
+				ID:        a2a.NewTaskID(),
+				ContextID: a2a.NewContextID(),
+				Artifacts: []*a2a.Artifact{{ID: a2a.NewArtifactID(), Parts: toolParts()}},
+				Status:    a2a.TaskStatus{State: tc.state},
+			}
+			got, err := ToSessionEvent(ctx, task)
+			if err != nil {
+				t.Fatalf("ToSessionEvent() error = %v", err)
+			}
+			if got == nil {
+				t.Fatal("ToSessionEvent() = nil, want an event")
+			}
+			if final := got.IsFinalResponse(); final != tc.wantFinal {
+				t.Errorf("IsFinalResponse() = %v, want %v (SkipSummarization = %v)", final, tc.wantFinal, got.Actions.SkipSummarization)
+			}
+		})
 	}
 }
