@@ -185,6 +185,62 @@ func TestFinishTaskTool_Declaration(t *testing.T) {
 	}
 }
 
+// The declaration must never offer the model a value Run rejects. A wrapped
+// result is rejected when null, so the declared result must not be nullable.
+func TestFinishTaskTool_DeclarationResultMatchesValidation(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputSchema *genai.Schema
+	}{
+		{
+			name:         "nullable string",
+			outputSchema: &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},
+		},
+		{
+			name:         "nullable integer",
+			outputSchema: &genai.Schema{Type: genai.TypeInteger, Nullable: genai.Ptr(true)},
+		},
+		{
+			name: "nullable array",
+			outputSchema: &genai.Schema{
+				Type:     genai.TypeArray,
+				Items:    &genai.Schema{Type: genai.TypeString},
+				Nullable: genai.Ptr(true),
+			},
+		},
+		{
+			name:         "string",
+			outputSchema: &genai.Schema{Type: genai.TypeString},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wantUserNullable := tc.outputSchema.Nullable
+			ft := newFinishTaskTool(t, tc.outputSchema)
+
+			declared := ft.Declaration().Parameters.Properties[ft.WrapperKey()]
+			if declared == nil {
+				t.Fatalf("Declaration() has no %q property", ft.WrapperKey())
+			}
+			if declared.Nullable != nil && *declared.Nullable {
+				t.Errorf("declared %q schema is nullable, want non-nullable", ft.WrapperKey())
+			}
+
+			got, err := ft.Run(nil, map[string]any{ft.WrapperKey(): nil})
+			if err != nil {
+				t.Fatalf("Run() unexpected error: %v", err)
+			}
+			if _, ok := got["error"]; !ok {
+				t.Errorf("Run() with null %q = %v, want a validation error", ft.WrapperKey(), got)
+			}
+
+			if diff := cmp.Diff(wantUserNullable, tc.outputSchema.Nullable); diff != "" {
+				t.Errorf("agent OutputSchema.Nullable changed (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestFinishTaskTool_WrapperKey(t *testing.T) {
 	tests := []struct {
 		name           string
