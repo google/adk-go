@@ -41,10 +41,12 @@ func TestRunner_OnRunError(t *testing.T) {
 		appendErr         error
 		userMessageErr    error
 		afterModelErr     error
+		liveSetupErr      error
 		wantErr           error
 		wantAfterRun      int
 	}{
 		{name: "success", wantAfterRun: 1},
+		{name: "live agent setup error", liveSetupErr: sentinel, wantErr: sentinel},
 		{name: "agent continues after errors", agentErrors: []error{sentinel, context.Canceled}, wantErr: sentinel, wantAfterRun: 1},
 		{name: "agent returns after error", agentErrors: []error{sentinel}, returnAfterErrors: true, wantErr: sentinel, wantAfterRun: 1},
 		{name: "before run error", beforeRunErr: sentinel, wantErr: sentinel, wantAfterRun: 1},
@@ -62,12 +64,13 @@ func TestRunner_OnRunError(t *testing.T) {
 	}
 	for _, kind := range []string{"custom", "node", "live"} {
 		for _, tc := range tests {
-			if (tc.afterModelErr != nil && kind != "node") || (tc.userMessageErr != nil && kind == "live") {
+			if (tc.liveSetupErr != nil && kind != "live") || (tc.afterModelErr != nil && kind != "node") || (tc.userMessageErr != nil && kind == "live") {
 				continue
 			}
 			for _, caller := range callers {
 				t.Run(kind+"/"+tc.name+"/"+caller.name, func(t *testing.T) {
 					var observed [2][]error
+					var order []int
 					afterCalls := 0
 					var invocationID string
 					replacement := genai.NewContentFromText("replacement", genai.RoleUser)
@@ -90,6 +93,7 @@ func TestRunner_OnRunError(t *testing.T) {
 							}
 							invocationID = ctx.InvocationID()
 							observed[index] = append(observed[index], err)
+							order = append(order, index)
 						}
 					}
 					p, err := plugin.New(plugin.Config{
@@ -104,6 +108,14 @@ func TestRunner_OnRunError(t *testing.T) {
 						},
 						OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
 							return replacement, tc.userMessageErr
+						},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					panicking, err := plugin.New(plugin.Config{
+						Name: "panicking", OnRunErrorCallback: func(agent.InvocationContext, error) {
+							panic("callback failure")
 						},
 					})
 					if err != nil {
@@ -148,13 +160,16 @@ func TestRunner_OnRunError(t *testing.T) {
 					}
 					if kind == "live" {
 						a = &mockLiveAgent{Agent: a, runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+							if tc.liveSetupErr != nil {
+								return nil, nil, tc.liveSetupErr
+							}
 							return &dummyLiveSession{}, sequence(ctx), nil
 						}}
 					}
 					svc := &beforeRunSessionService{Service: session.InMemoryService(), err: tc.appendErr}
 					r, err := New(Config{
 						AppName: "app", Agent: a, SessionService: svc, AutoCreateSession: true,
-						PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p, empty, second}},
+						PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p, panicking, empty, second}},
 					})
 					if err != nil {
 						t.Fatal(err)
@@ -168,6 +183,10 @@ func TestRunner_OnRunError(t *testing.T) {
 					check := func(err error) {
 						t.Helper()
 						errorsSeen++
+						if len(order) != 2 || order[0] != 0 || order[1] != 1 {
+							t.Fatal("plugins notified out of registration order")
+						}
+						order = nil
 						for i := range observed {
 							if len(observed[i]) != errorsSeen {
 								t.Fatalf("plugin %d notified %d times, want %d", i, len(observed[i]), errorsSeen)
@@ -306,4 +325,80 @@ func TestRunner_OnRunError_ChildError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Send and Close have their own error channel, independent of the event iterator.
+func TestRunner_OnRunError_LiveSessionErrorsExcluded(t *testing.T) {
+	sentinel := errors.New("live operation failed")
+	for _, operation := range []string{"send", "persist", "close"} {
+		t.Run(operation, func(t *testing.T) {
+			underlying := &runErrorLiveSession{}
+			svc := &runErrorSessionService{Service: session.InMemoryService()}
+			switch operation {
+			case "send":
+				underlying.sendErr = sentinel
+			case "persist":
+				svc.err = sentinel
+			case "close":
+				underlying.closeErr = sentinel
+			}
+			a := &mockLiveAgent{
+				Agent: must(agent.New(agent.Config{Name: "root"})),
+				runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+					return underlying, func(func(*session.Event, error) bool) {}, nil
+				},
+			}
+			calls := 0
+			p, err := plugin.New(plugin.Config{Name: "observer", OnRunErrorCallback: func(agent.InvocationContext, error) { calls++ }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := New(Config{AppName: "app", Agent: a, SessionService: svc, AutoCreateSession: true, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			live, events, err := r.RunLive(t.Context(), "user", "session", agent.LiveRunConfig{})
+			if err != nil {
+				t.Fatal("unexpected setup error")
+			}
+			if operation == "close" {
+				err = live.Close()
+			} else {
+				err = live.Send(agent.LiveRequest{Content: genai.NewContentFromText("question", genai.RoleUser)})
+				defer func() {
+					if err := live.Close(); err != nil {
+						t.Error("unexpected close error")
+					}
+				}()
+			}
+			if !errors.Is(err, sentinel) {
+				t.Fatal("operation did not preserve error identity")
+			}
+			for _, err := range events {
+				if err != nil {
+					t.Fatal("operation error leaked into event stream")
+				}
+			}
+			if calls != 0 {
+				t.Errorf("error callback ran %d times, want 0", calls)
+			}
+		})
+	}
+}
+
+type runErrorLiveSession struct{ sendErr, closeErr error }
+
+func (s *runErrorLiveSession) Send(agent.LiveRequest) error { return s.sendErr }
+func (s *runErrorLiveSession) Close() error                 { return s.closeErr }
+
+type runErrorSessionService struct {
+	session.Service
+	err error
+}
+
+func (s *runErrorSessionService) AppendEvent(ctx context.Context, sess session.Session, event *session.Event) error {
+	if s.err != nil {
+		return s.err
+	}
+	return s.Service.AppendEvent(ctx, sess, event)
 }
