@@ -462,7 +462,7 @@ func TestMCPToolRunContent(t *testing.T) {
 			want: map[string]any{"output": "[MCP image: mimeType=\"image/png\", size=1 bytes]\nnotes"},
 		},
 		{
-			name: "structured output takes precedence over mixed content",
+			name: "structured output keeps non-text content blocks under output",
 			result: &mcp.CallToolResult{
 				StructuredContent: map[string]any{"sha": "abc123"},
 				Content: []mcp.Content{
@@ -474,11 +474,11 @@ func TestMCPToolRunContent(t *testing.T) {
 					}},
 				},
 			},
-			want: map[string]any{
-				"output": map[string]any{"sha": "abc123"},
+			want: map[string]any{"output": map[string]any{
+				"structuredContent": map[string]any{"sha": "abc123"},
 				"content": "downloaded\n[MCP embedded resource: uri=\"repo://owner/project/file.txt\", " +
 					"mimeType=\"text/plain\"]\nfile contents",
-			},
+			}},
 		},
 		{
 			name: "structured output with text only remains compatible",
@@ -723,28 +723,46 @@ func TestHasMIMECharsetParameter(t *testing.T) {
 }
 
 func TestMCPToolRunStructuredContentKeepsContentBlocks(t *testing.T) {
-	tool := &mcpTool{
-		name: "test_tool",
-		mcpClient: &fixedResultMCPClient{result: &mcp.CallToolResult{
-			StructuredContent: map[string]any{"status": "ok"},
-			Content: []mcp.Content{
-				&mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
-					URI:      "repo://owner/project/main/file.go",
-					MIMEType: "text/plain",
-					Text:     "package example\n",
-				}},
-			},
+	size := int64(2048)
+	blocks := map[string]mcp.Content{
+		"embedded resource": &mcp.EmbeddedResource{Resource: &mcp.ResourceContents{
+			URI: "repo://owner/project/main/file.go", MIMEType: "text/plain", Text: "package example\n",
 		}},
+		"resource link": &mcp.ResourceLink{URI: "https://example.com/patch.diff", Name: "patch.diff", Size: &size},
+		"image":         &mcp.ImageContent{MIMEType: "image/png", Data: []byte("abc")},
+		"audio":         &mcp.AudioContent{MIMEType: "audio/wav", Data: []byte("abc")},
 	}
-	got, err := tool.Run(&agent.ContextMock{}, map[string]any{})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	content, ok := got["content"].(string)
-	if !ok {
-		t.Fatalf("Run() result missing 'content' key or not a string (got: %+v)", got)
-	}
-	if !strings.Contains(content, "package example") {
-		t.Errorf("Run() content = %q, want to contain %q", content, "package example")
+	for name, block := range blocks {
+		for _, first := range []bool{true, false} {
+			text := &mcp.TextContent{Text: "status"}
+			contents := []mcp.Content{text, block}
+			if first {
+				contents = []mcp.Content{block, text}
+			}
+			tool := &mcpTool{
+				name: "test_tool",
+				mcpClient: &fixedResultMCPClient{result: &mcp.CallToolResult{
+					StructuredContent: map[string]any{"status": "ok"},
+					Content:           contents,
+				}},
+			}
+			got, err := tool.Run(&agent.ContextMock{}, map[string]any{})
+			if err != nil {
+				t.Fatalf("%s: Run() error = %v", name, err)
+			}
+			if len(got) != 1 {
+				t.Errorf("%s: Run() keys = %d, want only \"output\"", name, len(got))
+			}
+			out, ok := got["output"].(map[string]any)
+			if !ok {
+				t.Fatalf("%s: output type = %T, want map", name, got["output"])
+			}
+			if diff := cmp.Diff(map[string]any{"status": "ok"}, out["structuredContent"]); diff != "" {
+				t.Errorf("%s: structuredContent mismatch (-want +got):\n%s", name, diff)
+			}
+			if c, _ := out["content"].(string); !strings.Contains(c, "status") || len(c) <= len("status") {
+				t.Errorf("%s: content missing blocks (len %d)", name, len(c))
+			}
+		}
 	}
 }

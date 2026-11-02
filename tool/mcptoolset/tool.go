@@ -158,13 +158,17 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	}
 
 	if res.StructuredContent != nil {
-		out := map[string]any{"output": res.StructuredContent}
-		// Text blocks usually duplicate the structured output; keep only
-		// results that carry other blocks, such as embedded resources.
+		// Text blocks usually duplicate the structured output; only results
+		// carrying other blocks, such as embedded resources, get them added.
+		// They are nested under "output" because model adapters may forward
+		// only part of the response map, and "output" is always forwarded.
 		if hasNonTextContent(res.Content) {
-			out["content"] = formatMCPContent(res.Content)
+			return map[string]any{"output": map[string]any{
+				"structuredContent": res.StructuredContent,
+				"content":           formatMCPContent(res.Content),
+			}}, nil
 		}
-		return out, nil
+		return map[string]any{"output": res.StructuredContent}, nil
 	}
 
 	content := formatMCPContent(res.Content)
