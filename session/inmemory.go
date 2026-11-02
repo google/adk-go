@@ -20,7 +20,6 @@ import (
 	"iter"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -121,17 +120,20 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		// create a new slice header pointing to the same array
 		filteredEvents = filteredEvents[start:]
 	}
-	// apply timestamp filter, assuming list is sorted
-	if !req.After.IsZero() && len(filteredEvents) > 0 {
-		firstIndexToKeep := sort.Search(len(filteredEvents), func(i int) bool {
-			// Find the first event that is not before the timestamp
-			return !filteredEvents[i].Timestamp.Before(req.After)
-		})
-		filteredEvents = filteredEvents[firstIndexToKeep:]
-	}
 
 	copiedSession.events = make([]*Event, 0, len(filteredEvents))
-	copiedSession.events = append(copiedSession.events, filteredEvents...)
+	for _, event := range filteredEvents {
+		// Test every event rather than searching for a cut point: events are
+		// kept in append order, which need not be timestamp order, and a
+		// binary search over it could keep events from before req.After. This
+		// keeps every event at or after req.After, as the database backends
+		// do. adk-python's in-memory service keeps only the trailing run of
+		// such events, so it also drops one appended ahead of an older event.
+		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
+			continue
+		}
+		copiedSession.events = append(copiedSession.events, event)
+	}
 
 	return &GetResponse{
 		Session: copiedSession,
