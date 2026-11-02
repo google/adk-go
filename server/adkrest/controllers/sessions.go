@@ -76,6 +76,10 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		}
 	}
 	if sessionID.ID == "" {
+		if err := validateBodySessionID(createSessionRequest.SessionID); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
 		sessionID.ID = createSessionRequest.SessionID
 	} else if createSessionRequest.SessionID != "" && createSessionRequest.SessionID != sessionID.ID {
 		http.Error(rw, "sessionId in request body does not match session_id in URL path", http.StatusBadRequest)
@@ -87,6 +91,23 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 		return
 	}
 	EncodeJSONResponse(respSession, http.StatusOK, rw)
+}
+
+// validateBodySessionID refuses a sessionId from the create request body that
+// the /sessions/{session_id} routes could not address afterwards.
+//
+// Those routes match {session_id} as one segment of the decoded, cleaned path.
+// An ID containing "/" spans several segments however it is encoded, and the
+// router redirects a "." or ".." segment to the path with it resolved away, so
+// a session created under any of them could be listed but never read, updated
+// or deleted; an ID ending in "/" even made DELETE remove the session without
+// the slash. A {session_id} taken from the URL cannot take these values, so only
+// the body needs the check. An empty ID is allowed and means "generate one".
+func validateBodySessionID(id string) error {
+	if strings.Contains(id, "/") || id == "." || id == ".." {
+		return fmt.Errorf(`sessionId %q in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`, id)
+	}
+	return nil
 }
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {

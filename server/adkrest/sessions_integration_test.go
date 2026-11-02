@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -188,4 +189,159 @@ func newChunkedSessionServer(t *testing.T, authenticatedUserID string) *httptest
 	}))
 	t.Cleanup(testServer.Close)
 	return testServer
+}
+
+// TestCreateSessionBodyIDRoundTrip pins that every session ID the create
+// endpoint accepts in its request body can afterwards be read, updated and
+// deleted through /sessions/{session_id} with the ID percent-encoded. An ID the
+// session routes cannot address must be refused with a 400 and not stored,
+// because a session created under it could only ever be listed.
+func TestCreateSessionBodyIDRoundTrip(t *testing.T) {
+	ids := []string{
+		"plain",
+		"with-dash_and.dot",
+		"...",
+		".hidden",
+		"trailing.",
+		"a b",
+		"a+b",
+		"a%b",
+		"%2F",
+		"a?b",
+		"a#b",
+		"a;b",
+		"a\\b",
+		"ünïcødé",
+		"a\tb",
+		"a\nb",
+		"a\x00b",
+		"/",
+		"x/y",
+		"a/",
+		"/a",
+		".",
+		"..",
+	}
+	for _, id := range ids {
+		t.Run(url.PathEscape(id), func(t *testing.T) {
+			base := newSessionIDServer(t) + "/apps/app/users/u/sessions"
+			body, err := json.Marshal(map[string]string{"sessionId": id})
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			status, respBody := doSessionRequest(t, http.MethodPost, base, string(body))
+			if status != http.StatusOK {
+				if status != http.StatusBadRequest {
+					t.Fatalf("POST %s with sessionId %q = %d, want 200 or 400; body: %s", base, id, status, respBody)
+				}
+				if listed := listSessionIDs(t, base); len(listed) != 0 {
+					t.Errorf("sessionId %q was refused with 400 but the list holds %q", id, listed)
+				}
+				return
+			}
+			if got := decodeSessionID(t, respBody); got != id {
+				t.Fatalf("POST returned session ID %q, want %q", got, id)
+			}
+
+			sessionURL := base + "/" + url.PathEscape(id)
+			for _, step := range []struct {
+				method string
+				body   string
+			}{
+				{http.MethodGet, ""},
+				{http.MethodPatch, `{"stateDelta":{"k":"v"}}`},
+				{http.MethodGet, ""},
+			} {
+				status, respBody := doSessionRequest(t, step.method, sessionURL, step.body)
+				if status != http.StatusOK {
+					t.Fatalf("%s %s after creating sessionId %q = %d, want 200; body: %s", step.method, sessionURL, id, status, respBody)
+				}
+				if got := decodeSessionID(t, respBody); got != id {
+					t.Fatalf("%s %s returned session ID %q, want %q", step.method, sessionURL, got, id)
+				}
+			}
+			if status, respBody := doSessionRequest(t, http.MethodDelete, sessionURL, ""); status != http.StatusOK {
+				t.Fatalf("DELETE %s after creating sessionId %q = %d, want 200; body: %s", sessionURL, id, status, respBody)
+			}
+			if listed := listSessionIDs(t, base); len(listed) != 0 {
+				t.Errorf("DELETE %s left sessions %q, want none", sessionURL, listed)
+			}
+		})
+	}
+}
+
+func newSessionIDServer(t *testing.T) string {
+	t.Helper()
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService: session.InMemoryService(),
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: "u"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+	testServer := httptest.NewServer(server)
+	t.Cleanup(testServer.Close)
+	return testServer.URL
+}
+
+// doSessionRequest sends one request without following redirects, so a path
+// the router rewrites shows up as the redirect it is rather than as whatever
+// the rewritten path happens to serve.
+func doSessionRequest(t *testing.T, method, target, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext(%s, %s) failed: %v", method, target, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, target, err)
+	}
+	respBody, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("io.ReadAll(response body) failed: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("response body Close() failed: %v", closeErr)
+	}
+	return resp.StatusCode, respBody
+}
+
+func decodeSessionID(t *testing.T, body []byte) string {
+	t.Helper()
+	var got struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+	}
+	return got.ID
+}
+
+func listSessionIDs(t *testing.T, listURL string) []string {
+	t.Helper()
+	status, body := doSessionRequest(t, http.MethodGet, listURL, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body: %s", listURL, status, body)
+	}
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &sessions); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+	}
+	ids := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		ids = append(ids, s.ID)
+	}
+	return ids
 }
