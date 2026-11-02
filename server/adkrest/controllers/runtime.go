@@ -421,7 +421,13 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 	return nil
 }
 
+// validateSessionExists answers 404 before a run starts when the session is
+// missing. With AutoCreateSession the runner creates a missing session, so
+// there is nothing to check, as in adk-python's /run_sse.
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+	if c.autoCreateSession {
+		return nil
+	}
 	_, err := c.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   appName,
 		UserID:    userID,
