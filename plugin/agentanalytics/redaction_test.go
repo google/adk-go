@@ -3534,9 +3534,15 @@ func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 		{`SELECT * FROM users WHERE password=abc' AND '1'='1`, `SELECT * FROM users WHERE password=[REDACTED] AND '1'='1`},
 		{`the password=users' wasn't changed`, `the password=[REDACTED] wasn't changed`},
 		{`password=it's Bob's`, `password=[REDACTED] Bob's`},
-		{`password=abc's foo bar's`, `password=[REDACTED] foo bar's`},
+		// A word that an "=" joins to the key before 's is the start of the
+		// value unless 's makes a contraction of it, as it does of it, so the
+		// single quote after abc opens a quoted part, closed or not, as the one
+		// after pre in password=pre's synthlow's changed does.
+		{`password=abc's foo bar's`, `password=[REDACTED]`},
+		{`password=it's foo bar's`, `password=[REDACTED] foo bar's`},
 		{`password=abc's`, `password=[REDACTED]`},
-		{`the user's password=abc's value`, `the user's password=[REDACTED] value`},
+		{`the user's password=abc's value`, `the user's password=[REDACTED]`},
+		{`the user's password=it's value`, `the user's password=[REDACTED] value`},
 		{`token=abc"def" next`, `token=[REDACTED] next`},
 		{`export DB_PASSWORD=pre"a b"; echo ok done`, `export DB_PASSWORD=[REDACTED]; echo ok done`},
 		// A single quote inside the bare value that starts no contraction
@@ -3786,7 +3792,8 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 		{`export DB_PASSWORD=pren't R15_CONTRACTION_NT'; echo ok`, `export DB_PASSWORD=[REDACTED]; echo ok`},
 		{`Bearer pre's R15_CONTRACTION_S' ok`, `Bearer [REDACTED] ok`},
 		{`password=it's Bob's`, `password=[REDACTED] Bob's`},
-		{`password=abc's foo bar's`, `password=[REDACTED] foo bar's`},
+		{`password=abc's foo bar's`, `password=[REDACTED]`},
+		{`password=it's foo bar's`, `password=[REDACTED] foo bar's`},
 		// R15-2: A newline immediately after an opening single quote.
 		{"export DB_PASSWORD=pre'\nR15_MULTILINE_INITIAL'; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok"},
 		{"export DB_PASSWORD=pre'\r\nR15_MULTILINE_INITIAL'; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok"},
@@ -4582,4 +4589,465 @@ func TestRound17ReviewRegressions(t *testing.T) {
 			t.Errorf("%s: scrubTextPatterns took %v, want <= 500ms", sc.name, elapsed)
 		}
 	}
+}
+
+// checkLongRedactionPaths checks, as checkAllRedactionPaths does, that
+// scrubTextPatterns, sanitizeRawText, redactErrorMessage and SmartTruncate of
+// an error write want for in, and that the scrubs leave want as it is, with a
+// SmartTruncate budget that holds all of in, for texts longer than the budget
+// of checkRedactionPaths allows, and that none of them writes the secrets.
+func checkLongRedactionPaths(t *testing.T, in, want string, secrets ...string) {
+	t.Helper()
+	raw, _ := sanitizeRawText(in)
+	var smart string
+	if b, _, err := SmartTruncate(errors.New(in), 2*len(in)+1000); err != nil || json.Unmarshal(b, &smart) != nil {
+		t.Errorf("SmartTruncate(errors.New(%s)) = (%s, %v), want a JSON string", elideText(in), elideText(string(b)), err)
+	}
+	for _, p := range []struct{ name, in, got string }{
+		{"scrubTextPatterns", in, scrubTextPatterns(in)},
+		{"sanitizeRawText", in, raw},
+		{"redactErrorMessage", in, redactErrorMessage(in)},
+		{"SmartTruncate", in, smart},
+		{"scrubTextPatterns", want, scrubTextPatterns(want)},
+		{"redactErrorMessage", want, redactErrorMessage(want)},
+	} {
+		if p.got != want {
+			t.Errorf("%s(%s) = %s, want %s", p.name, elideText(p.in), elideText(p.got), elideText(want))
+		}
+		for _, secret := range secrets {
+			if strings.Contains(p.got, secret) {
+				t.Errorf("%s(%s) = %s, which still holds %q", p.name, elideText(p.in), elideText(p.got), secret)
+			}
+		}
+	}
+}
+
+// elideText quotes s for a test message, with the middle of a long s left
+// out.
+func elideText(s string) string {
+	if len(s) <= 240 {
+		return fmt.Sprintf("%q", s)
+	}
+	return fmt.Sprintf("%q...<%d bytes>...%q", s[:80], len(s)-240, s[len(s)-160:])
+}
+
+// TestRound22ReviewRegressions checks the boundaries of the text scrub that
+// the direct, error and error-object paths share, for headers, shell
+// assignments and prose:
+//
+//   - a whitespace-folded header value runs on over a line of spaces or tabs
+//     alone to the folded lines after it, and past a first line that holds
+//     only the redaction placeholder, for every credential header, after LF
+//     and CRLF, while an empty line, or a line indented no further than the
+//     header, ends it;
+//   - a quote that opens any number of bytes or lines before a header and
+//     stays open into it carries the header's value on to where it closes;
+//   - a quote after a run of options and assignments long enough to push the
+//     command's declaration out of the shell lookbehind window is a shell
+//     quote, while a long word whose visible part shows that the name before
+//     its "=" is not a shell name keeps the contraction after it;
+//   - a possessive after it's is prose whatever the length or the script of
+//     its word, while a word glued to "=" that 's does not make a
+//     contraction of opens a quoted part of the value, however short the
+//     secret in the part;
+//   - the word cookie and a colon in prose, with no cookie pair after them,
+//     are not a Cookie header;
+//
+// and that the scrub takes time linear in the length of the text for runs of
+// the headers and assignments that these boundaries read.
+func TestRound22ReviewRegressions(t *testing.T) {
+	t.Run("folded headers", func(t *testing.T) {
+		const secret = "SYNTHETIC_CANARY_82517"
+		for _, h := range []struct{ name, first string }{
+			{"Authorization", "Bearer abc"},
+			{"Proxy-Authorization", "Basic abc"},
+			{"Api-Key", "part1"},
+			{"X-Api-Key", "part1"},
+			{"X-Goog-Api-Key", "part1"},
+			{"Api-Key-Secret", "part1"},
+			{"Api-Key-String", "part1"},
+			{"Cookie", "sid=part1;"},
+			{"Set-Cookie", "session=part1;"},
+		} {
+			for _, nl := range []string{"\n", "\r\n"} {
+				for _, ws := range []string{" ", "  ", "\t", "\t\t", " \t"} {
+					head := h.name + ": " + h.first
+					placeholder := h.name + ": [REDACTED]"
+					next := nl + "Accept: text/plain"
+					for _, in := range []string{
+						head + nl + ws + nl + "\t" + secret + next,
+						head + nl + ws + nl + ws + secret + next,
+						head + nl + ws + nl + ws + nl + ws + secret + next,
+						placeholder + nl + ws + secret + next,
+						placeholder + nl + ws + nl + ws + secret + next,
+					} {
+						checkAllRedactionPaths(t, in, placeholder+next)
+						checkNoLeak(t, in, secret)
+					}
+					for _, in := range []string{
+						head + nl + ws + nl + ws + secret,
+						placeholder + nl + ws + secret,
+					} {
+						checkAllRedactionPaths(t, in, placeholder)
+						checkNoLeak(t, in, secret)
+					}
+				}
+			}
+		}
+		for _, tt := range []struct{ in, want string }{
+			{"Authorization: Bearer abc\r\n \r\n\tSYNTHETIC_CANARY_82517\r\nAccept: text/plain", "Authorization: [REDACTED]\r\nAccept: text/plain"},
+			{"Authorization: [REDACTED]\r\n\tSYNTHETIC_CANARY_82517\r\nAccept: text/plain", "Authorization: [REDACTED]\r\nAccept: text/plain"},
+			{"Authorization: Bearer abc\n  \n  syntheticfold\nContent-Type: text/plain", "Authorization: [REDACTED]\nContent-Type: text/plain"},
+			// A folded Cookie value whose first line holds no cookie pair.
+			{"Cookie: abc\n\tsid=SYNTHETIC_COOKIE_2201\nAccept: text/plain", "Cookie: [REDACTED]\nAccept: text/plain"},
+			{"cookie: Monster\n\tsid=SYNTHETIC_COOKIE_2201\nAccept: */*", "cookie: [REDACTED]\nAccept: */*"},
+			// An indented header folds over the lines indented further.
+			{"  Authorization: Bearer abc\n    \n    SYNTHETIC_FOLD_2202\n  Accept: text/plain", "  Authorization: [REDACTED]\n  Accept: text/plain"},
+			// An empty line, or a line indented no further than the header,
+			// ends the header and is kept.
+			{"Authorization: Bearer abc\r\n\r\n{\"status\":\"ok\"}", "Authorization: [REDACTED]\r\n\r\n{\"status\":\"ok\"}"},
+			{"Authorization: Bearer abc\n\n{\"status\":\"ok\"}", "Authorization: [REDACTED]\n\n{\"status\":\"ok\"}"},
+			{"Authorization: [REDACTED]\r\n\r\n\tbody", "Authorization: [REDACTED]\r\n\r\n\tbody"},
+			{"  Authorization: Bearer abc\n  \n  Accept: text/plain", "  Authorization: [REDACTED]\n  \n  Accept: text/plain"},
+		} {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+			for _, secret := range []string{"SYNTHETIC_CANARY_82517", "syntheticfold", "SYNTHETIC_COOKIE_2201", "SYNTHETIC_FOLD_2202"} {
+				checkNoLeak(t, tt.in, secret)
+			}
+		}
+	})
+
+	t.Run("prior-line quote lookback", func(t *testing.T) {
+		const secret = "syntheticlookback"
+		for _, n := range []int{100, 4095, 4096, 4097, 5000} {
+			pad := "X-Pad: " + strings.Repeat("p", n)
+			for _, prefix := range []string{"'", "curl -H '", "curl -H \""} {
+				q := prefix[len(prefix)-1:]
+				in := prefix + pad + "\nAuthorization: Bearer abc\n" + secret + q + "\necho KEEP_HEADER_TAIL"
+				checkLongRedactionPaths(t, in, prefix+pad+"\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL", secret)
+			}
+			// A text that opens with a double quote is a JSON blob that does
+			// not parse for the paths that try it, which write a placeholder
+			// for all of it; the scrub of its text keeps the rest.
+			in := "\"" + pad + "\nAuthorization: Bearer abc\n" + secret + "\"\necho KEEP_HEADER_TAIL"
+			if got, want := scrubTextPatterns(in), "\""+pad+"\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL"; got != want {
+				t.Errorf("scrubTextPatterns(%s) = %s, want %s", elideText(in), elideText(got), elideText(want))
+			}
+			raw, _ := sanitizeRawText(in)
+			smart, _, err := SmartTruncate(errors.New(in), 2*len(in)+1000)
+			if err != nil || strings.Contains(raw, secret) || strings.Contains(string(smart), secret) || strings.Contains(redactErrorMessage(in), secret) {
+				t.Errorf("a path wrote %q for %s: %s / %s / %v", secret, elideText(in), elideText(raw), elideText(string(smart)), err)
+			}
+		}
+		// A quote that opens hundreds of header lines before the header.
+		var pad strings.Builder
+		for i := range 300 {
+			fmt.Fprintf(&pad, "X-Pad-%d: value\n", i)
+		}
+		for _, prefix := range []string{"'", "curl -H '", "curl -H \""} {
+			q := prefix[len(prefix)-1:]
+			in := prefix + pad.String() + "Authorization: Bearer abc\n" + secret + q + "\necho KEEP_HEADER_TAIL"
+			checkLongRedactionPaths(t, in, prefix+pad.String()+"Authorization: [REDACTED]\necho KEEP_HEADER_TAIL", secret)
+		}
+	})
+
+	t.Run("shell context", func(t *testing.T) {
+		const secret = "violetfern"
+		const redacted = "password=[REDACTED] changed"
+		// export and the options and assignments after it own the quotes
+		// of the assignment that follows them, however many there are,
+		// past the run (61 assignments and more) after which the window
+		// of inShellAssignment no longer reaches export. The possessive
+		// and the contraction after the plural possessive are prose outside
+		// a shell assignment, so that each pins the window's guard.
+		for _, pair := range []string{"password=users' violetfern's changed", "password=users' violetfern wasn't changed"} {
+			for _, k := range []int{1, 50, 58, 59, 60, 61, 62, 63, 64, 100} {
+				for _, arg := range []string{"X=1 ", "-x "} {
+					prefix := "export " + strings.Repeat(arg, k)
+					checkLongRedactionPaths(t, prefix+pair, prefix+redacted, secret)
+				}
+			}
+			for _, prefix := range []string{
+				"export" + strings.Repeat(" ", 300),
+				"export \\\n" + strings.Repeat("X=1 \\\n", 60),
+				"export \\\r\n" + strings.Repeat("X=1 \\\r\n", 60),
+				"export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/custom/very/long/directory/path/that/exceeds/two/hundred/and/fifty/six/bytes/by/quite/a/lot/so/winstart/lands/inside/the/value/after/colon:/usr/games:/usr/local/games:/snap/bin ",
+				"export " + strings.Repeat("--very-long-shell-option-flag-name ", 8),
+				"export " + strings.Repeat("--very-long-shell-option-flag-name ", 59),
+				"export A\\\n=1 ",
+				"export \\\n-x ",
+				"ex\\\nport ",
+				"ex\\\r\nport ",
+			} {
+				checkLongRedactionPaths(t, prefix+pair, prefix+redacted, secret)
+			}
+		}
+		// Prose before the pair, or a command that ends before it, keeps
+		// the contraction after it.
+		for _, k := range []int{40, 50, 51, 52, 70} {
+			prefix := strings.Repeat("word ", k)
+			checkLongRedactionPaths(t, prefix+"the password=users' wasn't changed", prefix+"the password=[REDACTED] wasn't changed")
+		}
+		for _, tt := range []struct{ in, want string }{
+			{"export; password=users' wasn't changed", "export; password=[REDACTED] wasn't changed"},
+			{"export X=1; password=users' wasn't changed", "export X=1; password=[REDACTED] wasn't changed"},
+			{"echo hi\npassword=users' wasn't changed", "echo hi\npassword=[REDACTED] wasn't changed"},
+		} {
+			checkLongRedactionPaths(t, tt.in, tt.want)
+		}
+		// A long word whose visible part shows that the name before its
+		// "=" is not a shell name, as the ":" before password does, keeps
+		// its contraction and the pairs after it, while a long value of a
+		// credential assignment is redacted whole.
+		for _, n := range []int{255, 256, 257, 300} {
+			prefix := strings.Repeat("a", n)
+			tail := " wasn't changed; prompt_token_count=10 next_page_token=c1"
+			checkLongRedactionPaths(t, prefix+":password=users'"+tail, prefix+":password=[REDACTED]"+tail)
+			for _, tt := range []struct{ in, want string }{
+				{"export DB_PASSWORD=" + prefix + "users' violetfern's changed", "export DB_PASSWORD=[REDACTED] changed"},
+				{"export db_password=" + prefix + "users' violetfern's changed", "export db_password=[REDACTED] changed"},
+				{"DB_PASSWORD=" + prefix + "users' violetfern's changed", "DB_PASSWORD=[REDACTED] changed"},
+				{prefix + " db_password=users' violetfern's changed", prefix + " db_password=[REDACTED] changed"},
+			} {
+				checkLongRedactionPaths(t, tt.in, tt.want, secret)
+			}
+		}
+	})
+
+	t.Run("shell guard witnesses", func(t *testing.T) {
+		// Short closing words, which no rule on the length of a word
+		// redacts on its own, and which outside a shell assignment are
+		// prose after a plural possessive, so that each pins the guard it
+		// names.
+		for _, closing := range []string{"violetfern's", "violetfern wasn't", "violetfern it's"} {
+			for _, tt := range []struct{ in, want string }{
+				// A snake_case name, and a name with a digit, with no declaration.
+				{"db_password=users' " + closing + " changed", "db_password=[REDACTED] changed"},
+				{"oauth2_token=users' " + closing + " changed", "oauth2_token=[REDACTED] changed"},
+				// A declaration, a backslash-newline and whitespace before the name.
+				{"export\\\n password=users' " + closing + " changed", "export\\\n password=[REDACTED] changed"},
+				{"export\\\r\n password=users' " + closing + " changed", "export\\\r\n password=[REDACTED] changed"},
+				{"export \\\n password=users' " + closing + " changed", "export \\\n password=[REDACTED] changed"},
+				{"export A\\\n=1 password=users' " + closing + " changed", "export A\\\n=1 password=[REDACTED] changed"},
+				{"export \\\n-x password=users' " + closing + " changed", "export \\\n-x password=[REDACTED] changed"},
+				{"ex\\\nport password=users' " + closing + " changed", "ex\\\nport password=[REDACTED] changed"},
+			} {
+				checkAllRedactionPaths(t, tt.in, tt.want)
+				checkNoLeak(t, tt.in, "violetfern")
+			}
+		}
+		// The same contractions outside a shell assignment are prose.
+		for _, tt := range []struct{ in, want string }{
+			{"the password=users' wasn't changed", "the password=[REDACTED] wasn't changed"},
+			{"the password=users' it's changed", "the password=[REDACTED] it's changed"},
+		} {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+		}
+	})
+
+	t.Run("possessives after it's", func(t *testing.T) {
+		for _, name := range []string{"Bob", "administrator", "Bartholomewsmith", "Екатерина", "José", strings.Repeat("x", 64)} {
+			for _, tt := range []struct{ in, want string }{
+				{"the password=it's " + name + "'s", "the password=[REDACTED] " + name + "'s"},
+				{"password=it's " + name + "'s", "password=[REDACTED] " + name + "'s"},
+				{"the password=it's " + name + "'s now", "the password=[REDACTED] " + name + "'s now"},
+				{"the password=It's " + name + "'s", "the password=[REDACTED] " + name + "'s"},
+			} {
+				checkAllRedactionPaths(t, tt.in, tt.want)
+			}
+		}
+	})
+
+	t.Run("short secrets in quoted parts", func(t *testing.T) {
+		// A word glued to "=" that 's does not make a contraction of, as
+		// pre is not, opens a quoted part of the value, which the next
+		// apostrophe closes, so that the words up to it are the secret,
+		// however short, and the word after it is kept. A part that no
+		// apostrophe closes owns the rest of the text, as an unclosed
+		// shell quote does.
+		for _, key := range []string{"password", "token", "apikey"} {
+			for _, secret := range []string{"z", "zqxjkv", "zqxjkvwpbnmh", "zqxjkvwpbnmhy"} {
+				for _, tt := range []struct{ in, want string }{
+					{key + "=pre's " + secret + "'s changed", key + "=[REDACTED] changed"},
+					{key + "=pre's " + secret + "'s", key + "=[REDACTED]"},
+					{key + "=pre's " + secret + " changed", key + "=[REDACTED]"},
+					{key + "=pre's " + secret, key + "=[REDACTED]"},
+				} {
+					checkAllRedactionPaths(t, tt.in, tt.want)
+					checkNoLeak(t, tt.in, secret)
+				}
+			}
+		}
+		for _, tt := range []struct{ in, want, secret string }{
+			{"password=pre's synthlow's changed", "password=[REDACTED] changed", "synthlow"},
+			{"token=pre's secret's changed", "token=[REDACTED] changed", "secret"},
+			{"apikey=pre's secret's changed", "apikey=[REDACTED] changed", "secret"},
+			{"password=pre's synthlow", "password=[REDACTED]", "synthlow"},
+			{"password=v1_pre's synthlow's changed", "password=[REDACTED] changed", "synthlow"},
+			{"token=my-pre's synthtok's changed", "token=[REDACTED] changed", "synthtok"},
+			{"apikey=2fapre's synthkey's changed", "apikey=[REDACTED] changed", "synthkey"},
+			{"secret=a.b's synthdot's changed", "secret=[REDACTED] changed", "synthdot"},
+			{"password=v1_pre's synthunclosed", "password=[REDACTED]", "synthunclosed"},
+		} {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+			checkNoLeak(t, tt.in, tt.secret)
+		}
+		// A word that 's makes a contraction of, glued to "=", and a
+		// contraction or a possessive after a plural possessive outside a
+		// shell assignment, are prose.
+		for _, tt := range []struct{ in, want string }{
+			{"password=it's foo bar's", "password=[REDACTED] foo bar's"},
+			{"the password=that's Bob's", "the password=[REDACTED] Bob's"},
+			{"the password=users' it's changed", "the password=[REDACTED] it's changed"},
+			{"the password=users' isn't changed", "the password=[REDACTED] isn't changed"},
+			{"the password=users' they're changed", "the password=[REDACTED] they're changed"},
+			{"the password=users' manager's changed", "the password=[REDACTED] manager's changed"},
+		} {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+		}
+	})
+
+	t.Run("cookie prose", func(t *testing.T) {
+		for _, in := range []string{
+			"cookie: Monster",
+			"The cookie: Monster was here.",
+			"Cookie: Monster",
+			"Set-Cookie: Monster",
+			"cookie: Monster cookie: Elmo",
+			"I ate a cookie: Monster says hi\nThen another.",
+			"The cookie: Monster said \"hello\nworld\" today.",
+			"Cookie: Monster said \"hello\nworld\" today.",
+			"The cookie: Monster was here " + strings.Repeat("ordinary words ", 25),
+			"Set-Cookie2: x",
+			"X-Cookie-Jar: x",
+			"Cookie-Count: 3",
+		} {
+			checkAllRedactionPaths(t, in, in)
+		}
+		for _, tail := range []string{"it's", `"hi"`} {
+			for _, n := range []int{1500, 6000} {
+				in := strings.Repeat("cookie: Monster ", n) + tail
+				checkLongRedactionPaths(t, in, in)
+			}
+		}
+		manyCookies := strings.Repeat("cookie: Monster ", 50)
+		for _, tt := range []struct{ in, want, secret string }{
+			{"Cookie: sid=synthetic; preference=light", "Cookie: [REDACTED]", "synthetic"},
+			{"cookie: sid=SYNTHETIC_COOKIE_2203", "cookie: [REDACTED]", "SYNTHETIC_COOKIE_2203"},
+			{"The cookie: sid=SYNTHETIC_COOKIE_2204 was set.", "The cookie: [REDACTED]", "SYNTHETIC_COOKIE_2204"},
+			{"Set-Cookie: session=SYNTHETIC_COOKIE_2205; Path=/", "Set-Cookie: [REDACTED]", "SYNTHETIC_COOKIE_2205"},
+			{"Cookie: sid=part1;\n  part2=SYNTHETIC_COOKIE_2206\nAccept: */*", "Cookie: [REDACTED]\nAccept: */*", "SYNTHETIC_COOKIE_2206"},
+			// A quoted value, or a value in a quote that runs over lines, is
+			// a header value whatever it holds.
+			{"Cookie: \"Monster SYNTHETIC_COOKIE_2207\"", "Cookie: [REDACTED]", "SYNTHETIC_COOKIE_2207"},
+			{"Cookie: 'Monster SYNTHETIC_COOKIE_2209'", "Cookie: [REDACTED]", "SYNTHETIC_COOKIE_2209"},
+			{"curl -H 'Cookie: Monster\nSYNTHETIC_COOKIE_2208'\necho ok", "curl -H 'Cookie: [REDACTED]\necho ok", "SYNTHETIC_COOKIE_2208"},
+			{"cookie=SYNTHETIC_COOKIE_2210", "cookie=[REDACTED]", "SYNTHETIC_COOKIE_2210"},
+			// Cookie prose before another credential on the same line does not
+			// mask that credential or become redacted on a second pass.
+			{"The cookie: pre\"Bearer \"secret456\"tail was here", "The cookie: pre\"Bearer [REDACTED] was here", "secret456"},
+			{"The cookie: pre\"Bearer \"secret456\" tail was here", "The cookie: pre\"Bearer [REDACTED] tail was here", "secret456"},
+			{"The cookie: Monster and Bearer secret789 were here.", "The cookie: Monster and Bearer [REDACTED] were here.", "secret789"},
+			{"Cookie: Monster Bearer secret789", "Cookie: Monster Bearer [REDACTED]", "secret789"},
+			{`The cookie: Monster and {"api_key": "secret789"} were here.`, `The cookie: Monster and {"api_key":"[REDACTED]"} were here.`, "secret789"},
+			{"The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\necho KEEP_OK", "SECRET"},
+			{manyCookies + "Cookie: sid=secret2211", manyCookies + "Cookie: [REDACTED]", "secret2211"},
+			{manyCookies + `"Cookie: sid=secret2211"`, manyCookies + `"Cookie: [REDACTED]`, "secret2211"},
+			{manyCookies + `Cookie: "secret2212"`, manyCookies + "Cookie: [REDACTED]", "secret2212"},
+			{manyCookies + "Authorization: Bearer secret2213", manyCookies + "Authorization: [REDACTED]", "secret2213"},
+			{manyCookies + "Bearer secret2214", manyCookies + "Bearer [REDACTED]", "secret2214"},
+			{manyCookies + "Basic dXNlcjpwYXNz", manyCookies + "Basic [REDACTED]", "dXNlcjpwYXNz"},
+			{manyCookies + "password=secret2215", manyCookies + "password=[REDACTED]", "secret2215"},
+		} {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+			checkNoLeak(t, tt.in, tt.secret)
+		}
+		// Structured Cookie and Set-Cookie values are redacted by key,
+		// whatever they hold.
+		for _, key := range []string{"Cookie", "cookie", "Set-Cookie", "set_cookie"} {
+			checkRedactedMap(t, key, "Monster")
+		}
+		for _, in := range []string{`{"cookie": "Monster"}`, `{"Set-Cookie": "Monster"}`} {
+			checkNoLeak(t, in, "Monster")
+		}
+	})
+
+	t.Run("linear scaling", func(t *testing.T) {
+		scrub := func(in string) { _ = scrubTextPatterns(in) }
+		for _, tt := range []struct {
+			name string
+			gen  func(n int) string
+			run  func(in string)
+			n    int
+		}{
+			{"whitespace-folded headers", func(n int) string {
+				return strings.Repeat("Authorization: Bearer abc\r\n \r\n\tSYNTHETIC_CANARY_82517\r\n", n)
+			}, scrub, 3200},
+			{"placeholder-folded headers", func(n int) string {
+				return strings.Repeat("Authorization: [REDACTED]\r\n\t\r\n\tSYNTHETIC_CANARY_82517\r\n", n)
+			}, scrub, 3200},
+			{"headers in prior-line quotes", func(n int) string {
+				return strings.Repeat("'\nAuthorization: Bearer abc\nsyntheticlookback'\n", n)
+			}, scrub, 3200},
+			{"headers in prior-line quotes through an error", func(n int) string {
+				return strings.Repeat("'\nAuthorization: Bearer abc\nsyntheticlookback'\n", n)
+			}, func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 3200},
+			{"headers after an unclosed quote", func(n int) string {
+				return "'" + strings.Repeat("\nAuthorization: Bearer abc", n)
+			}, scrub, 3200},
+			{"headers in a quote that opens on a header line", func(n int) string {
+				return "'X-Pad: x" + strings.Repeat("\nAuthorization: Bearer abc", n) + "\nsyntheticlookback'\necho ok"
+			}, scrub, 3200},
+			{"header lines between a quote and its header", func(n int) string {
+				return "'" + strings.Repeat("\nX-Pad: value", n) + "\nAuthorization: Bearer abc\nsyntheticlookback'\necho ok"
+			}, scrub, 12800},
+			{"headers after escaped-quote lines", func(n int) string {
+				return strings.Repeat("\\\"\nAuthorization: Bearer abc\n", n)
+			}, scrub, 3200},
+			{"headers after double-quote lines", func(n int) string {
+				return strings.Repeat("\"\nAuthorization: Bearer abc\nsynthetic\"\n", n)
+			}, scrub, 3200},
+			{"continued shell assignments", func(n int) string {
+				return strings.Repeat("export X=1 \\\n password=users' violetfern's changed\n", n)
+			}, scrub, 3200},
+			{"assignments after long runs of assignments", func(n int) string {
+				return strings.Repeat("export "+strings.Repeat("X=1 ", 70)+"password=users' violetfern's changed\n", n)
+			}, scrub, 400},
+			{"possessive chains", func(n int) string {
+				return strings.Repeat("password=users' synthlow's changed the password=it's Bob's ", n)
+			}, scrub, 2000},
+			{"cookie prose on one line", func(n int) string { return strings.Repeat("cookie: Monster ", n) }, scrub, 4000},
+			{"cookie prose on one line with apostrophe", func(n int) string { return strings.Repeat("cookie: Monster ", n) + "it's" }, func(in string) { _ = scrubErrorTokens(in) }, 6000},
+			{"cookie prose on one line with quotes", func(n int) string { return strings.Repeat("cookie: Monster ", n) + `"hi"` }, func(in string) { _ = scrubErrorTokens(in) }, 6000},
+			{"cookie prose on lines", func(n int) string { return strings.Repeat("The cookie: Monster was here.\n", n) }, scrub, 4000},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				small, large := tt.gen(tt.n/4), tt.gen(tt.n)
+				tt.run(small) // warm up
+				// The best of three runs of each size, so that a pause of the
+				// scheduler is not read as growth.
+				best := func(in string) time.Duration {
+					d := scrubTime(func() { tt.run(in) })
+					for range 2 {
+						d = min(d, scrubTime(func() { tt.run(in) }))
+					}
+					return d
+				}
+				ds, dl := best(small), best(large)
+				// Linear growth gives 4x; quadratic 16x. Allow generous noise
+				// and a floor for timer resolution.
+				if strings.HasPrefix(tt.name, "cookie prose on one line with") {
+					if dl > 6*ds && dl > 50*time.Millisecond {
+						t.Errorf("scrubbing %d repeats took %v and %d repeats took %v, want < 6x ratio", tt.n/4, ds, tt.n, dl)
+					}
+				}
+				if dl > 10*ds && dl > 100*time.Millisecond {
+					t.Errorf("scrubbing %d repeats took %v and %d repeats took %v, which is more than linear", tt.n/4, ds, tt.n, dl)
+				}
+				if dl > 4*time.Second {
+					t.Errorf("scrubbing %d repeats took %v, want well under 4s", tt.n, dl)
+				}
+			})
+		}
+	})
 }

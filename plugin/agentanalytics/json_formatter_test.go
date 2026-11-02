@@ -6316,3 +6316,100 @@ func TestReviewPlainErrorRegression(t *testing.T) {
 		}
 	})
 }
+
+// round22SensitiveErrors returns texts that hold a credential which only the
+// text scrub can find: a header value folded over a line of whitespace alone
+// or after a placeholder, a value in a quote that opens thousands of bytes
+// before its header, an assignment whose declaration the options and
+// assignments before it push out of the shell lookbehind window, and a short
+// secret in a quoted part of a lowercase or snake_case assignment. Each comes
+// with the text that the scrub writes for it and the secret that it must not
+// write.
+func round22SensitiveErrors() []struct{ name, in, want, secret string } {
+	pad := "'X-Pad: " + strings.Repeat("p", 5000)
+	assignments := "export " + strings.Repeat("X=1 ", 100)
+	longPath := "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/custom/very/long/directory/path/that/exceeds/two/hundred/and/fifty/six/bytes/by/quite/a/lot/so/winstart/lands/inside/the/value/after/colon:/usr/games:/usr/local/games:/snap/bin "
+	longOpts := "export " + strings.Repeat("--very-long-shell-option-flag-name ", 8)
+	return []struct{ name, in, want, secret string }{
+		{"whitespace-only CRLF fold", "Authorization: Bearer abc\r\n \r\n\tSYNTHETIC_CANARY_82517\r\nAccept: text/plain", "Authorization: [REDACTED]\r\nAccept: text/plain", "SYNTHETIC_CANARY_82517"},
+		{"CRLF fold after a placeholder", "Authorization: [REDACTED]\r\n\tSYNTHETIC_CANARY_82517\r\nAccept: text/plain", "Authorization: [REDACTED]\r\nAccept: text/plain", "SYNTHETIC_CANARY_82517"},
+		{"spaces-only LF fold", "Authorization: Bearer abc\n  \n  syntheticfold\nContent-Type: text/plain", "Authorization: [REDACTED]\nContent-Type: text/plain", "syntheticfold"},
+		{"tabs-only LF fold", "X-Goog-Api-Key: part1\n\t\n\tsyntheticfold\nContent-Type: text/plain", "X-Goog-Api-Key: [REDACTED]\nContent-Type: text/plain", "syntheticfold"},
+		{"whitespace-only cookie fold", "Cookie: sid=part1;\r\n\t\r\n\tsyntheticfold\r\nAccept: */*", "Cookie: [REDACTED]\r\nAccept: */*", "syntheticfold"},
+		{"quote opened 5000 bytes before the header", pad + "\nAuthorization: Bearer abc\nsyntheticlookback'\necho KEEP_HEADER_TAIL", pad + "\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL", "syntheticlookback"},
+		{"declaration outside the lookbehind window", assignments + "password=users' violetfern's changed", assignments + "password=[REDACTED] changed", "violetfern"},
+		{"declaration outside the lookbehind window before a contraction", assignments + "password=users' violetfern wasn't changed", assignments + "password=[REDACTED] changed", "violetfern"},
+		{"long PATH assignment before password", longPath + "password=users' violetfern's changed", longPath + "password=[REDACTED] changed", "violetfern"},
+		{"long option flags before password", longOpts + "password=users' violetfern's changed", longOpts + "password=[REDACTED] changed", "violetfern"},
+		{"line splice before equals in preceding assignment", "export A\\\n=1 password=users' violetfern's changed", "export A\\\n=1 password=[REDACTED] changed", "violetfern"},
+		{"line splice inside declaration keyword", "ex\\\nport password=users' violetfern's changed", "ex\\\nport password=[REDACTED] changed", "violetfern"},
+		{"short password in a quoted part", "password=pre's synthlow's changed", "password=[REDACTED] changed", "synthlow"},
+		{"short token in a quoted part", "token=pre's synthtok's changed", "token=[REDACTED] changed", "synthtok"},
+		{"short API key in a quoted part", "apikey=pre's synthkey's changed", "apikey=[REDACTED] changed", "synthkey"},
+		{"prefixed password stem in a quoted part", "password=v1_pre's synthlow's changed", "password=[REDACTED] changed", "synthlow"},
+		{"hyphenated token stem in a quoted part", "token=my-pre's synthtok's changed", "token=[REDACTED] changed", "synthtok"},
+		{"digit-prefixed API key stem in a quoted part", "apikey=2fapre's synthkey's changed", "apikey=[REDACTED] changed", "synthkey"},
+		{"dotted secret stem in a quoted part", "secret=a.b's synthdot's changed", "secret=[REDACTED] changed", "synthdot"},
+		{"prefixed unclosed password stem", "password=v1_pre's synthunclosed", "password=[REDACTED]", "synthunclosed"},
+		{"snake_case name before a plural possessive", "db_password=users' violetfern's changed", "db_password=[REDACTED] changed", "violetfern"},
+		{"cookie prose before quoted Bearer token", "The cookie: pre\"Bearer \"secret456\"tail was here", "The cookie: pre\"Bearer [REDACTED] was here", "secret456"},
+		{"cookie prose before spaced quoted Bearer token", "The cookie: pre\"Bearer \"secret456\" tail was here", "The cookie: pre\"Bearer [REDACTED] tail was here", "secret456"},
+		{"cookie prose before Bearer token", "The cookie: Monster and Bearer secret789 were here.", "The cookie: Monster and Bearer [REDACTED] were here.", "secret789"},
+		{"cookie prose before multiline curl header", "The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\necho KEEP_OK", "SECRET"},
+	}
+}
+
+// TestRound22PlainErrorRegression checks that SmartTruncate, which writes the
+// text of a plain error under redaction, writes the texts of
+// round22SensitiveErrors with their credentials redacted, whether the error
+// stands alone or in a map or a slice, and keeps the prose that the same
+// boundaries keep: a contraction after a long word whose visible part shows
+// that it is not a shell assignment, a possessive after it's, and the word
+// cookie and a colon with no cookie pair after them.
+func TestRound22PlainErrorRegression(t *testing.T) {
+	check := func(t *testing.T, in, want, secret string) {
+		t.Helper()
+		for _, v := range []struct {
+			name string
+			in   any
+			want any
+		}{
+			{"error", errors.New(in), want},
+			{"error in a map", map[string]any{"err": errors.New(in)}, map[string]any{"err": want}},
+			{"error in a slice", []any{errors.New(in)}, []any{want}},
+		} {
+			b, _, err := SmartTruncate(v.in, 2*len(in)+1000)
+			if secret != "" && bytes.Contains(b, []byte(secret)) {
+				t.Errorf("SmartTruncate(%s of %s) = %s, which holds %q", v.name, elideText(in), elideText(string(b)), secret)
+			}
+			var got any
+			if err != nil || json.Unmarshal(b, &got) != nil {
+				t.Errorf("SmartTruncate(%s of %s) = (%s, %v), want JSON", v.name, elideText(in), elideText(string(b)), err)
+				continue
+			}
+			if diff := cmp.Diff(v.want, got); diff != "" {
+				t.Errorf("SmartTruncate(%s of %s) mismatch (-want +got):\n%s", v.name, elideText(in), diff)
+			}
+		}
+	}
+	for _, tt := range round22SensitiveErrors() {
+		t.Run(tt.name, func(t *testing.T) {
+			check(t, tt.in, tt.want, tt.secret)
+		})
+	}
+	prose := strings.Repeat("a", 300)
+	for _, tt := range []struct{ name, in, want string }{
+		{"contraction after a long word that is not an assignment", prose + ":password=users' wasn't changed; prompt_token_count=10 next_page_token=c1", prose + ":password=[REDACTED] wasn't changed; prompt_token_count=10 next_page_token=c1"},
+		{"possessive of a long word after it's", "the password=it's administrator's", "the password=[REDACTED] administrator's"},
+		{"possessive of a non-ASCII word after it's", "the password=it's Екатерина's", "the password=[REDACTED] Екатерина's"},
+		{"cookie and a colon in prose", "cookie: Monster", "cookie: Monster"},
+		{"cookie and a colon in a sentence", "The cookie: Monster was here.", "The cookie: Monster was here."},
+		{"long cookie prose sentence over 256 bytes", "The cookie: Monster was here " + strings.Repeat("ordinary words ", 25), "The cookie: Monster was here " + strings.Repeat("ordinary words ", 25)},
+		{"cookie prose with later multiline quote", "The cookie: Monster said \"hello\nworld\" today.", "The cookie: Monster said \"hello\nworld\" today."},
+		{"capitalized cookie prose with later multiline quote", "Cookie: Monster said \"hello\nworld\" today.", "Cookie: Monster said \"hello\nworld\" today."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			check(t, tt.in, tt.want, "")
+		})
+	}
+}

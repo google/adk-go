@@ -140,8 +140,9 @@ const unicodeSpaceRun = `[` + unicodeSpaceClass + `]+`
 const delimSpaceClass = unicodeSpaceClass + `[:cntrl:]`
 
 var (
-	uriTokenRe   = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
-	authHeaderRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*([^\r\n]*)`)
+	uriTokenRe         = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
+	authHeaderRe       = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*([^\r\n]*)`)
+	authHeaderPrefixRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*`)
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
@@ -1843,41 +1844,197 @@ func scrubTextPatterns(s string) string {
 // placeholder. The value runs to the end of its line, and on over later lines
 // where a quote in it is not closed on its line (see authHeaderValueEnd), so
 // that the opening quote is not redacted while the rest of the credential is
-// left on the lines after it, as in Authorization: abc'x<LF>SECRET'.
+// left on the lines after it, as in Authorization: abc'x<LF>SECRET'. A Cookie
+// or Set-Cookie name and a colon whose value does not open with a quote and
+// holds no cookie pair (see cookieValueIsProse) on its one line, outside any
+// quote, as in The cookie: Monster was here., are prose and are left as they
+// are.
 func redactAuthHeaders(s string) string {
 	locs := authHeaderRe.FindAllStringSubmatchIndex(s, -1)
 	if locs == nil {
 		return s
 	}
 	var b strings.Builder
+	quotes := newHeaderQuoteScanner(s)
 	last := 0
-	for _, loc := range locs {
+	curLineStart, curLineEnd, curIndentLen := -1, -1, 0
+	for idx := 0; idx < len(locs); idx++ {
+		loc := locs[idx]
 		if loc[0] < last {
 			continue
 		}
+		outer, inner := quotes.openBefore(loc[0], loc[4])
+		if loc[5] != curLineEnd {
+			curLineStart = strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
+			curLineEnd = loc[5]
+			curIndentLen = 0
+			for curLineStart+curIndentLen < loc[0] && (s[curLineStart+curIndentLen] == ' ' || s[curLineStart+curIndentLen] == '\t') {
+				curIndentLen++
+			}
+		}
+		lineStart, indentLen := curLineStart, curIndentLen
+		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
+		if outer == "" && inner == "" && isCookieHeaderKey(s[loc[2]:loc[3]]) && openingQuote(s, loc[4]) == "" && cookieValueIsProse(s, loc[4]) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
+			if sub := authHeaderPrefixRe.FindStringSubmatchIndex(s[loc[4]:loc[5]]); sub != nil {
+				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
+				idx--
+			}
+			continue
+		}
+		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen)
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(s[loc[2]:loc[3]])
 		b.WriteString(": ")
 		b.WriteString(redactedValue)
-		outer, inner := quoteOpenOnLine(s, loc[0], loc[4])
-		lineStart := strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
-		indentLen := 0
-		for lineStart+indentLen < loc[0] && (s[lineStart+indentLen] == ' ' || s[lineStart+indentLen] == '\t') {
-			indentLen++
-		}
-		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
-		last = authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen)
+		last = end
 	}
 	b.WriteString(s[last:])
 	return b.String()
 }
 
-// maxHeaderQuoteLookback bounds how far back quoteOpenOnLine scans across prior
-// lines for an opening quote that spans into a header on a later line.
-const maxHeaderQuoteLookback = 4096
+// isCookieHeaderKey reports whether name is Cookie or Set-Cookie, ignoring
+// case, the whitespace around it, and the "_", "-" and "." separators.
+func isCookieHeaderKey(name string) bool {
+	n := removeKeySeparators(strings.ToLower(strings.TrimFunc(name, isDelimSpace)))
+	return n == "cookie" || n == "setcookie"
+}
 
-// quoteOpenOnLine returns the quotes of the strings that the part of the line
-// of s before i (or an earlier line in s when the quote stays open across the
+// cookieValueIsProse reports whether the text starting at s[start:] after a
+// Cookie or Set-Cookie name and its colon reads as prose rather than as a
+// cookie list: the first token on its line (after any semicolon-delimited
+// flag tokens) does not start with the redaction placeholder that a scrub of a
+// header value leaves and is not a cookie pair with "=" (RFC 6265), as Monster
+// in The cookie: Monster was here. is not.
+func cookieValueIsProse(s string, start int) bool {
+	at := start
+	for at < len(s) && s[at] != '\r' && s[at] != '\n' {
+		r, width := utf8.DecodeRuneInString(s[at:])
+		if !isDelimSpace(r) {
+			break
+		}
+		at += width
+	}
+	if strings.HasPrefix(s[at:], redactedValue) {
+		return false
+	}
+	for at < len(s) && s[at] != '\r' && s[at] != '\n' {
+		k := at
+		for k < len(s) {
+			c := s[k]
+			if c == '=' {
+				return false
+			}
+			if c <= ' ' || c == ':' || c == ';' || c == '"' || c == '\'' {
+				break
+			}
+			r, width := utf8.DecodeRuneInString(s[k:])
+			if isDelimSpace(r) {
+				break
+			}
+			k += width
+		}
+		sp := k
+		if k > at {
+			sp = skipHorizDelimSpace(s, k)
+		}
+		if sp < len(s) && s[sp] == '=' {
+			return false
+		}
+		if sp < len(s) && s[sp] == ';' {
+			at = skipHorizDelimSpace(s, sp+1)
+			continue
+		}
+		break
+	}
+	return true
+}
+
+// isCookieProse reports whether an unquoted key name, the delimiter delim
+// after it, and the value that starts at s[start:] read as the word cookie
+// and a colon in prose, as in The cookie: Monster was here., rather than as a
+// Cookie or Set-Cookie header: name is Cookie or Set-Cookie (see
+// isCookieHeaderKey), delim is a colon, the value does not open with a quote,
+// and the token after it is not a cookie pair (see cookieValueIsProse).
+// Structured Cookie and Set-Cookie fields, whose keys are quoted or whose
+// values are read by key, are redacted whatever their values hold.
+func isCookieProse(s, name, delim string, start int) bool {
+	if strings.TrimFunc(delim, isDelimSpace) != ":" || !isCookieHeaderKey(name) || openingQuote(s, start) != "" {
+		return false
+	}
+	return cookieValueIsProse(s, start)
+}
+
+// hasFoldedHeaderContinuation reports whether canFold is true and the line
+// ending at s[lineEnd] is followed immediately by an RFC 9112 whitespace-folded
+// continuation line (see isFoldedHeaderLine).
+func hasFoldedHeaderContinuation(s string, lineEnd int, canFold bool, indentLen int) bool {
+	if !canFold || lineEnd >= len(s) {
+		return false
+	}
+	next := lineEnd + 1
+	if s[lineEnd] == '\r' && next < len(s) && s[next] == '\n' {
+		next++
+	}
+	return next < len(s) && isFoldedHeaderLine(s, next, indentLen)
+}
+
+// headerQuoteScanner finds the quotes that are open before each header that
+// redactAuthHeaders reads in s, in order (see openBefore). It reads the lines
+// of s once, front to back, and carries the state of the quotes that are open
+// at the end of the lines before one header on to the next, rather than
+// reading back over those lines again for each header, so that a quote that
+// opens any number of lines and bytes before a header and stays open into
+// it, as the first quote of 'X-Pad: <5000 bytes><LF>Authorization: Bearer abc<LF>SECRET'
+// does, is found, and finding the quotes for all the headers in s takes time
+// linear in its length.
+type headerQuoteScanner struct {
+	s string
+	// lines is the state of the scan of the lines of s, up to the line break
+	// before the line of the last header that openBefore read the lines
+	// before for.
+	lines lineQuoteState
+	// curLine is the state of the scan on the line of the last header that
+	// openBefore read, so that subsequent headers on the same line advance
+	// from curLine.k rather than rescanning from lineStart.
+	curLine    lineQuoteState
+	hasCurLine bool
+	// closes caches where the quotes that stay open into a header from a line
+	// before it close, by kind of quote (see quoteCloses).
+	closes [4]quoteCloseMemo
+}
+
+// newHeaderQuoteScanner returns a headerQuoteScanner for s.
+func newHeaderQuoteScanner(s string) *headerQuoteScanner {
+	return &headerQuoteScanner{s: s, lines: newLineQuoteState(s, 0, len(s))}
+}
+
+// lineQuoteState is the state of a scan of the lines of s for the quotes that
+// are open before a header (see headerQuoteScanner.openBefore): the next byte
+// to read, k, the start and the end of the line of k, the quotes outer and
+// inner that are open there, where each opened and where the part of the line
+// that it holds starts, whether each stays open from an earlier line, and the
+// explicit outer quote that the last line break closed, if any.
+type lineQuoteState struct {
+	k, curLineStart, lineLim       int
+	outer, inner                   string
+	outerOpenPos, outerOpenEnd     int
+	innerOpenPos, innerOpenEnd     int
+	outerPriorLine, innerPriorLine bool
+	closingExplicitOuter           byte
+}
+
+// newLineQuoteState returns the state of a scan of s from the start of a line
+// at s[start:], with no quote open, that reads s up to bound.
+func newLineQuoteState(s string, start, bound int) lineQuoteState {
+	st := lineQuoteState{k: start, curLineStart: start, lineLim: bound, outerOpenPos: -1, outerOpenEnd: -1, innerOpenPos: -1, innerOpenEnd: -1}
+	if nl := strings.IndexAny(s[start:bound], "\r\n"); nl >= 0 {
+		st.lineLim = start + nl
+	}
+	return st
+}
+
+// openBefore returns the quotes of the strings that the part of the line of
+// s before i (or an earlier line in s when the quote stays open across the
 // line break into the header at i and closes at or after valStart) opens and
 // leaves open: outer, a double or a single quote, as the " before
 // Authorization in "Authorization: x" is, and inner, an escaped quote (\" or
@@ -1885,40 +2042,86 @@ const maxHeaderQuoteLookback = 4096
 // Authorization in {\"h\": \"Authorization: x\"} does. Inside a single-quoted
 // string every byte but the closing quote is literal, as a shell reads it;
 // elsewhere a backslash escapes the byte after it, and inside an escaped
-// string a quote is a byte of it unless it closes outer.
-func quoteOpenOnLine(s string, i, valStart int) (outer, inner string) {
-	lineStart := strings.LastIndexAny(s[:i], "\r\n") + 1
-	start := lineStart
-	if quoteRestIsHeaderOrSpace(s, lineStart, i) {
-		start = max(0, i-maxHeaderQuoteLookback)
-		if start > 0 && start < lineStart {
-			if nl := strings.IndexAny(s[start:lineStart], "\r\n"); nl >= 0 {
-				start += nl + 1
-			}
+// string a quote is a byte of it unless it closes outer. The lines before the
+// header's line are read only if the part of that line before the header is
+// whitespace or starts another header, and then from the start of s, however
+// far back, with the scan of them carried over from the header before; i
+// must lie after the line of the header of the call before.
+func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
+	s := h.s
+	var st lineQuoteState
+	var lineStart int
+	if h.hasCurLine && i >= h.curLine.k && i <= h.curLine.lineLim {
+		lineStart = h.curLine.curLineStart
+		h.curLine.scan(s, i, h.curLine.lineLim, lineStart)
+		st = h.curLine
+	} else {
+		lineStart = strings.LastIndexAny(s[:i], "\r\n") + 1
+		lineEnd := len(s)
+		if nl := strings.IndexAny(s[lineStart:], "\r\n"); nl >= 0 {
+			lineEnd = lineStart + nl
 		}
+		if lineStart > 0 && quoteRestIsHeaderOrSpace(s, lineStart, i) {
+			// The scan of the lines before is shared by all headers up to the
+			// line break before the header's line, which, as the header's line,
+			// it reads for this header alone, up to i.
+			brk := lineStart - 1
+			if brk > 0 && s[brk] == '\n' && s[brk-1] == '\r' {
+				brk--
+			}
+			h.lines.scan(s, brk, len(s), len(s)+1)
+			st = h.lines
+			st.lineLim = lineEnd
+		} else {
+			st = newLineQuoteState(s, lineStart, len(s))
+			st.lineLim = lineEnd
+		}
+		st.scan(s, i, lineEnd, lineStart)
 	}
-	outerOpenPos, outerOpenEnd := -1, -1
-	innerOpenPos, innerOpenEnd := -1, -1
-	outerPriorLine, innerPriorLine := false, false
-	var closingExplicitOuter byte
-	curLineStart := start
-	lineLim := i
-	if nl := strings.IndexAny(s[curLineStart:i], "\r\n"); nl >= 0 {
-		lineLim = curLineStart + nl
+	outer, inner = st.outer, st.inner
+	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
+	if inner != "" && innerPriorLine && !quoteRestIsHeaderOrSpace(s, st.innerOpenEnd, i) {
+		inner = ""
+		innerPriorLine = false
 	}
-	for k := start; k < i; {
+	if outer != "" && outerPriorLine && inner == "" && !quoteRestIsHeaderOrSpace(s, st.outerOpenEnd, i) {
+		outer = ""
+		outerPriorLine = false
+	}
+	if (outerPriorLine || innerPriorLine) && !h.quoteCloses(valStart, outer, inner) {
+		outer, inner = "", ""
+		outerPriorLine, innerPriorLine = false, false
+	}
+	st.outer, st.inner = outer, inner
+	st.outerPriorLine, st.innerPriorLine = outerPriorLine, innerPriorLine
+	h.curLine = st
+	h.hasCurLine = true
+	return outer, inner
+}
+
+// scan advances st over s up to to, reading s up to bound, for the header
+// whose line starts at hdrLineStart, or, if hdrLineStart is past the end of
+// s, over lines before the line of a header only.
+func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
+	k, curLineStart, lineLim := st.k, st.curLineStart, st.lineLim
+	outer, inner := st.outer, st.inner
+	outerOpenPos, outerOpenEnd := st.outerOpenPos, st.outerOpenEnd
+	innerOpenPos, innerOpenEnd := st.innerOpenPos, st.innerOpenEnd
+	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
+	closingExplicitOuter := st.closingExplicitOuter
+	for k < to {
 		c := s[k]
 		if c == '\r' || c == '\n' {
 			lineEnd := k
-			if c == '\r' && k+1 < i && s[k+1] == '\n' {
+			if c == '\r' && k+1 < bound && s[k+1] == '\n' {
 				k += 2
 			} else {
 				k++
 			}
 			prevLineStart := curLineStart
 			curLineStart = k
-			lineLim = i
-			if nl := strings.IndexAny(s[curLineStart:i], "\r\n"); nl >= 0 {
+			lineLim = bound
+			if nl := strings.IndexAny(s[curLineStart:bound], "\r\n"); nl >= 0 {
 				lineLim = curLineStart + nl
 			}
 			nextIsHeaderOrSpace := quoteRestIsHeaderOrSpace(s, curLineStart, lineLim)
@@ -1963,14 +2166,14 @@ func quoteOpenOnLine(s string, i, valStart int) (outer, inner string) {
 			}
 			k++
 		case c == '\\':
-			if q := openingQuote(s, k); q != "" && k+len(q) <= i {
+			if q := openingQuote(s, k); q != "" && k+len(q) <= bound {
 				switch inner {
 				case q:
 					inner = ""
 					innerOpenPos, innerOpenEnd = -1, -1
 					innerPriorLine = false
 				case "":
-					if outer == "" && !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < lineStart) && !inShellAssignment(s, k) {
+					if outer == "" && !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(s, k) {
 						break
 					}
 					inner = q
@@ -1979,7 +2182,7 @@ func quoteOpenOnLine(s string, i, valStart int) (outer, inner string) {
 					innerPriorLine = false
 				}
 			}
-			if k+1 < i && s[k+1] != '\r' && s[k+1] != '\n' {
+			if k+1 < bound && s[k+1] != '\r' && s[k+1] != '\n' {
 				k += 2
 			} else {
 				k++
@@ -1998,14 +2201,14 @@ func quoteOpenOnLine(s string, i, valStart int) (outer, inner string) {
 					k++
 					continue
 				}
-				if c == closingExplicitOuter && k < lineStart {
+				if c == closingExplicitOuter && k < hdrLineStart {
 					closingExplicitOuter = 0
 					if skipHorizDelimSpace(s, curLineStart) == k && skipHorizDelimSpace(s, k+1) == lineLim {
 						k++
 						continue
 					}
 				}
-				if !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < lineStart) && !inShellAssignment(s, k) {
+				if !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(s, k) {
 					k++
 					continue
 				}
@@ -2024,18 +2227,77 @@ func quoteOpenOnLine(s string, i, valStart int) (outer, inner string) {
 			k++
 		}
 	}
-	if inner != "" && innerPriorLine && !quoteRestIsHeaderOrSpace(s, innerOpenEnd, i) {
-		inner = ""
-		innerPriorLine = false
+	*st = lineQuoteState{
+		k: k, curLineStart: curLineStart, lineLim: lineLim,
+		outer: outer, inner: inner,
+		outerOpenPos: outerOpenPos, outerOpenEnd: outerOpenEnd,
+		innerOpenPos: innerOpenPos, innerOpenEnd: innerOpenEnd,
+		outerPriorLine: outerPriorLine, innerPriorLine: innerPriorLine,
+		closingExplicitOuter: closingExplicitOuter,
 	}
-	if outer != "" && outerPriorLine && inner == "" && !quoteRestIsHeaderOrSpace(s, outerOpenEnd, i) {
-		outer = ""
-		outerPriorLine = false
+}
+
+// quoteCloseMemo holds a scan of quoteCloseScan from from for one kind of
+// quote (see headerQuoteScanner.quoteCloses): where the quote closes, or -1,
+// the start of the last line in s[from+1:closePos+1] that starts another
+// header, or -1 (see crossesHeaderLine), and whether the line on which the
+// quote closes rejects the close if the quote crosses such a line (see
+// closeLineRejects).
+type quoteCloseMemo struct {
+	ok                          bool
+	from, closePos, lastHdrLine int
+	rejects                     bool
+}
+
+// quoteCloses reports what outerQuoteCloses reports for s[from:] and the
+// quotes outer and inner that stay open into a header from a line before it
+// (see openBefore), where from is the start of a header value, after its
+// colon and whitespace, so that no backslash before it escapes it. Where such
+// a quote closes depends on from and its kind alone: a single quote closes at
+// the next single quote, a double quote at the next one that a backslash does
+// not escape, whatever escaped quote is open inside it, and an escaped quote
+// open in no other string at the next escaped quote of its kind. The value of
+// each later header starts after the one of the header before, so the scan
+// that found the close for a header holds for every later header whose value
+// starts before that close, and is reused for them. The scans for a kind of
+// quote thus cover s at most once, however many headers a quote stays open
+// into, as the first quote of '<LF>Authorization: a<LF>Authorization: b<LF>...
+// does.
+func (h *headerQuoteScanner) quoteCloses(from int, outer, inner string) bool {
+	var m *quoteCloseMemo
+	switch {
+	case outer == `'` && inner == "":
+		m = &h.closes[0]
+	case outer == `"`:
+		m = &h.closes[1]
+	case outer == "" && inner == `\'`:
+		m = &h.closes[2]
+	case outer == "" && inner == `\"`:
+		m = &h.closes[3]
+	default:
+		return outerQuoteCloses(h.s, from, outer, inner)
 	}
-	if (outerPriorLine || innerPriorLine) && !outerQuoteCloses(s, valStart, outer, inner) {
-		return "", ""
+	s := h.s
+	if !m.ok || from < m.from || m.closePos >= 0 && from >= m.closePos {
+		closePos := quoteCloseScan(s, from, outer, inner)
+		*m = quoteCloseMemo{ok: true, from: from, closePos: closePos, lastHdrLine: -1}
+		if closePos >= 0 {
+			for p := closePos - 1; p >= from; p-- {
+				if (s[p] == '\n' || s[p] == '\r' && (p+1 >= len(s) || s[p+1] != '\n')) && startsHeaderLine(s, p+1) {
+					m.lastHdrLine = p + 1
+					break
+				}
+			}
+			if m.lastHdrLine >= 0 {
+				checkQuote := outer
+				if checkQuote == "" {
+					checkQuote = inner
+				}
+				m.rejects = closeLineRejects(s, closePos, checkQuote)
+			}
+		}
 	}
-	return outer, inner
+	return m.closePos >= 0 && !(m.lastHdrLine > from && m.rejects)
 }
 
 // isExplicitLineQuoteOpener reports whether the quote at s[k] on the line
@@ -2121,12 +2383,25 @@ func quoteRestIsHeaderOrSpace(s string, qEnd, lineEnd int) bool {
 // subsequent header line with the opening quote of a paired string on a later
 // line, as in req="Authorization: Bearer x<LF>Content-Type: application/json<LF><LF>{"status": "ok"}.
 func outerQuoteCloses(s string, from int, outer, inner string) bool {
-	origOuter, origInner := outer, inner
-	closePos := -1
+	closePos := quoteCloseScan(s, from, outer, inner)
+	if closePos < 0 {
+		return false
+	}
+	checkQuote := outer
+	if checkQuote == "" {
+		checkQuote = inner
+	}
+	return checkQuote == "" || !crossesHeaderLine(s, from, closePos) || !closeLineRejects(s, closePos, checkQuote)
+}
+
+// quoteCloseScan returns where the open outer and inner quotes at s[from]
+// close: the offset just after the quote that closes the last of them, or -1
+// if they do not close before the end of s. It reads s with the lexical rules
+// of headerQuoteScanner.openBefore.
+func quoteCloseScan(s string, from int, outer, inner string) int {
 	for k := from; k < len(s); {
 		if outer == "" && inner == "" {
-			closePos = k
-			break
+			return k
 		}
 		c := s[k]
 		switch {
@@ -2161,59 +2436,61 @@ func outerQuoteCloses(s string, from int, outer, inner string) bool {
 			k++
 		}
 	}
-	if closePos < 0 && outer == "" && inner == "" {
-		closePos = len(s)
+	if outer == "" && inner == "" {
+		return len(s)
 	}
-	if closePos < 0 {
-		return false
+	return -1
+}
+
+// closeLineRejects reports whether the line on which a quote checkQuote that
+// stays open over a later header line closes, just before closePos, shows
+// that the quote there opens a string of its own on that line rather than
+// closing the one opened before the header line: the rest of that line
+// leaves a quote of the kind open, or the quote ends the line and follows a
+// key and its colon or a shell assignment, as the last quote of
+// X-Note: 'hi<LF> does.
+func closeLineRejects(s string, closePos int, checkQuote string) bool {
+	rest := s[closePos:min(len(s), closePos+maxShellLineScan)]
+	if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
+		rest = rest[:nl]
 	}
-	checkQuote := origOuter
-	if checkQuote == "" {
-		checkQuote = origInner
+	if hasUnpairedQuoteOnLine(rest, checkQuote) {
+		return true
 	}
-	if checkQuote != "" && crossesHeaderLine(s, from, closePos) {
-		rest := s[closePos:min(len(s), closePos+maxShellLineScan)]
-		if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
-			rest = rest[:nl]
+	qPos := closePos - len(checkQuote)
+	closeLineStart := strings.LastIndexAny(s[:qPos], "\r\n") + 1
+	hdrStart := skipHorizDelimSpace(s, closeLineStart)
+	if skipHorizDelimSpace(s, closePos) == closePos+len(rest) && hdrStart < qPos {
+		p := qPos - 1
+		for p >= hdrStart && (s[p] == ' ' || s[p] == '\t') {
+			p--
 		}
-		if hasUnpairedQuoteOnLine(rest, checkQuote) {
-			return false
-		}
-		qPos := closePos - len(checkQuote)
-		closeLineStart := strings.LastIndexAny(s[:qPos], "\r\n") + 1
-		hdrStart := skipHorizDelimSpace(s, closeLineStart)
-		if skipHorizDelimSpace(s, closePos) == closePos+len(rest) && hdrStart < qPos {
-			p := qPos - 1
-			for p >= hdrStart && (s[p] == ' ' || s[p] == '\t') {
-				p--
+		if p >= hdrStart && strings.IndexByte(s[hdrStart:p], ':') < 0 && strings.IndexByte(s[hdrStart:p], '=') < 0 {
+			if s[p] == ':' || inShellAssignment(s, qPos) || (s[p] == '=' && p > hdrStart && (s[p-1] == ' ' || s[p-1] == '\t')) {
+				return true
 			}
-			if p >= hdrStart && strings.IndexByte(s[hdrStart:p], ':') < 0 && strings.IndexByte(s[hdrStart:p], '=') < 0 {
-				if s[p] == ':' || inShellAssignment(s, qPos) || (s[p] == '=' && p > hdrStart && (s[p-1] == ' ' || s[p-1] == '\t')) {
-					return false
-				}
-			}
 		}
 	}
-	return true
+	return false
 }
 
 // isFoldedHeaderLine reports whether the line starting at s[next:] is an
 // RFC 9112 whitespace-folded continuation of a header whose line started with
-// indentLen leading spaces or tabs.
+// indentLen leading spaces or tabs: it is indented further than the header's
+// line. A line of spaces or tabs alone is such a continuation too, as the
+// second line of Authorization: Bearer abc<CRLF> <CRLF>\tSECRET is, so that
+// the folded lines after it stay in the value; an empty line, or a line that
+// starts at the header's indentation or before it, as another header does, is
+// not.
 func isFoldedHeaderLine(s string, next, indentLen int) bool {
 	nextIndent := 0
 	for next+nextIndent < len(s) && (s[next+nextIndent] == ' ' || s[next+nextIndent] == '\t') {
 		nextIndent++
 	}
 	if indentLen == 0 {
-		if nextIndent == 0 {
-			return false
-		}
-	} else if nextIndent <= indentLen {
-		return false
+		return nextIndent > 0
 	}
-	rem := next + nextIndent
-	return rem < len(s) && s[rem] != '\r' && s[rem] != '\n'
+	return nextIndent > indentLen
 }
 
 // authHeaderValueEnd returns where the header value that starts at s[from:]
@@ -2232,7 +2509,7 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 // (see unclosedContractionIsProse). An escaped quote (\" or \') opens and
 // closes a value as a quote does (see escapedQuotedRegex), a backslash
 // escapes any other byte after it, and the quotes outer and inner of the
-// strings that are open before the header on its line (see quoteOpenOnLine)
+// strings that are open before the header (see headerQuoteScanner.openBefore)
 // advance through the header value with the same lexical rules (across line
 // breaks up to a line that starts another header when outer/inner is unclosed,
 // or across colon-led lines when outer/inner is demonstrably closed, or to the
@@ -2240,9 +2517,12 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 // nestedQuotedValueEnd) until those strings close, as the last quote of
 // "Authorization: x" or curl -H 'Authorization: Bearer abc<LF>SECRET' does,
 // rather than opening a new string. When canFold is true, unquoted RFC 9112
-// whitespace-folded continuation lines after end are also included.
+// whitespace-folded continuation lines after end are also included (see
+// isFoldedHeaderLine), even after a first line that holds only the redaction
+// placeholder, as the folded line of Authorization: [REDACTED]<CRLF>\tSECRET
+// does, since one redacted line does not show that the whole value is.
 func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int) int {
-	if strings.TrimSpace(s[from:end]) == redactedValue {
+	if !canFold && strings.TrimSpace(s[from:end]) == redactedValue {
 		return end
 	}
 	nestedEnd := 0
@@ -3618,6 +3898,12 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		// next_page_token, which textKeyAllowedAt does not accept, and whose
 		// value pairAtIf has not read. What follows the delimiter is scanned
 		// again.
+		return s[loc[0]:loc[7]], loc[7]
+	}
+	if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8]) {
+		// A Cookie or Set-Cookie name and a colon in prose, as in
+		// The cookie: Monster was here., which redactAuthHeaders leaves as
+		// it is too. What follows the delimiter is scanned again.
 		return s[loc[0]:loc[7]], loc[7]
 	}
 	open := brackets.before(s, loc[0])
@@ -6355,6 +6641,10 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(loc[7], loc[0]+1)
 			continue
 		}
+		if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8]) {
+			pos = max(loc[7], loc[0]+1)
+			continue
+		}
 		open := brackets.before(s, loc[0])
 		start, end := loc[8], loc[9]
 		quoted := quotes.before(s, start)
@@ -6456,16 +6746,53 @@ func unclosedContractionIsProse(s string, i, quoteLen int) bool {
 // stem lists that contractionStemIsProse reads.
 const maxContractionStem = 8
 
+// sContractionStems are the words that 's makes a contraction of (of is,
+// has or us), as in it's, that's and let's.
+var sContractionStems = []string{"he", "here", "how", "it", "let", "one", "she", "that", "there", "this", "what", "when", "where", "who", "why"}
+
 // contractionStemIsProse reports whether the word before the quote at s[i:],
 // of length quoteLen, whose ending of n bytes (see contractionLen), or the t
 // of n't if n is 0, follows the quote, is one that the ending makes a
-// contraction of in prose: any word before 's, which may be a possessive, and
-// before the other endings only the pronouns and verbs that take them, as in
-// I'd, we'll, they're, you've, I'm and doesn't, unlike the pre of pre'd.
+// contraction of in prose: any word before 's, which may be a possessive, as
+// in Bearer user's request, and before the other endings only the pronouns
+// and verbs that take them, as in I'd, we'll, they're, you've, I'm and
+// doesn't, unlike the pre of pre'd. A word that an "=" joins to a key before
+// it, as pre is in password=pre's x's, is the start of the key's value rather
+// than a possessive, so before 's it reads as prose only if 's makes a
+// contraction of it (see sContractionStems), as in the password=it's Bob's;
+// a word of letters too long to read back over does not.
 func contractionStemIsProse(s string, i, quoteLen, n int) bool {
 	ending := strings.ToLower(s[min(len(s), i+quoteLen):min(len(s), i+quoteLen+max(n, 1))])
 	if ending == "s" {
-		return true
+		start := i
+		for start > 0 {
+			r, size := utf8.DecodeLastRuneInString(s[:start])
+			if !unicode.IsLetter(r) {
+				break
+			}
+			if i-start >= maxShellWordScan {
+				return false
+			}
+			start -= size
+		}
+		if start == 0 {
+			return true
+		}
+		if s[start-1] == '=' {
+			return slices.Contains(sContractionStems, strings.ToLower(s[start:i]))
+		}
+		tokStart := start
+		for tokStart > 0 {
+			r, size := utf8.DecodeLastRuneInString(s[:tokStart])
+			if isDelimSpace(r) || strings.ContainsRune(",;([{\"'=", r) {
+				break
+			}
+			if i-tokStart >= maxShellWordScan {
+				return false
+			}
+			tokStart -= size
+		}
+		return tokStart == 0 || s[tokStart-1] != '='
 	}
 	start := i
 	for start > 0 && i-start <= maxContractionStem+1 {
@@ -6672,40 +6999,22 @@ func closingQuoteJoins(s string, i int, q string, compound bool) bool {
 // words around it do not prove that on their own, as violetfern's in
 // DB_PASSWORD=pre' violetfern's shows, where a shell closes the part there:
 // the part does not stand in a shell assignment (see inShellAssignment), and
-// either its opening quote starts the ending of a contraction too, as in
-// password=it's Bob's, or it is the apostrophe of a plural possessive, as the
+// either its opening quote starts the ending of a contraction too, of a word
+// that the ending makes one of (see contractionStemIsProse), as in
+// password=it's Bob's and the password=it's administrator's but not
+// password=pre's x's, or it is the apostrophe of a plural possessive, as the
 // one of users' is, and prose follows the ending on its line (see
-// proseFollowsEnding), as in the password=users' wasn't changed.
+// proseFollowsEnding), as in the password=users' wasn't changed. How long the
+// word before the closing quote is does not count, so that a long name, as in
+// the password=it's Bartholomewsmith's, reads as prose as a short one does.
 func closingQuoteIsApostrophe(s string, i, closing int) bool {
 	if !isProseContraction(s, closing) || inShellAssignment(s, i) {
 		return false
 	}
 	if startsContraction(s, i, 1) {
-		n := contractionLen(s[i+1:])
-		if !contractionStemIsProse(s, i, 1, n) {
-			return false
-		}
-		if strings.EqualFold(s[min(len(s), i+1):min(len(s), i+1+max(n, 1))], "s") &&
-			closingWordLen(s, closing) > 12 && !proseFollowsEnding(s, closing) {
-			return false
-		}
-		return true
+		return contractionStemIsProse(s, i, 1, contractionLen(s[i+1:]))
 	}
 	return i > 0 && (s[i-1] == 's' || s[i-1] == 'S') && isTrailingApostrophe(s, i) && proseFollowsEnding(s, closing)
-}
-
-// closingWordLen returns the byte length of the word of letters immediately
-// before s[closing].
-func closingWordLen(s string, closing int) int {
-	start := closing
-	for start > 0 {
-		r, size := utf8.DecodeLastRuneInString(s[:start])
-		if !unicode.IsLetter(r) {
-			break
-		}
-		start -= size
-	}
-	return closing - start
 }
 
 // proseFollowsEnding reports whether prose follows, on its line, the ending
@@ -6746,18 +7055,30 @@ const maxShellWordScan = 256
 // declare, local, readonly or typeset on its logical line, after options and
 // other assignments, as in export A=1 password=x. When the single unbroken
 // shell word containing s[i] extends past the bounded lookbehind window
-// without any unquoted shell word break, inShellAssignment fails closed and
-// returns true.
+// without any unquoted shell word break and holds no "=" in the window, so
+// that its name may be one, inShellAssignment fails closed and returns true;
+// a word whose visible part shows that the name before its "=" is not one, as
+// the : before password in <300 bytes>:password=users' wasn't changed does,
+// is read as any other word is. It fails closed as well when the word starts
+// with its name and only options and other assignments stand before it in the
+// window, which starts after the start of the command, so that the word they
+// follow may follow export outside the window, as in
+// export X=1 X=1 <...> password=users' violetfern's.
 func inShellAssignment(s string, i int) bool {
 	winStart := max(0, i-maxShellWordScan)
 	truncated := false
+	// sawCmdStart records whether the window reaches back to where a command
+	// may start: the start of s or of a logical line, or a command separator.
+	sawCmdStart := winStart == 0
 	if nl := lastUnescapedLineBreak(s, winStart, i); nl >= 0 {
 		winStart = nl
+		sawCmdStart = true
 	} else if winStart > 0 {
 		for steps := 0; winStart > 0 && steps < 16 && !isShellWordBreak(s[winStart-1]); steps++ {
 			winStart--
 		}
 		truncated = winStart > 0 && !isShellWordBreak(s[winStart-1])
+		sawCmdStart = winStart == 0 || strings.IndexByte(";&|(`", s[winStart-1]) >= 0 || lastUnescapedLineBreak(s, winStart-1, winStart) >= 0
 	}
 	var words []string
 	wordStart := -1
@@ -6772,17 +7093,23 @@ func inShellAssignment(s string, i int) bool {
 				continue
 			}
 			if wordStart >= 0 {
-				words = append(words, s[wordStart:k])
+				if w := stripShellLineSplices(s[wordStart:k]); w != "" {
+					words = append(words, w)
+				}
 				wordStart = -1
 			}
 			words = words[:0]
+			truncated = false
+			sawCmdStart = true
 			continue
 		}
 		if c == '\\' && k+1 < i {
 			if s[k+1] == '\n' || (s[k+1] == '\r' && k+2 < i && s[k+2] == '\n') {
-				if wordStart >= 0 && isShellDeclKeyword(s[wordStart:k]) {
-					words = append(words, s[wordStart:k])
-					wordStart = -1
+				if wordStart >= 0 {
+					if w := stripShellLineSplices(s[wordStart:k]); isShellDeclKeyword(w) {
+						words = append(words, w)
+						wordStart = -1
+					}
 				}
 				if s[k+1] == '\r' {
 					k += 2
@@ -6799,11 +7126,15 @@ func inShellAssignment(s string, i int) bool {
 		}
 		if isShellWordBreak(c) {
 			if wordStart >= 0 {
-				words = append(words, s[wordStart:k])
+				if w := stripShellLineSplices(s[wordStart:k]); w != "" {
+					words = append(words, w)
+				}
 				wordStart = -1
 			}
 			if c != ' ' && c != '\t' {
 				words = words[:0]
+				truncated = false
+				sawCmdStart = sawCmdStart || strings.IndexByte(";&|(`", c) >= 0
 			}
 			continue
 		}
@@ -6814,10 +7145,13 @@ func inShellAssignment(s string, i int) bool {
 	if wordStart < 0 {
 		return false
 	}
-	if truncated && wordStart == winStart {
+	word := stripShellLineSplices(s[wordStart:i])
+	if word == "" {
+		return false
+	}
+	if truncated && wordStart == winStart && shellWordEq(word) < 0 {
 		return true
 	}
-	word := s[wordStart:i]
 	leading := false
 	if eq := strings.IndexByte(word, '='); eq > 0 {
 		if name := stripShellNameQuotes(word[:eq]); isShellName(name) {
@@ -6851,7 +7185,7 @@ func inShellAssignment(s string, i int) bool {
 	if !leading {
 		return false
 	}
-	if len(words) == 0 && winStart > 0 && len(word) >= maxShellWordScan-16 {
+	if len(words) == 0 && winStart > 0 && i-wordStart >= maxShellWordScan-16 {
 		return true
 	}
 	for j := len(words) - 1; j >= 0; j-- {
@@ -6861,11 +7195,64 @@ func inShellAssignment(s string, i int) bool {
 			return true
 		case prev[0] == '-':
 		case strings.IndexByte(prev, '=') > 0 && isShellName(stripShellNameQuotes(prev[:strings.IndexByte(prev, '=')])):
+		case j == 0 && truncated && isTruncatedOptionOrAssignment(s, winStart, prev):
 		default:
 			return false
 		}
 	}
-	return false
+	return !sawCmdStart
+}
+
+// isTruncatedOptionOrAssignment reports whether a shell word that was sliced
+// at winStart with visible tail suffix is an option flag or variable
+// assignment (or exceeds a second maxShellWordScan lookback window without a
+// shell word break).
+func isTruncatedOptionOrAssignment(s string, winStart int, suffix string) bool {
+	limit := max(0, winStart-maxShellWordScan)
+	start := winStart
+	for start > limit && !isShellWordBreak(s[start-1]) {
+		start--
+	}
+	if start > 0 && !isShellWordBreak(s[start-1]) {
+		return true
+	}
+	full := stripShellLineSplices(s[start:winStart] + suffix)
+	if full == "" {
+		return false
+	}
+	if full[0] == '-' {
+		return true
+	}
+	eq := strings.IndexByte(full, '=')
+	return eq > 0 && isShellName(stripShellNameQuotes(full[:eq]))
+}
+
+// stripShellLineSplices removes unquoted backslash-newline line continuations
+// (\<LF> and \<CR><LF>) from a shell word fragment, as a POSIX shell removes
+// them before lexical token recognition.
+func stripShellLineSplices(w string) string {
+	if !strings.Contains(w, `\`) {
+		return w
+	}
+	s := strings.ReplaceAll(w, "\\\r\n", "")
+	return strings.ReplaceAll(s, "\\\n", "")
+}
+
+// shellWordEq returns the offset of the first "=" in the shell word w that is
+// not in a closed quoted segment of it, or -1 if there is none.
+func shellWordEq(w string) int {
+	for k := 0; k < len(w); k++ {
+		if w[k] == '\'' || w[k] == '"' {
+			if n := closedQuoteIn(w[k:]); n > 0 {
+				k += n - 1
+				continue
+			}
+		}
+		if w[k] == '=' {
+			return k
+		}
+	}
+	return -1
 }
 
 // lastUnescapedLineBreak returns the byte offset immediately after the last

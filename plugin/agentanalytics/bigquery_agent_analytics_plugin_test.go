@@ -5471,3 +5471,73 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 		}
 	})
 }
+
+// TestRound22CallbackRegressions checks that the callbacks keep the
+// credentials of round22SensitiveErrors out of every row that they write,
+// whether the credential comes as text or as a plain error in tool
+// arguments, a tool result or a state delta, and that they write the
+// scrubbed text as the content_parts of the user message and as the
+// error_message of the tool, model and invocation errors.
+func TestRound22CallbackRegressions(t *testing.T) {
+	for _, tt := range round22SensitiveErrors() {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-test", Contents: []*genai.Content{textContent("user", tt.in)}}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", tt.in)}, nil))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in, "result_err": errors.New(tt.in)}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in, "note_err": errors.New(tt.in)}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 9)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) {
+					t.Errorf("%s row holds %q: %s", et, tt.secret, elideText(s))
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventLLMRequest),
+				string(EventLLMResponse),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+				string(EventStateDelta),
+				string(EventInvocationError),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("missing event row %s (seen %v)", wantEvent, seen)
+				}
+			}
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			for _, got := range []struct{ name, text string }{
+				{"USER_MESSAGE_RECEIVED text", text},
+				{"TOOL_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventToolError)["error_message"])},
+				{"LLM_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventLLMError)["error_message"])},
+				{"INVOCATION_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventInvocationError)["error_message"])},
+			} {
+				if got.text != tt.want {
+					t.Errorf("%s = %s, want %s", got.name, elideText(got.text), elideText(tt.want))
+				}
+			}
+		})
+	}
+}
