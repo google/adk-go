@@ -19,10 +19,13 @@ import (
 	"fmt"
 	"io/fs"
 	"iter"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
 	"unicode"
+
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
@@ -148,7 +151,7 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 			}
 			return "", fmt.Errorf("failed to load artifact %s: %w", fileName, err)
 		}
-		return resp.Part.Text, nil
+		return artifactText(fileName, resp.Part), nil
 	}
 
 	if !isValidStateName(varName) {
@@ -168,6 +171,44 @@ func replaceMatch(ctx agent.InvocationContext, match string) (string, error) {
 	}
 
 	return fmt.Sprintf("%v", value), nil
+}
+
+// artifactText renders a loaded artifact for an instruction. A text artifact
+// can come back as inline data rather than as Text: gcsartifact stores a text
+// Part as a text/plain object and loads it back as bytes. Text-like inline data
+// is therefore decoded, as adk-python's _artifact_to_text does through
+// as_safe_part_for_llm (load_artifacts_tool.py), which counts as text the
+// text/* types, its _TEXT_LIKE_MIME_TYPES, and names with a text extension.
+func artifactText(name string, part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
+	if part.InlineData != nil && (isTextLikeMIMEType(part.InlineData.MIMEType) || hasTextFileExtension(name)) {
+		return strings.ToValidUTF8(string(part.InlineData.Data), "\uFFFD")
+	}
+	return part.Text
+}
+
+func isTextLikeMIMEType(mimeType string) bool {
+	mediaType, _, _ := strings.Cut(mimeType, ";")
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if strings.HasPrefix(mediaType, "text/") {
+		return true
+	}
+	switch mediaType {
+	case "application/csv", "application/json", "application/svg+xml", "application/xml",
+		"image/svg", "image/svg+xml", "image/xml":
+		return true
+	}
+	return false
+}
+
+func hasTextFileExtension(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".csv", ".txt", ".json", ".xml":
+		return true
+	}
+	return false
 }
 
 // isIdentifier checks if a string is a valid Go identifier.

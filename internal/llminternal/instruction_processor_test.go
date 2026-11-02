@@ -129,6 +129,50 @@ func TestInjectSessionState(t *testing.T) {
 			state:    map[string]any{"user_name": "Foo"},
 			want:     "Say Foo",
 		},
+		// A text artifact can come back as inline data rather than Text:
+		// gcsartifact stores a text Part as a text/plain object and loads it
+		// back as bytes. adk-python injects the decoded text
+		// (_instructions_utils.py, _artifact_to_text).
+		{
+			name:     "text artifact loaded as inline data",
+			template: "The artifact content is: {artifact.notes.txt}",
+			artifacts: map[string]*genai.Part{
+				"notes.txt": genai.NewPartFromBytes([]byte("hello from GCS"), "text/plain"),
+			},
+			want: "The artifact content is: hello from GCS",
+		},
+		{
+			name:     "text artifact with a charset parameter",
+			template: "The artifact content is: {artifact.notes}",
+			artifacts: map[string]*genai.Part{
+				"notes": genai.NewPartFromBytes([]byte("café"), "Text/Markdown; charset=utf-8"),
+			},
+			want: "The artifact content is: café",
+		},
+		{
+			name:     "json artifact with a charset parameter",
+			template: "Config: {artifact.config}",
+			artifacts: map[string]*genai.Part{
+				"config": genai.NewPartFromBytes([]byte(`{"k":"v"}`), "application/JSON; charset=utf-8"),
+			},
+			want: `Config: {"k":"v"}`,
+		},
+		{
+			name:     "text file uploaded as octet-stream",
+			template: "Rows: {artifact.rows.csv}",
+			artifacts: map[string]*genai.Part{
+				"rows.csv": genai.NewPartFromBytes([]byte("a,b\n1,2"), "application/octet-stream"),
+			},
+			want: "Rows: a,b\n1,2",
+		},
+		{
+			name:     "binary artifact still renders empty",
+			template: "Image: {artifact.photo.png}",
+			artifacts: map[string]*genai.Part{
+				"photo.png": genai.NewPartFromBytes([]byte{0x89, 'P', 'N', 'G'}, "image/png"),
+			},
+			want: "Image: ",
+		},
 		// Corresponds to: test_inject_session_state_with_missing_artifact_raises_key_error
 		{
 			name:     "missing required artifact",
