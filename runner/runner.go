@@ -43,6 +43,7 @@ import (
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -487,6 +488,20 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 	return modified
 }
 
+// stampTimestamp gives an event that an agent yielded, or a plugin returned in
+// its place, without a timestamp the time the runner received it, as
+// adk-python's Event does on construction.
+//
+// An event built as a struct literal never passes through session.NewEvent.
+// Stored with a zero timestamp it moves the session's last update time back to
+// year 1, and a backend that orders events by time, such as session/database,
+// reads it back ahead of every message before it.
+func stampTimestamp(ctx context.Context, event *session.Event) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = platform.Now(ctx)
+	}
+}
+
 // compactionRuntime returns the runtime that the request processors read off
 // the context, both to gate prompt assembly on compaction being configured and
 // to run intra-invocation compaction. It is nil when compaction is disabled for
@@ -743,6 +758,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 				yield(nil, err)
 				return
 			}
+			stampTimestamp(ctx, event)
 
 			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -766,6 +782,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
+				stampTimestamp(ctx, event) // a replacement may be a struct literal too
 			}
 
 			// only commit non-partial event to a session service
