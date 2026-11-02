@@ -4266,3 +4266,170 @@ func TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes(t *testing.T) {
 		}
 	}
 }
+
+// TestRound16ReviewRegressions checks the Round 16 review reproductions on
+// every text path, with a second scrub that leaves each output unchanged and
+// a leak check of every marker:
+//   - a closed quoted part that holds a backslash-newline is one part of the
+//     value;
+//   - the quote that closes a quoted part before a contraction ending is a
+//     close in a shell assignment, a compound shell word, or whenever the
+//     part's opening quote is neither a contraction nor a plural possessive
+//     followed by prose, whatever the case of the word before it;
+//   - an unclosed contraction-shaped quote that a line break follows, that is
+//     not after a contraction stem, or that stands in a shell assignment, an
+//     unclosed trailing quote before a line break in a shell assignment, and
+//     an unclosed part after a closed one, run on to the end of the text;
+//   - a token counter with a quoted decimal value after a credential is kept,
+//     while a quoted value that is not a count or that more text is glued to
+//     is redacted;
+//   - an Authorization or API-key header whose quote (including an escaped
+//     quote or an enclosing outer quote) closes on a later line, including
+//     over interior lines containing colons or indented obs-fold lines, or is
+//     not closed, is redacted over those lines up to the next unindented
+//     header, while an enclosing outer quote that closes on the header's line
+//     preserves subsequent lines.
+func TestRound16ReviewRegressions(t *testing.T) {
+	for _, tt := range []struct {
+		in, want string
+		allPaths bool
+		secrets  []string
+	}{
+		{"export DB_PASSWORD=\"a\"pre'\\\nSYNTHETIC_REVIEW_984731'; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"export DB_PASSWORD=\"a\"pre\"\\\nSYNTHETIC_REVIEW_984731\"; echo ok", "export DB_PASSWORD=\"[REDACTED]\"; echo ok", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"export DB_PASSWORD=\"a\"pre'x \\\nREVIEW_MATRIX_SECRET_5317'suffix; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"REVIEW_MATRIX_SECRET_5317"}},
+		{"export DB_PASSWORD=\"a\"pre'x \\\r\nREVIEW_MATRIX_SECRET_5317'suffix; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"REVIEW_MATRIX_SECRET_5317"}},
+		{"export DB_PASSWORD=\"a\"pre\"x \\\nREVIEW_MATRIX_SECRET_5317\"suffix; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"REVIEW_MATRIX_SECRET_5317"}},
+		{"curl -H 'x: Bearer abc'mid'x \\\nREVIEW_MATRIX_SECRET_5317'; echo ok", "curl -H 'x: Bearer [REDACTED]; echo ok", true, []string{"REVIEW_MATRIX_SECRET_5317"}},
+		{"export DB_PASSWORD=pre' violetfern's; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=\"a\"pre' violetfern's; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre's\nfoo='bar' violetfern's; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre'D\nSYNTHETIC_REVIEW_984731\ntoken=TAIL_984731; echo ok", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731", "TAIL_984731"}},
+		{"export DB_PASSWORD=pre's\nSYNTHETIC_REVIEW_984731\ntoken=TAIL_984731; echo ok", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731", "TAIL_984731"}},
+		{"export DB_PASSWORD=pre'll\nSYNTHETIC_REVIEW_984731\ntoken=TAIL_984731; echo ok", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731", "TAIL_984731"}},
+		{"export DB_PASSWORD=pre'd REVIEW_SYNTHETIC_7319", "export DB_PASSWORD=[REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"export DB_PASSWORD=pre's\nREVIEW_SYNTHETIC_7319", "export DB_PASSWORD=[REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"export DB_PASSWORD=\"a\"pre'correct\nSYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"export DB_PASSWORD=\"a\"pre's\nSYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"export DB_PASSWORD=\"a\"pre'x\nREVIEW_SYNTHETIC_7319\ntoken=SECOND_SECRET_7319", "export DB_PASSWORD=[REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319", "SECOND_SECRET_7319"}},
+		{"Authorization: Bearer \"a\"pre'x\nREVIEW_SYNTHETIC_7319", "Authorization: [REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"export DB_PASSWORD=pre'D\r\nSYNTHETIC_REVIEW_984731\r\ntoken=TAIL_984731; echo ok", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731", "TAIL_984731"}},
+		{"password=[REDACTED]prompt_tokens=\"10\"", "password=[REDACTED]prompt_tokens=\"10\"", true, []string{}},
+		{"password=[REDACTED]prompt_tokens='10'", "password=[REDACTED]prompt_tokens='10'", true, []string{}},
+		{"DB_PASSWORD=\"a\"prompt_tokens=\"10\"", "DB_PASSWORD=\"[REDACTED]\"prompt_tokens=\"10\"", true, []string{}},
+		{"password=[REDACTED]\"prompt_token_count\":\"10\"", "password=[REDACTED]\"prompt_token_count\":\"10\"", true, []string{}},
+		{"DB_PASSWORD=\"a\"\"prompt_token_count\":\"10\"", "DB_PASSWORD=\"[REDACTED]\"\"prompt_token_count\":\"10\"", true, []string{}},
+		{"password=\"abc\nprompt_tokens=\"SYNTHETIC_REVIEW_984731\"", "password=\"[REDACTED]\"", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"password=\"abc\nprompt_tokens=\"10\"SYNTHETIC_REVIEW_984731", "password=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"password=[REDACTED]prompt_tokens=\"10\"SYNTHETIC_REVIEW_984731", "password=[REDACTED]", true, []string{"SYNTHETIC_REVIEW_984731"}},
+		{"Authorization: abc'x\nREVIEW_SYNTHETIC_7319'", "Authorization: [REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"Authorization: Bearer abc'x\nREVIEW_SYNTHETIC_7319'", "Authorization: [REDACTED]", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"x-api-key: \"abc\nREVIEW_SYNTHETIC_7319\nContent-Type: text/plain", "x-api-key: [REDACTED]\nContent-Type: text/plain", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"Proxy-Authorization: Basic \"abc\nREVIEW_SYNTHETIC_7319\"\nAccept: */*", "Proxy-Authorization: [REDACTED]\nAccept: */*", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		{"api-key: 'abc\nREVIEW_SYNTHETIC_7319' tail\nHost: example.com", "api-key: [REDACTED]\nHost: example.com", true, []string{"REVIEW_SYNTHETIC_7319"}},
+		// A quoted bearer token that holds a backslash-newline, and a header whose
+		// apostrophe a quote on the next header line would close, which ends at its line.
+		{"run Bearer 'abc\\\nSYNTHETIC_BEARER_7319' tail", "run Bearer [REDACTED] tail", true, []string{"SYNTHETIC_BEARER_7319"}},
+		{"run Bearer \"abc\\\nSYNTHETIC_BEARER_7319\" tail", "run Bearer [REDACTED] tail", true, []string{"SYNTHETIC_BEARER_7319"}},
+		{"Authorization: Bob's key\nX-Note: 'hi'", "Authorization: [REDACTED]\nX-Note: 'hi'", true, []string{}},
+		{"Authorization: Bearer abc's\nX-Request-Id: 'r-1'", "Authorization: [REDACTED]\nX-Request-Id: 'r-1'", true, []string{}},
+		// Closing-contraction shell credentials without ;&|, including compound words with quoted spaces and quoted variable names.
+		{"export DB_PASSWORD=pre' violetfern's", "export DB_PASSWORD=[REDACTED]", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre' violetfern's\necho ok", "export DB_PASSWORD=[REDACTED]\necho ok", true, []string{"violetfern"}},
+		{"DB_PASSWORD=pre' violetfern's python3 app.py", "DB_PASSWORD=[REDACTED] python3 app.py", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre' violetfern's APP_ENV=prod", "export DB_PASSWORD=[REDACTED] APP_ENV=prod", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre' violetfern's # comment", "export DB_PASSWORD=[REDACTED] # comment", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre' violetfern's > /tmp/out", "export DB_PASSWORD=[REDACTED] > /tmp/out", true, []string{"violetfern"}},
+		{"(export DB_PASSWORD=pre' violetfern's )", "(export DB_PASSWORD=[REDACTED] )", true, []string{"violetfern"}},
+		{"(export DB_PASSWORD=pre' violetfern's)", "(export DB_PASSWORD=[REDACTED]", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=\"a\"pre' violetfern's", "export DB_PASSWORD=[REDACTED]", true, []string{"violetfern"}},
+		{"password=\"a\"users' violetfern's changed", "password=[REDACTED] changed", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=pre's\nfoo='bar' violetfern's\necho ok", "export DB_PASSWORD=[REDACTED]\necho ok", true, []string{"violetfern"}},
+		{"export DB_PASSWORD=\"a b\"pre's\nfoo='bar' violetfern's\necho ok", "export DB_PASSWORD=[REDACTED]\necho ok", true, []string{"violetfern"}},
+		{"export \"DB_PASSWORD\"=pre's\nfoo='bar' violetfern's\necho ok", "export \"DB_PASSWORD\"=[REDACTED]\necho ok", true, []string{"violetfern"}},
+		{"export \"db_password\"=\"a b\"pre' violetfern's\necho ok", "export \"db_password\"=[REDACTED]\necho ok", true, []string{"violetfern"}},
+		{"curl -H 'x: y' Bearer pre' violetfern's", "curl -H 'x: y' Bearer [REDACTED]", true, []string{"violetfern"}},
+		{"the password=users' wasn't changed", "the password=[REDACTED] wasn't changed", true, []string{}},
+		{"password=it's Bob's", "password=[REDACTED] Bob's", true, []string{}},
+		{"password=abc' (rejected)\ntoken_count=3 next_page_token=c1", "password=[REDACTED] (rejected)\ntoken_count=3 next_page_token=c1", true, []string{}},
+		// Same-line lowercase unclosed quotes and trailing-quote newline continuations.
+		{"export DB_PASSWORD=pre'd synthetic_lower_991", "export DB_PASSWORD=[REDACTED]", true, []string{"synthetic_lower_991"}},
+		{"export DB_PASSWORD=\"a\"pre'd synthetic_lower_991", "export DB_PASSWORD=[REDACTED]", true, []string{"synthetic_lower_991"}},
+		{"x=\"Bearer abc'd zqxsekreta\"", "x=\"Bearer [REDACTED]\"", true, []string{"zqxsekreta"}},
+		{"export DB_PASSWORD=\"a\"pre'\nSYNTHETIC_TRAIL_991", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_TRAIL_991"}},
+		{"export DB_PASSWORD=pre'\nSYNTHETIC_TRAIL_991", "export DB_PASSWORD=[REDACTED]", true, []string{"SYNTHETIC_TRAIL_991"}},
+		{"export \"DB_PASSWORD\"=pre'\nSYNTHETIC_QVAR_NL_902", "export \"DB_PASSWORD\"=[REDACTED]", true, []string{"SYNTHETIC_QVAR_NL_902"}},
+		{"password=doesn't work", "password=[REDACTED] work", true, []string{}},
+		{"Bearer user's request", "Bearer [REDACTED]'s request", true, []string{}},
+		// Closed, folded, escaped-quote, and outer-quoted single-line and multiline auth headers.
+		{"Authorization: \"abc\npart2: SYNTHETIC_HDR_995\"", "Authorization: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
+		{"Authorization: 'abc\npart2: SYNTHETIC_HDR_995'", "Authorization: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
+		{"x-api-key: \"{\n  sub_field: SYNTHETIC_HDR_995\n}\"", "x-api-key: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
+		{"Authorization: \"abc\n  folded_part: SYNTHETIC_HDR_995", "Authorization: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
+		{"x-api-key: \\\"abc\nSYNTHETIC_HDR_995\\\"", "x-api-key: [REDACTED]", false, []string{"SYNTHETIC_HDR_995"}},
+		{"'Authorization: SYNTHETIC_HDR_995'\nKEEP_NEXT_LINE", "'Authorization: [REDACTED]\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
+		{"msg=\"Authorization: SYNTHETIC_HDR_995\"\nKEEP_NEXT_LINE", "msg=\"Authorization: [REDACTED]\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
+		{"curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc\"def"}},
+		{"curl -H 'Authorization: Bearer abc\\'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc\\"}},
+		{"curl -H \"Authorization: Bearer abc'def\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc'def"}},
+		{"curl -H \"Authorization: Bearer it's\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{}},
+		{"{\"h\": \\\"Authorization: Bearer abc'def\\\"}\necho KEEP_LINE_2", "{\"h\": \\\"Authorization: [REDACTED]\necho KEEP_LINE_2", false, []string{"abc'def"}},
+		{"curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
+		{"curl -H \"x-api-key: abc\nSYNTHETIC_CURL_901\"\necho KEEP_LINE_2", "curl -H \"x-api-key: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
+		{"curl -H 'x-api-key: abc\nSYNTHETIC_OUTER_UNCL_901\nHost: example.com", "curl -H 'x-api-key: [REDACTED]\nHost: example.com", true, []string{"SYNTHETIC_OUTER_UNCL_901"}},
+		{"{\"h\": \\\"Authorization: Bearer abc\nSYNTHETIC_INNER_ESC_901\\\"}", "{\"h\": \\\"Authorization: [REDACTED]", false, []string{"SYNTHETIC_INNER_ESC_901"}},
+		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com\"", "req=\"Authorization: [REDACTED]\nHost: example.com\"", true, []string{"SYNTHETIC_REQ_901"}},
+		{"Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3", true, []string{"zqsecretb"}},
+		{"Error: couldn't call API (Authorization: Bearer zqsecretbb)\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", "Error: couldn't call API (Authorization: [REDACTED]\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", true, []string{"zqsecretbb"}},
+		{"WARN don't retry; Authorization: Bearer zqsecretbc\n2024-01-01 INFO next ZQKEEP_E", "WARN don't retry; Authorization: [REDACTED]\n2024-01-01 INFO next ZQKEEP_E", true, []string{"zqsecretbc"}},
+		{"It's broken: x-api-key: zqsecretbd\nZQKEEP_A\nZQKEEP_B", "It's broken: x-api-key: [REDACTED]\nZQKEEP_A\nZQKEEP_B", true, []string{"zqsecretbd"}},
+		{"'quoted' prefix then Authorization: Bearer zqsecretbe\nZQKEEP_K\nZQKEEP_L", "'quoted' prefix then Authorization: [REDACTED]\nZQKEEP_K\nZQKEEP_L", true, []string{"zqsecretbe"}},
+		{"user's request: Authorization: Bearer zqsecretbf\nHost: example.com\nZQKEEP_C", "user's request: Authorization: [REDACTED]\nHost: example.com\nZQKEEP_C", true, []string{"zqsecretbf"}},
+		{"users' Authorization: Bearer zqsecretbg\nZQKEEP_L2", "users' Authorization: [REDACTED]\nZQKEEP_L2", true, []string{"zqsecretbg"}},
+		{"curl -H 'Authorization: \"abc\n\nzqsecreta\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecreta"}},
+		{"msg=\"Authorization: 'abc\npart2: zqsecretab'\necho ZQKEEP_X", "msg=\"Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretab"}},
+		{"msg=\"Authorization: 'abc\npart2: zqsecretab2'\"\necho ZQKEEP_X", "msg=\"Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretab2"}},
+		{"echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "echo 'x-api-key: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretac"}},
+		{"curl -H 'Authorization: \\'abc\nzqsecretad\\''\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", false, []string{"zqsecretad"}},
+		{"Authorization: \"abc\n\nzqsecretae\"\necho ZQKEEP_X", "Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretae"}},
+		{"curl -H 'Authorization: \"abc zqsecretaf\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretaf"}},
+		{"curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretc"}},
+		{"curl -H 'Authorization: Bearer abc\nline2\n\nzqsecretcb'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretcb"}},
+		{"msg=\"Authorization: Bearer abc\n\nzqsecretcc\"", "msg=\"Authorization: [REDACTED]", true, []string{"zqsecretcc"}},
+		{"curl -H 'Authorization: Bearer abc\r\nSYNTHETIC_CRLF_901'\r\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\r\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CRLF_901"}},
+		{"export a=\\;1 db_password=pre's violetfern's", "export a=\\;1 db_password=[REDACTED]", true, []string{"violetfern"}},
+		{"export; password=users' wasn't changed", "export; password=[REDACTED] wasn't changed", true, []string{}},
+		{"export \" password=users' wasn't changed", "export \" password=[REDACTED] wasn't changed", true, []string{}},
+		{"export -\"a\n\" password=users' wasn't changed", "export -\"a\n\" password=[REDACTED] wasn't changed", true, []string{}},
+		{"curl -H 'Authorization: \"part1\npart2\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
+		{"curl -H 'x-api-key: \"{\n  a: 1\n}\"\nSYNTHETIC_TAIL_905'\necho KEEP_LINE_4", "curl -H 'x-api-key: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_TAIL_905"}},
+		{"curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
+		{"msg=\"Authorization: 'part1\npart2: x'\nSYNTHETIC_MSG3_905\"\nKEEP_LINE_4", "msg=\"Authorization: [REDACTED]\nKEEP_LINE_4", true, []string{"SYNTHETIC_MSG3_905"}},
+		{"{\"h\": \\\"Authorization: 'part1\npart2: s1'\nSYNTHETIC_JSON_LINE3_905\\\"}", "{\"h\": \\\"Authorization: [REDACTED]", false, []string{"SYNTHETIC_JSON_LINE3_905"}},
+		{"curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_EMSPACE_905"}},
+		{"curl -H 'Authorization: Bearer\u3000\"abc\npart2: SYNTHETIC_IDEO_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_IDEO_905"}},
+		{"curl -H 'Authorization: Bearer \\'\necho KEEP_LINE_2\\'", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2\\'", false, []string{}},
+		{"msg = b'Authorization: Bearer abc\nSYNTHETIC_PREF_905'\necho KEEP_LINE_2", "msg = b'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_PREF_905"}},
+		{"curl -H'Authorization: Bearer abc\nSYNTHETIC_FLAG_905'\necho KEEP_LINE_2", "curl -H'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_FLAG_905"}},
+		{"export X=pre's Authorization: Bearer abc\nSYNTHETIC_SH_HDR_905'\necho KEEP_LINE_2", "export X=pre's Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_SH_HDR_905"}},
+		{"curl -H 'Authorization: Bearer abc\n\n\nSYNTHETIC_3NL_905'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_3NL_905"}},
+		{"{\"h\": \\\"Authorization: 'abc\\\"}\npart2: KEEP_LINE_2'", "{\"h\": \\\"Authorization: [REDACTED]\npart2: KEEP_LINE_2'", false, []string{}},
+		{"curl -H 'Authorization: \"abc'\npart2: KEEP_LINE_2\"", "curl -H 'Authorization: [REDACTED]\npart2: KEEP_LINE_2\"", true, []string{}},
+		{"msg=\"Authorization: 'abc\"\npart2: KEEP_LINE_2'", "msg=\"Authorization: [REDACTED]\npart2: KEEP_LINE_2'", true, []string{}},
+	} {
+		if tt.allPaths {
+			checkAllRedactionPaths(t, tt.in, tt.want)
+			checkAllRedactionPaths(t, tt.want, tt.want)
+		} else {
+			if got := scrubTextPatterns(tt.in); got != tt.want {
+				t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+			if again := scrubTextPatterns(tt.want); again != tt.want {
+				t.Errorf("scrubbing %q again gave %q, want it unchanged", tt.want, again)
+			}
+		}
+		for _, secret := range tt.secrets {
+			checkNoLeak(t, tt.in, secret)
+		}
+	}
+}

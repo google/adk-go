@@ -1506,8 +1506,13 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 				// omitzero would read it, as another goroutine may update a
 				// Token uint64 atomically. Only a string field keeps its omit
 				// options, as in encoding/json: an empty one, whose length
-				// alone is read, is omitted.
-				if s.redact && isSensitiveKey(name) {
+				// alone is read, is omitted. The field is named for a
+				// credential by its Go name or by its json name (see
+				// fieldNamedForCredential), so a tag that names a counter or
+				// a cursor, as Password `json:"next_page_token"` and
+				// Token uint64 `json:"token_count,omitempty"` have, does not
+				// hide the credential.
+				if s.redact && fieldNamedForCredential(f) {
 					if (opts.omitEmpty || opts.omitZero) && fv.Kind() == reflect.String && fv.Len() == 0 {
 						continue
 					}

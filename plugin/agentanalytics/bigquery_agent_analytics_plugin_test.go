@@ -1150,7 +1150,8 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
-				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want)), "args")
+				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want),
+			), "args")
 			checkJSONAt(t, jsonObjectColumn(t, row, "attributes"),
 				fmt.Sprintf(`{"temp:token":%q,"theme":"dark"}`, tt.want), "session_metadata", "state")
 
@@ -3384,6 +3385,27 @@ func TestRedactionRegressions(t *testing.T) {
 		{"glued single-quote suffix after bare Bearer before second Bearer", `Bearer ASTRA_SYNTHETIC_935817'x1 y='Bearer ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `Bearer [REDACTED] y='Bearer [REDACTED]'`},
 		{"joined single-quoted suffix inside double-quoted Bearer command", `echo "Bearer abc'ASTRA_SYNTHETIC_935817'" more`, "ASTRA_SYNTHETIC_935817", `echo "Bearer [REDACTED]" more`},
 		{"multiline double-quoted joined shell password with bare suffix", "export DB_PASSWORD=pre\"\nASTRA_SYNTHETIC_935817\"end; echo ok", "ASTRA_SYNTHETIC_935817", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: closed single-quoted part with a backslash-newline", "export DB_PASSWORD=\"a\"pre'\\\nSYNTHETIC_REVIEW_984731'; echo ok", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: lowercase word before a contraction ending and a shell operator", "export DB_PASSWORD=pre's\nfoo='bar' violetfern's; echo ok", "violetfern", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: unclosed contraction-shaped quote before a line break", "export DB_PASSWORD=pre'D\nSYNTHETIC_REVIEW_984731\ntoken=TAIL_984731; echo ok", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: unclosed part after a closed one runs past its line", "export DB_PASSWORD=\"a\"pre'correct\nSYNTHETIC_REVIEW_984731", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: quoted token counter after a closed credential", "DB_PASSWORD=\"R16_SECRET_5521\"prompt_tokens=\"10\"", "R16_SECRET_5521", "DB_PASSWORD=\"[REDACTED]\"prompt_tokens=\"10\""},
+		{"Round 16: unclosed quoted API-key header over a later line", "x-api-key: \"abc\nREVIEW_SYNTHETIC_7319\nContent-Type: text/plain", "REVIEW_SYNTHETIC_7319", "x-api-key: [REDACTED]\nContent-Type: text/plain"},
+		{"Round 16: lowercase word before contraction ending at EOF", "export DB_PASSWORD=pre' violetfern's", "violetfern", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: multiline lowercase word before contraction ending without semicolon", "export DB_PASSWORD=pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export DB_PASSWORD=[REDACTED]\necho ok"},
+		{"Round 16: same-line lowercase word after unclosed contraction-shaped quote", "export DB_PASSWORD=pre'd synthetic_lower_991", "synthetic_lower_991", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: unclosed trailing single quote before newline in shell assignment", "export DB_PASSWORD=pre'\nSYNTHETIC_TRAIL_991", "SYNTHETIC_TRAIL_991", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: closed multiline quoted Authorization header containing colon", "Authorization: \"abc\npart2: SYNTHETIC_HDR_995\"", "SYNTHETIC_HDR_995", "Authorization: [REDACTED]"},
+		{"Round 16: indented multiline JSON in x-api-key header", "x-api-key: \"{\n  sub_field: SYNTHETIC_HDR_995\n}\"", "SYNTHETIC_HDR_995", "x-api-key: [REDACTED]"},
+		{"Round 16: single-line curl Authorization header with opposite quote preserves next line", "curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "abc\"def", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
+		{"Round 16: multiline outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "SYNTHETIC_CURL_901", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
+		{"Round 16: compound shell assignment with quoted space and multiline contraction", "export DB_PASSWORD=\"a b\"pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export DB_PASSWORD=[REDACTED]\necho ok"},
+		{"Round 16: quoted variable name in shell assignment with multiline contraction", "export \"DB_PASSWORD\"=pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export \"DB_PASSWORD\"=[REDACTED]\necho ok"},
+		{"Round 16: prose contraction before Authorization header preserves subsequent lines", "Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "zqsecretb", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3"},
+		{"Round 16: nested multiline quoted Authorization header inside outer quote", "echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "zqsecretac", "echo 'x-api-key: [REDACTED]\necho ZQKEEP_X"},
+		{"Round 16: blank continuation line inside outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "zqsecretc", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X"},
+		{"Round 16: nested multiline quoted Authorization header followed by trailing outer-quoted line", "curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "SYNTHETIC_LINE3_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4"},
+		{"Round 16: unicode em-space before nested multiline quoted Authorization header", "curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "SYNTHETIC_EMSPACE_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)

@@ -6173,3 +6173,73 @@ func TestSmartTruncate_OmitTagsDoNotReadFieldsRedactedByName(t *testing.T) {
 		t.Errorf("json.Marshal(controls{}) = (%s, %v), want {}", b, err)
 	}
 }
+
+// TestSmartTruncate_CredentialFieldNamesBeatMetadataTags checks that a field
+// whose Go name is a credential name is redacted by that name when its json
+// tag names a token counter or a pagination cursor, which are not
+// credentials, and that omitempty and omitzero then do not read it while
+// another goroutine updates it, as for a field whose tag names a credential.
+// Fields whose Go name and tag both name metadata are written as they are.
+func TestSmartTruncate_CredentialFieldNamesBeatMetadataTags(t *testing.T) {
+	const secret = "SYNTHETIC_REVIEW_984731"
+	type password struct {
+		Password string `json:"next_page_token"`
+	}
+	type apiKey struct {
+		APIKey string `json:"prompt_token_count,omitempty"`
+	}
+	type token struct {
+		Token uint64 `json:"token_count"`
+	}
+	type metadata struct {
+		NextPageToken    string `json:"next_page_token"`
+		PromptTokenCount uint64 `json:"prompt_token_count,omitempty"`
+	}
+	for _, tt := range []struct {
+		in   any
+		want string
+	}{
+		{password{Password: secret}, `{"next_page_token":"[REDACTED]"}`},
+		{apiKey{APIKey: secret}, `{"prompt_token_count":"[REDACTED]"}`},
+		{token{Token: 7}, `{"token_count":"[REDACTED]"}`},
+		{[]password{{Password: secret}}, `[{"next_page_token":"[REDACTED]"}]`},
+		{struct{ Inner password }{password{Password: secret}}, `{"Inner":{"next_page_token":"[REDACTED]"}}`},
+		{metadata{NextPageToken: "c1", PromptTokenCount: 10}, `{"next_page_token":"c1","prompt_token_count":10}`},
+	} {
+		if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != tt.want {
+			t.Errorf("SmartTruncate(%#v) = (%s, %v), want %s", tt.in, got, err, tt.want)
+		}
+	}
+
+	type omitEmpty struct {
+		Token uint64 `json:"token_count,omitempty"`
+	}
+	type omitZero struct {
+		Token uint64 `json:"token_count,omitzero"`
+	}
+	oe, oz := &omitEmpty{}, &omitZero{}
+	for _, tt := range []struct {
+		name  string
+		in    any
+		token *uint64
+	}{
+		{"omitempty", oe, &oe.Token},
+		{"omitzero", oz, &oz.Token},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			const want = `{"token_count":"[REDACTED]"}`
+			if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != want {
+				t.Errorf("SmartTruncate(zero %T) = (%s, %v), want %s", tt.in, got, err, want)
+			}
+			runWhileWriting(func() {
+				atomic.AddUint64(tt.token, 1)
+			}, func() {
+				for range 1000 {
+					if got, _, err := SmartTruncate(tt.in, 1000); err != nil || string(got) != want {
+						t.Fatalf("SmartTruncate(%T) = (%s, %v), want %s", tt.in, got, err, want)
+					}
+				}
+			})
+		})
+	}
+}
