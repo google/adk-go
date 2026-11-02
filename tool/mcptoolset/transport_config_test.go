@@ -15,7 +15,10 @@
 package mcptoolset
 
 import (
+	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -267,3 +270,38 @@ func wantsAuthTransport(t *testing.T, c *http.Client) {
 type stubRoundTripper struct{}
 
 func (*stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, nil }
+
+// TestCommandTransportReconnect checks that a CommandTransport can connect
+// more than once. An *exec.Cmd can be started only once, so the first connect
+// uses the caller's command and later ones must start a copy.
+func TestCommandTransportReconnect(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCommandTransportHelper$")
+	cmd.Env = append(os.Environ(), "MCPTOOLSET_TEST_HELPER=1")
+	tr, err := buildTransport(Config{Transport: &mcp.CommandTransport{Command: cmd}})
+	if err != nil {
+		t.Fatalf("buildTransport() error = %v", err)
+	}
+	for i := range 3 {
+		conn, err := tr.Connect(t.Context())
+		if err != nil {
+			t.Fatalf("Connect #%d error = %v", i+1, err)
+		}
+		// The first connect must run the caller's own command, so settings
+		// that cannot be copied (such as a CommandContext context) still apply.
+		if i == 0 && cmd.Process == nil {
+			t.Error("first Connect did not start the caller's command")
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("Close #%d error = %v", i+1, err)
+		}
+	}
+}
+
+// TestCommandTransportHelper is the child process of TestCommandTransportReconnect.
+// It exits when its stdin closes. In a normal test run it does nothing.
+func TestCommandTransportHelper(t *testing.T) {
+	if os.Getenv("MCPTOOLSET_TEST_HELPER") != "1" {
+		t.Skip("helper process for TestCommandTransportReconnect")
+	}
+	_, _ = io.Copy(io.Discard, os.Stdin)
+}

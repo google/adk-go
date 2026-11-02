@@ -16,9 +16,12 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -131,8 +134,60 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 		sseCopy := *t
 		sseCopy.HTTPClient = httpClient(t.HTTPClient, nil)
 		return &sseCopy, nil
+	case *mcp.CommandTransport:
+		// A nil Command is passed through so the SDK reports it as before.
+		if t != nil && t.Command != nil {
+			return newCommandTransport(t), nil
+		}
 	}
 	return transport, nil
+}
+
+// commandTransport lets a CommandTransport connect more than once. An
+// *exec.Cmd can be started only once, so the first Connect uses the caller's
+// command as is, and every later Connect runs a copy. Without this, a reconnect
+// fails with "exec: Stdout already set".
+type commandTransport struct {
+	first mcp.CommandTransport // the caller's transport, used for the first Connect
+	// spec copies the caller's command settings before the first Connect, as
+	// the SDK sets Stdin and Stdout on the command it starts.
+	spec exec.Cmd
+
+	mu   sync.Mutex
+	used bool // the caller's command has been handed to a Connect
+}
+
+func newCommandTransport(t *mcp.CommandTransport) *commandTransport {
+	src := t.Command
+	// Only the fields that configure a process are copied. The copy has no
+	// exec.CommandContext context or Cancel hook, because os/exec does not
+	// expose them.
+	return &commandTransport{first: *t, spec: exec.Cmd{
+		Path:        src.Path,
+		Args:        src.Args,
+		Env:         src.Env,
+		Dir:         src.Dir,
+		Stdin:       src.Stdin,
+		Stderr:      src.Stderr,
+		ExtraFiles:  src.ExtraFiles,
+		SysProcAttr: src.SysProcAttr,
+		WaitDelay:   src.WaitDelay,
+		Err:         src.Err,
+	}}
+}
+
+// Connect implements mcp.Transport.
+func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.mu.Lock()
+	first := !t.used
+	t.used = true
+	t.mu.Unlock()
+
+	if first {
+		return t.first.Connect(ctx)
+	}
+	cmd := t.spec
+	return (&mcp.CommandTransport{Command: &cmd, TerminateDuration: t.first.TerminateDuration}).Connect(ctx)
 }
 
 // httpClient returns a shallow copy of base whose Transport adds the ADK
