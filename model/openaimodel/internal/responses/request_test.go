@@ -856,6 +856,7 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 // must not go out as a location for the server to fetch, which would be a
 // request for a string that is not a URL.
 func TestBuildParams_Media(t *testing.T) {
+	const secretURL = "https://example.com/report.pdf?X-Amz-Signature=SECRET"
 	tests := []struct {
 		name        string
 		role        string
@@ -988,7 +989,7 @@ func TestBuildParams_Media(t *testing.T) {
 		{
 			name:        "file_in_a_developer_message_is_refused",
 			role:        "developer",
-			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "https://example.com/report.pdf"}},
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
 			wantErrText: "media in a developer message is not supported: application/pdf",
 		},
 		{
@@ -1030,6 +1031,9 @@ func TestBuildParams_Media(t *testing.T) {
 				}
 				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
 					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				if strings.Contains(err.Error(), "SECRET") {
+					t.Errorf("buildParams() err = %q leaks the file uri", err)
 				}
 				return
 			}
