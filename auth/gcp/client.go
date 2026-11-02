@@ -139,11 +139,6 @@ type APIError struct {
 	// it. A service can put such a marker in its own body and be excused the same
 	// way, since there is no telling its markers from ours.
 	//
-	// A value can also be partly legible. Where the UserID is a substring of the
-	// ContinueURI and the service spells the URI with escapes the scrub cannot
-	// match, the UserID's marker lands inside the URI and the rest of the URI
-	// reads plainly around it, as "my-[redacted].test/oauth/callback".
-	//
 	// It can also be none of the response. Where the identifiers could not be
 	// shown to be gone, Body is a fixed sentence saying so and bears no relation
 	// to what the service sent. A response too long to examine whole lands here

@@ -88,10 +88,10 @@ const maxScrubbableSecret = 4096
 // decode to 20,000 and come back scrubbed rather than withheld.
 //
 // Where one secret is a substring of another — a UserID inside the ContinueURI —
-// and the service echoes the longer one in an escaped spelling, the response is
-// withheld whole: the scrub cannot remove the escaped value as a unit, and
-// marking the shorter one inside it would leave the rest readable. A response
-// naming only the shorter secret is still scrubbed and shown.
+// a response that contains any escape and names the shorter secret is withheld
+// whole: the scrub cannot remove an escaped longer value as a unit, and marking
+// the shorter one inside it would leave the rest readable. A response with no
+// escapes is still scrubbed and shown.
 //
 // Two things here look like they could be simpler and cannot be.
 //
@@ -185,32 +185,42 @@ func showable(s string, secrets []string) (string, bool) {
 	return out, true
 }
 
-// splitsContainer reports whether s carries one secret only in an escaped
-// spelling while a shorter secret sits inside it. The scrub cannot match the
-// escaped container, so it would mark the shorter one in the middle of it and
-// leave the rest of the container readable. The container is found by decoding
-// s, which covers the spellings this package's decoder handles.
+// splitsContainer reports whether s must be withheld because one secret contains
+// another — a UserID inside the ContinueURI — and s is written with escapes.
+// The scrub cannot match an escaped container, so it would mark the shorter
+// secret in the middle of it and leave the rest readable. Which spelling the
+// service echoed is not decided from s, which the service controls: any escape
+// in a response that names the shorter secret withholds it. A response with no
+// escapes is scrubbed normally.
+//
+// Text past [maxStraddleWindow] is not decoded, and a decode that does not finish
+// is treated as though a secret were in it.
 func splitsContainer(s string, secrets []string) bool {
-	var lowered []string
+	var inners []string
 	for _, v := range secrets {
-		if v != "" {
-			lowered = append(lowered, strings.ToLower(v))
+		for _, outer := range secrets {
+			if v != "" && len(outer) > len(v) && strings.Contains(strings.ToLower(outer), strings.ToLower(v)) {
+				inners = append(inners, strings.ToLower(v))
+			}
 		}
 	}
-	var ls, ld string
-	for _, inner := range lowered {
-		for _, outer := range lowered {
-			if len(outer) <= len(inner) || !strings.Contains(outer, inner) {
-				continue
-			}
-			if ls == "" {
-				ls = strings.ToLower(s)
-				d, _ := decodeFully(s)
-				ld = strings.ToLower(d)
-			}
-			if !strings.Contains(ls, outer) && strings.Contains(ld, outer) {
-				return true
-			}
+	if len(inners) == 0 {
+		return false
+	}
+	if !fitsStraddleWindow(s) {
+		return true
+	}
+	d, done := decodeFully(s)
+	if !done {
+		return true
+	}
+	if d == s {
+		return false
+	}
+	ls, ld := strings.ToLower(s), strings.ToLower(d)
+	for _, inner := range inners {
+		if strings.Contains(ls, inner) || strings.Contains(ld, inner) {
+			return true
 		}
 	}
 	return false

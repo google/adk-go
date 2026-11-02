@@ -1720,7 +1720,12 @@ func TestRedactedForErrorWithholdsEscapedContainer(t *testing.T) {
 		{"unicode escaped", `at https:\u002f\u002fcb.test\u002fu\u002falice\u002fdone`, false},
 		{"unescaped", `at https://cb.test/u/alice/done`, true},
 		{"user id only", `denied for alice, try later`, true},
-		{"unrelated escape kept", `a\/b for alice`, true},
+		{"unrelated escape withheld", `a\/b for alice`, false},
+		{"no escape with user id", `a/b for alice`, true},
+		{"escaped and plain", `invalid: https:\/\/cb.test\/u\/alice\/done (normalized: https://cb.test/u/alice/done)`, false},
+		{"doubly escaped", `https:\\\/\\\/cb.test\\\/u\\\/alice\\\/done`, false},
+		{"escape before uri", `at \u005cu0068ttps:\/\/cb.test\/u\/alice\/done`, false},
+		{"escape before uri changes first char", `at \u005cu004ch\/u\/alice`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
