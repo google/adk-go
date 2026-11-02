@@ -36,6 +36,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
@@ -983,5 +984,94 @@ func TestParallelAgent_NestedEscalateKeepsSiblings(t *testing.T) {
 	}
 	if !slices.Contains(authors, "slow") {
 		t.Errorf("events authored by %v: sibling was stopped by a nested escalate, want it to finish", authors)
+	}
+}
+
+// An error yielded by an agent nested below a direct sub-agent, for example
+// inside an inner ParallelAgent, must be returned when another direct
+// sub-agent escalates after it, even if the agents in between have not
+// returned the error yet. Each case runs once; with the fix the outcome does
+// not depend on timing.
+func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	parallel := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	sequential := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	nestings := []struct {
+		name string
+		wrap func(failing agent.Agent) agent.Agent
+	}{
+		{"inner parallel", func(f agent.Agent) agent.Agent { return parallel("inner", f) }},
+		{"sequential then parallel", func(f agent.Agent) agent.Agent { return sequential("seq", parallel("inner", f)) }},
+		{"parallel, sequential, parallel", func(f agent.Agent) agent.Agent {
+			return parallel("mid", sequential("seq", parallel("inner", f)))
+		}},
+	}
+	cleanups := []struct {
+		name string
+		run  func(ctx agent.InvocationContext)
+	}{
+		{"no cleanup", func(agent.InvocationContext) {}},
+		{"50ms cleanup", func(agent.InvocationContext) { time.Sleep(50 * time.Millisecond) }},
+		// Cleanup that lasts until the run cancels it, like a remote agent's
+		// cleanup call.
+		{"cleanup until canceled", func(ctx agent.InvocationContext) { <-ctx.Done() }},
+	}
+	for _, nesting := range nestings {
+		for _, cleanup := range cleanups {
+			t.Run(nesting.name+"/"+cleanup.name, func(t *testing.T) {
+				failed := make(chan struct{})
+				failing := must(agent.New(agent.Config{
+					Name: "failing",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							defer cleanup.run(ctx)
+							yield(nil, boom)
+							close(failed)
+						}
+					},
+				}))
+				escalator := must(agent.New(agent.Config{
+					Name: "escalator",
+					Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							<-failed
+							yield(&session.Event{
+								LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+								Actions:     session.EventActions{Escalate: true},
+							}, nil)
+						}
+					},
+				}))
+				outer := parallel("outer", nesting.wrap(failing), escalator)
+				r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				// The deadline only bounds a regression where the run never
+				// cancels the failing agent's cleanup.
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				sawErr := false
+				for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+					if errors.Is(err, boom) {
+						sawErr = true
+					}
+					if ev != nil && ev.Actions.Escalate {
+						t.Errorf("escalate event yielded after a nested error, want the error instead")
+					}
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("run ended only at the test deadline")
+				}
+				if !sawErr {
+					t.Errorf("nested error was not returned")
+				}
+			})
+		}
 	}
 }

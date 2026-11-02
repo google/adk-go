@@ -47,8 +47,10 @@ type Config struct {
 // If a direct sub-agent yields an event with Actions.Escalate, the agent yields
 // that event, cancels the remaining branches and ends. If a sub-agent has
 // already yielded an error by then, that error is returned instead of the
-// event. Escalations from deeper agents are passed through and do not stop
-// this agent.
+// event. That includes an error yielded by an agent nested at any depth below
+// this one in the same invocation, even if the agents in between have not
+// returned it yet. Escalations from deeper agents are passed through and do
+// not stop this agent.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
@@ -98,7 +100,23 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 		subAgent := sa
 		errGroup.Go(func() error {
-			subCtx := icontext.NewInvocationContext(errGroupCtx, icontext.InvocationContextParams{
+			wrap := func(err error) error {
+				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
+			}
+			onErr := func(err error) {
+				err = wrap(err)
+				firstErr.CompareAndSwap(nil, &err)
+				// An enclosing ParallelAgent only gets this error from us once
+				// our errgroup returns, so record it there now as well.
+				reportErr(ctx, err)
+			}
+			// Agents nested below subAgent, such as an inner ParallelAgent,
+			// report their errors here as soon as they are yielded.
+			reporterCtx := context.WithValue(errGroupCtx, errReporterKey{}, errReporter{
+				invocationID: ctx.InvocationID(),
+				report:       onErr,
+			})
+			subCtx := icontext.NewInvocationContext(reporterCtx, icontext.InvocationContextParams{
 				Artifacts:    ctx.Artifacts(),
 				Memory:       ctx.Memory(),
 				Session:      ctx.Session(),
@@ -109,13 +127,6 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				InvocationID: ctx.InvocationID(),
 			})
 
-			wrap := func(err error) error {
-				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
-			}
-			onErr := func(err error) {
-				err = wrap(err)
-				firstErr.CompareAndSwap(nil, &err)
-			}
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan, onErr); err != nil {
 				return wrap(err)
 			}
@@ -209,6 +220,25 @@ func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- 
 		}
 	}
 	return nil
+}
+
+// errReporterKey is the context key of the errReporter of the closest
+// enclosing ParallelAgent.
+type errReporterKey struct{}
+
+// errReporter records an error in an enclosing ParallelAgent. It is scoped to
+// one invocation, so an agent run in a separate invocation (for example
+// through an agent tool) does not report into it.
+type errReporter struct {
+	invocationID string
+	report       func(error)
+}
+
+// reportErr records err in the closest enclosing ParallelAgent of ctx, if any.
+func reportErr(ctx agent.InvocationContext, err error) {
+	if r, ok := ctx.Value(errReporterKey{}).(errReporter); ok && r.invocationID == ctx.InvocationID() {
+		r.report(err)
+	}
 }
 
 type result struct {
