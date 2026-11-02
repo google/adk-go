@@ -23,6 +23,8 @@ import (
 	"log"
 	"log/slog"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,11 +37,14 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/internal/adkcontext"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolsearch"
 )
 
 type dummyLLM struct {
@@ -431,14 +436,14 @@ func TestDrawNode(t *testing.T) {
 			visitedNodes := make(map[string]bool)
 			nodeName := ""
 			if tt.agent != nil {
-				err = drawNode(context.Background(), graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes, DarkTheme)
+				err = drawNode(testToolsets(t), graph, parentGraph, tt.agent, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
 				nodeName = tt.agent.Name()
 			}
 			if tt.tool != nil {
-				err = drawNode(context.Background(), graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes, DarkTheme)
+				err = drawNode(testToolsets(t), graph, parentGraph, tt.tool, tt.highlightedPairs, visitedNodes, DarkTheme)
 				if err != nil {
 					t.Fatalf("drawNode failed: %v", err)
 				}
@@ -472,7 +477,7 @@ func TestDrawClusterNode(t *testing.T) {
 	parentGraph := graph
 	visitedNodes := make(map[string]bool)
 	agent := newTestAgent(t, "MyClusterAgent", "", agentinternal.TypeSequentialAgent, nil, nil)
-	err = drawNode(context.Background(), graph, parentGraph, agent, [][]string{}, visitedNodes, DarkTheme)
+	err = drawNode(testToolsets(t), graph, parentGraph, agent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("drawNode failed: %v", err)
 	}
@@ -615,7 +620,7 @@ func TestDrawCluster(t *testing.T) {
 			parentAgent := newTestAgent(t, "ParentAgent", "", tt.agentType, []agent.Agent{subAgent1, subAgent2}, nil)
 
 			clusterGraph := gographviz.NewGraph()
-			err = drawCluster(context.Background(), parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes, DarkTheme)
+			err = drawCluster(testToolsets(t), parentGraph, clusterGraph, parentAgent, [][]string{}, visitedNodes, DarkTheme)
 			if err != nil {
 				t.Fatalf("drawCluster failed: %v", err)
 			}
@@ -673,7 +678,7 @@ func TestBuildGraph(t *testing.T) {
 	subAgent2 := newTestAgent(t, "SubAgent2", "", agentinternal.TypeLLMAgent, nil, nil)
 	mainAgent := newTestAgent(t, "MainAgent", "", agentinternal.TypeLLMAgent, []agent.Agent{subAgent1, subAgent2}, []tool.Tool{tool2})
 
-	err = buildGraph(context.Background(), graph, parentGraph, mainAgent, [][]string{}, visitedNodes, DarkTheme)
+	err = buildGraph(testToolsets(t), graph, parentGraph, mainAgent, [][]string{}, visitedNodes, DarkTheme)
 	if err != nil {
 		t.Fatalf("buildGraph failed: %v", err)
 	}
@@ -711,6 +716,14 @@ func parseGraph(t *testing.T, dot string) *gographviz.Graph {
 		t.Fatalf("analyse DOT: %v\n%s", err, dot)
 	}
 	return g
+}
+
+// testToolsets returns a toolset lister for a graph built directly by a test.
+func testToolsets(t *testing.T) *toolsetLister {
+	t.Helper()
+	l, stop := newToolsetLister(context.Background())
+	t.Cleanup(stop)
+	return l
 }
 
 func TestNestedWorkflowGraph(t *testing.T) {
@@ -1041,12 +1054,15 @@ func captureDefaultLog(t *testing.T) *bytes.Buffer {
 // TestAgentGraphLogsSkippedToolsets pins that a skipped toolset leaves a trace,
 // so a developer can see why its tools are missing, and that the trace names
 // types only: an error or panic value can carry a server URL or credentials.
+//
+// A wrapper around a nil toolset passes the nil check and panics in Name as
+// well as Tools; the graph must survive logging it.
 func TestAgentGraphLogsSkippedToolsets(t *testing.T) {
 	logs := captureDefaultLog(t)
 	root, err := llmagent.New(llmagent.Config{
 		Name:     "root",
 		Model:    &dummyLLM{},
-		Toolsets: []tool.Toolset{failingToolset{}, panickingToolset{}, nil, staticToolset{}},
+		Toolsets: []tool.Toolset{failingToolset{}, panickingToolset{}, nil, tool.WithConfirmation(nil, true, nil), staticToolset{}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1074,66 +1090,305 @@ func TestAgentGraphLogsSkippedToolsets(t *testing.T) {
 	want := []map[string]any{
 		{"level": "WARN", "msg": msg, "agent": "root", "toolset": "failing", "toolset_type": "services.failingToolset", "kind": "error", "error_type": "*errors.errorString"},
 		{"level": "WARN", "msg": msg, "agent": "root", "toolset": "panicking", "toolset_type": "services.panickingToolset", "kind": "panic", "error_type": "string"},
+		{"level": "WARN", "msg": msg, "agent": "root", "toolset": "", "toolset_type": "*tool.confirmationToolset", "kind": "panic", "error_type": "runtime.errorString"},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("log records mismatch (-want +got):\n%s", diff)
 	}
 }
 
-// blockingToolset never lists its tools on its own, like an MCP server that
-// accepts the connection and never answers. It gives up when its context does.
-type blockingToolset struct{}
-
-func (blockingToolset) Name() string { return "blocking" }
-
-func (blockingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
-	<-ctx.Done()
-	return nil, ctx.Err()
+// shortenToolsetWait sets toolsetWaitBudget to d for the rest of the test.
+func shortenToolsetWait(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := toolsetWaitBudget
+	toolsetWaitBudget = d
+	t.Cleanup(func() { toolsetWaitBudget = prev })
 }
 
-// TestAgentGraphBoundsToolsetResolution pins that an unresponsive toolset
-// costs the graph at most the resolution budget. Without one the graph waits
-// on it forever, where it used to render without the toolset's tools.
-func TestAgentGraphBoundsToolsetResolution(t *testing.T) {
-	prev := toolsetResolveBudget
-	toolsetResolveBudget = 50 * time.Millisecond
-	t.Cleanup(func() { toolsetResolveBudget = prev })
-
-	helper := newTestAgent(t, "helper", "", agentinternal.TypeLLMAgent, nil, nil)
-	root, err := llmagent.New(llmagent.Config{
-		Name:      "root",
-		Model:     &dummyLLM{},
-		Tools:     []tool.Tool{newTestTool("direct_tool")},
-		Toolsets:  []tool.Toolset{blockingToolset{}, staticToolset{}},
-		SubAgents: []agent.Agent{helper},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
+// buildGraphWithin builds root's graph for ctx and fails the test if that takes
+// longer than limit, rather than hanging it.
+func buildGraphWithin(t *testing.T, ctx context.Context, root agent.Agent, limit time.Duration) string {
+	t.Helper()
 	type result struct {
 		dot string
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
-		dot, err := GetAgentGraph(context.Background(), root, nil)
+		dot, err := GetAgentGraph(ctx, root, nil)
 		done <- result{dot, err}
 	}()
-	var res result
 	select {
-	case res = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("GetAgentGraph still waiting on an unresponsive toolset after 10s")
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("GetAgentGraph: %v", res.err)
+		}
+		return res.dot
+	case <-time.After(limit):
+		t.Fatalf("GetAgentGraph still running after %v", limit)
+		return ""
 	}
-	if res.err != nil {
-		t.Fatalf("GetAgentGraph: %v", res.err)
+}
+
+// startingToolset stands in for a stdio MCP server that is still starting: it
+// lists its tool once ready is closed. Like mcptoolset reusing the
+// CommandTransport of a process the MCP SDK killed, it breaks for good if the
+// context it is listed with is done before then.
+type startingToolset struct {
+	ready  chan struct{}
+	calls  atomic.Int32
+	broken atomic.Bool
+}
+
+func newStartingToolset(t *testing.T) (ts *startingToolset, release func()) {
+	ts = &startingToolset{ready: make(chan struct{})}
+	release = sync.OnceFunc(func() { close(ts.ready) })
+	t.Cleanup(release)
+	return ts, release
+}
+
+func (*startingToolset) Name() string { return "starting" }
+
+func (s *startingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	s.calls.Add(1)
+	if s.broken.Load() {
+		return nil, errors.New("exec: Stdout already set")
 	}
-	g := parseGraph(t, res.dot)
+	select {
+	case <-s.ready:
+		return []tool.Tool{&mockTool{name: "started_tool"}}, nil
+	case <-ctx.Done():
+		s.broken.Store(true)
+		return nil, ctx.Err()
+	}
+}
+
+// TestAgentGraphLeavesAStartingToolsetUsable pins that a graph built while a
+// toolset is still starting leaves it out without canceling it, even when the
+// request that asked for the graph ends. Canceling a stdio MCP toolset while
+// it connects breaks it for every later run of the agent.
+func TestAgentGraphLeavesAStartingToolsetUsable(t *testing.T) {
+	shortenToolsetWait(t, 50*time.Millisecond)
+	logs := captureDefaultLog(t)
+	starting, release := newStartingToolset(t)
+	helper := newTestAgent(t, "helper", "", agentinternal.TypeLLMAgent, nil, nil)
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     &dummyLLM{},
+		Tools:     []tool.Tool{newTestTool("direct_tool")},
+		Toolsets:  []tool.Toolset{starting, staticToolset{}},
+		SubAgents: []agent.Agent{helper},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The dev UI asks for the graph as soon as an app is opened, and the
+	// request ends once it has its answer.
+	reqCtx, endRequest := context.WithCancel(context.Background())
+	dot := buildGraphWithin(t, reqCtx, root, 10*time.Second)
+	endRequest()
+	g := parseGraph(t, dot)
 	for _, to := range []string{"direct_tool", "toolset_tool", "helper"} {
 		if lookupEdge(t, g, "root", to) == nil {
-			t.Errorf("missing edge root -> %s\n%s", to, res.dot)
+			t.Errorf("missing edge root -> %s\n%s", to, dot)
 		}
+	}
+	if g.IsNode("started_tool") {
+		t.Errorf("drew the tool of a toolset that had not started\n%s", dot)
+	}
+	if !strings.Contains(logs.String(), `"toolset":"starting"`) || !strings.Contains(logs.String(), `"kind":"timeout"`) {
+		t.Errorf("logs = %s, want a timeout record for toolset starting", logs)
+	}
+
+	// The server comes up. The agent's next run lists the toolset as usual.
+	release()
+	tools, err := starting.Tools(newGraphContext(context.Background(), root))
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("Tools after the graph = %v, %v; want the started tool: the graph broke the toolset", tools, err)
+	}
+	if dot := buildGraphWithin(t, context.Background(), root, 10*time.Second); lookupEdge(t, parseGraph(t, dot), "root", "started_tool") == nil {
+		t.Errorf("missing edge root -> started_tool once the toolset started\n%s", dot)
+	}
+}
+
+// hungToolset never returns from Tools until released, whatever its context
+// does, like a stdio MCP server that ignores SIGTERM while the MCP SDK waits
+// to kill it.
+type hungToolset struct{ release chan struct{} }
+
+func (hungToolset) Name() string { return "hung" }
+
+func (h hungToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	<-h.release
+	return nil, nil
+}
+
+// TestAgentGraphDoesNotWaitPastItsBudget pins that the graph answers once its
+// budget is spent even if a toolset never returns, rather than waiting on the
+// toolset's own shutdown, which for a stdio MCP server can take 10s more and
+// reach the web launcher's 15s write timeout.
+func TestAgentGraphDoesNotWaitPastItsBudget(t *testing.T) {
+	shortenToolsetWait(t, 50*time.Millisecond)
+	hung := hungToolset{release: make(chan struct{})}
+	t.Cleanup(func() { close(hung.release) })
+	root, err := llmagent.New(llmagent.Config{
+		Name:     "root",
+		Model:    &dummyLLM{},
+		Tools:    []tool.Tool{newTestTool("direct_tool")},
+		Toolsets: []tool.Toolset{hung, staticToolset{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dot := buildGraphWithin(t, context.Background(), root, 5*time.Second)
+	g := parseGraph(t, dot)
+	for _, to := range []string{"direct_tool", "toolset_tool"} {
+		if lookupEdge(t, g, "root", to) == nil {
+			t.Errorf("missing edge root -> %s\n%s", to, dot)
+		}
+	}
+}
+
+// rendezvousToolset lists its tool only once its partner has started listing.
+// A pair of them lists both only when they list at the same time.
+type rendezvousToolset struct {
+	name           string
+	started, other chan struct{}
+	start          func()
+}
+
+func newRendezvousPair() (a, b *rendezvousToolset) {
+	aStarted, bStarted := make(chan struct{}), make(chan struct{})
+	a = &rendezvousToolset{name: "a", started: aStarted, other: bStarted}
+	b = &rendezvousToolset{name: "b", started: bStarted, other: aStarted}
+	a.start = sync.OnceFunc(func() { close(aStarted) })
+	b.start = sync.OnceFunc(func() { close(bStarted) })
+	return a, b
+}
+
+func (r *rendezvousToolset) Name() string { return r.name }
+
+func (r *rendezvousToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
+	r.start()
+	<-r.other
+	return []tool.Tool{&mockTool{name: r.name + "_tool"}}, nil
+}
+
+// TestAgentGraphListsToolsetsTogether pins that every toolset in the tree
+// starts listing when the graph does. Listed one after another, a toolset
+// would get only what an earlier slow one left of the budget.
+func TestAgentGraphListsToolsetsTogether(t *testing.T) {
+	shortenToolsetWait(t, 2*time.Second)
+	a, b := newRendezvousPair()
+	// One toolset on the root and one on a sub-agent inside a workflow, which
+	// the graph reaches last.
+	worker, err := llmagent.New(llmagent.Config{Name: "worker", Model: &dummyLLM{}, Toolsets: []tool.Toolset{b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline := newTestAgent(t, "pipeline", "", agentinternal.TypeSequentialAgent, []agent.Agent{worker}, nil)
+	root, err := llmagent.New(llmagent.Config{
+		Name:      "root",
+		Model:     &dummyLLM{},
+		Toolsets:  []tool.Toolset{a},
+		SubAgents: []agent.Agent{pipeline},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dot := buildGraphWithin(t, context.Background(), root, 10*time.Second)
+	g := parseGraph(t, dot)
+	if lookupEdge(t, g, "root", "a_tool") == nil || lookupEdge(t, g, "worker", "b_tool") == nil {
+		t.Errorf("want edges root -> a_tool and worker -> b_tool\n%s", dot)
+	}
+}
+
+// TestAgentGraphSharesAListingStillRunning pins that graphs built while a
+// toolset is still listing wait for that listing instead of starting another,
+// so an MCP server that never answers leaves one goroutine behind rather than
+// one per graph request.
+func TestAgentGraphSharesAListingStillRunning(t *testing.T) {
+	shortenToolsetWait(t, 20*time.Millisecond)
+	starting, _ := newStartingToolset(t)
+	root, err := llmagent.New(llmagent.Config{Name: "root", Model: &dummyLLM{}, Toolsets: []tool.Toolset{starting}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 3 {
+		buildGraphWithin(t, context.Background(), root, 5*time.Second)
+	}
+	if got := starting.calls.Load(); got != 1 {
+		t.Errorf("Tools calls = %d, want 1 shared by every graph", got)
+	}
+}
+
+// probingToolset records what the context it is listed with reports.
+type probingToolset struct {
+	mu   sync.Mutex
+	seen map[string]any
+}
+
+func (*probingToolset) Name() string { return "probing" }
+
+func (p *probingToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
+	_, err := ctx.ReadonlyState().Get("anything")
+	_, hasIdentity := agent.IdentityFromContext(ctx)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = map[string]any{
+		"AgentName":    ctx.AgentName(),
+		"AppName":      ctx.AppName(),
+		"UserID":       ctx.UserID(),
+		"SessionID":    ctx.SessionID(),
+		"InvocationID": ctx.InvocationID(),
+		"Branch":       ctx.Branch(),
+		"UserContent":  ctx.UserContent() == nil,
+		"stateErr":     errors.Is(err, session.ErrStateKeyNotExist),
+		"identity":     hasIdentity,
+	}
+	return []tool.Tool{&mockTool{name: "probed_tool"}}, nil
+}
+
+// TestAgentGraphListsToolsetsWithoutASession pins the context a toolset is
+// listed with outside a run: the agent's name, and empty values instead of
+// panics for everything a run would supply, including state, so toolsets such
+// as tool/toolsearch that read it still list their tools. It carries no
+// invocation identity even when the request does, so nothing lists tools as
+// whoever asked for the graph.
+func TestAgentGraphListsToolsetsWithoutASession(t *testing.T) {
+	probe := &probingToolset{}
+	search, err := toolsearch.New(namedToolset{name: "catalog", tools: []string{"core_tool", "gated_tool"}}, toolsearch.Config{CoreToolNames: []string{"core_tool"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := llmagent.New(llmagent.Config{Name: "root", Model: &dummyLLM{}, Toolsets: []tool.Toolset{probe, search}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqCtx := context.WithValue(context.Background(), adkcontext.IdentityKey, agent.Identity{UserID: "requester", AppName: "app", SessionID: "s"})
+
+	dot := buildGraphWithin(t, reqCtx, root, 10*time.Second)
+	g := parseGraph(t, dot)
+	for _, to := range []string{"probed_tool", toolsearch.ToolName, "core_tool"} {
+		if lookupEdge(t, g, "root", to) == nil {
+			t.Errorf("missing edge root -> %s\n%s", to, dot)
+		}
+	}
+	if g.IsNode("gated_tool") {
+		t.Errorf("drew gated_tool, which toolsearch hides until it is discovered\n%s", dot)
+	}
+	want := map[string]any{
+		"AgentName": "root", "AppName": "", "UserID": "", "SessionID": "", "InvocationID": "", "Branch": "",
+		"UserContent": true, "stateErr": true, "identity": false,
+	}
+	probe.mu.Lock()
+	defer probe.mu.Unlock()
+	if diff := cmp.Diff(want, probe.seen); diff != "" {
+		t.Errorf("context seen by the toolset mismatch (-want +got):\n%s", diff)
 	}
 }
 

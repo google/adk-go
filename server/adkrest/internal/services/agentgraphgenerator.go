@@ -16,18 +16,14 @@ package services
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/awalterschulze/gographviz"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
-	icontext "google.golang.org/adk/v2/internal/context"
 	llmagentinternal "google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/tool"
 )
@@ -283,7 +279,7 @@ func edgeHighlighted(from, to string, higlightedPairs [][]string) *bool {
 	return nil
 }
 
-func drawCluster(ctx context.Context, parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawCluster(toolsets *toolsetLister, parentGraph, cluster *gographviz.Graph, agent agent.Agent, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	agentInternal, ok := agent.(agentinternal.Agent)
 	if !ok {
 		return nil
@@ -293,7 +289,7 @@ func drawCluster(ctx context.Context, parentGraph, cluster *gographviz.Graph, ag
 	// destination cluster was actually added; a name already visited as a tool
 	// is skipped and must not be linked through a node that was never drawn.
 	for _, subAgent := range subs {
-		err := buildGraph(ctx, cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err := buildGraph(toolsets, cluster, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("draw cluster: build graph: %w", err)
 		}
@@ -324,7 +320,7 @@ func drawCluster(ctx context.Context, parentGraph, cluster *gographviz.Graph, ag
 	return nil
 }
 
-func drawNode(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func drawNode(toolsets *toolsetLister, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	name := nodeName(instance)
 	shape := nodeShape(instance)
 	caption := nodeCaption(instance)
@@ -353,7 +349,7 @@ func drawNode(ctx context.Context, graph, parentGraph *gographviz.Graph, instanc
 		if err != nil {
 			return fmt.Errorf("add cluster: %w", err)
 		}
-		return drawCluster(ctx, parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
+		return drawCluster(toolsets, parentGraph, cluster, agent, highlightedPairs, visitedNodes, theme)
 	} else {
 		nodeAttributes := map[string]string{
 			"label":     caption,
@@ -396,38 +392,7 @@ func drawEdge(graph *gographviz.Graph, from, to string, highlightedPairs [][]str
 	return graph.AddEdge(src, dst, true, edgeAttributes)
 }
 
-// toolsetPanicError is a panic recovered from Toolset.Tools.
-type toolsetPanicError struct {
-	value any
-}
-
-func (e *toolsetPanicError) Error() string {
-	return fmt.Sprintf("toolset.Tools panicked: %v", e.value)
-}
-
-// logSkippedToolset records that the graph of a leaves out toolset because
-// listing its tools failed with err. The graph still renders, so the caller
-// gets no error, and without this line a developer has no way to see why the
-// toolset's tools are missing.
-//
-// It logs types, not the error or panic value: those can carry a server URL
-// or credentials.
-func logSkippedToolset(ctx context.Context, a agent.Agent, toolset tool.Toolset, err error) {
-	kind, errType := "error", fmt.Sprintf("%T", err)
-	var p *toolsetPanicError
-	if errors.As(err, &p) {
-		kind, errType = "panic", fmt.Sprintf("%T", p.value)
-	}
-	slog.WarnContext(ctx, "agent graph: skipping a toolset that could not list its tools", //nolint:forbidigo // the graph still renders without this toolset, so there is no error to return
-		"agent", a.Name(),
-		"toolset", toolset.Name(),
-		"toolset_type", fmt.Sprintf("%T", toolset),
-		"kind", kind,
-		"error_type", errType,
-	)
-}
-
-func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
+func buildGraph(toolsets *toolsetLister, graph, parentGraph *gographviz.Graph, instance any, highlightedPairs [][]string, visitedNodes map[string]bool, theme Theme) error {
 	namedInstance, ok := instance.(namedInstance)
 	if !ok {
 		return nil
@@ -436,7 +401,7 @@ func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, insta
 		return nil
 	}
 
-	err := drawNode(ctx, graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
+	err := drawNode(toolsets, graph, parentGraph, instance, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return fmt.Errorf("draw node: %w", err)
 	}
@@ -448,7 +413,7 @@ func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, insta
 	if ok {
 		tools := llmagentinternal.Reveal(llmAgent).Tools
 		for _, tool := range tools {
-			err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+			err = drawNode(toolsets, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
 			if err != nil {
 				return fmt.Errorf("draw tool node: %w", err)
 			}
@@ -461,28 +426,17 @@ func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, insta
 			if toolset == nil {
 				continue
 			}
-			var tsTools []tool.Tool
-			var tsErr error
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						tsErr = &toolsetPanicError{value: r}
-					}
-				}()
-				// The graph is drawn outside any run, so there is no session,
-				// user or invocation to give the toolset; only the agent.
-				rCtx := icontext.NewReadonlyContext(icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: agent}))
-				tsTools, tsErr = toolset.Tools(rCtx)
-			}()
+			tsTools, tsErr := toolsets.tools(agent, toolset)
 			if tsErr != nil {
-				// A toolset that needs a run (per-user auth, the session) or an
-				// unreachable server cannot list its tools here. Skip it, as
-				// adk-python does, so the rest of the graph still renders.
-				logSkippedToolset(ctx, agent, toolset, tsErr)
+				// A toolset that needs a run (per-user auth, for example), an
+				// unreachable server or one still starting cannot list its tools
+				// here. Skip it, as adk-python does, so the rest of the graph
+				// still renders.
+				logSkippedToolset(toolsets.ctx, agent, toolset, tsErr)
 				continue
 			}
 			for _, tool := range tsTools {
-				err = drawNode(ctx, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
+				err = drawNode(toolsets, graph, parentGraph, tool, highlightedPairs, visitedNodes, theme)
 				if err != nil {
 					return fmt.Errorf("draw tool node: %w", err)
 				}
@@ -494,7 +448,7 @@ func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, insta
 		}
 	}
 	for _, subAgent := range agent.SubAgents() {
-		err = buildGraph(ctx, graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
+		err = buildGraph(toolsets, graph, parentGraph, subAgent, highlightedPairs, visitedNodes, theme)
 		if err != nil {
 			return fmt.Errorf("build sub agent graph: %w", err)
 		}
@@ -508,20 +462,6 @@ func buildGraph(ctx context.Context, graph, parentGraph *gographviz.Graph, insta
 	return nil
 }
 
-// toolsetResolveBudget is the deadline one graph gives toolset resolution,
-// across every agent in the tree rather than per agent. Toolsets may reach out
-// over the network (an MCP server, for example), and the graph must not wait
-// on an unresponsive one indefinitely. The deadline binds only toolsets that
-// honor their context; those return the context error once it passes and are
-// logged and skipped like any other failing toolset.
-//
-// It has to leave room under the web launcher's default 15s write timeout,
-// past which the client gets no response at all. An MCP toolset can spend
-// about 5s more after its context ends, cleaning up a session with a server
-// that does not answer; a 10s budget measured 15s in total and the response
-// was dropped. It is a variable so tests can shorten it.
-var toolsetResolveBudget = 5 * time.Second
-
 // GetAgentGraph renders the agent tree as Graphviz DOT source in the dark
 // theme. It is kept for callers that do not care about the palette.
 func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]string) (string, error) {
@@ -530,6 +470,12 @@ func GetAgentGraph(ctx context.Context, agent agent.Agent, highlightedPairs [][]
 
 // GetAgentGraphWithTheme renders the agent tree as Graphviz DOT source using
 // the given palette.
+//
+// It draws the tools of every toolset in the tree, so it calls Toolset.Tools,
+// and an MCP toolset connects to its server. It waits for them at most
+// toolsetWaitBudget and leaves out, and logs, a toolset that has not listed its
+// tools by then or cannot list them outside a run. A listing still running
+// when it returns is not canceled; it finishes in the background.
 func GetAgentGraphWithTheme(ctx context.Context, agent agent.Agent, highlightedPairs [][]string, theme Theme) (string, error) {
 	graph := gographviz.NewGraph()
 	if err := graph.SetName("AgentGraph"); err != nil {
@@ -544,11 +490,11 @@ func GetAgentGraphWithTheme(ctx context.Context, agent agent.Agent, highlightedP
 	if err := graph.AddAttr(graph.Name, "bgcolor", theme.Background); err != nil {
 		return "", fmt.Errorf("set graph background color: %w", err)
 	}
-	// One budget for the whole walk, not one per agent.
-	ctx, cancel := context.WithTimeout(ctx, toolsetResolveBudget)
-	defer cancel()
+	toolsets, stop := newToolsetLister(ctx)
+	defer stop()
+	toolsets.start(agent)
 	visitedNodes := map[string]bool{}
-	err := buildGraph(ctx, graph, graph, agent, highlightedPairs, visitedNodes, theme)
+	err := buildGraph(toolsets, graph, graph, agent, highlightedPairs, visitedNodes, theme)
 	if err != nil {
 		return "", fmt.Errorf("build root graph: %w", err)
 	}
