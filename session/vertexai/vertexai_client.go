@@ -113,9 +113,9 @@ func isNotFoundError(err error) bool {
 	// status.Code returns codes.Unknown if it's not a gRPC error, otherwise the
 	// specific gRPC code, and it unwraps, so the first arm still sees a
 	// NOT_FOUND that getSession has wrapped in session.ErrNotFound. The
-	// sentinel arm is therefore redundant for every error the backend
-	// produces; it is kept because it is the only arm that catches
-	// getSession's nil-response guard, which carries no gRPC status.
+	// sentinel arm catches the getSession errors that carry no gRPC status:
+	// the nil-response guard, and a session that belongs to another user.
+	// deleteSession relies on the second to treat that session as missing.
 	return status.Code(err) == codes.NotFound || errors.Is(err, session.ErrNotFound)
 }
 
@@ -158,7 +158,7 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	if err != nil {
 		// The Agent Engine answers a missing session with NOT_FOUND (HTTP 404).
 		// Get re-wraps this one rung up, because a NOT_FOUND can also surface
-		// from the concurrent ListEvents call, so this wrap is defence in depth
+		// from the concurrent ListEvents call, so this wrap is defense in depth
 		// rather than the load-bearing one: dropping it changes no observable
 		// behavior. It stays so that getSession's own contract does not depend
 		// on what its callers do with the error.
@@ -175,8 +175,12 @@ func (c *vertexAiClient) getSession(ctx context.Context, req *session.GetRequest
 	if sessRpcResp == nil {
 		return nil, fmt.Errorf("%w: %q", session.ErrNotFound, req.SessionID)
 	}
+	// Another user's session is reported as missing, as the in-memory and
+	// database services report it, so the REST layer answers 404 for every
+	// backend. This diverges from adk-python, whose VertexAiSessionService
+	// raises ValueError here and so answers 500.
 	if sessRpcResp.UserId != req.UserID {
-		return nil, fmt.Errorf("session %s does not belong to user %s", req.SessionID, req.UserID)
+		return nil, fmt.Errorf("%w: session %s does not belong to user %s", session.ErrNotFound, req.SessionID, req.UserID)
 	}
 
 	return &localSession{
@@ -269,7 +273,10 @@ func (c *vertexAiClient) deleteSession(ctx context.Context, req *session.DeleteR
 		SessionID: req.SessionID,
 	}); err != nil {
 		if isNotFoundError(err) {
-			return nil // A missing session is a no-op.
+			// A missing session, or another user's, is a no-op, as it is for
+			// the in-memory and database services. adk-python's
+			// VertexAiSessionService raises ValueError for another user's.
+			return nil
 		}
 		return err
 	}
@@ -349,8 +356,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	return nil
 }
 
-// eventNeedsRawEvent reports whether the event carries state that has no
-// dedicated SessionEvent column and would be lost without raw_event.
+// eventNeedsRawEvent reports whether the event carries state that would be
+// lost without raw_event, because no SessionEvent column holds it or ADK does
+// not read back the one that does.
 // Gating raw_event on this keeps plain events on their legacy wire format,
 // so the recorded replay fixtures stay valid.
 func eventNeedsRawEvent(event *session.Event) bool {
@@ -359,6 +367,12 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
 		len(event.Routes) > 0 ||
+		// A finished live transcription is appended as an event with no
+		// Content, so the transcription is all it carries. EventMetadata has
+		// transcription fields, but adk-python neither writes nor reads them
+		// and keeps transcriptions in raw_event only, so this does the same.
+		event.InputTranscription != nil ||
+		event.OutputTranscription != nil ||
 		// A context-compaction summary lives entirely on Actions.Compaction:
 		// its Content is nil and it has no state or artifact delta, so without
 		// raw_event nothing about it reaches the backend. On reload the session
@@ -645,6 +659,21 @@ func aiplatformToGenaiContent(rpcResp *aiplatformpb.SessionEvent) *genai.Content
 					Name:     v.FunctionResponse.Name,
 					Response: responseMap,
 				}
+			case *aiplatformpb.Part_ExecutableCode:
+				part.ExecutableCode = &genai.ExecutableCode{
+					Code:     v.ExecutableCode.Code,
+					Language: genai.Language(v.ExecutableCode.Language.String()),
+				}
+			case *aiplatformpb.Part_CodeExecutionResult:
+				part.CodeExecutionResult = &genai.CodeExecutionResult{
+					Outcome: genai.Outcome(v.CodeExecutionResult.Outcome.String()),
+					Output:  v.CodeExecutionResult.Output,
+				}
+			case *aiplatformpb.Part_FileData:
+				part.FileData = &genai.FileData{
+					MIMEType: v.FileData.MimeType,
+					FileURI:  v.FileData.FileUri,
+				}
 			}
 			parts = append(parts, part)
 		}
@@ -699,6 +728,30 @@ func createAiplatformpbContent(event *session.Event) (*aiplatformpb.Content, err
 						Id:       part.FunctionResponse.ID,
 						Name:     part.FunctionResponse.Name,
 						Response: response,
+					},
+				}
+			}
+			if part.ExecutableCode != nil {
+				aiplatformPart.Data = &aiplatformpb.Part_ExecutableCode{
+					ExecutableCode: &aiplatformpb.ExecutableCode{
+						Code:     part.ExecutableCode.Code,
+						Language: aiplatformpb.ExecutableCode_Language(aiplatformpb.ExecutableCode_Language_value[string(part.ExecutableCode.Language)]),
+					},
+				}
+			}
+			if part.CodeExecutionResult != nil {
+				aiplatformPart.Data = &aiplatformpb.Part_CodeExecutionResult{
+					CodeExecutionResult: &aiplatformpb.CodeExecutionResult{
+						Outcome: aiplatformpb.CodeExecutionResult_Outcome(aiplatformpb.CodeExecutionResult_Outcome_value[string(part.CodeExecutionResult.Outcome)]),
+						Output:  part.CodeExecutionResult.Output,
+					},
+				}
+			}
+			if part.FileData != nil {
+				aiplatformPart.Data = &aiplatformpb.Part_FileData{
+					FileData: &aiplatformpb.FileData{
+						MimeType: part.FileData.MIMEType,
+						FileUri:  part.FileData.FileURI,
 					},
 				}
 			}

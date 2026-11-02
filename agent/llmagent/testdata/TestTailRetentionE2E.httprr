@@ -1,0 +1,757 @@
+httprr trace v1
+629 3208
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 397
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The deployment region for this project is europe-west4."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:06 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2291
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Understood, the tail_retention_agent is ready to perform tail-retention compaction in europe-west4.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 60,
+    "candidatesTokenCount": 25,
+    "totalTokenCount": 470,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 60
+      }
+    ],
+    "thoughtsTokenCount": 385,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 95
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "6KKVau-bIpmv28oP-e-6qA8",
+  "turnToken": "v1_Chc2S0tWYXUtYklwbXYyOG9QLWUtNnFBOBIXNktLVmF1LWJJcG12MjhvUC1lLTZxQTg"
+}
+2927 2875
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2694
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The deployment region for this project is europe-west4."}],"role":"user"},{"parts":[{"text":"Understood, the tail_retention_agent is ready to perform tail-retention compaction in europe-west4.","thoughtSignature":"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"}],"role":"model"},{"parts":[{"text":"Explain in one sentence why connection pooling matters."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:08 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1644
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Connection pooling improves application performance and scalability by reusing a cache of database connections instead of repeatedly creating new ones.",
+            "thoughtSignature": "EtUJCtIJARFNMg/3m8+VuGGfwNeTskBcAVKxYwIAeaRmC7yiTTvZDK+wIHz/UR2syEGAfFAtpSj+4bYADqUMTSE0KN8paCfA2cLs8L6IKSqim5zcYEQKNpYnjLLAuy5EMJtQcRnUmpAcez5/m3HdlW5/sATHQ/JkMmtDiI2TmYWG0H3pnGlc8qHM40yL80G1uLwrwNlkMs3yUBaT3rNNqaN+i8aZhifqQ2BtOr6d5U2aI53ibG6aUnvq3uZ2ORft+uWLLNfJRESxYyHW3OkPZGjIfOPsTJpbt6kW3F8ivVzJ06lgiHw0VW3lfuc6Bz4PB3f07s2PighwyFQRgf7xLjS62NcTqFa481ITH6QmU5XkPMHXRw0Fl4XczT2w31HIxLB6ntRNtE15inOrR/xJCeajt7zoe+p/ZwwrWS7biLBetfNmMSwupfqX7EeS1k7Vqbj/JWnvn1iZtLqDodoCeunT185Ns1jFsG7TZ0D3yB0nsMKQ0o4gKvGLIjuGTCFqNHrL1m+YmqCgZFQFnLWo5ZtMc04FLT47/EE8LATNaLOnis+rlacI4R5rAPa5y55cPlDwu2vI5401tsV2cQpZtGkmeD/n+6onEkW6f/mmbLPxyuuQW3BRomkkfQGtA0meSgXucjUKR1kefF1CnbDHayh31s3sLOA4PYW/ajGmjuPPW+KV7PFTa2NhZPqV3k7g0X82ASaVB0UnKf1yg48yxdg7XuEw+pin19yDYE/tB6JrZDwj1qqt/2TjY5SFMVQEbxUcYHM1vLBbFJlVU8VBo7kNt9szAaKf0hT6Gp29uRlohIRDXCgF+LPiFBYKffb9XfjiZne+jsayeEEZBtYE1RE40IJ5XrV6Nr5fwTlFMxx/wyO3STkQHwSnzL98wPb+FgJMju46RTdUtnfnxvMvt3gtaBrAYsyvJQnJfIk3lHn4yI2Q6kk3N9Vw5aoLQcfm081/+KrOiDzwdCThmAzSX6RNxvw3oGXHRCYLYysn2rpyVOZge4vOt/1lPJeh0qKuoIFWLYNKOqezDuzGRqaQui+zcEdDR8PL7RGKDHRFnXrj8d24+3KBRdCg6y2b2ORbBrSC0f6U0gHrVtzjGaqtz6nkIGg88kek72Jnwy7OuPNMnM5QpcTGD+f3HPVRdEFwn4qcVrBIYibaQVTZZIRRgG8yhJ1fbewtVsBK5KyQmfRVlHgQQoSegsvpnJWz36b1KRCTc07rri/c6O+s6d/fqdNSGchUxSGZI5BUSnLwHmakp7GgL0KDyCV1Ij1VdIhZWFMDx5RRdv403htX7QvL+VfUeSvpXRE5abJyoJ4hkkwD9kec11GVe8KVK1kGUF2koDaZ9DjAgcx/OhDHSfCHnQUf0w0bzh4/Db/rNuy/Tqepwcf2QlWWyrDZ4UVaZ/nquDcflm9VvFUcAZ4n3AKOCu2CLsx8nuj7cM1J7V4qXvmxpEKLzF6Sfqq/KeeOgZ6jK/X4L7/zq9HFFXU0tOhIPMby3xBuk0yUOLpMPeZ/pG8cOqcWs20DzgfYbXbvj0UCFoOmc15MasJoAN5sJpeOOPD3pnvLFLikSJ4x6WuodPYixw53iN3wbLgMqkNZHK9sych1g505OysENkRRdjfjmUNMPRloCSmEbw9Ytjw/qylpsVFNdP8dMQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 481,
+    "candidatesTokenCount": 21,
+    "totalTokenCount": 739,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 481
+      }
+    ],
+    "thoughtsTokenCount": 237,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 528
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "6qKVapLjMd-wxN8Poo_C2As",
+  "turnToken": "v1_Chc2cUtWYXBMak1kLXd4TjhQb29fQzJBcxIXNnFLVmFwTGpNZC13eE44UG9vX0MyQXM"
+}
+1631 5553
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 1398
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nuser: The deployment region for this project is europe-west4.\ntail_retention_agent: Understood, the tail_retention_agent is ready to perform tail-retention compaction in europe-west4."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:12 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3578
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user specified that the deployment region for the project is `europe-west4`.\n\n### Context Summary\nThe user provided the deployment region for the project. The agent (`tail_retention_agent`) acknowledged this information and confirmed it is ready to perform tail-retention compaction in the `europe-west4` region. \n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 278,
+    "candidatesTokenCount": 148,
+    "totalTokenCount": 1090,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 278
+      }
+    ],
+    "thoughtsTokenCount": 664,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 309
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "7KKVarKJHPP-vdIPpNDyiAk",
+  "turnToken": "v1_Chc3S0tWYXJLSkhQUC12ZElQcE5EeWlBaxIXN0tLVmFyS0pIUFAtdmRJUHBORHlpQWs"
+}
+3326 3279
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3093
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user specified that the deployment region for the project is `europe-west4`.\n\n### Context Summary\nThe user provided the deployment region for the project. The agent (`tail_retention_agent`) acknowledged this information and confirmed it is ready to perform tail-retention compaction in the `europe-west4` region. \n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"Explain in one sentence why connection pooling matters."}],"role":"user"},{"parts":[{"text":"Connection pooling improves application performance and scalability by reusing a cache of database connections instead of repeatedly creating new ones.","thoughtSignature":"EtUJCtIJARFNMg/3m8+VuGGfwNeTskBcAVKxYwIAeaRmC7yiTTvZDK+wIHz/UR2syEGAfFAtpSj+4bYADqUMTSE0KN8paCfA2cLs8L6IKSqim5zcYEQKNpYnjLLAuy5EMJtQcRnUmpAcez5/m3HdlW5/sATHQ/JkMmtDiI2TmYWG0H3pnGlc8qHM40yL80G1uLwrwNlkMs3yUBaT3rNNqaN+i8aZhifqQ2BtOr6d5U2aI53ibG6aUnvq3uZ2ORft+uWLLNfJRESxYyHW3OkPZGjIfOPsTJpbt6kW3F8ivVzJ06lgiHw0VW3lfuc6Bz4PB3f07s2PighwyFQRgf7xLjS62NcTqFa481ITH6QmU5XkPMHXRw0Fl4XczT2w31HIxLB6ntRNtE15inOrR/xJCeajt7zoe+p/ZwwrWS7biLBetfNmMSwupfqX7EeS1k7Vqbj/JWnvn1iZtLqDodoCeunT185Ns1jFsG7TZ0D3yB0nsMKQ0o4gKvGLIjuGTCFqNHrL1m+YmqCgZFQFnLWo5ZtMc04FLT47/EE8LATNaLOnis+rlacI4R5rAPa5y55cPlDwu2vI5401tsV2cQpZtGkmeD/n+6onEkW6f/mmbLPxyuuQW3BRomkkfQGtA0meSgXucjUKR1kefF1CnbDHayh31s3sLOA4PYW/ajGmjuPPW+KV7PFTa2NhZPqV3k7g0X82ASaVB0UnKf1yg48yxdg7XuEw+pin19yDYE/tB6JrZDwj1qqt/2TjY5SFMVQEbxUcYHM1vLBbFJlVU8VBo7kNt9szAaKf0hT6Gp29uRlohIRDXCgF+LPiFBYKffb9XfjiZne+jsayeEEZBtYE1RE40IJ5XrV6Nr5fwTlFMxx/wyO3STkQHwSnzL98wPb+FgJMju46RTdUtnfnxvMvt3gtaBrAYsyvJQnJfIk3lHn4yI2Q6kk3N9Vw5aoLQcfm081/+KrOiDzwdCThmAzSX6RNxvw3oGXHRCYLYysn2rpyVOZge4vOt/1lPJeh0qKuoIFWLYNKOqezDuzGRqaQui+zcEdDR8PL7RGKDHRFnXrj8d24+3KBRdCg6y2b2ORbBrSC0f6U0gHrVtzjGaqtz6nkIGg88kek72Jnwy7OuPNMnM5QpcTGD+f3HPVRdEFwn4qcVrBIYibaQVTZZIRRgG8yhJ1fbewtVsBK5KyQmfRVlHgQQoSegsvpnJWz36b1KRCTc07rri/c6O+s6d/fqdNSGchUxSGZI5BUSnLwHmakp7GgL0KDyCV1Ij1VdIhZWFMDx5RRdv403htX7QvL+VfUeSvpXRE5abJyoJ4hkkwD9kec11GVe8KVK1kGUF2koDaZ9DjAgcx/OhDHSfCHnQUf0w0bzh4/Db/rNuy/Tqepwcf2QlWWyrDZ4UVaZ/nquDcflm9VvFUcAZ4n3AKOCu2CLsx8nuj7cM1J7V4qXvmxpEKLzF6Sfqq/KeeOgZ6jK/X4L7/zq9HFFXU0tOhIPMby3xBuk0yUOLpMPeZ/pG8cOqcWs20DzgfYbXbvj0UCFoOmc15MasJoAN5sJpeOOPD3pnvLFLikSJ4x6WuodPYixw53iN3wbLgMqkNZHK9sych1g505OysENkRRdjfjmUNMPRloCSmEbw9Ytjw/qylpsVFNdP8dMQ=="}],"role":"model"},{"parts":[{"text":"In one sentence, when is a circuit breaker worth adding?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:14 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2312
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "A circuit breaker is worth adding when your application relies on remote services, to prevent a failing dependency from causing a cascading system failure.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 478,
+    "candidatesTokenCount": 26,
+    "totalTokenCount": 809,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 478
+      }
+    ],
+    "thoughtsTokenCount": 305,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 529
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "8KKVavXAA72zvdIPi5S86A0",
+  "turnToken": "v1_Chc4S0tWYXZYQUE3Mnp2ZElQaTVTODZBMBIXOEtLVmF2WEFBNzJ6dmRJUGk1Uzg2QTA"
+}
+2402 6047
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2169
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nmodel: **Conversation Language:** English\\n\\n### User Request\\nThe user specified that the deployment region for the project is `europe-west4`.\\n\\n### Context Summary\\nThe user provided the deployment region for the project. The agent (`tail_retention_agent`) acknowledged this information and confirmed it is ready to perform tail-retention compaction in the `europe-west4` region. \\n\\n### Tools Used\\n*No tools have been called in this conversation so far.*\\n\\n### Durable Facts\\n*   The deployment region for this project is `europe-west4`.\\n\\n### Unresolved Questions or Tasks\\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.\nuser: Explain in one sentence why connection pooling matters.\ntail_retention_agent: Connection pooling improves application performance and scalability by reusing a cache of database connections instead of repeatedly creating new ones."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:18 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3847
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of why connection pooling matters.\n\n### Context Summary\nThe conversation previously focused on setting up a tail-retention compaction task, where the user specified the deployment region. In the latest interaction, the user asked a conceptual question regarding connection pooling. The agent explained that connection pooling enhances performance and scalability by reusing a cache of active database connections instead of repeatedly creating new ones.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "EoAYCv0XARFNMg/H8lVoiV5VtTHjnpLF2MW+WzeqcWQ+yJ0uuLe/k1pDwGiBS2ZYEgkarCqeqylfqF6XXC2PzklwK0Eo7dpJYbsMi0Aum9IQMr6HGci73ecUIj+ZPjte3GoKBMKaMEGcPnBWpGgmkuuEdC1YVX1ZeqvQp1GxMMVi5glUqIfiD6MNpzzjTFlifIdGh7xEXsSSVonGnClC8t1vDKpxztaIcm3XUohvq+pfwpZbxkrnlBeKZCroPLiII6MurlUvRAJvf0QvKCWpTKpp0swR/RMLHTDZ6kxtZ5DMtDGu8+uhH6Iy1jDqyKzZPatE5qLiTtpEl2tE4jUCtMgFvD8Kmtqy3soXBIGYNfeWORSabxZlN4CihHEttWg5UxYn0wvO5/PhkIiWtCfNAIeZMAm044LOTBzTWnb84ik+EARVX+OIb0sv3T4OyrFQlQ4gLnsaQOXVfML49yp7iG5zoeU9S2vopHmBb8vXZl1lZXeLHNgRRhxMgidILvTbmmmdN0o/Kll/9h8JOX2vhI2las1XMwvpIA0V+hjwup36UNTLmlBwtPXqozAeSSbK2pvnPdHP5ShZ9yV8IqTVgKY/sld8KSt219Vq1R3QjRZ8bVlnWYJCWaCDOj/tocrUGwjYGWVaLeIZ3pArCFjOALJgX2ORgbB50V/rBmCY2E7IgO7rvvz2B6MmVxTTPKs/gjJ3/ydVxPFtTMlAkipbRfvQ/Dzm2jFccSs7qr/Y8wbkiHrN6n+LCIQDkLeODFwzlI+Dv6ll+t9tDGWlRMSJuxkV3duiGZHPhg6UIJQ+dE5dVPa63NAPqBLzvOfGlb8DMmOqsfknYXB51khvEmAIOBoPs5htZyH8+UrqFCkiwm7rTejAg9YTZjntCCLDL6lFoXiaxR50ZPlQut2MIropq4lpUEaK1fNsrucTB8XuJoe77RdgQhXcqdkjjY9NE7ewTw4iNWzoNJLznBxCwfwxhb2Pcoe3Mokwq6P9mSjVNa55ZUctprOqCaZgoPOpyQ6uBD1OxB2G+RLDqSvd4vljhDB0FHVbrZzYlEygQ0ikzivqlxUbSW40Ktpc0Z+JocVC9IzOAp7vnfDPFFgD3H2rzYU85r3k1E1e7qf4ZCOCUvT49ucNRUuf3aPFagtEH/B1iwPJCw/aOk4iy4D9awTcmMeE8KGkzQPzmpuOCjX1oNddLiyd1E++1d/93hqu69h0EHQ4lTM81udIjhdbyzbpW3mSDwCZEjYQZyVxFwKxMpcwFxmhn+bZOiXe+lK58xlOiNy2CyrM5lME9egKShjyeTe+xS4CO1vE3I0lE16ewFOa8qHe3+347+sJyH5F+nqw/luOkapaYTDPfHgaAp8EuO5BF3li3uDFZyYHDLX6JvusRHMTaWNG6SDqornaxhJ3VlefIdhqfTOzk3UUX1P+98M1PHagi7LH5+JV08H1lFRqSqTk+JLhQYnk6yMxBtqocP/DGigMeaSZJTU8LgTx0Flaph/QUOJR2kA+EapMaBSxTxN7LmZA4PrheGh65RphzZ3xDg/D586DzaUkZeyqW7ePFjFJdFdAjm4b3ndUPzt7S5CfBRX9598b8uzWIlO+bbHZ58zVVpWEE2Dn2ZXoNkZgZ0eCwyVzaBeVlNtgfbxGBHPbrhktA1XFzA1RDMnL6CuuHwupJu2pd3aybsAZ/9aIaikdQWSB5ouiXaaS/AlWs68+vQ16OpwcO3AaP/oUZCQ6xuP99kJVhA2STODlE3yVZJ/8SByydrdMsxcTumkyOr8EXW8aO354Arszv4RtnkAJGzp49lNIAK0k5U542BJmxcEitEwnJMDOoMcuvTT++xtsG6FPSbvgzv50ja8CwHZbYEgjNRjR6uyWKchkm3vu6AchFTc0nRq05quXJViEEBHtjvVKTypyQxrXfHv+lvHCu+vElf5hD+pXVX/S24ZykwV6nGHDHvFD26Nzowzun96PSoJu6+038A3rK1bfRL/xhCmg0xv55Y0194NZKbwUzuOGYPvSBb2lFG3Xc9+47fztM/AtwoFM2HI1jACB3EwohLKpwu9FFU2oYWaE6EH5p1D9OFrakUcJAjTTXfvLO3gK/xp9ZLX6dGBnU+DmmtYcSL90OitezJzODmCkwl08W0CigsC+9nmmMQgCTdm85enR/juzdzn5Z6/CfItOcqOFHn6eWuw2PdVLhgzoD9Ht4S2K/IkLQhbzKbgW12hP6yxCEHJxFCLs5RDPMbEgqM2fPiPJi51xOcuaBIjxOavEbdVX5I2PXVcKufiCmwraHvoh/mhiSAKXCmwLDOiDov9C4kDADmO67dwGttJqj1iABOu1JqmsZ1urNPaXGHofA/eqy/4N9r2M8fJn3rcjJWMgnWmDkcGwa0frE9WEfZf0xoVjR1l1KarXqCSeP42wyTcFGeGfPI6RW1HNDh5C/KYS+Xp3CAdisI5o9awXmXWVU3GMfVjpNUwOJDNXIOMSHP69aYcqRMPSb4X15eLTFDg4Ha/yvx0Cp5ylMB15qZ5lC9PspTgC3Vb2j+W6aQhBW2aOQUrrQnN+DOz1rWJjkxRAhA1GCWwNQzBOEVFaqT5PJZgSHO8Pzt6nT/dTpDGJ6fPKvJuU1f6cPUpUH5yggX2p0vMZA4NEwK3xgmtKhdVH/uwK+cw1ssHDwZ1/h41xS1JbQPM3t45SMmdMIMd4WPoPBEg0f4akW6OZlnxPxdR4GPluZfWrlo1qOGCFlWZtCCCRzdyN9j7z9CXYKA57J6FKyiFwMOWFRhOzRTyHygwpVrg7iYGHEef/9Nn/VN8pcW0wtEcdiXHoBGDwYWcslSvGgZQ5MPb83cFKQf8SruuRJPA5rdNzg7auVy4cPpWqjQUfHszUc7xjoKG5LG42uH+HNEZ+vh1psyaOfcetYUnns0iw88cQH1SrwchGnQG48uoPj/PHOVbRMhSJM3QZbYR0/sxxU9xRC2RqHyoPWpE+UwfaCZPxuuCMmWts3H8fAHxnAGer8f0CAFgE7KYkBsiB0vvtZJQq3Bu8JKj0qbLk833UatFFwtmZIQjl+0WbkafETfzDF1mUnzCLWJ2TdBlfiohJvW2D5CXaVEpQzUHm4bsWpd4Hk3TyfaYmFsI0d7wcO5DhzJt8u1uVT9qrXVMWYI4fcOtggjTIbQyPU5ooIVjCft14sMiXXDFY3SHnS643dInfJtZt8A+7NvDuws8Q6mMPQKFc0j+dMV0d8XJYV9bEhkViJbpOAs35AZvsFrDxbAE6hwMLA1AYffz6hdxbNGsweA3s8YH0ONE8eEoJYxhco3+v5jGDoZOqQzN1xZtNodNwL//N7GLUaj6NBelmsSYJO+GQ/OSmvROm1KqDf648TjV7lhdI/K5oNK0KH60YwVglKMiPyzvm5prZQBg41LHIDAX+j7V0ClyAVSnvoqFYJZgHKmgcHFr/8HU75clhrBlot80Z957kfN8MwAzg4GCB1Yw7FdSUbNodNXNcahO+3undMKTXvEj8kOCCyQ3/xruEydLM6udkEGvhBF3WL1K/FViFvZ6EFAmFRGV2q4UTUNmxB0BEOdxp0pVEn8OyINutk+J3VPMLuvvW3PN6IW3eU6mFpW1DHFe8Mgop1JoGsT/wjw08V+dwqVIZzUXZ35y9A/F4EPUVRdXRtxeEAZDmI5a4C8a6LPzimvFUbMBo5ub+HVQpfeFJomWLGrHGye5WDHRhmKkq1f6QIB++ylHnM/F7utRKn4XnCKZg2suwtwkup4V3m1OayGCoFnMRVdu++bjIYG+aE0i7uTQ3x8JbK4cYH3M/daWFwGycvqmRjrL+si9iRCWCXVVoAlQolf14CohUlxy8n7GaswJfLg3sIqisNbOVrMFa1H+zIwfCHne3HzXYpiwIHbd0jRueztDGz68anOjNNsEONaXiIZf0HMNtKwB/U5MVbVspuTi6NJg3dFRiQDtHu00TAx+9bBIf31Md62WPUbAn7ifNA2rGaS8b3f2Kp2izH8U9PKPUzj/rZiIOzCGi12R0FLpsT7Ub4S9hsaG7Jx6FffemlvHev1sA1GHBCmu5iSW7fD5wLUB4n7C6Npu1MDJQREZSREP/ew0bSR92ghw0A7sz"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 438,
+    "candidatesTokenCount": 162,
+    "totalTokenCount": 1248,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 438
+      }
+    ],
+    "thoughtsTokenCount": 648,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 469
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "8qKVavWVFuCIvdIPw7Xb8Ag",
+  "turnToken": "v1_Chc4cUtWYXZXVkZ1Q0l2ZElQdzdYYjhBZxIXOHFLVmF2V1ZGdUNJdmRJUHc3WGI4QWc"
+}
+3908 2495
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3675
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of why connection pooling matters.\n\n### Context Summary\nThe conversation previously focused on setting up a tail-retention compaction task, where the user specified the deployment region. In the latest interaction, the user asked a conceptual question regarding connection pooling. The agent explained that connection pooling enhances performance and scalability by reusing a cache of active database connections instead of repeatedly creating new ones.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"In one sentence, when is a circuit breaker worth adding?"}],"role":"user"},{"parts":[{"text":"A circuit breaker is worth adding when your application relies on remote services, to prevent a failing dependency from causing a cascading system failure.","thoughtSignature":"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"}],"role":"model"},{"parts":[{"text":"One sentence: what is the point of a canary deploy?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:19 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1654
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The point of a canary deployment is to safely test a new software release on a small subset of real users to detect bugs before rolling it out to everyone.",
+            "thoughtSignature": "ErYHCrMHARFNMg8KunK6qz8EO31aBv9Ra6YsBkOdz+sfyrnxnCoSqSXnVI9lHq85KEgduIVbTCGFzg0dCRQ7yKc+tWM5aUiKZvPxELql7abfu1VR1KQ4g0x/LlrwXsia/21NxdOl959vvdmxB42K1EzWfHCA7YvJbHdkNUIMQZOkUyrS6v6zmfz3su5/E7mvfBmh+29hGIrk1WWKSvxDlZoRvP/NL0dHjYFFwLLYjsseZD0glYchaTNPwcC4oFweXBLQC2cxBRDUb7FyeCtpEFvGryN2IHKA+2R8byB0evzOcjauvuBZA7qIg3ZOUS5Juyp3yY2VhDB9sZ9/jwiv5Gua0keTt1P3kYxTxbyRBzvo9LP9mdmOe5CuVOgh+a1FhQr1wfB2YcRQj35JhofT0rCJj8r5z1aq5pwlJZmvXFJFcln0k+mOSHLKeWOuOOKtwfgDX29iCg7yzAlcUoMiHQ4e93Xmn5GjNFtXGLwpqMp6+H8R0JUtBp/fX6yxvpTW8YyHy0D5Y4BOmhzt2IrGZTblCyhzRWet3IFUIgFVKUxdw23j8LCaXZf6sDiDo7ZX8bcAIFXUAC6X2SSzwI3ozsci/iwT2791vs08H5/C2HIR/P6UkF03vbrlfGzB9/oRlObz+TIeBC7ERX5hXKRslbk9CahwUo1cwd3lnkuBRTyHyHLoO8OOqblbu1mFwpnOEnXEJtUpLLmdIcpVN+z1bvGnTJ3l8aQEU+E6r+Qo0UMlSmQVqMB2gtZntIaAtwgfmHwySsmq6gN9E/+10zvbxFMMuwteod6UiolAu1Ggmj9Eyjq+fMk4AnMvwo+2bWlPsshUJsCnO91hP0u6HEApiuayOV27zKlUMSznPlQsWawmnbOipX35MFTivjmM3C5nTW4b4jCpDD7410oOhkN5ncG1gTgQjyInhOBl/G9Kwae0+Iyu2zlhxUnbk3jN+etymM+DBvGSjkrSTnWy+F09xJauYzltD6O+LQ1cEgiBqfKpnYEbe48vJWL12/8tXOEdWimZ+yoKi/yiKM9Yrg+sOTestJTiicBKNmOZ1P2l7+sccLLe472SCsP8dKwg8Lfg3toGPsKnpt+7qTf3K/qDlE4B/Psrw9tGKpHbY3zd8MhEtGF+7QGlYUO8Xje4bNRLMUqIxBCtO5cXGZuyPeFp0TeD6FE8+TmooiUKolo+VIwpa8J/D+uQQi9SAePhidv/sTrtl7zZVe2ZzuOWVbieR8E6kSWl9tyE4Neezyha7WHeMcubBr+2ibY="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 568,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 799,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 568
+      }
+    ],
+    "thoughtsTokenCount": 200,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 619
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "9qKVapvHDLL4xN8P0PW30As",
+  "turnToken": "v1_Chc5cUtWYXB2SERMTDR4TjhQMFBXMzBBcxIXOXFLVmFwdkhETEw0eE44UDBQVzMwQXM"
+}
+2589 5683
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2356
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nmodel: **Conversation Language:** English\\n\\n### User Request\\nThe user requested a one-sentence explanation of why connection pooling matters.\\n\\n### Context Summary\\nThe conversation previously focused on setting up a tail-retention compaction task, where the user specified the deployment region. In the latest interaction, the user asked a conceptual question regarding connection pooling. The agent explained that connection pooling enhances performance and scalability by reusing a cache of active database connections instead of repeatedly creating new ones.\\n\\n### Tools Used\\n*No tools have been called in this conversation so far.*\\n\\n### Durable Facts\\n*   The deployment region for this project is `europe-west4`.\\n\\n### Unresolved Questions or Tasks\\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.\nuser: In one sentence, when is a circuit breaker worth adding?\ntail_retention_agent: A circuit breaker is worth adding when your application relies on remote services, to prevent a failing dependency from causing a cascading system failure."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:23 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=4050
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of when a circuit breaker is worth adding to an application.\n\n### Context Summary\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region. Recently, the user has asked brief conceptual questions about software architecture. First, the user asked about the importance of connection pooling, and most recently, they asked about the utility of a circuit breaker. The agent explained that a circuit breaker is valuable when an application relies on remote services, as it prevents a failing dependency from causing a cascading system failure.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "EoMVCoAVARFNMg/9FrjttS5ZJ38ZaqGqr1b37/+V+R9E+16yoyO5ao2mNaR6fQB7ZNGpXspXviJotzNSDq7yDC9GGE4FyKoJ020bSTy9MCoWtUzV2bVdeftkLrO+YtZMlMQdzZ5B0b8rvF7yRc4yN/abjVDnAyuDpB30lrJYNBFikGmBd5PrDE3OU5Ak+YJp2Bt9u27k9zQ3DVHoW/iImya8xS7qG4Q9DsIYU4nIiw2jluIFZ4iTDqju6f4V5KjQIm6skFFIsEhfGceni2YuVksjSNVgcHEliz85bItQdeFTZfQropIdYzEXSe3/M1JPlgTKVmrBhZ88jvp/J9BYi9s97gtYB4osxl/n+snW5Nb8cT8nENCGfttkmZnrL46jCpcgWa2d4uLIhMxh61Vwq4yLQwGxIQL6arXZJZYwVMQ1CZhHi0lOGFbMltuwNZdBTAulYVv4ARyrebwZDcvvyc82blJEcks7L6nYcgPB9VejY0up59smYzHX3IkrH0NDJGCS3fFCF3TuonqkqJfpWir562vkvT/QBN2Ci3MRvYftYDtJDJOE7pOEyMoftm0sTGAkJLBqOiSyX83UKli4iR36EQ0qeZI9M97lfl8xC+RHVd3nhtwn84+j1g3YhrhEnN7k6vj7h+BSNLcA7f5yyOZBj8inSuhxmwhjRLB8Ltpqa83I8VpqLc6gd2ELytgKUROp/Qzb1GbIliB/45mE/i2qnUG7onRGZkXSTFzFqJKgipiOPcKpPXpq1q/r/N9F7HTvxqjFpq20qbK8gfUUbd9fUZIViuEfV25kgBIujUTE1mRqQHcEVViWgoCO3r5GClMLALYs9PCQk91LsGZiDS65HZ1K0MiXwYtZXyDnIAz4+PdoY/R0MfCgPlEwZJxyGmfa7WljxW4S53KCmIB6bPEkm+Wk3Rb8CYnwGiNbIf9moLvq0AFXygXXUf6cSrRdTRmtkN6HQPMZP7J41S1dLa0wltNRhE+DLiTzOSHLazldmLKGjutV/Y+7eZNvukhLAdz9XVwRI3qbw8e18QGlhv3xb8WP9sqU7LJR9EoVZaq6kstq9XxEd5TQXWn/mRyRjCLqpdHdnn7qf/DSxrMuslj/6t5cd0F/hN27SXKIoj8JH3cK9F/air5+EdID1gyL2REBehtWGlYFV91yYuDHnBD2ZkpNK8HVURCNZyvnf1O2zkV0OXqhDTq/7z4sRxvJOhXZ67j8/dByAekLmsT6yg+Jhxn3cuTXjShmMd3wpSRdtb42Cq7eWYRBlo0dQKc1BZtUbRLTEl/EY+7T+6eHHF8RQXvs7HCVjYTHF19JOdyBPm0xsC0f6QRqhyOLtER1vi1+IqgeYbL/BjY6D1TEN3fYEvj22yFMMnuOCPfUt/HuJkwARUbeBXKnA1QrUet6VOYM70OO7vH9CzyQM3DYXnxgO6103q9DmQBv/A56qOH4vLlbAVmBh6HnWil6XPx34+F9HzZcKskxn8T1BWF86/pbc+mH9PjbG0OifKrz4gxP1tZb9z5XvuO7CrjHHPW45ebs0bLtwHbQlyDetl3h+cHCKXI0BD4Zv5ThFfBhl5PpClABPtpeaa2CrP8fHFAZj7nVUn1Jud7cSVYgboH43m4KqTiR9lJVXNUCz7idNbZ/RZt7Ru1AYgTzmdEVDp0RA1WF5VzrDpuJ711ElGXvDzYQ5qsN6WxoqXq+fv0ZQykhFenRu7hvkgsGvXE09WkUsSS253GlVGQa/CV5VxWl6YMTITtfR/1Kg82D4JUGQjCIHpQT81EMqxlju3xtDDFs940qALthgpMY/epTGIeULRJD6fU72tqheyeK68KbZI5vIkrEragNZl+wtF1XCI3i1fc8kTri13cCOohFjfeoRU39vPtPZpR8oYD5M0bxFXMp3r4tNiCymZyOtrWwJEx2txOk4zeLJ7XmfDS1o5gNwGHm059zG4Oga+nOzfNwYwLesUyQgx9gBTorlucpWzBNWgwDGbuFi5RWoqviAlTSMXpd4fE8PVyyutpbQmB4aVgxKnBGNkV5EbcWpgDhAKHu0qhQy9Vj5pwzMToPoogYhZ2G+G1acZHkcS1MbRBB1MVPnXE5no32cRU2dgl+jyh97oZcJoqzKwRiw2i73te/suRRc+zSQH0hvlxIJBRHF6MHwEYETncjno/vTPTulW3PmADu4X81MbQFQlSIwbHEhuaOhTVVojp3U1RLwkfcIhFfEycBiEdHt3eHxDMt81iBm8YUKJqTMoGat+yTg6Ng7IXrZzKssoaWZAEhUBJeAGcHmZYY1xsT2OZ5Yt6c8XwxstyijM6xekBlRJyZsQRbPWfmgEf7L2CAwZqOTVFTOkOQ8QPLBBEgIUxw//f2cWkbGUM+DeKeaakszee+Sql3sC1S7SILFt/HsPDaWT9n8Lxp7lJG3SaWvleJRIZhY5PtyxjwsEVEyE+AmV4Vdzds2VfnTw6eVl955GRICVfdSjQIwh+30v7+56/KYYsTioBdur2/KP949RQniPABSPHyd1VrVYp29eEG31l+iwlDzfImQEtpfjIfxpf8rPJ0kdnQTIBAq0VUApym2GxKu/w6uTi7tgk9LDlmpPWwvXKLEvkk5E4AjgDo50zHJvNuoJI1cAmL7DzGsi0kQJopvyCBHlUwKGShKuGC9u+/yvfnbL1L9n2OE0aPQ01eI2m+Tm+2ctM3zajv5spD92Cra2s0WxrA20/iX6qIMZjrffwQlVR3l2GjBsXFhOoO/78GRHvCELco80KkQO8AwD8ldfGIYRSNUPpIOp0Cr0hrOaFiLuAyTkhPkH3fqeoOFlfEPv9FMgoefb21SUExLtpvk9bNHTbTzm0/OfuRsvmb2lHxygQOTE8A+st+xV13Ed27r3JfMWZejrJpIvNPqJmgkMhPZemwzjwaYjkzgmSyZtiATXi6zrk7ALxz7+5samNmLYS8EAbx83JF0raeSj23sY/KILgNxwIjjB2/RgIGMps852fCddVWPRAvRH2/pNr5Kd6AGmKhgz78miPywDmEy7o3dtQar6UcO1nkzz1TXS+KiWTI2rUtUdMMgQKCCchiLuKv3er/b4LI4etrPpEXv9luTxIqI9LtICQYykG6tt2LDovvpzrpFMtHrRpdzGmNgHV5LJHnfJZv0ViCNqfarJUH8XLFeIGYG0ajNtv3kKAWpfNQd9+o9JGqRnywEzUnGvn4mGZ89XjfLipCU9oczSx4l14UYcLPJkIE4QQ4HA8aQ00RK/k0QvyNpaS/W0dWVfXDu75HMQG8Gl+snhtJCaJ2yyYxXM+2TiLXG50w2W53Fta1PzsxiREpwY95k7RKSn1dmPvG1Fqdx8SlzltXBuCwABTAbkXaoNyzWhsNn8iLk4KaRy3IhkCk7SGfDCdCozhJxLSoFSHeXQin5x6amko07KYPEPm+Sz2TDNVDncEOTwJgdffMWHSwM7pE7kSGFV2BgL6tPSZHCUbqVSfKRWBx2s4bbLiZyKpQgkc8IhB0RM+CrHqdI2W/8c/UkPI0FfGdQMkslV7VN2iG26Nim2tAQTFgH2GPa/0/+tUo7714S50cTjLUaAMMCdl3NTeaE1yW1Vjg4W9O"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 459,
+    "candidatesTokenCount": 193,
+    "totalTokenCount": 1230,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 459
+      }
+    ],
+    "thoughtsTokenCount": 578,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 490
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "96KVarTfNNeHxs0PzbbryQw",
+  "turnToken": "v1_Chc5NktWYXJUZk5OZUh4czBQemJicnlRdxIXOTZLVmFyVGZOTmVIeHMwUHpiYnJ5UXc"
+}
+3264 2504
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3031
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of when a circuit breaker is worth adding to an application.\n\n### Context Summary\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region. Recently, the user has asked brief conceptual questions about software architecture. First, the user asked about the importance of connection pooling, and most recently, they asked about the utility of a circuit breaker. The agent explained that a circuit breaker is valuable when an application relies on remote services, as it prevents a failing dependency from causing a cascading system failure.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"One sentence: what is the point of a canary deploy?"}],"role":"user"},{"parts":[{"text":"The point of a canary deployment is to safely test a new software release on a small subset of real users to detect bugs before rolling it out to everyone.","thoughtSignature":"ErYHCrMHARFNMg8KunK6qz8EO31aBv9Ra6YsBkOdz+sfyrnxnCoSqSXnVI9lHq85KEgduIVbTCGFzg0dCRQ7yKc+tWM5aUiKZvPxELql7abfu1VR1KQ4g0x/LlrwXsia/21NxdOl959vvdmxB42K1EzWfHCA7YvJbHdkNUIMQZOkUyrS6v6zmfz3su5/E7mvfBmh+29hGIrk1WWKSvxDlZoRvP/NL0dHjYFFwLLYjsseZD0glYchaTNPwcC4oFweXBLQC2cxBRDUb7FyeCtpEFvGryN2IHKA+2R8byB0evzOcjauvuBZA7qIg3ZOUS5Juyp3yY2VhDB9sZ9/jwiv5Gua0keTt1P3kYxTxbyRBzvo9LP9mdmOe5CuVOgh+a1FhQr1wfB2YcRQj35JhofT0rCJj8r5z1aq5pwlJZmvXFJFcln0k+mOSHLKeWOuOOKtwfgDX29iCg7yzAlcUoMiHQ4e93Xmn5GjNFtXGLwpqMp6+H8R0JUtBp/fX6yxvpTW8YyHy0D5Y4BOmhzt2IrGZTblCyhzRWet3IFUIgFVKUxdw23j8LCaXZf6sDiDo7ZX8bcAIFXUAC6X2SSzwI3ozsci/iwT2791vs08H5/C2HIR/P6UkF03vbrlfGzB9/oRlObz+TIeBC7ERX5hXKRslbk9CahwUo1cwd3lnkuBRTyHyHLoO8OOqblbu1mFwpnOEnXEJtUpLLmdIcpVN+z1bvGnTJ3l8aQEU+E6r+Qo0UMlSmQVqMB2gtZntIaAtwgfmHwySsmq6gN9E/+10zvbxFMMuwteod6UiolAu1Ggmj9Eyjq+fMk4AnMvwo+2bWlPsshUJsCnO91hP0u6HEApiuayOV27zKlUMSznPlQsWawmnbOipX35MFTivjmM3C5nTW4b4jCpDD7410oOhkN5ncG1gTgQjyInhOBl/G9Kwae0+Iyu2zlhxUnbk3jN+etymM+DBvGSjkrSTnWy+F09xJauYzltD6O+LQ1cEgiBqfKpnYEbe48vJWL12/8tXOEdWimZ+yoKi/yiKM9Yrg+sOTestJTiicBKNmOZ1P2l7+sccLLe472SCsP8dKwg8Lfg3toGPsKnpt+7qTf3K/qDlE4B/Psrw9tGKpHbY3zd8MhEtGF+7QGlYUO8Xje4bNRLMUqIxBCtO5cXGZuyPeFp0TeD6FE8+TmooiUKolo+VIwpa8J/D+uQQi9SAePhidv/sTrtl7zZVe2ZzuOWVbieR8E6kSWl9tyE4Neezyha7WHeMcubBr+2ibY="}],"role":"model"},{"parts":[{"text":"Briefly, why do idempotency keys matter for retries?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:25 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1652
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Idempotency keys ensure that retried requests are processed only once, preventing duplicate transactions or unintended side effects.",
+            "thoughtSignature": "Es4HCssHARFNMg996JH3X68TBq8m99ULU8DXWY3zWMusv9Uikp0KKyCFaK0F8qEafp9B93Z5GxPvvWNNVvMvsGZXYsYqHJxjP2PW/5Y8oLYhM3Xe443g0SfP+ZGt7gRG0UIwDfBCnCpJR4rjnVZI2e7jD6wgnr/K/86r6KO/v6GyRRLpV02CkTXuD/Np+PF5Zo8gsz35idXTXosV7YJYwXnFD4l3cIi4gvFAS2Kq1c8LI28eBJlzXKDqxo9O9IgMokfyXZ20GDGGnM3c88HNSDhs/ZwEGbQnfTU5Zi9vty1jmPwWiL/oEPq+wy2Lv12vj5zIqDJultKxiqvxIbMZgBZqwdefh/jQeirMHlb14hbAQ7YQBuDWxbp9B8DWuGy90DQhNCQ1KcvdDgIvrv8eQHYvMLK58zDaAVhyfU944lQYMCO2NnQ+cqlVqg1mBfoNJ3OPy26pxZE8yPxKHoCncJVDDPQhGEoJv3G4meIxI0k+Dk2IfysQH8UO9IvjXbEoZepm9ZsBiRsD0aMunBbXuuqIJpiEwsigFCJ7ESKL6m0aQjSg56CgGrlXyBz4EROjSCLlbgAzxQxiuW3QVQBSRbjmA0FD5G7TXG4WFAIt+EzRqe84CbVEDoyKM3mo43/viQHXWTqyd6fatDKjwGOSeaCqgav+gG0U+0QHqBaVQgAv7i8X/alfJ84UocRb4E41Z2PSSLb5VzFEoD0ODuVW78hgloJpcS4SQqtfeS7H6cAi35bQJpTReGwrtErnPd7X+oic+qY4lGy5cisaVdWngDGTH71BqTBW4RvLt0co0WUJj4Lfqg0p7kPEVyWUvkR/5xCiYZ9I7THAKzd4cv61bFhLRhaB7/BQCxf7iu3yvICRAQFXFaKrjB6ur1Ubw6gBhc1NrOQYjX3hIiFuFP9MKCYY6cnuVJfwsvQ3FdTRgYQHL4A5AXKYtEYs00QY18zk8a2VeA8PJBH+QI5L0ehcKZ4gWWeuIOOvCnL5cnwyMm0nMNwcMGn5ZKTrxAAN7FnUtbC3eJW5piqxC5zLYY30PC/P6Q5jwYB60eLe2Ywxww3rvzrpkVXsaYhPTIs8hy+ocCbvS0F9rusx9aW7BZ3h0QrCdl17S5Kwdr3By1bOopeIr5SKJ527vkPeLU5HnlScToSFqeVXgFZe3BsE8jrHfiqA9S6Q7dBtFHYiUS5qHdxD/SxjkSBYvh1gKJRtOPwXV1wnjc2x0LlyKoaweC1jiKfKly2CO+JSuAH1eYufTkENv74UQQKYrUEKBUJ4+0Nus/TLwLOn+ExAT5qkM7VO44M="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 501,
+    "candidatesTokenCount": 22,
+    "totalTokenCount": 727,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 501
+      }
+    ],
+    "thoughtsTokenCount": 204,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 552
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "-6KVasGDOLOe28oPsOmZuQk",
+  "turnToken": "v1_ChctNktWYXNHRE9MT2UyOG9Qc09tWnVRaxIXLTZLVmFzR0RPTE9lMjhvUHNPbVp1UWs"
+}
+2728 6415
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2495
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nmodel: **Conversation Language:** English\\n\\n### User Request\\nThe user requested a one-sentence explanation of when a circuit breaker is worth adding to an application.\\n\\n### Context Summary\\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region. Recently, the user has asked brief conceptual questions about software architecture. First, the user asked about the importance of connection pooling, and most recently, they asked about the utility of a circuit breaker. The agent explained that a circuit breaker is valuable when an application relies on remote services, as it prevents a failing dependency from causing a cascading system failure.\\n\\n### Tools Used\\n*No tools have been called in this conversation so far.*\\n\\n### Durable Facts\\n*   The deployment region for this project is `europe-west4`.\\n\\n### Unresolved Questions or Tasks\\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.\nuser: One sentence: what is the point of a canary deploy?\ntail_retention_agent: The point of a canary deployment is to safely test a new software release on a small subset of real users to detect bugs before rolling it out to everyone."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:29 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3848
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of the purpose of a canary deployment.\n\n### Context Summary\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region (`europe-west4`). Recently, the user has transitioned to asking brief, conceptual software architecture and deployment questions. After previously asking about connection pooling and circuit breakers, the user asked about canary deployments. The agent explained that a canary deployment is used to safely test a new software release on a small subset of real users to detect bugs before a full rollout.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 496,
+    "candidatesTokenCount": 191,
+    "totalTokenCount": 1385,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 496
+      }
+    ],
+    "thoughtsTokenCount": 698,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 527
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "_aKVavzJJMqh28oPyeao4Aw",
+  "turnToken": "v1_ChdfYUtWYXZ6SkpNcWgyOG9QeWVhbzRBdxIXX2FLVmF2ekpKTXFoMjhvUHllYW80QXc"
+}
+3255 2802
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3022
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence explanation of the purpose of a canary deployment.\n\n### Context Summary\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region (`europe-west4`). Recently, the user has transitioned to asking brief, conceptual software architecture and deployment questions. After previously asking about connection pooling and circuit breakers, the user asked about canary deployments. The agent explained that a canary deployment is used to safely test a new software release on a small subset of real users to detect bugs before a full rollout.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"Briefly, why do idempotency keys matter for retries?"}],"role":"user"},{"parts":[{"text":"Idempotency keys ensure that retried requests are processed only once, preventing duplicate transactions or unintended side effects.","thoughtSignature":"Es4HCssHARFNMg996JH3X68TBq8m99ULU8DXWY3zWMusv9Uikp0KKyCFaK0F8qEafp9B93Z5GxPvvWNNVvMvsGZXYsYqHJxjP2PW/5Y8oLYhM3Xe443g0SfP+ZGt7gRG0UIwDfBCnCpJR4rjnVZI2e7jD6wgnr/K/86r6KO/v6GyRRLpV02CkTXuD/Np+PF5Zo8gsz35idXTXosV7YJYwXnFD4l3cIi4gvFAS2Kq1c8LI28eBJlzXKDqxo9O9IgMokfyXZ20GDGGnM3c88HNSDhs/ZwEGbQnfTU5Zi9vty1jmPwWiL/oEPq+wy2Lv12vj5zIqDJultKxiqvxIbMZgBZqwdefh/jQeirMHlb14hbAQ7YQBuDWxbp9B8DWuGy90DQhNCQ1KcvdDgIvrv8eQHYvMLK58zDaAVhyfU944lQYMCO2NnQ+cqlVqg1mBfoNJ3OPy26pxZE8yPxKHoCncJVDDPQhGEoJv3G4meIxI0k+Dk2IfysQH8UO9IvjXbEoZepm9ZsBiRsD0aMunBbXuuqIJpiEwsigFCJ7ESKL6m0aQjSg56CgGrlXyBz4EROjSCLlbgAzxQxiuW3QVQBSRbjmA0FD5G7TXG4WFAIt+EzRqe84CbVEDoyKM3mo43/viQHXWTqyd6fatDKjwGOSeaCqgav+gG0U+0QHqBaVQgAv7i8X/alfJ84UocRb4E41Z2PSSLb5VzFEoD0ODuVW78hgloJpcS4SQqtfeS7H6cAi35bQJpTReGwrtErnPd7X+oic+qY4lGy5cisaVdWngDGTH71BqTBW4RvLt0co0WUJj4Lfqg0p7kPEVyWUvkR/5xCiYZ9I7THAKzd4cv61bFhLRhaB7/BQCxf7iu3yvICRAQFXFaKrjB6ur1Ubw6gBhc1NrOQYjX3hIiFuFP9MKCYY6cnuVJfwsvQ3FdTRgYQHL4A5AXKYtEYs00QY18zk8a2VeA8PJBH+QI5L0ehcKZ4gWWeuIOOvCnL5cnwyMm0nMNwcMGn5ZKTrxAAN7FnUtbC3eJW5piqxC5zLYY30PC/P6Q5jwYB60eLe2Ywxww3rvzrpkVXsaYhPTIs8hy+ocCbvS0F9rusx9aW7BZ3h0QrCdl17S5Kwdr3By1bOopeIr5SKJ527vkPeLU5HnlScToSFqeVXgFZe3BsE8jrHfiqA9S6Q7dBtFHYiUS5qHdxD/SxjkSBYvh1gKJRtOPwXV1wnjc2x0LlyKoaweC1jiKfKly2CO+JSuAH1eYufTkENv74UQQKYrUEKBUJ4+0Nus/TLwLOn+ExAT5qkM7VO44M="}],"role":"model"},{"parts":[{"text":"One sentence on structured logging versus plain text."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:31 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1779
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Structured logging provides machine-readable formats like JSON for easy querying and analysis, whereas plain text is unstructured and harder for automated tools to parse.",
+            "thoughtSignature": "EpIJCo8JARFNMg80mFA0jPpZZrbBc7DRyS8XeCoTBckK9CeQiOt2Y+dczIUGsWUE3qlTVva5HHHOg3jHLw7YILpCKcobZhUZi5hDlEZsEUxMdEInldbV3/Y7u9G/i8eUEP0tmjNoBt3WhcxJsUksDTq2MB1Em1zeBejO25dcnzFqDs9tQVjLPHm5TU9ZCpmzkd7OtKcCk/VEt4/5KCcTdKfVfVtAsnXwk/Qh0C05tMOdPwPTCY1AKaWbA4W6TqFs78YBAmseD5cOEjSaD2DKk2uIPAplY42bR+Xzjn5EviYwBZUHGY7UZglM3Ybh2GlvmT5mrYjx+mLRy9synZA7W5ZcjTbAs/tl0xf4c1PIOqTya4hEUGLjGSJDyMpFeEYUXE33fR9Hx+F//3eLab/JLb4iGm/EKm7IRFVBDxcKkQm1oHR8P+WR8XSnFyWPE3UQ+IGXzXe1gr1meSyPLd+bnwHem8p/LfQygVKd/5qA7Vb+S/g8ca9JTcA/p1YIr3DByQSM47QgLljGLcygM/A+DsRiKyz3prSnhSxdfRFhfYP75knB4jVTbLgKpUFZ+N/TxolewEnOFHXyoAzOLfZPrIK3Nhb0pOxduoFXORrn9OIXaObKHtSgeidEjZuomF4HO0GwyTDRrVqt6YGYyYXDLGT/RwP9iVygyyCAfw2/ELb12EJI9SuPFIgCGkF6ZTYjicSqJbcHgDDR58100cdR2Os4eviXaje1EzrO7UzFfmAHWsN04fZqAiCRpOlevoGSKw5gLvJI+pRZw890MMUQi1zJmcSmj+xV4SPsnuNXRnw2aNIT7kytwhYX3q4HUNprr+6gJOsMoWsBoOFv2gcjdiZ97bfKgCvBSxmv4SJgq77JPcV3bqP1OvoCBrCYSd5e6N8JxfESq9yNswt1OYQxuI/bq+7/pRIjCGbT6SzVsjTnv/vw3DEHZplaVVmvG2Vr/eCn9DWBwBNivAwesf4Z8sSY+dmN3eK0H2MoiqT1XX7C7aUhfEOH6cjLgFA+OekiIg832IhTjZaR/nyYkQiSzsv6jqzWbmfPF3b8J3XxkdrgtL/txu4Pepq6R4PqN68A4NX0oamWwN5vq0/Rt7Er53q4XlHw9Jw0e4SmE6U1Ho+8BZjGbxHmUS25cAy4684vnMHxcW7dF4xEI04T9N8LvDqzLB2sveFLTXKHignqwbVO7NWCAhC+TUx3HVbByITWxMPX2SR9js0vGKCLDw6S2vsYkij9cqXdbjaNBQr4U8hwqqG3L/UY0HnlfxZMqQmuraGjexHeLJxlLwj04CSbIV+i/Z7LrcfAxnlV7Dn7WXqDk3+FLsVB+zS7jJleMjrqWwT80EEgC9wlUJoTBNie498Gbe8vnHvJGKADV7EpEirXCztDSsUp32IThq2lDtJt+XBFoIfsSYWYcd1qfTrGdX9oKn0XlUt9s4sngQjYH30EPL0EqnsN1Z/GtQlOXuLkEzo/xznVeNuKPFWhWAnb7ZL/xzDyUWe7W/0w1wR0tOs6EFLPxqf0driZmnOWlXVXKH64yFEg76AWuK+ILhQYBmbx6Nj8"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 490,
+    "candidatesTokenCount": 28,
+    "totalTokenCount": 751,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 490
+      }
+    ],
+    "thoughtsTokenCount": 233,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 541
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "AaOVapSLGtC9vdIPuKyQ8Aw",
+  "turnToken": "v1_ChdBYU9WYXBTTEd0Qzl2ZElQdUt5UThBdxIXQWFPVmFwU0xHdEM5dmRJUHVLeVE4QXc"
+}
+2686 5344
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2453
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nmodel: **Conversation Language:** English\\n\\n### User Request\\nThe user requested a one-sentence explanation of the purpose of a canary deployment.\\n\\n### Context Summary\\nThe conversation originally focused on setting up a tail-retention compaction task in a specific deployment region (`europe-west4`). Recently, the user has transitioned to asking brief, conceptual software architecture and deployment questions. After previously asking about connection pooling and circuit breakers, the user asked about canary deployments. The agent explained that a canary deployment is used to safely test a new software release on a small subset of real users to detect bugs before a full rollout.\\n\\n### Tools Used\\n*No tools have been called in this conversation so far.*\\n\\n### Durable Facts\\n*   The deployment region for this project is `europe-west4`.\\n\\n### Unresolved Questions or Tasks\\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.\nuser: Briefly, why do idempotency keys matter for retries?\ntail_retention_agent: Idempotency keys ensure that retried requests are processed only once, preventing duplicate transactions or unintended side effects."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:34 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3543
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user requested a brief explanation of why idempotency keys are important when performing retries.\n\n### Context Summary\nThe conversation originally began with setting up a tail-retention compaction task in the `europe-west4` deployment region. It has since transitioned into a series of brief, conceptual questions on software architecture and deployment strategies. After discussing connection pooling, circuit breakers, and canary deployments, the user asked about idempotency keys. The agent explained that idempotency keys ensure retried requests are processed only once, preventing duplicate transactions or unintended side effects.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 484,
+    "candidatesTokenCount": 191,
+    "totalTokenCount": 1197,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 484
+      }
+    ],
+    "thoughtsTokenCount": 522,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 515
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "A6OVapjnDLeJvdIP2PGEqQg",
+  "turnToken": "v1_ChdBNk9WYXBqbkRMZUp2ZElQMlBHRXFRZxIXQTZPVmFwam5ETGVKdmRJUDJQR0VxUWc"
+}
+3580 2767
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3347
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user requested a brief explanation of why idempotency keys are important when performing retries.\n\n### Context Summary\nThe conversation originally began with setting up a tail-retention compaction task in the `europe-west4` deployment region. It has since transitioned into a series of brief, conceptual questions on software architecture and deployment strategies. After discussing connection pooling, circuit breakers, and canary deployments, the user asked about idempotency keys. The agent explained that idempotency keys ensure retried requests are processed only once, preventing duplicate transactions or unintended side effects.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable Facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"One sentence on structured logging versus plain text."}],"role":"user"},{"parts":[{"text":"Structured logging provides machine-readable formats like JSON for easy querying and analysis, whereas plain text is unstructured and harder for automated tools to parse.","thoughtSignature":"EpIJCo8JARFNMg80mFA0jPpZZrbBc7DRyS8XeCoTBckK9CeQiOt2Y+dczIUGsWUE3qlTVva5HHHOg3jHLw7YILpCKcobZhUZi5hDlEZsEUxMdEInldbV3/Y7u9G/i8eUEP0tmjNoBt3WhcxJsUksDTq2MB1Em1zeBejO25dcnzFqDs9tQVjLPHm5TU9ZCpmzkd7OtKcCk/VEt4/5KCcTdKfVfVtAsnXwk/Qh0C05tMOdPwPTCY1AKaWbA4W6TqFs78YBAmseD5cOEjSaD2DKk2uIPAplY42bR+Xzjn5EviYwBZUHGY7UZglM3Ybh2GlvmT5mrYjx+mLRy9synZA7W5ZcjTbAs/tl0xf4c1PIOqTya4hEUGLjGSJDyMpFeEYUXE33fR9Hx+F//3eLab/JLb4iGm/EKm7IRFVBDxcKkQm1oHR8P+WR8XSnFyWPE3UQ+IGXzXe1gr1meSyPLd+bnwHem8p/LfQygVKd/5qA7Vb+S/g8ca9JTcA/p1YIr3DByQSM47QgLljGLcygM/A+DsRiKyz3prSnhSxdfRFhfYP75knB4jVTbLgKpUFZ+N/TxolewEnOFHXyoAzOLfZPrIK3Nhb0pOxduoFXORrn9OIXaObKHtSgeidEjZuomF4HO0GwyTDRrVqt6YGYyYXDLGT/RwP9iVygyyCAfw2/ELb12EJI9SuPFIgCGkF6ZTYjicSqJbcHgDDR58100cdR2Os4eviXaje1EzrO7UzFfmAHWsN04fZqAiCRpOlevoGSKw5gLvJI+pRZw890MMUQi1zJmcSmj+xV4SPsnuNXRnw2aNIT7kytwhYX3q4HUNprr+6gJOsMoWsBoOFv2gcjdiZ97bfKgCvBSxmv4SJgq77JPcV3bqP1OvoCBrCYSd5e6N8JxfESq9yNswt1OYQxuI/bq+7/pRIjCGbT6SzVsjTnv/vw3DEHZplaVVmvG2Vr/eCn9DWBwBNivAwesf4Z8sSY+dmN3eK0H2MoiqT1XX7C7aUhfEOH6cjLgFA+OekiIg832IhTjZaR/nyYkQiSzsv6jqzWbmfPF3b8J3XxkdrgtL/txu4Pepq6R4PqN68A4NX0oamWwN5vq0/Rt7Er53q4XlHw9Jw0e4SmE6U1Ho+8BZjGbxHmUS25cAy4684vnMHxcW7dF4xEI04T9N8LvDqzLB2sveFLTXKHignqwbVO7NWCAhC+TUx3HVbByITWxMPX2SR9js0vGKCLDw6S2vsYkij9cqXdbjaNBQr4U8hwqqG3L/UY0HnlfxZMqQmuraGjexHeLJxlLwj04CSbIV+i/Z7LrcfAxnlV7Dn7WXqDk3+FLsVB+zS7jJleMjrqWwT80EEgC9wlUJoTBNie498Gbe8vnHvJGKADV7EpEirXCztDSsUp32IThq2lDtJt+XBFoIfsSYWYcd1qfTrGdX9oKn0XlUt9s4sngQjYH30EPL0EqnsN1Z/GtQlOXuLkEzo/xznVeNuKPFWhWAnb7ZL/xzDyUWe7W/0w1wR0tOs6EFLPxqf0driZmnOWlXVXKH64yFEg76AWuK+ILhQYBmbx6Nj8"}],"role":"model"},{"parts":[{"text":"Why might p99 latency matter more than the mean? One sentence."}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:36 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=2187
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The p99 metric matters more because it reveals the worst-case experience of your slowest users, whereas the mean masks these critical outliers.",
+            "thoughtSignature": "EosJCogJARFNMg9rs5SV+vcTv8r8p4c5xLH+VxKPKOIyLqg7247WjmrZ4n5wVxhMi0393oKDd83Ez/7cbug/Cn2XN34RMM8Gl0ggqWKuKEDjiCuJYu6L9OTv3H4AfnTHzk+C+muXMWnkxEi3428UCC309voKVEcRRjB82KHIRY/Pv4YoeFMaY7y83lM8L+23LtmEko47rix9a/SyMKn5NsDnblVdzNs/qZGaT6CbTLlHeQvPHj7XbPIOkGx85eaFGWtElJS7poO0D5cfwyCEit3Em7moX1hZIzO4kMObX4pFg6o+5DqrjLUW/+022iAaJlXu+f/ToUwMm30kstf8DwNLSmL8joZ4/YaE74C4ZKyANID0h3ee04Rnz5ZoZRQt1KIjPaTEWobxCzYvBr/FOWXlfuM/1tS56yG2fwRHEVQ5Xb0wkmxdQCXDJo83Zill7Y0cJJWk2ZWiFXd65ffIeqN9sbPghxZXZl2OEyLXAaSXjeezHvfutlWq8rA9wnUd/MPaeXnOgPUEk4b6WSMbzvf7e62FEohYa8oyDVTX4Zy0p5GDxEDyLbO5nzOw9P47xHzD/wZT3XiqhOqNKliSTyfkcY1qBlEI6ygwxwSspWOg/OR8iUFpKep0IcTmXkOCzzuh4qlFBpQdUCI7n0bEve9/Vjz88v9s+5WbDmaGENT6vNRq/BfafgCb0Ee+EpnyuN1GD53BeSz/zQF6HnyB0ixfAUrgdG5CRVW0HOM6cisoS3OLKg3teu8OuRP4Pz2m9cxAS0YRIhcELle0nX0E5PwmFUHf+IBWCEYbxg7Dq3ntISJevw/zo/bCuyyFFFhG11QqEKTQPcSffWM6bEZBUKzhiIQkN14LsX8LIkpSNz8UwElwNb/sfRT+zMZZ6JguP+LgczYPq7hHhqDs7hrFx0aHQmgHcrsJGfdCCghTKCS5Vl87yYnG9irAKQLST/H7IIPkm6DbuERkg+E/bfntadzBJ5N303hD1nBh4bnS3XGhOMtpnOXW6fYdqXxa4Y7pOdKC4R08UXf0xYQNLGmc14gcGvZAYyuPrCXH7zVN/AgG2y82dQbAEwJzlw9O40Y4DVmZ2O6JBSJyXXMfKb8o6fu8gu3bz4pN5PI7/lPuC3GYKwutxHVUcXEYLsevDeWUZMyUoJhohytQnMyQ4DO/kUxMkAHr6CgKgeVkv0wvXAwLzzo0mY8mn9kV2oV+Q9JQxbT4QGJRHl2pwBn9c+DoXspKHEMiQrLLefZNYgyBkFQsaxvscQuUMuQFL4glKm0GYIHzK/AXYc9kr3a/i9z/4gmpqCbx5Amlw246Mr79sQ2cmyIL20FnTY+5ODQhzxfKl6AXDrllBLOhcQFsLT+9T7Prx6v1oErPMPFCUa48rH+yOttUXzwcyF4bhKwRU1xFjIr6Eb/oIel2WJ9vOi7PxP5M3Tra4tRm6XuyCG2jSXzrCjUVyLidQD2xobLhhhob5o5YWm4+5ldI697WSBzfg/4ygCCKU2EzFnh/DOENTyKY8yXwfyI8f2nYo6C9yeDIgsAsJrYrG91RjDB0aO4="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 527,
+    "candidatesTokenCount": 28,
+    "totalTokenCount": 812,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 527
+      }
+    ],
+    "thoughtsTokenCount": 257,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 578
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "BqOVat_3Lebwxs0Pi-aGiAs",
+  "turnToken": "v1_ChdCcU9WYXRfM0xlYnd4czBQaS1hR2lBcxIXQnFPVmF0XzNMZWJ3eHMwUGktYUdpQXM"
+}
+2742 6287
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 2509
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"The following is a conversation history between a user and an AI agent. It may or may not start from a compacted history. Please identify and reiterate the user request, summarize the context so far, focusing on key decisions made and information obtained, as well as any unresolved questions or tasks. CRITICAL INSTRUCTIONS: 1. Explicitly identify and state the primary language used by the user at the top of your summary (e.g., \"Conversation Language: English\"). 2. If the agent called any tools, accurately list the exact tool names used to maintain tool grounding. 3. Maintain a section titled \"Durable facts\" listing every concrete detail the user has stated: identifiers, names, dates, numbers, chosen options and the reasons given for them. Copy each one verbatim. This history may already be a summary of a summary, so any durable fact present in the history MUST be carried forward unchanged, even if it is old and the recent turns are about something else. Never drop or generalize a durable fact to save space; drop narrative instead. The rest of the summary should be concise and capture the essence of the interaction.\n\nmodel: **Conversation Language:** English\\n\\n### User Request\\nThe user requested a brief explanation of why idempotency keys are important when performing retries.\\n\\n### Context Summary\\nThe conversation originally began with setting up a tail-retention compaction task in the `europe-west4` deployment region. It has since transitioned into a series of brief, conceptual questions on software architecture and deployment strategies. After discussing connection pooling, circuit breakers, and canary deployments, the user asked about idempotency keys. The agent explained that idempotency keys ensure retried requests are processed only once, preventing duplicate transactions or unintended side effects.\\n\\n### Tools Used\\n*No tools have been called in this conversation so far.*\\n\\n### Durable Facts\\n*   The deployment region for this project is `europe-west4`.\\n\\n### Unresolved Questions or Tasks\\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.\nuser: One sentence on structured logging versus plain text.\ntail_retention_agent: Structured logging provides machine-readable formats like JSON for easy querying and analysis, whereas plain text is unstructured and harder for automated tools to parse."}],"role":"user"}],"generationConfig":{}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:40 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=3527
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence comparison explaining the difference between structured logging and plain text logging.\n\n### Context Summary\nThe conversation originally began with setting up a tail-retention compaction task in the `europe-west4` deployment region. It has since transitioned into a series of brief, conceptual questions on software architecture, design patterns, and deployment strategies. After discussing connection pooling, circuit breakers, canary deployments, and idempotency keys, the user asked about structured logging versus plain text. The agent explained that structured logging provides machine-readable formats (like JSON) for easy automated querying, whereas plain text is unstructured and difficult for tools to parse.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`.",
+            "thoughtSignature": "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"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 487,
+    "candidatesTokenCount": 210,
+    "totalTokenCount": 1333,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 487
+      }
+    ],
+    "thoughtsTokenCount": 636,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 518
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "CKOVarjDOsPqvdIPk_-e8Qs",
+  "turnToken": "v1_ChdDS09WYXJqRE9zUHF2ZElQa18tZThRcxIXQ0tPVmFyakRPc1BxdmRJUGtfLWU4UXM"
+}
+3656 2619
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent HTTP/1.1
+Host: generativelanguage.googleapis.com
+User-Agent: Go-http-client/1.1
+Content-Length: 3423
+Content-Type: application/json
+
+{"contents":[{"parts":[{"text":"**Conversation Language:** English\n\n### User Request\nThe user requested a one-sentence comparison explaining the difference between structured logging and plain text logging.\n\n### Context Summary\nThe conversation originally began with setting up a tail-retention compaction task in the `europe-west4` deployment region. It has since transitioned into a series of brief, conceptual questions on software architecture, design patterns, and deployment strategies. After discussing connection pooling, circuit breakers, canary deployments, and idempotency keys, the user asked about structured logging versus plain text. The agent explained that structured logging provides machine-readable formats (like JSON) for easy automated querying, whereas plain text is unstructured and difficult for tools to parse.\n\n### Tools Used\n*No tools have been called in this conversation so far.*\n\n### Durable facts\n*   The deployment region for this project is `europe-west4`.\n\n### Unresolved Questions or Tasks\n*   Awaiting further instructions or parameters to proceed with the tail-retention compaction process in `europe-west4`."}],"role":"model"},{"parts":[{"text":"Why might p99 latency matter more than the mean? One sentence."}],"role":"user"},{"parts":[{"text":"The p99 metric matters more because it reveals the worst-case experience of your slowest users, whereas the mean masks these critical outliers.","thoughtSignature":"EosJCogJARFNMg9rs5SV+vcTv8r8p4c5xLH+VxKPKOIyLqg7247WjmrZ4n5wVxhMi0393oKDd83Ez/7cbug/Cn2XN34RMM8Gl0ggqWKuKEDjiCuJYu6L9OTv3H4AfnTHzk+C+muXMWnkxEi3428UCC309voKVEcRRjB82KHIRY/Pv4YoeFMaY7y83lM8L+23LtmEko47rix9a/SyMKn5NsDnblVdzNs/qZGaT6CbTLlHeQvPHj7XbPIOkGx85eaFGWtElJS7poO0D5cfwyCEit3Em7moX1hZIzO4kMObX4pFg6o+5DqrjLUW/+022iAaJlXu+f/ToUwMm30kstf8DwNLSmL8joZ4/YaE74C4ZKyANID0h3ee04Rnz5ZoZRQt1KIjPaTEWobxCzYvBr/FOWXlfuM/1tS56yG2fwRHEVQ5Xb0wkmxdQCXDJo83Zill7Y0cJJWk2ZWiFXd65ffIeqN9sbPghxZXZl2OEyLXAaSXjeezHvfutlWq8rA9wnUd/MPaeXnOgPUEk4b6WSMbzvf7e62FEohYa8oyDVTX4Zy0p5GDxEDyLbO5nzOw9P47xHzD/wZT3XiqhOqNKliSTyfkcY1qBlEI6ygwxwSspWOg/OR8iUFpKep0IcTmXkOCzzuh4qlFBpQdUCI7n0bEve9/Vjz88v9s+5WbDmaGENT6vNRq/BfafgCb0Ee+EpnyuN1GD53BeSz/zQF6HnyB0ixfAUrgdG5CRVW0HOM6cisoS3OLKg3teu8OuRP4Pz2m9cxAS0YRIhcELle0nX0E5PwmFUHf+IBWCEYbxg7Dq3ntISJevw/zo/bCuyyFFFhG11QqEKTQPcSffWM6bEZBUKzhiIQkN14LsX8LIkpSNz8UwElwNb/sfRT+zMZZ6JguP+LgczYPq7hHhqDs7hrFx0aHQmgHcrsJGfdCCghTKCS5Vl87yYnG9irAKQLST/H7IIPkm6DbuERkg+E/bfntadzBJ5N303hD1nBh4bnS3XGhOMtpnOXW6fYdqXxa4Y7pOdKC4R08UXf0xYQNLGmc14gcGvZAYyuPrCXH7zVN/AgG2y82dQbAEwJzlw9O40Y4DVmZ2O6JBSJyXXMfKb8o6fu8gu3bz4pN5PI7/lPuC3GYKwutxHVUcXEYLsevDeWUZMyUoJhohytQnMyQ4DO/kUxMkAHr6CgKgeVkv0wvXAwLzzo0mY8mn9kV2oV+Q9JQxbT4QGJRHl2pwBn9c+DoXspKHEMiQrLLefZNYgyBkFQsaxvscQuUMuQFL4glKm0GYIHzK/AXYc9kr3a/i9z/4gmpqCbx5Amlw246Mr79sQ2cmyIL20FnTY+5ODQhzxfKl6AXDrllBLOhcQFsLT+9T7Prx6v1oErPMPFCUa48rH+yOttUXzwcyF4bhKwRU1xFjIr6Eb/oIel2WJ9vOi7PxP5M3Tra4tRm6XuyCG2jSXzrCjUVyLidQD2xobLhhhob5o5YWm4+5ldI697WSBzfg/4ygCCKU2EzFnh/DOENTyKY8yXwfyI8f2nYo6C9yeDIgsAsJrYrG91RjDB0aO4="}],"role":"model"},{"parts":[{"text":"One sentence: what does backpressure mean in a queue?"}],"role":"user"}],"generationConfig":{},"systemInstruction":{"parts":[{"text":"You are a concise assistant. Answer in one short sentence.\n\nYou are an agent. Your internal name is \"tail_retention_agent\". The description about you is \"agent used to exercise tail-retention compaction\"."}],"role":"user"}}HTTP/2.0 200 OK
+Content-Type: application/json; charset=UTF-8
+Date: Mon, 31 Aug 2026 15:51:42 GMT
+Server: scaffolding on HTTPServer2
+Server-Timing: gfet4t7; dur=1595
+Vary: Origin
+Vary: X-Origin
+Vary: Referer
+X-Content-Type-Options: nosniff
+X-Frame-Options: SAMEORIGIN
+X-Gemini-Service-Tier: standard
+X-Xss-Protection: 0
+
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Backpressure is a mechanism where downstream systems signal upstream producers to slow down data transmission when queues are full, preventing system overload.",
+            "thoughtSignature": "EpEICo4IARFNMg8P6vmPeDBycLQmdLEdU/1u9zLosrMugIdrge0AjfwubcZjxLovOm3hPsvo671+p2Rz8Ox3RDDw9t9QhUWIod6oQ7n80il9cOHTasYLFN4rOx8Ela7wwjnaIBShNWRF8tfRu3IEoEewMQYHbIlhQtR51XN9tppduhSNY5r6N6lGFpbxOwzPNyizYWJv01+2XGDjQoKR6mtfirBUfLjVcZIZVCRRlnbOZ0h4+TVrh1w0DJPYrLCwq9225Jh6sBVYgA/Knzt0GZR/WcB0HcdT0L5XxDeu8/BSwjOJPwdGKdfRfv542qAWy/wgnCLGEg4J7qAOFUZNY5XWwTz+aNDohGCrhnL3hYnCbIVtMOjisLZKiLub45kohyVI+Fmqtke99LYtJc1L8dn2Wr0MxEnGeIetlPE2/Q0hjGTFL6SfVvB6RuLm1f/eD1h0Pa66NxzvSBj4Tt9627rCMeY2HnbC3hsJ2tu3QXhR4JgAHUrgkzWcaN9J9UERjUdirjykOZ1KfsLpJjREYpdivlTtrWip6tC5Q5dI9WqFlbacKkG1zwol/OBMZT8TgqNgPJmgd5fbpCSq2tGxhBpKIlph4dsSScTCcb7b28nEDDG1EKUrTPdPECE18fiBDLMycUkdMGTk/7HViVvC2u0LC6sMiCXghCjJv5Dvu/NoHWASJN55JtfFLW6YY/IfOxmSr10v2wU/QHLnbdUJZjeCHUjjR3TVxBzFmSyZjufc+7CVCxyJiDXhtCFLZ3kJceTbFOX7AJfMeruirv7ghdfx3UGsLsCH31MqFryDMcOVQr91aW/4iT5zWDNzS8Nz3Z8QCMdyOrqZTmfqjy+J3JqoU/d96wHLc4XpX0Y4w0kc0pqDi0xrhfAcQAaK/rM8y1JlagU+V7BtOph+LeElQCWTOulkG/QpyEs6T+Ar9aEzjXdxrg/e0OiBybnJhQ2ZLQPxK0KKjwdyRYPISqeDW8X6vr2A1LfC7FKgSw574PQurgo9JyYE301nHyjsMWHA10+NqWgp3GUNK+3LaWphf82e6K9nr3lfRNg1eNvnYif29FKcNg1HCCNlIG9Y2dhnwQz2f+cOxH3+8VN1VOHICAU332IAYnmHLY2ISFCbEk3Qwr7i6l6B7xYvBJDvXYsMyVABcqgw2mWcZaOst3RK2T3JTNobqEVjmFeILScFH7s/aoK/+orJf4W405G0GIYM4fCvvxgTYGc8tF65z1ClvAGQMsGE2zXatZ0mbmW3o3KDAbSEzWboTE8BuSu6cWmVMoa9cUbjYt/g5UF2HH4gWB85slvzKcu8cUzdT244rCNvIBd1nRvqwjE3E9Ie64xoUUCFZe5G2zsj92wOAeuNleh3ZVAZJvZHx1KyygWpYgMpwzdu"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 573,
+    "candidatesTokenCount": 25,
+    "totalTokenCount": 808,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 573
+      }
+    ],
+    "thoughtsTokenCount": 210,
+    "serviceTier": "standard",
+    "rawPromptTokenCount": 624
+  },
+  "modelVersion": "gemini-3.5-flash",
+  "responseId": "DKOVavr9HYXdvdIP2PaNmAw",
+  "turnToken": "v1_ChdES09WYXZyOUhZWGR2ZElQMlBhTm1BdxIXREtPVmF2cjlIWVhkdmRJUDJQYU5tQXc"
+}

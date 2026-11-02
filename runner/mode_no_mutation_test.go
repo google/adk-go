@@ -35,7 +35,7 @@ import (
 // separate consequence, pinned in workflow, and not what this test is for.
 //
 // It lives in this directory on purpose. The property is about this package's
-// behaviour, and a version of it in another DIRECTORY leaves `go test ./runner/`
+// behavior, and a version of it in another DIRECTORY leaves `go test ./runner/`
 // green while the write is back — which is the loop someone editing this file
 // actually runs. package runner rather than runner_test only so it can reuse
 // scriptedModel.

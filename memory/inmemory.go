@@ -80,9 +80,16 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 			continue
 		}
 
+		// Thought parts are the model's reasoning, not conversation, so they are
+		// neither searched nor returned, as in adk-python.
 		words := make(map[string]struct{})
 		var texts []string
+		var visibleParts []*genai.Part
 		for _, part := range event.LLMResponse.Content.Parts {
+			if part == nil || part.Thought {
+				continue
+			}
+			visibleParts = append(visibleParts, part)
 			if part.Text == "" {
 				continue
 			}
@@ -95,9 +102,12 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 			continue
 		}
 
+		content := *event.LLMResponse.Content
+		content.Parts = visibleParts
+
 		values = append(values, value{
 			id:             event.ID,
-			content:        event.LLMResponse.Content,
+			content:        &content,
 			author:         event.Author,
 			timestamp:      event.Timestamp,
 			customMetadata: event.CustomMetadata,
@@ -202,11 +212,16 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 func extractWords(text string) map[string]struct{} {
 	res := make(map[string]struct{})
 
-	for s := range strings.SplitSeq(text, " ") {
-		if s == "" {
+	for word := range strings.FieldsFuncSeq(text, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r) && r != '_'
+	}) {
+		// A mark with no letter or number before it, such as the emoji variation
+		// selector U+FE0F, does not belong to a word.
+		word = strings.TrimLeftFunc(word, unicode.IsMark)
+		if word == "" {
 			continue
 		}
-		res[strings.ToLower(s)] = struct{}{}
+		res[strings.ToLower(word)] = struct{}{}
 	}
 
 	return res

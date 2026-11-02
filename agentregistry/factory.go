@@ -343,6 +343,8 @@ func toA2ASkills(skills []Skill) []a2a.AgentSkill {
 // default, requests to *.googleapis.com endpoints are authenticated with the
 // registry's Application Default Credentials; use [WithMCPHTTPClient] and/or
 // [WithMCPHeaders] to override or augment egress.
+//
+// Callers must close the returned toolset as described in [mcptoolset.New].
 func (c *Client) MCPToolset(ctx context.Context, name string, opts ...MCPToolsetOption) (tool.Toolset, error) {
 	server, err := c.GetMCPServer(ctx, name)
 	if err != nil {
