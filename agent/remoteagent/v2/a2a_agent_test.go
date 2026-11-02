@@ -1305,6 +1305,69 @@ func TestRemoteAgent_ErrorIfAgentCardResolutionFails(t *testing.T) {
 	}
 }
 
+func TestRemoteAgent_ErrorIfMessageCreationFails(t *testing.T) {
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				t.Error("remote agent was called, want the request to fail before sending")
+			}
+		},
+	}
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+	remoteAgent := utils.Must(NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		GenAIPartConverter: func(ctx context.Context, event *session.Event, part *genai.Part) (*a2a.Part, error) {
+			return nil, fmt.Errorf("unsupported part")
+		},
+	}))
+
+	// Only a scoped dispatch seeding its input from UserContent propagates a
+	// part conversion error from newMessage.
+	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Agent:          remoteAgent,
+		Session:        prepareSession(t, t.Context(), nil),
+		IsolationScope: "workflow/node@1",
+		UserContent:    genai.NewContentFromText("seeded node input", genai.RoleUser),
+	})
+	gotEvents, err := runAndCollect(ictx, remoteAgent)
+	if err == nil || !strings.Contains(err.Error(), "message creation failed") {
+		t.Fatalf("agent.Run() error = %v, want message creation failure", err)
+	}
+	if len(gotEvents) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(gotEvents))
+	}
+}
+
+func TestRemoteAgent_ErrorIfDefaultConversionFails(t *testing.T) {
+	executor := &mockA2AExecutor{
+		executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+			return func(yield func(a2a.Event, error) bool) {
+				yield(a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("hello")), nil)
+			}
+		},
+	}
+	server := startA2AServer(executor)
+	card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+	remoteAgent := utils.Must(NewA2A(A2AConfig{
+		Name:      "a2a",
+		AgentCard: card,
+		A2APartConverter: func(ctx context.Context, a2aEvent a2a.Event, part *a2a.Part) (*genai.Part, error) {
+			return nil, fmt.Errorf("unsupported part")
+		},
+	}))
+
+	ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+	gotEvents, err := runAndCollect(ictx, remoteAgent)
+	if err == nil || !strings.Contains(err.Error(), "failed to convert a2aEvent") {
+		t.Fatalf("agent.Run() error = %v, want conversion failure", err)
+	}
+	if len(gotEvents) != 0 {
+		t.Fatalf("len(events) = %d, want 0", len(gotEvents))
+	}
+}
+
 func TestRemoteAgent_CustomConverters(t *testing.T) {
 	originalA2APart := a2a.NewTextPart("hello")
 	customA2APart := a2a.NewTextPart("modified")

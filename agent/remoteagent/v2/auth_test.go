@@ -841,8 +841,8 @@ func TestRemoteAgent_AuthCleanupReusesTheInvocationCredential(t *testing.T) {
 }
 
 // TestRedactTokenError pins that the token endpoint's response body does not
-// reach the error string, which ends up in the invocation's error event, while
-// the error chain still resolves for a caller inspecting it.
+// reach the error string, which Run returns to the caller, while the error
+// chain still resolves for a caller inspecting it.
 func TestRedactTokenError(t *testing.T) {
 	const body = "sensitive-echo-of-the-request"
 	tests := []struct {
