@@ -1662,6 +1662,12 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
+		// Keep the original diagnostic through callbacks; only the final
+		// model-facing panic response must omit its value and stack.
+		var panicErr *toolinternal.PanicError
+		if errors.As(err, &panicErr) {
+			return map[string]any{"error": streamingToolInternalError(tool.Name())}
+		}
 		return map[string]any{"error": err.Error()}
 	}
 	return response
