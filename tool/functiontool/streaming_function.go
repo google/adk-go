@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -141,7 +142,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 				if !canYield {
 					panic(r)
 				}
-				yield("", fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack()))
+				yield("", &toolinternal.HandlerError{Err: fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())})
 			}
 		}()
 
@@ -183,6 +184,9 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 		}
 
 		for res, err := range f.handler(ctx, input) {
+			if err != nil {
+				err = &toolinternal.HandlerError{Err: err}
+			}
 			if !yield(res, err) {
 				return
 			}
