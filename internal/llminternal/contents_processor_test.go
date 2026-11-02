@@ -475,6 +475,121 @@ func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *tes
 	}
 }
 
+// TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent pins
+// that the parent's transfer_to_agent call and response do not start the
+// current turn of the agent it hands over to. Anchoring there would leave the
+// user's request out of that agent's prompt. Mirrors adk-python's
+// _is_direct_transfer in _get_current_turn_contents.
+func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *testing.T) {
+	t.Parallel()
+	const (
+		parentName = "coordinator"
+		agentName  = "geography"
+	)
+
+	question := genai.NewContentFromText("What is the capital of France?", genai.RoleUser)
+	transferCallPart := &genai.Part{
+		FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "transfer_to_agent", Args: map[string]any{"agent_name": agentName}},
+	}
+	transferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{transferCallPart}}
+	textThenTransferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Handing over."}, transferCallPart}}
+	transferResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "transfer_to_agent", Response: map[string]any{}},
+	}}}
+	ownCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-2", Name: "lookup", Args: map[string]any{"country": "France"}},
+	}}}
+	ownResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-2", Name: "lookup", Response: map[string]any{"capital": "Paris"}},
+	}}}
+
+	userEvent := &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: question}}
+	transferResponseEvent := &session.Event{
+		Author:      parentName,
+		LLMResponse: model.LLMResponse{Content: transferResponse},
+		Actions:     session.EventActions{TransferToAgent: agentName},
+	}
+	// The transfer itself stays in the prompt, as context from another agent.
+	transferCallContext := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: `[coordinator] called tool ` + "`transfer_to_agent`" + ` with parameters: {"agent_name":"geography"}`},
+	}}
+	transferResponseContext := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: "[coordinator] `transfer_to_agent` tool returned result: {}"},
+	}}
+
+	tests := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			name: "transfer is the latest event",
+			events: []*session.Event{
+				userEvent,
+				{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}},
+				transferResponseEvent,
+			},
+			want: []*genai.Content{question, transferCallContext, transferResponseContext},
+		},
+		{
+			// The call is not the event's first part.
+			name: "parent writes text before the transfer call",
+			events: []*session.Event{
+				userEvent,
+				{Author: parentName, LLMResponse: model.LLMResponse{Content: textThenTransferCall}},
+				transferResponseEvent,
+			},
+			want: []*genai.Content{
+				question,
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[coordinator] said: Handing over."},
+					{Text: `[coordinator] called tool ` + "`transfer_to_agent`" + ` with parameters: {"agent_name":"geography"}`},
+				}},
+				transferResponseContext,
+			},
+		},
+		{
+			// The transfer is no longer the latest event on the agent's next
+			// model call, after its own tool call.
+			name: "agent's own tool call after the transfer",
+			events: []*session.Event{
+				userEvent,
+				{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}},
+				transferResponseEvent,
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownCall}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownResponse}},
+			},
+			want: []*genai.Content{question, transferCallContext, transferResponseContext, ownCall, ownResponse},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := utils.Must(llmagent.New(llmagent.Config{
+				Name:            agentName,
+				Model:           &testModel{},
+				IncludeContents: llmagent.IncludeContentsNone,
+			}))
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:   a,
+				Session: &fakeSession{events: tc.events},
+			})
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff(tc.want, req.Contents); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
 // verifies that the contents from the different scope are not included
 // in the content for LLM.
