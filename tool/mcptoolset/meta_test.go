@@ -35,6 +35,8 @@ func TestIsReservedMetaKey(t *testing.T) {
 		{key: "dev.mcp/key", want: true},
 		{key: "org.modelcontextprotocol.api/key", want: true},
 		{key: "com.mcp.tools/key", want: true},
+		{key: "net.mcp/hint", want: true},
+		{key: "uk.modelcontextprotocol/x", want: true},
 		{key: "com.example.mcp/key", want: false},
 		// Only the second label carries the marker, so a marker at any other
 		// position leaves the key to the server.

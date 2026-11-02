@@ -1709,8 +1709,8 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 			var offered []string
 			ts, err := mcptoolset.New(mcptoolset.Config{
 				Transport: clientTransport,
-				ToolFilter: func(ctx agent.ReadonlyContext, t tool.Tool) bool {
-					offered = append(offered, t.Name())
+				ToolFilter: func(ctx agent.ReadonlyContext, offeredTool tool.Tool) bool {
+					offered = append(offered, offeredTool.Name())
 					return true
 				},
 			})

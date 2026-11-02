@@ -411,9 +411,10 @@ type ToolError struct {
 	// sent none.
 	Details string
 
-	// Meta holds the metadata the server attached to the result, without keys
-	// in prefixes the MCP protocol reserves for itself. It is nil when the
-	// server attached no metadata of its own.
+	// Meta holds the metadata the server attached to the result, without the
+	// keys the MCP protocol reserves for itself: those in a reserved prefix and
+	// the unprefixed progressToken, traceparent, tracestate and baggage. It is
+	// nil when the server attached no metadata of its own.
 	Meta map[string]any
 }
 
