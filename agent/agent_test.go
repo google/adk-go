@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -411,6 +412,68 @@ func TestRunWithoutRunFunc(t *testing.T) {
 			}
 			if afterCalls != 0 {
 				t.Errorf("after-agent callbacks ran %d times, want 0", afterCalls)
+			}
+		})
+	}
+}
+
+// savingArtifacts embeds a nil Artifacts and implements only Save, which always
+// succeeds with version 1.
+type savingArtifacts struct{ Artifacts }
+
+func (savingArtifacts) Save(context.Context, string, *genai.Part) (*artifact.SaveResponse, error) {
+	return &artifact.SaveResponse{Version: 1}, nil
+}
+
+// TestAgentCallbacks_ArtifactOnlyDeltaEmitsEvent guards that a callback which
+// saves an artifact and returns nil content still has the save recorded on a
+// session event, for both the before-agent and after-agent phases.
+func TestAgentCallbacks_ArtifactOnlyDeltaEmitsEvent(t *testing.T) {
+	saveOnly := func(ctx Context) (*genai.Content, error) {
+		_, err := ctx.Artifacts().Save(ctx, "report.txt", genai.NewPartFromText("x"))
+		return nil, err
+	}
+	tests := []struct {
+		name   string
+		config Config
+	}{
+		{name: "before_agent", config: Config{BeforeAgentCallbacks: []BeforeAgentCallback{saveOnly}}},
+		{name: "after_agent", config: Config{AfterAgentCallbacks: []AfterAgentCallback{saveOnly}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			custom := &customAgent{}
+			tt.config.Name = "test"
+			tt.config.Run = custom.Run
+			testAgent, err := New(tt.config)
+			if err != nil {
+				t.Fatalf("failed to create agent: %v", err)
+			}
+			ctx := &invocationContext{
+				Context:   t.Context(),
+				agent:     testAgent,
+				artifacts: savingArtifacts{},
+				session:   &mockSession{sessionID: "test-session"},
+			}
+			var got []*session.Event
+			for event, err := range testAgent.Run(ctx) {
+				if err != nil {
+					t.Fatalf("unexpected error from the agent: %v", err)
+				}
+				got = append(got, event)
+			}
+			var deltas []map[string]int64
+			for _, ev := range got {
+				if len(ev.Actions.ArtifactDelta) > 0 {
+					deltas = append(deltas, ev.Actions.ArtifactDelta)
+				}
+			}
+			want := []map[string]int64{{"report.txt": 1}}
+			if diff := cmp.Diff(want, deltas); diff != "" {
+				t.Errorf("artifact deltas recorded on events mismatch (-want +got):\n%s", diff)
+			}
+			if custom.callCounter != 1 {
+				t.Errorf("agent Run called %d times, want 1", custom.callCounter)
 			}
 		})
 	}
