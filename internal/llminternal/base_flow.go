@@ -24,11 +24,13 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"net"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -153,7 +155,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				}
 				thoughtOnlyTurns++
 				if thoughtOnlyTurns >= maxConsecutiveThoughtOnlyTurns {
-					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event",
+					log.Printf("adk: model %q produced %d consecutive thought-only turns without an answer (limit %d) for agent %q (invocation %q); giving up and returning the last thinking event", //nolint:forbidigo // pre-slog call site
 						f.Model.Name(), thoughtOnlyTurns, maxConsecutiveThoughtOnlyTurns, ctx.Agent().Name(), ctx.InvocationID())
 					return
 				}
@@ -166,7 +168,7 @@ func (f *Flow) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error]
 				// an a2a peer whose stream ends on an appended artifact chunk with no
 				// terminal status). The turn was truncated, not completed, which is
 				// not expected, so we log a warning and return instead of looping again.
-				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history",
+				log.Printf("adk: agent %q (invocation %q): step ended on a partial event from %q; the producer did not close its stream with an aggregated final event, so the turn will not appear in session history", //nolint:forbidigo // pre-slog call site
 					ctx.Agent().Name(), ctx.InvocationID(), lastEvent.Author)
 				return
 			}
@@ -316,7 +318,7 @@ func (s *liveSessionImpl) pushError(err error) bool {
 	}
 }
 
-// tornDown reports whether the session was closed or the invocation cancelled.
+// tornDown reports whether the session was closed or the invocation canceled.
 func tornDown(ctx context.Context, sess *liveSessionImpl) bool {
 	select {
 	case <-sess.done:
@@ -345,6 +347,62 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// isResumable reports whether a live-connection error means the socket is
+// gone and the flow should reconnect, rather than surface the error and stop.
+//
+// Both the reader and the sender goroutine report into the same errChan and
+// the flow acts on whichever arrives first, so the two must classify the same
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
+func isResumable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == io.EOF {
+		return true
+	}
+	// A failed read or write on the underlying socket of an already-established
+	// connection. The dial lives on a different path, which handles its own
+	// errors, so reaching here means a live connection dropped.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return true
+	}
+	// Match the close code rather than the text: gorilla puts the socket
+	// addresses in its error text, so a port such as 41008 would match "1008".
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr.Code == websocket.ClosePolicyViolation {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "EOF") ||
+		strings.Contains(errStr, "GoAway")
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -391,21 +449,6 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			SessionResumption:        runCfg.Live.SessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
-		}
-
-		isResumable := func(err error) bool {
-			if err == nil {
-				return false
-			}
-			if err == io.EOF {
-				return true
-			}
-			errStr := err.Error()
-			return strings.Contains(errStr, "broken pipe") ||
-				strings.Contains(errStr, "connection reset") ||
-				strings.Contains(errStr, "EOF") ||
-				strings.Contains(errStr, "1008") ||
-				strings.Contains(errStr, "GoAway")
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)
@@ -455,7 +498,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 				sleepDuration := policy.jittered(currentBackoff)
 				currentBackoff = policy.nextBackoff(currentBackoff)
 
-				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v",
+				log.Printf("live session: reconnect attempt %d/%d (%d short-lived) in %v", //nolint:forbidigo // pre-slog call site
 					reconnectAttempts, policy.maxAttempts, shortLivedReconnects, sleepDuration)
 				if !waitBeforeReconnect(ctx, sess, sleepDuration) {
 					// Cancellation reports itself, matching the consumer
@@ -482,14 +525,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			connCtx, cancelConn := context.WithCancel(ctx)
 
 			if liveConnectConfig.SessionResumption != nil {
-				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle)
+				log.Printf("connecting with live session handle: %s\n", liveConnectConfig.SessionResumption.Handle) //nolint:forbidigo // pre-slog call site
 			}
 			liveSession, err := client.Live.Connect(connCtx, f.Model.Name(), liveConnectConfig)
 			if err != nil {
 				cancelConn()
-				log.Printf("failed to connect live session: %v\n", err)
+				log.Printf("failed to connect live session: %v\n", err) //nolint:forbidigo // pre-slog call site
 				if isReconnect {
-					// genai returns without closing the socket it dialled when
+					// genai returns without closing the socket it dialed when
 					// the setup write fails, and it dials with a context-less
 					// dialer, so cancelConn cannot release it either. Each
 					// budgeted redial against such an endpoint strands one fd
@@ -519,7 +562,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// Send preprocessed content directly to model if any exists after early preprocessing
 			if len(nreq.Contents) > 0 {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
-					log.Printf("failed to send history: %v\n", err)
+					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
 					sess.pushError(err)
 					// cleanup, not a bare return: genai dials the live socket
 					// with a context-less websocket.DefaultDialer.Dial, and
@@ -545,7 +588,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if resp != nil {
 						if resp.SessionResumptionHandle != "" {
 							if isIContext {
-								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle)
+								log.Printf("received session resumption handle: %s\n", resp.SessionResumptionHandle) //nolint:forbidigo // pre-slog call site
 								iCtx.SetLiveSessionResumptionHandle(resp.SessionResumptionHandle)
 							}
 						}
@@ -690,7 +733,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					}
 				case ce := <-errChan:
 					if isResumable(ce.err) {
-						log.Printf("Connection error, attempting to resume: %v\n", ce.err)
+						log.Printf("Connection error, attempting to resume: %v\n", ce.err) //nolint:forbidigo // pre-slog call site
 						lastErr = ce.err
 						// Score the connection's life from where the error was
 						// produced, not from here: this loop also runs tools
@@ -799,7 +842,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta, artifactDelta)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -977,6 +1020,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
 		}
 
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
+		}
+
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, artifactDelta, err)
@@ -1037,56 +1088,28 @@ type responseWithEventID struct {
 // generateContent wraps the LLM call with tracing and logging.
 // The generate_content span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*responseWithEventID, error] {
-	return func(yield func(*responseWithEventID, error) bool) {
-		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName:    m.Name(),
-			InvocationID: ctx.InvocationID(),
-			Request:      req,
-		})
-		ctx = ctx.WithContext(spanCtx)
-		backend := googlellm.GetGoogleLLMVariant(m)
-		// Log request before calling the model.
-		telemetry.LogRequest(ctx, req, backend)
-
-		var lastResponse responseWithEventID
-		var lastErr error
-		spanEnded := false
-		endSpanAndTrackResult := func() {
-			if spanEnded {
-				// Return to avoid spamming the logs with "span already ended" errors.
-				return
-			}
-			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
-				Response: lastResponse.LLMResponse,
-				EventID:  lastResponse.eventID,
-				Error:    lastErr,
-			})
-			span.End()
-			spanEnded = true
-		}
-		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
-		defer endSpanAndTrackResult()
-		for resp, err := range m.GenerateContent(ctx, req, useStream) {
-			if resp == nil && err == nil {
-				// Third-party model implementations may yield an empty response.
-				continue
-			}
-			response := newResponseWithEventID(ctx, resp)
-			lastResponse = *response
-			lastErr = err
-			// Complete the span immediately to avoid capturing the upstream yield processing time.
-			if err != nil {
-				endSpanAndTrackResult()
-			} else if !resp.Partial {
-				// Log only final responses.
-				telemetry.LogResponse(ctx, resp, backend)
-				endSpanAndTrackResult()
-			}
-			if !yield(response, err) {
-				return
-			}
-		}
+	params := telemetry.GenerateContentParams{
+		ModelName:    m.Name(),
+		InvocationID: ctx.InvocationID(),
+		Request:      req,
+		Backend:      googlellm.GetGoogleLLMVariant(m),
+		Stream:       useStream,
 	}
+	response := func(r *responseWithEventID) (*model.LLMResponse, string) { return r.LLMResponse, r.eventID }
+	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
+		ctx := ctx.WithContext(spanCtx)
+		return func(yield func(*responseWithEventID, error) bool) {
+			for resp, err := range m.GenerateContent(ctx, req, useStream) {
+				if resp == nil && err == nil {
+					// Third-party model implementations may yield an empty response.
+					continue
+				}
+				if !yield(newResponseWithEventID(ctx, resp), err) {
+					return
+				}
+			}
+		}
+	})
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
@@ -1157,7 +1180,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any, artifactDelta map[string]int64) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -1169,6 +1192,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp.LLMResponse
 	ev.Actions.StateDelta = stateDelta
+	ev.Actions.ArtifactDelta = artifactDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -1381,7 +1405,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 								default:
 								}
 								if err != nil {
-									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Error in streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 								updatedContent := &genai.Content{
@@ -1393,7 +1417,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 									},
 								}
 								if err := liveSess.Send(agent.LiveRequest{Content: updatedContent}); err != nil {
-									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err)
+									fmt.Printf("Failed to send content from streaming tool %s: %v\n", streamTool.Name(), err) //nolint:forbidigo // pre-slog call site
 									return
 								}
 							}

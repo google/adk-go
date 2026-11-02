@@ -70,12 +70,8 @@ type A2AConfig struct {
 	// CardResolveOptions can be used to provide a set of agencard.Resolver configurations.
 	CardResolveOptions []agentcard.ResolveOption
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [agent.BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
 	// BeforeRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then the
@@ -95,12 +91,9 @@ type A2AConfig struct {
 	// This is the ideal place to log agent responses, collect metrics on token or perform
 	// pre-processing of events before a mapper is invoked.
 	AfterRequestCallbacks []AfterA2ARequestCallback
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [agent.AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// A2APartConverter is a custom converter for converting A2A parts to GenAI parts.

@@ -436,7 +436,7 @@ const refResolution = time.Microsecond
 
 // excludes reports whether rng names ev as a hole.
 //
-// Only the exclusion test is normalised, never inRange. Widening a hole leaves
+// Only the exclusion test is normalized, never inRange. Widening a hole leaves
 // an extra event raw beside a summary of it, which is recoverable. Widening the
 // range would pull in an event that sits just outside it and was summarized by
 // nothing, which is the deletion this is here to prevent.
@@ -544,7 +544,7 @@ func newCoverIndex(events []*session.Event) coverIndex {
 // never described it.
 //
 // Unioning is the safe direction. A hole is the claim "this event was not
-// summarized". Honouring a hole that was not needed leaves an event raw beside a
+// summarized". Honoring a hole that was not needed leaves an event raw beside a
 // summary of it, which is visible and recoverable. Ignoring one that was needed
 // deletes conversation. When records disagree, the claim of absence wins.
 //
@@ -719,7 +719,7 @@ func UnwrapSession(s session.Session) session.Session {
 //
 // This is the only place that answers the question. Compaction has already
 // grown three predicates for "is this a compaction", the weakest of which
-// authorised deletion, and coverage is the one where a disagreement deletes
+// authorized deletion, and coverage is the one where a disagreement deletes
 // conversation, so it gets exactly one definition.
 //
 // The range says what a summary stands in for and the exclusion list says which
@@ -749,7 +749,7 @@ func inRange(ev *session.Event, rng *session.EventCompaction) bool {
 // the last check and the store there is a window in which another writer can
 // land an event. It does not take a hostile plugin or even a concurrent
 // invocation to hit. An event carries the timestamp it was created at rather
-// than stored at, so parallel tool responses and sub-agent events funnelled
+// than stored at, so parallel tool responses and sub-agent events funneled
 // through a channel are routinely created before a range ends and stored after
 // the check, and one that wins the race to append sits before the summary in
 // the stream and inside its range, where the positional guard cannot help it.

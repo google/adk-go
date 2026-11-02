@@ -40,14 +40,14 @@ var (
 
 // LogStartStop is a helper function which executes a particular command with logging
 func LogStartStop(msg string, command func(p Printer) error) error {
-	fmt.Println(msg, ": "+Green+"Starting"+Reset)
-	err := command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) })
-	fmt.Println()
+	fmt.Println(msg, ": "+Green+"Starting"+Reset)                              //nolint:forbidigo // pre-slog call site
+	err := command(func(a ...any) { fmt.Println("    "+Green+"> "+Reset, a) }) //nolint:forbidigo // pre-slog call site
+	fmt.Println()                                                              //nolint:forbidigo // pre-slog call site
 	if err == nil {
-		fmt.Println(msg, ": "+Green+"Finished successfully"+Reset)
+		fmt.Println(msg, ": "+Green+"Finished successfully"+Reset) //nolint:forbidigo // pre-slog call site
 	} else {
-		fmt.Println(msg, ": "+Red+"Finished with error"+Reset)
-		fmt.Println("Error:", err)
+		fmt.Println(msg, ": "+Red+"Finished with error"+Reset) //nolint:forbidigo // pre-slog call site
+		fmt.Println("Error:", err)                             //nolint:forbidigo // pre-slog call site
 	}
 
 	return err
@@ -97,8 +97,8 @@ func newReprintableStream(s io.Writer, prefix, color string) io.Writer {
 // function LogCommand runs a command pretty-printing its stdout and stderr
 func LogCommand(c *exec.Cmd, p Printer) error {
 	p("Running : ", Yellow, c.Dir, Reset, " ", c)
-	c.Stdout = newReprintableStream(os.Stdout, "  ", Yellow)
-	c.Stderr = newReprintableStream(os.Stdout, "  ", Yellow)
+	c.Stdout = newReprintableStream(os.Stdout, "  ", Yellow) //nolint:forbidigo // pre-slog call site
+	c.Stderr = newReprintableStream(os.Stdout, "  ", Yellow) //nolint:forbidigo // pre-slog call site
 	return c.Run()
 }
 

@@ -209,7 +209,7 @@ func toolConfirmationResponseFromUserInput(line string) map[string]any {
 }
 
 // renderGenericInterruptPrompt is the fallback for HITL kinds the
-// launcher does not specifically recognise. Prints the kind name
+// launcher does not specifically recognize. Prints the kind name
 // and the raw args so the operator can compose a sensible
 // response by hand.
 func renderGenericInterruptPrompt(name string, args map[string]any) {

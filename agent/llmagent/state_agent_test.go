@@ -657,6 +657,7 @@ func (m *mockToolset) ProcessRequest(ctx agent.Context, req *model.LLMRequest) e
 	utils.AppendInstructions(req, "Extra instruction from mockToolset")
 	return nil
 }
+
 func (m *mockToolset) Name() string                                         { return "test_toolset" }
 func (m *mockToolset) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) { return nil, nil }
 

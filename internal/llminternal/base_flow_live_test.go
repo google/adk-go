@@ -348,12 +348,45 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 2,
 		},
 		{
+			// A close frame with code 1008 (policy violation) reaches
+			// isResumable as a *websocket.CloseError and must reconnect.
+			name: "policy violation close 1008 reconnects",
+			serveConn: func(connNum int, conn *websocket.Conn) {
+				if connNum == 1 {
+					deadline := time.Now().Add(time.Second)
+					_ = conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "policy violation"), deadline)
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+					return
+				}
+				blockUntilClientCloses(conn)
+			},
+			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
+				sawTurn := false
+				for ev, err := range seq {
+					if err != nil {
+						continue
+					}
+					if ev != nil && ev.LLMResponse.Content != nil {
+						sawTurn = true
+						cancel()
+					}
+				}
+				if !sawTurn {
+					t.Error("never received the post-reconnect model turn")
+				}
+			},
+			wantConns: 2,
+		},
+		{
 			// A close frame with a non-resumable code must surface as an error
 			// to the caller and terminate the flow after a single connection.
 			//
 			// This case passes with or without the errChan guards: the sender
 			// exits through the existing connCtx.Done() arm, so nothing is
-			// stranded. It pins the terminal-path behaviour; it is not a
+			// stranded. It pins the terminal-path behavior; it is not a
 			// regression guard for the leak.
 			name: "non-resumable error terminates after one connection",
 			serveConn: func(connNum int, conn *websocket.Conn) {
@@ -375,7 +408,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 1,
 		},
 		{
-			// Cancelling the invocation context while the reader is blocked in
+			// Canceling the invocation context while the reader is blocked in
 			// Recv is the everyday teardown path: cleanup closes the
 			// connection, the reader's Recv fails, and its error send must not
 			// block forever on the abandoned channel.
@@ -449,7 +482,7 @@ func liveHistoryProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f 
 // Every other return in RunLive's own body releases the attempt through
 // cleanup (or cancelConn, before the connection exists). The SendHistory
 // failure path returns without either, so the websocket is never closed.
-// Cancelling the context would not help: genai dials with
+// Canceling the context would not help: genai dials with
 // websocket.DefaultDialer.Dial, which takes no context, and nothing in the SDK
 // watches one — only an explicit Close releases that socket. So the connection
 // survives for the lifetime of the process, not just the invocation.

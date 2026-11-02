@@ -17,6 +17,7 @@ package agentregistry
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -43,9 +44,6 @@ func TestMCPToolset_E2E(t *testing.T) {
 	mcpSrv := httptest.NewServer(mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer }, nil))
 	defer mcpSrv.Close()
-	// The toolset holds a persistent streamable-HTTP connection with no public
-	// close; force-close it (runs before Close) so the server can shut down.
-	defer mcpSrv.CloseClientConnections()
 
 	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := MCPServer{
@@ -63,6 +61,11 @@ func TestMCPToolset_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MCPToolset() error = %v", err)
 	}
+	defer func() {
+		if err := ts.(io.Closer).Close(); err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+	}()
 
 	rctx := icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{}))
 	tools, err := ts.Tools(rctx)

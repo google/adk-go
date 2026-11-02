@@ -66,11 +66,11 @@ func reportsFailure(resp *oairesponses.Response) bool {
 }
 
 // failedResponseError renders a failure as an error quoting the server: the
-// message as the text, the response ID and error code as a labelled
+// message as the text, the response ID and error code as a labeled
 // parenthetical. The ID is there because the response is discarded with the
 // failure, so nothing else is left to quote back to the provider.
 //
-// The ID and code are labelled and quoted because they are server-chosen: bare,
+// The ID and code are labeled and quoted because they are server-chosen: bare,
 // an ID containing ", code " renders exactly as an ID and a code would, and
 // quoting is what makes the field boundary the server's to state rather than to
 // forge. Neither is elided when the message appears to repeat it — saying a code
@@ -269,7 +269,7 @@ func truncated(resp *oairesponses.Response, incompleteEvent bool) bool {
 		// A finished turn carries incomplete_details as null.
 		return resp.JSON.IncompleteDetails.Valid()
 	default:
-		// failed, cancelled, incomplete, in_progress and queued all describe an
+		// failed, cancelled, incomplete, in_progress and queued all describe an //nolint:misspell
 		// unfinished turn. Enumerating the finished states instead keeps a
 		// status added later from defaulting to a clean stop.
 		return true

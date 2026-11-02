@@ -36,7 +36,7 @@ import (
 // table rather than by cases. Rows are the shapes a session or an invocation can
 // legally take, columns the ways a context is derived from one. Reviewing this
 // procedure a diff at a time found one failing shape per round over five rounds,
-// each fix moving the failure to a neighbouring shape.
+// each fix moving the failure to a neighboring shape.
 //
 // The policy the table encodes:
 //   - An invocation reports the user of its OWN session, never one it inherited.
@@ -223,7 +223,7 @@ func identityColumns(t *testing.T, enclosing InvocationContext) []identityColumn
 		{name: "PromoteWithDelta, nil InvocationContextDelta", of: func(ic InvocationContext) context.Context {
 			return PromoteWithDelta(ic, &CommonContextDelta{})
 		}},
-		// The one-token neighbour of the column above, and it used to answer
+		// The one-token neighbor of the column above, and it used to answer
 		// differently: keying the shortcut on a nil pointer rather than on
 		// emptiness meant an allocated-but-unset delta reached the invocation and
 		// dropped an out-of-module decorator. A caller that allocates the delta
@@ -772,7 +772,7 @@ func TestPromotedColumnsCallTheMethodTheyName(t *testing.T) {
 	}
 	// Pinned here too rather than relying on the sibling test's count: a guard
 	// whose non-emptiness lives in another function is one deletion from being
-	// vacuous, which is the failure this file catalogues.
+	// vacuous, which is the failure this file catalogs.
 	if want := 8; checked != want {
 		t.Errorf("promoted columns checked = %d, want %d", checked, want)
 	}
@@ -896,7 +896,7 @@ func TestRebindDoesNotCarryTheArtifactsHandle(t *testing.T) {
 // and have it reported: the mechanism does not authenticate the value, and
 // supplying one never requires naming the key. Pinned in both directions,
 // because the false half was the half that mattered: a reader of the old
-// sentence would have taken interception for a defence.
+// sentence would have taken interception for a defense.
 func TestAnUnmarkedContextCanAnswerTheKeyItself(t *testing.T) {
 	enclosing := &invocationContext{Context: t.Context(), session: matrixOwner("enclosing")}
 
@@ -956,7 +956,7 @@ func (s keySniffer) Value(k any) any {
 // the key, which is the shape that actually matters: it forwards keys and swaps
 // only what comes back an Identity. A wrapper answering EVERY key with an
 // Identity would be a far cruder thing and would break its own context, so
-// modelling that instead would suggest forging costs more than it does. Matching
+// modeling that instead would suggest forging costs more than it does. Matching
 // on the type is what lets this fixture stay short — it does also catch an
 // Identity stored under some other key, which a real one aiming to be quiet
 // would avoid, and which is beside the point being pinned here.
