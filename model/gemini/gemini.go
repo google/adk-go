@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
-	"runtime"
 	"strings"
 
 	"google.golang.org/genai"
@@ -69,14 +68,10 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		}
 	}
 
-	// Create header value once, when the model is created
-	headerValue := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
-		strings.TrimPrefix(runtime.Version(), "go"))
-
 	return &geminiModel{
 		name:               modelName,
 		client:             client,
-		versionHeaderValue: headerValue,
+		versionHeaderValue: version.TrackingHeader(),
 	}, nil
 }
 
