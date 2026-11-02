@@ -18,6 +18,7 @@ package agentengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -120,11 +121,19 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "", "Name of the model to be used for memory generation, as publishers/google/models/<model_id>. If empty, Memory Bank uses its own default model."+
 		" A non-empty value is prefixed with projects/<project_name>/locations/<region>, so the model must be available in that region. To list models, GET"+
 		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models")
-	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.secrets, "secret", nil, "Secret Manager secret to expose as an environment variable, as ENV_VARIABLE=SECRET:VERSION, where VERSION is a version number or \"latest\". Can be repeated.")
+	agentEngineCmd.PersistentFlags().StringArrayVar(&flags.agentEngine.secrets, "secret", nil, "Secret Manager secret to expose as an environment variable, as ENV_VARIABLE=SECRET:VERSION, where SECRET is a bare secret name (not a resource path) and VERSION is a version number, \"latest\" or a Secret Manager alias. The Reasoning Engine Service Agent needs roles/secretmanager.secretAccessor on the secret, or the deployed agent cannot read it. Not supported with --agent_engine_id. Can be repeated.")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
 }
 
-var secretFlagRegexp = regexp.MustCompile(`^([^=]+)=(.+):(.+)$`)
+var secretFlagRegexp = regexp.MustCompile(`^([^=]+)=([A-Za-z0-9_-]+):([A-Za-z0-9_-]+)$`)
+
+// reservedEnvNames are set by the command in DeploymentSpec.Env on create.
+var reservedEnvNames = map[string]bool{
+	"GOOGLE_CLOUD_REGION": true,
+	"NUM_WORKERS":         true,
+	"GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY":         true,
+	"OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": true,
+}
 
 var envVarNameRegexp = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -139,6 +148,9 @@ func parseSecrets(specs []string) ([]*aiplatformpb.SecretEnvVar, error) {
 		}
 		if !envVarNameRegexp.MatchString(m[1]) {
 			return nil, fmt.Errorf("invalid --secret value at position %d: environment variable name must match %s", i+1, envVarNameRegexp)
+		}
+		if reservedEnvNames[m[1]] {
+			return nil, fmt.Errorf("invalid --secret value at position %d: environment variable name is set by the command", i+1)
 		}
 		if seen[m[1]] {
 			return nil, fmt.Errorf("invalid --secret value at position %d: duplicate environment variable name", i+1)
@@ -159,6 +171,9 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 			secretEnv, err := parseSecrets(f.agentEngine.secrets)
 			if err != nil {
 				return err
+			}
+			if len(secretEnv) > 0 && f.agentEngine.agentEngineID != "" {
+				return errors.New("--secret is not supported with --agent_engine_id: updating an existing Agent Engine cannot configure secrets")
 			}
 			f.agentEngine.secretEnv = secretEnv
 

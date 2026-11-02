@@ -419,15 +419,15 @@ func TestSecretFlagIsRegistered(t *testing.T) {
 }
 
 func TestParseSecrets(t *testing.T) {
-	got, err := parseSecrets([]string{"A=my-secret:latest", "B=projects/p/secrets/s:3"})
+	got, err := parseSecrets([]string{"A=my-secret:latest", "B=s_2:3"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 || got[0].Name != "A" || got[0].SecretRef.Secret != "my-secret" || got[0].SecretRef.Version != "latest" ||
-		got[1].SecretRef.Secret != "projects/p/secrets/s" || got[1].SecretRef.Version != "3" {
+		got[1].SecretRef.Secret != "s_2" || got[1].SecretRef.Version != "3" {
 		t.Errorf("unexpected result %v", got)
 	}
-	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:"} {
+	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:", "A=s:1,B=t:2", "A=s:1\r", "A=projects/p/secrets/s:3"} {
 		if _, err := parseSecrets([]string{bad}); err == nil {
 			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
 		}
@@ -435,7 +435,7 @@ func TestParseSecrets(t *testing.T) {
 }
 
 func TestParseSecrets_RejectsInvalidNameAndDuplicates(t *testing.T) {
-	for _, bad := range [][]string{{"1A=s:1"}, {"A-B=s:1"}, {"A=s:1", "A=t:2"}} {
+	for _, bad := range [][]string{{"1A=s:1"}, {"GOOGLE_CLOUD_REGION=s:1"}, {"NUM_WORKERS=s:1"}, {"GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=s:1"}, {"OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=s:1"}, {"A-B=s:1"}, {"A=s:1", "A=t:2"}} {
 		if _, err := parseSecrets(bad); err == nil {
 			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
 		}
@@ -444,9 +444,34 @@ func TestParseSecrets_RejectsInvalidNameAndDuplicates(t *testing.T) {
 
 func TestComputeFlags_RejectsInvalidSecret(t *testing.T) {
 	resetFlags(t, "cmd/app/main.go")
+	parent := flags.build.tempDir
 	flags.agentEngine.secrets = []string{"bad"}
 	if err := flags.computeFlags(); err == nil {
 		t.Fatal("computeFlags() = nil, want an error for an invalid --secret")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("rejected --secret left %d entries in the temp dir parent", len(entries))
+	}
+}
+
+func TestComputeFlags_RejectsSecretWithAgentEngineID(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	parent := flags.build.tempDir
+	flags.agentEngine.agentEngineID = "123"
+	flags.agentEngine.secrets = []string{"API_KEY=my-secret:latest"}
+	if err := flags.computeFlags(); err == nil {
+		t.Fatal("computeFlags() = nil, want an error for --secret with --agent_engine_id")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("rejected --secret left %d entries in the temp dir parent", len(entries))
 	}
 }
 
