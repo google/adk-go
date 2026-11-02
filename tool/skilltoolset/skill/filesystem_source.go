@@ -203,9 +203,18 @@ func (f *fileSystemSource) resolveWithinSkill(name, p string) (string, error) {
 		// Drop the symlink itself, splice its target's components in
 		// (resolved relative to the symlink's own directory, which is
 		// what every POSIX symlink target is relative to) ahead of
-		// whatever of the original path still remains to process.
+		// whatever of the original path still remains to process. The
+		// target is split as-is, not cleaned first: a target such as
+		// "sub/../secret.md" must have "sub" walked -- and resolved, if
+		// it is itself a symlink -- before ".." is applied to wherever
+		// that lands, the same order the OS follows. path.Clean would
+		// instead fold "sub/.." away up front, before "sub" is ever
+		// looked at, which can land on the wrong file or fail outright.
+		// The loop's own handling of "", ".", and ".." segments above
+		// already does this folding one component at a time, in the
+		// right order, so nothing further is needed here.
 		resolved = resolved[:len(resolved)-1]
-		pending = append(strings.Split(path.Clean(target), "/"), pending...)
+		pending = append(strings.Split(target, "/"), pending...)
 	}
 
 	resolvedPath := strings.Join(resolved, "/")
@@ -269,16 +278,16 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 // 'assets/', and 'scripts/' directories. It restricts traversal to these
 // approved directories and returns sanitized paths relative to the skill root.
 //
-// Note: fs.WalkDir skips a symlink it finds inside a directory without
-// following it, but it does follow one if the walk's own root is a
-// symlink, and the fs.Stat this method runs before the walk follows links
-// too. So if resourceDirectoryPath (or, when it is empty, assets/,
-// references/, or scripts/ itself) is a symlink, this method walks and
-// lists whatever it points at, by name, the same way LoadResource used to
-// before this change. That behavior is unchanged by this change and is not
-// this method's to fix here -- see the symlink-escape issue's follow-up
-// notes -- but it means this method is not a safe source of truth for
-// which paths stay inside the skill the way LoadResource now is.
+// Every returned path is checked with resolveWithinSkill first, the same
+// check LoadResource applies, so a path this method returns can always be
+// opened by LoadResource: anything that would resolve outside the skill is
+// left out of the result instead of being returned and then refused. This
+// also covers resourceDirectoryPath (or, when it is empty, assets/,
+// references/, or scripts/ itself) being a symlink: fs.WalkDir and the
+// fs.Stat this method runs before it both follow such a link and walk
+// whatever it points at, but every name found that way is still checked
+// before being included, so one escaping entry no longer has to break
+// every skill a caller is trying to list or preload.
 func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDirectoryPath string) ([]string, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
@@ -321,9 +330,17 @@ func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDire
 				}
 				return err
 			}
-			if !d.IsDir() {
-				resources = append(resources, p)
+			if d.IsDir() {
+				return nil
 			}
+			// Confirm this path resolves inside the skill the same way
+			// LoadResource would check it, so every name reported here is
+			// one LoadResource will actually serve; drop it silently
+			// otherwise rather than let it surface as a later failure.
+			if _, err := f.resolveWithinSkill(name, path.Join(name, p)); err != nil {
+				return nil
+			}
+			resources = append(resources, p)
 			return nil
 		})
 		if err != nil {

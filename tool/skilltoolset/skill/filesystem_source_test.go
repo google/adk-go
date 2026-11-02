@@ -330,17 +330,20 @@ func TestFileSystemSource_LoadResource(t *testing.T) {
 }
 
 // TestFileSystemSource_LoadResource_SymlinkEscape exercises LoadResource
-// against a real on-disk filesystem (os.DirFS), since fstest.MapFS has no
-// notion of symbolic links and so cannot represent this attack at all.
+// against a real on-disk filesystem (os.DirFS), to confirm the check holds
+// against actual OS symlink-following behavior and not only the synthetic
+// symlinks fstest.MapFS can represent -- MapFS has supported symlinks
+// since Go 1.25, and
+// TestFileSystemSource_LoadResource_WindowsStyleSymlinkTarget below uses
+// one directly.
 //
 // A skill is free to ship a symlink inside assets/, references/, or
 // scripts/ (a normal thing for a skill bundle to do, e.g. linking a shared
-// asset). Before this change, LoadResource validated resourcePath as a
-// string but then opened it with the OS, which transparently follows any
-// symlink in the path -- so a symlink pointing outside the skill's own
-// directory let LoadResource return the content of an arbitrary file on
-// disk. This test fails without the rejectSymlinkPath check in
-// LoadResource.
+// asset). Before the fix, LoadResource validated resourcePath as a string
+// but then opened it with the OS, which transparently follows any symlink
+// in the path -- so a symlink pointing outside the skill's own directory
+// let LoadResource return the content of an arbitrary file on disk. This
+// test fails without the resolveWithinSkill check in LoadResource.
 func TestFileSystemSource_LoadResource_SymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 
