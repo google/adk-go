@@ -232,16 +232,21 @@ func TestInMemoryService_DoesNotAliasStoredParts(t *testing.T) {
 func fullPart() *genai.Part {
 	fps := 24.0
 	return &genai.Part{
-		Text:             "x",
-		InlineData:       &genai.Blob{Data: []byte("abc"), MIMEType: "text/plain"},
-		FileData:         &genai.FileData{FileURI: "gs://b/o"},
-		ThoughtSignature: []byte("sig"),
-		VideoMetadata:    &genai.VideoMetadata{FPS: &fps, StartOffset: time.Second},
-		PartMetadata:     map[string]any{"src": map[string]any{"name": "a"}, "list": []any{map[string]any{"n": "1"}}},
-		MediaResolution:  &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionLow},
-		FunctionCall:     &genai.FunctionCall{Name: "fn", Args: map[string]any{"a": map[string]any{"b": "c"}}},
-		FunctionResponse: &genai.FunctionResponse{Name: "fn", Response: map[string]any{"r": []any{"s"}}},
-		ExecutableCode:   &genai.ExecutableCode{Code: "print(1)"},
+		Text:                "x",
+		InlineData:          &genai.Blob{Data: []byte("abc"), MIMEType: "text/plain"},
+		FileData:            &genai.FileData{FileURI: "gs://b/o"},
+		ThoughtSignature:    []byte("sig"),
+		VideoMetadata:       &genai.VideoMetadata{FPS: &fps, StartOffset: time.Second},
+		PartMetadata:        map[string]any{"src": map[string]any{"name": "a"}, "list": []any{map[string]any{"n": "1"}}},
+		MediaResolution:     &genai.PartMediaResolution{Level: genai.PartMediaResolutionLevelMediaResolutionLow},
+		FunctionCall:        &genai.FunctionCall{Name: "fn", Args: map[string]any{"a": map[string]any{"b": "c"}}},
+		FunctionResponse:    &genai.FunctionResponse{Name: "fn", Response: map[string]any{"r": []any{"s"}}},
+		ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+		CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+		ToolCall:            &genai.ToolCall{ID: "t", Args: map[string]any{"q": []any{"a"}}},
+		ToolResponse:        &genai.ToolResponse{ID: "t", Response: map[string]any{"r": map[string]any{"k": "v"}}},
+		AudioTranscription:  &genai.Transcription{Text: "hello"},
+		SpeechMetadata:      &genai.SpeechMetadata{Speaker: "s"},
 	}
 }
 
@@ -259,6 +264,11 @@ func mutateFullPart(p *genai.Part) {
 	p.FunctionCall.Args["a"].(map[string]any)["b"] = "edited"
 	p.FunctionResponse.Response["r"].([]any)[0] = "edited"
 	p.ExecutableCode.Code = "edited"
+	p.CodeExecutionResult.Output = "edited"
+	p.ToolCall.Args["q"].([]any)[0] = "edited"
+	p.ToolResponse.Response["r"].(map[string]any)["k"] = "edited"
+	p.AudioTranscription.Text = "edited"
+	p.SpeechMetadata.Speaker = "edited"
 }
 
 func TestInMemoryService_DoesNotAliasStoredPartFields(t *testing.T) {
