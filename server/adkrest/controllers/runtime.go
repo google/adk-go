@@ -331,7 +331,7 @@ func (c *RuntimeAPIController) RunSSEHandler(rw http.ResponseWriter, req *http.R
 
 	err = c.validateSessionExists(req.Context(), runAgentRequest.AppName, runAgentRequest.UserId, runAgentRequest.SessionId)
 	if err != nil {
-		http.Error(rw, "failed to find the session: "+err.Error(), http.StatusNotFound)
+		http.Error(rw, "failed to find the session: "+err.Error(), statusOf(err))
 		return
 	}
 
@@ -428,7 +428,14 @@ func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appNam
 		SessionID: sessionID,
 	})
 	if err != nil {
-		return newStatusError(fmt.Errorf("failed to get session: %w", err), http.StatusNotFound)
+		// A session the service reports missing, or one the request does not
+		// fully name, is the client's 404. A service that failed to answer is
+		// the server's fault, as in writeSessionServiceError.
+		code := http.StatusInternalServerError
+		if errors.Is(err, session.ErrNotFound) || appName == "" || userID == "" || sessionID == "" {
+			code = http.StatusNotFound
+		}
+		return newStatusError(fmt.Errorf("failed to get session: %w", err), code)
 	}
 	return nil
 }
