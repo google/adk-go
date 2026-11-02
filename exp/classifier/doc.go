@@ -22,9 +22,18 @@
 // generate text, stream, or call tools. It takes an input and a named set of
 // [Choice], [Binary], and [Score] questions, and returns a calibrated or
 // estimated probability distribution over each question's possible answers.
+// Dedicated decision models such as
+// [google.golang.org/adk/v2/exp/classifier/typesafe.Classifier] implement
+// [Classifier] directly, while [LLMClassifier] (constructed with [NewLLM])
+// implements it on top of any [google.golang.org/adk/v2/model.LLM] via
+// structured JSON output.
 //
 // Classifiers are stateless: context from earlier conversation turns must be
 // included in the input passed to [Classifier.Classify], as text or as plain
 // JSON values such as a slice of role and text maps. A []*genai.Content
 // history is rejected with [ErrInvalidInput]; see [ValidateInput].
+//
+// To route a [google.golang.org/adk/v2/workflow.Workflow] graph on a
+// classifier's answer to a [Choice] or [Binary] question, construct a [Node]
+// with [NewNode].
 package classifier

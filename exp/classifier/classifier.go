@@ -39,6 +39,20 @@ var (
 	// [genai.Content] or [*genai.Content], or is unsupported by the classifier
 	// implementation.
 	ErrInvalidInput = errors.New("classifier: invalid input")
+	// ErrInvalidNodeConfig is returned when [NodeConfig] fails validation in
+	// [NewNode], or when a [Node] was not constructed with [NewNode].
+	ErrInvalidNodeConfig = errors.New("classifier: invalid node configuration")
+	// ErrInvalidRoute is returned during [google.golang.org/adk/v2/workflow.New]
+	// when a [Node] has outgoing routed edges it can never emit or leaves one of
+	// its routes uncovered without a Default or unconditional fallback edge.
+	ErrInvalidRoute = errors.New("classifier: invalid outgoing route")
+	// ErrInvalidLLMConfig is returned when [LLMConfig] fails validation in
+	// [NewLLM], or when an [LLMClassifier] was not constructed with [NewLLM].
+	ErrInvalidLLMConfig = errors.New("classifier: invalid LLM classifier configuration")
+	// ErrModelFailure is returned by [LLMClassifier.Classify] when the model
+	// yields no response before ctx ends, sets an error code on its response,
+	// or stops at FinishReasonMaxTokens before finishing its JSON answer.
+	ErrModelFailure = errors.New("classifier: model failed to classify")
 )
 
 // Classifier answers typed questions about an input with probability distributions.
