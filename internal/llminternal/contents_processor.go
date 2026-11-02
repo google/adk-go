@@ -755,9 +755,25 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
-	// Find the latest event that starts the current turn and process from there
+	callIDs := make(map[string]struct{})
+	for _, event := range events {
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			if call.ID != "" {
+				callIDs[call.ID] = struct{}{}
+			}
+		}
+	}
+	// Find the latest event that starts the current turn and process from there.
+	// A tool result the caller posted back (a long-running tool's, say) is not
+	// a turn start, and the turn has to reach back to the call it answers, past
+	// any user turn sent while the tool was pending. As in adk-python's
+	// _get_current_turn_contents.
+	unanswered := make(map[string]struct{})
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
+		for _, call := range utils.FunctionCalls(utils.Content(event)) {
+			delete(unanswered, call.ID)
+		}
 		// Events from a sibling branch are not part of this agent's
 		// current turn. In parallel delegations, a sibling may append its
 		// response after this agent's user input; treating that response as
@@ -769,6 +785,17 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		// invisible to the agent, so skip it as a pivot (matching
 		// adk-python's _should_include_event_in_context gate here).
 		if event.IsolationScope != isolationScope {
+			continue
+		}
+		if isSubmittedToolResult(event) {
+			for _, response := range utils.FunctionResponses(utils.Content(event)) {
+				if _, ok := callIDs[response.ID]; ok && response.ID != "" {
+					unanswered[response.ID] = struct{}{}
+				}
+			}
+			continue
+		}
+		if len(unanswered) > 0 {
 			continue
 		}
 		// An event discarded by foreign conversion cannot start a visible
@@ -783,6 +810,12 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
 	return buildContentsDefault(agentName, branch, isolationScope, events, isSingleTurn, userContent)
+}
+
+// isSubmittedToolResult reports whether ev is a tool result the caller posted
+// back as a user-authored function response.
+func isSubmittedToolResult(ev *session.Event) bool {
+	return ev.Author == "user" && len(utils.FunctionResponses(utils.Content(ev))) > 0
 }
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
