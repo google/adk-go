@@ -305,3 +305,24 @@ func FromContext(ctx context.Context) *PluginManager {
 	m, _ := ctx.Value(plugincontext.PluginManagerCtxKey).(*PluginManager)
 	return m
 }
+
+type inheritCtxKey struct{}
+
+// WithInheritedPlugins marks ctx so that the next runner started with it keeps
+// the plugin manager already in ctx when that runner has no plugins of its own.
+// Only agenttool sets this mark, for the sub-runner it starts. Any other runner
+// without plugins replaces the manager in ctx with its own empty one.
+func WithInheritedPlugins(ctx context.Context) context.Context {
+	return context.WithValue(ctx, inheritCtxKey{}, FromContext(ctx))
+}
+
+// TakeInheritedPlugins returns the plugin manager marked by
+// WithInheritedPlugins, or nil, and a ctx with the mark cleared, so that the
+// mark applies to one runner only and not to runners started further down.
+func TakeInheritedPlugins(ctx context.Context) (context.Context, *PluginManager) {
+	pm, ok := ctx.Value(inheritCtxKey{}).(*PluginManager)
+	if !ok {
+		return ctx, nil
+	}
+	return context.WithValue(ctx, inheritCtxKey{}, (*PluginManager)(nil)), pm
+}

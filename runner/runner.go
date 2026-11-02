@@ -1288,12 +1288,15 @@ func hasInlineData(event *session.Event) bool {
 }
 
 // withPluginManager puts this runner's plugin manager in ctx, which is where
-// tools and callbacks look it up. A runner without plugins leaves ctx alone, so
-// a sub-runner started from inside a tool (agenttool) keeps the plugin manager
-// of the run that started it. Run-level callbacks always stay with r.pluginManager.
+// tools and callbacks look it up. The one exception is a runner without plugins
+// that agenttool starts for a sub-agent: it keeps the plugin manager of the run
+// that called the tool, so that run's plugins also see the sub-agent. Any other
+// runner uses only its own plugins. Run-level callbacks always stay with
+// r.pluginManager.
 func (r *Runner) withPluginManager(ctx context.Context) context.Context {
-	if !r.pluginManager.HasPlugins() {
-		return ctx
+	ctx, inherited := plugininternal.TakeInheritedPlugins(ctx)
+	if !r.pluginManager.HasPlugins() && inherited.HasPlugins() {
+		return plugininternal.ToContext(ctx, inherited)
 	}
 	return plugininternal.ToContext(ctx, r.pluginManager)
 }

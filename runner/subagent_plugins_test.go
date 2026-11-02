@@ -15,6 +15,7 @@
 package runner_test
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
@@ -34,10 +36,12 @@ import (
 
 // pluginRecorder is a plugin that records which of its callbacks fired.
 type pluginRecorder struct {
-	mu          sync.Mutex
-	beforeTools []string
-	beforeRuns  int
-	userMsgs    []string
+	mu           sync.Mutex
+	beforeTools  []string
+	beforeAgents []string
+	beforeModels []string
+	beforeRuns   int
+	userMsgs     []string
 }
 
 func (p *pluginRecorder) plugin(t *testing.T) *plugin.Plugin {
@@ -48,6 +52,18 @@ func (p *pluginRecorder) plugin(t *testing.T) *plugin.Plugin {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			p.beforeTools = append(p.beforeTools, tl.Name())
+			return nil, nil
+		},
+		BeforeAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.beforeAgents = append(p.beforeAgents, ctx.AgentName())
+			return nil, nil
+		},
+		BeforeModelCallback: func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			p.beforeModels = append(p.beforeModels, ctx.AgentName())
 			return nil, nil
 		},
 		BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
@@ -138,6 +154,13 @@ func TestRunner_ParentPluginsReachAgentToolLlmSubAgent(t *testing.T) {
 	if want := []string{"sub_agent", "inner_tool"}; !slices.Equal(p.beforeTools, want) {
 		t.Errorf("BeforeToolCallback saw %v, want %v", p.beforeTools, want)
 	}
+	// The parent's agent and model callbacks fire for the sub-agent too.
+	if want := []string{"parent", "sub_agent"}; !slices.Equal(p.beforeAgents, want) {
+		t.Errorf("BeforeAgentCallback saw %v, want %v", p.beforeAgents, want)
+	}
+	if !slices.Contains(p.beforeModels, "sub_agent") {
+		t.Errorf("BeforeModelCallback saw %v, want it to include sub_agent", p.beforeModels)
+	}
 }
 
 // Same, with the LlmAgent behind a SequentialAgent wrapper.
@@ -190,5 +213,146 @@ func TestRunner_ParentPluginsDoNotOwnSubRunCallbacks(t *testing.T) {
 	}
 	if p.beforeRuns != 1 {
 		t.Errorf("BeforeRunCallback ran %d times, want 1 (the parent run only)", p.beforeRuns)
+	}
+}
+
+// A runner without plugins that is not started by agenttool must not pick up
+// the plugins of the context it is called with. Here a plugin's callback runs
+// a judge agent through its own plugin-less runner, passing the callback's
+// context. The judge's model call must not fire the callback again.
+func TestRunner_PluginCallbackRunnerDoesNotInheritPlugins(t *testing.T) {
+	judge, err := llmagent.New(llmagent.Config{
+		Name:  "judge",
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("SAFE", "model")}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	judgeRunner, err := runner.New(runner.Config{
+		AppName:           "judge_app",
+		Agent:             judge,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	var mu sync.Mutex
+	var seen []string
+	pl, err := plugin.New(plugin.Config{
+		Name: "llm_judge",
+		AfterModelCallback: func(ctx agent.Context, _ *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+			mu.Lock()
+			seen = append(seen, ctx.AgentName())
+			n := len(seen)
+			mu.Unlock()
+			if n > 3 {
+				return nil, fmt.Errorf("judge callback re-entered %d times", n)
+			}
+			for _, err := range judgeRunner.Run(ctx, "judge-user", fmt.Sprintf("judge-%d", n),
+				genai.NewContentFromText("is this safe?", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					return nil, err
+				}
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+
+	parent, err := llmagent.New(llmagent.Config{
+		Name:  "parent",
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("hello", "model")}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             parent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*plugin.Plugin{pl}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if want := []string{"parent"}; !slices.Equal(seen, want) {
+		t.Errorf("AfterModelCallback saw %v, want %v (the judge runner must not inherit the plugin)", seen, want)
+	}
+}
+
+// A plugin-less runner called with a context that already carries plugins,
+// outside agenttool, must not run them.
+func TestRunner_SeparateRunnerDoesNotInheritContextPlugins(t *testing.T) {
+	p := &pluginRecorder{}
+	separateAgent, err := llmagent.New(llmagent.Config{
+		Name:  "separate",
+		Model: &scriptedModel{responses: []*genai.Content{genai.NewContentFromText("separate done", "model")}},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	// The tool below runs under the parent run, so its context carries the
+	// parent's plugins when it calls this separate plugin-less runner.
+	separate, err := runner.New(runner.Config{
+		AppName:           "separate_app",
+		Agent:             separateAgent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	callSeparate, err := functiontool.New(functiontool.Config{Name: "call_separate", Description: "runs another runner"},
+		func(ctx agent.Context, _ struct{}) (string, error) {
+			for _, err := range separate.Run(ctx, "u2", "s2", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					return "", err
+				}
+			}
+			return "ok", nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	parent, err := llmagent.New(llmagent.Config{
+		Name: "parent",
+		Model: &scriptedModel{responses: []*genai.Content{
+			callContent("call_separate", nil),
+			genai.NewContentFromText("done", "model"),
+		}},
+		Tools: []tool.Tool{callSeparate},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "app",
+		Agent:             parent,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+		PluginConfig:      runner.PluginConfig{Plugins: []*plugin.Plugin{p.plugin(t)}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if slices.Contains(p.beforeAgents, "separate") || slices.Contains(p.beforeModels, "separate") {
+		t.Errorf("parent plugin fired for the separate runner: agents %v, models %v", p.beforeAgents, p.beforeModels)
 	}
 }

@@ -65,3 +65,26 @@ func TestFromContext(t *testing.T) {
 		t.Errorf("FromContext() on an empty context = non-nil, want nil")
 	}
 }
+
+func TestTakeInheritedPlugins(t *testing.T) {
+	p, err := plugin.New(plugin.Config{Name: "test-plugin"})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	pm, err := NewPluginManager(PluginConfig{Plugins: []*plugin.Plugin{p}})
+	if err != nil {
+		t.Fatalf("NewPluginManager() error = %v", err)
+	}
+	ctx := ToContext(context.Background(), pm)
+
+	if _, got := TakeInheritedPlugins(ctx); got != nil {
+		t.Errorf("TakeInheritedPlugins() without a mark = non-nil, want nil")
+	}
+	cleared, got := TakeInheritedPlugins(WithInheritedPlugins(ctx))
+	if got != pm {
+		t.Errorf("TakeInheritedPlugins() did not return the marked manager")
+	}
+	if _, again := TakeInheritedPlugins(cleared); again != nil {
+		t.Errorf("TakeInheritedPlugins() on a cleared context = non-nil, want nil")
+	}
+}
