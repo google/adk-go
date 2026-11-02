@@ -16,6 +16,7 @@ package mcptoolset_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -470,4 +471,68 @@ func TestAuthConcurrentCloseWaits(t *testing.T) {
 	close(release)
 	<-first
 	<-second
+}
+
+// TestAuthSessionsAnswerElicitation checks that with Config.Auth, the MCP
+// session opened for a user's credential carries the configured
+// ElicitationHandler, so a server that elicits on that session gets an answer.
+func TestAuthSessionsAnswerElicitation(t *testing.T) {
+	const loginURL = "https://idp.example.com/login"
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "user_bound_server", Version: "v1.0.0"}, nil)
+	server.AddTool(&mcp.Tool{
+		Name:        "gateway_tool",
+		Description: "elicits a login before responding",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		res, ok := req.Params.InputResponses["login"].(*mcp.ElicitResult)
+		if !ok {
+			return &mcp.CallToolResult{InputRequests: mcp.InputRequestMap{
+				"login": &mcp.ElicitParams{Mode: "url", Message: "please log in", URL: loginURL, ElicitationID: "elicitation-1"},
+			}}, nil
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{
+			&mcp.TextContent{Text: req.Extra.TokenInfo.UserID + " " + res.Action + "ed"},
+		}}, nil
+	})
+	verify := func(_ context.Context, token string, _ *http.Request) (*sdkauth.TokenInfo, error) {
+		user, ok := strings.CutPrefix(token, "token-of-")
+		if !ok {
+			return nil, sdkauth.ErrInvalidToken
+		}
+		return &sdkauth.TokenInfo{UserID: user, Expiration: time.Now().Add(time.Hour)}, nil
+	}
+	httpServer := httptest.NewServer(sdkauth.RequireBearerToken(verify, nil)(
+		mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)))
+	t.Cleanup(httpServer.Close)
+
+	var mu sync.Mutex
+	var gotURLs []string
+	ts, err := mcptoolset.New(mcptoolset.Config{
+		Endpoint: httpServer.URL,
+		Auth:     perUserToken,
+		ElicitationHandler: func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotURLs = append(gotURLs, req.Params.URL)
+			return &mcp.ElicitResult{Action: "accept"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("mcptoolset.New() failed: %v", err)
+	}
+	t.Cleanup(func() { _ = ts.(io.Closer).Close() })
+
+	for _, user := range []string{"alice", "bob"} {
+		got, err := callWhoami(ts, invocationAs(t, "app", user))
+		if err != nil {
+			t.Fatalf("as %s: %v", user, err)
+		}
+		if want := user + " accepted"; got != want {
+			t.Errorf("as %s: tool answered %q, want %q", user, got, want)
+		}
+	}
+	if len(gotURLs) != 2 || gotURLs[0] != loginURL || gotURLs[1] != loginURL {
+		t.Errorf("ElicitationHandler got URLs %q, want %q twice", gotURLs, loginURL)
+	}
 }
