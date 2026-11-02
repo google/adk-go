@@ -469,12 +469,16 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		}
 
 		content := aiplatformToGenaiContent(rpcResp)
+		actions, err := aiplatformToSessionEventActions(rpcResp.Actions)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching session events: %w", err)
+		}
 		event := &session.Event{
 			ID:           id,
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions:      aiplatformToSessionEventActions(rpcResp.Actions),
+			Actions:      actions,
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -504,7 +508,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 }
 
 func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventActions, error) {
-	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 && len(event.Actions.RequestedAuthConfigs) == 0 {
 		return nil, nil
 	}
 
@@ -525,12 +529,19 @@ func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventAc
 			actions.ArtifactDelta[name] = int32(version)
 		}
 	}
+	if len(event.Actions.RequestedAuthConfigs) > 0 {
+		configs, err := toStructPB(event.Actions.RequestedAuthConfigs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
+		}
+		actions.RequestedAuthConfigs = configs
+	}
 	return actions, nil
 }
 
-func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session.EventActions {
+func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) (session.EventActions, error) {
 	if actions == nil {
-		return session.EventActions{}
+		return session.EventActions{}, nil
 	}
 
 	eventActions := session.EventActions{
@@ -542,7 +553,16 @@ func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session
 			eventActions.ArtifactDelta[name] = int64(version)
 		}
 	}
-	return eventActions
+	if len(actions.RequestedAuthConfigs.GetFields()) > 0 {
+		b, err := json.Marshal(actions.RequestedAuthConfigs.AsMap())
+		if err != nil {
+			return session.EventActions{}, fmt.Errorf("marshaling requested auth configs: %w", err)
+		}
+		if err := json.Unmarshal(b, &eventActions.RequestedAuthConfigs); err != nil {
+			return session.EventActions{}, fmt.Errorf("unmarshaling requested auth configs: %w", err)
+		}
+	}
+	return eventActions, nil
 }
 
 func sessionIdBySessionName(sn string) (string, error) {

@@ -47,6 +47,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -1697,6 +1698,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
 		}
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
+	}
+	if other.RequestedAuthConfigs != nil {
+		if base.RequestedAuthConfigs == nil {
+			base.RequestedAuthConfigs = make(map[string]toolauth.Config)
+		}
+		maps.Copy(base.RequestedAuthConfigs, other.RequestedAuthConfigs)
 	}
 	return base
 }

@@ -83,6 +83,10 @@ var casesWithoutReplay = map[string]string{
 	// TestAppendEvent_stripsTempKeysBeforePersist until a maintainer re-records
 	// with UPDATE_REPLAYS=true.
 	"Test_vertexaiService_StateManagement_temp_state_is_not_persisted": "append_event_temp_state_test.go",
+	// Pinned offline against the in-process fake backend, in both directions
+	// and against adk-python's wire value, by
+	// TestVertexAiClientRequestedAuthConfigsMatchPython in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_configs_round_trip": "vertexai_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {

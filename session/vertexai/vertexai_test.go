@@ -27,6 +27,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/util/vertexai"
 
 	"google.golang.org/api/option"
@@ -800,10 +801,13 @@ func TestEventActionsConverters(t *testing.T) {
 					t.Fatalf("structpb.NewStruct() failed: %v", err)
 				}
 
-				actions := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
+				actions, err := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
 					StateDelta:    stateDelta,
 					ArtifactDelta: map[string]int32{"chart.html": 3, "table.csv": 7},
 				})
+				if err != nil {
+					t.Fatalf("aiplatformToSessionEventActions() failed: %v", err)
+				}
 
 				if diff := cmp.Diff(want, actions); diff != "" {
 					t.Errorf("actions mismatch (-want +got):\n%s", diff)
@@ -813,7 +817,11 @@ func TestEventActionsConverters(t *testing.T) {
 		{
 			name: "aiplatform to session nil actions",
 			run: func(t *testing.T) {
-				if diff := cmp.Diff(session.EventActions{}, aiplatformToSessionEventActions(nil)); diff != "" {
+				actions, err := aiplatformToSessionEventActions(nil)
+				if err != nil {
+					t.Fatalf("aiplatformToSessionEventActions() failed: %v", err)
+				}
+				if diff := cmp.Diff(session.EventActions{}, actions); diff != "" {
 					t.Errorf("actions mismatch (-want +got):\n%s", diff)
 				}
 			},
@@ -904,6 +912,117 @@ func TestVertexAiClientEventActionsRoundTrip(t *testing.T) {
 				t.Errorf("Actions mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// testAuthConfig is a credential request as a tool records it. The token
+// endpoint auth method and the scopes are set, so it reads back unchanged.
+func testAuthConfig() toolauth.Config {
+	return toolauth.Config{
+		AuthScheme: toolauth.Scheme{
+			Type: toolauth.SchemeTypeOAuth2,
+			Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+				AuthorizationURL: "https://example.com/authorize",
+				TokenURL:         "https://example.com/token",
+				Scopes:           map[string]string{"read": "Read"},
+			}},
+		},
+		RawAuthCredential: &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeOAuth2,
+			OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", TokenEndpointAuthMethod: "client_secret_basic"},
+		},
+		CredentialKey: "my_tool_tokens",
+	}
+}
+
+// pythonRequestedAuthConfigs is the actions.requested_auth_configs value that
+// adk-python 2.12.0 writes for testAuthConfig under call-1
+// (vertex_ai_session_service.py).
+const pythonRequestedAuthConfigs = `{"call-1":{"authScheme":{"flows":{"authorizationCode":{"authorizationUrl":"https://example.com/authorize","scopes":{"read":"Read"},"tokenUrl":"https://example.com/token"}},"type":"oauth2"},` +
+	`"credentialKey":"my_tool_tokens","rawAuthCredential":{"authType":"oauth2","oauth2":{"clientId":"cid","tokenEndpointAuthMethod":"client_secret_basic"}}}}`
+
+func TestVertexAiClientRequestedAuthConfigsMatchPython(t *testing.T) {
+	t.Run("written_as_adk-python_writes_them", func(t *testing.T) {
+		ctx := t.Context()
+		service := &fakeVertexAiSessionService{}
+		client := newFakeVertexAiClient(t, service)
+
+		event := session.NewEvent(ctx, "invocation-1")
+		event.Author = "agent"
+		event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": testAuthConfig()}
+		if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+			t.Fatalf("appendEvent() failed: %v", err)
+		}
+
+		want := &structpb.Struct{}
+		if err := want.UnmarshalJSON([]byte(pythonRequestedAuthConfigs)); err != nil {
+			t.Fatalf("UnmarshalJSON() failed: %v", err)
+		}
+		got := service.events[0].GetActions().GetRequestedAuthConfigs()
+		if diff := cmp.Diff(want.AsMap(), got.AsMap()); diff != "" {
+			t.Errorf("requested_auth_configs differs from adk-python (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("read_as_adk-python_writes_them", func(t *testing.T) {
+		configs := &structpb.Struct{}
+		if err := configs.UnmarshalJSON([]byte(pythonRequestedAuthConfigs)); err != nil {
+			t.Fatalf("UnmarshalJSON() failed: %v", err)
+		}
+		service := &fakeVertexAiSessionService{events: []*aiplatformpb.SessionEvent{{
+			Name:    "sessions/session-1/events/event-1",
+			Author:  "agent",
+			Actions: &aiplatformpb.EventActions{RequestedAuthConfigs: configs},
+		}}}
+		client := newFakeVertexAiClient(t, service)
+
+		got, err := client.listSessionEvents(t.Context(), "test-app", "session-1", time.Time{}, 0)
+		if err != nil {
+			t.Fatalf("listSessionEvents() failed: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want 1", len(got))
+		}
+		want := map[string]toolauth.Config{"call-1": testAuthConfig()}
+		if diff := cmp.Diff(want, got[0].Actions.RequestedAuthConfigs); diff != "" {
+			t.Errorf("RequestedAuthConfigs mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotDecode(t *testing.T) {
+	// A scheme with no type cannot be read as a toolauth.Scheme. Dropping it
+	// would lose the pending request without a trace, so the read fails.
+	configs, err := structpb.NewStruct(map[string]any{"call-1": map[string]any{"authScheme": map[string]any{}}})
+	if err != nil {
+		t.Fatalf("structpb.NewStruct() failed: %v", err)
+	}
+	service := &fakeVertexAiSessionService{events: []*aiplatformpb.SessionEvent{{
+		Name:    "sessions/session-1/events/event-1",
+		Author:  "agent",
+		Actions: &aiplatformpb.EventActions{RequestedAuthConfigs: configs},
+	}}}
+	client := newFakeVertexAiClient(t, service)
+
+	if _, err := client.listSessionEvents(t.Context(), "test-app", "session-1", time.Time{}, 0); err == nil {
+		t.Error("listSessionEvents() succeeded, want an error for a requested auth config that does not decode")
+	}
+}
+
+func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode(t *testing.T) {
+	// A NaN has no JSON form. Writing the event without the request would lose
+	// it without a trace, so the append fails.
+	ctx := t.Context()
+	client := newFakeVertexAiClient(t, &fakeVertexAiSessionService{})
+	config := testAuthConfig()
+	config.Extra = map[string]any{"ratio": math.NaN()}
+
+	event := session.NewEvent(ctx, "invocation-1")
+	event.Author = "agent"
+	event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": config}
+
+	if err := client.appendEvent(ctx, "test-app", "session-1", event); err == nil {
+		t.Error("appendEvent() succeeded, want an error for a requested auth config that does not encode")
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 // ExpectedSession represents a snapshot of a session's public state for test comparisons.
@@ -597,6 +598,63 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 			if diff := cmp.Diff(want, c.ExcludedEvents); diff != "" {
 				t.Errorf("excluded events mismatch (-want +got):\n%s", diff)
+			}
+		})
+
+		t.Run("requested_auth_configs_round_trip", func(t *testing.T) {
+			// A pending credential request is recorded only on the event that
+			// made it. The user may answer after a restart or on another
+			// server, and a backend that drops the config leaves nothing to
+			// match the answer against.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+			requested := func() map[string]toolauth.Config {
+				return map[string]toolauth.Config{"call-1": {
+					AuthScheme: toolauth.Scheme{
+						Type: toolauth.SchemeTypeOAuth2,
+						Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+							AuthorizationURL: "https://example.com/authorize",
+							TokenURL:         "https://example.com/token",
+							Scopes:           map[string]string{"read": "Read"},
+						}},
+					},
+					RawAuthCredential: &toolauth.Credential{
+						AuthType: toolauth.CredentialTypeOAuth2,
+						OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", TokenEndpointAuthMethod: "client_secret_basic"},
+					},
+					CredentialKey: "my_tool_tokens",
+				}}
+			}
+			event := &session.Event{
+				ID:           "auth_request_event",
+				Author:       "agent",
+				InvocationID: "inv-auth",
+				Actions:      session.EventActions{RequestedAuthConfigs: requested()},
+			}
+			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != 1 {
+				t.Fatalf("Expected 1 event, got %d", len(snap.Events))
+			}
+			if diff := cmp.Diff(requested(), snap.Events[0].Actions.RequestedAuthConfigs); diff != "" {
+				t.Errorf("RequestedAuthConfigs mismatch after a round trip (-want +got):\n%s", diff)
 			}
 		})
 

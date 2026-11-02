@@ -244,8 +244,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Only StateDelta comes from the trim above; every other field below is
 	// read off event. The canonical record is not a mirror of the one
-	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
-	// RequestedToolConfirmations where the local record aliases them.
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta,
+	// RequestedToolConfirmations and RequestedAuthConfigs where the local record
+	// aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -257,6 +258,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			StateDelta:                 trimmedDelta,
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,

@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -255,6 +256,11 @@ type EventActions struct {
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+
+	// RequestedAuthConfigs holds the credentials that tools asked the end user
+	// for, keyed by function call ID, since one function response event can
+	// answer several calls.
+	RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.
