@@ -1608,6 +1608,58 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 	}
 }
 
+// systemInstructionAcceptedFields are the genai.Part fields a system-instruction
+// part may carry beside its text. Like accountedForFields, the list is restated
+// rather than derived from the code, so a field genai adds later is absent from
+// it and the walk below demands it be refused.
+var systemInstructionAcceptedFields = map[string]string{
+	"Thought":          "a marker no wire field carries; the text is sent, as adk-python does",
+	"ThoughtSignature": "no request field on either endpoint carries one",
+	"PartMetadata":     "caller bookkeeping, never content",
+	"VideoMetadata":    "qualifies media, and the part carries none",
+	"MediaResolution":  "qualifies media, and the part carries none",
+}
+
+// Every genai.Part field riding on a system-instruction text part is either
+// accepted above or refused by name, because instructions carries text only.
+func TestBuildParams_SystemInstructionWalksEveryPartField(t *testing.T) {
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		if field.Name == "Text" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			if !field.IsExported() {
+				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
+					"check by hand whether a system instruction should refuse it", field.Name)
+			}
+			part := &genai.Part{Text: "describe it"}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+			params, err := buildParams("fallback", &model.LLMRequest{
+				Contents: []*genai.Content{userContent(&genai.Part{Text: "hi"})},
+				Config: &genai.GenerateContentConfig{
+					SystemInstruction: &genai.Content{Parts: []*genai.Part{part}},
+				},
+			})
+			if why, accepted := systemInstructionAcceptedFields[field.Name]; accepted {
+				if err != nil {
+					t.Fatalf("buildParams() err = %v for a text part carrying %s, want nil: %s", err, field.Name, why)
+				}
+				if got, want := params.Instructions, param.NewOpt("describe it"); got != want {
+					t.Errorf("Instructions = %q for a text part carrying %s, want %q: %s", got.Value, field.Name, want.Value, why)
+				}
+				return
+			}
+			// HasSuffix rather than Contains: one field name can prefix another.
+			want := "unsupported system instruction part: " + field.Name
+			if err == nil || !strings.HasSuffix(err.Error(), want) {
+				t.Errorf("buildParams() err = %v for a text part carrying %s, want it to end with %q", err, field.Name, want)
+			}
+		})
+	}
+}
+
 // A set field outside the supported lists is refused by name, whatever genai
 // adds. Dropping a name from a list stands in for a field genai adds later. It
 // swaps package variables, so it must not run in parallel with other tests.
