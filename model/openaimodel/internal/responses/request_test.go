@@ -863,6 +863,7 @@ func TestBuildParams_Media(t *testing.T) {
 		part        *genai.Part
 		want        []string
 		wantErr     error
+		wantNotErr  error
 		wantErrText string
 	}{
 		{
@@ -993,10 +994,12 @@ func TestBuildParams_Media(t *testing.T) {
 			wantErrText: "media in a developer message is not supported: application/pdf",
 		},
 		{
-			// The role is checked before the media type, as in Completions.
+			// The role is checked before the media type, as in Completions,
+			// so audio gets the role error and not ErrUnsupportedMIMEType.
 			name:        "audio_in_a_system_message_gets_the_role_error",
 			role:        "system",
 			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantNotErr:  shared.ErrUnsupportedMIMEType,
 			wantErrText: "media in a system message is not supported: audio/mpeg",
 		},
 		{
@@ -1028,6 +1031,9 @@ func TestBuildParams_Media(t *testing.T) {
 				}
 				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantNotErr != nil && errors.Is(err, tt.wantNotErr) {
+					t.Errorf("buildParams() err = %v, want it not to match %v", err, tt.wantNotErr)
 				}
 				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
 					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
