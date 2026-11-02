@@ -215,6 +215,46 @@ Body`,
 			},
 			wantInstruction: "# Markdown\nBody",
 		},
+		{
+			name: "keys outside the specification set with list and mapping values are ignored",
+			input: `---
+name: shared-skill
+description: A skill shared with another agent runtime.
+tags: [a, b]
+hooks:
+  pre: cmd
+  post:
+    - one
+    - two
+---
+# Markdown
+Body`,
+			want: &Frontmatter{
+				Name:        "shared-skill",
+				Description: "A skill shared with another agent runtime.",
+			},
+			wantInstruction: "# Markdown\nBody",
+		},
+		{
+			name:  "allowed_tools spelling",
+			input: "---\nname: skill\ndescription: skill\nallowed_tools: Read Bash(git:*)\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read", "Bash(git:*)"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools takes precedence over allowed_tools",
+			input: "---\nname: skill\ndescription: skill\nallowed_tools: Write\nallowed-tools: Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
 	}
 
 	for _, testcase := range tests {
@@ -281,6 +321,21 @@ func TestParse_InvalidFormat(t *testing.T) {
 		{
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
+		},
+		{
+			name:    "metadata value is a list",
+			input:   "---\nname: skill\ndescription: skill\nmetadata:\n  tags: [a, b]\n---\n# Markdown\nBody",
+			wantErr: "cannot unmarshal !!seq into string",
+		},
+		{
+			name:    "description is a mapping",
+			input:   "---\nname: skill\ndescription:\n  text: skill\n---\n# Markdown\nBody",
+			wantErr: "cannot unmarshal !!map into string",
+		},
+		{
+			name:    "allowed_tools with unclosed opening parenthesis",
+			input:   "---\nname: skill\ndescription: skill\nallowed_tools: Bash(git:* Read\n---\n# Markdown\nBody",
+			wantErr: "unclosed '('",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",
