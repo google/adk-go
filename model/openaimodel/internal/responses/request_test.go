@@ -930,11 +930,14 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 // must not go out as a location for the server to fetch, which would be a
 // request for a string that is not a URL.
 func TestBuildParams_Media(t *testing.T) {
+	const secretURL = "https://example.com/report.pdf?X-Amz-Signature=SECRET"
 	tests := []struct {
 		name        string
+		role        string
 		part        *genai.Part
 		want        []string
 		wantErr     error
+		wantNotErr  error
 		wantErrText string
 	}{
 		{
@@ -1043,12 +1046,58 @@ func TestBuildParams_Media(t *testing.T) {
 			},
 			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
 		},
+		{
+			// System and developer messages take input_text only. The
+			// Completions path already refuses media in those roles; sending
+			// input_image here would be a 400 from the API instead.
+			name:        "image_in_a_system_message_is_refused",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: image/png",
+		},
+		{
+			name:        "image_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a developer message is not supported: image/png",
+		},
+		{
+			name:        "file_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
+			wantErrText: "media in a developer message is not supported: application/pdf",
+		},
+		{
+			// The role is checked before the media type, as in Completions,
+			// so audio gets the role error and not ErrUnsupportedMIMEType.
+			name:        "audio_in_a_system_message_gets_the_role_error",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantNotErr:  shared.ErrUnsupportedMIMEType,
+			wantErrText: "media in a system message is not supported: audio/mpeg",
+		},
+		{
+			name: "text_in_a_system_message_is_kept",
+			role: "system",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/system:be terse"},
+		},
+		{
+			name: "text_in_a_developer_message_is_kept",
+			role: "developer",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/developer:be terse"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			role := tt.role
+			if role == "" {
+				role = string(genai.RoleUser)
+			}
 			params, err := buildParams("fallback", &model.LLMRequest{
-				Contents: []*genai.Content{userContent(tt.part)},
+				Contents: []*genai.Content{{Role: role, Parts: []*genai.Part{tt.part}}},
 			})
 			if tt.wantErr != nil || tt.wantErrText != "" {
 				if err == nil {
@@ -1057,8 +1106,14 @@ func TestBuildParams_Media(t *testing.T) {
 				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
 				}
+				if tt.wantNotErr != nil && errors.Is(err, tt.wantNotErr) {
+					t.Errorf("buildParams() err = %v, want it not to match %v", err, tt.wantNotErr)
+				}
 				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
 					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				if strings.Contains(err.Error(), "SECRET") {
+					t.Errorf("buildParams() err = %q leaks the file uri", err)
 				}
 				return
 			}
