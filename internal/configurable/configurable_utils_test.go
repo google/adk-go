@@ -17,6 +17,7 @@ package configurable
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,9 +34,11 @@ func isContainmentRejection(err error) bool {
 	return errors.Is(err, utils.ErrNotValidRelativePath) || errors.Is(err, utils.ErrSymlinkInRelativePath)
 }
 
-// newAgentDir lays out an agent directory with a sibling config, a file outside
-// the directory, and a symlink inside the directory pointing at that outside
-// file. It returns the base directory and the parent agent config path.
+// newAgentDir lays out an agent directory with a sibling config and a file
+// outside the directory, and returns the base directory, the agent directory
+// and the parent agent config path. It creates no link, so the tests built on
+// it run where symlink creation is unavailable (Windows without Developer
+// Mode); a test that needs the escaping link calls linkOutside.
 func newAgentDir(t *testing.T) (base, agentDir, agentPath string) {
 	t.Helper()
 
@@ -63,15 +66,23 @@ func newAgentDir(t *testing.T) (base, agentDir, agentPath string) {
 	if err := os.WriteFile(outside, []byte("agent_class: LlmAgent\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q) failed: %v", outside, err)
 	}
-	if err := os.Symlink(outside, filepath.Join(agentDir, "link.yaml")); err != nil {
-		t.Skipf("symlinks are not supported in this environment: %v", err)
-	}
 
 	return base, agentDir, agentPath
 }
 
+// linkOutside adds agentDir/link.yaml, a symlink to the outside.yaml that
+// newAgentDir wrote next to the agent directory. It skips the test where the
+// link cannot be created, so only tests that need the link are skipped there.
+func linkOutside(t *testing.T, base, agentDir string) {
+	t.Helper()
+	if err := os.Symlink(filepath.Join(base, "outside.yaml"), filepath.Join(agentDir, "link.yaml")); err != nil {
+		t.Skipf("symlinks are not supported in this environment: %v", err)
+	}
+}
+
 func TestResolveAgentReferenceRejectsEscapingConfigPath(t *testing.T) {
-	_, agentDir, _ := newAgentDir(t)
+	base, agentDir, _ := newAgentDir(t)
+	linkOutside(t, base, agentDir)
 	tests := []struct {
 		name    string
 		refPath string
@@ -214,9 +225,25 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 		t.Errorf("ResolveAgentReference(_, %q, %q) = %v, want a config file not found error that is not a containment rejection", agentDir, "missing.yaml", err)
 	}
 
-	// The symlinked parent must not weaken the check itself.
-	if _, err := ResolveAgentReference(context.Background(), agentDir, filepath.Join("..", "outside.yaml")); err == nil {
-		t.Error("ResolveAgentReference through a symlinked parent with an escaping reference succeeded, want an error")
+	// A link below the alias that names its target by the real path stays
+	// inside: this is only true when the base is resolved as well, otherwise the
+	// two sides are rooted differently and the reference is refused.
+	if err := os.Symlink(filepath.Join(realDir, "root_agent.yaml"), filepath.Join(realDir, "self.yaml")); err != nil {
+		t.Fatalf("Symlink(self.yaml) failed: %v", err)
+	}
+	if _, err := resolveConfigReference(agentDir, "self.yaml"); err != nil {
+		t.Errorf("resolveConfigReference(%q, self.yaml) = %v, want success: the link lands inside the real directory", agentDir, err)
+	}
+
+	// The symlinked parent must not weaken the check itself. The outside file
+	// exists, so an accepted reference would load it rather than fail as not
+	// found, and the refusal must come from the lexical check, which runs
+	// before any link is looked at.
+	if err := os.WriteFile(filepath.Join(base, "outside.yaml"), []byte("agent_class: LlmAgent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(outside.yaml) failed: %v", err)
+	}
+	if _, err := ResolveAgentReference(context.Background(), agentDir, filepath.Join("..", "outside.yaml")); !errors.Is(err, utils.ErrNotValidRelativePath) {
+		t.Errorf("ResolveAgentReference through a symlinked parent with an escaping reference = %v, want %v", err, utils.ErrNotValidRelativePath)
 	}
 }
 
@@ -224,9 +251,8 @@ func TestResolveAgentReferenceSymlinkedParentDir(t *testing.T) {
 // volume name. On Windows a drive-relative reference such as `C:node.yaml` is
 // not absolute yet still escapes the parent directory, by resolving against the
 // current directory of that drive. SafeSubpath refuses these on Windows because
-// the volume name carries a ':' (rejected by its windows-specific
-// forbidden-character check) or a leading `\\` (rejected by its UNC-prefix
-// check); the test keys its own expectation off filepath.VolumeName.
+// filepath.IsLocal rejects both the ':' of a drive and the leading `\\` of a
+// UNC path; the test keys its own expectation off filepath.VolumeName.
 //
 // The expectation is platform-dependent rather than skipped, so that the test
 // asserts something everywhere: on Unix these are ordinary, if odd, relative
@@ -255,9 +281,9 @@ func TestResolveConfigReferenceVolumeQualifiedRefs(t *testing.T) {
 //
 // The projected-volume case is the one that motivated it: the kubelet
 // materializes a Kubernetes ConfigMap as a `..data` symlink to a timestamped
-// directory plus one symlink per key. Bazel runfiles forests and Nix store
-// paths have the same shape. Links that leave the directory stay refused; see
-// the SafeSubpath tests in internal/utils.
+// directory plus one symlink per key, all inside the mount. Links that leave
+// the directory stay refused (a Bazel runfiles link, say, which points into the
+// execroot); see the SafeSubpath tests in internal/utils.
 func TestResolveConfigReferenceAcceptsLinksThatStayInside(t *testing.T) {
 	const nodeYAML = "name: join_node\nagent_class: JoinNode\n"
 
@@ -396,10 +422,9 @@ func TestResolveConfigReferenceBelowNonDirectory(t *testing.T) {
 }
 
 // TestResolveConfigReferenceEmptyRef covers the empty reference, which is
-// usually an unfilled template rather than an attempt to escape. It cleans to
-// ".", which resolves back to the base directory, and SafeSubpath refuses a
-// reference that lands on the base itself with a distinct "effectively empty"
-// message rather than the generic "not a subpath" — the wording this test pins,
+// usually an unfilled template rather than an attempt to escape. SafeSubpath
+// refuses it at its first check with a message that says the reference is
+// empty, rather than the generic "not a subpath" — the wording this test pins,
 // so an unfilled template reads as such.
 func TestResolveConfigReferenceEmptyRef(t *testing.T) {
 	_, agentDir, _ := newAgentDir(t)
@@ -519,6 +544,68 @@ func TestResolveConfigReferenceOSSpecificRefs(t *testing.T) {
 			if !withinDir(agentDir, got) {
 				t.Errorf("resolveConfigReference(%q, %q) = %q, which escapes the parent directory %q",
 					agentPath, tc.refPath, got, agentDir)
+			}
+		})
+	}
+}
+
+// TestFromConfigRefusesEscapingAgentReferences drives the containment check on
+// sub_agents and AgentTool references through the public FromConfig, which is
+// where the directory handed to the factories takes effect, and pins that a
+// refusal names the reference as written. The outside file exists, so with the
+// check removed the reference would load (and fail on its missing name) rather
+// than fail as not found.
+func TestFromConfigRefusesEscapingAgentReferences(t *testing.T) {
+	base, agentDir, _ := newAgentDir(t)
+	if err := os.WriteFile(filepath.Join(agentDir, "sub.yaml"), []byte("name: sub\nagent_class: SequentialAgent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sub.yaml) failed: %v", err)
+	}
+	// Building an LlmAgent constructs a genai client, which needs a key but
+	// makes no request.
+	t.Setenv("GOOGLE_API_KEY", "test-key")
+
+	for _, tc := range []struct {
+		name    string
+		config  string
+		ref     string
+		wantErr bool
+	}{
+		{
+			name:    "sub_agents inside",
+			config:  "name: root\nagent_class: SequentialAgent\nsub_agents:\n  - config_path: sub.yaml\n",
+			ref:     "sub.yaml",
+			wantErr: false,
+		},
+		{
+			name:    "sub_agents escaping",
+			config:  "name: root\nagent_class: SequentialAgent\nsub_agents:\n  - config_path: ../../outside.yaml\n",
+			ref:     "../../outside.yaml",
+			wantErr: true,
+		},
+		{
+			name:    "AgentTool escaping",
+			config:  "name: root\nagent_class: LlmAgent\nmodel: gemini-2.5-flash\ntools:\n  - name: AgentTool\n    args:\n      agent:\n        config_path: ../../outside.yaml\n",
+			ref:     "../../outside.yaml",
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(agentDir, strings.ReplaceAll(tc.name, " ", "_")+".yaml")
+			if err := os.WriteFile(path, []byte(tc.config), 0o644); err != nil {
+				t.Fatalf("WriteFile(%q) failed: %v", path, err)
+			}
+			_, err := FromConfig(context.Background(), path)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("FromConfig(%q) = %v, want success", path, err)
+				}
+				return
+			}
+			if !isContainmentRejection(err) {
+				t.Fatalf("FromConfig(%q) = %v, want a containment rejection of %q (outside file: %s)", path, err, tc.ref, filepath.Join(base, "outside.yaml"))
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("%q", tc.ref)) {
+				t.Errorf("FromConfig(%q) = %q, want the error to name the reference %q", path, err, tc.ref)
 			}
 		})
 	}

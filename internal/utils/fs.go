@@ -27,10 +27,12 @@ import (
 )
 
 var (
-	// ErrNotValidRelativePath means that a path is considered not relative or invalid
-	ErrNotValidRelativePath = errors.New("the path is not valid relative path in the subtree")
-	// ErrSymlinkInRelativePath means that a path contains a link that resolves outside the base
-	ErrSymlinkInRelativePath = errors.New("relative path contains a symlink")
+	// ErrNotValidRelativePath means that the reference, read as a string, is not
+	// a relative path below the base directory.
+	ErrNotValidRelativePath = errors.New("path is not a relative path inside the base directory")
+	// ErrSymlinkInRelativePath means that a link on the way leads outside the
+	// base directory. A link that stays inside is not an error.
+	ErrSymlinkInRelativePath = errors.New("path leads outside the base directory through a link")
 )
 
 // SafeSubpath resolves rel below base and checks that the result stays inside it.
@@ -40,11 +42,15 @@ var (
 //
 // Returns ErrNotValidRelativePath iff rel is not a local path below base:
 // absolute, empty, escaping through "..", effectively empty, or (on Windows)
-// carrying a drive, a stream, a reserved device name or a trailing dot/space.
-// Returns ErrSymlinkInRelativePath iff a component of rel below base is a
-// symlink or another link-like entry that resolves outside base. A link that
-// resolves inside base is accepted, which keeps Kubernetes ConfigMap and Secret
-// mounts (a "..data" link and per-key links) working, as in adk-python.
+// carrying a drive, a UNC prefix, a reserved device name or a trailing dot or
+// space.
+// Returns ErrSymlinkInRelativePath iff following the links on the way (symlinks,
+// and on Windows junctions and other reparse points that name a target) lands
+// outside base, itself followed the same way. A link that lands inside base is
+// accepted, which keeps Kubernetes ConfigMap and Secret mounts (a "..data" link
+// and per-key links) working, as in adk-python. A link whose target does not
+// exist is judged by where it points: outside is refused, inside is returned
+// so the caller's read reports the missing file.
 // A component that does not exist, or that sits below a non-directory, is not
 // an error here: nothing below it can exist, so the path is returned and the
 // caller's read reports the real problem.
@@ -67,8 +73,10 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 	if !filepath.IsLocal(rel) {
 		return "", "", fmt.Errorf("%w: rel path is not local", ErrNotValidRelativePath)
 	}
-	// on windows IsLocal does not look at alternate data streams ("test.txt:aaa") and
-	// does not refuse trailing " " and "." on every component
+	// On Windows IsLocal already refuses any ':' (a stream or a drive) and the
+	// leading separators of a UNC path. What it leaves to this block is the
+	// other characters a file name may not contain, and a trailing " " or "."
+	// on a component other than the last.
 	if runtime.GOOS == "windows" {
 		if strings.ContainsAny(rel, windowsForbiddenStandardChars) {
 			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars: %v", ErrNotValidRelativePath, windowsForbiddenStandardChars)
@@ -100,63 +108,100 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
 	}
 
-	inside, err := resolvesInside(absBase, res)
-	if err != nil {
-		return "", "", fmt.Errorf("cannot resolve links: %w", err)
-	}
-	if !inside {
-		return "", "", ErrSymlinkInRelativePath
+	if _, err := resolveInside(absBase, res); err != nil {
+		return "", "", err
 	}
 	return res, r, nil
 }
 
-// resolvesInside reports whether target, with every link on the way resolved,
-// is still below base (itself resolved, so a symlinked base is trusted).
-func resolvesInside(base, target string) (bool, error) {
-	realBase, err := resolveExisting(base)
+// resolveInside follows the links in target and reports where it really lands.
+// It returns ErrSymlinkInRelativePath when that is not below base, itself
+// followed the same way so a base reached through a link is trusted.
+func resolveInside(base, target string) (string, error) {
+	realBase, err := followLinks(base)
 	if err != nil {
-		return false, err
+		return "", fmt.Errorf("cannot resolve links in base: %w", err)
 	}
-	realTarget, err := resolveExisting(target)
+	realTarget, err := followLinks(target)
 	if err != nil {
-		if errors.Is(err, errDangling) {
-			return false, nil
-		}
-		return false, err
+		return "", fmt.Errorf("cannot resolve links: %w", err)
 	}
 	rel, err := filepath.Rel(realBase, realTarget)
-	if err != nil {
-		return false, nil
+	if err != nil || (rel != "." && !filepath.IsLocal(rel)) {
+		return "", fmt.Errorf("%w: it resolves to %q", ErrSymlinkInRelativePath, realTarget)
 	}
-	return rel == "." || filepath.IsLocal(rel), nil
+	return realTarget, nil
 }
 
-var errDangling = errors.New("dangling link")
+// maxLinkFollows bounds the number of links followed on one path, as
+// filepath.EvalSymlinks does, so a link loop is an error rather than a hang.
+const maxLinkFollows = 255
 
-// resolveExisting resolves the links in the deepest existing prefix of p and
-// appends the rest as is: a component that does not exist, or sits below a
-// non-directory, cannot hide a link. A dangling link is errDangling, because
-// its destination is unknown.
-func resolveExisting(p string) (string, error) {
-	existing, rest := p, ""
-	for {
-		real, err := filepath.EvalSymlinks(existing)
-		if err == nil {
-			return filepath.Join(real, rest), nil
+// followLinks walks the absolute path p one component at a time and replaces
+// every link by its target, so the result names the entry the operating system
+// would open. It is filepath.EvalSymlinks with two differences that matter
+// here:
+//
+//   - A link is anything os.Readlink can read. On Windows that includes a
+//     directory junction, which since Go 1.23 os.Lstat reports as ModeIrregular
+//     and which EvalSymlinks therefore does not follow (it fails with ENOTDIR
+//     when a junction sits in the middle of a path).
+//   - A link whose target does not exist is still followed, by name, and a
+//     component that does not exist, or sits below a non-directory, ends the
+//     walk with the remaining components appended as written. Nothing below
+//     such a component can exist, so it can hide no link, and the caller's
+//     read is what reports the missing file.
+//
+// A ".." after a link applies to the link's target, as the operating system
+// would apply it, not to the name of the link.
+func followLinks(p string) (string, error) {
+	sep := string(filepath.Separator)
+	vol := filepath.VolumeName(p)
+	cur := vol + sep
+	rest := strings.Split(strings.Trim(p[len(vol):], sep), sep)
+	follows := 0
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		switch c {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
 		}
-		if !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
+		next := filepath.Join(cur, c)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				return filepath.Join(append([]string{next}, rest[i+1:]...)...), nil
+			}
 			return "", err
 		}
-		if _, lerr := os.Lstat(existing); lerr == nil {
-			return "", errDangling
+		if !isLinkLike(fi.Mode()) {
+			cur = next
+			continue
 		}
-		parent := filepath.Dir(existing)
-		if parent == existing {
-			return filepath.Join(existing, rest), nil
+		dest, err := os.Readlink(next)
+		if err != nil {
+			// A reparse point that names no target (a cloud placeholder, say)
+			// redirects the read nowhere, so it is an ordinary entry here.
+			cur = next
+			continue
 		}
-		rest = filepath.Join(filepath.Base(existing), rest)
-		existing = parent
+		follows++
+		if follows > maxLinkFollows {
+			return "", fmt.Errorf("too many links in %q", p)
+		}
+		if !filepath.IsAbs(dest) {
+			dest = filepath.Join(cur, dest)
+		}
+		// Start over from the target, with what follows the link still to walk.
+		destVol := filepath.VolumeName(dest)
+		cur = destVol + sep
+		rest = append(strings.Split(strings.Trim(dest[len(destVol):], sep), sep), rest[i+1:]...)
+		i = -1
 	}
+	return filepath.Clean(cur), nil
 }
 
 // return a slice of path elements for a given path
@@ -177,42 +222,18 @@ func splitPathToFragments(p string) []string {
 	return res
 }
 
-// ContainsSymlink checks the rel path for symlinks
-// The check is performed regardless the rel path is valid or not
-// The check takes into the consideration the actual FS
-func ContainsSymlink(base, rel string) (bool, error) {
-	if !filepath.IsAbs(base) {
-		return false, fmt.Errorf("the base path has to be absolute")
-	}
-	if filepath.IsAbs(rel) {
-		return false, fmt.Errorf("the rel path must not be absolute")
-	}
-
-	p := base
-	frags := splitPathToFragments(rel)
-	for _, fr := range frags {
-		p = filepath.Join(p, fr)
-		fi, err := os.Lstat(p)
-		if err != nil {
-			return false, fmt.Errorf("cannot Lstat: %w", err)
-		}
-		if isLinkLike(fi.Mode()) {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
 const (
-	// windowsForbiddenStandardChars contains standard char which are not allowed to be used in a file/dir name
-	windowsForbiddenStandardChars string = `:<>"|?*`
+	// windowsForbiddenStandardChars contains the printable characters a Windows
+	// file or directory name may not contain. ':' is not listed because
+	// filepath.IsLocal refuses it first.
+	windowsForbiddenStandardChars string = `<>"|?*`
 	// windowsForbiddenLowChar contains low <32 chars which are not allowed to be used in a file/dir name
 	windowsForbiddenLowChar string = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
 )
 
 // isLinkLike reports whether a component may redirect the read somewhere other
-// than where its own name sits in the tree.
+// than where its own name sits in the tree. followLinks asks os.Readlink where,
+// and treats a reparse point that names no target as an ordinary entry.
 //
 // ModeSymlink alone is not enough on Windows. A directory junction is a reparse
 // point with tag IO_REPARSE_TAG_MOUNT_POINT, and since Go 1.23 (godebug

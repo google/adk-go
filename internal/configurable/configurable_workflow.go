@@ -29,7 +29,10 @@ import (
 )
 
 // nodeFunctionRegistry stores pre-registered custom node functions.
-// nodeRegistry caches resolved workflow nodes.
+// nodeRegistry caches the nodes loaded from YAML, keyed by the real path of
+// the file. Only a YAML reference that has passed the containment check may
+// look a node up there: the key is a path, so a name looked up without the
+// check could reach a node loaded for a workflow in another directory.
 var (
 	nodeFunctionRegistry = make(map[string]func(agent.Context, any) (any, error))
 	nodeRegistry         = make(map[string]workflow.Node)
@@ -78,7 +81,7 @@ type toolNodeYAMLConfig struct {
 }
 
 // newWorkflowAgent builds a workflow agent from YAML data.
-func newWorkflowAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newWorkflowAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg workflowYAMLConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal Workflow config: %w", err)
@@ -94,7 +97,7 @@ func newWorkflowAgent(ctx context.Context, data []byte, configPath string) (agen
 	// TODO(kdroste): move to invocationContext?
 	edgeParserCtx := context.WithValue(ctx, subAgentsCollectorKey, &subAgents)
 
-	edges, err := parseEdges(edgeParserCtx, configPath, cfg.Edges)
+	edges, err := parseEdges(edgeParserCtx, configDir, cfg.Edges)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse workflow edges: %w", err)
 	}
@@ -118,7 +121,7 @@ type contextKeyCollector string
 const subAgentsCollectorKey contextKeyCollector = "subAgentsCollector"
 
 // parseEdges converts dynamic sequence nodes from YAML into structural edges.
-func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]workflow.Edge, error) {
+func parseEdges(ctx context.Context, configDir string, nodes []yaml.Node) ([]workflow.Edge, error) {
 	var edges []workflow.Edge
 
 	for _, edgeNode := range nodes {
@@ -132,7 +135,7 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 		for _, item := range edgeNode.Content {
 			switch item.Kind {
 			case yaml.ScalarNode:
-				n, err := resolveNodeLike(ctx, parentPath, item.Value)
+				n, err := resolveNodeLike(ctx, configDir, item.Value)
 				if err != nil {
 					return nil, err
 				}
@@ -171,7 +174,7 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 				// deterministic.
 				for _, routeVal := range slices.Sorted(maps.Keys(routeMap)) {
 					targetRef := routeMap[routeVal]
-					targetNode, err := resolveNodeLike(ctx, parentPath, targetRef)
+					targetNode, err := resolveNodeLike(ctx, configDir, targetRef)
 					if err != nil {
 						return nil, err
 					}
@@ -196,38 +199,18 @@ func parseEdges(ctx context.Context, parentPath string, nodes []yaml.Node) ([]wo
 	return edges, nil
 }
 
-// resolveNodeLike maps a YAML identifier to a concrete workflow.Node.
-func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node, error) {
+// resolveNodeLike maps a YAML identifier to a concrete workflow.Node. A
+// reference ending in .yaml or .yml is a file inside configDir; anything else
+// is the name of a registered node function.
+func resolveNodeLike(ctx context.Context, configDir, ref string) (workflow.Node, error) {
 	if ref == "START" {
 		return workflow.Start, nil
 	}
 
-	var cacheKey string
-	var absPath string
-	isYAML := strings.HasSuffix(ref, ".yaml") || strings.HasSuffix(ref, ".yml")
-
-	if isYAML {
-		// Node refs are loaded straight off disk by resolveNodeFromYAML, so they
-		// need the same containment check as agent refs: without it a workflow
-		// config can read and instantiate a node from anywhere on the filesystem.
-		var err error
-		absPath, err = resolveConfigReference(parentPath, ref)
-		if err != nil {
-			return nil, err
-		}
-		cacheKey = absPath
-	} else {
-		cacheKey = ref
-	}
-
-	registryMu.RLock()
-	n, exists := nodeRegistry[cacheKey]
-	registryMu.RUnlock()
-	if exists {
-		return n, nil
-	}
-
-	if !isYAML {
+	if !strings.HasSuffix(ref, ".yaml") && !strings.HasSuffix(ref, ".yml") {
+		// A name never consults nodeRegistry: its keys are file paths, and a
+		// lookup by name would hand out a node loaded for another directory
+		// without the containment check below.
 		registryMu.RLock()
 		typedFn, exists := nodeFunctionRegistry[ref]
 		registryMu.RUnlock()
@@ -237,18 +220,34 @@ func resolveNodeLike(ctx context.Context, parentPath, ref string) (workflow.Node
 		return workflow.NewFunctionNode(ref, typedFn, workflow.NodeConfig{}), nil
 	}
 
-	n, err := resolveNodeFromYAML(ctx, parentPath, ref, absPath)
+	// Node refs are loaded straight off disk by resolveNodeFromYAML, so they
+	// need the same containment check as agent refs, and they need it ahead of
+	// the cache lookup: without it a workflow config can read and instantiate a
+	// node from anywhere on the filesystem.
+	absPath, err := resolveConfigReference(configDir, ref)
+	if err != nil {
+		return nil, err
+	}
+
+	registryMu.RLock()
+	n, exists := nodeRegistry[absPath]
+	registryMu.RUnlock()
+	if exists {
+		return n, nil
+	}
+
+	n, err = resolveNodeFromYAML(ctx, configDir, ref, absPath)
 	if err != nil {
 		return nil, err
 	}
 
 	registryMu.Lock()
-	nodeRegistry[cacheKey] = n
+	nodeRegistry[absPath] = n
 	registryMu.Unlock()
 	return n, nil
 }
 
-func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (workflow.Node, error) {
+func resolveNodeFromYAML(ctx context.Context, configDir, ref, absPath string) (workflow.Node, error) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, err
@@ -327,7 +326,7 @@ func resolveNodeFromYAML(ctx context.Context, parentPath, ref, absPath string) (
 	}
 
 	// Otherwise, it is a standard agent class. Resolve it as an agent and wrap in NewAgentNode.
-	ag, err := ResolveAgentReference(ctx, parentPath, ref)
+	ag, err := ResolveAgentReference(ctx, configDir, ref)
 	if err != nil {
 		return nil, err
 	}

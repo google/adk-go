@@ -110,12 +110,12 @@ func init() {
 		if ss, ok := a["skip_summarization"].(bool); ok {
 			skipSummarization = ss
 		}
-		parentPath, ok := ctx.Value(parentPathKey).(string)
+		configDir, ok := ctx.Value(parentPathKey).(string)
 		if !ok {
 			return nil, fmt.Errorf("parentPath not found in context")
 		}
 		if configPath, ok := a["config_path"].(string); ok {
-			ag, err := ResolveAgentReference(ctx, parentPath, configPath)
+			ag, err := ResolveAgentReference(ctx, configDir, configPath)
 			if err != nil {
 				return nil, err
 			}
@@ -374,10 +374,15 @@ func ResolveCallbackReference(ctx context.Context, callbackName string) (any, er
 	return nil, fmt.Errorf("callback '%s' not found", callbackName)
 }
 
-func resolveConfigReference(parentPath, refPath string) (string, error) {
-	abs, _, err := utils.SafeSubpath(parentPath, refPath)
+// resolveConfigReference is the one containment check for every config
+// reference: a sub_agents or AgentTool config_path and a workflow edge. It
+// refuses a reference that is not a relative path inside configDir or that
+// leads outside it through a link, naming the reference in the error so a
+// refusal in a log says which one.
+func resolveConfigReference(configDir, refPath string) (string, error) {
+	abs, _, err := utils.SafeSubpath(configDir, refPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("config reference %q: %w", refPath, err)
 	}
 	// A link that stays inside the directory is accepted, but the agent is keyed
 	// by the real path so one config cannot be registered under two spellings.
@@ -387,9 +392,11 @@ func resolveConfigReference(parentPath, refPath string) (string, error) {
 	return abs, nil
 }
 
-// ResolveAgentReference builds an agent from a reference config.
-func ResolveAgentReference(ctx context.Context, agentDir, refPath string) (agent.Agent, error) {
-	absPath, err := resolveConfigReference(agentDir, refPath)
+// ResolveAgentReference builds an agent from a reference config. configDir is
+// the directory of the referencing config and refPath is the reference as
+// written there.
+func ResolveAgentReference(ctx context.Context, configDir, refPath string) (agent.Agent, error) {
+	absPath, err := resolveConfigReference(configDir, refPath)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +423,7 @@ func ResolveAgentReference(ctx context.Context, agentDir, refPath string) (agent
 }
 
 // NewLLMAgent is the factory function registered in the system.
-func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newLLMAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg llmAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -433,7 +440,7 @@ func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Age
 		return nil, fmt.Errorf("'model' is required for LlmAgent")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toLLMAgentConfig(ctx)
 	if err != nil {
@@ -443,7 +450,7 @@ func newLLMAgent(ctx context.Context, data []byte, configPath string) (agent.Age
 	return llmagent.New(*agentConfig)
 }
 
-func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newLoopAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg loopAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -457,7 +464,7 @@ func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Ag
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toLoopAgentConfig(ctx)
 	if err != nil {
@@ -467,7 +474,7 @@ func newLoopAgent(ctx context.Context, data []byte, configPath string) (agent.Ag
 	return loopagent.New(*agentConfig)
 }
 
-func newParallelAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newParallelAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg parallelAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -481,7 +488,7 @@ func newParallelAgent(ctx context.Context, data []byte, configPath string) (agen
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toParallelAgentConfig(ctx)
 	if err != nil {
@@ -491,7 +498,7 @@ func newParallelAgent(ctx context.Context, data []byte, configPath string) (agen
 	return parallelagent.New(*agentConfig)
 }
 
-func newSequentialAgent(ctx context.Context, data []byte, configPath string) (agent.Agent, error) {
+func newSequentialAgent(ctx context.Context, data []byte, configDir string) (agent.Agent, error) {
 	var cfg sequentialAgentYAMLConfig
 
 	// Unmarshal parses the shared fields (Name) into BaseAgentConfig
@@ -505,7 +512,7 @@ func newSequentialAgent(ctx context.Context, data []byte, configPath string) (ag
 		return nil, fmt.Errorf("'name' is required")
 	}
 
-	cfg.ConfigPath = configPath
+	cfg.ConfigDir = configDir
 
 	agentConfig, err := cfg.toSequentialAgentConfig(ctx)
 	if err != nil {

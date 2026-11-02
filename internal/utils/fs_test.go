@@ -150,12 +150,13 @@ func TestSafeSubpath_Windows(t *testing.T) {
 		{name: "reserved_name_con", rel: "CON", wantErr: true},
 		{name: "reserved_name_nul", rel: "NUL", wantErr: true},
 		{name: "reserved_name_com1", rel: "COM1", wantErr: true},
-		// the reserved names are matched case-insensitively, with or without an extension
+		// the reserved names are matched case-insensitively. A reserved name with
+		// an extension ("nul.yaml") is not listed: since Windows 11 it is an
+		// ordinary file name, and filepath.IsLocal asks the running Windows
+		// (RtlIsDosDeviceName_U), so its answer depends on the host.
 		{name: "reserved_name_con_lower", rel: "con", wantErr: true},
 		{name: "reserved_name_conin_lower", rel: "conin$", wantErr: true},
-		{name: "reserved_name_nul_ext", rel: "nul.yaml", wantErr: true},
-		{name: "reserved_name_com1_mixed_ext", rel: "Com1.yaml", wantErr: true},
-		{name: "reserved_name_in_subdir", rel: "sub/aux.yaml", wantErr: true},
+		{name: "reserved_name_in_subdir", rel: "sub/aux", wantErr: true},
 		{name: "ads_on_inside_file", rel: "file.txt:hidden", wantErr: true},
 		{name: "control_char", rel: "bad\x01name.txt", wantErr: true},
 
@@ -207,8 +208,9 @@ func TestSafeSubpath_NonWindows(t *testing.T) {
 	runTests(t, base, cases)
 }
 
-// TestIsLinkLike pins the mode predicate the component walk uses. It runs
-// everywhere, unlike the junction test, which needs Windows to build one.
+// TestIsLinkLike pins the mode predicate followLinks uses to decide which
+// components to ask os.Readlink about. It runs everywhere, unlike the junction
+// test, which needs Windows to build one.
 func TestIsLinkLike(t *testing.T) {
 	for _, tc := range []struct {
 		name string

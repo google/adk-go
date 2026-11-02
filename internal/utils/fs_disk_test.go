@@ -94,13 +94,45 @@ func TestSafeSubpath_OnDisk(t *testing.T) {
 				t.Errorf("SafeSubpath(%q, %s) = %v, want %v", base, rel, err, ErrSymlinkInRelativePath)
 			}
 		}
-
-		// a dangling link has no known destination and is refused
-		if err := os.Symlink(filepath.Join(outside, "nope"), filepath.Join(base, "dangling")); err != nil {
+		// a relative link destination with ".." is applied where the link sits,
+		// as the operating system applies it: one climbs to base/f.txt and stays
+		// inside, the other climbs out to the outside directory and is refused
+		if err := os.Symlink(filepath.Join("..", "f.txt"), filepath.Join(realDir, "up.txt")); err != nil {
 			t.Skipf("symlinks are not supported in this environment: %v", err)
 		}
-		if _, _, err := SafeSubpath(base, "dangling"); !errors.Is(err, ErrSymlinkInRelativePath) {
-			t.Errorf("SafeSubpath(%q, dangling) = %v, want %v", base, err, ErrSymlinkInRelativePath)
+		if _, _, err := SafeSubpath(base, "real/up.txt"); err != nil {
+			t.Errorf("SafeSubpath(%q, real/up.txt) = %v, want success: ../f.txt from real/ is base/f.txt", base, err)
+		}
+		relOut, err := filepath.Rel(realDir, filepath.Join(outside, "secret.txt"))
+		if err != nil {
+			t.Fatalf("Rel failed: %v", err)
+		}
+		if err := os.Symlink(relOut, filepath.Join(realDir, "climb.txt")); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+		if _, _, err := SafeSubpath(base, "real/climb.txt"); !errors.Is(err, ErrSymlinkInRelativePath) {
+			t.Errorf("SafeSubpath(%q, real/climb.txt) = %v, want %v: the link climbs out through %q", base, err, ErrSymlinkInRelativePath, relOut)
+		}
+
+		// a dangling link is judged by where it points: outside is refused,
+		// inside is returned so the caller's read reports the missing file
+		if err := os.Symlink(filepath.Join(outside, "nope"), filepath.Join(base, "dangling_out")); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+		if _, _, err := SafeSubpath(base, "dangling_out"); !errors.Is(err, ErrSymlinkInRelativePath) {
+			t.Errorf("SafeSubpath(%q, dangling_out) = %v, want %v", base, err, ErrSymlinkInRelativePath)
+		}
+		if err := os.Symlink("real/nope", filepath.Join(base, "dangling_in")); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+		if _, _, err := SafeSubpath(base, "dangling_in"); err != nil {
+			t.Errorf("SafeSubpath(%q, dangling_in) = %v, want success: the link points inside base", base, err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(realDir, "sneak.txt")); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+		if _, _, err := SafeSubpath(base, "real/sneak.txt"); !errors.Is(err, ErrSymlinkInRelativePath) {
+			t.Errorf("SafeSubpath(%q, real/sneak.txt) = %v, want %v", base, err, ErrSymlinkInRelativePath)
 		}
 	})
 
