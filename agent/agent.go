@@ -179,6 +179,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		})
 
 		event, err := runBeforeAgentCallbacks(nodeCtx)
+		if event != nil && a.OnBeforeAgentCallbackEvent != nil {
+			a.OnBeforeAgentCallbackEvent(event)
+		}
 		if event != nil || err != nil {
 			if !yield(event, err) {
 				return

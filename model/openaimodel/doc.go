@@ -27,7 +27,9 @@
 // Every top-level field of genai.GenerateContentConfig is translated, rejected
 // with an error naming it, or ignored because it has no effect on these APIs,
 // the pre-existing errors being checked first
-// so existing errors.Is call sites are unaffected. Rejection keys on presence,
+// so existing errors.Is call sites are unaffected. A field this package does
+// not know, including one genai adds later, is rejected, as is an unknown field
+// of HTTPOptions or ThinkingConfig. Rejection keys on presence,
 // which is only observable where the zero value cannot itself be a setting, so
 // a plain bool or string carrying its zero — AudioTimestamp false, CachedContent
 // or MediaResolution empty — passes unremarked, as does HTTPOptions.Headers,
@@ -48,7 +50,8 @@
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
-//	            and on Responses also StopSequences, the penalties and Seed
+//	            and on Responses also a non-empty StopSequences, the
+//	            penalties and Seed
 //	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
 //	            effect because these APIs never pause a generation with
 //	            CONTINUATION; and on Chat Completions
