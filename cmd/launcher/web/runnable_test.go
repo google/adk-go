@@ -46,7 +46,7 @@ func (s *runnableTestSublauncher) SetupSubrouters(router *mux.Router, _ *launche
 
 func TestNewRunnableUsesValuesAndActivatesSublaunchers(t *testing.T) {
 	sub := &runnableTestSublauncher{keyword: "test", route: "/test"}
-	r, err := NewRunnable(Config{Host: "127.0.0.1", Port: 9099, ReadTimeout: 3 * time.Second}, sub)
+	r, err := NewRunnable(Config{Port: 9099, ReadTimeout: 3 * time.Second}, sub)
 	if err != nil {
 		t.Fatalf("NewRunnable() failed: %v", err)
 	}
@@ -57,9 +57,6 @@ func TestNewRunnableUsesValuesAndActivatesSublaunchers(t *testing.T) {
 	}
 	if w.config.port != 9099 {
 		t.Errorf("port = %d, want 9099", w.config.port)
-	}
-	if w.config.host != "127.0.0.1" {
-		t.Errorf("host = %q, want %q", w.config.host, "127.0.0.1")
 	}
 	if w.config.readTimeout != 3*time.Second {
 		t.Errorf("readTimeout = %v, want 3s", w.config.readTimeout)
@@ -81,6 +78,66 @@ func TestNewRunnableUsesValuesAndActivatesSublaunchers(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://127.0.0.1/test", nil))
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("GET /test = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
+func TestNewRunnableCopiesEveryConfigField(t *testing.T) {
+	origins := []string{"https://example.com", "https://second.example"}
+	r, err := NewRunnable(Config{
+		Host:            "192.168.1.10",
+		Port:            9099,
+		AllowOrigins:    origins,
+		WriteTimeout:    4 * time.Second,
+		ReadTimeout:     3 * time.Second,
+		IdleTimeout:     5 * time.Second,
+		ShutdownTimeout: 6 * time.Second,
+		OTelToCloud:     true,
+		UseH2C:          true,
+		MaxPayloadSize:  1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewRunnable() failed: %v", err)
+	}
+	w := r.(*webLauncher)
+
+	// Host is deliberately not the 127.0.0.1 default, so deleting the field
+	// copy fails this instead of passing by coincidence.
+	if w.config.host != "192.168.1.10" {
+		t.Errorf("host = %q, want %q", w.config.host, "192.168.1.10")
+	}
+	if w.config.port != 9099 {
+		t.Errorf("port = %d, want 9099", w.config.port)
+	}
+	if w.config.writeTimeout != 4*time.Second {
+		t.Errorf("writeTimeout = %v, want 4s", w.config.writeTimeout)
+	}
+	if w.config.readTimeout != 3*time.Second {
+		t.Errorf("readTimeout = %v, want 3s", w.config.readTimeout)
+	}
+	if w.config.idleTimeout != 5*time.Second {
+		t.Errorf("idleTimeout = %v, want 5s", w.config.idleTimeout)
+	}
+	if w.config.shutdownTimeout != 6*time.Second {
+		t.Errorf("shutdownTimeout = %v, want 6s", w.config.shutdownTimeout)
+	}
+	if !w.config.otelToCloud {
+		t.Error("otelToCloud = false, want true")
+	}
+	if !w.config.useH2C {
+		t.Error("useH2C = false, want true")
+	}
+	if w.config.maxPayloadSize != 1<<20 {
+		t.Errorf("maxPayloadSize = %d, want %d", w.config.maxPayloadSize, 1<<20)
+	}
+
+	// A later change to the caller's slice must not reach the running server:
+	// overwriting an entry with "*" would otherwise turn the origin check off.
+	origins[0] = "*"
+	if w.config.allowOrigins[0] != "https://example.com" {
+		t.Errorf("allowOrigins[0] = %q after the caller's slice changed, want the value passed to NewRunnable", w.config.allowOrigins[0])
+	}
+	if len(w.config.allowOrigins) != 2 {
+		t.Errorf("len(allowOrigins) = %d, want 2", len(w.config.allowOrigins))
 	}
 }
 

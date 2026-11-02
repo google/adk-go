@@ -80,9 +80,9 @@ type Config struct {
 // arguments.
 //
 // It exists for applications that define their own flags: passing
-// [NewLauncher] to [launcher.Launcher.Execute] hands every argument in os.Args,
-// including the application's own, to the launcher's flag set, where they are
-// rejected as unknown.
+// [NewLauncher] to [launcher.Launcher.Execute] hands it every argument the
+// caller supplies, the application's own included, for the launcher's flag
+// set to parse, where they are rejected as unknown.
 func NewRunnable(cfg Config) (launcher.Runnable, error) {
 	switch cfg.StreamingMode {
 	case "", agent.StreamingModeNone, agent.StreamingModeSSE:
@@ -94,14 +94,30 @@ func NewRunnable(cfg Config) (launcher.Runnable, error) {
 	if shutdownTimeout == 0 {
 		shutdownTimeout = 2 * time.Second
 	}
-	return &consoleLauncher{
+	return validatingRunnable{inner: &consoleLauncher{
 		flags: flag.NewFlagSet("console", flag.ContinueOnError),
 		config: &consoleConfig{
 			streamingMode:   cfg.StreamingMode,
 			otelToCloud:     cfg.OTelToCloud,
 			shutdownTimeout: shutdownTimeout,
 		},
-	}, nil
+	}}, nil
+}
+
+// validatingRunnable rejects a launcher.Config that cannot work before the
+// wrapped Run replaces the process-wide telemetry providers or creates a
+// session. Execute performs that check at the same point, and its doc comment
+// names it as the only entry point; Run is reachable without Execute through
+// [launcher.Runnable], so the check has to travel with it.
+type validatingRunnable struct {
+	inner launcher.Runnable
+}
+
+func (r validatingRunnable) Run(ctx context.Context, config *launcher.Config) error {
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	return r.inner.Run(ctx, config)
 }
 
 // Run implements launcher.SubLauncher. It starts the console interaction loop.

@@ -78,8 +78,8 @@ type SubLauncher interface {
 // the process command line.
 //
 // An application that defines its own flags can hold a Runnable instead of
-// calling [Launcher.Execute], which would hand every argument in os.Args — the
-// application's included — to the launcher's flag set, where they parse as
+// calling [Launcher.Execute], which parses every argument its caller supplies,
+// the application's own included, so the launcher's flag set rejects them as
 // unknown.
 type Runnable interface {
 	// Run executes the launcher with the configuration it was built from.

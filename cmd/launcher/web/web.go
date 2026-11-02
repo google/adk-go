@@ -431,18 +431,53 @@ func defaultWebConfig() *webConfig {
 
 // Config carries the web launcher's options as values. A zero field keeps the
 // same default as the corresponding command-line flag: Port 8080, Host
-// 127.0.0.1, and the timeouts as shown by -help.
+// 127.0.0.1, WriteTimeout and ReadTimeout and ShutdownTimeout 15s,
+// IdleTimeout 60s, MaxPayloadSize 0 (10 MiB or an embedder's value), and the
+// two booleans false.
 type Config struct {
-	Host            string
-	Port            int
-	AllowOrigins    []string
-	WriteTimeout    time.Duration
-	ReadTimeout     time.Duration
-	IdleTimeout     time.Duration
+	// Host is the interface the server binds to. Empty binds 127.0.0.1.
+	Host string
+	// Port is the TCP port to listen on. Zero means 8080, so "any free port"
+	// cannot be expressed here.
+	Port int
+	// AllowOrigins lists origins admitted on every route of the web server
+	// (e.g., "https://example.com"; a bare hostname and optional port is read
+	// as http). Each entry is admitted by the origin check on every route, is
+	// allowed for CORS on the REST API, and on a loopback bind also allows
+	// requests whose Host header names that entry's host; other cross-origin
+	// browser requests are refused with 403.
+	//
+	// "*" allows any origin and turns the origin and DNS-rebinding checks off
+	// on every route - do not use it on a server reachable from an untrusted
+	// network, since these endpoints are unauthenticated.
+	//
+	// The slice is copied, so later changes to the caller's slice do not
+	// affect the running launcher.
+	AllowOrigins []string
+	// WriteTimeout bounds writing the response after the headers and body are
+	// read. Long-lived streaming responses may need a larger value.
+	WriteTimeout time.Duration
+	// ReadTimeout bounds reading the whole request including the body.
+	ReadTimeout time.Duration
+	// IdleTimeout bounds waiting for the next request, and applies only when
+	// keep-alive is enabled.
+	IdleTimeout time.Duration
+	// ShutdownTimeout bounds waiting for active requests to finish during
+	// shutdown.
 	ShutdownTimeout time.Duration
-	OTelToCloud     bool
-	UseH2C          bool
-	MaxPayloadSize  int64
+	// OTelToCloud enables OpenTelemetry export to GCP:
+	// telemetry.googleapis.com. When false, a
+	// telemetry.WithOtelToCloud option in launcher.Config.TelemetryOptions
+	// decides.
+	OTelToCloud bool
+	// UseH2C enables prior-knowledge cleartext HTTP/2 (h2c; no HTTP/1.1
+	// Upgrade) on the web server listener. Cleartext is insecure; do not expose
+	// it to untrusted networks.
+	UseH2C bool
+	// MaxPayloadSize bounds request bodies in bytes; larger requests are
+	// rejected with HTTP 400. Zero uses the default (10 MiB) or a value set by
+	// an embedder.
+	MaxPayloadSize int64
 }
 
 // NewRunnable returns a launcher that runs with cfg and parses no command-line
@@ -450,9 +485,9 @@ type Config struct {
 // keyword walk Parse performs; without any, Run reports that none is active.
 //
 // It exists for applications that define their own flags: passing
-// [NewLauncher] to [launcher.Launcher.Execute] hands every argument in os.Args,
-// including the application's own, to the launcher's flag set, where they are
-// rejected as unknown.
+// [NewLauncher] to [launcher.Launcher.Execute] hands it every argument the
+// caller supplies, the application's own included, for the launcher's flag
+// set to parse, where they are rejected as unknown.
 func NewRunnable(cfg Config, sublaunchers ...Sublauncher) (launcher.Runnable, error) {
 	if cfg.Port < 0 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("invalid port %d", cfg.Port)
@@ -483,7 +518,7 @@ func newWebConfigFromValues(cfg Config) *webConfig {
 		c.port = cfg.Port
 	}
 	if len(cfg.AllowOrigins) > 0 {
-		c.allowOrigins = slices.Clip(cfg.AllowOrigins)
+		c.allowOrigins = slices.Clone(cfg.AllowOrigins)
 	}
 	if cfg.WriteTimeout != 0 {
 		c.writeTimeout = cfg.WriteTimeout
