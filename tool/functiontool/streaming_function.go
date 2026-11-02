@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
@@ -148,18 +149,18 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 
 		m, ok := args.(map[string]any)
 		if !ok {
-			yield("", fmt.Errorf("unexpected args type, got: %T", args))
+			yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("unexpected args type, got: %T", args)})
 			return
 		}
 		input, err := typeutil.ConvertToWithJSONSchema[map[string]any, TArgs](m, f.inputSchema)
 		if err != nil {
-			yield("", err)
+			yield("", &toolerror.BeforeHandler{Err: err})
 			return
 		}
 
 		if confirmation := ctx.ToolConfirmation(); confirmation != nil {
 			if !confirmation.Confirmed {
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected))
+				yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRejected)})
 				return
 			}
 		} else {
@@ -174,11 +175,11 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 					fmt.Sprintf("Please approve or reject the tool call %s() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
 						f.Name()), nil)
 				if err != nil {
-					yield("", err)
+					yield("", &toolerror.BeforeHandler{Err: err})
 					return
 				}
 				ctx.Actions().SkipSummarization = true
-				yield("", fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired))
+				yield("", &toolerror.BeforeHandler{Err: fmt.Errorf("error tool %q %w", f.Name(), tool.ErrConfirmationRequired)})
 				return
 			}
 		}
