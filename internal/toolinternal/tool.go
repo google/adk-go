@@ -16,6 +16,7 @@
 package toolinternal
 
 import (
+	"fmt"
 	"iter"
 
 	"google.golang.org/genai"
@@ -60,3 +61,18 @@ type ResponseDeferrer interface {
 type SkipSummarizationResultDisplayer interface {
 	DisplayResultOnSkipSummarization() bool
 }
+
+// PanicError is a panic recovered from a tool's handler. Its message includes
+// the panic value and the stack, so callbacks and plugins can record them, but
+// the flow must not show it to the model.
+type PanicError struct {
+	msg string
+}
+
+// NewPanicError formats the message once, when the panic is recovered, so
+// every reader gets the same text even if value changes later.
+func NewPanicError(tool string, value any, stack []byte) *PanicError {
+	return &PanicError{msg: fmt.Sprintf("panic in tool %q: %v\nstack: %s", tool, value, stack)}
+}
+
+func (e *PanicError) Error() string { return e.msg }

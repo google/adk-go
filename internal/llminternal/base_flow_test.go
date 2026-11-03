@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -33,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/toolauth"
 )
 
@@ -112,6 +114,13 @@ type testCase struct {
 }
 
 func TestCallTool(t *testing.T) {
+	panicTool, err := functiontool.New(functiontool.Config{Name: "panicTool"}, func(agent.Context, struct{}) (struct{}, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var panicCallbackErr error
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
@@ -134,6 +143,18 @@ func TestCallTool(t *testing.T) {
 			},
 			args: map[string]any{"key": "value"},
 			want: map[string]any{"error": "tool error"},
+		},
+		{
+			name: "tool panic is hidden from the model but not from callbacks",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					panicCallbackErr = err
+					return nil, nil
+				},
+			},
+			want: map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
 		},
 		{
 			name: "before callback returns result",
@@ -433,6 +454,16 @@ func TestCallTool(t *testing.T) {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+	// The model gets the generic message, but callbacks still need the panic
+	// value and the stack frames to diagnose it.
+	if panicCallbackErr == nil {
+		t.Fatal("OnToolError callback was not called for the panic")
+	}
+	for _, want := range []string{"boom", "stack:", "runtime/debug.Stack"} {
+		if !strings.Contains(panicCallbackErr.Error(), want) {
+			t.Errorf("OnToolError callback error is missing %q", want)
+		}
 	}
 }
 
