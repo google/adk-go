@@ -3252,24 +3252,8 @@ func nextSplicedKeyName(s string, pos int) []int {
 		// backward from i for the start of the key name: text key bytes
 		// (letters, digits, _, -) and line splices.
 		keyStart := i
-		for keyStart > pos {
-			c := s[keyStart-1]
-			if isTextKeyByte(c) {
-				keyStart--
-				continue
-			}
-			if c == '\\' && keyStart-2 >= pos && (s[keyStart] == '\n' || s[keyStart] == '\r') {
-				// A preceding line splice: the backslash is at
-				// keyStart-1, the line break at keyStart.
-				keyStart -= 2
-				if s[keyStart+1] == '\r' && keyStart+2 < len(s) && s[keyStart+2] == '\n' {
-					// CRLF splice: the \r is at keyStart+1,
-					// \n at keyStart+2, backslash at keyStart.
-					// keyStart already points past the backslash.
-				}
-				continue
-			}
-			break
+		for keyStart > pos && isTextKeyByte(s[keyStart-1]) {
+			keyStart--
 		}
 		// Scan forward from i+spliceLen for the end of the key name: text
 		// key bytes and more line splices.
@@ -3306,14 +3290,16 @@ func nextSplicedKeyName(s string, pos int) []int {
 			// Check for a value start after the delimiter.
 			afterDelim := skipDelimSpace(s, d+1)
 			if hasTextValueStart(s[afterDelim:]) {
-				valEnd := afterDelim
+				var valEnd int
 				if q := findQuotedValue(s[afterDelim:]); q != "" {
 					valEnd = afterDelim + len(q)
 				} else {
 					valEnd = bareValueEnd(s, afterDelim)
 				}
-				return []int{keyStart, valEnd, keyStart, keyEnd,
-					quoteStart, quoteEnd, d, d + 1, afterDelim, valEnd}
+				return []int{
+					keyStart, valEnd, keyStart, keyEnd,
+					quoteStart, quoteEnd, d, d + 1, afterDelim, valEnd,
+				}
 			}
 		}
 		// Also check for a quote right after the key before the delimiter.
@@ -3323,14 +3309,16 @@ func nextSplicedKeyName(s string, pos int) []int {
 			if d2 < len(s) && (s[d2] == '=' || s[d2] == ':') {
 				afterDelim := skipDelimSpace(s, d2+1)
 				if hasTextValueStart(s[afterDelim:]) {
-					valEnd := afterDelim
+					var valEnd int
 					if q := findQuotedValue(s[afterDelim:]); q != "" {
 						valEnd = afterDelim + len(q)
 					} else {
 						valEnd = bareValueEnd(s, afterDelim)
 					}
-					return []int{keyStart, valEnd, keyStart, keyEnd,
-						quoteStart, quoteEnd, d2, d2 + 1, afterDelim, valEnd}
+					return []int{
+						keyStart, valEnd, keyStart, keyEnd,
+						quoteStart, quoteEnd, d2, d2 + 1, afterDelim, valEnd,
+					}
 				}
 			}
 		}
@@ -4477,19 +4465,15 @@ func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds
 		}
 		k += sz
 	}
+	if k >= len(s) || (s[k] != ' ' && s[k] != '\t') {
+		return end
+	}
 	// Scan forward on the same line for a later closing quote of the same kind.
 	// Limit the scan to at most 256 bytes after the apostrophe to avoid O(N²)
 	// on long lines with many quotes.
-	lineEnd := strings.IndexAny(s[end:], "\r\n")
-	if lineEnd < 0 {
-		lineEnd = len(s) - end
-	}
-	lineEnd += end
-	if lineEnd > k+256 {
-		lineEnd = k + 256
-	}
-	if k >= lineEnd || (s[k] != ' ' && s[k] != '\t') {
-		return end
+	lineEnd := min(len(s), k+256)
+	if nl := strings.IndexAny(s[end:lineEnd], "\r\n"); nl >= 0 {
+		lineEnd = end + nl
 	}
 	// Look for a closing quote q on the rest of the line after k.
 	rest := s[k:lineEnd]

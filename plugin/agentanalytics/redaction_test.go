@@ -5436,16 +5436,26 @@ func TestRound24ReviewRegressions(t *testing.T) {
 			name string
 			in   string
 		}{
-			{"redacted bearer + quoted password key",
-				`x='Bearer [REDACTED]'"password": ZQXSEKRETN}`},
-			{"bearer abc + quoted password key",
-				`x='Bearer abc'"password": ZQXSEKRETN}`},
-			{"bearer abc + quoted label key",
-				`x='Bearer abc'"label": ZQXSEKRETN}`},
-			{"redacted bearer + quoted token key",
-				`x='Bearer [REDACTED]'"token": ZQXSEKRETN}`},
-			{"redacted bearer + single-quoted password key",
-				`x="Bearer [REDACTED]"'password': ZQXSEKRETN}`},
+			{
+				"redacted bearer + quoted password key",
+				`x='Bearer [REDACTED]'"password": ZQXSEKRETN}`,
+			},
+			{
+				"bearer abc + quoted password key",
+				`x='Bearer abc'"password": ZQXSEKRETN}`,
+			},
+			{
+				"bearer abc + quoted label key",
+				`x='Bearer abc'"label": ZQXSEKRETN}`,
+			},
+			{
+				"redacted bearer + quoted token key",
+				`x='Bearer [REDACTED]'"token": ZQXSEKRETN}`,
+			},
+			{
+				"redacted bearer + single-quoted password key",
+				`x="Bearer [REDACTED]"'password': ZQXSEKRETN}`,
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				checkNoLeak(t, tc.in, "ZQXSEKRETN")
@@ -5458,10 +5468,14 @@ func TestRound24ReviewRegressions(t *testing.T) {
 			name string
 			in   string
 		}{
-			{"note prefix before DB_PASSWORD",
-				"note:DB_PASSWORD=users' synthcanary's changed"},
-			{"cmd prefix before db_password",
-				"cmd:db_password=users' synthcanary's changed"},
+			{
+				"note prefix before DB_PASSWORD",
+				"note:DB_PASSWORD=users' synthcanary's changed",
+			},
+			{
+				"cmd prefix before db_password",
+				"cmd:db_password=users' synthcanary's changed",
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				checkNoLeak(t, tc.in, secret)
@@ -5474,14 +5488,22 @@ func TestRound24ReviewRegressions(t *testing.T) {
 			name string
 			in   string
 		}{
-			{"password equals it's SECRET",
-				"password='it's " + secret + "' user=x"},
-			{"password equals Bob's SECRET",
-				"password='Bob's " + secret + "' user=x"},
-			{"password equals I'm SECRET",
-				"password='I'm " + secret + "' user=x"},
-			{"password equals O'Brien SECRET",
-				"password='O'Brien " + secret + "' user=x"},
+			{
+				"password equals it's SECRET",
+				"password='it's " + secret + "' user=x",
+			},
+			{
+				"password equals Bob's SECRET",
+				"password='Bob's " + secret + "' user=x",
+			},
+			{
+				"password equals I'm SECRET",
+				"password='I'm " + secret + "' user=x",
+			},
+			{
+				"password equals O'Brien SECRET",
+				"password='O'Brien " + secret + "' user=x",
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				checkNoLeak(t, tc.in, secret)
@@ -5509,18 +5531,30 @@ func TestRound24ReviewRegressions(t *testing.T) {
 			name string
 			in   string
 		}{
-			{"DB_PASSWORD equals pre LF SECRET value continuation",
-				"DB_PASSWORD=pre\\\n" + secret},
-			{"DB_PASSWORD equals pre CRLF SECRET value continuation",
-				"DB_PASSWORD=pre\\\r\n" + secret},
-			{"DB_PASS LF WORD equals SECRET (spliced key name)",
-				"DB_PASS\\\nWORD=" + secret},
-			{"DB_PASS CRLF WORD equals SECRET (spliced key name)",
-				"DB_PASS\\\r\nWORD=" + secret},
-			{"DB_PASSWORD LF equals SECRET (spliced before delimiter)",
-				"DB_PASSWORD\\\n=" + secret},
-			{"DB_PASSWORD CRLF equals SECRET (spliced before delimiter)",
-				"DB_PASSWORD\\\r\n=" + secret},
+			{
+				"DB_PASSWORD equals pre LF SECRET value continuation",
+				"DB_PASSWORD=pre\\\n" + secret,
+			},
+			{
+				"DB_PASSWORD equals pre CRLF SECRET value continuation",
+				"DB_PASSWORD=pre\\\r\n" + secret,
+			},
+			{
+				"DB_PASS LF WORD equals SECRET (spliced key name)",
+				"DB_PASS\\\nWORD=" + secret,
+			},
+			{
+				"DB_PASS CRLF WORD equals SECRET (spliced key name)",
+				"DB_PASS\\\r\nWORD=" + secret,
+			},
+			{
+				"DB_PASSWORD LF equals SECRET (spliced before delimiter)",
+				"DB_PASSWORD\\\n=" + secret,
+			},
+			{
+				"DB_PASSWORD CRLF equals SECRET (spliced before delimiter)",
+				"DB_PASSWORD\\\r\n=" + secret,
+			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				checkNoLeak(t, tc.in, secret)
