@@ -28,4 +28,6 @@
 //     typed questions with probability distributions
 //   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
 //     by TypeSafe's Jev decision models
+//   - [google.golang.org/adk/v2/exp/openapitoolset]: tools for the operations
+//     of an OpenAPI spec
 package exp
