@@ -2921,7 +2921,8 @@ func (f *keyValFinder) find(rest string) []int {
 	// opening quote, also when a key that they read starts at its first byte,
 	// as temp:a does in "temp:a=b c": "x", where they would read "b" as the
 	// value and leave "x" in place.
-	if f.qNext != nil && (loc == nil || f.qNext[0]-pos <= start) {
+	if f.qNext != nil && (loc == nil || f.qNext[0]-pos <= start) &&
+		(f.splicedNext == nil || f.qNext[0] <= f.splicedNext[0]) {
 		qLoc := make([]int, len(f.qNext))
 		for i, v := range f.qNext {
 			qLoc[i] = -1
@@ -3297,7 +3298,12 @@ func nextSplicedKeyName(s string, pos int) []int {
 			// Check for a value start after the delimiter.
 			afterDelim := skipDelimSpace(s, d+1)
 			if hasTextValueStart(s[afterDelim:]) {
-				valEnd := bareValueEnd(s, afterDelim)
+				valEnd := afterDelim
+				if q := findQuotedValue(s[afterDelim:]); q != "" {
+					valEnd = afterDelim + len(q)
+				} else {
+					valEnd = bareValueEnd(s, afterDelim)
+				}
 				return []int{keyStart, valEnd, keyStart, keyEnd,
 					quoteStart, quoteEnd, d, d + 1, afterDelim, valEnd}
 			}
@@ -3309,7 +3315,12 @@ func nextSplicedKeyName(s string, pos int) []int {
 			if d2 < len(s) && (s[d2] == '=' || s[d2] == ':') {
 				afterDelim := skipDelimSpace(s, d2+1)
 				if hasTextValueStart(s[afterDelim:]) {
-					valEnd := bareValueEnd(s, afterDelim)
+					valEnd := afterDelim
+					if q := findQuotedValue(s[afterDelim:]); q != "" {
+						valEnd = afterDelim + len(q)
+					} else {
+						valEnd = bareValueEnd(s, afterDelim)
+					}
 					return []int{keyStart, valEnd, keyStart, keyEnd,
 						quoteStart, quoteEnd, d2, d2 + 1, afterDelim, valEnd}
 				}
@@ -5943,27 +5954,15 @@ func skipHorizDelimSpace(s string, i int) int {
 // starts with a non-whitespace, non-delimiter byte, as textValueStartRe does.
 // It reads at most a few bytes rather than compiling a regex match.
 func hasTextValueStart(s string) bool {
-	i := 0
-	for i < len(s) {
-		c := s[i]
-		if c < utf8.RuneSelf {
-			if c > ' ' && c != '\x7f' && c != ',' && c != ';' && c != '&' {
-				return true
-			}
-			if c == '\n' || c == '\r' {
-				return false
-			}
-			i++
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\t', '\n', '\f', '\r', ' ':
 			continue
-		}
-		r, size := utf8.DecodeRuneInString(s[i:])
-		if !unicode.IsSpace(r) && r != ',' && r != ';' && r != '&' {
+		case ',', ';', '&':
+			return false
+		default:
 			return true
 		}
-		if r == '\u0085' || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
-			return false
-		}
-		i += size
 	}
 	return false
 }
@@ -5991,7 +5990,7 @@ func findQuotedValue(s string) string {
 			return s[:j+1]
 		}
 	}
-	return s
+	return ""
 }
 
 // holdsValue reports whether v contains a rune other than delimiter whitespace
@@ -7382,6 +7381,9 @@ func startsContraction(s string, i, quoteLen int) bool {
 // quote that closes a part is never read as an apostrophe.
 func closingQuoteJoins(s string, i int, q string, compound bool) bool {
 	quoteLen := len(openingQuote(s, i))
+	if len(q) < 2*quoteLen {
+		return false
+	}
 	inner := q[quoteLen : len(q)-quoteLen]
 	closing := i + len(q) - quoteLen
 	if inner == "" || startsContraction(s, closing, quoteLen) && (quoteLen != 1 || !compound && closingQuoteIsApostrophe(s, i, closing)) {
@@ -7489,8 +7491,8 @@ func inShellAssignment(s string, i int) bool {
 // a fixed-size ring under a mutex takes its place.
 var (
 	shellScannerMu    sync.Mutex
-	shellScannerCache  [8]*shellAssignScanner
-	shellScannerHand   int
+	shellScannerCache [8]*shellAssignScanner
+	shellScannerHand  int
 )
 
 // acquireShellScanner gets a scanner for s from the ring, reset unless it
