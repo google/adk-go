@@ -1505,7 +1505,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": err.Error()}
+								result = map[string]any{"error": toolErrorMessage(streamTool.Name(), err)}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1662,7 +1662,7 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		return map[string]any{"error": toolErrorMessage(tool.Name(), err)}
 	}
 	return response
 }
@@ -1721,14 +1721,31 @@ func streamingToolErrorMessage(toolName string, err error) string {
 	if before, ok := err.(*toolerror.BeforeHandler); ok {
 		return before.Error()
 	}
-	return streamingToolInternalError(toolName)
+	return toolInternalError(toolName)
 }
 
-// streamingToolInternalError is the generic FunctionResponse error text for a
-// failed streaming tool. Panic values, handler errors and stacks stay out of
-// the model-facing payload (parity with adk-python _live_caller).
-func streamingToolInternalError(toolName string) string {
+// toolErrorMessage is the error text the model gets for a failed tool call
+// outside live mode. A recovered panic becomes the generic message, because
+// its text carries the panic value and the stack. Any other error keeps its
+// text, because a returned error is how a Go tool tells the model what went
+// wrong.
+func toolErrorMessage(toolName string, err error) string {
+	var p *toolinternal.PanicError
+	if errors.As(err, &p) {
+		return toolInternalError(toolName)
+	}
+	return err.Error()
+}
+
+// toolInternalError is the generic error text for a tool that failed in a way
+// the model must not see, as adk-python's live caller sends it.
+func toolInternalError(toolName string) string {
 	return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
+}
+
+// streamingToolInternalError is kept for existing tests; same text as toolInternalError.
+func streamingToolInternalError(toolName string) string {
+	return toolInternalError(toolName)
 }
 
 func mergeParallelFunctionResponseEvents(events []*session.Event) (*session.Event, error) {
