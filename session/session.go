@@ -307,7 +307,7 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 	// than restating the struct keeps fields added upstream from being
 	// silently dropped here.
 	type alias EventActions
-	return json.Marshal(struct {
+	b, err := json.Marshal(struct {
 		alias
 		StateDelta    *map[string]any   `json:"stateDelta,omitempty"`
 		ArtifactDelta *map[string]int64 `json:"artifactDelta,omitempty"`
@@ -316,6 +316,20 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 		StateDelta:    nilOrRef(a.StateDelta),
 		ArtifactDelta: nilOrRef(a.ArtifactDelta),
 	})
+	if err != nil || len(a.RequestedAuthConfigs) == 0 {
+		return b, err
+	}
+	// Config.MarshalJSON accepts an incomplete struct literal, such as a zero
+	// Scheme, that Config.UnmarshalJSON refuses. Checking the round trip here
+	// fails the write before a backend stores an event that makes every later
+	// read of the session fail.
+	var check struct {
+		RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs"`
+	}
+	if err := json.Unmarshal(b, &check); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // nilOrRef returns nil for a nil map and a pointer to m otherwise, turning

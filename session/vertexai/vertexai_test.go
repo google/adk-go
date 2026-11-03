@@ -1010,19 +1010,60 @@ func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotDecode(t *testing.T)
 }
 
 func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode(t *testing.T) {
-	// A NaN has no JSON form. Writing the event without the request would lose
-	// it without a trace, so the append fails.
-	ctx := t.Context()
-	client := newFakeVertexAiClient(t, &fakeVertexAiSessionService{})
-	config := testAuthConfig()
-	config.Extra = map[string]any{"ratio": math.NaN()}
+	// Writing an event whose request cannot be encoded or decoded back would
+	// either lose the request or make every later read of the session fail, so
+	// the append fails.
+	withNaN := testAuthConfig()
+	withNaN.Extra = map[string]any{"ratio": math.NaN()}
 
-	event := session.NewEvent(ctx, "invocation-1")
-	event.Author = "agent"
-	event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": config}
+	for _, tc := range []struct {
+		name   string
+		config toolauth.Config
+	}{
+		{
+			name:   "NaN in extra",
+			config: withNaN,
+		},
+		{
+			name:   "zero scheme",
+			config: toolauth.Config{CredentialKey: "k"},
+		},
+		{
+			name: "oauth2 flow without URLs",
+			config: toolauth.Config{
+				AuthScheme: toolauth.Scheme{
+					Type:  toolauth.SchemeTypeOAuth2,
+					Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{}},
+				},
+			},
+		},
+		{
+			name: "credential without authType",
+			config: toolauth.Config{
+				AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+				RawAuthCredential: &toolauth.Credential{},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := newFakeVertexAiClient(t, &fakeVertexAiSessionService{})
 
-	if err := client.appendEvent(ctx, "test-app", "session-1", event); err == nil {
-		t.Error("appendEvent() succeeded, want an error for a requested auth config that does not encode")
+			event := session.NewEvent(ctx, "invocation-1")
+			event.Author = "agent"
+			event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": tc.config}
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err == nil {
+				t.Errorf("appendEvent() succeeded, want an error")
+			}
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() after rejected appendEvent failed: %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("listSessionEvents() returned %d events, want 0", len(got))
+			}
+		})
 	}
 }
 

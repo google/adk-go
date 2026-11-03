@@ -534,6 +534,9 @@ func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventAc
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
 		}
+		if _, err := aiplatformToSessionEventActions(&aiplatformpb.EventActions{RequestedAuthConfigs: configs}); err != nil {
+			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
+		}
 		actions.RequestedAuthConfigs = configs
 	}
 	return actions, nil
