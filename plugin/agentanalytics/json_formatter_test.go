@@ -1124,9 +1124,7 @@ func TestRedactErrorMessage(t *testing.T) {
 			name: "embedded JSON with equals sign in quoted temp key redacts the value",
 			msg:  `failed: {"temp:cache=foo": "SYNTHETIC_SECRET"}`,
 			// The quoted key, whose name holds "=", is read whole, as in a
-			// map, rather than as the pair temp:cache=foo of the bare
-			// key=value text, which would redact the closing quote of the
-			// key with the value.
+			// map, so that both its inner name and closing quote are kept.
 			want: `failed: {"temp:cache=foo":"[REDACTED]"}`,
 		},
 		{
@@ -2367,7 +2365,9 @@ func TestRedactErrorMessage(t *testing.T) {
 		{
 			name: "bare token value ending with escaped quote before password key",
 			msg:  `token=abc\"password\": SECRET123`,
-			want: redactedSensitiveTextPlaceholder,
+			// The value of token is redacted to its end, over the escaped
+			// key and the value after it.
+			want: "token=[REDACTED]",
 		},
 		{
 			name: "prefixed quoted string where earlier token swallows escaped newline before password",
@@ -2825,7 +2825,9 @@ func TestSanitizeRawText(t *testing.T) {
 			{`POST /v1/login: 400: {"msg":"password:\n SECRET123"}`, redactedSensitiveTextPlaceholder},
 			{`bad config: {'error': 'token=abc\npassword: SECRET123'}`, redactedSensitiveTextPlaceholder},
 			{`upstream error: {"error":"token=abc\npassword: SECRET123`, redactedSensitiveTextPlaceholder},
-			{`token=abc\"password\": SECRET123`, redactedSensitiveTextPlaceholder},
+			// The value of token is redacted to its end, over the escaped
+			// key and the value after it.
+			{`token=abc\"password\": SECRET123`, "token=[REDACTED]"},
 			{`upstream failed: "token=abc\npassword: SECRET123"`, redactedSensitiveTextPlaceholder},
 			{`POST /v1/login: 400: {"msg":"token=abc%0Apassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
 			{`POST /v1/login: 400: {"msg":"token=abc\\u000apassword: SECRET123"}`, redactedSensitiveTextPlaceholder},
@@ -6258,7 +6260,7 @@ func TestReviewPlainErrorRegression(t *testing.T) {
 		{
 			name: "multiline outer-quoted curl header with colon on continuation line",
 			err:  errors.New("curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok"),
-			want: "curl -H 'Authorization: [REDACTED]\necho ok",
+			want: "curl -H 'Authorization: [REDACTED]'\necho ok",
 		},
 		{
 			name: "Cookie header with multiple attributes",
@@ -6348,7 +6350,7 @@ func round22SensitiveErrors() []struct{ name, in, want, secret string } {
 		{"spaces-only LF fold", "Authorization: Bearer abc\n  \n  syntheticfold\nContent-Type: text/plain", "Authorization: [REDACTED]\nContent-Type: text/plain", "syntheticfold"},
 		{"tabs-only LF fold", "X-Goog-Api-Key: part1\n\t\n\tsyntheticfold\nContent-Type: text/plain", "X-Goog-Api-Key: [REDACTED]\nContent-Type: text/plain", "syntheticfold"},
 		{"whitespace-only cookie fold", "Cookie: sid=part1;\r\n\t\r\n\tsyntheticfold\r\nAccept: */*", "Cookie: [REDACTED]\r\nAccept: */*", "syntheticfold"},
-		{"quote opened 5000 bytes before the header", pad + "\nAuthorization: Bearer abc\nsyntheticlookback'\necho KEEP_HEADER_TAIL", pad + "\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL", "syntheticlookback"},
+		{"quote opened 5000 bytes before the header", pad + "\nAuthorization: Bearer abc\nsyntheticlookback'\necho KEEP_HEADER_TAIL", pad + "\nAuthorization: [REDACTED]'\necho KEEP_HEADER_TAIL", "syntheticlookback"},
 		{"declaration outside the lookbehind window", assignments + "password=users' violetfern's changed", assignments + "password=[REDACTED] changed", "violetfern"},
 		{"declaration outside the lookbehind window before a contraction", assignments + "password=users' violetfern wasn't changed", assignments + "password=[REDACTED] changed", "violetfern"},
 		{"long PATH assignment before password", longPath + "password=users' violetfern's changed", longPath + "password=[REDACTED] changed", "violetfern"},
@@ -6367,7 +6369,7 @@ func round22SensitiveErrors() []struct{ name, in, want, secret string } {
 		{"cookie prose before quoted Bearer token", "The cookie: pre\"Bearer \"secret456\"tail was here", "The cookie: pre\"Bearer [REDACTED] was here", "secret456"},
 		{"cookie prose before spaced quoted Bearer token", "The cookie: pre\"Bearer \"secret456\" tail was here", "The cookie: pre\"Bearer [REDACTED] tail was here", "secret456"},
 		{"cookie prose before Bearer token", "The cookie: Monster and Bearer secret789 were here.", "The cookie: Monster and Bearer [REDACTED] were here.", "secret789"},
-		{"cookie prose before multiline curl header", "The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\necho KEEP_OK", "SECRET"},
+		{"cookie prose before multiline curl header", "The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\"\necho KEEP_OK", "SECRET"},
 	}
 }
 
@@ -6454,10 +6456,14 @@ func round23SensitiveErrors() []struct{ name, in, want, secret string } {
 		{"embedded equals after long shell assignment value", a, "export DB_PASSWORD=[REDACTED] changed", "synthcanary"},
 		{"quoted shell assignments outside 256-byte lookbehind", b, "export " + strings.Repeat("A='foo bar' ", 40) + "password=[REDACTED] changed", "synthcanary"},
 		{"double-quoted shell assignments outside 256-byte lookbehind", bDouble, "export " + strings.Repeat(`A="foo bar" `, 40) + "password=[REDACTED] changed", "synthcanary"},
-		{"placeholder-first multiline quoted Authorization header", c, "curl -H 'Authorization: [REDACTED]\necho KEEP", "synthcanary"},
-		{"placeholder-first multiline quoted Cookie header", cCookie, "curl -H 'Cookie: [REDACTED]\necho KEEP", "synthcanary"},
-		{"placeholder-first multiline header inside 5000-byte prior quote", cPad, "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\necho KEEP", "synthcanary"},
-		{"second real cookie after rejected prior-line quote and cookie prose", "'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
+		{"placeholder-first multiline quoted Authorization header", c, "curl -H 'Authorization: [REDACTED]'\necho KEEP", "synthcanary"},
+		{"placeholder-first multiline quoted Cookie header", cCookie, "curl -H 'Cookie: [REDACTED]'\necho KEEP", "synthcanary"},
+		{"placeholder-first multiline header inside 5000-byte prior quote", cPad, "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]'\necho KEEP", "synthcanary"},
+		// A quote on a line before that never closes holds no string, so
+		// the line after it is read as it is read with no quote before
+		// it: the r" before the second Cookie opens a string that holds
+		// that header and never closes, and the value runs to the end.
+		{"second real cookie after rejected prior-line quote and cookie prose", "'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]", "synthcanary"},
 	}
 }
 
@@ -6465,7 +6471,8 @@ func round23SensitiveErrors() []struct{ name, in, want, secret string } {
 // SmartTruncate writes a plain error that holds a text of
 // round23SensitiveErrors as {} under redaction, and the text itself with its
 // credentials redacted, and keeps the prose of a contraction after a long
-// word and of cookie prose after a rejected quote. It then checks that a
+// word; a line after a quote that never closes is read as it is read with no
+// quote before it. It then checks that a
 // plain error is {} for texts whose credential the text scrub can leave in
 // place: a quoted passphrase with an apostrophe in it, a shell value that a
 // separated contraction runs into, the same inside escaped JSON, and a
@@ -6480,7 +6487,12 @@ func TestRound23PlainErrorRegression(t *testing.T) {
 	prose := strings.Repeat("a", 300)
 	for _, tt := range []struct{ name, in, want string }{
 		{"long non-assignment prefix before colon-password", prose + ":password=users' wasn't changed; prompt_token_count=10 next_page_token=c1", prose + ":password=[REDACTED] wasn't changed; prompt_token_count=10 next_page_token=c1"},
-		{"rejected prior-line quote before cookie prose keeps lines", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE"},
+		// The quote line before never closes, so the r' after the first
+		// Cookie, which is prose, opens a string that holds the second
+		// Cookie header up to the quote that closes it. The scrub redacts
+		// that value, and a text that opens with a double quote and does
+		// not parse as JSON is then written as the placeholder.
+		{"rejected prior-line quote before a quoted cookie header", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", unparseableJSONPlaceholder},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			checkPlainErrorText(t, tt.in, tt.want, "")

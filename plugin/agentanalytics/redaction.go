@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,7 +28,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -142,8 +142,13 @@ const delimSpaceClass = unicodeSpaceClass + `[:cntrl:]`
 
 var (
 	uriTokenRe         = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
-	authHeaderRe       = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*([^\r\n]*)`)
-	authHeaderPrefixRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*`)
+	authHeaderRe       = regexp.MustCompile(`(?im)\b` + authHeaderNamePattern + `([^\r\n]*)`)
+	authHeaderPrefixRe = regexp.MustCompile(`(?im)\b` + authHeaderNamePattern)
+	// authHeaderAtRe and authHeaderPrefixAtRe match authHeaderRe and
+	// authHeaderPrefixRe at the start of a text, without the word boundary,
+	// which findAtKeys reads in the text around the match.
+	authHeaderAtRe       = regexp.MustCompile(`(?i)^` + authHeaderNamePattern + `([^\r\n]*)`)
+	authHeaderPrefixAtRe = regexp.MustCompile(`(?i)^` + authHeaderNamePattern)
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
@@ -154,8 +159,12 @@ var (
 	bearerTokenAtRe = regexp.MustCompile(`^(?:` + bearerTokenRe.String() + `)`)
 	// basicTokenRe matches a candidate basic credential, which
 	// redactBasicCredential redacts only if it is valid base64.
-	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)` + unicodeSpaceRun + `([A-Za-z0-9+/]+={0,2})`)
-	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"([\s\p{Z}]*(?:` + sensitiveKeyRegex() + `)[\s\p{Z}]*)"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
+	basicTokenRe = regexp.MustCompile(`(?i)\b(basic)` + unicodeSpaceRun + `([A-Za-z0-9+/]+={0,2})`)
+	// basicTokenAtRe matches basicTokenRe at the start of a slice only.
+	basicTokenAtRe    = regexp.MustCompile(`^(?:` + basicTokenRe.String() + `)`)
+	jsonKeyValTokenRe = regexp.MustCompile(`(?i)` + jsonKeyValTokenPattern())
+	// jsonKeyValTokenAtRe matches jsonKeyValTokenRe at the start of a text.
+	jsonKeyValTokenAtRe = regexp.MustCompile(`(?i)^` + jsonKeyValTokenPattern())
 	// textValueAtRe matches delimiter whitespace and the value part of
 	// textKeyValTokenAtRe at the start of a slice, for quoted keys whose name and
 	// delimiter quotedKeyScanAt has already read.
@@ -179,7 +188,21 @@ var (
 	// keyValFinder reads back itself. Of the dotted OAuth names, it finds
 	// those of two words only, such as oauth2Config.code; findCamelKeyName
 	// finds the others.
-	textKeyNameRe = regexp.MustCompile(`(?i)(?:\b|_)(` + bareTextKeyNameRegex() + `)((?:\\?["'])?)[` + delimSpaceClass + `]*([=:])`)
+	textKeyNameRe = regexp.MustCompile(`(?i)(?:\b|_)` + textKeyNamePattern())
+	// textKeyNameAtBoundaryRe and textKeyNameAtUnderscoreRe match
+	// textKeyNameRe at the start of a text, after the word boundary that
+	// findTextKeyName reads in the text around the match, or from the "_"
+	// that the match opens with.
+	textKeyNameAtBoundaryRe   = regexp.MustCompile(`(?i)^` + textKeyNamePattern())
+	textKeyNameAtUnderscoreRe = regexp.MustCompile(`(?i)^_` + textKeyNamePattern())
+	// textKeyNameNoOAuthAtBoundaryRe and textKeyNameNoOAuthAtUnderscoreRe are
+	// those two without the dotted OAuth names, for the starts at which
+	// findTextKeyName knows that none matches, and oauthTailAtRe matches
+	// what has to follow the run of words that such a name starts with: its
+	// last word, the quote that may follow it and the delimiter.
+	textKeyNameNoOAuthAtBoundaryRe   = regexp.MustCompile(`(?i)^` + textKeyNamePatternOf(bareSensitiveKeyRegex()))
+	textKeyNameNoOAuthAtUnderscoreRe = regexp.MustCompile(`(?i)^_` + textKeyNamePatternOf(bareSensitiveKeyRegex()))
+	oauthTailAtRe                    = regexp.MustCompile(`(?i)^[.]code((?:\\?["'])?)[` + delimSpaceClass + `]*([=:])`)
 	// textKeyNameCamelAtRe matches the key of a pair at the start of the
 	// text, like textKeyNameRe, but starts at the credential name without a
 	// word boundary before it (see findCamelKeyName), and reads a dotted
@@ -319,6 +342,31 @@ func hasQuotedSensitiveKey(s string) bool {
 		i = max(nextPos, i+len(quote))
 	}
 	return false
+}
+
+// authHeaderNamePattern is the pattern of the name of an Authorization,
+// API-key, Cookie or Set-Cookie header, which is submatch 1, and of the colon
+// after it.
+const authHeaderNamePattern = `((?:proxy[-_])?authorization|(?:x[-_](?:goog[-_])?)?api[-_]key(?:[-_](?:secret|string))?|(?:set[-_])?cookie)[ \t]*:[ \t]*`
+
+// jsonKeyValTokenPattern returns the pattern of jsonKeyValTokenRe: a quoted
+// sensitive key, which may be padded with spaces inside its quotes, and the
+// value after its colon.
+func jsonKeyValTokenPattern() string {
+	return `"([\s\p{Z}]*(?:` + sensitiveKeyRegex() + `)[\s\p{Z}]*)"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`
+}
+
+// textKeyNamePattern returns the pattern of textKeyNameRe after the word
+// boundary or the "_" that a match opens with: a credential name, an
+// optional quote, which may be escaped, and a delimiter.
+func textKeyNamePattern() string {
+	return textKeyNamePatternOf(bareTextKeyNameRegex())
+}
+
+// textKeyNamePatternOf returns textKeyNamePattern for the names of bare in
+// place of those of bareTextKeyNameRegex.
+func textKeyNamePatternOf(bare string) string {
+	return `(` + bare + `)((?:\\?["'])?)[` + delimSpaceClass + `]*([=:])`
 }
 
 // sensitiveValueRegex returns the pattern for the value that follows a
@@ -491,8 +539,12 @@ func fixedSensitiveKeyRegex() string {
 	return `(?:` + strings.Join(top, "|") + `)[_.-]*`
 }
 
+// normalizeKey returns k in lower case, without the whitespace around it,
+// with "_" for "-", and without the shell line splices that break it, as the
+// one of DB_PASS\<LF>WORD does, which a shell removes (see
+// stripShellLineSplices).
 func normalizeKey(k string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimFunc(k, isDelimSpace)), "-", "_")
+	return strings.ReplaceAll(strings.ToLower(strings.TrimFunc(stripShellLineSplices(k), isDelimSpace)), "-", "_")
 }
 
 // removeKeySeparators returns k without its "_", "-" and "." separators.
@@ -514,9 +566,11 @@ func removeKeySeparators(k string) string {
 // credential name, as an environment variable or a prefixed field does, such
 // as DB_PASSWORD, GITHUB_TOKEN, OPENAI_API_KEY, dbPassword,
 // x-amz-security-token or stripe.api.key, is sensitive too (see
-// isCompoundSensitiveKey).
+// isCompoundSensitiveKey). A key is read without the shell line splices that
+// break it (see stripShellLineSplices), as a shell joins DB_PASS\<LF>WORD
+// into DB_PASSWORD.
 func isSensitiveKey(k string) bool {
-	name, exact := exactSensitiveKey(k)
+	name, exact := exactSensitiveKey(stripShellLineSplices(k))
 	return exact || isCompoundSensitiveKey(name)
 }
 
@@ -754,11 +808,27 @@ var bareTextKeyRe = regexp.MustCompile(`(?i)^(?:` + bareSensitiveKeyRegex() + `)
 // textKeyNameRegex).
 var textKeyNameWholeRe = regexp.MustCompile(`(?i)^(?:` + textKeyNameRegex() + `)$`)
 
+// isBareTextKey reports whether bareTextKeyRe matches key. Each key that it
+// matches, a "temp:" key or a credential name, starts with the letters of a
+// name of textKeyNames, so it is matched only where keyNameSet.mayStartAt
+// finds them.
+func isBareTextKey(key string) bool {
+	return textKeyNames.mayStartAt(key, 0) && bareTextKeyRe.MatchString(key)
+}
+
+// isWholeTextKeyName reports whether textKeyNameWholeRe matches name. It is
+// matched only where mayStartTextKeyName finds that a key name may start in
+// the compound prefix that name starts with, as it finds in each name that
+// textKeyNameWholeRe matches.
+func isWholeTextKeyName(name string) bool {
+	return mayStartTextKeyName(name) && textKeyNameWholeRe.MatchString(name)
+}
+
 // textKeyAllowed reports whether a key that keyValFinder found is to be
 // redacted: a plain sensitive key name always is, and a compound name is
 // if isSensitiveKey accepts it or a "-" in it precedes a plain name.
 func textKeyAllowed(key string) bool {
-	if bareTextKeyRe.MatchString(key) || isSensitiveKey(key) {
+	if isBareTextKey(key) || isSensitiveKey(key) {
 		return true
 	}
 	if isPageTokenName(key) {
@@ -768,7 +838,7 @@ func textKeyAllowed(key string) bool {
 	// A sensitive name after a "-" has always been matched on its own, as in
 	// foo-signature=..., whose "-" is a word boundary.
 	for i := strings.IndexByte(key, '-'); i >= 0; {
-		if bareTextKeyRe.MatchString(key[i+1:]) {
+		if isBareTextKey(key[i+1:]) {
 			return true
 		}
 		next := strings.IndexByte(key[i+1:], '-')
@@ -1342,6 +1412,16 @@ func redactJSONTextWithBudget(s string, depth int, budget *nodeBudget) (sanitize
 	}
 
 	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
+		// A string leaf of a JSON value that a shell line splice breaks, as
+		// the one of {"note": "DB_PASS\\\nWORD=x"} is, is scrubbed on its
+		// own: a scrub of the encoded JSON text around it reads the splice
+		// as the escapes \\ and \n rather than as a backslash and a line
+		// break, and so finds no key there.
+		if depth > 0 && (strings.Contains(s, "\\\n") || strings.Contains(s, "\\\r")) {
+			if scrubbed := scrubErrorText(s); scrubbed != s {
+				return scrubbed, true, false
+			}
+		}
 		return s, false, false
 	}
 	if depth >= maxSanitizeDepth {
@@ -1715,8 +1795,16 @@ func unescapeCredentialStep(s string) string {
 // unescapeBackslashControls), so passes are needed only where percent, \x or
 // \u escapes and backslash escapes nest inside each other; up to
 // 2*maxCanonicalUnescapePasses are run, failing closed if escapes still change
-// past that depth.
+// past that depth. When raw and scrubbed are each one JSON document, the
+// keys and strings of raw and scrubbed are decoded exactly and checked in
+// pairs instead (see jsonExposesCredential).
 func hasBackslashEscapedCredential(raw, scrubbed string) bool {
+	if !strings.ContainsAny(raw, `\%`) {
+		return false
+	}
+	if exposes, ok := jsonExposesCredential(raw, scrubbed); ok {
+		return exposes
+	}
 	var parts []string
 	curRaw, curScrubbed := raw, scrubbed
 	for range 2 * maxCanonicalUnescapePasses {
@@ -1752,6 +1840,128 @@ func hasBackslashEscapedCredential(raw, scrubbed string) bool {
 		curRaw, curScrubbed = nextRaw, nextScrubbed
 	}
 	return unescapeCredentialStep(curRaw) != curRaw
+}
+
+// jsonExposesCredential reports, when raw and scrubbed are each one JSON
+// document (an object, an array or a string) of the same shape, whether
+// scrubbed, decoded exactly, still holds a credential: a value under a
+// sensitive key, or JSON text in a string that holds one (see
+// redactJSONValue), or a key or a string that exposes a credential of the key
+// or the string at the same place in raw (see jsonStringExposes). ok is
+// false, and the caller unescapes the whole text instead, when they are not
+// such documents or do not decode within the limits that redactJSONValue
+// reads JSON with. Unescaping the whole of a JSON document would read the
+// escapes of one string as bytes of the text around it: the \n of
+// {"note":"The cookie: 2.5 ounces remained.\nKEEP"} becomes a line break that
+// leaves the quote of the string open across it, and a scrub of that text
+// then reads the prose in the string as a Cookie header's value.
+func jsonExposesCredential(raw, scrubbed string) (exposes, ok bool) {
+	raw, scrubbed = trimBOMAndSpace(raw), trimBOMAndSpace(scrubbed)
+	if len(raw) > maxInspectableJSONTextBytes || !startsJSONDocument(raw) || !startsJSONDocument(scrubbed) ||
+		!utf8.ValidString(raw) || !utf8.ValidString(scrubbed) {
+		return false, false
+	}
+	rawValue, ok := decodeJSONDocument(raw)
+	if !ok {
+		return false, false
+	}
+	scrubbedValue, ok := decodeJSONDocument(scrubbed)
+	if !ok {
+		return false, false
+	}
+	_, changed, lost := redactJSONValue(scrubbedValue, 1, &nodeBudget{remaining: maxSanitizeNodes})
+	if lost {
+		return false, false
+	}
+	if changed {
+		return true, true
+	}
+	return jsonValuesExpose(rawValue, scrubbedValue, 1)
+}
+
+// startsJSONDocument reports whether s, with no BOM or space around it,
+// starts a JSON object, array or string.
+func startsJSONDocument(s string) bool {
+	return s != "" && (s[0] == '{' || s[0] == '[' || s[0] == '"')
+}
+
+// decodeJSONDocument decodes s, one JSON document, as redactJSONValue reads
+// JSON: within its node budget, and with no key twice in an object.
+func decodeJSONDocument(s string) (any, bool) {
+	v, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(s), &nodeBudget{remaining: maxSanitizeNodes})
+	return v, err == nil && !exceeded && !sawDuplicateKey
+}
+
+// jsonValuesExpose reports whether scrubbed, the decoded value of a scrub of
+// the JSON text of raw, keeps a credential of raw: whether a key or a string
+// of scrubbed exposes one of the key or the string at the same place in raw
+// (see jsonStringExposes). The keys of an object are read in sorted order.
+// ok is false when raw and scrubbed differ in shape, so that their keys and
+// strings cannot be paired. Past maxSanitizeDepth it reports true.
+func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
+	if depth >= maxSanitizeDepth {
+		return true, true
+	}
+	switch r := raw.(type) {
+	case map[string]any:
+		s, isMap := scrubbed.(map[string]any)
+		if !isMap || len(s) != len(r) {
+			return false, false
+		}
+		keys := make([]string, 0, len(r))
+		for k := range r {
+			if _, found := s[k]; !found {
+				return false, false
+			}
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		for _, k := range keys {
+			if jsonStringExposes(k, k) {
+				return true, true
+			}
+			if exposes, ok := jsonValuesExpose(r[k], s[k], depth+1); exposes || !ok {
+				return exposes, ok
+			}
+		}
+		return false, true
+	case []any:
+		s, isSlice := scrubbed.([]any)
+		if !isSlice || len(s) != len(r) {
+			return false, false
+		}
+		for i := range r {
+			if exposes, ok := jsonValuesExpose(r[i], s[i], depth+1); exposes || !ok {
+				return exposes, ok
+			}
+		}
+		return false, true
+	case string:
+		s, isString := scrubbed.(string)
+		if !isString {
+			return false, false
+		}
+		return jsonStringExposes(r, s), true
+	default:
+		return false, raw == scrubbed
+	}
+}
+
+// jsonStringExposes reports whether scrubbed, a key or a string of the
+// decoded scrub of JSON text, exposes a credential of raw, the key or the
+// string at the same place in the decoded text itself. When nothing of raw
+// was redacted, it does if scrubErrorText redacts raw. Otherwise it does if
+// scrubErrorText still redacts scrubbed, or redacts a part of raw that
+// scrubbed keeps (see keptInOrder), as for a scrub of the escaped text that
+// reads secret: a\npassword: SECRET as one value and keeps SECRET.
+func jsonStringExposes(raw, scrubbed string) bool {
+	if raw == scrubbed {
+		return !isKnownSentinel(raw) && scrubErrorText(raw) != raw
+	}
+	if !isKnownSentinel(scrubbed) && scrubErrorText(scrubbed) != scrubbed {
+		return true
+	}
+	return !keptInOrder(keptLiterals(scrubbed), scrubErrorText(raw))
 }
 
 // unescapeBackslashControls decodes the standard backslash escapes in s. A
@@ -1830,27 +2040,1380 @@ func trimTrailingPunctuation(s string) string {
 // scrubTextPatterns redacts Authorization, API-key, Cookie and Set-Cookie
 // headers, bearer and basic credentials, and the values of sensitive
 // key-value pairs in s.
+//
+// Its passes read quotes, shell assignments, line splices and prose more
+// closely than the baseline pass does (see baselineCuts), so that they redact
+// more, but such a reading may also take a value to end elsewhere than the
+// baseline pass does. Whatever they read, every byte of s that the baseline
+// pass would replace with a placeholder is left out of the result: the
+// passes record which bytes of the text they write are copies of s (see
+// passRecorder), and any copy of a byte that the baseline pass cuts is
+// redacted after them (see keepBaselineCuts).
+//
+// The passes are written so that a scrub of their own result changes
+// nothing. A placeholder that keepBaselineCuts writes between bytes that they
+// kept can make them read the result differently from s, though, so when it
+// writes one the scrub is repeated on its own result, at most maxScrubRounds
+// times in all, until it changes nothing. Every round only adds redaction,
+// and a fixed number of rounds keeps the work linear.
 func scrubTextPatterns(s string) string {
-	if !mayMatchTextPatterns(s) {
-		return s
+	out, floored := scrubTextRound(s)
+	for round := 1; round < maxScrubRounds && floored; round++ {
+		prev := out
+		if out, floored = scrubTextRound(prev); out == prev {
+			break
+		}
 	}
-	s = redactAuthHeaders(s)
+	return out
+}
+
+// maxScrubRounds bounds the rounds of scrubTextPatterns.
+const maxScrubRounds = 3
+
+// scrubTextRound runs the passes of scrubTextPatterns once over s and
+// redacts what the baseline pass cuts in s. It also reports whether that
+// redacted anything that the passes kept.
+func scrubTextRound(s string) (string, bool) {
+	if !mayMatchTextPatterns(s) {
+		return s, false
+	}
+	var rec [5]passRecorder
+	out := redactAuthHeadersRecorded(s, &rec[0])
 	var bearerQuotes openQuotes
 	var bearerPairs sensitivePairSpans
-	s = replaceMatches(s, bearerTokenRe, func(s string, loc []int) (string, int) {
+	out = replaceMatchesFunc(out, findBearerToken, func(s string, loc []int) (string, int) {
 		return redactBearerToken(s, loc, &bearerQuotes, &bearerPairs)
-	})
-	s = replaceMatches(s, basicTokenRe, redactBasicCredential)
+	}, &rec[1])
+	out = replaceMatchesFunc(out, findBasicToken, redactBasicCredential, &rec[2])
 	var jsonQuotes openQuotes
-	s = replaceMatches(s, jsonKeyValTokenRe, func(s string, loc []int) (string, int) {
+	out = replaceMatchesFunc(out, findJSONKeyValToken, func(s string, loc []int) (string, int) {
 		return redactJSONKeyValue(s, loc, &jsonQuotes)
-	})
+	}, &rec[3])
 	var brackets openBrackets
 	var quotes openQuotes
-	finder := keyValFinder{whole: s}
-	return replaceMatchesFunc(s, finder.find, func(s string, loc []int) (string, int) {
+	finder := keyValFinder{whole: out}
+	out = replaceMatchesFunc(out, finder.find, func(s string, loc []int) (string, int) {
 		return redactTextKeyValue(s, loc, &brackets, &quotes)
+	}, &rec[4])
+	return keepBaselineCuts(out, len(s), rec[:], baselineCuts(s))
+}
+
+// copySpan records that the n bytes that a pass wrote at offset out of its
+// result are a copy of the n bytes at offset in of the text it read.
+type copySpan struct{ out, in, n int }
+
+// textRange is the range [start, end) of a text.
+type textRange struct{ start, end int }
+
+// passRecorder records, for a pass that copies the text it reads and replaces
+// parts of it, which bytes of its result are copies of that text (kept, in
+// order), and which ranges of that text it replaced (cut). Methods on a nil
+// *passRecorder do nothing.
+type passRecorder struct {
+	kept    []copySpan
+	cut     []textRange
+	written int // the length of the result so far
+}
+
+// reset forgets what r has recorded.
+func (r *passRecorder) reset() {
+	if r != nil {
+		*r = passRecorder{kept: r.kept[:0], cut: r.cut[:0]}
+	}
+}
+
+// copied records that the pass wrote a copy of the n bytes at offset at of
+// the text it read.
+func (r *passRecorder) copied(at, n int) {
+	if r == nil || n <= 0 {
+		return
+	}
+	if k := len(r.kept) - 1; k >= 0 && r.kept[k].out+r.kept[k].n == r.written && r.kept[k].in+r.kept[k].n == at {
+		r.kept[k].n += n
+	} else {
+		r.kept = append(r.kept, copySpan{r.written, at, n})
+	}
+	r.written += n
+}
+
+// replaced records that the pass wrote repl in place of in[start:end]. The
+// bytes that repl shares with in[start:end] at its start and at its end (see
+// sharedEnds) are copies; the bytes of in[start:end] between them are cut.
+func (r *passRecorder) replaced(in string, start, end int, repl string) {
+	if r == nil {
+		return
+	}
+	if end < start {
+		end = start
+	}
+	pre, suf := sharedEnds(in[start:end], repl)
+	r.copied(start, pre)
+	r.written += len(repl) - pre - suf
+	if start+pre < end-suf {
+		r.cut = append(r.cut, textRange{start + pre, end - suf})
+	}
+	r.copied(end-suf, suf)
+}
+
+// placeholderStart is the text that every redaction placeholder starts with.
+const placeholderStart = "[REDACTED"
+
+// sharedEnds returns the lengths of the longest prefix and the longest suffix
+// that m and repl share, which hold whole runes, do not overlap, and leave out
+// any redaction placeholder in repl, so that the placeholder is never read as
+// a copy of the text it replaced.
+func sharedEnds(m, repl string) (pre, suf int) {
+	if m == repl {
+		return len(m), 0
+	}
+	limit := min(len(m), len(repl))
+	if i := strings.Index(repl, placeholderStart); i >= 0 {
+		limit = min(limit, i)
+	}
+	for pre < limit && m[pre] == repl[pre] {
+		pre++
+	}
+	for pre > 0 && (pre < len(m) && !utf8.RuneStart(m[pre]) || pre < len(repl) && !utf8.RuneStart(repl[pre])) {
+		pre--
+	}
+	limit = min(len(m), len(repl)) - pre
+	if i := strings.LastIndex(repl, placeholderStart); i >= 0 {
+		closing := strings.IndexByte(repl[i:], ']')
+		if closing < 0 {
+			closing = len(repl) - i - 1
+		}
+		limit = min(limit, len(repl)-(i+closing+1))
+	}
+	for suf < limit && m[len(m)-1-suf] == repl[len(repl)-1-suf] {
+		suf++
+	}
+	for suf > 0 && (!utf8.RuneStart(m[len(m)-suf]) || !utf8.RuneStart(repl[len(repl)-suf])) {
+		suf--
+	}
+	return pre, suf
+}
+
+// composeSpans returns which bytes of the result of a second pass are copies
+// of the text that a first pass read, given the copies that each pass made of
+// the text it read (first, then second, whose input is the result of the
+// first pass).
+func composeSpans(first, second []copySpan) []copySpan {
+	var out []copySpan
+	for _, c := range second {
+		// The first span of first that ends after c starts.
+		j, _ := slices.BinarySearchFunc(first, c.in, func(f copySpan, at int) int {
+			return cmp.Compare(f.out+f.n, at+1)
+		})
+		for ; j < len(first) && first[j].out < c.in+c.n; j++ {
+			f := first[j]
+			lo, hi := max(c.in, f.out), min(c.in+c.n, f.out+f.n)
+			if lo < hi {
+				out = append(out, copySpan{c.out + lo - c.in, f.in + lo - f.out, hi - lo})
+			}
+		}
+	}
+	return out
+}
+
+// mapRanges returns the ranges of the text that a pass read of which the
+// bytes in ranges, ranges of its result, are copies (see copySpan).
+func mapRanges(ranges []textRange, kept []copySpan) []textRange {
+	var out []textRange
+	for _, r := range ranges {
+		j, _ := slices.BinarySearchFunc(kept, r.start, func(k copySpan, at int) int {
+			return cmp.Compare(k.out+k.n, at+1)
+		})
+		for ; j < len(kept) && kept[j].out < r.end; j++ {
+			k := kept[j]
+			lo, hi := max(r.start, k.out), min(r.end, k.out+k.n)
+			if lo < hi {
+				out = append(out, textRange{k.in + lo - k.out, k.in + hi - k.out})
+			}
+		}
+	}
+	return out
+}
+
+// isCutPadding reports whether c, at an end of a range that a pass cut, is
+// whitespace, a quote, a bracket or punctuation around a value rather than a
+// byte of the value. The baseline pass writes its own delimiters, quotes and
+// spaces around a placeholder, so these bytes at the ends of what it cut are
+// not what it redacted.
+func isCutPadding(c byte) bool {
+	return c <= ' ' || c == 0x7f || strings.IndexByte(`"'\:=,;.{}[]()`, c) >= 0
+}
+
+// trimCut returns r without the padding bytes of s (see isCutPadding) at its
+// ends, leaving any placeholder in cutPlaceholders whole.
+func trimCut(s string, r textRange) textRange {
+	for r.start < r.end && isCutPadding(s[r.start]) {
+		if _, ok := placeholderStartingAt(s, r.start); ok {
+			break
+		}
+		r.start++
+	}
+	for r.end > r.start && isCutPadding(s[r.end-1]) {
+		if _, ok := placeholderEndingAt(s, r.end); ok {
+			break
+		}
+		r.end--
+	}
+	return r
+}
+
+// cutPlaceholders holds the placeholders that a scrub of text may leave in it.
+var cutPlaceholders = []string{redactedValue, redactedSensitiveTextPlaceholder, redactedURIPlaceholder, url.QueryEscape(redactedValue)}
+
+// refineCuts returns the ranges, in order, of the bytes in cuts, ranges of s,
+// without the padding at their ends (see trimCut) and without the
+// placeholders that s already holds.
+//
+// A cut that starts with a placeholder that ends the value that starts there
+// (see placeholderEnds) is left out whole: the value that the baseline pass
+// read there was redacted by an earlier scrub, which ended it at the
+// placeholder and kept the pairs that follow it, so that a scrub of its own
+// result changes nothing. Of any other cut that holds a placeholder, only the
+// bytes beside the placeholders are returned (see appendWithoutPlaceholders):
+// text can hold a placeholder without any scrub having written it, as in
+// "password": " [REDACTED] x", where it is only a part of a credential that
+// it does not cover whole, and the rest of the credential is redacted with it
+// and is not kept for the placeholder.
+func refineCuts(s string, cuts []textRange) []textRange {
+	slices.SortFunc(cuts, func(a, b textRange) int { return cmp.Compare(a.start, b.start) })
+	var out []textRange
+	var quotes openQuotes
+	for _, c := range cuts {
+		t := trimCut(s, c)
+		if t.start >= t.end {
+			continue
+		}
+		quoted := quotes.before(s, t.start)
+		if strings.HasPrefix(s[t.start:t.end], redactedValue) &&
+			(placeholderEnds(s, t.start+len(redactedValue), quoted) || closesOuterQuote(s, t.start+len(redactedValue), c.end, 0, quoted)) {
+			continue
+		}
+		out = appendWithoutPlaceholders(out, s, t)
+	}
+	return out
+}
+
+// appendWithoutPlaceholders appends to out the ranges of t, a range of s, that
+// the placeholders that s holds in t leave, without the padding at their ends
+// (see trimCut). A range that only spaces or tabs separate from a placeholder
+// takes in the placeholder, so that the placeholder and the bytes of the
+// credential beside it are replaced as one.
+func appendWithoutPlaceholders(out []textRange, s string, t textRange) []textRange {
+	holes := placeholderRanges(s, t)
+	if len(holes) == 0 {
+		return append(out, t)
+	}
+	at := t.start
+	for i := 0; i <= len(holes); i++ {
+		end := t.end
+		if i < len(holes) {
+			end = holes[i].start
+		}
+		if r := trimCut(s, textRange{at, end}); r.start < r.end {
+			if i > 0 && isBlank(s[holes[i-1].end:r.start]) {
+				r.start = holes[i-1].start
+			}
+			if i < len(holes) && isBlank(s[r.end:holes[i].start]) {
+				r.end = holes[i].end
+			}
+			if last := len(out) - 1; last >= 0 && out[last].end >= r.start {
+				out[last].end = max(out[last].end, r.end)
+			} else {
+				out = append(out, r)
+			}
+		}
+		if i < len(holes) {
+			at = holes[i].end
+		}
+	}
+	return out
+}
+
+// placeholderRanges returns the ranges of the placeholders of cutPlaceholders
+// that s holds in r, in order and cut off at the ends of r, with those that
+// overlap or touch merged.
+func placeholderRanges(s string, r textRange) []textRange {
+	var holes []textRange
+	for _, p := range cutPlaceholders {
+		hi := min(len(s), r.end+len(p)-1)
+		// Any placeholder that starts in this window overlaps r.
+		for i := max(0, r.start-len(p)+1); i < hi; {
+			j := strings.Index(s[i:hi], p)
+			if j < 0 {
+				break
+			}
+			h := textRange{i + j, i + j + len(p)}
+			holes = append(holes, textRange{max(h.start, r.start), min(h.end, r.end)})
+			i = h.start + 1
+		}
+	}
+	slices.SortFunc(holes, func(a, b textRange) int { return cmp.Compare(a.start, b.start) })
+	merged := holes[:0]
+	for _, h := range holes {
+		if last := len(merged) - 1; last >= 0 && merged[last].end >= h.start {
+			merged[last].end = max(merged[last].end, h.end)
+		} else {
+			merged = append(merged, h)
+		}
+	}
+	return merged
+}
+
+// isBlank reports whether s holds only spaces and tabs.
+func isBlank(s string) bool {
+	return strings.Trim(s, " \t") == ""
+}
+
+// keepBaselineCuts returns out, the result of the passes of scrubTextPatterns
+// on a text of n bytes, with every copy that it holds of a byte in cuts (see
+// baselineCuts), ranges of that text, replaced with the redaction
+// placeholder. recs are what the passes recorded, in the order in which they
+// ran. A run of such copies is replaced as a whole, without the padding at
+// its ends (see isCutPadding). It also reports whether it replaced any.
+func keepBaselineCuts(out string, n int, recs []passRecorder, cuts []textRange) (string, bool) {
+	if len(cuts) == 0 {
+		return out, false
+	}
+	kept := []copySpan{{0, 0, n}}
+	for i := range recs {
+		kept = composeSpans(kept, recs[i].kept)
+	}
+	var redact []textRange
+	for _, k := range kept {
+		j, _ := slices.BinarySearchFunc(cuts, k.in, func(c textRange, at int) int {
+			return cmp.Compare(c.end, at+1)
+		})
+		for ; j < len(cuts) && cuts[j].start < k.in+k.n; j++ {
+			lo, hi := max(k.in, cuts[j].start), min(k.in+k.n, cuts[j].end)
+			if lo >= hi {
+				continue
+			}
+			r := textRange{k.out + lo - k.in, k.out + hi - k.in}
+			if last := len(redact) - 1; last >= 0 && redact[last].end == r.start {
+				redact[last].end = r.end
+			} else {
+				redact = append(redact, r)
+			}
+		}
+	}
+	var b strings.Builder
+	at := 0
+	for _, r := range redact {
+		t := trimCut(out, r)
+		if t.start >= t.end {
+			continue
+		}
+		// A placeholder that the copies run up to, past padding that the
+		// baseline pass cut too, is replaced together with them, so that a
+		// value that both cut is written as one placeholder.
+		if p, ok := placeholderEndingAt(out, r.start); ok {
+			t.start = p.start
+		}
+		if p, ok := placeholderStartingAt(out, r.end); ok {
+			t.end = p.end
+		}
+		if at > 0 && t.start <= at {
+			// The placeholder written last already covers the start.
+			at = max(at, t.end)
+			continue
+		}
+		b.WriteString(out[at:t.start])
+		b.WriteString(redactedValue)
+		at = t.end
+	}
+	if at == 0 {
+		return out, false
+	}
+	b.WriteString(out[at:])
+	return b.String(), true
+}
+
+// placeholderEndingAt returns the range of the placeholder in s that ends at
+// offset i, if there is one.
+func placeholderEndingAt(s string, i int) (textRange, bool) {
+	for _, p := range cutPlaceholders {
+		if strings.HasSuffix(s[:i], p) {
+			return textRange{i - len(p), i}, true
+		}
+	}
+	return textRange{}, false
+}
+
+// placeholderStartingAt returns the range of the placeholder in s that starts
+// at offset i, if there is one.
+func placeholderStartingAt(s string, i int) (textRange, bool) {
+	for _, p := range cutPlaceholders {
+		if strings.HasPrefix(s[i:], p) {
+			return textRange{i, i + len(p)}, true
+		}
+	}
+	return textRange{}, false
+}
+
+// The baseline pass is the plain scrub of key-value text that the passes of
+// scrubTextPatterns refine. It reads quotes only as its regular expressions
+// do and reads no shell syntax or prose, and its keys are those of
+// baselineKeyNames. scrubTextPatterns redacts at least what it redacts.
+
+// baselineKeyNames holds the key names that the baseline pass reads as
+// sensitive, in order.
+var baselineKeyNames = []string{
+	"access_token", "api_key", "api_key_secret", "api_key_string", "auth_code",
+	"authorization", "aws_secret_access_key", "aws_session_token", "bearer",
+	"client_secret", "code_verifier", "credential", "credentials",
+	"google_access_id", "id_token", "passphrase", "password", "private_key",
+	"proxy_authorization", "refresh_token", "secret", "secret_access_key",
+	"session_token", "sig", "signature", "token", "x_amz_credential",
+	"x_amz_signature", "x_api_key", "x_auth_token", "x_goog_api_key",
+	"x_goog_credential", "x_goog_security_token", "x_goog_signature",
+}
+
+// baselineKeySet holds the names in baselineKeyNames.
+var baselineKeySet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(baselineKeyNames))
+	for _, k := range baselineKeyNames {
+		set[k] = struct{}{}
+	}
+	return set
+}()
+
+// baselineFixedKeyRegex returns an alternation of baselineKeyNames, in which
+// each "_" may also be written as "-" or left out.
+func baselineFixedKeyRegex() string {
+	parts := make([]string, 0, len(baselineKeyNames))
+	for _, k := range baselineKeyNames {
+		parts = append(parts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_-]?"))
+	}
+	return strings.Join(parts, "|")
+}
+
+// baselineKeyRegex returns an alternation of the baseline key names and a
+// "temp:" key name, which runs on up to a byte in tempStop.
+func baselineKeyRegex(tempStop string) string {
+	return `temp:[^` + tempStop + `]+|` + baselineFixedKeyRegex()
+}
+
+// baselineQuotedValueRegex returns the pattern for a quoted value that the
+// baseline pass reads: a double- or single-quoted string, in which a
+// backslash escapes any byte but a line break, or a string quoted with
+// escaped quotes (see escapedQuotedRegex).
+func baselineQuotedValueRegex() string {
+	return `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` + escapedQuotedRegex(`"`) + `|` + escapedQuotedRegex(`'`)
+}
+
+// baselineValueRegex returns the pattern for the value after a key that the
+// baseline pass reads: a quoted value or a run of bytes other than those in
+// bareStop.
+func baselineValueRegex(bareStop string) string {
+	return baselineQuotedValueRegex() + `|[^` + bareStop + `]+`
+}
+
+// The patterns of the baseline pass. It reads each of them, case-insensitively,
+// where a word boundary (\b) is, but the JSON pattern, which opens with a
+// quote, at any offset. They are compiled anchored to the start of the text
+// that they are matched against, and findAtKeys and findAtQuotedKeys try
+// them only where the key names that they start with may start (see
+// keyNameSet): a regular expression search for them reads every byte of the
+// text with each of their many alternatives.
+var (
+	baselineAuthHeaderPattern      = `((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`
+	baselineBearerTokenPattern     = `(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`
+	baselineBasicTokenPattern      = `(basic)\s+([A-Za-z0-9+/]+={0,2})`
+	baselineJSONKeyValTokenPattern = `"[\s\p{Z}]*(` + baselineKeyRegex(`"'\s\r\n,}`) + `)[\s\p{Z}]*"\s*:\s*(` + baselineValueRegex(`\s,}`) + `)`
+	baselineTextKeyValTokenPattern = `(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + baselineValueRegex(`\s,;&`) + `)`
+)
+
+// The key names that the patterns of the baseline pass start with, after
+// the opening quote and spaces of the JSON pattern, and those that the
+// patterns of the passes of scrubTextPatterns start with: authHeaderRe,
+// textKeyNameRe, after its word boundary or "_", textKeyNameCamelAtRe, and
+// jsonKeyValTokenRe, after its opening quote, spaces and separators. The
+// bearer and basic patterns of both passes start with bearerKeys and
+// basicKeys.
+var (
+	baselineAuthHeaderKeys = newKeyNameSet("proxy_authorization", "authorization", "x_api_key", "api_key")
+	bearerKeys             = newKeyNameSet("bearer")
+	basicKeys              = newKeyNameSet("basic")
+	baselineKeys           = newKeyNameSet(append([]string{session.KeyPrefixTemp}, baselineKeyNames...)...)
+	authHeaderKeys         = newKeyNameSet("proxy_authorization", "authorization", "x_api_key", "x_goog_api_key", "api_key", "set_cookie", "cookie")
+	textKeyNames           = newKeyNameSet(append([]string{session.KeyPrefixTemp, "oauth"}, slices.Collect(maps.Keys(sensitiveKeys))...)...)
+	jsonKeyNames           = newKeyNameSet(append([]string{session.KeyPrefixUser, session.KeyPrefixApp, session.KeyPrefixTemp}, slices.Collect(maps.Keys(sensitiveKeys))...)...)
+)
+
+var (
+	baselineAuthHeaderAtRe      = regexp.MustCompile(`(?i)^` + baselineAuthHeaderPattern)
+	baselineBearerTokenAtRe     = regexp.MustCompile(`(?i)^` + baselineBearerTokenPattern)
+	baselineBasicTokenAtRe      = regexp.MustCompile(`(?i)^` + baselineBasicTokenPattern)
+	baselineJSONKeyValTokenAtRe = regexp.MustCompile(`(?i)^` + baselineJSONKeyValTokenPattern)
+	baselineTextKeyValTokenAtRe = regexp.MustCompile(`(?i)^` + baselineTextKeyValTokenPattern)
+	baselineNestedKeyNameRe     = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)?(` + baselineFixedKeyRegex() + `)$`)
+	baselineCompoundKeyNameRe   = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:[^\s"'\\]*[^\w\s"'\\])?(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)$`)
+	baselineQuotedValueRe       = regexp.MustCompile(`^(?:` + baselineQuotedValueRegex() + `)`)
+)
+
+// baselineDelimSpace holds the bytes that [\s[:cntrl:]] matches around the
+// delimiters of baselineTextKeyValTokenRe.
+const baselineDelimSpace = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f \x7f"
+
+// baselineCuts returns the ranges of s, in order, whose bytes the baseline
+// pass replaces with a placeholder, without the padding at their ends (see
+// isCutPadding) and without any placeholder already in s. Like the passes of
+// scrubTextPatterns, the baseline pass redacts Authorization and API-key
+// headers, then bearer and basic credentials, then the values of JSON pairs
+// and then those of key-value pairs, each in the text that the one before it
+// wrote.
+func baselineCuts(s string) []textRange {
+	_, cuts := baselineScrub(s)
+	if len(cuts) == 0 {
+		return nil
+	}
+	return refineCuts(s, cuts)
+}
+
+// baselineScrub returns the text that the baseline pass writes for s, and the
+// ranges of s whose bytes it replaced with a placeholder.
+func baselineScrub(s string) (string, []textRange) {
+	var cuts []textRange
+	// kept maps the text that the last step wrote back to s.
+	kept := []copySpan{{0, 0, len(s)}}
+	cur := s
+	step := func(scrub func(string, *passRecorder) string) {
+		var rec passRecorder
+		next := scrub(cur, &rec)
+		cuts = append(cuts, mapRanges(rec.cut, kept)...)
+		kept = composeSpans(kept, rec.kept)
+		cur = next
+	}
+	step(baselineAuthHeaders)
+	step(func(s string, rec *passRecorder) string {
+		var quotes openQuotes
+		return replaceMatchesFunc(s, func(s string) []int {
+			return findAtKeys(s, 0, bearerKeys, baselineBearerTokenAtRe)
+		}, func(s string, loc []int) (string, int) {
+			return baselineRedactBearerToken(s, loc, &quotes)
+		}, rec)
 	})
+	step(func(s string, rec *passRecorder) string {
+		return replaceMatchesFunc(s, func(s string) []int {
+			return findAtKeys(s, 0, basicKeys, baselineBasicTokenAtRe)
+		}, redactBasicCredential, rec)
+	})
+	step(baselineJSONKeyValues)
+	step(baselineTextKeyValues)
+	return cur, cuts
+}
+
+// baselineAuthHeaders replaces the value of each Authorization or API-key
+// header that baselineAuthHeaderAtRe matches at a word boundary, to the end of
+// its line, with the redaction placeholder.
+func baselineAuthHeaders(s string, rec *passRecorder) string {
+	locs := findAllAtKeys(s, baselineAuthHeaderKeys, baselineAuthHeaderAtRe)
+	if locs == nil {
+		rec.copied(0, len(s))
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	quotes := newHeaderQuoteScanner(s)
+	for _, loc := range locs {
+		repl := s[loc[2]:loc[3]] + ": " + redactedValue
+		end := loc[1]
+		// A header in a string that is open before it, as the one of
+		// curl -H 'Authorization: Bearer abc' https://x is, ends at the
+		// quote on its line that closes that string, so that
+		// keepBaselineCuts keeps that quote and the text after it. Only
+		// the header's line is read for that quote, so that the pass
+		// stays linear however many headers the string holds, and a
+		// single quote between two letters, as the one of Bob's is, reads
+		// as an apostrophe and leaves the cut at the end of the line.
+		if outer, inner := quotes.openBefore(loc[0], loc[3]); outer != "" || inner != "" {
+			if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] && !quoteJoinsLetters(s, k-1) {
+				end = closingQuotesStart(s, loc[3], k, outer, inner)
+			}
+		}
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(repl)
+		rec.copied(last, loc[0]-last)
+		rec.replaced(s, loc[0], end, repl)
+		last = end
+	}
+	b.WriteString(s[last:])
+	rec.copied(last, len(s)-last)
+	return b.String()
+}
+
+// quoteJoinsLetters reports whether s[i] is a single quote between two
+// letters, as the apostrophe of Bob's is.
+func quoteJoinsLetters(s string, i int) bool {
+	if i <= 0 || i+1 >= len(s) || s[i] != '\'' {
+		return false
+	}
+	prev, _ := utf8.DecodeLastRuneInString(s[:i])
+	next, _ := utf8.DecodeRuneInString(s[i+1:])
+	return unicode.IsLetter(prev) && unicode.IsLetter(next)
+}
+
+// baselineRedactBearerToken replaces a baselineBearerTokenAtRe match. "bearer
+// of" followed by a space is prose ("the bearer of bad news"), not a token.
+// When a quote opened before the keyword closes at loc[4], it ends the
+// enclosing string rather than opening a quoted token; if another quote
+// follows at once, as in echo 'Bearer '"secret"; echo 'done', that quote
+// opens the token.
+func baselineRedactBearerToken(s string, loc []int, quotes *openQuotes) (string, int) {
+	end := loc[5]
+	quoted := quotes.before(s, loc[4])
+	if q := openingQuote(s, loc[4]); q != "" && quoted&quoteKind(q) != 0 {
+		if q2 := openingQuote(s, loc[4]+len(q)); q2 != "" {
+			q2Start := loc[4] + len(q)
+			if m := baselineQuotedValueRe.FindString(s[q2Start:]); m != "" && q2Start+len(m) < end && !startsQuotedKeyWithValue(s[q2Start:], 0) {
+				end = q2Start + len(m)
+			}
+		}
+	}
+	value := s[loc[4]:end]
+	if rest := s[loc[4]:]; len(rest) >= 2 && strings.EqualFold(rest[:2], "of") {
+		if r, _ := utf8.DecodeRuneInString(rest[2:]); len(rest) == 2 || unicode.IsSpace(r) {
+			quotes.skip(s, end)
+			return s[loc[0]:end], end
+		}
+	}
+	quotes.skip(s, end)
+	if inner, _ := unquoteValue(value); isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return s[loc[2]:loc[3]] + " " + redactedValue, end
+}
+
+// baselineJSONKeyValues replaces each baselineJSONKeyValTokenAtRe match in s as
+// baselineRedactJSONKeyValue does, and records in rec which bytes of the
+// result are copies of s (see passRecorder). The key that a replacement
+// writes is recorded as a copy of the key in s, and the whitespace around
+// that key, which the replacement leaves out, as neither copied nor cut, so
+// that only the value reads as cut: the baseline pass rewrites the key
+// without that whitespace, but does not redact it.
+func baselineJSONKeyValues(s string, rec *passRecorder) string {
+	var b strings.Builder
+	last, pos := 0, 0
+	for pos < len(s) {
+		loc := baselineFindJSONKeyValToken(s, pos)
+		if loc == nil {
+			break
+		}
+		repl, end := baselineRedactJSONKeyValue(s, loc)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(repl)
+		rec.copied(last, loc[0]-last)
+		if key := s[loc[2]:loc[3]]; repl != s[loc[0]:end] && strings.HasPrefix(repl, `"`+key+`"`) {
+			// The match opens with the quote before the key, and the first
+			// quote after the key closes it.
+			keyClose := loc[3] + strings.IndexByte(s[loc[3]:end], '"')
+			rec.copied(loc[0], 1)
+			rec.copied(loc[2], len(key))
+			rec.replaced(s, keyClose, end, repl[1+len(key):])
+		} else {
+			rec.replaced(s, loc[0], end, repl)
+		}
+		last = end
+		pos = max(end, loc[0]+1)
+	}
+	if last == 0 {
+		rec.reset()
+		rec.copied(0, len(s))
+		return s
+	}
+	b.WriteString(s[last:])
+	rec.copied(last, len(s)-last)
+	return b.String()
+}
+
+// baselineRedactJSONKeyValue replaces a baselineJSONKeyValTokenAtRe match with
+// "key":"[REDACTED]".
+func baselineRedactJSONKeyValue(s string, loc []int) (string, int) {
+	end := baselineSensitiveValueEnd(s, loc[4], loc[5])
+	if inner, _ := unquoteValue(s[loc[4]:end]); isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
+}
+
+// baselineFindJSONKeyValToken returns the submatch indexes in s of the first
+// match of baselineJSONKeyValTokenAtRe at or after s[from:], or nil. A match
+// opens with a quote, which spaces may follow, and then a key name of
+// baselineKeys.
+func baselineFindJSONKeyValToken(s string, from int) []int {
+	return findAtQuotedKeys(s, from, baselineKeys, false, baselineJSONKeyValTokenAtRe)
+}
+
+// findJSONKeyValToken returns the submatch indexes in s of the first match of
+// jsonKeyValTokenRe in s, or nil. A match opens with a quote, which spaces
+// may follow, and then a key name of jsonKeyNames, which a run of "_", "-"
+// and "." may come before (see sensitiveKeyRegex).
+func findJSONKeyValToken(s string) []int {
+	return findAtQuotedKeys(s, 0, jsonKeyNames, true, jsonKeyValTokenAtRe)
+}
+
+// findAtQuotedKeys returns the submatch indexes in s of the first match of at
+// at or after s[from:], or nil: at is anchored with ^, and each of its
+// matches opens with a quote, which spaces that [\s\p{Z}] matches may follow,
+// and then a key name of keys, or, if separated, a run of "_", "-" and "."
+// and then one, so at is tried only where one of those names may start
+// (see keyNameSet), as findAtKeys tries the patterns that open with a key.
+func findAtQuotedKeys(s string, from int, keys *keyNameSet, separated bool, at *regexp.Regexp) []int {
+	for i := from; i < len(s); i++ {
+		q := strings.IndexByte(s[i:], '"')
+		if q < 0 {
+			return nil
+		}
+		i += q
+		k := i + 1
+		for k < len(s) {
+			r, n := utf8.DecodeRuneInString(s[k:])
+			if !isJSONKeySpace(r) {
+				break
+			}
+			k += n
+		}
+		for separated && k < len(s) && (s[k] == '_' || s[k] == '-' || s[k] == '.') {
+			k++
+		}
+		if keys.mayStartAt(s, k) {
+			if loc := at.FindStringSubmatchIndex(s[i:]); loc != nil {
+				return offsetLoc(loc, i)
+			}
+		}
+	}
+	return nil
+}
+
+// isJSONKeySpace reports whether r is a space that [\s\p{Z}] matches.
+func isJSONKeySpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\f', '\r', ' ':
+		return true
+	}
+	return r >= utf8.RuneSelf && unicode.Is(unicode.Z, r)
+}
+
+// baselineFindKeyValToken returns the submatch indexes in s of the first
+// match of baselineTextKeyValTokenAtRe at a word boundary in s, or at its
+// start without one, or nil.
+func baselineFindKeyValToken(s string) []int {
+	if s == "" {
+		return nil
+	}
+	if baselineKeys.mayStartAt(s, 0) {
+		if loc := baselineTextKeyValTokenAtRe.FindStringSubmatchIndex(s); loc != nil {
+			return loc
+		}
+	}
+	return findAtKeys(s, 1, baselineKeys, baselineTextKeyValTokenAtRe)
+}
+
+// findAtKeys returns the submatch indexes in s of the first match of at at
+// or after s[from:] that starts at a word boundary, or nil: at is anchored
+// with ^, and is tried only where a key name of keys, which each of its
+// matches starts with, may start. That finds the match that the pattern of at
+// with \b in place of ^ would find in s from offset from, and in the same
+// time as a single search for that pattern takes when the text holds a few
+// of those key names, rather than after reading each byte of the text with
+// each alternative of the pattern. The boundary at from is read as \b reads
+// it in s, with the byte before from, as FindAllStringSubmatchIndex and the
+// other searches from an offset of a text do; a search in a text that starts
+// at from reads none.
+func findAtKeys(s string, from int, keys *keyNameSet, at *regexp.Regexp) []int {
+	for i := from; i < len(s); i++ {
+		if !wordBoundaryAt(s, i) || !keys.mayStartAt(s, i) {
+			continue
+		}
+		if loc := at.FindStringSubmatchIndex(s[i:]); loc != nil {
+			return offsetLoc(loc, i)
+		}
+	}
+	return nil
+}
+
+// findAllAtKeys returns the submatch indexes in s of the matches of at that
+// findAtKeys finds, in order, each searched for from the end of the one
+// before it, as FindAllStringSubmatchIndex searches for the pattern of at
+// with \b in place of ^. A match holds a key name, so it is not empty.
+func findAllAtKeys(s string, keys *keyNameSet, at *regexp.Regexp) [][]int {
+	var locs [][]int
+	for pos := 0; ; {
+		loc := findAtKeys(s, pos, keys, at)
+		if loc == nil {
+			return locs
+		}
+		locs = append(locs, loc)
+		pos = loc[1]
+	}
+}
+
+// findBearerToken returns the submatch indexes in s of the first match of
+// bearerTokenRe in s, or nil.
+func findBearerToken(s string) []int {
+	return findAtKeys(s, 0, bearerKeys, bearerTokenAtRe)
+}
+
+// findBasicToken returns the submatch indexes in s of the first match of
+// basicTokenRe in s, or nil.
+func findBasicToken(s string) []int {
+	return findAtKeys(s, 0, basicKeys, basicTokenAtRe)
+}
+
+// findTextKeyName returns the submatch indexes in s of the first match of
+// textKeyNameRe in s, or nil. A match opens with a word boundary or a "_" and
+// then a name of bareTextKeyNameRegex, which starts with a letter, so it can
+// start only where a key name of textKeyNames may start (see keyNameSet)
+// after a word boundary, as \b reads it in s, or after a "_" that the match
+// holds; it is searched for there only, as findAtKeys searches.
+//
+// The dotted OAuth name oauth[a-z0-9_-]*[.]code reads the run of bytes that
+// [a-z0-9_-] matches that it starts in to its end, so the pattern that holds
+// it is tried at the start of an "oauth" only if that run is followed by the
+// rest of such a name (see oauthTailAtRe): whether it is, is the same for every
+// "oauth" in the run, and is read once, as oauth-oauth-oauth-... holds one
+// run, which a pattern tried at each of its words would read again and again.
+func findTextKeyName(s string) []int {
+	// oauthEnd is the end of the run that the last "oauth" read was in, and
+	// oauthTail reports whether the rest of a dotted OAuth name follows it.
+	oauthEnd, oauthTail := 0, false
+	for i := 0; i < len(s); i++ {
+		start := i
+		underscore := s[i] == '_'
+		if underscore {
+			if !textKeyNames.mayStartAt(s, i+1) {
+				continue
+			}
+			start = i + 1
+		} else if !wordBoundaryAt(s, i) || !textKeyNames.mayStartAt(s, i) {
+			continue
+		}
+		withOAuth := false
+		if len(s)-start >= len("oauth") && strings.EqualFold(s[start:start+len("oauth")], "oauth") {
+			if start >= oauthEnd {
+				oauthEnd = textKeyRunEnd(s, start)
+				oauthTail = oauthTailAtRe.MatchString(s[oauthEnd:])
+			}
+			withOAuth = oauthTail
+		}
+		var at *regexp.Regexp
+		switch {
+		case underscore && withOAuth:
+			at = textKeyNameAtUnderscoreRe
+		case underscore:
+			at = textKeyNameNoOAuthAtUnderscoreRe
+		case withOAuth:
+			at = textKeyNameAtBoundaryRe
+		default:
+			at = textKeyNameNoOAuthAtBoundaryRe
+		}
+		if loc := at.FindStringSubmatchIndex(s[i:]); loc != nil {
+			return offsetLoc(loc, i)
+		}
+	}
+	return nil
+}
+
+// textKeyRunEnd returns the offset in s at which the run of the runes that
+// [a-z0-9_-] matches in a case-insensitive pattern, which include the Kelvin
+// sign and the long s, that starts at s[i:] ends.
+func textKeyRunEnd(s string, i int) int {
+	for i < len(s) {
+		switch c, size := foldKeyLetter(s, i); {
+		case isTextKeyByte(s[i]):
+			i++
+		case c == 'k' || c == 's':
+			i += size
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// mayStartTextKeyName reports whether textKeyNameAtRe may match at the start
+// of s: whether a key name of textKeyNames may start in the run of bytes that
+// [a-z0-9_-] matches in a case-insensitive pattern, as the compound prefix of
+// a key does (see textKeyNameRegex), that s starts with. The credential name
+// of the key starts with a letter, so it starts in that run.
+func mayStartTextKeyName(s string) bool {
+	for j := 0; j < len(s); {
+		if textKeyNames.mayStartAt(s, j) {
+			return true
+		}
+		switch c, size := foldKeyLetter(s, j); {
+		case isTextKeyByte(s[j]):
+			j++
+		case c == 'k' || c == 's':
+			// The Kelvin sign or the long s.
+			j += size
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// offsetLoc adds offset to each submatch index in loc that is not -1, and
+// returns loc.
+func offsetLoc(loc []int, offset int) []int {
+	for k, v := range loc {
+		if v >= 0 {
+			loc[k] = v + offset
+		}
+	}
+	return loc
+}
+
+// wordBoundaryAt reports whether \b matches at s[i:]: whether exactly one of
+// the runes before and at s[i] is an ASCII word character, as \b reads them.
+// Every byte of a rune outside ASCII, and every byte of invalid UTF-8, is at
+// or after a byte that is not an ASCII word character itself.
+func wordBoundaryAt(s string, i int) bool {
+	before := i > 0 && isASCIIWordByte(s[i-1])
+	return before != (i < len(s) && isASCIIWordByte(s[i]))
+}
+
+// isASCIIWordByte reports whether c is an ASCII word character, [0-9A-Za-z_].
+func isASCIIWordByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_'
+}
+
+// keyNameSet holds a set of key names, as a trie of their letters, for
+// telling where one of them may start in a text without reading the text
+// with a regular expression at each of its bytes: findAtKeys and the other
+// searches of the patterns that open with one of the names try the pattern
+// only where mayStartAt finds the letters of a name.
+type keyNameSet struct {
+	// next holds the nodes for the letters "a" to "z", and for ":", that
+	// may follow the letters that lead to this node in a name.
+	next [27]*keyNameSet
+	// end reports whether the letters that lead to this node are a name.
+	end bool
+}
+
+// newKeyNameSet returns the keyNameSet of names, which are written in lower
+// case, with ASCII letters, "_" and ":" only, and start with a letter. A "_"
+// is not a letter of a name, as any run of separators may be read in its
+// place (see mayStartAt).
+func newKeyNameSet(names ...string) *keyNameSet {
+	root := &keyNameSet{}
+	for _, name := range names {
+		n := root
+		for i := 0; i < len(name); i++ {
+			if name[i] == '_' {
+				continue
+			}
+			k := keyNameIndex(name[i])
+			if n.next[k] == nil {
+				n.next[k] = &keyNameSet{}
+			}
+			n = n.next[k]
+		}
+		n.end = true
+	}
+	return root
+}
+
+// keyNameIndex returns the index in keyNameSet.next of c, a lower-case ASCII
+// letter or ":".
+func keyNameIndex(c byte) int {
+	if c == ':' {
+		return 26
+	}
+	return int(c - 'a')
+}
+
+// mayStartAt reports whether a key name of p may start at s[i:]: whether the
+// letters of one of the names follow, in order, as a case-insensitive
+// pattern reads them, with any run of "_", "-" and "." between any two of
+// them, as fixedSensitiveKeyRegex reads separators. A pattern that reads
+// fewer separators in a name, or none, as the patterns of the baseline pass
+// and bearerTokenRe do, finds no name at s[i:] when mayStartAt finds none.
+func (p *keyNameSet) mayStartAt(s string, i int) bool {
+	n := p
+	for i < len(s) {
+		c, size := foldKeyLetter(s, i)
+		switch {
+		case 'a' <= c && c <= 'z' || c == ':':
+			if n = n.next[keyNameIndex(c)]; n == nil {
+				return false
+			}
+			if n.end {
+				return true
+			}
+		case n == p || c != '_' && c != '-' && c != '.':
+			return false
+		}
+		i += size
+	}
+	return false
+}
+
+// foldKeyLetter returns the lower-case ASCII letter, or the "_", "-", "." or
+// ":", that the rune at s[i:] matches in a case-insensitive pattern, or 0 if
+// it matches none, and the length of the rune if it matches one. Case
+// folding matches two runes outside ASCII with ASCII letters: the Kelvin
+// sign with "k" and the long s with "s".
+func foldKeyLetter(s string, i int) (byte, int) {
+	switch c := s[i]; {
+	case 'a' <= c && c <= 'z', c == '_', c == '-', c == '.', c == ':':
+		return c, 1
+	case 'A' <= c && c <= 'Z':
+		return c + 'a' - 'A', 1
+	case strings.HasPrefix(s[i:], "\u017f"):
+		return 's', len("\u017f")
+	case strings.HasPrefix(s[i:], "\u212a"):
+		return 'k', len("\u212a")
+	}
+	return 0, 1
+}
+
+// baselineTextKeyValues replaces each baselineTextKeyValTokenAtRe match in s as
+// baselineRedactTextKeyValue does, skipping dotted or hyphenated pagination
+// cursor suffixes ("token" preceded by "." or "-" where isPageTokenName holds)
+// before running baselineTextKeyValTokenAtRe so long runs of dotted cursor
+// names stay linear while preserving baselineFindKeyValToken's exact regexp
+// behavior.
+func baselineTextKeyValues(s string, rec *passRecorder) string {
+	var brackets openBrackets
+	var b strings.Builder
+	last, pos := 0, 0
+	for i := 0; i < len(s); i++ {
+		if i > pos && !wordBoundaryAt(s, i) {
+			continue
+		}
+		if !baselineKeys.mayStartAt(s, i) {
+			continue
+		}
+		if i > 0 && (s[i-1] == '.' || s[i-1] == '-') && len(s)-i >= len("token") &&
+			strings.EqualFold(s[i:i+len("token")], "token") &&
+			(len(s)-i == len("token") || !isTextKeyByte(s[i+len("token")])) &&
+			isPageTokenName(s[dottedKeyStart(s, i):i+len("token")]) {
+			i += len("token") - 1
+			continue
+		}
+		loc := baselineTextKeyValTokenAtRe.FindStringSubmatchIndex(s[i:])
+		if loc == nil {
+			continue
+		}
+		loc = offsetLoc(loc, i)
+		repl, end := baselineRedactTextKeyValue(s, loc, &brackets)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(repl)
+		rec.copied(last, loc[0]-last)
+		rec.replaced(s, loc[0], end, repl)
+		last = end
+		pos = max(end, loc[0]+1)
+		i = pos - 1
+	}
+	if last == 0 {
+		rec.reset()
+		rec.copied(0, len(s))
+		return s
+	}
+	b.WriteString(s[last:])
+	rec.copied(last, len(s)-last)
+	return b.String()
+}
+
+// baselineRedactTextKeyValue replaces a baselineTextKeyValTokenRe match,
+// keeping the key, its quote, the delimiter and the quotes around the value.
+// A value that is itself a sensitive key is left in place, so that the pair
+// it starts is matched on its own, and one that only ends in a key name is
+// redacted together with the value of the pair it starts (see
+// baselineNestsSensitiveKey). brackets counts the brackets opened before the
+// key.
+func baselineRedactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, int) {
+	if loc[2] > 0 && (s[loc[2]-1] == '.' || s[loc[2]-1] == '-') {
+		if isPageTokenName(s[dottedKeyStart(s, loc[2]):loc[3]]) {
+			return s[loc[0]:loc[7]], loc[7]
+		}
+	}
+	if loc[4] == loc[5] && strings.HasPrefix(strings.ToLower(s[loc[2]:loc[3]]), session.KeyPrefixTemp) {
+		if qPair := enclosingQuotedTempPair(s, loc[0], loc[3]); qPair != nil {
+			loc = qPair
+		}
+	}
+	open := brackets.before(s, loc[0])
+	start, end := loc[8], loc[9]
+	switch kind, pair := baselineNestsSensitiveKey(s, start, end, startsLine(s, loc[7], start)); kind {
+	case nestedKey:
+		return s[loc[0]:start], start
+	case valueEndingInKeyName:
+		_, quote := unquoteValue(s[start:end])
+		end = baselineNestedPairEnd(s, pair, open)
+		brackets.skip(end)
+		return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+	}
+	end = baselineTextValueEnd(s, start, end, open)
+	brackets.skip(end)
+	if end == start {
+		return s[loc[0]:end], end
+	}
+	inner, quote := unquoteValue(s[start:end])
+	if isRedactedValue(inner) {
+		return s[loc[0]:end], end
+	}
+	return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+}
+
+// enclosingQuotedTempPair checks whether a "temp:" match at s[keyStart:keyEnd]
+// stands inside a single-line quoted key that contains a ":" or "=" delimiter
+// (such as 'temp:a=b': 'x' or "user:temp:a:b": "x"), and if so returns the
+// outer quoted pair's submatch slice starting at keyStart.
+func enclosingQuotedTempPair(s string, keyStart, keyEnd int) []int {
+	p := keyStart
+	for p > 0 && s[p-1] != '\n' && s[p-1] != '\r' && isDelimSpace(rune(s[p-1])) {
+		p--
+	}
+	for _, pfx := range []string{session.KeyPrefixUser, session.KeyPrefixApp} {
+		if p >= len(pfx) && strings.EqualFold(s[p-len(pfx):p], pfx) {
+			p -= len(pfx)
+			for p > 0 && s[p-1] != '\n' && s[p-1] != '\r' && isDelimSpace(rune(s[p-1])) {
+				p--
+			}
+			break
+		}
+	}
+	qOpen := -1
+	if p >= 2 && s[p-2] == '\\' && (s[p-1] == '"' || s[p-1] == '\'') {
+		qOpen = p - 2
+	} else if p >= 1 && (s[p-1] == '"' || s[p-1] == '\'') {
+		qOpen = p - 1
+	}
+	if qOpen < 0 {
+		return nil
+	}
+	qPair := quotedPairAtStart(s[qOpen:])
+	if qPair == nil || qPair[8] < 0 || qOpen+qPair[3] <= keyEnd {
+		return nil
+	}
+	offsetLoc(qPair, qOpen)
+	qPair[0], qPair[2] = keyStart, keyStart
+	return qPair
+}
+
+// baselineTextValueEnd returns the end of the value matched at s[start:end]
+// after a key: a quoted value ends at its closing quote, a value that opens a
+// JSON object or array is extended as in baselineSensitiveValueEnd, and a
+// bare value ends before the "}" and "]" at its end that close a bracket
+// opened before the key (see trimEnclosingClosers). open is the number of
+// brackets opened before the key.
+func baselineTextValueEnd(s string, start, end, open int) int {
+	if _, quote := unquoteValue(s[start:end]); quote != "" {
+		return end
+	}
+	rest := baselineSensitiveValueEnd(s, start, start)
+	return rest + len(trimEnclosingClosers(s[rest:max(end, rest)], open))
+}
+
+// baselineNestsSensitiveKey tells whether the value matched at s[start:end]
+// is a sensitive key rather than a value, as nestsSensitiveKey does for the
+// passes of scrubTextPatterns, but as the baseline pass reads values (see
+// baselineValueStartsAt).
+func baselineNestsSensitiveKey(s string, start, end int, lineStart bool) (nestedKeyKind, int) {
+	if end-start > maxNestedKeyLen || s[start] == '{' || s[start] == '[' {
+		return notNestedKey, 0
+	}
+	v := s[start:end]
+	if inner, quote := unquoteValue(v); quote != "" {
+		if !baselineValueFollowsDelimiter(s, end) {
+			return notNestedKey, 0
+		}
+		return baselineNestedKeyName(inner, start+len(quote), lineStart)
+	}
+	if strings.HasSuffix(v, ":") || strings.HasSuffix(v, "=") {
+		if !baselineValueStartsAt(s, end) {
+			return notNestedKey, 0
+		}
+		return baselineNestedKeyName(v[:len(v)-1], start, lineStart)
+	}
+	if baselineFollowedByDelimiter(s, end) {
+		if !baselineValueFollowsDelimiter(s, end) {
+			return notNestedKey, 0
+		}
+		return baselineNestedKeyName(v, start, lineStart)
+	}
+	if q := strings.IndexAny(v, `"'\`); q > 0 && (v[q-1] == ':' || v[q-1] == '=') &&
+		len(baselineQuotedValueRe.FindString(s[start+q:])) > end-start-q && baselineValueStartsAt(s, start+q) {
+		if kind, pair := baselineNestedKeyName(v[:q-1], start, lineStart); kind != notNestedKey {
+			return kind, pair
+		}
+	}
+	i := strings.LastIndexAny(v, ":=")
+	if i <= 0 {
+		return notNestedKey, 0
+	}
+	rest := trimTrailingPunctuation(v[i+1:])
+	inner, _ := unquoteValue(rest)
+	if !isRedactedValue(inner) {
+		for _, q := range []string{`\"`, `\'`, `"`, `'`} {
+			if strings.HasSuffix(rest, q) {
+				if inner2, q2 := unquoteValue(rest[:len(rest)-len(q)]); q2 != "" && isRedactedValue(inner2) {
+					inner = inner2
+					break
+				}
+			}
+		}
+		if !isRedactedValue(inner) {
+			return notNestedKey, 0
+		}
+	}
+	return baselineNestedKeyName(v[:i], start, lineStart)
+}
+
+// baselineNestedKeyName classifies a value that may start a nested pair (see
+// baselineNestsSensitiveKey): name is the name of that pair, which begins at
+// offset at of the text, and lineStart reports whether the value starts a
+// line.
+func baselineNestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
+	if _, ok := baselineKeySet[name]; ok {
+		return nestedKey, at
+	}
+	if m := baselineNestedKeyNameRe.FindStringSubmatchIndex(name); m != nil {
+		return nestedKey, at + m[2]
+	}
+	m := baselineCompoundKeyNameRe.FindStringSubmatchIndex(name)
+	switch {
+	case m == nil:
+		return notNestedKey, 0
+	case lineStart:
+		return nestedKey, at + m[2]
+	default:
+		return valueEndingInKeyName, at + m[2]
+	}
+}
+
+// baselineNestedPairEnd returns where the text to redact with a value that
+// only ends in a key name ends, given pair, where the pair that the key name
+// starts begins in s. open is the number of brackets opened before the key of
+// the value.
+func baselineNestedPairEnd(s string, pair, open int) int {
+	for {
+		loc := baselineTextKeyValTokenAtRe.FindStringSubmatchIndex(s[pair:])
+		if loc == nil {
+			return pair
+		}
+		start, end := pair+loc[8], pair+loc[9]
+		kind, next := baselineNestsSensitiveKey(s, start, end, startsLine(s, pair+loc[7], start))
+		if kind == notNestedKey {
+			return baselineTextValueEnd(s, start, end, open)
+		}
+		pair = next
+	}
+}
+
+// baselineFollowedByDelimiter reports whether a key-value delimiter, ":" or
+// "=", follows s[:i], possibly after whitespace.
+func baselineFollowedByDelimiter(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], baselineDelimSpace)
+	return rest != "" && (rest[0] == ':' || rest[0] == '=')
+}
+
+// baselineValueFollowsDelimiter reports whether a key-value delimiter follows
+// s[:i], possibly after whitespace, and a value starts after it (see
+// baselineValueStartsAt).
+func baselineValueFollowsDelimiter(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], baselineDelimSpace)
+	return rest != "" && (rest[0] == ':' || rest[0] == '=') && baselineValueStartsAt(rest, 1)
+}
+
+// baselineValueStartsAt reports whether a value that can be redacted starts
+// in s at i, possibly after whitespace: a quoted value that ends there (see
+// baselineQuotedValueEnds), or else the first run of bytes up to the next
+// whitespace, ",", ";" or "&", which holds a byte other than whitespace and
+// closing punctuation.
+func baselineValueStartsAt(s string, i int) bool {
+	rest := strings.TrimLeft(s[i:], baselineDelimSpace)
+	if rest != "" && (rest[0] == '"' || rest[0] == '\'' || rest[0] == '\\') {
+		if q := baselineQuotedValueRe.FindString(rest); q != "" && baselineQuotedValueEnds(rest, len(q)) {
+			rest, _ = unquoteValue(q)
+			return strings.Trim(rest, baselineDelimSpace+closingPunctuation) != ""
+		}
+	}
+	if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
+		rest = rest[:n]
+	}
+	return strings.Trim(rest, baselineDelimSpace+closingPunctuation) != ""
+}
+
+// baselineQuotedValueEnds reports whether the quoted value s[:n] at the start
+// of s ends there: s ends after it, or goes on with a character that is not a
+// letter, a digit, "_" or the quote that the value starts with.
+func baselineQuotedValueEnds(s string, n int) bool {
+	after := s[n:]
+	if after == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(after)
+	if r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return false
+	}
+	_, quote := unquoteValue(s[:n])
+	return !strings.HasPrefix(after, quote)
+}
+
+// baselineSensitiveValueEnd returns the end of the value matched at
+// s[start:end]. A value that opens a JSON object or array is extended to its
+// closing bracket, or to the end of s if it is not closed. Brackets inside
+// strings do not count, including strings delimited by escaped quotes.
+func baselineSensitiveValueEnd(s string, start, end int) int {
+	if c := s[start]; c != '{' && c != '[' {
+		return end
+	}
+	depth := 0
+	// quote is the quote of the string being skipped. escaped reports that
+	// the string was opened with an escaped quote (\" or \'); only the same
+	// escaped quote closes it.
+	var quote byte
+	escaped := false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			if c != '\\' || i+1 == len(s) {
+				break
+			}
+			switch s[i+1] {
+			case quote:
+				quote, escaped = 0, false
+				i++
+			case '\\':
+				// An escape of the inner text. The escaped character may
+				// itself be escaped, as in \\\" or \\\\.
+				i += 2
+				if i < len(s) && s[i] == '\\' {
+					i++
+				}
+			default:
+				i++
+			}
+		case c == '\\':
+			if quote == 0 && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\'') {
+				quote, escaped = s[i+1], true
+			}
+			i++
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '{' || c == '[':
+			depth++
+		case c == '}' || c == ']':
+			depth--
+			if depth == 0 {
+				return max(end, i+1)
+			}
+		}
+	}
+	return len(s)
 }
 
 // redactAuthHeaders replaces the value of each Authorization, API-key,
@@ -1859,13 +3422,22 @@ func scrubTextPatterns(s string) string {
 // where a quote in it is not closed on its line (see authHeaderValueEnd), so
 // that the opening quote is not redacted while the rest of the credential is
 // left on the lines after it, as in Authorization: abc'x<LF>SECRET'. A Cookie
-// or Set-Cookie name and a colon whose value does not open with a quote and
-// holds no cookie pair (see cookieValueIsProse) on its one line, outside any
-// quote, as in The cookie: Monster was here., are prose and are left as they
-// are.
+// or Set-Cookie name and a colon whose value does not open with a quote,
+// starts with a word and holds no cookie pair (see cookieValueIsProse) on its
+// one line, outside any quote, as in The cookie: Monster was here., are prose
+// and are left as they are. A value in a string that was open before the
+// header keeps the quote that closes that string (see closingQuotesStart).
 func redactAuthHeaders(s string) string {
-	locs := authHeaderRe.FindAllStringSubmatchIndex(s, -1)
+	return redactAuthHeadersRecorded(s, nil)
+}
+
+// redactAuthHeadersRecorded is redactAuthHeaders that also records in rec,
+// if it is not nil, which bytes of the result are copies of s (see
+// passRecorder).
+func redactAuthHeadersRecorded(s string, rec *passRecorder) string {
+	locs := findAllAtKeys(s, authHeaderKeys, authHeaderAtRe)
 	if locs == nil {
+		rec.copied(0, len(s))
 		return s
 	}
 	var b strings.Builder
@@ -1888,22 +3460,69 @@ func redactAuthHeaders(s string) string {
 		}
 		lineStart, indentLen := curLineStart, curIndentLen
 		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
-		if outer == "" && inner == "" && isCookieHeaderKey(s[loc[2]:loc[3]]) && openingQuote(s, loc[4]) == "" && cookieValueIsProse(s, loc[4]) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
-			if sub := authHeaderPrefixRe.FindStringSubmatchIndex(s[loc[4]:loc[5]]); sub != nil {
+		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[4], loc[5], outer, inner, quotes) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
+			if sub := findAtKeys(s[loc[4]:loc[5]], 0, authHeaderKeys, authHeaderPrefixAtRe); sub != nil {
 				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
 				idx--
 			}
 			continue
 		}
 		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
+		if outer != "" || inner != "" {
+			end = closingQuotesStart(s, loc[4], end, outer, inner)
+		}
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(s[loc[2]:loc[3]])
 		b.WriteString(": ")
 		b.WriteString(redactedValue)
+		if rec != nil {
+			rec.copied(last, loc[0]-last)
+			rec.replaced(s, loc[0], end, s[loc[2]:loc[3]]+": "+redactedValue)
+		}
 		last = end
 	}
+	if last == 0 {
+		// Every header read as prose: s is returned as it is, not as a
+		// copy, so that the passes after this one read the same bytes.
+		rec.reset()
+		rec.copied(0, len(s))
+		return s
+	}
 	b.WriteString(s[last:])
+	rec.copied(last, len(s)-last)
 	return b.String()
+}
+
+// closingQuotesStart returns where the quotes that close the strings outer
+// and inner (see headerQuoteScanner.openBefore), which were open before the
+// header value at s[from:end], start at the end of that value, after any
+// spaces or tabs there, or end if it does not end with them. A header in a
+// string that was open before it, as the one in
+// curl -H 'Authorization: Bearer abc' is, ends with the quote that closes that
+// string; that quote is left out of the redaction, so that a scrub of the
+// result reads the string closed where s closed it, rather than reading it
+// open up to the next quote on a later line and redacting the lines up to
+// there. The quote that closes outer comes last and the escaped quote that
+// closes inner before it, as in "{\"h\": \"Authorization: abc\""; a quote
+// after a backslash is escaped, and so closes inner rather than outer, unless
+// outer is a single quote, in which (as in a POSIX shell) a backslash is a
+// byte of the string. Any other quote at the end of the value, such as one
+// that closes a string that the value itself opened, as the last quote of
+// Authorization: 'abc' does, is a byte of the value, and is redacted with it.
+func closingQuotesStart(s string, from, end int, outer, inner string) int {
+	v := end
+	for v > from && (s[v-1] == ' ' || s[v-1] == '\t') {
+		v--
+	}
+	start := end
+	if outer != "" && v-1 >= from && s[v-1] == outer[0] && (outer == "'" || v-2 < from || s[v-2] != '\\') {
+		v--
+		start = v
+	}
+	if inner != "" && v-len(inner) >= from && s[v-len(inner):v] == inner {
+		start = v - len(inner)
+	}
+	return start
 }
 
 // isCookieHeaderKey reports whether name is Cookie or Set-Cookie, ignoring
@@ -1913,12 +3532,46 @@ func isCookieHeaderKey(name string) bool {
 	return n == "cookie" || n == "setcookie"
 }
 
+// isAuthHeaderKey reports whether name is an Authorization, API-key, Cookie, or
+// Set-Cookie header name matched by authHeaderNamePattern, ignoring case, the
+// whitespace around it, and the "_", "-" and "." separators.
+func isAuthHeaderKey(name string) bool {
+	switch removeKeySeparators(strings.ToLower(strings.TrimFunc(name, isDelimSpace))) {
+	case "cookie", "setcookie", "authorization", "proxyauthorization",
+		"apikey", "apikeysecret", "apikeystring",
+		"xapikey", "xapikeysecret", "xapikeystring",
+		"xgoogapikey", "xgoogapikeysecret", "xgoogapikeystring":
+		return true
+	default:
+		return false
+	}
+}
+
+// endsWithAuthHeaderKey reports whether name is an auth or cookie header key
+// matched by isAuthHeaderKey or ends with "cookie" (such as my-cookie,
+// x-set-cookie or foo.cookie).
+func endsWithAuthHeaderKey(name string) bool {
+	if len(name) >= len("cookie") && strings.EqualFold(name[len(name)-len("cookie"):], "cookie") {
+		return true
+	}
+	return isAuthHeaderKey(name)
+}
+
 // cookieValueIsProse reports whether the text starting at s[start:] after a
 // Cookie or Set-Cookie name and its colon reads as prose rather than as a
-// cookie list: the first token on its line (after any semicolon-delimited
-// flag tokens) does not start with the redaction placeholder that a scrub of a
-// header value leaves and is not a cookie pair with "=" (RFC 6265), as Monster
-// in The cookie: Monster was here. is not.
+// cookie list (RFC 6265). Its first token on its line must be a word of
+// letters, with at most punctuation after them, as Monster in The cookie:
+// Monster was here. is, rather than an opaque value, as 5f2b9c0e7d1a is, or a
+// value with a colon in it, as app:sid=x is; neither it nor a token that a
+// semicolon or a comma joins to it (a cookie attribute, as HttpOnly in
+// Set-Cookie: x; HttpOnly is, or the next item of a list, as sid=x in
+// Set-Cookie: Secure, sid=x is) may be a cookie pair with "=", nor may the
+// rest of the value hold "=", other than after a plain credential name that
+// the key-value pass redacts on its own (see restHoldsCookiePair); and the
+// text must not start with the redaction placeholder that a scrub of a header
+// value leaves. A token that holds a colon ends the tokens read, so that the
+// tokens read for one header are never read again for a header that the
+// colon may start later on the line.
 func cookieValueIsProse(s string, start int) bool {
 	at := start
 	for at < len(s) && s[at] != '\r' && s[at] != '\n' {
@@ -1931,21 +3584,90 @@ func cookieValueIsProse(s string, start int) bool {
 	if strings.HasPrefix(s[at:], redactedValue) {
 		return false
 	}
+	// Handle a quoted first word: if the value starts with an opening quote,
+	// validate the inner word as prose and advance past it into the
+	// standard token loop, which checks that at least one more prose word
+	// follows.
+	first := true
+	numFirst := true
+	hasAlpha := false
+	if q := openingQuote(s, at); q != "" {
+		qcOuter, qcInner := q, ""
+		if len(q) == 2 {
+			qcOuter, qcInner = "", q
+		}
+		closeIdx := quoteCloseScan(s[:min(len(s), at+256)], at+len(q), qcOuter, qcInner)
+		if closeIdx < 0 || closeIdx >= len(s) || s[closeIdx] == '\r' || s[closeIdx] == '\n' {
+			return false
+		}
+		innerWord := s[at+len(q) : closeIdx-len(q)]
+		if !isProseCookieWord(innerWord) {
+			return false
+		}
+		afterQ := closeIdx
+		for afterQ < len(s) && strings.IndexByte(".,;:!?)", s[afterQ]) >= 0 {
+			afterQ++
+		}
+		sp := skipHorizDelimSpace(s, afterQ)
+		if sp <= afterQ || sp >= len(s) || s[sp] == '\r' || s[sp] == '\n' {
+			return false
+		}
+		numFirst = false
+		at = sp
+	}
 	for at < len(s) && s[at] != '\r' && s[at] != '\n' {
+		if s[at] == '"' || s[at] == '\'' || (s[at] == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\'' || s[at+1] == 'n' || s[at+1] == 'r' || s[at+1] == 't' || s[at+1] == '\\')) {
+			if restHoldsCookiePair(s, at, false) {
+				return false
+			}
+			break
+		}
 		k := at
+		colon := false
 		for k < len(s) {
 			c := s[k]
 			if c == '=' {
 				return false
 			}
-			if c <= ' ' || c == ':' || c == ';' || c == '"' || c == '\'' {
+			if c == ',' && k > at && s[k-1] >= '0' && s[k-1] <= '9' && k+1 < len(s) && s[k+1] >= '0' && s[k+1] <= '9' {
+				k++
+				continue
+			}
+			if c == '\'' && isMidWordApostrophe(s, k) {
+				k++
+				continue
+			}
+			if c == '\\' && k+1 < len(s) && (s[k+1] == '"' || s[k+1] == '\'' || s[k+1] == 'n' || s[k+1] == 'r' || s[k+1] == 't' || s[k+1] == '\\') {
+				break
+			}
+			if c <= ' ' || c == ';' || c == ',' || c == '"' || c == '\'' {
 				break
 			}
 			r, width := utf8.DecodeRuneInString(s[k:])
 			if isDelimSpace(r) {
 				break
 			}
+			if c == ':' {
+				colon = true
+			}
 			k += width
+		}
+		if first && !isProseCookieWord(s[at:k]) {
+			if numFirst && isProseQuantity(s[at:k]) {
+				if sp := skipHorizDelimSpace(s, k); sp > k && sp < len(s) && s[sp] != '\r' && s[sp] != '\n' {
+					numFirst = false
+					at = sp
+					continue
+				}
+			}
+			return false
+		}
+		if isProseCookieWord(s[at:k]) {
+			hasAlpha = true
+		}
+		first = false
+		if colon {
+			return hasAlpha && !restHoldsCookiePair(s, at, true)
 		}
 		sp := k
 		if k > at {
@@ -1954,26 +3676,300 @@ func cookieValueIsProse(s string, start int) bool {
 		if sp < len(s) && s[sp] == '=' {
 			return false
 		}
-		if sp < len(s) && s[sp] == ';' {
+		if sp < len(s) && (s[sp] == ';' || s[sp] == ',') {
 			at = skipHorizDelimSpace(s, sp+1)
+			continue
+		}
+		if restHoldsCookiePair(s, sp, true) {
+			return false
+		}
+		break
+	}
+	return hasAlpha
+}
+
+// restHoldsCookiePair reports whether the rest of a Cookie value that
+// cookieValueIsProse reads as prose, s[at:] up to the end of its line, the
+// start of another Cookie or Authorization header on the line (including
+// hyphen- or dot-prefixed cookie key names and delimiter whitespace before the
+// colon), or the standard net/http ErrNoCookie phrase
+// ("http: named cookie not present"), holds "=", as a cookie pair does: the
+// sid=x of Cookie: "word" Monster sid=x, the "sid=x" of
+// curl -H 'Cookie: chocolate, "sid=x"', the sid=x of
+// Cookie: Monster at 10:30 sid=x, and the password=x of the JSON string
+// "The cookie: chocolate\npassword=x", whose escaped line break leaves it on
+// the line, all hold one. Any other "=" on the same line fails closed as a
+// cookie pair, except when keyed is true and "=" stands right after a plain
+// credential name (see isBareTextKey) that starts at s[at] or after a space or
+// a tab, as the password= of cookie: Monster password=x does: the key-value
+// pass redacts the value after it on its own, so the words before it may stay.
+// After a JSON line-break or tab escape, keyed is cleared so that a credential
+// pair or colon-delimited key on the escaped continuation line is recognized
+// too.
+func restHoldsCookiePair(s string, at int, keyed bool) bool {
+	// name is where the run of key name bytes that ends at s[i] starts, if
+	// s[at], a space or a tab starts it, or -1.
+	name := at
+	for i := at; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '=':
+			if !keyed || name < 0 || name == i || !isBareTextKey(s[name:i]) {
+				return true
+			}
+			name = -1
+		case c == '\r' || c == '\n':
+			return false
+		case c == ':':
+			const errNoCookieColon = ": named cookie not present"
+			if len(s)-i >= len(errNoCookieColon) && strings.EqualFold(s[i:i+len(errNoCookieColon)], errNoCookieColon) {
+				return false
+			}
+			end := i
+			for end > at {
+				r, width := utf8.DecodeLastRuneInString(s[at:end])
+				if !isDelimSpace(r) && !(width == 1 && (s[end-1] <= ' ' || s[end-1] == 0x7f)) {
+					break
+				}
+				end -= width
+			}
+			start := end
+			for start > at && isTextKeyByte(s[start-1]) {
+				start--
+			}
+			if start < end && endsWithAuthHeaderKey(s[start:end]) {
+				return false
+			}
+			if !keyed && name >= 0 && name < i && isBareTextKey(s[name:i]) {
+				return true
+			}
+			name = -1
+		case c == ' ' || c == '\t':
+			name = i + 1
+		case c == '\\' && i+1 < len(s) && (s[i+1] == 'n' || s[i+1] == 'r' || s[i+1] == 't' || s[i+1] == '\\'):
+			keyed = false
+			i++
+			name = i + 1
+		case name >= 0 && !isTextKeyByte(c):
+			name = -1
+		}
+	}
+	return false
+}
+
+// isProseCookieWord reports whether w, the first token of the text after a
+// Cookie or Set-Cookie name and its colon, is a word that prose may hold
+// there: one or more letters (optionally after an opening parenthesis), or
+// hyphenated letter segments such as chocolate-chip, followed by nothing but
+// a closing parenthesis or punctuation that may end a word in a sentence
+// (".", "!", "?" or ":"), as Monster, (chocolate) and Monster. are and
+// 5f2b9c0e and app:sid are not.
+func isProseCookieWord(w string) bool {
+	// Trim leading opening parenthesis and typographic open quotes.
+	w = strings.TrimLeft(w, "(“”‘’")
+	i := 0
+	for {
+		seg := 0
+		for i+seg < len(w) {
+			r, width := utf8.DecodeRuneInString(w[i+seg:])
+			if !unicode.IsLetter(r) {
+				break
+			}
+			seg += width
+		}
+		if seg == 0 {
+			return false
+		}
+		i += seg
+		if i < len(w) && (w[i] == '-' || w[i] == '\'') {
+			i++
 			continue
 		}
 		break
 	}
+	return strings.Trim(w[i:], ").,;:!?\u201d\u2019") == ""
+}
+
+// isUnsignedDecimal reports whether w is a non-negative numeric token:
+// an integer ("2"), decimal ("2.5"), fraction ("1/2"), comma-grouped count
+// ("2,000"), or a Unicode vulgar fraction ("½"). It is the numeric
+// core of isProseQuantity without the sign, parenthesis, or unit handling.
+func isUnsignedDecimal(w string) bool {
+	if w == "" {
+		return false
+	}
+	prevNum := false
+	for i := 0; i < len(w); {
+		c := w[i]
+		if c == '.' || c == ',' || c == '/' {
+			if !prevNum || i+1 >= len(w) {
+				return false
+			}
+			prevNum = false
+			i++
+			continue
+		}
+		r, width := utf8.DecodeRuneInString(w[i:])
+		if !unicode.IsNumber(r) {
+			return false
+		}
+		prevNum = true
+		i += width
+	}
+	return prevNum
+}
+
+// isLowerAlphaWord reports whether w is a word of two or more lowercase
+// ASCII letters, as in "ounce" and "pack", so a hyphenated token like
+// "2.5-ounce" reads as a quantity-unit compound rather than a value.
+func isLowerAlphaWord(w string) bool {
+	if len(w) < 2 {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		if w[i] < 'a' || w[i] > 'z' {
+			return false
+		}
+	}
 	return true
+}
+
+// isASCIIDigits reports whether w is one or more ASCII digits.
+func isASCIIDigits(w string) bool {
+	if w == "" {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		if w[i] < '0' || w[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isProseQuantity reports whether w is a quantity that may precede a prose
+// noun after "cookie:": an unsigned number (see isUnsignedDecimal), as 2,
+// 2.5, 1/2, 2,000 and ½ are; an ordinal, as 2nd is; a time of day, as 2:30,
+// 2:30pm and 14:30:05 are; a range or a quantity-unit compound, as 2-3 and
+// 2.5-ounce are; a multiplier, as x2 and 2x are; or a letter grade, as A+
+// is. Each may have a leading parenthesis, sign, currency symbol or '#', as
+// in $2 and #2, and trailing punctuation or '%'.
+func isProseQuantity(w string) bool {
+	w = strings.TrimLeft(w, "(-+$#\u20ac\u00a3\u00a5")
+	w = strings.TrimRight(w, ").,;:!?%")
+	n := len(w)
+	if n == 0 {
+		return false
+	}
+	if n == 2 && w[0]|0x20 >= 'a' && w[0]|0x20 <= 'z' && (w[1] == '+' || w[1] == '-') {
+		return true
+	}
+	if (w[0] == 'x' || w[0] == 'X') && isUnsignedDecimal(w[1:]) {
+		return true
+	}
+	if (w[n-1] == 'x' || w[n-1] == 'X') && isUnsignedDecimal(w[:n-1]) {
+		return true
+	}
+	if n > 2 {
+		switch strings.ToLower(w[n-2:]) {
+		case "st", "nd", "rd", "th":
+			if isASCIIDigits(w[:n-2]) {
+				return true
+			}
+		}
+	}
+	if hh, rest, ok := strings.Cut(w, ":"); ok {
+		if len(hh) > 2 || !isASCIIDigits(hh) {
+			return false
+		}
+		if r := len(rest); r > 2 {
+			if suffix := strings.ToLower(rest[r-2:]); suffix == "am" || suffix == "pm" {
+				rest = rest[:r-2]
+			}
+		}
+		mm, ss, hasSeconds := strings.Cut(rest, ":")
+		return len(mm) == 2 && isASCIIDigits(mm) && (!hasSeconds || len(ss) == 2 && isASCIIDigits(ss))
+	}
+	if dash := strings.IndexByte(w, '-'); dash > 0 {
+		numPart, unitPart := w[:dash], w[dash+1:]
+		if isUnsignedDecimal(numPart) && (isUnsignedDecimal(unitPart) || isLowerAlphaWord(unitPart)) {
+			return true
+		}
+	}
+	return isUnsignedDecimal(w)
+}
+
+// cookieLineProseAllowed reports whether the text that starts at s[start:]
+// after a Cookie or Set-Cookie name and its colon, on the line ending at or
+// before lineEnd, reads as prose rather than as a cookie list (see
+// cookieValueIsProse), whether or not the value is inside an open quote.
+// When outer or inner is open (as in a JSON string), it finds where they
+// close on the line, slices the value up to the closing quote, and reads
+// that slice as prose; when neither is open, it reads the value directly.
+// A value whose open quotes do not close on its line is not prose. quotes
+// is the scanner of s that found outer and inner; it finds where they close
+// (see headerQuoteScanner.closeAt), so that the checks for all the headers
+// inside one long quoted string read that string once, not once each.
+func cookieLineProseAllowed(s string, start, lineEnd int, outer, inner string, quotes *headerQuoteScanner) bool {
+	if outer == "" && inner == "" {
+		return cookieValueIsProse(s, start)
+	}
+	scanFrom := start
+	if q := openingQuote(s, start); q != "" && (q == outer || q == inner) {
+		qcOuter, qcInner := q, ""
+		if len(q) == 2 {
+			qcOuter, qcInner = "", q
+		}
+		closeIdx := quoteCloseScan(s, start+len(q), qcOuter, qcInner)
+		if closeIdx > start+len(q) && closeIdx <= lineEnd {
+			scanFrom = closeIdx
+		}
+	}
+	k := quotes.closeAt(scanFrom, outer, inner)
+	if k < 0 || k > lineEnd {
+		return false
+	}
+	contentEnd := closingQuotesStart(s, start, k, outer, inner)
+	return cookieValueIsProse(s[:contentEnd], start)
 }
 
 // isCookieProse reports whether an unquoted key name, the delimiter delim
 // after it, and the value that starts at s[start:] read as the word cookie
 // and a colon in prose, as in The cookie: Monster was here., rather than as a
 // Cookie or Set-Cookie header: name is Cookie or Set-Cookie (see
-// isCookieHeaderKey), delim is a colon, the value does not open with a quote,
-// and the token after it is not a cookie pair (see cookieValueIsProse).
+// isCookieHeaderKey), delim is a colon, any quote that opens the value or
+// encloses s[start] closes on the same line, and the value slice up to any
+// enclosing closing quote reads as prose (see cookieValueIsProse).
 // Structured Cookie and Set-Cookie fields, whose keys are quoted or whose
 // values are read by key, are redacted whatever their values hold.
-func isCookieProse(s, name, delim string, start int) bool {
-	if strings.TrimFunc(delim, isDelimSpace) != ":" || !isCookieHeaderKey(name) || openingQuote(s, start) != "" {
+func isCookieProse(s, name, delim string, start int, quotes *openQuotes) bool {
+	if strings.TrimFunc(delim, isDelimSpace) != ":" || !isCookieHeaderKey(name) {
 		return false
+	}
+	quoted := quotes.before(s, start)
+	allQuoted := quoted | quotes.innerAt(s, start)
+	scanFrom := start
+	// If the value opens with a quote, check that the quote closes on the
+	// same line; if it does not, the value is a header inside a quoted
+	// string, not prose.
+	if q := openingQuote(s, start); q != "" {
+		qcOuter, qcInner := q, ""
+		if len(q) == 2 {
+			qcOuter, qcInner = "", q
+		}
+		closeIdx := quoteCloseScan(s[:min(len(s), start+256)], start+len(q), qcOuter, qcInner)
+		if closeIdx < 0 || closeIdx >= len(s) || s[closeIdx] == '\r' || s[closeIdx] == '\n' {
+			return false
+		}
+		if allQuoted&quoteKind(q) != 0 {
+			scanFrom = closeIdx
+		}
+	}
+	if allQuoted != 0 {
+		endQuote := quotes.endOnLine(s, scanFrom, allQuoted)
+		if endQuote < 0 {
+			return false
+		}
+		s = s[:endQuote]
 	}
 	return cookieValueIsProse(s, start)
 }
@@ -2015,11 +4011,27 @@ type headerQuoteScanner struct {
 	// closes caches where the quotes that stay open into a header from a line
 	// before it close, by kind of quote (see quoteCloses).
 	closes [4]quoteCloseMemo
+	// proseCloses caches where the quotes that are open before a Cookie
+	// header's value close, by kind of quote (see closeAt).
+	proseCloses [4]quoteCloseMemo
+	// shell answers inShellAssignment for the quotes of s. It belongs to
+	// this scan alone, so that its cursors are never evicted by another
+	// scrub and nothing keeps s once the scan is done.
+	shell *shellAssignScanner
 }
 
 // newHeaderQuoteScanner returns a headerQuoteScanner for s.
 func newHeaderQuoteScanner(s string) *headerQuoteScanner {
-	return &headerQuoteScanner{s: s, lines: newLineQuoteState(s, 0, len(s))}
+	return &headerQuoteScanner{s: s, lines: newLineQuoteState(s, 0, len(s)), shell: newShellAssignScanner(s)}
+}
+
+// shellScanner returns the scanner that answers inShellAssignment for the
+// text that h reads, or nil if h is nil.
+func (h *headerQuoteScanner) shellScanner() *shellAssignScanner {
+	if h == nil {
+		return nil
+	}
+	return h.shell
 }
 
 // lineQuoteState is the state of a scan of the lines of s for the quotes that
@@ -2067,7 +4079,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 	var lineStart int
 	if h.hasCurLine && i >= h.curLine.k && i <= h.curLine.lineLim {
 		lineStart = h.curLine.curLineStart
-		h.curLine.scan(s, i, h.curLine.lineLim, lineStart)
+		h.curLine.scan(h.shell, s, i, h.curLine.lineLim, lineStart)
 		st = h.curLine
 	} else {
 		lineStart = strings.LastIndexAny(s[:i], "\r\n") + 1
@@ -2083,14 +4095,14 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 			if brk > 0 && s[brk] == '\n' && s[brk-1] == '\r' {
 				brk--
 			}
-			h.lines.scan(s, brk, len(s), len(s)+1)
+			h.lines.scan(h.shell, s, brk, len(s), len(s)+1)
 			st = h.lines
 			st.lineLim = lineEnd
 		} else {
 			st = newLineQuoteState(s, lineStart, len(s))
 			st.lineLim = lineEnd
 		}
-		st.scan(s, i, lineEnd, lineStart)
+		st.scan(h.shell, s, i, lineEnd, lineStart)
 	}
 	h.curLine = st
 	h.hasCurLine = true
@@ -2105,7 +4117,18 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 		outerPriorLine = false
 	}
 	if (outerPriorLine || innerPriorLine) && !h.quoteCloses(valStart, outer, inner) {
-		outer, inner = "", ""
+		// A quote from a line before that never closes holds no string, so
+		// the header's line is read again from its start with no quote open,
+		// as the quote before Authorization in
+		// '<LF>Cookie: x; curl -H "Authorization: y<LF>z" is read. The state
+		// read again replaces the one carried into the line, so each line is
+		// read again at most once.
+		lineLim := st.lineLim
+		st = newLineQuoteState(s, lineStart, len(s))
+		st.lineLim = lineLim
+		st.scan(h.shell, s, i, lineLim, lineStart)
+		h.curLine = st
+		outer, inner = st.outer, st.inner
 	}
 	return outer, inner
 }
@@ -2113,7 +4136,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 // scan advances st over s up to to, reading s up to bound, for the header
 // whose line starts at hdrLineStart, or, if hdrLineStart is past the end of
 // s, over lines before the line of a header only.
-func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
+func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrLineStart int) {
 	k, curLineStart, lineLim := st.k, st.curLineStart, st.lineLim
 	outer, inner := st.outer, st.inner
 	outerOpenPos, outerOpenEnd := st.outerOpenPos, st.outerOpenEnd
@@ -2123,7 +4146,6 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 	for k < to {
 		c := s[k]
 		if c == '\r' || c == '\n' {
-			lineEnd := k
 			if c == '\r' && k+1 < bound && s[k+1] == '\n' {
 				k += 2
 			} else {
@@ -2135,11 +4157,8 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 			if nl := strings.IndexAny(s[curLineStart:bound], "\r\n"); nl >= 0 {
 				lineLim = curLineStart + nl
 			}
-			nextIsHeaderOrSpace := quoteRestIsHeaderOrSpace(s, curLineStart, lineLim)
 			validInner := inner != "" && innerOpenEnd >= 0 &&
-				(innerPriorLine || isExplicitLineQuoteOpener(s, prevLineStart, innerOpenPos)) &&
-				quoteRestIsHeaderOrSpace(s, innerOpenEnd, lineEnd) &&
-				nextIsHeaderOrSpace
+				(innerPriorLine || isExplicitLineQuoteOpener(sh, s, prevLineStart, innerOpenPos))
 			if validInner {
 				innerOpenEnd = k
 				innerPriorLine = true
@@ -2149,19 +4168,14 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 				innerPriorLine = false
 			}
 			explicitOuter := outer != "" && outerOpenEnd >= 0 &&
-				(outerPriorLine || isExplicitLineQuoteOpener(s, prevLineStart, outerOpenPos))
-			validOuter := explicitOuter &&
-				(validInner || (quoteRestIsHeaderOrSpace(s, outerOpenEnd, lineEnd) && nextIsHeaderOrSpace))
-			if validOuter {
+				(outerPriorLine || isExplicitLineQuoteOpener(sh, s, prevLineStart, outerOpenPos))
+			if explicitOuter {
 				if !validInner {
 					outerOpenEnd = k
 				}
 				outerPriorLine = true
 				closingExplicitOuter = 0
 			} else {
-				if explicitOuter {
-					closingExplicitOuter = outer[0]
-				}
 				outer = ""
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
@@ -2184,7 +4198,7 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 					innerOpenPos, innerOpenEnd = -1, -1
 					innerPriorLine = false
 				case "":
-					if outer == "" && !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(s, k) {
+					if outer == "" && !canOpenPriorLineQuote(sh, s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(sh, s, k) {
 						break
 					}
 					inner = q
@@ -2208,7 +4222,7 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 			k++
 		case c == '"' || c == '\'':
 			if outer == "" {
-				if c == '\'' && (isMidWordApostrophe(s, k) && !opensPrefixedString(s, k) || isTrailingApostrophe(s, k)) && !inShellAssignment(s, k) {
+				if c == '\'' && (isMidWordApostrophe(s, k) && !opensPrefixedString(s, k) || isTrailingApostrophe(s, k)) && !inShellAssignment(sh, s, k) {
 					k++
 					continue
 				}
@@ -2219,7 +4233,7 @@ func (st *lineQuoteState) scan(s string, to, bound, hdrLineStart int) {
 						continue
 					}
 				}
-				if !canOpenPriorLineQuote(s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(s, k) {
+				if !canOpenPriorLineQuote(sh, s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(sh, s, k) {
 					k++
 					continue
 				}
@@ -2275,18 +4289,9 @@ type quoteCloseMemo struct {
 // into, as the first quote of '<LF>Authorization: a<LF>Authorization: b<LF>...
 // does.
 func (h *headerQuoteScanner) quoteCloses(from int, outer, inner string) bool {
-	var m *quoteCloseMemo
-	switch {
-	case outer == `'` && inner == "":
-		m = &h.closes[0]
-	case outer == `"`:
-		m = &h.closes[1]
-	case outer == "" && inner == `\'`:
-		m = &h.closes[2]
-	case outer == "" && inner == `\"`:
-		m = &h.closes[3]
-	default:
-		return outerQuoteCloses(h.s, from, outer, inner)
+	m := closeSlot(&h.closes, outer, inner)
+	if m == nil {
+		return outerQuoteCloses(h.shell, h.s, from, outer, inner)
 	}
 	s := h.s
 	if !m.ok || from < m.from || m.closePos >= 0 && from >= m.closePos {
@@ -2304,7 +4309,7 @@ func (h *headerQuoteScanner) quoteCloses(from int, outer, inner string) bool {
 				checkQuote = inner
 			}
 			if checkQuote != "" {
-				m.rejects = closeLineRejects(s, closePos, checkQuote)
+				m.rejects = closeLineRejects(h.shell, s, closePos, checkQuote)
 			}
 		}
 	}
@@ -2313,7 +4318,10 @@ func (h *headerQuoteScanner) quoteCloses(from int, outer, inner string) bool {
 
 // placeholderQuoteCloses reports whether outer and inner close after a header
 // line whose first-line value is already redactedValue, without pairing with
-// an opening quote on a later line (see closeLineRejects).
+// an opening quote on a later line (see closeLineRejects). A single quote
+// closes there even after a backslash, as the last quote of
+// curl -H 'Authorization: [REDACTED]<LF>SECRET\'<LF>echo ok does, since a
+// backslash in a single-quoted shell string is a byte of the string.
 func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner string) bool {
 	if inner != "" {
 		outer = ""
@@ -2321,29 +4329,49 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 	if !h.quoteCloses(from, outer, inner) {
 		return false
 	}
+	if m := closeSlot(&h.closes, outer, inner); m != nil {
+		return !m.rejects
+	}
+	return false
+}
+
+// closeSlot returns the entry of memos that caches the close of the quotes
+// outer and inner (see quoteCloses), or nil if their close is not cached.
+func closeSlot(memos *[4]quoteCloseMemo, outer, inner string) *quoteCloseMemo {
 	switch {
 	case outer == `'` && inner == "":
-		cp := h.closes[0].closePos
-		if h.closes[0].rejects {
-			return false
-		}
-		if cp >= 2 && h.s[cp-2] == '\\' {
-			lineStart := strings.LastIndexAny(h.s[:cp-1], "\r\n") + 1
-			if lineStart < len(h.s) && (h.s[lineStart] == ' ' || h.s[lineStart] == '\t') {
-				return true
-			}
-			return strings.IndexByte(h.s[lineStart:cp-2], '\'') >= 0
-		}
-		return true
+		return &memos[0]
 	case outer == `"`:
-		return !h.closes[1].rejects
+		return &memos[1]
 	case outer == "" && inner == `\'`:
-		return !h.closes[2].rejects
+		return &memos[2]
 	case outer == "" && inner == `\"`:
-		return !h.closes[3].rejects
+		return &memos[3]
 	default:
-		return false
+		return nil
 	}
+}
+
+// closeAt returns quoteCloseScan(h.s, from, outer, inner): where the quotes
+// outer and inner that are open before a Cookie header's value close, where
+// from is the start of that value, or the end of a string that the value
+// opens with a quote of their kind, and is no earlier than the from of the
+// call before for those quotes, as it is for the headers of s in order. As
+// with quoteCloses, where such quotes close depends on from and their kind
+// alone, so the scan that found the close for one header holds for every
+// later header whose value starts before that close, and is reused for it.
+// The checks for all the headers inside one long quoted string, as the ones
+// in message="The cookie: a was b. The cookie: a was b. ..." are, thus read
+// that string once, rather than once for each header.
+func (h *headerQuoteScanner) closeAt(from int, outer, inner string) int {
+	m := closeSlot(&h.proseCloses, outer, inner)
+	if m == nil {
+		return quoteCloseScan(h.s, from, outer, inner)
+	}
+	if !m.ok || from < m.from || m.closePos >= 0 && from >= m.closePos {
+		*m = quoteCloseMemo{ok: true, from: from, closePos: quoteCloseScan(h.s, from, outer, inner), lastHdrLine: -1}
+	}
+	return m.closePos
 }
 
 // isExplicitLineQuoteOpener reports whether the quote at s[k] on the line
@@ -2351,11 +4379,11 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 // start of the line, in a shell assignment or prefixed string, after a
 // delimiter such as =, :, {, [, (, or comma, or after a CLI flag token starting
 // with '-') rather than after plain prose words as in `world "`.
-func isExplicitLineQuoteOpener(s string, lineStart, k int) bool {
+func isExplicitLineQuoteOpener(sh *shellAssignScanner, s string, lineStart, k int) bool {
 	if k < lineStart {
 		return false
 	}
-	if skipHorizDelimSpace(s, lineStart) == k || inShellAssignment(s, k) || opensPrefixedString(s, k) {
+	if skipHorizDelimSpace(s, lineStart) == k || inShellAssignment(sh, s, k) || opensPrefixedString(s, k) {
 		return true
 	}
 	p := k - 1
@@ -2384,7 +4412,7 @@ func isExplicitLineQuoteOpener(s string, lineStart, k int) bool {
 // s[lineStart:lineLim], stands where a quoted string may open rather than at
 // the closing quote of an earlier word or sentence, as in world!", world2' or
 // last_word".
-func canOpenPriorLineQuote(s string, lineStart, k, lineLim int, isPriorLine bool) bool {
+func canOpenPriorLineQuote(sh *shellAssignScanner, s string, lineStart, k, lineLim int, isPriorLine bool) bool {
 	if k == 0 {
 		return true
 	}
@@ -2393,7 +4421,7 @@ func canOpenPriorLineQuote(s string, lineStart, k, lineLim int, isPriorLine bool
 		qLen = 2
 	}
 	if isPriorLine && quoteRestIsHeaderOrSpace(s, min(k+qLen, lineLim), lineLim) {
-		return isExplicitLineQuoteOpener(s, lineStart, k)
+		return isExplicitLineQuoteOpener(sh, s, lineStart, k)
 	}
 	r, _ := utf8.DecodeLastRuneInString(s[:k])
 	if isDelimSpace(r) || opensPrefixedString(s, k) {
@@ -2428,7 +4456,7 @@ func quoteRestIsHeaderOrSpace(s string, qEnd, lineEnd int) bool {
 // close before the end of s without pairing an unclosed quote across a
 // subsequent header line with the opening quote of a paired string on a later
 // line, as in req="Authorization: Bearer x<LF>Content-Type: application/json<LF><LF>{"status": "ok"}.
-func outerQuoteCloses(s string, from int, outer, inner string) bool {
+func outerQuoteCloses(sh *shellAssignScanner, s string, from int, outer, inner string) bool {
 	closePos := quoteCloseScan(s, from, outer, inner)
 	if closePos < 0 {
 		return false
@@ -2437,7 +4465,7 @@ func outerQuoteCloses(s string, from int, outer, inner string) bool {
 	if checkQuote == "" {
 		checkQuote = inner
 	}
-	return checkQuote == "" || !crossesHeaderLine(s, from, closePos) || !closeLineRejects(s, closePos, checkQuote)
+	return checkQuote == "" || !crossesHeaderLine(s, from, closePos) || !closeLineRejects(sh, s, closePos, checkQuote)
 }
 
 // quoteCloseScan returns where the open outer and inner quotes at s[from]
@@ -2495,7 +4523,7 @@ func quoteCloseScan(s string, from int, outer, inner string) int {
 // leaves a quote of the kind open, or the quote ends the line and follows a
 // key and its colon or a shell assignment, as the last quote of
 // X-Note: 'hi<LF> does.
-func closeLineRejects(s string, closePos int, checkQuote string) bool {
+func closeLineRejects(sh *shellAssignScanner, s string, closePos int, checkQuote string) bool {
 	rest := s[closePos:min(len(s), closePos+maxShellLineScan)]
 	if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
 		rest = rest[:nl]
@@ -2512,7 +4540,7 @@ func closeLineRejects(s string, closePos int, checkQuote string) bool {
 			p--
 		}
 		if p >= hdrStart && strings.IndexByte(s[hdrStart:p], ':') < 0 && strings.IndexByte(s[hdrStart:p], '=') < 0 {
-			if s[p] == ':' || inShellAssignment(s, qPos) || (s[p] == '=' && p > hdrStart && (s[p-1] == ' ' || s[p-1] == '\t')) {
+			if s[p] == ':' || inShellAssignment(sh, s, qPos) || (s[p] == '=' && p > hdrStart && (s[p-1] == ' ' || s[p-1] == '\t')) {
 				return true
 			}
 		}
@@ -2568,6 +4596,7 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 // placeholder, as the folded line of Authorization: [REDACTED]<CRLF>\tSECRET
 // does, since one redacted line does not show that the whole value is.
 func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int, quotes *headerQuoteScanner) int {
+	sh := quotes.shellScanner()
 	var closesChecked, closes bool
 	if !canFold && strings.TrimSpace(s[from:end]) == redactedValue {
 		if outer == "" && inner == "" || quotes == nil || !quotes.placeholderQuoteCloses(end, outer, inner) {
@@ -2577,6 +4606,8 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 		closes = true
 	}
 	nestedEnd := 0
+	lineEnd := end
+	entryOuter, entryInner := outer, inner
 	for k := from; ; {
 		if k < end {
 			if outer != "" || inner != "" {
@@ -2619,6 +4650,9 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				}
 				if outer == "" && inner == "" {
 					nestedEnd = 0
+					if entryOuter != "" && entryInner == "" && k <= lineEnd {
+						return k
+					}
 				}
 				continue
 			}
@@ -2635,7 +4669,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				k++
 				continue
 			}
-			m := findQuotedValue(s[k:])
+			m := quotedValueAt(sh, s, k)
 			if m != "" && k+len(m) > end && q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) && crossesHeaderLine(s, end, k+len(m)) {
 				rest := s[k+len(m):]
 				if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
@@ -2646,7 +4680,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				}
 			}
 			if m == "" {
-				if q == "'" && startsContraction(s, k, 1) && unclosedContractionIsProse(s, k, 1) {
+				if q == "'" && startsContraction(s, k, 1) && unclosedContractionIsProse(sh, s, k, 1) {
 					k++
 					continue
 				}
@@ -2680,7 +4714,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				if quotes != nil {
 					closes = quotes.quoteCloses(end, outer, inner)
 				} else {
-					closes = outerQuoteCloses(s, end, outer, inner)
+					closes = outerQuoteCloses(sh, s, end, outer, inner)
 				}
 			}
 			next := end + 1
@@ -2874,7 +4908,7 @@ func (f *keyValFinder) find(rest string) []int {
 		}
 		return cutQuotedPairAt(rest, qLoc)
 	}
-	if rest != "" && (isTextKeyByte(rest[0]) || rest[0] >= utf8.RuneSelf) {
+	if rest != "" && (isTextKeyByte(rest[0]) || rest[0] >= utf8.RuneSelf) && mayStartTextKeyName(rest) {
 		if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && hasTextValueStart(rest[loc[1]:]) {
 			return cutPairAtIf(textKeyAllowedAt(f.whole, pos+loc[2], pos+loc[3]), rest, loc, 0, textKeyValTokenAtRe)
 		}
@@ -3023,7 +5057,7 @@ func quotedKeyAllowed(raw string) bool {
 		return false
 	}
 	rest, _ := cutStatePrefix(trimmed)
-	return !isPageTokenName(trimmed) && bareTextKeyRe.MatchString(rest)
+	return !isPageTokenName(trimmed) && isBareTextKey(rest)
 }
 
 // scanQuotedKeyToken scans from the opening quote at s[i:] (of length
@@ -3196,7 +5230,7 @@ func nextQuotedKeyName(s string, pos int) ([]int, int) {
 // keys without values (such as oauth-oauth-...x.code=,) in linear time.
 func nextKeyName(s string, pos int) []int {
 	for {
-		loc := textKeyNameRe.FindStringSubmatchIndex(s[pos:])
+		loc := findTextKeyName(s[pos:])
 		if loc == nil {
 			return nil
 		}
@@ -3290,12 +5324,7 @@ func nextSplicedKeyName(s string, pos int) []int {
 			// Check for a value start after the delimiter.
 			afterDelim := skipDelimSpace(s, d+1)
 			if hasTextValueStart(s[afterDelim:]) {
-				var valEnd int
-				if q := findQuotedValue(s[afterDelim:]); q != "" {
-					valEnd = afterDelim + len(q)
-				} else {
-					valEnd = bareValueEnd(s, afterDelim)
-				}
+				valEnd := splicedValueEnd(s, afterDelim)
 				return []int{
 					keyStart, valEnd, keyStart, keyEnd,
 					quoteStart, quoteEnd, d, d + 1, afterDelim, valEnd,
@@ -3309,12 +5338,7 @@ func nextSplicedKeyName(s string, pos int) []int {
 			if d2 < len(s) && (s[d2] == '=' || s[d2] == ':') {
 				afterDelim := skipDelimSpace(s, d2+1)
 				if hasTextValueStart(s[afterDelim:]) {
-					var valEnd int
-					if q := findQuotedValue(s[afterDelim:]); q != "" {
-						valEnd = afterDelim + len(q)
-					} else {
-						valEnd = bareValueEnd(s, afterDelim)
-					}
+					valEnd := splicedValueEnd(s, afterDelim)
 					return []int{
 						keyStart, valEnd, keyStart, keyEnd,
 						quoteStart, quoteEnd, d2, d2 + 1, afterDelim, valEnd,
@@ -3325,6 +5349,24 @@ func nextSplicedKeyName(s string, pos int) []int {
 		i = keyEnd
 	}
 	return nil
+}
+
+// splicedValueEnd returns where the value that nextSplicedKeyName reads at
+// s[start:] ends: a quoted value at its closing quote, and a bare value as
+// bareValueEnd reads it, except that a value that starts with a redaction
+// placeholder is read only up to the end of the placeholder if the value may
+// end there (see placeholderCut), as keyValFinder reads the values of the
+// keys that textKeyNameRe finds. bareValueEnd runs on past line splices, so
+// a run of redacted spliced pairs in one word would otherwise be read from
+// each key to the end of the word.
+func splicedValueEnd(s string, start int) int {
+	if cut := placeholderCut(s, start); cut >= 0 {
+		return cut
+	}
+	if q := findQuotedValue(s[start:]); q != "" {
+		return start + len(q)
+	}
+	return bareValueEnd(s, start)
 }
 
 // pairAt returns the submatch indexes in s of the pair whose key and
@@ -3446,8 +5488,12 @@ func camelScanStart(s string, t, e int) int {
 }
 
 // keyNameAt returns the submatch indexes in s of the key and delimiter that
-// textKeyNameCamelAtRe matches at s[i:], if a value follows them, or nil.
+// textKeyNameCamelAtRe matches at s[i:], if a value follows them, or nil. A
+// match starts with a key name of textKeyNames (see keyNameSet).
 func keyNameAt(s string, i int) []int {
+	if !textKeyNames.mayStartAt(s, i) {
+		return nil
+	}
 	loc := textKeyNameCamelAtRe.FindStringSubmatchIndex(s[i:])
 	if loc == nil || !hasTextValueStart(s[i+loc[1]:]) {
 		return nil
@@ -3542,15 +5588,14 @@ func isTextKeyByte(c byte) bool {
 	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' || c == '-'
 }
 
-// replaceMatches replaces each match of re in s with the text returned by
-// repl, which receives the submatch indexes of the match and also returns
-// where the replaced text ends; it may extend past the match. The search
-// resumes there, so the replaced spans never overlap.
-func replaceMatches(s string, re *regexp.Regexp, repl func(s string, loc []int) (string, int)) string {
-	return replaceMatchesFunc(s, re.FindStringSubmatchIndex, repl)
-}
-
-func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, loc []int) (string, int)) string {
+// replaceMatchesFunc replaces each match that find finds in s with the text
+// returned by repl, which receives the submatch indexes of the match and also
+// returns where the replaced text ends; it may extend past the match. find
+// returns the submatch indexes of the first match in the text that it is
+// given, as FindStringSubmatchIndex does, or nil. The search resumes where
+// the replaced text ends, so the replaced spans never overlap. rec, if not
+// nil, records which bytes of the result are copies of s (see passRecorder).
+func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, loc []int) (string, int), rec *passRecorder) string {
 	var b strings.Builder
 	last, pos := 0, 0
 	for pos < len(s) {
@@ -3566,13 +5611,18 @@ func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, l
 		replacement, end := repl(s, loc)
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(replacement)
+		rec.copied(last, loc[0]-last)
+		rec.replaced(s, loc[0], end, replacement)
 		last = end
 		pos = max(end, loc[0]+1)
 	}
 	if last == 0 {
+		rec.reset()
+		rec.copied(0, len(s))
 		return s
 	}
 	b.WriteString(s[last:])
+	rec.copied(last, len(s)-last)
 	return b.String()
 }
 
@@ -3588,6 +5638,9 @@ func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, l
 // quote skipped (see openQuotes.unpaired), so that the text after it is
 // searched again.
 func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitivePairSpans) (string, int) {
+	// sh reads s; the prefixes of s that the token is read in below share
+	// it (see shellAssignScanner.use).
+	sh := quotes.shellFor(s)
 	end := loc[5]
 	quoted := quotes.before(s, loc[4])
 	innerQuoted := quotes.innerAt(s, loc[4])
@@ -3601,6 +5654,15 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 			n++
 		}
 		if n%4 == 1 && end-1 > loc[4] {
+			end--
+		}
+	}
+	if end < len(s) && (s[end] == '"' || s[end] == '\'') && end-1 > loc[4] && s[end-1] == '\\' {
+		n := 0
+		for n < end-loc[4] && s[end-1-n] == '\\' {
+			n++
+		}
+		if n%4 == 1 && startsQuotedKey(s[end-1:], quoted) {
 			end--
 		}
 	}
@@ -3628,8 +5690,8 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 				q2Start := loc[4] + len(q)
 				if m := quotedValueRe.FindString(s[q2Start:]); m != "" {
 					end = q2Start + len(m)
-					if !quotedValueEnds(s[q2Start:], len(m), afterClose) || opensDelimitedValue(s, end, afterClose) {
-						end = runOnValueEnd(s, q2Start, end, 0, afterClose)
+					if !quotedValueEnds(s[q2Start:], len(m), afterClose) || opensDelimitedValue(sh, s, end, afterClose) {
+						end = runOnValueEnd(sh, s, q2Start, end, 0, afterClose)
 					}
 				} else {
 					end = len(s)
@@ -3679,11 +5741,11 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 			}
 		}
 		if end > loc[4]+len(q) && !quotedValueEnds(s[loc[4]:], end-loc[4], quoted) {
-			if quote := textBetweenStrings(s, loc[4], end, quoted); quote != "" {
+			if quote := textBetweenStrings(sh, s, loc[4], end, quoted); quote != "" {
 				next := quotes.unpaired(s, loc[4], quote)
 				return s[loc[0]:next], next
 			}
-			end = textValueEnd(s, loc[4], end, 0, quoted)
+			end = textValueEnd(sh, s, loc[4], end, 0, quoted)
 			value = s[loc[4]:end]
 		}
 		if closes {
@@ -3704,8 +5766,8 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 				q2Start := end + len(q)
 				if m := quotedValueRe.FindString(s[q2Start:]); m != "" {
 					end = q2Start + len(m)
-					if !quotedValueEnds(s[q2Start:], len(m), afterClose) || opensDelimitedValue(s, end, afterClose) {
-						end = runOnValueEnd(s, q2Start, end, 0, afterClose)
+					if !quotedValueEnds(s[q2Start:], len(m), afterClose) || opensDelimitedValue(sh, s, end, afterClose) {
+						end = runOnValueEnd(sh, s, q2Start, end, 0, afterClose)
 					}
 				} else {
 					end = len(s)
@@ -3736,9 +5798,9 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 			} else if quoted&quoteKind(q) != 0 && (strings.HasSuffix(s[:loc[2]], q) || !startsContraction(s, end, len(q))) {
 				// The quote closes the string that the token is in. A word
 				// joined to it is read as gluedWordEnd reads it.
-				end, closeOuter = gluedWordEnd(s, loc, end, q, quoted, quotes)
+				end, closeOuter = gluedWordEnd(sh, s, loc, end, q, quoted, quotes)
 				value = s[loc[4]:end]
-			} else if !endsString(s, end, q, quoted) && (innerQuoted&quoteKind(q) == 0 || !closersEndValue(s, end+len(q), quoted)) {
+			} else if !endsString(s, end, q, quoted) && !startsQuotedKey(s[end:], quoted) && (innerQuoted&quoteKind(q) == 0 || !closersEndValue(s, end+len(q), quoted)) {
 				// A quote that closes a string nested in the one that the
 				// token is in (see innerAt) and that closing brackets that
 				// end the value follow (see closersEndValue), as after the
@@ -3763,12 +5825,11 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 				at := -1
 				if allQuoted != 0 {
 					if at = quotes.endOnLine(s, end+len(q), allQuoted); at >= 0 {
-						primeShellScanner(s)
 						t = s[:at]
 					}
 				}
 				bEnd := bareValueEnd(t, end)
-				vEnd, next := joinedQuoteEnd(t, end, bEnd, 0, allQuoted)
+				vEnd, next := joinedQuoteEnd(sh, t, end, bEnd, 0, allQuoted)
 				if vEnd > bEnd {
 					// When the string does not end on the token's line, a
 					// quote on a later line that ends it also ends a value
@@ -3781,13 +5842,13 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 					}
 				}
 				if vEnd > bEnd {
-					end = textValueEnd(t, loc[4], vEnd, 0, allQuoted)
+					end = textValueEnd(sh, t, loc[4], vEnd, 0, allQuoted)
 					value = s[loc[4]:end]
 				} else if next > end {
 					if oq := openingQuote(s, next); oq != "" && endsString(s, next, oq, allQuoted) {
 						end = next
 					} else {
-						end = runOnValueEnd(t, end, next, 0, allQuoted)
+						end = runOnValueEnd(sh, t, end, next, 0, allQuoted)
 					}
 					value = s[loc[4]:end]
 				} else if end+len(q) < bEnd && s[end-1] != ':' && s[end-1] != '=' && s[end-1] != '\\' && !startsContraction(s, end, len(q)) {
@@ -3812,12 +5873,12 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 				// it.
 				if at >= 0 && end == at {
 					if cq := openingQuote(s, at); allQuoted&quoteKind(cq) != 0 {
-						end, closeOuter = gluedWordEnd(s, loc, end, cq, quoted, quotes)
+						end, closeOuter = gluedWordEnd(sh, s, loc, end, cq, quoted, quotes)
 						value = s[loc[4]:end]
 					}
 				}
 			}
-		} else if tEnd := textValueEnd(s, loc[4], end, 0, quoted); tEnd != end {
+		} else if tEnd := textValueEnd(sh, s, loc[4], end, 0, quoted); tEnd != end {
 			end = tEnd
 			value = s[loc[4]:end]
 		}
@@ -3850,13 +5911,13 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 // object of {"auth": "Bearer a"}{"user": "b"} does, are not such a word, and
 // are left in place with the quote. When the word is redacted, quotes is set
 // to read on from its end.
-func gluedWordEnd(s string, loc []int, end int, q string, quoted quoteKinds, quotes *openQuotes) (int, string) {
+func gluedWordEnd(sh *shellAssignScanner, s string, loc []int, end int, q string, quoted quoteKinds, quotes *openQuotes) (int, string) {
 	afterClose := quoted &^ quoteKind(q)
 	tailStart := end + len(q)
 	if closersEndValue(s, tailStart, afterClose) || startsPairAfterBrackets(s, tailStart, afterClose) || startsBearerKeyword(s, tailStart) {
 		return end, ""
 	}
-	wordEnd, closes := runOnWord(s, tailStart, afterClose)
+	wordEnd, closes := runOnWord(sh, s, tailStart, afterClose)
 	end = stringEndIn(s, tailStart, wordEnd, afterClose)
 	// Every quoted part of a word that ends on its line closes in it, as the
 	// shell reads the word (see runOnWord), so the string that the token is
@@ -3908,7 +5969,7 @@ func startsPairAfterBrackets(s string, i int, quoted quoteKinds) bool {
 		return true
 	}
 	rest := s[k:]
-	if rest == "" || !isTextKeyByte(rest[0]) && rest[0] < utf8.RuneSelf {
+	if rest == "" || !isTextKeyByte(rest[0]) && rest[0] < utf8.RuneSelf || !mayStartTextKeyName(rest) {
 		return false
 	}
 	loc := textKeyNameAtRe.FindStringSubmatchIndex(rest)
@@ -3937,7 +5998,7 @@ func laterBearerCut(s string, from, end int) int {
 	}
 	cut := end
 	for at := from; at < end; {
-		m := bearerTokenRe.FindStringSubmatchIndex(s[at:])
+		m := findBearerToken(s[at:])
 		if m == nil || at+m[2] >= end {
 			break
 		}
@@ -4065,6 +6126,7 @@ func isBase64Byte(c byte) bool {
 // of " in config, api_key=" in "token": " in config, api_key="x" is, is left
 // in place with its opening quote skipped (see openQuotes.unpaired).
 func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
+	sh := quotes.shellFor(s)
 	quoted := quotes.before(s, loc[4])
 	q := openingQuote(s, loc[4])
 	closes := q != "" && closesString(s, loc[4], q, quoted)
@@ -4072,7 +6134,7 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 		quotes.skip(s, loc[4])
 		return s[loc[0]:loc[4]], loc[4]
 	}
-	if quote := textBetweenStrings(s, loc[4], loc[5], quoted); quote != "" {
+	if quote := textBetweenStrings(sh, s, loc[4], loc[5], quoted); quote != "" {
 		next := quotes.unpaired(s, loc[4], quote)
 		return s[loc[0]:next], next
 	}
@@ -4081,14 +6143,14 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 	case nestedKey:
 		return s[loc[0]:loc[4]], loc[4]
 	case valueEndingInKeyName:
-		end := nestedPairEnd(s, pair, loc[5], 0, quoted)
+		end := nestedPairEndWith(sh, s, pair, loc[5], 0, quoted)
 		if closes && end > loc[4] {
 			quotes.drop()
 		}
 		quotes.skip(s, end)
 		return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
 	}
-	end := textValueEnd(s, loc[4], loc[5], 0, quoted)
+	end := textValueEnd(sh, s, loc[4], loc[5], 0, quoted)
 	if closes && end > loc[4] {
 		quotes.drop()
 	}
@@ -4118,6 +6180,7 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 // [{APIKey:...}]. brackets counts the brackets opened before the key, and
 // quotes the quotes that leave a string open before the value.
 func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *openQuotes) (string, int) {
+	sh := quotes.shellFor(s)
 	if loc[8] < 0 {
 		// A compound name that does not end in a credential name, such as
 		// next_page_token, which textKeyAllowedAt does not accept, and whose
@@ -4125,7 +6188,7 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		// again.
 		return s[loc[0]:loc[7]], loc[7]
 	}
-	if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8]) {
+	if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], quotes) {
 		// A Cookie or Set-Cookie name and a colon in prose, as in
 		// The cookie: Monster was here., which redactAuthHeaders leaves as
 		// it is too. What follows the delimiter is scanned again.
@@ -4156,7 +6219,7 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		// outside an enclosing string of the same quote kind, as in
 		// export "DB_PASSWORD"=" a b"c, is not that text, as the quotes of a
 		// shell command join words into one value.
-		if quote := textBetweenStrings(s, start, end, quoted); quote != "" {
+		if quote := textBetweenStrings(sh, s, start, end, quoted); quote != "" {
 			next := quotes.unpaired(s, start, quote)
 			brackets.skip(next)
 			return s[loc[0]:next], next
@@ -4167,7 +6230,7 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		return s[loc[0]:start], start
 	case valueEndingInKeyName:
 		_, quote := unquoteValue(s[start:end])
-		end = nestedPairEnd(s, pair, end, open, quoted)
+		end = nestedPairEndWith(sh, s, pair, end, open, quoted)
 		brackets.skip(end)
 		quotes.skip(s, end)
 		return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
@@ -4177,7 +6240,7 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		quotes.skip(s, redEnd)
 		return s[loc[0]:redEnd], redEnd
 	}
-	end = textValueEnd(s, start, end, open, quoted)
+	end = textValueEnd(sh, s, start, end, open, quoted)
 	brackets.skip(end)
 	if q := openingQuote(s, start); q != "" && end > start && closesString(s, start, q, quoted) {
 		// The opening quote of the value, which would close the string open
@@ -4227,8 +6290,57 @@ func redactedPrefixEnd(s string, start, end int, quoted quoteKinds) int {
 // end the value there: it is the rest of a credential that only starts with
 // the placeholder, which a shell reads as one word, and it is redacted with
 // it.
+//
+// The placeholder also ends a value that only quotes follow up to the end of
+// its line, as the quote that redactAuthHeaders leaves after the placeholder
+// of curl -H 'Authorization: Bearer abc' closes the string that holds the
+// header (see closingQuotesStart).
 func placeholderEnds(s string, end int, quoted quoteKinds) bool {
-	return startsRedactedPair(s, end, quoted)
+	if startsRedactedPair(s, end, quoted) || startsBearerKeyword(s, end) || quotesEndLine(s, end) {
+		return true
+	}
+	// A closing quote after [REDACTED] that matches the enclosing quote
+	// kind, followed by whitespace, a structural delimiter, or the end
+	// of the string, ends the placeholder. This prevents redactTextKeyValue
+	// from eating the closing quote and the rest of the line (as in
+	// 'Authorization: [REDACTED]' user=bob). The quote must match the
+	// enclosing quote kind so that password=[REDACTED]" secret" (where
+	// no quote is open before [REDACTED]) still redacts " secret".
+	if quoted != 0 {
+		if q := openingQuote(s, end); q != "" && quoted&quoteKind(q) != 0 {
+			k := end + len(q)
+			if k >= len(s) {
+				return true
+			}
+			if s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r' || s[k] == ',' || s[k] == ';' || s[k] == ')' || s[k] == ']' || s[k] == '}' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// quotesEndLine reports whether s[i:] starts with quotes, each of which may
+// follow a backslash, that only spaces or tabs follow up to the end of the
+// line or of s.
+func quotesEndLine(s string, i int) bool {
+	k := i
+	for k < len(s) {
+		if s[k] == '\\' && k+1 < len(s) && (s[k+1] == '\'' || s[k+1] == '"') {
+			k += 2
+		} else if s[k] == '\'' || s[k] == '"' {
+			k++
+		} else {
+			break
+		}
+	}
+	if k == i {
+		return false
+	}
+	for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+		k++
+	}
+	return k == len(s) || s[k] == '\n' || s[k] == '\r'
 }
 
 // startsRedactedPair reports whether a pair that ends a preceding value starts
@@ -4247,7 +6359,7 @@ func placeholderEnds(s string, end int, quoted quoteKinds) bool {
 // of a credential that a shell joins into one word with it, as in
 // DB_PASSWORD="[REDACTED]"label=SECRET, so the value runs on over it.
 func startsRedactedPair(s string, end int, quoted quoteKinds) bool {
-	if kind, _ := afterClosedQuotePair(s, end, quoted); kind == nestedKey {
+	if kind, _ := afterClosedQuotePair(nil, s, end, quoted); kind == nestedKey {
 		n := 0
 		for end+n < len(s) && n < maxNestedKeyLen && isCamelTokenByte(s[end+n]) {
 			n++
@@ -4425,15 +6537,41 @@ func bareValueEnd(s string, i int) int {
 	}
 }
 
+// quoteKindString returns the opening quote string for the quote kinds in
+// quoted, or "" if quoted is 0 or ambiguous. It returns the first matching
+// quote kind: ", ', ", or '.
+func quoteKindString(quoted quoteKinds) string {
+	switch {
+	case quoted&1 != 0:
+		return `"`
+	case quoted&2 != 0:
+		return `'`
+	case quoted&4 != 0:
+		return `\"`
+	case quoted&8 != 0:
+		return `\'`
+	}
+	return ""
+}
+
 // interiorApostropheEnd returns the end of the value that starts at s[start]
 // with opening quote q, when the closing quote at s[end-len(q):end] is an
 // interior word apostrophe (a letter immediately precedes it, as the one in
-// 'it's), by scanning forward on the same line for a later closing quote of
-// the same kind that ends at a value boundary. It returns end unchanged when
-// the closing quote is not an interior apostrophe, no later closing quote is
-// found on the same line, or the later closing quote does not end at a value
-// boundary.
-func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds) int {
+// 'it's), by scanning forward on the same line for the first later quote of
+// the same kind that ends at a value boundary. Quotes between two letters on
+// the way, as the one of friend's, are apostrophes too and are passed over, as
+// are pairs inside the single-quoted value, as in 'it's token=prefix secret',
+// and times, as in 10:30, which may all be words of a passphrase. It returns
+// end unchanged when the closing quote is not an interior apostrophe, when the
+// line holds no such later quote, or when a later quote opens the value of a
+// sensitive key or a quoted sensitive key (see endsInSensitiveKeyDelimiter and
+// opensQuotedPair), so that the value never takes in that key and leaves its
+// value after it. A value whose opening quote is joined to the words on both
+// sides of it, as the one of DB_PASSWORD=pre'it's correct SECRET is, instead
+// runs to the end of the line when the line holds no such later quote. In a
+// value that its quote opens explicitly, the quote found may be followed on
+// to a later one on its line (see laterValueQuoteEnd).
+func interiorApostropheEnd(sh *shellAssignScanner, s string, start, end int, q string, quoted quoteKinds) int {
 	closing := end - len(q)
 	if closing <= start+len(q) {
 		return end
@@ -4449,7 +6587,7 @@ func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds
 		return end
 	}
 	// A letter must follow the closing quote, and after advancing over contiguous
-	// letters, horizontal whitespace (not : or =) must follow.
+	// letters, horizontal whitespace must follow.
 	if end >= len(s) {
 		return end
 	}
@@ -4465,43 +6603,286 @@ func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds
 		}
 		k += sz
 	}
-	if k >= len(s) || (s[k] != ' ' && s[k] != '\t') {
+	if k >= len(s) {
 		return end
 	}
-	// Scan forward on the same line for a later closing quote of the same kind.
-	// Limit the scan to at most 256 bytes after the apostrophe to avoid O(N²)
-	// on long lines with many quotes.
-	lineEnd := min(len(s), k+256)
-	if nl := strings.IndexAny(s[end:lineEnd], "\r\n"); nl >= 0 {
-		lineEnd = end + nl
+	prevStart, _ := utf8.DecodeLastRuneInString(s[:start])
+	explicitOpen := start == 0 || (!isCamelTokenByte(s[start-1]) && !unicode.IsLetter(prevStart) && !unicode.IsNumber(prevStart))
+	// The closing quote starts the ending of a contraction or a possessive
+	// (see startsContraction), as the second quote of 'it's... SECRET' does,
+	// rather than closing the part before it, as the second quote of
+	// 'benign'api_key='x' does.
+	contraction := startsContraction(s, closing, len(q))
+	// A quote that is not explicitly opened but is joined both to the word
+	// before it and to the byte after it, and whose closing quote starts a
+	// contraction, as the first quote of DB_PASSWORD=pre'it's correct SECRET
+	// is, opens no string of its own. When no later quote on the line ends
+	// the value, the value runs to the end of the line, rather than ending
+	// at the apostrophe of it's and leaving the rest of the value after it.
+	// A quote with a space after it, as the one of users' wasn't, is a
+	// trailing apostrophe and is left as it is, and a part that a quote
+	// closes before a word, as the one of pre'a b'c is, stays a part.
+	nextRune, _ := utf8.DecodeRuneInString(s[start+len(q):])
+	joinedOpen := !explicitOpen && contraction && !isDelimSpace(nextRune)
+	// In a value that its quote opens explicitly, the ending of a
+	// contraction that a digit, "_" or "=" follows, as in 'it's_x S',
+	// 'it's=x S' and 'it's1 S', starts the ending of a contraction too when
+	// a later quote on the line closes it before any key-value delimiter:
+	// startsContraction leaves those out so that a quote before a word or a
+	// key name, as in f'd={x}' or 'abc'd1 user=x, opens a part, while a
+	// quoted passphrase with a glued suffix reads on to the quote that ends it.
+	gluedContraction := explicitOpen && !contraction && startsContractionBefore(s, closing, len(q), unicode.IsLetter)
+	contraction = contraction || gluedContraction
+	if joinedOpen && strings.HasPrefix(s[k:], q) && !strings.HasPrefix(s[k+len(q):], q) {
+		return end
 	}
-	// Look for a closing quote q on the rest of the line after k.
-	rest := s[k:lineEnd]
-	for {
-		idx := strings.Index(rest, q)
-		if idx < 0 {
+	// After the ending of a contraction in a value that its quote opens
+	// explicitly or joins to the words on both sides of it, any punctuation
+	// continues the value, as the ... of 'it's... SECRET', the ) of
+	// 'it's) SECRET' and the , of DB_PASSWORD=pre'it's,SECRET do. Elsewhere
+	// only one mark of punctuation that whitespace or the end of s follows
+	// does.
+	if s[k] != ' ' && s[k] != '\t' && s[k] != '\n' && s[k] != '\r' && !(contraction && (explicitOpen || joinedOpen)) {
+		if strings.IndexByte(".,;:!?", s[k]) < 0 {
 			return end
 		}
-		candEnd := k + idx + len(q)
-		// No key=val between the apostrophe and the closing quote.
-		if strings.ContainsAny(s[k:candEnd-len(q)], "=:") {
-			rest = rest[idx+len(q):]
+		// Punctuation after the contraction suffix is allowed only if
+		// followed by whitespace or end of string.
+		if k+1 < len(s) && s[k+1] != ' ' && s[k+1] != '\t' && s[k+1] != '\n' && s[k+1] != '\r' {
+			return end
+		}
+	}
+	bound := sh.boundTo(s) && (len(q) == 1 || len(q) == 2)
+	qIdx := len(q) - 1
+	if explicitOpen {
+		qIdx += 2
+	}
+	lineEnd := sh.stringEndOnLine(s, k, quoted)
+	if bound && sh.noApostrophe[qIdx][2] == int(quoted) && sh.noApostrophe[qIdx][0] <= k && k < sh.noApostrophe[qIdx][1] {
+		if explicitOpen && !gluedContraction || joinedOpen && sh.noApostrophe[qIdx][1] >= lineEnd {
+			return sh.noApostrophe[qIdx][1]
+		}
+		return end
+	}
+	scanEnd := lineEnd
+	if explicitOpen {
+		if quoted == 0 {
+			scanEnd = len(s)
+		} else if lineEnd == lineBreakFrom(sh, s, k) && lineEnd < len(s) {
+			// The outer string did not close on the first line; bound
+			// scanEnd to the outer string's closing quote.
+			outerQ := quoteKindString(quoted)
+			if outerQ != "" {
+				qcOuter, qcInner := outerQ, ""
+				if len(outerQ) == 2 {
+					qcOuter, qcInner = "", outerQ
+				}
+				closePos := quoteCloseScan(s, lineEnd, qcOuter, qcInner)
+				if closePos > lineEnd {
+					scanEnd = closePos - len(outerQ)
+				} else {
+					scanEnd = len(s)
+				}
+			}
+		}
+	}
+	stop := scanEnd
+	for i := k; i < scanEnd; {
+		idx := strings.Index(s[i:scanEnd], q)
+		if idx < 0 {
+			break
+		}
+		c := i + idx
+		if c > lineEnd {
+			lineStart := i
+			if nl := strings.LastIndexAny(s[i:c], "\r\n"); nl >= 0 {
+				lineStart = i + nl + 1
+			}
+			if endsInKeyDelimiter(s[lineStart:c], isIdentifierKey) || opensQuotedPair(s, c, len(q), s[lineStart:c]) {
+				stop = c
+				break
+			}
+		}
+		if gluedContraction && (endsInKeyDelimiter(s[i:c], isIdentifierKey) || opensQuotedPair(s, c, len(q), s[i:c])) {
+			stop = c
+			break
+		}
+		if endsInSensitiveKeyDelimiter(s[i:c]) || opensQuotedPair(s, c, len(q), s[i:c]) {
+			if !explicitOpen || c > lineEnd {
+				stop = c
+				break
+			}
+			qv := quotedValueAt(sh, s, c)
+			if len(qv) >= 2*len(q) && c+len(qv) <= scanEnd && !spansLine(sh, s, c, len(qv)) && !isMidWordApostrophe(s, c+len(qv)-len(q)) {
+				i = c + len(qv)
+				continue
+			}
+			i = c + len(q)
 			continue
 		}
-		// No unpaired q between the apostrophe and the closing quote, or after it.
-		if !hasUnpairedQuoteOnLine(s[end:candEnd-len(q)], q) && !hasUnpairedQuoteOnLine(s[candEnd:lineEnd], q) {
-			if quotedValueEnds(s[start:], candEnd-start, quoted) {
-				return candEnd
+		i = c + len(q)
+		if isMidWordApostrophe(s, c) {
+			continue
+		}
+		if i >= len(s) || s[i] == '\n' || s[i] == '\r' || quotedValueEnds(s[start:], i-start, quoted) || openingQuote(s, i) != "" {
+			if explicitOpen && contraction && c < lineEnd {
+				return laterValueQuoteEnd(s, start, i, lineEnd, q, quoted)
 			}
-			if candEnd >= len(s) || s[candEnd] == '\n' || s[candEnd] == '\r' {
-				return candEnd
+			return i
+		}
+		if c > lineEnd {
+			stop = c
+			break
+		}
+	}
+	// For an explicitly-opened unquoted value, find the first continuation
+	// line after lineEnd that starts a new key assignment, and stop there,
+	// so the value does not extend past a line like user=bob in
+	// password='it's pad\nuser=bob.
+	if explicitOpen && quoted == 0 && stop > lineEnd {
+		searchFrom := lineEnd + 1
+		if s[lineEnd] == '\r' && searchFrom < stop && s[searchFrom] == '\n' {
+			searchFrom++
+		}
+		for contStart := searchFrom; contStart < stop; {
+			lineEnd2 := stop
+			if nl := strings.IndexAny(s[contStart:stop], "\r\n"); nl >= 0 {
+				lineEnd2 = contStart + nl
 			}
-			if oq := openingQuote(s, candEnd); oq != "" {
-				return candEnd
+			contLine := s[contStart:lineEnd2]
+			if eq := strings.IndexByte(contLine, '='); eq > 0 && eq <= maxNestedKeyLen && eq+1 < len(contLine) && contLine[eq+1] != '=' && skipHorizDelimSpace(contLine, eq+1) < len(contLine) {
+				keyName := strings.TrimRightFunc(contLine[:eq], isDelimSpace)
+				validKey := keyName != "" && isIdentifierKey(keyName)
+				for ki := 0; validKey && ki < len(keyName); ki++ {
+					if !isCamelTokenByte(keyName[ki]) {
+						validKey = false
+					}
+				}
+				if validKey {
+					if contStart > lineEnd+1 && s[contStart-1] == '\n' && contStart-2 >= 0 && s[contStart-2] == '\r' {
+						stop = contStart - 2
+					} else if contStart > lineEnd && s[contStart-1] == '\n' {
+						stop = contStart - 1
+					} else {
+						stop = contStart
+					}
+					break
+				}
+			}
+			if lineEnd2 >= stop {
+				break
+			}
+			contStart = lineEnd2 + 1
+			if contStart < stop && s[contStart-1] == '\r' && s[contStart] == '\n' {
+				contStart++
 			}
 		}
-		rest = rest[idx+len(q):]
 	}
+	if bound && (!gluedContraction || stop >= lineEnd) {
+		sh.noApostrophe[qIdx] = [3]int{k, stop, int(quoted)}
+	}
+	// A joined quote's scan stops before lineEnd only at a quote that opens
+	// the value of a sensitive key, as the one after token= in
+	// password=pre'it's token='x' does; the value then ends at the
+	// apostrophe, so that the key and its value are read on their own.
+	if explicitOpen && !gluedContraction || joinedOpen && stop >= lineEnd {
+		return stop
+	}
+	return end
+}
+
+// laterValueQuoteEnd returns where a value ends that a quote opens explicitly
+// at s[start], that holds the ending of a contraction (see
+// interiorApostropheEnd), and whose quote q ending at s[from] would close it
+// at a value boundary: at the end of the next quote q before lineEnd that
+// ends at a value boundary too (see quotedValueEnds), as the last quote of
+// password='it's' QQSA' user=x does, a shell joining the parts between them
+// into the value, as it would for a value such as it's' QQSA written into
+// the quotes as it is; at lineEnd when only horizontal whitespace separates
+// s[from] from an unclosed quote q on the line, as in token='don't_'  'S; or
+// at from, when no such quote follows, when prose words precede a quote that
+// opens a new quoted word, or when a key and a key-value delimiter (see
+// trailingKeyStart) or a quote that opens a quoted pair (see opensQuotedPair)
+// comes first, as in password='it's' user=x and password='it's' note='x'.
+// Apostrophes between two letters on the way, as the one of Bob's, are passed
+// over.
+func laterValueQuoteEnd(s string, start, from, lineEnd int, q string, quoted quoteKinds) int {
+	keysFrom := from
+	for i := from; i < lineEnd; {
+		idx := strings.Index(s[i:lineEnd], q)
+		if idx < 0 {
+			break
+		}
+		c := i + idx
+		for p := keysFrom; p < c; p++ {
+			if (s[p] == '=' || s[p] == ':') && trailingKeyStart(s[from:p+1], isIdentifierKey) >= 0 {
+				return from
+			}
+		}
+		keysFrom = c
+		i = c + len(q)
+		if isMidWordApostrophe(s, c) {
+			continue
+		}
+		if opensQuotedPair(s, c, len(q), s[from:c]) {
+			return from
+		}
+		if i >= len(s) || s[i] == '\n' || s[i] == '\r' || quotedValueEnds(s[start:], i-start, quoted) {
+			return i
+		}
+		if skipHorizDelimSpace(s, from) < c {
+			return from
+		}
+		if !strings.Contains(s[i:lineEnd], q) && unclosedQuoteOpens(s, c, q, true, quoted) {
+			return lineEnd
+		}
+	}
+	return from
+}
+
+// gluedQuotedKeyStart returns the offset of the first quote in the bare value
+// s[start+1:end] that is joined to a letter, a digit, "_", "-", "." or the "]"
+// that ends a placeholder before it and that starts a quoted key whose value
+// the text patterns redact on its own, with its delimiter and value (see
+// startsQuotedKey), as the quote after abc does in token=abc'password': x and
+// token=abc"password" = x; or -1. A shell would join such a key to the value,
+// but read on its own the key keeps its value from being left in place after
+// a redacted value that took the key. Only keys that close within
+// maxNestedKeyLen bytes and inside the bare value are read, and a value is
+// looked for after one key at most, so that the scan reads each byte of the
+// bare value a bounded number of times.
+func gluedQuotedKeyStart(s string, start, end int, quoted quoteKinds) int {
+	for i := start + 1; i < end; i++ {
+		q := openingQuote(s, i)
+		if q == "" {
+			continue
+		}
+		if p := s[i-1]; !isCamelTokenByte(p) && p != ']' {
+			i += len(q) - 1
+			continue
+		}
+		lim := min(end, i+len(q)+maxNestedKeyLen+len(q))
+		if i+len(q) >= lim || !strings.Contains(s[i+len(q):lim], q) {
+			i += len(q) - 1
+			continue
+		}
+		loc := quotedKeyAtStart(s[i:])
+		if loc == nil || s[i+loc[6]] == '=' && i+loc[7] < len(s) && s[i+loc[7]] == '=' {
+			i += len(q) - 1
+			continue
+		}
+		raw := s[i+loc[2] : i+loc[3]]
+		trimmed := strings.TrimFunc(raw, isDelimSpace)
+		if !quotedKeyAllowed(raw) && !isPreservedPageTokenName(trimmed) && !isTokenCounterName(trimmed) {
+			i += len(q) - 1
+			continue
+		}
+		if startsQuotedKey(s[i:], quoted) {
+			return i
+		}
+		return -1
+	}
+	return -1
 }
 
 // textValueEnd returns the end of the value matched at s[start:end] after a
@@ -4523,7 +6904,7 @@ func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds
 // quote tells where it ends, unless the quote does not open a value (see
 // unclosedQuoteOpens): quoted holds the quotes that leave a string open before
 // the value.
-func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
+func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
 	if q := openingQuote(s, start); q != "" {
 		if closesString(s, start, q, quoted) && !ownsQuotedValue(s, start, end, q) {
 			return start
@@ -4538,11 +6919,14 @@ func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 			// the same kind closes the value. Extend end to that later closing
 			// quote so the full passphrase is redacted.
 			if strings.HasSuffix(q, "'") && end > start+len(q) {
-				if nextEnd := interiorApostropheEnd(s, start, end, q, quoted); nextEnd > end {
+				if nextEnd := interiorApostropheEnd(sh, s, start, end, q, quoted); nextEnd > end {
+					if strings.HasSuffix(s[start:nextEnd], q) && (!quotedValueEnds(s[start:], nextEnd-start, quoted) || opensDelimitedValue(sh, s, nextEnd, quoted)) {
+						return runOnValueEnd(sh, s, start, nextEnd, open, quoted)
+					}
 					return nextEnd
 				}
 			}
-			return runOnValueEnd(s, start, end, open, quoted)
+			return runOnValueEnd(sh, s, start, end, open, quoted)
 		}
 		if unclosedQuoteOpens(s, start, q, true, quoted) {
 			return len(s)
@@ -4556,8 +6940,18 @@ func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 		(s[end] == '\n' || s[end] == '\r') && s[end-1] == '\\' {
 		end = bareValueEnd(s, start)
 	}
+	// A quote joined to the bare value that starts a quoted key whose value
+	// the text patterns redact on its own (see gluedQuotedKeyStart), as the
+	// one after abc does in token=abc'password': x, ends the value there, so
+	// that the key is read with its value rather than redacted with this
+	// value while its own value is left in place.
+	if openingQuote(s, start) == "" {
+		if g := gluedQuotedKeyStart(s, start, end, quoted); g > start {
+			return g
+		}
+	}
 	// rest is where the text after a JSON object or array value starts.
-	rest := sensitiveValueEnd(s, start, start)
+	rest := sensitiveValueEndWith(sh, s, start, start)
 	if rest < end {
 		// The closing bracket of an object or array that starts the value
 		// is a byte of the value, so a quote joined to it opens a quoted
@@ -4570,12 +6964,12 @@ func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 		if rest > start && !endsString(s, rest, openingQuote(s, rest), quoted) {
 			from = rest - 1
 		}
-		if opened := openedValueEnd(s, from, end, open, false, quoted); opened > end {
+		if opened := openedValueEnd(sh, s, from, end, open, false, quoted); opened > end {
 			return opened
 		}
 	}
 	if rest == start {
-		if spaced := spacedValueEnd(s, end, open, quoted); spaced > end {
+		if spaced := spacedValueEnd(sh, s, end, open, quoted); spaced > end {
 			return spaced
 		}
 	}
@@ -4603,27 +6997,27 @@ func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 // ends in a delimiter, as the "x": of password="a""x": "b" does, runs on over
 // the quoted value, object or array that whitespace and the delimiter open
 // (see delimitedValueEnd), so that no value is left after it without its key.
-func runOnValueEnd(s string, start, end, open int, quoted quoteKinds) int {
+func runOnValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
 	inner, _ := unquoteValue(s[start:end])
 	if opensLaterValue(inner, s[end:]) {
-		return forwardValueEnd(s, start, end, open, quoted)
+		return forwardValueEnd(sh, s, start, end, open, quoted)
 	}
-	if kind, pair := afterClosedQuotePair(s, end, quoted); kind == valueEndingInKeyName {
-		return nestedPairEnd(s, pair, end, open, quoted)
+	if kind, pair := afterClosedQuotePair(sh, s, end, quoted); kind == valueEndingInKeyName {
+		return nestedPairEndWith(sh, s, pair, end, open, quoted)
 	}
 	if startsRedactedPair(s, end, quoted) {
 		return end
 	}
-	word := runOnWordEnd(s, end, quoted)
+	word := runOnWordEnd(sh, s, end, quoted)
 	for word > end && (s[word-1] == ':' || s[word-1] == '=') {
-		e, runsOn := delimitedValueEnd(s, word, quoted)
+		e, runsOn := delimitedValueEnd(sh, s, word, quoted)
 		if e < 0 {
 			break
 		}
 		if !runsOn {
 			return e
 		}
-		end, word = e, runOnWordEnd(s, e, quoted)
+		end, word = e, runOnWordEnd(sh, s, e, quoted)
 	}
 	return end + len(trimEnclosingClosers(s[end:word], open))
 }
@@ -4635,45 +7029,146 @@ func runOnValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 // (see quotedValueEnds); or -1 if none opens there. A quote that closes a
 // string open before the value opens nothing (see closesString), and one that
 // is not closed opens a value that runs on to the end of s (see
-// unclosedQuoteOpens).
-func delimitedValueEnd(s string, i int, quoted quoteKinds) (int, bool) {
-	at := skipHorizDelimSpace(s, i)
-	if at == i || at >= len(s) {
-		return -1, false
-	}
-	if c := s[at]; c == '{' || c == '[' {
-		return sensitiveValueEnd(s, at, at), false
-	}
-	quote := openingQuote(s, at)
-	if quote == "" || closesString(s, at, quote, quoted) {
-		return -1, false
-	}
-	q := findQuotedValue(s[at:])
-	if q == "" {
-		if unclosedQuoteOpens(s, at, quote, true, quoted) {
-			return len(s), false
-		}
-		return -1, false
-	}
-	runsOn := !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(s, at+len(q), quoted)
-	if !runsOn && !valueStartsAt(s, at, true, quoted) {
-		return -1, false
-	}
-	return at + len(q), runsOn
+// unclosedQuoteOpens). sh, if bound to s, keeps what it works out (see
+// delimitedChainEnd).
+func delimitedValueEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (int, bool) {
+	d := delimitedChainEnd(sh, s, i, quoted)
+	return d.end, d.runsOn
 }
 
 // opensDelimitedValue reports whether s[i:] starts with zero or more closing
 // brackets (")", "]" or "}") and ":" followed by horizontal whitespace and a
 // quoted value, JSON object or JSON array (see delimitedValueEnd).
-func opensDelimitedValue(s string, i int, quoted quoteKinds) bool {
+func opensDelimitedValue(sh *shellAssignScanner, s string, i int, quoted quoteKinds) bool {
+	if j := delimiterAfterClosers(s, i); j >= 0 {
+		return delimitedChainEnd(sh, s, j+1, quoted).end >= 0
+	}
+	return false
+}
+
+// delimiterAfterClosers returns the offset of the ":" that zero or more
+// closing brackets (")", "]" or "}") at s[i:] lead to, or -1.
+func delimiterAfterClosers(s string, i int) int {
 	for i < len(s) && (s[i] == ')' || s[i] == ']' || s[i] == '}') {
 		i++
 	}
 	if i >= len(s) || s[i] != ':' {
-		return false
+		return -1
 	}
-	e, _ := delimitedValueEnd(s, i+1, quoted)
-	return e >= 0
+	return i
+}
+
+// delimitedEnd is what delimitedValueEnd returns for an offset: the end of
+// the value, or -1, and whether the value runs on.
+type delimitedEnd struct {
+	end    int
+	runsOn bool
+}
+
+// delimitedKey returns the key of shellAssignScanner.delimited for what
+// delimitedValueEnd returns at s[i:] when the quotes in quoted are open.
+func delimitedKey(i int, quoted quoteKinds) int {
+	return i<<8 | int(quoted)
+}
+
+// delimitedChainEnd returns what delimitedValueEnd returns for s[i:]. What
+// it returns for a quoted value whose closing quote ends a value and a ":"
+// follows (see opensDelimitedValue) depends on whether that ":" opens
+// another value, which may in turn depend on the value after it, and so on,
+// as along "x": "x": "x": ...: it reads such a chain forwards once and then
+// works out each value from the one after it, rather than reading the rest
+// of the chain again from each value, and sh, if bound to s, keeps what it
+// worked out for each, so that a caller that asks about each value of the
+// chain in turn, as runOnValueEnd does, reads the chain once.
+func delimitedChainEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) delimitedEnd {
+	bound := sh.boundTo(s)
+	// chain holds, for each value whose result waits on the next one, the
+	// offset it was asked about, where its quote opens and where it ends.
+	type link struct{ from, at, end int }
+	var chain []link
+	var d delimitedEnd
+	for {
+		if bound {
+			if memo, ok := sh.delimited[delimitedKey(i, quoted)]; ok {
+				d = memo
+				break
+			}
+		}
+		step, at, next := delimitedStep(sh, s, i, quoted)
+		if next < 0 {
+			d = step
+			if bound {
+				sh.keepDelimited(i, quoted, d)
+			}
+			break
+		}
+		chain = append(chain, link{from: i, at: at, end: step.end})
+		i = next
+	}
+	for k := len(chain) - 1; k >= 0; k-- {
+		l := chain[k]
+		switch {
+		case d.end >= 0:
+			d = delimitedEnd{end: l.end, runsOn: true}
+		case valueStartsAt(s, l.at, true, quoted):
+			d = delimitedEnd{end: l.end}
+		default:
+			d = delimitedEnd{end: -1}
+		}
+		if bound {
+			sh.keepDelimited(l.from, quoted, d)
+		}
+	}
+	return d
+}
+
+// keepDelimited records d as what delimitedValueEnd returns at s[i:] when
+// the quotes in quoted are open.
+func (sc *shellAssignScanner) keepDelimited(i int, quoted quoteKinds, d delimitedEnd) {
+	if sc.delimited == nil {
+		sc.delimited = make(map[int]delimitedEnd)
+	}
+	sc.delimited[delimitedKey(i, quoted)] = d
+}
+
+// delimitedStep works out what delimitedValueEnd returns for s[i:] where
+// that does not depend on a value after it, and returns it with next < 0.
+// Where the quoted value at s[i:] ends a value and a ":" follows (see
+// delimiterAfterClosers), whether the value runs on depends on whether that
+// ":" opens another value: it returns the end of the value in d.end, where
+// its quote opens in at, and next, the offset after the ":", where the
+// caller reads on.
+func delimitedStep(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (d delimitedEnd, at, next int) {
+	none := delimitedEnd{end: -1}
+	at = skipHorizDelimSpace(s, i)
+	if at == i || at >= len(s) {
+		return none, at, -1
+	}
+	if c := s[at]; c == '{' || c == '[' {
+		return delimitedEnd{end: sensitiveValueEndWith(sh, s, at, at)}, at, -1
+	}
+	quote := openingQuote(s, at)
+	if quote == "" || closesString(s, at, quote, quoted) {
+		return none, at, -1
+	}
+	q := quotedValueAt(sh, s, at)
+	if q == "" {
+		if unclosedQuoteOpens(s, at, quote, true, quoted) {
+			return delimitedEnd{end: len(s)}, at, -1
+		}
+		return none, at, -1
+	}
+	end := at + len(q)
+	if !quotedValueEnds(s[at:], len(q), quoted) {
+		return delimitedEnd{end: end, runsOn: true}, at, -1
+	}
+	if j := delimiterAfterClosers(s, end); j >= 0 {
+		return delimitedEnd{end: end}, at, j + 1
+	}
+	if !valueStartsAt(s, at, true, quoted) {
+		return none, at, -1
+	}
+	return delimitedEnd{end: end}, at, -1
 }
 
 // runOnWordEnd returns the end of the word that starts at s[i:]: the first
@@ -4696,8 +7191,8 @@ func opensDelimitedValue(s string, i int, quoted quoteKinds) bool {
 // DB_PASSWORD="a"pre' violetfern's is not. A single quote that
 // quotedValueRegex finds no closing quote for is closed by the quote of a
 // later \' on its line, as a shell reads it (see shellQuotedSegment).
-func runOnWordEnd(s string, i int, quoted quoteKinds) int {
-	end, _ := runOnWord(s, i, quoted)
+func runOnWordEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) int {
+	end, _ := runOnWord(sh, s, i, quoted)
 	return end
 }
 
@@ -4707,7 +7202,7 @@ func runOnWordEnd(s string, i int, quoted quoteKinds) int {
 // runs the word on to the end of the text (see unclosedQuoteOpens), which
 // leaves the string that the quote opens open, nor if the word ends after a
 // quote that closes a string open before the word (see startsQuotedKey).
-func runOnWord(s string, i int, quoted quoteKinds) (int, bool) {
+func runOnWord(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (int, bool) {
 	joined := true
 	for i < len(s) {
 		if q := openingQuote(s, i); q != "" && !endsString(s, i, q, quoted) {
@@ -4721,16 +7216,16 @@ func runOnWord(s string, i int, quoted quoteKinds) (int, bool) {
 				// the pair after it is matched on its own.
 				return i + len(q), false
 			}
-			m := findQuotedOrShellSegment(s, i)
+			m := findQuotedOrShellSegment(sh, s, i)
 			if m != "" {
 				inner, _ := unquoteValue(m)
 				last, _ := utf8.DecodeLastRuneInString(inner)
-				hasNL := strings.ContainsAny(m, "\r\n")
+				hasNL := spansLine(sh, s, i, len(m))
 				if !hasNL && (joined || !strings.HasSuffix(q, "'")) ||
-					!multilineContractionOpensPair(s, i, m, quoted) &&
+					!multilineContractionOpensPair(sh, s, i, m, quoted) &&
 						(quotedValueEnds(s[i:], len(m), quoted) ||
 							openingQuote(s, i+len(m)) != "" ||
-							(!startsContraction(s, i, len(q)) || !isDelimSpace(last)) && (!hasNL || !isDelimSpace(last)) && closingQuoteJoins(s, i, m, true)) {
+							(!startsContraction(s, i, len(q)) || !isDelimSpace(last)) && (!hasNL || !isDelimSpace(last)) && closingQuoteJoins(sh, s, i, m, true)) {
 					i += len(m)
 					joined = true
 					continue
@@ -4766,7 +7261,7 @@ func runOnWord(s string, i int, quoted quoteKinds) (int, bool) {
 // valueEndingInKeyName and the offset of the sensitive key name for a compound
 // name ending in a credential suffix before ":port" or spaced delimiters, or
 // notNestedKey when no sensitive pair with a value starts at s[end:].
-func afterClosedQuotePair(s string, end int, quoted quoteKinds) (nestedKeyKind, int) {
+func afterClosedQuotePair(sh *shellAssignScanner, s string, end int, quoted quoteKinds) (nestedKeyKind, int) {
 	n := 0
 	for end+n < len(s) && isCamelTokenByte(s[end+n]) {
 		if n == maxNestedKeyLen {
@@ -4798,11 +7293,7 @@ func afterClosedQuotePair(s string, end int, quoted quoteKinds) (nestedKeyKind, 
 		return notNestedKey, 0
 	}
 	if n == maxNestedKeyLen || (n > 0 && end+n < len(s) && s[end+n] == ':' && openingQuote(s, end+n+1) == "") {
-		bareEnd := end
-		for bareEnd < len(s) && strings.IndexByte(regexpSpace+",;&", s[bareEnd]) < 0 {
-			bareEnd++
-		}
-		if bareEnd > end {
+		if bareEnd := bareWordEnd(sh, s, end); bareEnd > end {
 			return nestsSensitiveKey(s, end, bareEnd, false, true, quoted)
 		}
 	}
@@ -4837,7 +7328,7 @@ func startsPlainPair(s string, end int) bool {
 // closing quote does not end a value, as in password=a = "b c"d, runs on (see
 // runOnValueEnd, where open is as for textValueEnd). Bare tokens after a
 // spaced delimiter, as in failed: password: x : retry, are left alone.
-func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
+func spacedValueEnd(sh *shellAssignScanner, s string, end, open int, quoted quoteKinds) int {
 	at := skipHorizDelimSpace(s, end)
 	if at == end || at >= len(s) || (s[at] != ':' && s[at] != '=') {
 		return end
@@ -4847,15 +7338,15 @@ func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
 		return end
 	}
 	if c := s[at]; c == '{' || c == '[' {
-		return sensitiveValueEnd(s, at, at)
+		return sensitiveValueEndWith(sh, s, at, at)
 	}
 	if quote := openingQuote(s, at); quote != "" {
 		if closesString(s, at, quote, quoted) {
 			return end
 		}
 		if q := findQuotedValue(s[at:]); q != "" {
-			if !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(s, at+len(q), quoted) {
-				return runOnValueEnd(s, at, at+len(q), open, quoted)
+			if !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(sh, s, at+len(q), quoted) {
+				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
 			}
 			if valueStartsAt(s, at, true, quoted) {
 				return at + len(q)
@@ -4900,11 +7391,11 @@ func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
 // the bytes of the bare value before it, with no delimiter between them, as
 // in DB_PASSWORD=pre"correct horse staple", opens a quoted part of the same
 // value too (see joinedQuoteEnd).
-func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quoted quoteKinds) int {
+func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trailingQuoteOpens bool, quoted quoteKinds) int {
 	for i := start; i < end; i++ {
 		if s[i] != ':' && s[i] != '=' {
 			if i > start {
-				e, next := joinedQuoteEnd(s, i, end, open, quoted)
+				e, next := joinedQuoteEnd(sh, s, i, end, open, quoted)
 				if e > end {
 					return e
 				}
@@ -4918,7 +7409,7 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 		}
 		var e int
 		if c := s[at]; c == '{' || c == '[' {
-			e = sensitiveValueEnd(s, at, at)
+			e = sensitiveValueEndWith(sh, s, at, at)
 		} else if quote := openingQuote(s, at); quote != "" {
 			checkClose := !trailingQuoteOpens || at >= end
 			if checkClose && at+len(quote) >= end && closesString(s, at, quote, quoted) {
@@ -4955,22 +7446,22 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 			// A quote that ends the bare value, or follows it, opens a quoted
 			// value that does not end where a value may end, as in
 			// password=a="b"c, even if trailingQuoteOpens is set.
-			runsOn := !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(s, at+len(q), quoted)
+			runsOn := !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(sh, s, at+len(q), quoted)
 			if at+len(quote) >= end && runsOn {
-				return runOnValueEnd(s, at, at+len(q), open, quoted)
+				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
 			}
 			// A quote inside the bare value whose quoted value runs on past
 			// it but does not end there opens a value that runs on, as in
 			// token=a:'s b 1'x, password=a='d b'c or
 			// export DB_PASSWORD=a:'s correct staple horse; the user's.
 			if at+len(quote) < end && at+len(q) > end && runsOn {
-				return runOnValueEnd(s, at, at+len(q), open, quoted)
+				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
 			}
 			// A quote or value that follows a quoted value closed in or at the
 			// end of the bare value, as in token=a:'b'' c d' or
 			// password=a:'x_token=' "b c", is read with it (see runOnValueEnd).
 			if at+len(q) <= end && runsOn {
-				if w := runOnValueEnd(s, at, at+len(q), open, quoted); w > end {
+				if w := runOnValueEnd(sh, s, at, at+len(q), open, quoted); w > end {
 					return w
 				}
 			}
@@ -5043,43 +7534,64 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 // outside of any quoted value. A single quote that quotedValueRegex finds no
 // closing quote for is closed by the quote of a later \' on its line, as in
 // DB_PASSWORD=pre' SECRET\'; echo ok (see shellQuotedSegment).
-func joinedQuoteEnd(s string, i, end, open int, quoted quoteKinds) (valueEnd, next int) {
+func joinedQuoteEnd(sh *shellAssignScanner, s string, i, end, open int, quoted quoteKinds) (valueEnd, next int) {
 	quote := openingQuote(s, i)
 	if quote == "" || s[i-1] == ':' || s[i-1] == '=' || s[i-1] == '\\' || closesString(s, i, quote, quoted) {
 		return end, i
 	}
-	q := findQuotedOrShellSegment(s, i)
+	q := findQuotedOrShellSegment(sh, s, i)
 	quote2 := openingQuote(s, i)
-	if q != "" && strings.HasSuffix(quote2, "'") && !strings.ContainsAny(q, "\r\n") && !quotedValueEnds(s[i:], len(q), quoted) {
-		if nextEnd := interiorApostropheEnd(s, i, i+len(q), quote2, quoted); nextEnd > i+len(q) {
-			q = s[i:nextEnd]
+	if q != "" && strings.HasSuffix(quote2, "'") && !spansLine(sh, s, i, len(q)) && !quotedValueEnds(s[i:], len(q), quoted) {
+		if nextEnd := interiorApostropheEnd(sh, s, i, i+len(q), quote2, quoted); nextEnd > i+len(q) {
+			if strings.HasSuffix(s[i:nextEnd], quote2) {
+				q = s[i:nextEnd]
+			} else if prev, _ := utf8.DecodeLastRuneInString(s[:i]); isCamelTokenByte(s[i-1]) || unicode.IsLetter(prev) || unicode.IsNumber(prev) {
+				// The quote is joined to the words on both sides of
+				// it, as the first one of
+				// DB_PASSWORD=pre'it's correct SECRET is, and no later
+				// quote closes it (see interiorApostropheEnd): the
+				// value runs to nextEnd and is redacted whole.
+				return nextEnd, nextEnd
+			}
 		}
 	}
 	inner, _ := unquoteValue(q)
 	last, _ := utf8.DecodeLastRuneInString(inner)
-	joins := q != "" && !isDelimSpace(last) && closingQuoteJoins(s, i, q, false)
+	joins := q != "" && !isDelimSpace(last) && closingQuoteJoins(sh, s, i, q, false)
 	// A quote that nothing closes and that a line break follows in a shell
 	// assignment (see inShellAssignment), as the one of
 	// DB_PASSWORD=pre'<LF>SECRET does, opens a part that runs on over the line
 	// break, as a shell reads it, rather than reads as a trailing apostrophe,
 	// as the one of password=it'<LF>next does.
-	breaksLine := q == "" && i+len(quote) < len(s) && (s[i+len(quote)] == '\n' || s[i+len(quote)] == '\r') && inShellAssignment(s, i)
+	breaksLine := q == "" && i+len(quote) < len(s) && (s[i+len(quote)] == '\n' || s[i+len(quote)] == '\r') && inShellAssignment(sh, s, i)
 	if strings.HasSuffix(quote, "'") {
 		if i+len(quote) < end {
 			if startsContraction(s, i, len(quote)) &&
-				(q == "" && unclosedContractionIsProse(s, i, len(quote)) ||
-					q != "" && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!joins || multilineContractionOpensPair(s, i, q, quoted))) {
+				(q == "" && unclosedContractionIsProse(sh, s, i, len(quote)) ||
+					q != "" && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!joins || multilineContractionOpensPair(sh, s, i, q, quoted))) {
 				return end, i
 			}
-		} else if q == "" && !breaksLine || q != "" && !closingQuoteJoins(s, i, q, false) && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" {
+		} else if q == "" && !breaksLine || q != "" && !closingQuoteJoins(sh, s, i, q, false) && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" {
 			return end, i
 		}
 	}
-	if i+len(quote) >= end && !breaksLine && (skipHorizDelimSpace(s, i+len(quote)) == i+len(quote) || strings.ContainsAny(q, "\r\n")) &&
-		(q == "" || !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!strings.HasSuffix(quote, "'") && !strings.ContainsAny(q, "\r\n") || !joins)) {
+	if i+len(quote) >= end && !breaksLine && (skipHorizDelimSpace(s, i+len(quote)) == i+len(quote) || spansLine(sh, s, i, len(q))) &&
+		(q == "" || !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!strings.HasSuffix(quote, "'") && !spansLine(sh, s, i, len(q)) || !joins)) {
 		return end, i
 	}
 	if q == "" {
+		// An apostrophe that nothing closes and that starts the ending of a
+		// contraction or a possessive (see startsContraction), as the one of
+		// abc's in password=abc's prompt_tokens=10 next_page_token=c1 does,
+		// ends with its word when the next word on the line starts a pair
+		// that ends a value (see startsRedactedPair), rather than opening a
+		// part that runs on over that pair: the value is redacted up to the
+		// pair, and the pair is read on its own.
+		if strings.HasSuffix(quote, "'") && i+len(quote) < end && !breaksLine && startsContraction(s, i, len(quote)) {
+			if k := skipHorizDelimSpace(s, end); k > end && startsRedactedPair(s, k, quoted) {
+				return end, i
+			}
+		}
 		if unclosedQuoteOpens(s, i, quote, true, quoted) {
 			return len(s), i
 		}
@@ -5092,8 +7604,8 @@ func joinedQuoteEnd(s string, i, end, open int, quoted quoteKinds) (valueEnd, ne
 	if inner, _ := unquoteValue(q); opensLaterConstruct(s, i, len(q), len(quote), inner, quoted) || opensQuotedPair(s, closing, len(quote), inner) {
 		return end, i
 	}
-	if !quotedValueEnds(s[i:], len(q), quoted) || opensDelimitedValue(s, i+len(q), quoted) {
-		return runOnValueEnd(s, i, i+len(q), open, quoted), i
+	if !quotedValueEnds(s[i:], len(q), quoted) || opensDelimitedValue(sh, s, i+len(q), quoted) {
+		return runOnValueEnd(sh, s, i, i+len(q), open, quoted), i
 	}
 	return i + len(q), i
 }
@@ -5107,10 +7619,10 @@ func joinedQuoteEnd(s string, i, end, open int, quoted quoteKinds) (valueEnd, ne
 // that line), as in "password=it's\nuser='bob'". In a shell assignment (see
 // inShellAssignment) the segment is a quoted part of the value, as a shell
 // reads it, as in export DB_PASSWORD=pre's\nfoo='bar' violetfern's.
-func multilineContractionOpensPair(s string, i int, q string, quoted quoteKinds) bool {
+func multilineContractionOpensPair(sh *shellAssignScanner, s string, i int, q string, quoted quoteKinds) bool {
 	quote := openingQuote(s, i)
 	quoteLen := len(quote)
-	if quoteLen == 0 || len(q) < 2*quoteLen || !strings.ContainsAny(q, "\r\n") || !startsContraction(s, i, quoteLen) || inShellAssignment(s, i) {
+	if quoteLen == 0 || len(q) < 2*quoteLen || !spansLine(sh, s, i, len(q)) || !startsContraction(s, i, quoteLen) || inShellAssignment(sh, s, i) {
 		return false
 	}
 	inner := q[quoteLen : len(q)-quoteLen]
@@ -5267,14 +7779,17 @@ const maxShellLineScan = 4096
 // does, as the b'secret\'b' of token=b'secret\'b'; echo 'ok' does, keeps
 // quotedValueRegex's reading, and so does one whose line runs on for more
 // than maxShellLineScan bytes after the shell's part, or that runs past its
-// line.
-func findQuotedOrShellSegment(s string, i int) string {
-	m := findQuotedValue(s[i:])
+// line. sh, if bound to s, keeps the scans of quotedValueAt and the line
+// breaks of s (see lineBreakFrom), so that the quotes of a word that one
+// scan reads, which the word's reader asks about in turn, are not each read
+// again to the end of the value.
+func findQuotedOrShellSegment(sh *shellAssignScanner, s string, i int) string {
+	m := quotedValueAt(sh, s, i)
 	seg := shellQuotedSegment(s, i)
 	switch {
 	case m == "":
 		return seg
-	case seg == "" || len(seg) >= len(m) || strings.ContainsAny(m, "\r\n"):
+	case seg == "" || len(seg) >= len(m) || spansLine(sh, s, i, len(m)):
 		return m
 	}
 	from := i + len(seg)
@@ -5698,6 +8213,9 @@ func allowedKeyAt(s string, i int) bool {
 	if qLoc := quotedKeyAtStart(s[i:]); qLoc != nil {
 		return quotedKeyAllowed(s[i+qLoc[2] : i+qLoc[3]])
 	}
+	if !mayStartTextKeyName(s[i:]) {
+		return false
+	}
 	loc := textKeyNameAtRe.FindStringSubmatchIndex(s[i:])
 	return loc != nil && textKeyAllowedAt(s, i+loc[2], i+loc[3]) && hasTextValueStart(s[i+loc[1]:])
 }
@@ -5725,7 +8243,7 @@ func compoundKeyStart(name string) int {
 		return o
 	}
 	for d := 0; ; {
-		if textKeyNameWholeRe.MatchString(name[d:]) {
+		if isWholeTextKeyName(name[d:]) {
 			return d
 		}
 		n := strings.IndexByte(name[d:], '.')
@@ -5799,6 +8317,12 @@ func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
 // opened before the key of the value, and quoted the quotes that leave a
 // string open before the value.
 func nestedPairEnd(s string, pair, valueEnd, open int, quoted quoteKinds) int {
+	return nestedPairEndWith(nil, s, pair, valueEnd, open, quoted)
+}
+
+// nestedPairEndWith is nestedPairEnd, with sh answering inShellAssignment
+// for s (a fresh scanner is used if sh is nil).
+func nestedPairEndWith(sh *shellAssignScanner, s string, pair, valueEnd, open int, quoted quoteKinds) int {
 	// A value longer than maxNestedKeyLen is read as a key only while each
 	// one ends further right than the one before it: keys apart from each
 	// other, as in a: KEY: KEY: KEY="x y", are read once each, but a run of
@@ -5819,12 +8343,12 @@ func nestedPairEnd(s string, pair, valueEnd, open int, quoted quoteKinds) int {
 		}
 		start, end := pair+loc[8], pair+loc[9]
 		if end-start > maxNestedKeyLen && end <= prevEnd {
-			return oversizedValueEnd(s, start, end, open, quoted)
+			return oversizedValueEnd(sh, s, start, end, open, quoted)
 		}
 		prevEnd = end
 		kind, next := nestsSensitiveKey(s, start, end, startsLine(s, pair+loc[7], start), true, quoted)
 		if kind == notNestedKey {
-			return textValueEnd(s, start, end, open, quoted)
+			return textValueEnd(sh, s, start, end, open, quoted)
 		}
 		pair, valueEnd = next, end
 	}
@@ -5844,12 +8368,12 @@ func nestedPairEnd(s string, pair, valueEnd, open int, quoted quoteKinds) int {
 // unless it does not open a value (see unclosedQuoteOpens), or a bare value.
 // Without a delimiter after it, the word is read as a bare value (see
 // textValueEnd). open and quoted are as for textValueEnd.
-func oversizedValueEnd(s string, start, end, open int, quoted quoteKinds) int {
-	closed := sensitiveValueEnd(s, start, start)
+func oversizedValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
+	closed := sensitiveValueEndWith(sh, s, start, start)
 	if closed > end {
 		return closed
 	}
-	if opened := openedValueEnd(s, closed, end, open, true, quoted); opened > end {
+	if opened := openedValueEnd(sh, s, closed, end, open, true, quoted); opened > end {
 		return opened
 	}
 	v := s[start:end]
@@ -5857,32 +8381,32 @@ func oversizedValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 	if !strings.HasSuffix(v, ":") && !strings.HasSuffix(v, "=") {
 		at = skipDelimSpace(s, end)
 		if at == len(s) || (s[at] != ':' && s[at] != '=') {
-			return textValueEnd(s, start, end, open, quoted)
+			return textValueEnd(sh, s, start, end, open, quoted)
 		}
 		at++
 	}
 	at = skipDelimSpace(s, at)
 	rest := s[at:]
 	if rest != "" && (rest[0] == '{' || rest[0] == '[') {
-		return sensitiveValueEnd(s, at, at)
+		return sensitiveValueEndWith(sh, s, at, at)
 	}
 	if q := openingQuote(s, at); q != "" {
 		if closesString(s, at, q, quoted) {
-			return textValueEnd(s, start, end, open, quoted)
+			return textValueEnd(sh, s, start, end, open, quoted)
 		}
 		if qv := quotedValueRe.FindString(rest); qv != "" {
 			if !quotedValueEnds(rest, len(qv), quoted) {
-				return runOnValueEnd(s, at, at+len(qv), open, quoted)
+				return runOnValueEnd(sh, s, at, at+len(qv), open, quoted)
 			}
 			if valueStartsAt(s, at, true, quoted) {
 				return at + len(qv)
 			}
-			return textValueEnd(s, start, end, open, quoted)
+			return textValueEnd(sh, s, start, end, open, quoted)
 		}
 		if unclosedQuoteOpens(s, at, q, true, quoted) {
 			return len(s)
 		}
-		return textValueEnd(s, start, end, open, quoted)
+		return textValueEnd(sh, s, start, end, open, quoted)
 	}
 	if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
 		return at + n
@@ -5960,27 +8484,10 @@ func hasTextValueStart(s string) bool {
 }
 
 // findQuotedValue returns the quoted-value match that quotedValueRe.FindString
-// returns for s, but without the regex overhead when the quote at s[0] is a
-// plain single or double quote whose body holds no backslash escape: the scan
-// walks to the matching close in one pass. When s starts with a backslash-
-// escaped quote (\" or \') or the body contains a backslash, it falls back to
-// quotedValueRe so the escape grammar stays in one place.
+// returns for s, read by quotedValueScan without the regexp.
 func findQuotedValue(s string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	q := s[0]
-	if q != '\'' && q != '"' {
-		return quotedValueRe.FindString(s)
-	}
-	for j := 1; j < len(s); j++ {
-		c := s[j]
-		if c == '\\' {
-			return quotedValueRe.FindString(s)
-		}
-		if c == q {
-			return s[:j+1]
-		}
+	if end, _ := quotedValueScan(s, 0); end > 0 {
+		return s[:end]
 	}
 	return ""
 }
@@ -6029,7 +8536,7 @@ func valueStartsAt(s string, i int, mayClose bool, quoted quoteKinds) bool {
 		if q != "" {
 			inner, _ := unquoteValue(q)
 			if holdsValue(inner) {
-				return textBetweenStrings(s, at, at+len(q), quoted) == ""
+				return textBetweenStrings(nil, s, at, at+len(q), quoted) == ""
 			}
 			after := s[at+len(q):]
 			return after != "" && !followsValueBoundary(after, quoted) && openingQuote(after, 0) == ""
@@ -6240,8 +8747,11 @@ func readsAsProse(inner string) bool {
 // " in config, api_key=" does (see opensLaterPairAfterSpace). Where no closed
 // second string follows the closing quote, as in " R8 R9"suffix, " R8 R9"" or
 // " R8 R9_TOKEN=" expired, the text is a credential that the closing quote
-// runs into (see runOnValueEnd).
-func textBetweenStrings(s string, start, end int, quoted quoteKinds) string {
+// runs into (see runOnValueEnd). sh, if bound to s, keeps the scans of
+// quotedValueAt and the brackets of s (see bracketEnd), so that a second
+// string or an object that runs on to the end of s is not read to its end
+// again for each value that it follows.
+func textBetweenStrings(sh *shellAssignScanner, s string, start, end int, quoted quoteKinds) string {
 	inner, quote := unquoteValue(s[start:end])
 	if quote == "" || !readsAsProse(inner) || !pairsForward(s[start:], end-start) {
 		return ""
@@ -6256,11 +8766,11 @@ func textBetweenStrings(s string, start, end int, quoted quoteKinds) string {
 	}
 	secStart := end - len(quote)
 	secQuoted := quoted
-	second := quotedValueRe.FindString(s[secStart:])
+	second := quotedValueAt(sh, s, secStart)
 	if len(second) <= 2*len(quote) && laterPair {
 		secStart = end
 		secQuoted = quoted | quoteKind(quote)
-		second = quotedValueRe.FindString(s[secStart:])
+		second = quotedValueAt(sh, s, secStart)
 	}
 	if len(second) <= 2*len(quote) {
 		return ""
@@ -6271,7 +8781,7 @@ func textBetweenStrings(s string, start, end int, quoted quoteKinds) string {
 	if !quotedSecondEnds(s[secStart:], len(second), secQuoted) {
 		if laterPair {
 			if bStart := secStart + len(quote); bStart < len(s) && (s[bStart] == '{' || s[bStart] == '[') {
-				if bEnd, closed := bracketValueEnd(s, bStart); closed &&
+				if bEnd, closed := bracketEnd(sh, s, bStart); closed &&
 					strings.HasPrefix(s[bEnd:], quote) &&
 					quotedSecondEnds(s[secStart:], bEnd+len(quote)-secStart, secQuoted) {
 					return quote
@@ -6672,7 +9182,7 @@ func startsLaterConstructAt(s string, quoted quoteKinds) bool {
 	if startsQuotedKeyWithValue(s, quoted) {
 		return true
 	}
-	kind, _ := afterClosedQuotePair(s, 0, quoted)
+	kind, _ := afterClosedQuotePair(nil, s, 0, quoted)
 	return kind == nestedKey
 }
 
@@ -6748,12 +9258,12 @@ func ownsQuotedValue(s string, start, end int, q string) bool {
 // to the end of s if a quote that opens a value is not closed, so that the
 // pairs it holds are redacted with it without pairing a closing quote across
 // whitespace with a following quoted value's opening quote.
-func forwardValueEnd(s string, start, end, open int, quoted quoteKinds) int {
+func forwardValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
 	for {
 		inner, quote := unquoteValue(s[start:end])
 		if quote == "" || !opensLaterValue(inner, s[end:]) {
-			if quote != "" && (!quotedValueEnds(s[start:], end-start, quoted) || opensDelimitedValue(s, end, quoted)) {
-				return runOnValueEnd(s, start, end, open, quoted)
+			if quote != "" && (!quotedValueEnds(s[start:], end-start, quoted) || opensDelimitedValue(sh, s, end, quoted)) {
+				return runOnValueEnd(sh, s, start, end, open, quoted)
 			}
 			return end
 		}
@@ -6771,7 +9281,7 @@ func forwardValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 				continue
 			}
 			if after < len(s) && (s[after] == '{' || s[after] == '[') {
-				return sensitiveValueEnd(s, after, after)
+				return sensitiveValueEndWith(sh, s, after, after)
 			}
 			if readsAsProse(inner) && opensLaterPairAfterSpace(inner, s[end:]) {
 				qOpen := end - len(quote)
@@ -6784,9 +9294,9 @@ func forwardValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 				bareEnd++
 			}
 			if kind, pair := nestsSensitiveKey(s, after, bareEnd, startsLine(s, end, after), true, quoted); kind != notNestedKey {
-				return nestedPairEnd(s, pair, bareEnd, open, quoted)
+				return nestedPairEndWith(sh, s, pair, bareEnd, open, quoted)
 			}
-			return textValueEnd(s, after, bareEnd, open, quoted)
+			return textValueEnd(sh, s, after, bareEnd, open, quoted)
 		}
 		qOpen := end - len(quote)
 		m := quotedValueRe.FindString(s[qOpen:])
@@ -6860,6 +9370,20 @@ type openQuotes struct {
 	// that do not end on it hold bearer tokens.
 	inner innerQuoteScan
 	ends  [6]stringEndScan
+	// shell answers inShellAssignment for the text of the pass that owns
+	// these quotes (see shellFor).
+	shell *shellAssignScanner
+}
+
+// shellFor returns the scanner that answers inShellAssignment for s, the
+// text of the pass that owns q, or a prefix of it. It is made on first use
+// and belongs to that pass alone.
+func (q *openQuotes) shellFor(s string) *shellAssignScanner {
+	if q.shell == nil {
+		q.shell = newShellAssignScanner(s)
+	}
+	q.shell.use(s)
+	return q.shell
 }
 
 // innerQuoteScan is where innerAt has read the string that opens at the
@@ -7020,6 +9544,7 @@ func (p *sensitivePairSpans) build(s string) {
 	finder := keyValFinder{whole: s}
 	var brackets openBrackets
 	var quotes openQuotes
+	sh := quotes.shellFor(s)
 	for pos := 0; pos < len(s); {
 		loc := finder.find(s[pos:])
 		if loc == nil {
@@ -7034,7 +9559,7 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(loc[7], loc[0]+1)
 			continue
 		}
-		if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8]) {
+		if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], &quotes) {
 			pos = max(loc[7], loc[0]+1)
 			continue
 		}
@@ -7053,7 +9578,7 @@ func (p *sensitivePairSpans) build(s string) {
 			end = bareValueEnd(s, end)
 		}
 		if loc[4] < loc[5] && (quoted&quoteKind(openingQuote(s, start)) != 0 || s[loc[5]:loc[7]] != "=") {
-			if quote := textBetweenStrings(s, start, end, quoted); quote != "" {
+			if quote := textBetweenStrings(sh, s, start, end, quoted); quote != "" {
 				next := quotes.unpaired(s, start, quote)
 				brackets.skip(next)
 				pos = max(next, loc[0]+1)
@@ -7065,7 +9590,7 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(start, loc[0]+1)
 			continue
 		case valueEndingInKeyName:
-			end = nestedPairEnd(s, pair, end, open, quoted)
+			end = nestedPairEndWith(sh, s, pair, end, open, quoted)
 			brackets.skip(end)
 			quotes.skip(s, end)
 			p.spans = append(p.spans, pairSpan{keyStart: loc[0], valStart: start, valEnd: end})
@@ -7079,7 +9604,7 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(redEnd, loc[0]+1)
 			continue
 		}
-		end = textValueEnd(s, start, end, open, quoted)
+		end = textValueEnd(sh, s, start, end, open, quoted)
 		brackets.skip(end)
 		if q := openingQuote(s, start); q != "" && end > start && closesString(s, start, q, quoted) {
 			quotes.drop()
@@ -7115,13 +9640,13 @@ func isMidWordApostrophe(s string, pos int) bool {
 // contraction of, as in x="Bearer abc'd secret", or in a shell assignment, as
 // in export DB_PASSWORD=pre'd secret, the quote is left open over the rest of
 // the value, as a shell leaves it.
-func unclosedContractionIsProse(s string, i, quoteLen int) bool {
+func unclosedContractionIsProse(sh *shellAssignScanner, s string, i, quoteLen int) bool {
 	n := contractionLen(s[i+quoteLen:])
 	after := i + quoteLen + max(n, 1)
 	if after < len(s) && (s[after] == '\n' || s[after] == '\r') {
 		return false
 	}
-	if !contractionStemIsProse(s, i, quoteLen, n) || inShellAssignment(s, i) {
+	if !contractionStemIsProse(s, i, quoteLen, n) || inShellAssignment(sh, s, i) {
 		return false
 	}
 	if after >= len(s) {
@@ -7319,15 +9844,29 @@ func opensPrefixedString(s string, pos int) bool {
 // possessive ending at the start of after (s, m, d, ll, re or ve, in either
 // case) when followed by neither a letter, a digit, "_" nor "=", or 0.
 func contractionLen(after string) int {
+	return contractionEndingLen(after, continuesWordOrKey)
+}
+
+// contractionEndingLen returns the byte length of the English contraction or
+// possessive ending at the start of after (s, m, d, ll, re or ve, in either
+// case) when the rune after it is not one that continues reports, or 0.
+func contractionEndingLen(after string, continues func(rune) bool) int {
 	for _, ending := range []string{"ll", "re", "ve", "s", "m", "d"} {
 		if len(after) >= len(ending) && strings.EqualFold(after[:len(ending)], ending) {
 			r, _ := utf8.DecodeRuneInString(after[len(ending):])
-			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '=' {
+			if !continues(r) {
 				return len(ending)
 			}
 		}
 	}
 	return 0
+}
+
+// continuesWordOrKey reports whether r, after the ending of a contraction,
+// makes that ending the start of a word or a key name instead: a letter, a
+// digit, "_" or "=".
+func continuesWordOrKey(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '='
 }
 
 // isContraction reports whether after, the text after an apostrophe, starts
@@ -7344,15 +9883,23 @@ func isContraction(after string) bool {
 // of it's, we'll, I'm and don't do (see contractionLen), rather than opens a
 // quoted part.
 func startsContraction(s string, i, quoteLen int) bool {
+	return startsContractionBefore(s, i, quoteLen, continuesWordOrKey)
+}
+
+// startsContractionBefore reports whether the single quote at s[i:], of
+// length quoteLen, starts the ending of a contraction or a possessive, as
+// startsContraction reads it, when the rune after that ending is not one that
+// continues reports.
+func startsContractionBefore(s string, i, quoteLen int, continues func(rune) bool) bool {
 	after := s[i+quoteLen:]
-	if isContraction(after) {
+	if contractionEndingLen(after, continues) > 0 {
 		return true
 	}
 	if i == 0 || (s[i-1] != 'n' && s[i-1] != 'N') || after == "" || (after[0] != 't' && after[0] != 'T') {
 		return false
 	}
 	r, _ := utf8.DecodeRuneInString(after[1:])
-	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '='
+	return !continues(r)
 }
 
 // closingQuoteJoins reports whether the closing quote of the quoted part q at
@@ -7371,14 +9918,14 @@ func startsContraction(s string, i, quoteLen int) bool {
 // echo ok. In a word that a closed quoted part has already joined (compound,
 // see runOnWord), as the one of DB_PASSWORD="a"pre' violetfern's, a single
 // quote that closes a part is never read as an apostrophe.
-func closingQuoteJoins(s string, i int, q string, compound bool) bool {
+func closingQuoteJoins(sh *shellAssignScanner, s string, i int, q string, compound bool) bool {
 	quoteLen := len(openingQuote(s, i))
 	if len(q) < 2*quoteLen {
 		return false
 	}
 	inner := q[quoteLen : len(q)-quoteLen]
 	closing := i + len(q) - quoteLen
-	if inner == "" || startsContraction(s, closing, quoteLen) && (quoteLen != 1 || !compound && closingQuoteIsApostrophe(s, i, closing)) {
+	if inner == "" || startsContraction(s, closing, quoteLen) && (quoteLen != 1 || !compound && closingQuoteIsApostrophe(sh, s, i, closing)) {
 		return false
 	}
 	if last, _ := utf8.DecodeLastRuneInString(inner); isDelimSpace(last) {
@@ -7403,8 +9950,8 @@ func closingQuoteJoins(s string, i int, q string, compound bool) bool {
 // proseFollowsEnding), as in the password=users' wasn't changed. How long the
 // word before the closing quote is does not count, so that a long name, as in
 // the password=it's Bartholomewsmith's, reads as prose as a short one does.
-func closingQuoteIsApostrophe(s string, i, closing int) bool {
-	if !isProseContraction(s, closing) || inShellAssignment(s, i) {
+func closingQuoteIsApostrophe(sh *shellAssignScanner, s string, i, closing int) bool {
+	if !isProseContraction(s, closing) || inShellAssignment(sh, s, i) {
 		return false
 	}
 	if startsContraction(s, i, 1) {
@@ -7448,8 +9995,10 @@ const maxShellWordScan = 256
 // before an "=" in it is an environment or snake_case variable name (see
 // isEnvVarName), or the word starts with its name and follows export, env,
 // declare, local, readonly or typeset on its logical line, after options and
-// other assignments, as in export A=1 password=x.
-func inShellAssignment(s string, i int) bool {
+// other assignments, as in export A=1 password=x. sh reads s, or a text that
+// s is a prefix of, and carries its scan from one call to the next (see
+// shellAssignScanner.use); a fresh scanner is used if sh is nil.
+func inShellAssignment(sh *shellAssignScanner, s string, i int) bool {
 	if i <= 0 || i > len(s) {
 		return false
 	}
@@ -7467,89 +10016,36 @@ func inShellAssignment(s string, i int) bool {
 	if p < 0 {
 		return false
 	}
-	sc := acquireShellScanner(s)
-	defer releaseShellScanner(sc)
-	return sc.at(i)
+	if sh == nil {
+		sh = newShellAssignScanner(s)
+	}
+	sh.use(s)
+	return sh.at(i)
 }
 
-// shellScannerMu guards shellScannerCache, the ring of scanners that
-// inShellAssignment reuses between calls. A scrub asks about many quotes of
-// one string, each in a call of its own, and a scanner that a call gets back
-// for the string that it last scanned goes on from its cursors and quote
-// records; scanning each line again from its start for every quote would
-// make the scrub quadratic in the length of a line. A sync.Pool would serve,
-// but its Put drops roughly one in four items when the race detector is on,
-// which discards cached cursors and makes the scan quadratic under -race, so
-// a fixed-size ring under a mutex takes its place.
-var (
-	shellScannerMu    sync.Mutex
-	shellScannerCache [8]*shellAssignScanner
-	shellScannerHand  int
-)
-
-// acquireShellScanner gets a scanner for s from the ring, reset unless it
-// last scanned s or a string that s is a prefix of (as when redactBearerToken
-// passes t = s[:at] for growing at values). Comparing the strings returns at
-// once when they differ in length or share their bytes; only strings of the
-// same length that differ read their common prefix, once a call. A prefix
-// slice of a cached full string shares the same backing bytes, so
-// sc.s[:len(s)] == s is an O(1) pointer-and-length comparison.
-func acquireShellScanner(s string) *shellAssignScanner {
-	shellScannerMu.Lock()
-	var sc *shellAssignScanner
-	for i := range shellScannerCache {
-		c := shellScannerCache[i]
-		if c == nil {
-			continue
-		}
-		if c.s == s {
-			sc = c
-			shellScannerCache[i] = nil
-			break
-		}
-		if len(s) <= len(c.s) && c.s[:len(s)] == s {
-			sc = c
-			shellScannerCache[i] = nil
-			break
-		}
-	}
-	shellScannerMu.Unlock()
-	if sc == nil {
-		sc = &shellAssignScanner{}
-	}
-	if sc.s != s && !(len(s) <= len(sc.s) && sc.s[:len(s)] == s) {
-		sc.reset(s)
-	}
+// newShellAssignScanner returns a scanner that reads s for inShellAssignment.
+// Each pass of a scrub owns the scanners it uses: a scrub asks about many
+// quotes of its text, each in a call of its own, and the scanner goes on from
+// the cursors and quote records of the calls before, as reading each line
+// again from its start for every quote would make the scrub quadratic in the
+// length of a line. No scanner is shared between scrubs, so concurrent scrubs
+// neither contend for nor evict each other's scanners, and none of them keeps
+// the text once the pass that owns it returns.
+func newShellAssignScanner(s string) *shellAssignScanner {
+	sc := &shellAssignScanner{}
+	sc.reset(s)
 	return sc
 }
 
-func releaseShellScanner(sc *shellAssignScanner) {
-	shellScannerMu.Lock()
-	old := shellScannerCache[shellScannerHand]
-	shellScannerCache[shellScannerHand] = sc
-	shellScannerHand = (shellScannerHand + 1) % len(shellScannerCache)
-	shellScannerMu.Unlock()
-	if old != nil {
-		old.reset("")
+// use points sc at s, unless sc already reads s or a text that s is a prefix
+// of, as when redactBearerToken reads a token in t = s[:at]: such a prefix
+// shares the bytes of the text, so the comparison returns at once, and the
+// scan goes on as the one of the whole text.
+func (sc *shellAssignScanner) use(s string) {
+	if len(s) <= len(sc.s) && sc.s[:len(s)] == s {
+		return
 	}
-}
-
-// primeShellScanner ensures a scanner initialized with s is in the ring, so
-// that acquireShellScanner can find it when callers pass prefix slices t = s[:at]
-// of s. It is called in redactBearerToken before such slices are made.
-func primeShellScanner(s string) {
-	shellScannerMu.Lock()
-	for i := range shellScannerCache {
-		c := shellScannerCache[i]
-		if c != nil && (c.s == s || (len(s) <= len(c.s) && c.s[:len(s)] == s)) {
-			shellScannerMu.Unlock()
-			return
-		}
-	}
-	shellScannerMu.Unlock()
-	sc := &shellAssignScanner{}
 	sc.reset(s)
-	releaseShellScanner(sc)
 }
 
 type shellQuoteMemo struct {
@@ -7616,10 +10112,42 @@ type shellCursor struct {
 	levels [8]shellScanLevel
 }
 
+// shellAssignScanner reads one text, s, for the pass that owns it. Besides
+// the scan of inShellAssignment, it keeps what the pass has read of s for
+// other questions that the pass asks again and again about places along s,
+// each of which could otherwise read on to the end of s: so that a pass
+// stays linear in the length of s, each answer is read once and then looked
+// up. Each of these records holds only for s itself, not for a text that s
+// is a prefix of, so a helper uses one only when sh.s is s (see
+// boundTo).
 type shellAssignScanner struct {
 	s       string
 	cursors [8]shellCursor
 	quotes  [4]shellQuoteMemo
+	// word is the run of bytes other than whitespace, ",", ";" and "&"
+	// that bareWordEnd read last in s, s[word[0]:word[1]], which ends at
+	// such a byte or at the end of s.
+	word [2]int
+	// values holds the last scan of quotedValueAt for each kind of quote
+	// (see quoteKindIndex).
+	values [4]quotedValueMemo
+	// breaks holds the offsets of the line breaks of s, in order, once
+	// breaksRead is set (see lineBreakFrom).
+	breaks     []int
+	breaksRead bool
+	// brackets is the table of bracketSkips for s, or nil until bracketEnd
+	// first needs it.
+	brackets []int32
+	// delimited holds what delimitedChainEnd worked out for each offset and
+	// set of open quotes (see delimitedKey).
+	delimited map[int]delimitedEnd
+	// noApostrophe records, for "'" and "\'" (slots 0..1 when !explicitOpen,
+	// slots 2..3 when explicitOpen), the last range [from, to, quoted) in
+	// which interiorApostropheEnd found no closing quote.
+	noApostrophe [4][3]int
+	// ends memoizes stringEndIn per quoteKinds slot across calls on the same
+	// line (see stringEndOnLine).
+	ends [6]stringEndScan
 }
 
 func (sc *shellAssignScanner) reset(s string) {
@@ -7632,6 +10160,317 @@ func (sc *shellAssignScanner) reset(s string) {
 		}
 	}
 	sc.quotes = [4]shellQuoteMemo{}
+	sc.word = [2]int{-1, -1}
+	sc.values = [4]quotedValueMemo{}
+	sc.breaks, sc.breaksRead = sc.breaks[:0], false
+	sc.brackets = nil
+	sc.delimited = nil
+	sc.noApostrophe = [4][3]int{{-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}, {-1, -1, -1}}
+	sc.ends = [6]stringEndScan{}
+}
+
+// boundTo reports whether sc is not nil and reads s itself, so that what it
+// keeps of its text holds for s.
+func (sc *shellAssignScanner) boundTo(s string) bool {
+	return sc != nil && len(sc.s) == len(s) && sc.s == s
+}
+
+// stringEndOnLine returns stringEndIn(s, from, lineBreakFrom(sc, s, from), quoted),
+// memoizing the scan per quoteKinds slot on sc so repeated calls on the same
+// line do not rescan to the end of the line.
+func (sc *shellAssignScanner) stringEndOnLine(s string, from int, quoted quoteKinds) int {
+	lineEnd := lineBreakFrom(sc, s, from)
+	if quoted == 0 {
+		return lineEnd
+	}
+	if !sc.boundTo(s) {
+		return stringEndIn(s, from, lineEnd, quoted)
+	}
+	c := &sc.ends[endScanSlot(quoted)]
+	if c.kinds == quoted && c.from <= from && (c.at >= from || c.at < 0 && from <= c.lineEnd) {
+		if c.at >= 0 {
+			return c.at
+		}
+		return c.lineEnd
+	}
+	end := stringEndIn(s, from, lineEnd, quoted)
+	at := end
+	if end == lineEnd {
+		at = -1
+	}
+	*c = stringEndScan{kinds: quoted, from: from, lineEnd: lineEnd, at: at}
+	return end
+}
+
+// bareWordEnd returns where the run of bytes other than whitespace, ",", ";"
+// and "&" that runs on through s[i:] ends: at the first such byte, or at the
+// end of s. sh, if not nil and bound to s, keeps the run it read last, so
+// that the pairs of one long word, which nestedPairEndWith reads in turn as
+// in 'temp:a='temp:a=..., read the word once rather than each to its end.
+func bareWordEnd(sh *shellAssignScanner, s string, i int) int {
+	bound := sh.boundTo(s)
+	if bound && sh.word[0] <= i && i <= sh.word[1] {
+		return sh.word[1]
+	}
+	end := len(s)
+	if n := strings.IndexAny(s[i:], regexpSpace+",;&"); n >= 0 {
+		end = i + n
+	}
+	if bound {
+		sh.word = [2]int{i, end}
+	}
+	return end
+}
+
+// quotedValueMemo records a scan of quotedValueScan from the quote at open:
+// it read s[open:stop] as a part of the value and found the value
+// s[open:end], or none if end is negative.
+type quotedValueMemo struct {
+	open, end, stop int
+}
+
+// quoteKindIndex returns the index of the quote q, ", ', \" or \', in
+// shellAssignScanner.values.
+func quoteKindIndex(q string) int {
+	idx := 0
+	if q[len(q)-1] == '\'' {
+		idx = 1
+	}
+	if len(q) == 2 {
+		idx += 2
+	}
+	return idx
+}
+
+// quotedValueScan reads the quoted value that the quote at s[i:] opens as
+// quotedValueRe reads it, without the regexp: it returns end, just past the
+// closing quote of the value, or -1 if quotedValueRe matches nothing at
+// s[i:], and stop, the offset at which the scan ended: the closing quote, or
+// the byte (or the end of s) at which the value can go on no further. Every
+// byte of s[i:stop] is read as the opening quote, a byte of the value or a
+// part of an escape. quotedValueRegex reads each byte one way only, so the
+// scan never goes back.
+func quotedValueScan(s string, i int) (end, stop int) {
+	q := openingQuote(s, i)
+	switch len(q) {
+	case 1:
+		c := q[0]
+		for j := i + 1; j < len(s); j++ {
+			switch s[j] {
+			case c:
+				return j + 1, j
+			case '\\':
+				// A backslash escapes the byte after it, a line break
+				// too.
+				if j+1 == len(s) {
+					return -1, j
+				}
+				j++
+			}
+		}
+		return -1, len(s)
+	case 2:
+		c := q[1]
+		j := i + 2
+		for j < len(s) {
+			if b := s[j]; b == c {
+				// Only \q closes the value; a bare quote ends it unclosed.
+				return -1, j
+			} else if b != '\\' {
+				j++
+				continue
+			}
+			if j+1 == len(s) {
+				return -1, j
+			}
+			switch s[j+1] {
+			case c:
+				return j + 2, j
+			case '\\':
+			default:
+				j += 2
+				continue
+			}
+			// A doubled backslash starts an escape of the inner text:
+			// \\\\, \\\q, or \\ and a byte other than a backslash and q
+			// (see escapedQuotedRegex).
+			if j+2 == len(s) || s[j+2] == c {
+				return -1, j
+			}
+			if s[j+2] != '\\' {
+				j += 3
+				continue
+			}
+			if j+3 == len(s) || (s[j+3] != '\\' && s[j+3] != c) {
+				return -1, j
+			}
+			j += 4
+		}
+		return -1, len(s)
+	}
+	return -1, i
+}
+
+// quotedValueAt returns the quoted value that the quote at s[i:] opens, as
+// quotedValueRe reads it (see quotedValueScan), or "". sh, if bound to s
+// (see shellAssignScanner.boundTo), keeps the last scan for each kind of
+// quote, so that a quote of the same kind that the scan read as a byte of
+// the value, as each \' of a word that repeats x\\\' is, is not read again
+// to where the value ends: such a quote is the escaped byte of an escape
+// (one that stood where the value could close would have closed it), so a
+// scan from it reads on in step with the scan before, from the byte after
+// it, and ends where that scan did.
+func quotedValueAt(sh *shellAssignScanner, s string, i int) string {
+	q := openingQuote(s, i)
+	if q == "" {
+		return ""
+	}
+	var memo *quotedValueMemo
+	if sh.boundTo(s) {
+		memo = &sh.values[quoteKindIndex(q)]
+		if memo.open <= i && i+len(q) <= memo.stop {
+			if memo.end < 0 {
+				return ""
+			}
+			return s[i:memo.end]
+		}
+	}
+	end, stop := quotedValueScan(s, i)
+	if memo != nil {
+		*memo = quotedValueMemo{open: i, end: end, stop: stop}
+	}
+	if end < 0 {
+		return ""
+	}
+	return s[i:end]
+}
+
+// lineBreakFrom returns the offset of the first line break ("\r" or "\n") in
+// s at or after i, or len(s) if there is none. sh, if bound to s (see
+// shellAssignScanner.boundTo), reads the line breaks of s once, so that
+// asking whether each of many long quoted parts spans a line does not read
+// each of them again.
+func lineBreakFrom(sh *shellAssignScanner, s string, i int) int {
+	if !sh.boundTo(s) {
+		if n := strings.IndexAny(s[i:], "\r\n"); n >= 0 {
+			return i + n
+		}
+		return len(s)
+	}
+	if !sh.breaksRead {
+		sh.breaksRead = true
+		for j := 0; j < len(s); {
+			n := strings.IndexAny(s[j:], "\r\n")
+			if n < 0 {
+				break
+			}
+			sh.breaks = append(sh.breaks, j+n)
+			j += n + 1
+		}
+	}
+	if k, _ := slices.BinarySearch(sh.breaks, i); k < len(sh.breaks) {
+		return sh.breaks[k]
+	}
+	return len(s)
+}
+
+// spansLine reports whether the part s[i:i+n] holds a line break (see
+// lineBreakFrom).
+func spansLine(sh *shellAssignScanner, s string, i, n int) bool {
+	return lineBreakFrom(sh, s, i) < i+n
+}
+
+// bracketEnd returns what bracketValueEnd returns for the "{" or "[" at
+// s[start]. sh, if bound to s (see shellAssignScanner.boundTo), reads the
+// brackets and strings of s once (see bracketSkips), so that the objects
+// and arrays that a pass asks about, each of which runs on to the end of s
+// if nothing closes it, are not each read to their end.
+func bracketEnd(sh *shellAssignScanner, s string, start int) (int, bool) {
+	if c := s[start]; !sh.boundTo(s) || len(s) >= 1<<31-1 || c != '{' && c != '[' {
+		return bracketValueEnd(s, start)
+	}
+	if sh.brackets == nil {
+		sh.brackets = bracketSkips(s)
+	}
+	if m := sh.brackets[start+1]; m >= 0 {
+		return int(m) + 1, true
+	}
+	return len(s), false
+}
+
+// bracketSkips returns a table, for each offset i of s and for len(s), of
+// the offset of the first "}" or "]" that bracketValueEnd meets if it reads
+// s from i outside of a string at a depth of 0, past the strings and
+// the objects and arrays that open and close at or after i, or -1 if it
+// meets none before the end of s. bracketValueEnd(s, i) for a "{" or "[" at
+// s[i] thus ends just past the offset at i+1. It reads s once, from its end,
+// and works out the offset at i from the ones after it: a "}" or "]" is its
+// own; a "{" or "[" skips to the offset after the bracket that closes it;
+// and a string, an escape or another byte skips to the offset after it. A
+// string that a quote opens ends at the first quote of its kind that an
+// even run of backslashes (none, too) precedes, as a backslash in it
+// escapes the byte after it; one that an escaped quote, \" or \', opens
+// ends at the first such quote that a run of 4n+1 backslashes precedes, the
+// last of which escapes it, as the earlier ones pair into escapes of the
+// inner text (see bracketValueEnd).
+func bracketSkips(s string) []int32 {
+	skips := make([]int32, len(s)+1)
+	skips[len(s)] = -1
+	quoteIdx := func(c byte) int {
+		if c == '\'' {
+			return 1
+		}
+		return 0
+	}
+	// plain holds the first quote of each kind after i that closes a string
+	// that a quote opens; escapedAfter holds the first that closes one
+	// that an escaped quote opens, at or after i+1, and escaped the same at
+	// or after i+2, where such a string opened at i starts.
+	plain := [2]int32{-1, -1}
+	escaped, escapedAfter := plain, plain
+	for i := len(s) - 1; i >= 0; i-- {
+		switch c := s[i]; c {
+		case '}', ']':
+			skips[i] = int32(i)
+		case '{', '[':
+			skips[i] = -1
+			if m := skips[i+1]; m >= 0 {
+				skips[i] = skips[m+1]
+			}
+		default:
+			// last is the offset of the last byte of the string, escape
+			// or byte that starts at i, or -1 if s ends before it does.
+			var last int32
+			switch {
+			case c == '"' || c == '\'':
+				last = plain[quoteIdx(c)]
+			case c == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\''):
+				last = escaped[quoteIdx(s[i+1])]
+			case c == '\\' && i+1 < len(s):
+				last = int32(i + 1)
+			default:
+				last = int32(i)
+			}
+			skips[i] = -1
+			if last >= 0 {
+				skips[i] = skips[last+1]
+			}
+		}
+		escaped = escapedAfter
+		if c := s[i]; c == '"' || c == '\'' {
+			run := 0
+			for run < i && s[i-1-run] == '\\' {
+				run++
+			}
+			if run%2 == 0 {
+				plain[quoteIdx(c)] = int32(i)
+			}
+			if run%4 == 1 {
+				escapedAfter[quoteIdx(c)] = int32(i)
+			}
+		}
+	}
+	return skips
 }
 
 func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
@@ -8338,17 +11177,18 @@ func trimUnopenedClosers(v string) string {
 	return v[:end]
 }
 
-// sensitiveValueEnd returns the end of the value matched at s[start:end]. A
-// value that opens a JSON object or array, such as the one in
+// sensitiveValueEndWith returns the end of the value matched at
+// s[start:end]. A value that opens a JSON object or array, such as the one in
 // {"token": {"value": "..."}}, is extended to its closing bracket, or to the
 // end of s if it is not closed, so that the fields nested in it are redacted
 // together with it. Brackets inside strings do not count, including strings
-// delimited by escaped quotes, as in JSON text formatted with %q.
-func sensitiveValueEnd(s string, start, end int) int {
+// delimited by escaped quotes, as in JSON text formatted with %q. sh, if
+// bound to s, reads the brackets of s once (see bracketEnd).
+func sensitiveValueEndWith(sh *shellAssignScanner, s string, start, end int) int {
 	if c := s[start]; c != '{' && c != '[' {
 		return end
 	}
-	e, closed := bracketValueEnd(s, start)
+	e, closed := bracketEnd(sh, s, start)
 	if !closed {
 		return len(s)
 	}

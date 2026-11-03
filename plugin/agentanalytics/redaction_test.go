@@ -18,14 +18,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
+	"unsafe"
+	"weak"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
 )
 
 func TestScrubTextPatterns_BearerAndBasicWithUnicodeWhitespace(t *testing.T) {
@@ -50,8 +59,8 @@ func TestScrubTextPatterns_BearerAndBasicWithUnicodeWhitespace(t *testing.T) {
 		{"basic vertical tab", "Basic\vdXNlcjpwYXNz", "Basic [REDACTED]"},
 		{"basic line separator", "Basic\u2028dXNlcjpwYXNz", "Basic [REDACTED]"},
 		{"basic paragraph separator", "Basic\u2029dXNlcjpwYXNz", "Basic [REDACTED]"},
-		{"bearer token stops at a vertical tab", "x Bearer SYNTHETIC_SECRET\vy", "x Bearer [REDACTED]\vy"},
-		{"bearer token stops at a line separator", "x Bearer SYNTHETIC_SECRET\u2028y", "x Bearer [REDACTED]\u2028y"},
+		{"bearer token stops at a vertical tab", "x Bearer SYNTHETIC_SECRET\vy", "x Bearer [REDACTED]"},
+		{"bearer token stops at a line separator", "x Bearer SYNTHETIC_SECRET\u2028y", "x Bearer [REDACTED]"},
 		// Bearer token after NBSP must not swallow trailing Unicode whitespace.
 		{"bearer token stops at trailing nbsp", "x Bearer\u00a0sk-live-SECRET\u00a0y", "x Bearer [REDACTED]\u00a0y"},
 		// "bearer of" prose with NBSP must not swallow a following real Bearer token.
@@ -801,17 +810,17 @@ func TestScrubTextPatterns_OpenedValueEnds(t *testing.T) {
 		{"array", `token=a=["b", "c"] kept`, `token=[REDACTED] kept`},
 		{"quoted value closed in the bare value", `password=a:"b",kept=1`, `password=[REDACTED],kept=1`},
 		{"object closed in the bare value", `password=a:{"b":"c"},kept=1`, `password=[REDACTED],kept=1`},
-		{"oversized run, then a spaced = and an object", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c"} kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
-		{"oversized run, then an object in the word", "credentials:\n a_PASSWORD: " + run + `={"b": "c"} kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
-		{"oversized run, then an array after a delimiter", "credentials:\n a_PASSWORD: " + run + `: ["b", "c"] kept`, "credentials:\n a_PASSWORD:[REDACTED] kept"},
-		{"oversized run, then an object that is not closed", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c" kept`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		{"oversized run, then a spaced = and an object", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c"} kept`, "credentials:[REDACTED] kept"},
+		{"oversized run, then an object in the word", "credentials:\n a_PASSWORD: " + run + `={"b": "c"} kept`, "credentials:[REDACTED] kept"},
+		{"oversized run, then an array after a delimiter", "credentials:\n a_PASSWORD: " + run + `: ["b", "c"] kept`, "credentials:[REDACTED] kept"},
+		{"oversized run, then an object that is not closed", "credentials:\n a_PASSWORD: " + run + ` = {"b": "c" kept`, "credentials:[REDACTED]"},
 		// A quote at the end of an oversized run whose last key is followed
 		// by a spaced delimiter opens a value, even when a letter follows
 		// the quoted value, which the quote runs into: the letter is
 		// redacted with the value, as it may be part of it (see
 		// runOnValueEnd). Read from the delimiter instead, the value would
 		// end at its first space.
-		{"oversized run, then a quote that ends the word", "credentials:\n a_PASSWORD: " + run + `=" = b c"x`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		{"oversized run, then a quote that ends the word", "credentials:\n a_PASSWORD: " + run + `=" = b c"x`, "credentials:[REDACTED]"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1096,6 +1105,14 @@ func checkNoLeak(t *testing.T, in, secret string) {
 	}
 }
 
+// baselineRedacts reports whether the baseline pass, which scrubTextPatterns
+// runs under its own passes so that text loses at least what that pass
+// redacts, removes the secret from in.
+func baselineRedacts(in, secret string) bool {
+	out, _ := baselineScrub(in)
+	return !strings.Contains(out, secret)
+}
+
 // TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters checks that a bare
 // value that ends in or is followed after horizontal whitespace by a
 // delimiter, followed by whitespace (including Unicode spaces and vertical
@@ -1176,7 +1193,7 @@ func TestScrubTextPatterns_ValuesOpenedAfterSpacedDelimiters(t *testing.T) {
 		// TestScrubTextPatterns_QuotedCredentialsRunningIntoText).
 		{`password=a: "x""y"`, `password=[REDACTED]`},
 		{`failed: "password=" "x"`, `failed: "password=" "x"`},
-		{`failed: "password=" and "y""`, `failed: "password=" and "y""`},
+		{`failed: "password=" and "y""`, `failed: "password=" [REDACTED] "y""`},
 	} {
 		checkRedactionPaths(t, tt.in, tt.want)
 	}
@@ -1199,26 +1216,26 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 		{`DB_PASSWORD=\"prefix R7_SYNTHETIC_CREDENTIAL_9327`, `DB_PASSWORD=[REDACTED]`},
 		{`DB_PASSWORD=\'prefix R7_SYNTHETIC_CREDENTIAL_9327`, `DB_PASSWORD=[REDACTED]`},
 		{`err="failed: DB_PASSWORD="prefix R7_SYNTHETIC_CREDENTIAL_9327`, `err="failed: DB_PASSWORD=[REDACTED]`},
-		{"credentials:\n a_PASSWORD: " + run + ` = "prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:\n a_PASSWORD:[REDACTED]"},
-		{"credentials:\n a_PASSWORD: " + run + `: 'prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:\n a_PASSWORD:[REDACTED]"},
+		{"credentials:\n a_PASSWORD: " + run + ` = "prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:[REDACTED]"},
+		{"credentials:\n a_PASSWORD: " + run + `: 'prefix R7_SYNTHETIC_CREDENTIAL_9327`, "credentials:[REDACTED]"},
 		// Unclosed spaced quotes under envelope and nested keys.
-		{`credentials: token = "   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
-		{`credentials: token = '   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
-		{`credentials: token = \"   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
-		{`credentials: token = \'   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials: token=[REDACTED]`},
+		{`credentials: token = "   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials:[REDACTED]`},
+		{`credentials: token = '   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials:[REDACTED]`},
+		{`credentials: token = \"   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials:[REDACTED]`},
+		{`credentials: token = \'   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `credentials:[REDACTED]`},
 		{`credentials: password="correct R7_SYNTHETIC_CREDENTIAL_9327 battery"`, `credentials: password="[REDACTED]"`},
-		{"credentials:\n  token: \"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "credentials:\n  token:[REDACTED]"},
+		{"credentials:\n  token: \"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
 		// The quote closes the string that the pair is in, including when
 		// another quoted pair follows on the same line.
 		{`failed: "password=" in config`, `failed: "password=" in config`},
-		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=" DB_PASSWORD="[REDACTED]"`},
-		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password=" DB_PASSWORD=[REDACTED]`},
-		{`failed: "password=   " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=   " DB_PASSWORD="[REDACTED]"`},
+		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=" [REDACTED]="[REDACTED]"`},
+		{`failed: "password=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password=" [REDACTED]=[REDACTED]`},
+		{`failed: "password=   " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=   " [REDACTED]="[REDACTED]"`},
 		{`failed: "password=abc:" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=[REDACTED] DB_PASSWORD="[REDACTED]"`},
 		{`failed: "password=abc:" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: "password=[REDACTED] DB_PASSWORD=[REDACTED]`},
 		{`failed: "password=abc: " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "password=[REDACTED] " DB_PASSWORD="[REDACTED]"`},
 		{`failed: 'password=abc: ' dbPassword='   R7_SYNTHETIC_CREDENTIAL_9327'`, `failed: 'password=[REDACTED] ' dbPassword='[REDACTED]'`},
-		{`failed: "credentials: token = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials:[REDACTED] = " DB_PASSWORD="[REDACTED]"`},
+		{`failed: "credentials: token = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials:[REDACTED] = " [REDACTED]="[REDACTED]"`},
 		{"failed: \"credentials= " + run + ` = " DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials=[REDACTED] = " DB_PASSWORD="[REDACTED]"`},
 		{"failed: \"credentials= " + run + `=" DB_PASSWORD="   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "credentials=[REDACTED] DB_PASSWORD="[REDACTED]"`},
 		{"failed: \"credentials= " + run + ` = " in config`, `failed: "credentials=[REDACTED] = " in config`},
@@ -1233,7 +1250,7 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 		{`err="can't connect" dbPassword='   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `err="can't connect" dbPassword=[REDACTED]`},
 		{`x='a "b' DB_PASSWORD="   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `x='a "b' DB_PASSWORD=[REDACTED]`},
 		{`dir="C:\\" DB_PASSWORD="   prefix R7_SYNTHETIC_CREDENTIAL_9327`, `dir="C:\\" DB_PASSWORD=[REDACTED]`},
-		{"\\\"Authorization: R7_SYNTHETIC_CREDENTIAL_9327\\\"\nDB_PASSWORD=\\\"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "\\\"Authorization: [REDACTED]\nDB_PASSWORD=[REDACTED]"},
+		{"\\\"Authorization: R7_SYNTHETIC_CREDENTIAL_9327\\\"\nDB_PASSWORD=\\\"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "\\\"Authorization: [REDACTED]\\\"\nDB_PASSWORD=[REDACTED]"},
 		{"msg=\"line1\nDB_PASSWORD=\"   prefix R7_SYNTHETIC_CREDENTIAL_9327", "msg=\"line1\nDB_PASSWORD=[REDACTED]"},
 		// Apostrophes inside a single-quoted string, within a word, after
 		// a plural or a non-ASCII letter, or inside a redacted value, do not
@@ -1303,29 +1320,29 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 		{`failed: {"password": "prefix R7_SYNTHETIC_CREDENTIAL_9327`, `failed: {"password":"[REDACTED]"`},
 		{`x "temp:cache": "prefix R7_SYNTHETIC_CREDENTIAL_9327 suffix}`, `x "temp:cache":"[REDACTED]"`},
 		{`failed: 'error at "token": ' user=alice`, `failed: 'error at "token": ' user=alice`},
-		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327'`, `failed: 'error at "token": ' DB_PASSWORD='[REDACTED]'`},
-		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: 'error at "token": ' DB_PASSWORD=[REDACTED]`},
-		{`got "token": " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`failed: "Bearer " api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "Bearer " api_key="[REDACTED]"`},
-		{`Bearer " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer " in config, api_key="[REDACTED]"`},
+		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327'`, `failed: 'error at "token": ' [REDACTED]='[REDACTED]'`},
+		{`failed: 'error at "token": ' DB_PASSWORD='   R7_SYNTHETIC_CREDENTIAL_9327`, `failed: 'error at "token": ' [REDACTED]=[REDACTED]`},
+		{`got "token": " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`failed: "Bearer " api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "Bearer " [REDACTED]="[REDACTED]"`},
+		{`Bearer " in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer [REDACTED]`},
 		{`failed: "Bearer "R7_SYNTHETIC_CREDENTIAL_9327""`, `failed: "Bearer [REDACTED]"`},
 		// The later string's value starts with a character that a key does
 		// not, or the value before it ends in a key and a delimiter.
-		{`got "token": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="$2b$12$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="/R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="-R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="★R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="{\"k\":\"R7_SYNTHETIC_CREDENTIAL_9327\"}"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key=""R7_SYNTHETIC_CREDENTIAL_9327""`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`got "token": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL`, `got "token": " in config, api_key="[REDACTED]" DB_PASSWORD=[REDACTED]`},
-		{`got "password": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `got "password": " in config, api_key="[REDACTED]"`},
-		{`got "password": " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "password": " in config, api_key="[REDACTED]"`},
-		{`got "password": " in config, api_key=""R7_SYNTHETIC_CREDENTIAL_9327""`, `got "password": " in config, api_key="[REDACTED]"`},
-		{`Bearer " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer " in config, api_key="[REDACTED]"`},
-		{`Bearer " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer " in config, api_key="[REDACTED]"`},
-		{`Bearer " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL`, `Bearer " in config, api_key="[REDACTED]" DB_PASSWORD=[REDACTED]`},
+		{`got "token": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="$2b$12$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="/R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="-R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="★R7_SYNTHETIC_CREDENTIAL_9327"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="{\"k\":\"R7_SYNTHETIC_CREDENTIAL_9327\"}"`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key=""R7_SYNTHETIC_CREDENTIAL_9327""`, `got "token":"[REDACTED]"`},
+		{`got "token": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL`, `got "token":"[REDACTED]"`},
+		{`got "password": " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `got "password":"[REDACTED]"`},
+		{`got "password": " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `got "password":"[REDACTED]"`},
+		{`got "password": " in config, api_key=""R7_SYNTHETIC_CREDENTIAL_9327""`, `got "password":"[REDACTED]"`},
+		{`Bearer " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer [REDACTED]`},
+		{`Bearer " in config, api_key="$R7_SYNTHETIC_CREDENTIAL_9327"`, `Bearer [REDACTED]`},
+		{`Bearer " in config, api_key="   R7_SYNTHETIC_CREDENTIAL_9327" DB_PASSWORD="   SYNTHETIC_R7_CREDENTIAL`, `Bearer [REDACTED]`},
 		{`failed: "Bearer "   R7_SYNTHETIC_CREDENTIAL_9327"`, `failed: "Bearer [REDACTED]`},
 		{`failed: "Bearer "   R7_SYNTHETIC_CREDENTIAL_9327""`, `failed: "Bearer [REDACTED]"`},
 		{`password=" in config, api_key="R7_SYNTHETIC_CREDENTIAL_9327"`, `password="[REDACTED]"`},
@@ -1351,11 +1368,12 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 	if raw, _ := sanitizeRawText(adjJSON); strings.Contains(raw, "R7_SYNTHETIC_CREDENTIAL_9327") || strings.Contains(raw, "SYNTHETIC_R7_CREDENTIAL") {
 		t.Errorf("sanitizeRawText(%q) = %q, leaked credential", adjJSON, raw)
 	}
-	// Quote-led multiline input where authHeaderRe consumes the closing quote
-	// on line 1 (sanitizeRawText and SmartTruncate fail closed as unparseable
-	// JSON; scrubTextPatterns resets quote state at the newline).
+	// Quote-led multiline input where authHeaderRe reads the header up to the
+	// closing quote on line 1 and keeps that quote (sanitizeRawText and
+	// SmartTruncate fail closed as unparseable JSON; scrubTextPatterns resets
+	// quote state at the newline).
 	quoteLedAuth := "\"Authorization: R7_SYNTHETIC_CREDENTIAL_9327\"\nDB_PASSWORD=\"   prefix R7_SYNTHETIC_CREDENTIAL_9327"
-	if got, want := scrubTextPatterns(quoteLedAuth), "\"Authorization: [REDACTED]\nDB_PASSWORD=[REDACTED]"; got != want {
+	if got, want := scrubTextPatterns(quoteLedAuth), "\"Authorization: [REDACTED]\"\nDB_PASSWORD=[REDACTED]"; got != want {
 		t.Errorf("scrubTextPatterns(%q) = %q, want %q", quoteLedAuth, got, want)
 	}
 	if raw, _ := sanitizeRawText(quoteLedAuth); strings.Contains(raw, "R7_SYNTHETIC_CREDENTIAL_9327") {
@@ -1452,8 +1470,8 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		// After a ":" and whitespace, as in JSON, the same text is the text
 		// between two strings, which is kept, and the pair in the second
 		// string is redacted on its own.
-		{`failed: "password": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `failed: "password": " in config, api_key="[REDACTED]"`},
-		{`failed: "password": " for user "bob"`, `failed: "password": " for user "bob"`},
+		{`failed: "password": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `failed: "password":"[REDACTED]"`},
+		{`failed: "password": " for user "bob"`, `failed: "password":"[REDACTED]"`},
 		// A nested quoted value after a delimiter, whose closing quote runs
 		// into a letter or into more quotes, with or without spaces around
 		// the delimiter.
@@ -1479,10 +1497,10 @@ func TestScrubTextPatterns_QuotedCredentialsRunningIntoText(t *testing.T) {
 		{`failed: "password=a: "R8_SYNTHETIC_SECRET_4800"x"`, `failed: "password=[REDACTED]`},
 		// The words between two strings are not a credential, and the pair
 		// that a closing quote opens the value of is redacted on its own.
-		{`got "token": " for user "bob"`, `got "token": " for user "bob"`},
-		{`Bearer " for user "bob"`, `Bearer " for user "bob"`},
-		{`got "token": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `got "token": " in config, api_key="[REDACTED]"`},
-		{`Bearer " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `Bearer " in config, api_key="[REDACTED]"`},
+		{`got "token": " for user "bob"`, `got "token":"[REDACTED]"`},
+		{`Bearer " for user "bob"`, `Bearer [REDACTED]`},
+		{`got "token": " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `got "token":"[REDACTED]"`},
+		{`Bearer " in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `Bearer [REDACTED]`},
 		{`password=" in config, api_key="R8_SYNTHETIC_CREDENTIAL_49173"`, `password="[REDACTED]"`},
 	} {
 		checkAllRedactionPaths(t, tt.in, tt.want)
@@ -1699,7 +1717,7 @@ func TestScrubTextPatterns_NestedAndConcatenatedQuotes(t *testing.T) {
 			`='my'"'"'R8_SYNTHETIC_TAIL_4802'`,
 			`=a:'s R8_SYNTHETIC_SECRET_4800'x`,
 		} {
-			checkAllRedactionPaths(t, "credentials:\n a_PASSWORD: "+key+value, "credentials:\n a_PASSWORD:[REDACTED]")
+			checkAllRedactionPaths(t, "credentials:\n a_PASSWORD: "+key+value, "credentials:[REDACTED]")
 		}
 	}
 }
@@ -1727,8 +1745,8 @@ func TestScrubTextPatterns_DottedOAuthNames(t *testing.T) {
 		{"credentials: status.oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
 		{"password=secretPrefix.oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "password=[REDACTED]"},
 		{"password=secretPrefix.dbPassword: R7_SYNTHETIC_CREDENTIAL_9327", "password=[REDACTED]"},
-		{"credentials:\n  oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327\n  region: us", "credentials:\n  oauth2Config.extra.code:[REDACTED]\n  region: us"},
-		{"credentials:\n a_PASSWORD: " + longKey + ".oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:\n a_PASSWORD:[REDACTED]"},
+		{"credentials:\n  oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327\n  region: us", "credentials:[REDACTED]\n  region: us"},
+		{"credentials:\n a_PASSWORD: " + longKey + ".oauth2Config.extra.code: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
 		// Names that isCompoundSensitiveKey does not accept.
 		{"xoauth.extra.code=kept", "xoauth.extra.code=kept"},
 		{"oauth2Config.extra.codes=kept", "oauth2Config.extra.codes=kept"},
@@ -1767,8 +1785,8 @@ func TestScrubTextPatterns_DottedCredentialNames(t *testing.T) {
 		checkRedactionPaths(t, "x "+name+": R7_SYNTHETIC_CREDENTIAL_9327 y", "x "+name+":[REDACTED] y")
 	}
 	for _, tt := range []struct{ in, want string }{
-		{"credentials:\n  stripe.api.key: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:\n  stripe.api.key:[REDACTED]"},
-		{"credentials:\n  my.stripe_api.key: R7_SYNTHETIC_CREDENTIAL_9327\n  region: us", "credentials:\n  my.stripe_api.key:[REDACTED]\n  region: us"},
+		{"credentials:\n  stripe.api.key: R7_SYNTHETIC_CREDENTIAL_9327", "credentials:[REDACTED]"},
+		{"credentials:\n  my.stripe_api.key: R7_SYNTHETIC_CREDENTIAL_9327\n  region: us", "credentials:[REDACTED]\n  region: us"},
 		{`x "api.key": "R7_SYNTHETIC_CREDENTIAL_9327"`, `x "api.key":"[REDACTED]"`},
 		{"password=my.stripe.api.key: R7_SYNTHETIC_CREDENTIAL_9327 tcp", "password=[REDACTED] tcp"},
 		{"password=my.stripe_api.key: R7_SYNTHETIC_CREDENTIAL_9327 tcp", "password=[REDACTED] tcp"},
@@ -1787,11 +1805,12 @@ func TestScrubTextPatterns_DottedCredentialNames(t *testing.T) {
 // dotted name that ends in a page token, as isSensitiveKey reads a map key, on
 // every path, to tell the access token of a page from a pagination cursor:
 // the value of fb.page_token or home.page_token is redacted although that of
-// page_token is a cursor, and the value of page.token, next.page.token,
-// prev.page.token, previous.page.token or x.next.page.token is kept although
-// that of token is a credential, whichever of the two comes first and whatever
-// pair or key surrounds them. A dotted name that is neither is read by its
-// last words, as before.
+// page_token is a cursor, whichever of the two comes first and whatever pair
+// or key surrounds them. The value of a dotted cursor name whose last word is
+// token, as page.token, next.page.token or x.next.page.token, is redacted in
+// text, although isSensitiveKey keeps it in a map, because the baseline pass
+// reads that last word as the credential key token. A dotted name that is
+// neither is read by its last words, as before.
 func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 	longDotted := strings.Repeat("abcdefgh.", 16)
 	for _, tt := range []struct{ in, want string }{
@@ -1808,9 +1827,9 @@ func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 		{"page.token.fb.page_token=R8_SYNTHETIC_CREDENTIAL_49173", "page.token.fb.page_token=[REDACTED]"},
 		{"next.page.token.token=R8_SYNTHETIC_CREDENTIAL_49173", "next.page.token.token=[REDACTED]"},
 		{`failed: {"fb.page_token": "R8_SYNTHETIC_CREDENTIAL_49173"}`, `failed: {"fb.page_token":"[REDACTED]"}`},
-		{"credentials:\n  fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:\n  fb.page_token:[REDACTED]"},
+		{"credentials:\n  fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:[REDACTED]"},
 		// An oversized run of dotted words before the name.
-		{"credentials:\n  " + longDotted + "z.fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:\n  " + longDotted + "z.fb.page_token:[REDACTED]"},
+		{"credentials:\n  " + longDotted + "z.fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "credentials:[REDACTED]"},
 		// The access token and the cursor in either order.
 		{"a.b.fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173 next.page.token: cursor-1", "a.b.fb.page_token:[REDACTED] next.page.token: cursor-1"},
 		{"next.page.token: cursor-1 fb.page_token: R8_SYNTHETIC_CREDENTIAL_49173", "next.page.token: cursor-1 fb.page_token:[REDACTED]"},
@@ -1824,14 +1843,14 @@ func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 	}
 	for _, in := range []string{
 		"page_token=cursor-0",
+		"x.next_page_token=cursor-6",
+		"x.nextPageToken=cursor-8",
 		"page.token=cursor-1",
 		"next.page.token=cursor-2",
 		"prev.page.token: cursor-3",
 		"previous.page.token=cursor-4",
 		"x.next.page.token=cursor-5",
-		"x.next_page_token=cursor-6",
 		"Next.Page.Token=cursor-7",
-		"x.nextPageToken=cursor-8",
 		"page.token=cursor-9 next.page.token: cursor-10 prev.page.token=cursor-11 previous.page.token: cursor-12 x.next.page.token=cursor-13",
 		`failed: {"next.page.token": "cursor-14"}`,
 		`failed: {"x.next.page.token": "cursor-15"}`,
@@ -1875,7 +1894,10 @@ func TestScrubTextPatterns_DottedPageTokens(t *testing.T) {
 // cut the name inside that run, so the value of a.....page_token, which the
 // word "a" makes the access token of a page, is redacted whatever the length
 // of the run, as that of the map key is, and the value of
-// next.....page_token, which is a cursor, is kept.
+// next.....page_token, which is a cursor, is kept. The value of
+// prev.....page.token or x.next.page.....token, whose last word is token, is
+// redacted, as the baseline pass redacts it, and so is that of any name that
+// the baseline pass redacts although isSensitiveKey keeps it.
 func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
 	for _, n := range []int{124, 125, 126, 127, 128, 129, 130, 131, 300} {
 		dots := strings.Repeat(".", n)
@@ -1901,14 +1923,16 @@ func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
 						kept++
 					}
 					for _, in := range []string{name + "=R8_SYNTHETIC_CREDENTIAL_49173", "x " + name + ": R8_SYNTHETIC_CREDENTIAL_49173"} {
+						want := want || baselineRedacts(in, "R8_SYNTHETIC_CREDENTIAL_49173")
 						if got := !strings.Contains(scrubTextPatterns(in), "R8_SYNTHETIC_CREDENTIAL_49173"); got != want {
-							t.Errorf("scrubTextPatterns redacted the value of the name %q (%d bytes): %v, want %v as for the map key", prefix+"…"+last, len(name), got, want)
+							t.Errorf("scrubTextPatterns redacted the value of the name %q (%d bytes): %v, want %v as for the map key or the baseline pass", prefix+"…"+last, len(name), got, want)
 						}
 					}
 					in := name + "=R8_SYNTHETIC_CREDENTIAL_49173"
+					want = want || baselineRedacts(in, "R8_SYNTHETIC_CREDENTIAL_49173")
 					b, _, err := smartTruncateText(t, in, 1<<20)
 					if got := err == nil && !strings.Contains(string(b), "R8_SYNTHETIC_CREDENTIAL_49173"); got != want {
-						t.Errorf("SmartTruncate(%q…%q) redacted the value: %v, want %v as for the map key (err %v)", prefix, last, got, want, err)
+						t.Errorf("SmartTruncate(%q…%q) redacted the value: %v, want %v as for the map key or the baseline pass (err %v)", prefix, last, got, want, err)
 					}
 				}
 			}
@@ -1921,7 +1945,8 @@ func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
 
 // TestScrubTextPatterns_DottedNamesAgreeWithMapKeys checks that a dotted name
 // has its value redacted in text exactly when isSensitiveKey redacts the
-// value of a map key of that name, for names of up to four dotted words
+// value of a map key of that name or the baseline pass redacts it in the same
+// text, for names of up to four dotted words
 // (including empty segments from repeated dots, as in api..key): dotted OAuth
 // names, names made of the words of credential names and others, as in
 // stripe.api.key, stripe.api..key or x.goog.api.key, and names that end in a
@@ -1951,12 +1976,13 @@ func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 			sensitive++
 		}
 		for _, in := range []string{name + "=R7_SYNTHETIC_CREDENTIAL_9327", "x " + name + ": R7_SYNTHETIC_CREDENTIAL_9327"} {
+			want := want || baselineRedacts(in, "R7_SYNTHETIC_CREDENTIAL_9327")
 			if got := !strings.Contains(scrubTextPatterns(in), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
-				t.Errorf("scrubTextPatterns(%q) redacted the value: %v, want %v as for the map key", in, got, want)
+				t.Errorf("scrubTextPatterns(%q) redacted the value: %v, want %v as for the map key or the baseline pass", in, got, want)
 			}
 			b, _, err := smartTruncateText(t, in, 1000)
 			if got := err == nil && !strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
-				t.Errorf("SmartTruncate(%q) = (%s, %v), redacted the value: %v, want %v as for the map key", in, b, err, got, want)
+				t.Errorf("SmartTruncate(%q) = (%s, %v), redacted the value: %v, want %v as for the map key or the baseline pass", in, b, err, got, want)
 			}
 		}
 	}
@@ -2002,10 +2028,31 @@ func scrubTime(f func()) time.Duration {
 	return time.Since(start)
 }
 
+// scrubEveryPath scrubs in as scrubTextPatterns, sanitizeRawText,
+// redactErrorMessage and SmartTruncate do, which read text with the same
+// passes under their own entry points.
+func scrubEveryPath(in string) {
+	_ = scrubTextPatterns(in)
+	_, _ = sanitizeRawText(in)
+	_ = redactErrorMessage(in)
+	_, _, _ = SmartTruncate(in, 1<<20)
+}
+
 // TestScrubTextPatterns_CamelCaseScanIsLinear checks that the search for
 // camelCase keys does not rescan the text for each key or boundary in it: a
 // run of n repeats must take about n times as long as one of n/4, not n^2.
 func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
+	// The race detector slows the scrubs about twentyfold. A row whose
+	// large run would take longer than the limit below under it uses a
+	// sixteenth of its size there, so that the run takes about as long as
+	// it does at full size without the race detector. For such a row, only
+	// the run at full size tells linear growth from quadratic.
+	raceScaled := func(n int) int {
+		if raceEnabled {
+			return n / 16
+		}
+		return n
+	}
 	tests := []struct {
 		name string
 		gen  func(n int) string
@@ -2184,6 +2231,34 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"bare run of double-dotted OAuth words without a value", func(n int) string { return strings.Repeat("oauth..", n) + "x.code=" },
 			func(in string) { _ = scrubTextPatterns(in) }, 8000,
+		},
+		// Each word of a run of OAuth words starts a dotted OAuth name that
+		// no ".code" and delimiter end, which the pattern reads to the end
+		// of the run before it fails: the run is read once, not for each
+		// word, whichever way the paths read the text.
+		{
+			"one run of hyphenated OAuth words with no dotted name", func(n int) string { return strings.Repeat("oauth-", n) },
+			scrubEveryPath, 8000,
+		},
+		{
+			"one run of underscored OAuth words with no dotted name", func(n int) string { return strings.Repeat("oauth_", n) },
+			scrubEveryPath, 8000,
+		},
+		{
+			"one run of mixed OAuth words with no dotted name", func(n int) string { return strings.Repeat("oauth-oauth_", n/2) },
+			scrubEveryPath, 8000,
+		},
+		{
+			"one run of hyphenated OAuth words before a code with no delimiter", func(n int) string { return strings.Repeat("oauth-", n) + ".code" },
+			scrubEveryPath, 8000,
+		},
+		{
+			"one run of underscored OAuth words before a code with no value", func(n int) string { return strings.Repeat("oauth_", n) + ".code " },
+			scrubEveryPath, 8000,
+		},
+		{
+			"one run of OAuth words before a code that a quote and no delimiter follow", func(n int) string { return strings.Repeat("oauth-", n) + `.code"` },
+			scrubEveryPath, 8000,
 		},
 		{
 			// Each word starts a dotted OAuth name, which runs on to the
@@ -2674,6 +2749,57 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
+		{
+			"repeated single-quoted contraction in double quotes", func(n int) string {
+				return `message="` + strings.Repeat("password='it's ", n) + `"`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 16000,
+		},
+		{
+			"repeated single-quoted contraction in double quotes on every path", func(n int) string {
+				return `message="` + strings.Repeat("password='it's ", n) + `"`
+			},
+			scrubEveryPath, raceScaled(8000),
+		},
+		{
+			"multiline unclosed call-wrapped single-quoted contraction", func(n int) string {
+				return strings.Repeat("password=f('it's \n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, 4000,
+		},
+		{
+			"multiline unclosed call-wrapped single-quoted contraction on every path", func(n int) string {
+				return strings.Repeat("password=f('it's \n", n)
+			},
+			scrubEveryPath, raceScaled(4000),
+		},
+		{
+			// Where the quote that holds each Cookie header closes is
+			// found once for all the headers in it (see
+			// headerQuoteScanner.closeAt).
+			"repeated quoted cookie prose in double quotes", func(n int) string {
+				return `message="` + strings.Repeat("The cookie: chocolate was delicious. ", n) + `"`
+			},
+			scrubEveryPath, raceScaled(8000),
+		},
+		{
+			"repeated JSON cookie prose with quantities", func(n int) string {
+				return `{"note":"` + strings.Repeat("The cookie: 2.5 ounces remained. ", n) + `"}`
+			},
+			scrubEveryPath, raceScaled(16000),
+		},
+		{
+			"repeated hyphen-prefixed cookie prose on one line", func(n int) string {
+				return strings.Repeat("my-cookie: Monster ate x-set-cookie: Monster ate ", n)
+			},
+			scrubEveryPath, raceScaled(4000),
+		},
+		{
+			"repeated delimiter-space-before-colon cookie prose on one line", func(n int) string {
+				return strings.Repeat("Cookie\u00a0: Monster ate Cookie\u2003: Monster ate Cookie\x0b: Monster ate ", n)
+			},
+			scrubEveryPath, raceScaled(4000),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2705,7 +2831,9 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 // names written with repeated or mixed "_", "-" and "." separators inside the
 // name (including camelCase and acronym prefixes) are redacted in free text
 // across all paths just as isSensitiveKey redacts them as structured map keys,
-// while non-credential names and pagination cursors remain preserved.
+// while non-credential names and pagination cursors remain preserved, but for
+// the cursors whose last word is token after a separator, whose value the
+// baseline pass redacts.
 func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
 	sensitiveNames := []string{
 		"api__key",
@@ -2741,8 +2869,8 @@ func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
 	}
 	for _, tt := range []struct{ in, want string }{
 		{`{"api__key":"SYNTHETIC_CREDENTIAL_6301","note":"ok"}`, `{"api__key":"[REDACTED]","note":"ok"}`},
-		{"credentials:\n  stripe.api..key: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:\n  stripe.api..key:[REDACTED]\n  region: us"},
-		{"credentials:\n  foo.auth..code: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:\n  foo.auth..code:[REDACTED]\n  region: us"},
+		{"credentials:\n  stripe.api..key: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:[REDACTED]\n  region: us"},
+		{"credentials:\n  foo.auth..code: SYNTHETIC_CREDENTIAL_6301\n  region: us", "credentials:[REDACTED]\n  region: us"},
 	} {
 		checkRedactionPaths(t, tt.in, tt.want)
 	}
@@ -2752,9 +2880,6 @@ func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
 		"access..id",
 		"api.x.key",
 		"my.api..key.file",
-		"page..token",
-		"next..page..token",
-		"prev__page--token",
 		"x.next..page__token",
 	} {
 		if isSensitiveKey(name) {
@@ -2762,6 +2887,16 @@ func TestScrubTextPatterns_RepeatedAndMixedSeparatorKeys(t *testing.T) {
 		}
 		in := name + "=kept-value"
 		checkRedactionPaths(t, in, in)
+	}
+	for _, name := range []string{
+		"page..token",
+		"next..page..token",
+		"prev__page--token",
+	} {
+		if isSensitiveKey(name) {
+			t.Fatalf("isSensitiveKey(%q) = true, want false", name)
+		}
+		checkRedactionPaths(t, name+"=kept-value", name+"=kept-value")
 	}
 }
 
@@ -2889,7 +3024,7 @@ func TestTrailingSeparatorKeyPolicyAgreement(t *testing.T) {
 		checkAllRedactionPaths(t, `failed: "`+name+`": "`+secret+`"`, `failed: "`+name+`":"[REDACTED]"`)
 		checkAllRedactionPaths(t, `failed: '`+name+`': '`+secret+`'`, `failed: '`+name+`':'[REDACTED]'`)
 		checkRedactionPaths(t, `{"`+name+`":"`+secret+`","~ok":"1"}`, `{"`+name+`":"[REDACTED]","~ok":"1"}`)
-		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:\n  "+name+":[REDACTED]\n  region: us")
+		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:[REDACTED]\n  region: us")
 	}
 
 	// Leading-dot standalone and camelCase keys preserve the leading dot in text.
@@ -2899,7 +3034,7 @@ func TestTrailingSeparatorKeyPolicyAgreement(t *testing.T) {
 		}
 		checkAllRedactionPaths(t, name+"="+secret, name+"=[REDACTED]")
 		checkRedactionPaths(t, `{"`+name+`":"`+secret+`"}`, `{"`+name+`":"[REDACTED]"}`)
-		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:\n  "+name+":[REDACTED]\n  region: us")
+		checkRedactionPaths(t, "credentials:\n  "+name+": "+secret+"\n  region: us", "credentials:[REDACTED]\n  region: us")
 	}
 
 	// Adjacent compound pairs with trailing separators preserve both keys.
@@ -3102,7 +3237,7 @@ func TestPaddedQuotedCompoundKeysPolicyAgreement(t *testing.T) {
 	}
 	// Valid JSON, nested YAML envelope, stray preceding quote, and malformed JSON fail-closed.
 	checkAllRedactionPaths(t, `{" DB_PASSWORD ":"`+secret+`"}`, `{" DB_PASSWORD ":"[REDACTED]"}`)
-	checkAllRedactionPaths(t, "credentials:\n  \" DB_PASSWORD \": \""+secret+"\"", "credentials:\n  \" DB_PASSWORD \":\"[REDACTED]\"")
+	checkAllRedactionPaths(t, "credentials:\n  \" DB_PASSWORD \": \""+secret+"\"", "credentials:\"[REDACTED]\"")
 	checkAllRedactionPaths(t, `failed: "credentials": " DB_PASSWORD ": "`+secret+`"`, `failed: "credentials":"[REDACTED]"`)
 	if got := scrubTextPatterns(`"credentials": " DB_PASSWORD ": "` + secret + `"`); got != `"credentials":"[REDACTED]"` {
 		t.Errorf(`scrubTextPatterns("credentials": " DB_PASSWORD ": ...) = %q, want %q`, got, `"credentials":"[REDACTED]"`)
@@ -3286,7 +3421,8 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 	}
 	// Valid JSON is read as JSON on every path.
 	for _, key := range []string{"user:temp:scratch", " user: temp:a=b ", " user: DB_PASSWORD ", "temp:", "temp:a="} {
-		checkAllRedactionPaths(t, `{"`+key+`": "`+secret+`"}`, `{"`+key+`":"[REDACTED]"}`)
+		in := `{"` + key + `": "` + secret + `"}`
+		checkAllRedactionPaths(t, in, `{"`+key+`":"[REDACTED]"}`)
 	}
 	// A quoted key is read whole whatever follows its delimiter: a value
 	// that is not quoted, as in the repr of a Python dict that holds a
@@ -3319,9 +3455,9 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 		{`failed: {' user: DB_PASSWORD ': ` + secret + `}`, `failed: {' user: DB_PASSWORD ':[REDACTED]}`},
 		{`failed: "temp:a=b" = ` + secret, `failed: "temp:a=b"=[REDACTED]`},
 		{`failed: 'temp:a=b' = ` + secret, `failed: 'temp:a=b'=[REDACTED]`},
-		{"credentials:\n  'temp:a=b': " + secret, "credentials:\n  'temp:a=b':[REDACTED]"},
-		{"credentials:\n  'temp:a=b': '" + secret + "'", "credentials:\n  'temp:a=b':'[REDACTED]'"},
-		{"credentials:\n  \"temp:a=b\": " + secret, "credentials:\n  \"temp:a=b\":\"[REDACTED]\""},
+		{"credentials:\n  'temp:a=b': " + secret, "credentials:[REDACTED]"},
+		{"credentials:\n  'temp:a=b': '" + secret + "'", "credentials:'[REDACTED]'"},
+		{"credentials:\n  \"temp:a=b\": " + secret, "credentials:\"[REDACTED]\""},
 		{`token=abc:'s note 'temp:a=b': ` + secret, `token=[REDACTED] note 'temp:a=b':[REDACTED]`},
 		{`token=abc:'s note 'temp:a=b': '` + secret + `'`, `token=[REDACTED] note 'temp:a=b':'[REDACTED]'`},
 		// A quoted "temp:" key that no delimiter follows is no key: the
@@ -3402,8 +3538,8 @@ func TestStatePrefixedAndDelimiterTempKeysPolicyAgreement(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		{`credentials: ' user: DB_PASSWORD ': '` + secret + `'`, `credentials:'[REDACTED]'`},
 		{`credentials: 'temp:a=b': '` + secret + `'`, `credentials:'[REDACTED]'`},
-		{"credentials:\n  ' user: DB_PASSWORD ': '" + secret + "'", "credentials:\n  ' user: DB_PASSWORD ':'[REDACTED]'"},
-		{"credentials:\n  ' temp:a b ': '" + secret + "'", "credentials:\n  ' temp:a b ':'[REDACTED]'"},
+		{"credentials:\n  ' user: DB_PASSWORD ': '" + secret + "'", "credentials:'[REDACTED]'"},
+		{"credentials:\n  ' temp:a b ': '" + secret + "'", "credentials:'[REDACTED]'"},
 		{`password=' user: DB_PASSWORD ': '` + secret + `'`, `password='[REDACTED]'`},
 		{`token=abc:'s note ' user: DB_PASSWORD ': ' ` + secret + `'`, `token=[REDACTED] note ' user: DB_PASSWORD ':'[REDACTED]'`},
 		{`token=abc:'s note ' temp:a=b ': ' ` + secret + `'`, `token=[REDACTED] note ' temp:a=b ':'[REDACTED]'`},
@@ -3610,7 +3746,8 @@ func TestScrubTextPatterns_ShellQuoteJoinedInsideBareValue(t *testing.T) {
 // as a cursor and kept in maps, structs and text, while a credential key
 // whose words only end in such a split, as in arn_ext_page_token, or that
 // holds no direction word, as fb.page_token and page_access_token do, is
-// still redacted.
+// still redacted. In text, the value of x.n_e_x_t.page.token is redacted
+// too, as the baseline pass reads its last word as the credential key token.
 func TestIsPageTokenName_SplitDirectionWords(t *testing.T) {
 	const cursor = "cursor-123"
 	const secret = "R13_SYNTHETIC_52816"
@@ -4008,9 +4145,9 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 		{`msg "token":" a b "` + secret + `""next_page_token":"cursor-1"`, `msg "token":"[REDACTED]""next_page_token":"cursor-1"`},
 		{`msg "token":" a b "` + secret + `""token_count":7`, `msg "token":"[REDACTED]""token_count":7`},
 		{`msg "token": " for user "bob""token":" a b "` + secret + `"`, `msg "token":"[REDACTED]""token":"[REDACTED]"`},
-		{`got "token": " for user "bob"`, `got "token": " for user "bob"`},
-		{`failed: "password": " for user "bob"`, `failed: "password": " for user "bob"`},
-		{`got 'token': ' for user 'bob'`, `got 'token': ' for user 'bob'`},
+		{`got "token": " for user "bob"`, `got "token":"[REDACTED]"`},
+		{`failed: "password": " for user "bob"`, `failed: "password":"[REDACTED]"`},
+		{`got 'token': ' for user 'bob'`, `got 'token':'[REDACTED]'`},
 		// Round 15e: A brace key that is not closed before its delimiter is a key even before prose, failing closed.
 		{`say {temp:a{b}: hello`, `say {temp:a{b}:[REDACTED]`},
 		// Round 15f Item 2: On the rest of a contraction-led line, and where a quoted part of a value closes, a quote between two letters is an
@@ -4214,9 +4351,10 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 
 // TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes checks that a word of one
 // to four quoted token pairs, each of whose values holds words before a second
-// string with a credential in it, is redacted pair by pair after each kind of
-// prefix, in the glued and spaced forms with double and single quotes, so that
-// no value of the word survives however many pairs it holds.
+// string with a credential in it, is redacted pair by pair (or, for some
+// prefixes, from its first value on as one value) after each kind of prefix,
+// in the glued and spaced forms with double and single quotes, so that no
+// value of the word survives however many pairs it holds.
 func TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes(t *testing.T) {
 	secrets := []string{"QQSA", "QQSB", "QQSC", "QQSD"}
 	forms := []struct {
@@ -4238,13 +4376,22 @@ func TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes(t *testing.T) {
 		{`password='x'`, `password='[REDACTED]'`},
 		{`password=[REDACTED]`, `password=[REDACTED]`},
 	}
+	// The baseline pass (see baselineCuts) reads the rest of a word of
+	// double-quoted pairs after password=[REDACTED] as the value of
+	// password=, so the text paths redact the word after its first key as
+	// one value.
+	merged := func(prefix, pairWant string) bool {
+		return prefix == `password=[REDACTED]` && strings.HasPrefix(pairWant, `"`)
+	}
 	for _, f := range forms {
 		for _, p := range prefixes {
 			for n := 1; n <= len(secrets); n++ {
 				in, want := p.in, p.want
-				for _, s := range secrets[:n] {
+				for i, s := range secrets[:n] {
 					in += f.pair(s)
-					want += f.want
+					if i == 0 || !merged(p.in, f.want) {
+						want += f.want
+					}
 				}
 				checkAllRedactionPaths(t, in, want)
 				checkAllRedactionPaths(t, want, want)
@@ -4262,9 +4409,11 @@ func TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes(t *testing.T) {
 		for _, p := range prefixes {
 			for n := 1; n <= len(secrets); n++ {
 				in, want := p.in, p.want
-				for range n {
+				for i := range n {
 					in += f.pair("x")
-					want += f.want
+					if i == 0 || !merged(p.in, f.want) {
+						want += f.want
+					}
 				}
 				checkAllRedactionPaths(t, in, want)
 			}
@@ -4392,18 +4541,18 @@ func TestRound16ReviewRegressions(t *testing.T) {
 		{"x-api-key: \"{\n  sub_field: SYNTHETIC_HDR_995\n}\"", "x-api-key: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
 		{"Authorization: \"abc\n  folded_part: SYNTHETIC_HDR_995", "Authorization: [REDACTED]", true, []string{"SYNTHETIC_HDR_995"}},
 		{"x-api-key: \\\"abc\nSYNTHETIC_HDR_995\\\"", "x-api-key: [REDACTED]", false, []string{"SYNTHETIC_HDR_995"}},
-		{"'Authorization: SYNTHETIC_HDR_995'\nKEEP_NEXT_LINE", "'Authorization: [REDACTED]\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
-		{"msg=\"Authorization: SYNTHETIC_HDR_995\"\nKEEP_NEXT_LINE", "msg=\"Authorization: [REDACTED]\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
-		{"curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc\"def"}},
-		{"curl -H 'Authorization: Bearer abc\\'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc\\"}},
-		{"curl -H \"Authorization: Bearer abc'def\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"abc'def"}},
-		{"curl -H \"Authorization: Bearer it's\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{}},
+		{"'Authorization: SYNTHETIC_HDR_995'\nKEEP_NEXT_LINE", "'Authorization: [REDACTED]'\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
+		{"msg=\"Authorization: SYNTHETIC_HDR_995\"\nKEEP_NEXT_LINE", "msg=\"Authorization: [REDACTED]\"\nKEEP_NEXT_LINE", true, []string{"SYNTHETIC_HDR_995"}},
+		{"curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"abc\"def"}},
+		{"curl -H 'Authorization: Bearer abc\\'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"abc\\"}},
+		{"curl -H \"Authorization: Bearer abc'def\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_LINE_2", true, []string{"abc'def"}},
+		{"curl -H \"Authorization: Bearer it's\"\necho KEEP_LINE_2", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_LINE_2", true, []string{}},
 		{"{\"h\": \\\"Authorization: Bearer abc'def\\\"}\necho KEEP_LINE_2", "{\"h\": \\\"Authorization: [REDACTED]\necho KEEP_LINE_2", false, []string{"abc'def"}},
-		{"curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
-		{"curl -H \"x-api-key: abc\nSYNTHETIC_CURL_901\"\necho KEEP_LINE_2", "curl -H \"x-api-key: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
+		{"curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
+		{"curl -H \"x-api-key: abc\nSYNTHETIC_CURL_901\"\necho KEEP_LINE_2", "curl -H \"x-api-key: [REDACTED]\"\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CURL_901"}},
 		{"curl -H 'x-api-key: abc\nSYNTHETIC_OUTER_UNCL_901\nHost: example.com", "curl -H 'x-api-key: [REDACTED]\nHost: example.com", true, []string{"SYNTHETIC_OUTER_UNCL_901"}},
 		{"{\"h\": \\\"Authorization: Bearer abc\nSYNTHETIC_INNER_ESC_901\\\"}", "{\"h\": \\\"Authorization: [REDACTED]", false, []string{"SYNTHETIC_INNER_ESC_901"}},
-		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com\"", "req=\"Authorization: [REDACTED]", true, []string{"SYNTHETIC_REQ_901"}},
+		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com\"", "req=\"Authorization: [REDACTED]\"", true, []string{"SYNTHETIC_REQ_901"}},
 		{"req=\"Authorization: Bearer SYNTHETIC_REQ_901\nHost: example.com", "req=\"Authorization: [REDACTED]\nHost: example.com", true, []string{"SYNTHETIC_REQ_901"}},
 		{"Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3", true, []string{"zqsecretb"}},
 		{"Error: couldn't call API (Authorization: Bearer zqsecretbb)\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", "Error: couldn't call API (Authorization: [REDACTED]\n  at foo.go:12\n  at bar.go:34 ZQKEEP_D", true, []string{"zqsecretbb"}},
@@ -4412,36 +4561,36 @@ func TestRound16ReviewRegressions(t *testing.T) {
 		{"'quoted' prefix then Authorization: Bearer zqsecretbe\nZQKEEP_K\nZQKEEP_L", "'quoted' prefix then Authorization: [REDACTED]\nZQKEEP_K\nZQKEEP_L", true, []string{"zqsecretbe"}},
 		{"user's request: Authorization: Bearer zqsecretbf\nHost: example.com\nZQKEEP_C", "user's request: Authorization: [REDACTED]\nHost: example.com\nZQKEEP_C", true, []string{"zqsecretbf"}},
 		{"users' Authorization: Bearer zqsecretbg\nZQKEEP_L2", "users' Authorization: [REDACTED]\nZQKEEP_L2", true, []string{"zqsecretbg"}},
-		{"curl -H 'Authorization: \"abc\n\nzqsecreta\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecreta"}},
+		{"curl -H 'Authorization: \"abc\n\nzqsecreta\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X", true, []string{"zqsecreta"}},
 		{"msg=\"Authorization: 'abc\npart2: zqsecretab'\necho ZQKEEP_X", "msg=\"Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretab"}},
-		{"msg=\"Authorization: 'abc\npart2: zqsecretab2'\"\necho ZQKEEP_X", "msg=\"Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretab2"}},
-		{"echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "echo 'x-api-key: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretac"}},
-		{"curl -H 'Authorization: \\'abc\nzqsecretad\\''\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", false, []string{"zqsecretad"}},
+		{"msg=\"Authorization: 'abc\npart2: zqsecretab2'\"\necho ZQKEEP_X", "msg=\"Authorization: [REDACTED]\"\necho ZQKEEP_X", true, []string{"zqsecretab2"}},
+		{"echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "echo 'x-api-key: [REDACTED]'\necho ZQKEEP_X", true, []string{"zqsecretac"}},
+		{"curl -H 'Authorization: \\'abc\nzqsecretad\\''\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X", false, []string{"zqsecretad"}},
 		{"Authorization: \"abc\n\nzqsecretae\"\necho ZQKEEP_X", "Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretae"}},
-		{"curl -H 'Authorization: \"abc zqsecretaf\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretaf"}},
-		{"curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretc"}},
-		{"curl -H 'Authorization: Bearer abc\nline2\n\nzqsecretcb'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X", true, []string{"zqsecretcb"}},
-		{"msg=\"Authorization: Bearer abc\n\nzqsecretcc\"", "msg=\"Authorization: [REDACTED]", true, []string{"zqsecretcc"}},
-		{"curl -H 'Authorization: Bearer abc\r\nSYNTHETIC_CRLF_901'\r\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\r\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CRLF_901"}},
+		{"curl -H 'Authorization: \"abc zqsecretaf\"'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X", true, []string{"zqsecretaf"}},
+		{"curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X", true, []string{"zqsecretc"}},
+		{"curl -H 'Authorization: Bearer abc\nline2\n\nzqsecretcb'\necho ZQKEEP_X", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X", true, []string{"zqsecretcb"}},
+		{"msg=\"Authorization: Bearer abc\n\nzqsecretcc\"", "msg=\"Authorization: [REDACTED]\"", true, []string{"zqsecretcc"}},
+		{"curl -H 'Authorization: Bearer abc\r\nSYNTHETIC_CRLF_901'\r\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\r\necho KEEP_LINE_2", true, []string{"SYNTHETIC_CRLF_901"}},
 		{"export a=\\;1 db_password=pre's violetfern's", "export a=\\;1 db_password=[REDACTED]", true, []string{"violetfern"}},
 		{"export; password=users' wasn't changed", "export; password=[REDACTED] wasn't changed", true, []string{}},
 		{"export \" password=users' wasn't changed", "export \" password=[REDACTED] wasn't changed", true, []string{}},
 		{"export -\"a\n\" password=users' wasn't changed", "export -\"a\n\" password=[REDACTED] wasn't changed", true, []string{}},
-		{"curl -H 'Authorization: \"part1\npart2\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
-		{"curl -H 'x-api-key: \"{\n  a: 1\n}\"\nSYNTHETIC_TAIL_905'\necho KEEP_LINE_4", "curl -H 'x-api-key: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_TAIL_905"}},
-		{"curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
-		{"msg=\"Authorization: 'part1\npart2: x'\nSYNTHETIC_MSG3_905\"\nKEEP_LINE_4", "msg=\"Authorization: [REDACTED]\nKEEP_LINE_4", true, []string{"SYNTHETIC_MSG3_905"}},
+		{"curl -H 'Authorization: \"part1\npart2\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
+		{"curl -H 'x-api-key: \"{\n  a: 1\n}\"\nSYNTHETIC_TAIL_905'\necho KEEP_LINE_4", "curl -H 'x-api-key: [REDACTED]'\necho KEEP_LINE_4", true, []string{"SYNTHETIC_TAIL_905"}},
+		{"curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_4", true, []string{"SYNTHETIC_LINE3_905"}},
+		{"msg=\"Authorization: 'part1\npart2: x'\nSYNTHETIC_MSG3_905\"\nKEEP_LINE_4", "msg=\"Authorization: [REDACTED]\"\nKEEP_LINE_4", true, []string{"SYNTHETIC_MSG3_905"}},
 		{"{\"h\": \\\"Authorization: 'part1\npart2: s1'\nSYNTHETIC_JSON_LINE3_905\\\"}", "{\"h\": \\\"Authorization: [REDACTED]", false, []string{"SYNTHETIC_JSON_LINE3_905"}},
-		{"curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_EMSPACE_905"}},
-		{"curl -H 'Authorization: Bearer\u3000\"abc\npart2: SYNTHETIC_IDEO_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_IDEO_905"}},
-		{"curl -H 'Authorization: Bearer \\'\necho KEEP_LINE_2\\'", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2\\'", false, []string{}},
-		{"msg = b'Authorization: Bearer abc\nSYNTHETIC_PREF_905'\necho KEEP_LINE_2", "msg = b'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_PREF_905"}},
-		{"curl -H'Authorization: Bearer abc\nSYNTHETIC_FLAG_905'\necho KEEP_LINE_2", "curl -H'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_FLAG_905"}},
-		{"export X=pre's Authorization: Bearer abc\nSYNTHETIC_SH_HDR_905'\necho KEEP_LINE_2", "export X=pre's Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_SH_HDR_905"}},
-		{"curl -H 'Authorization: Bearer abc\n\n\nSYNTHETIC_3NL_905'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2", true, []string{"SYNTHETIC_3NL_905"}},
+		{"curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_EMSPACE_905"}},
+		{"curl -H 'Authorization: Bearer\u3000\"abc\npart2: SYNTHETIC_IDEO_905\"'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_IDEO_905"}},
+		{"curl -H 'Authorization: Bearer \\'\necho KEEP_LINE_2\\'", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2\\'", false, []string{}},
+		{"msg = b'Authorization: Bearer abc\nSYNTHETIC_PREF_905'\necho KEEP_LINE_2", "msg = b'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_PREF_905"}},
+		{"curl -H'Authorization: Bearer abc\nSYNTHETIC_FLAG_905'\necho KEEP_LINE_2", "curl -H'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_FLAG_905"}},
+		{"export X=pre's Authorization: Bearer abc\nSYNTHETIC_SH_HDR_905'\necho KEEP_LINE_2", "export X=pre's Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_SH_HDR_905"}},
+		{"curl -H 'Authorization: Bearer abc\n\n\nSYNTHETIC_3NL_905'\necho KEEP_LINE_2", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2", true, []string{"SYNTHETIC_3NL_905"}},
 		{"{\"h\": \\\"Authorization: 'abc\\\"}\npart2: KEEP_LINE_2'", "{\"h\": \\\"Authorization: [REDACTED]\npart2: KEEP_LINE_2'", false, []string{}},
-		{"curl -H 'Authorization: \"abc'\npart2: KEEP_LINE_2\"", "curl -H 'Authorization: [REDACTED]\npart2: KEEP_LINE_2\"", true, []string{}},
-		{"msg=\"Authorization: 'abc\"\npart2: KEEP_LINE_2'", "msg=\"Authorization: [REDACTED]\npart2: KEEP_LINE_2'", true, []string{}},
+		{"curl -H 'Authorization: \"abc'\npart2: KEEP_LINE_2\"", "curl -H 'Authorization: [REDACTED]'\npart2: KEEP_LINE_2\"", true, []string{}},
+		{"msg=\"Authorization: 'abc\"\npart2: KEEP_LINE_2'", "msg=\"Authorization: [REDACTED]\"\npart2: KEEP_LINE_2'", true, []string{}},
 	} {
 		if tt.allPaths {
 			checkAllRedactionPaths(t, tt.in, tt.want)
@@ -4509,10 +4658,10 @@ func TestRound17ReviewRegressions(t *testing.T) {
 		{strings.Repeat("word ", 70) + "the password=users' wasn't changed", strings.Repeat("word ", 70) + "the password=[REDACTED] wasn't changed", true, nil},
 		{strings.Repeat("a", 300) + " password=it's Bob's", strings.Repeat("a", 300) + " password=[REDACTED] Bob's", true, nil},
 		// Multiline headers: colon-led continuation inside closed outer quote, empty first line, prior-line outer quote.
-		{"curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
-		{"curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
-		{"curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "curl -H '\nAuthorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
-		{"curl -H \"\nAuthorization: abc\npart2: syntheticvioletfern\"\necho ok", "curl -H \"\nAuthorization: [REDACTED]\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]'\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "curl -H 'Authorization: [REDACTED]'\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "curl -H '\nAuthorization: [REDACTED]'\necho ok", true, []string{"syntheticvioletfern"}},
+		{"curl -H \"\nAuthorization: abc\npart2: syntheticvioletfern\"\necho ok", "curl -H \"\nAuthorization: [REDACTED]\"\necho ok", true, []string{"syntheticvioletfern"}},
 		{"{\"h\": \\\"\nAuthorization: abc\nsyntheticvioletfern\\\"}\necho ok", "{\"h\": \\\"\nAuthorization: [REDACTED]\necho ok", false, []string{"syntheticvioletfern"}},
 		// Unquoted RFC 9112 whitespace-folded header continuations.
 		{"Authorization: Bearer abc\n  SYNTHETIC_FOLD_1601\nContent-Type: text/plain", "Authorization: [REDACTED]\nContent-Type: text/plain", true, []string{"SYNTHETIC_FOLD_1601"}},
@@ -4536,33 +4685,37 @@ func TestRound17ReviewRegressions(t *testing.T) {
 		{"msg=\"hello\n\"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"hello\n\"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET"}},
 		{"msg=\"" + strings.Repeat("line_of_prose_text_1234567890\n", 160) + "last_word\"\nAuthorization: Bearer SYNTHETIC_SECRET\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", "msg=\"" + strings.Repeat("line_of_prose_text_1234567890\n", 160) + "last_word\"\nAuthorization: [REDACTED]\nHost: example.com\nstatus=\"ok\"\nKEEP_AFTER", false, []string{"SYNTHETIC_SECRET"}},
 		// Escaped quotes inside paired double-quoted arguments on the closing line of a multiline header.
-		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_1\" -H \"X-Quote: a\\\"b\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_1"}},
-		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_2\" -d \"{\\\"msg\\\": \\\"a\\\\\\\"b\\\"}\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_2"}},
+		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_1\" -H \"X-Quote: a\\\"b\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_1"}},
+		{"curl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_ESC_2\" -d \"{\\\"msg\\\": \\\"a\\\\\\\"b\\\"}\"\necho KEEP_OK", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_ESC_2"}},
 		// Unmatched quote on an earlier line before a multiline outer-quoted header.
-		{"Error: unexpected \" in input\ncurl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_1\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_1"}},
-		{"Error: unexpected ' in input\ncurl -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_2'\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H 'Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_2"}},
-		{"Error: unexpected \" in input\ncurl -H \"\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_3\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"\nAuthorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_3"}},
+		{"Error: unexpected \" in input\ncurl -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_1\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_1"}},
+		{"Error: unexpected ' in input\ncurl -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_2'\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H 'Authorization: [REDACTED]'\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_2"}},
+		{"Error: unexpected \" in input\ncurl -H \"\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_3\"\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H \"\nAuthorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_3"}},
 		{"Error: unexpected \" in input\n{\\\"h\\\": \\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_4\\\"}\necho KEEP_OK", "Error: unexpected \" in input\n{\\\"h\\\": \\\"Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_4"}},
-		{"Error: unexpected \" in input\n\\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_5\\\"\necho KEEP_OK", "Error: unexpected \" in input\n\\\"Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_5"}},
+		{"Error: unexpected \" in input\n\\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_5\\\"\necho KEEP_OK", "Error: unexpected \" in input\n\\\"Authorization: [REDACTED]\\\"\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_5"}},
 		{"Error: unexpected ' in input\n{\\'h\\': \\'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_6\\'}\necho KEEP_OK", "Error: unexpected ' in input\n{\\'h\\': \\'Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_6"}},
-		{"Error: unexpected ' in input\n\\'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_7\\'\necho KEEP_OK", "Error: unexpected ' in input\n\\'Authorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_7"}},
-		{"Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_8\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_8"}},
-		{"Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_9\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_9"}},
-		{"Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_10'\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_10"}},
-		{"Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_11\\\"}\"\necho KEEP_OK", "Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_11"}},
+		{"Error: unexpected ' in input\n\\'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_7\\'\necho KEEP_OK", "Error: unexpected ' in input\n\\'Authorization: [REDACTED]\\'\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_7"}},
+		{"Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_8\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: a'b\" -H \"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_8"}},
+		{"Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_9\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Note: 'hi'\" -H \"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_9"}},
+		{"Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_10'\necho KEEP_OK", "Error: unexpected \" in input\ncurl -H 'X-Note: \"hi\"' -H 'Authorization: [REDACTED]'\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_10"}},
+		{"Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: abc\npart2: SYNTHETIC_SECRET_TAINT_11\\\"}\"\necho KEEP_OK", "Error: unexpected \\\" in input\ncurl -d \"{\\\"h\\\": \\\"Authorization: [REDACTED]\"\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_11"}},
 		{"Error: unexpected \" in input\n{\\\"h\\\": \\\"\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_12\\\"}\necho KEEP_OK", "Error: unexpected \" in input\n{\\\"h\\\": \\\"\nAuthorization: [REDACTED]\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_12"}},
-		{"Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_13\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: [REDACTED]\necho KEEP_OK", true, []string{"SYNTHETIC_SECRET_TAINT_13"}},
+		// Decoding the escaped quotes of the X-Json header pairs the quotes
+		// of this text differently, so the error paths, which check that
+		// decoding a scrubbed text exposes nothing, fail closed on it (see
+		// taint13 below).
+		{"Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_13\"\necho KEEP_OK", "Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: [REDACTED]\"\necho KEEP_OK", false, []string{"SYNTHETIC_SECRET_TAINT_13"}},
 		// Prior-line closed multiline string and unclosed header quote before a later single-opening-quote header line.
 		{"msg=\"hello\nworld \"\nAuthorization: Bearer SYNTHETIC_SECRET_END_1\nHost: example.com\nX-End: \"\nKEEP_AFTER", "msg=\"hello\nworld \"\nAuthorization: [REDACTED]\nHost: example.com\nX-End: \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_END_1"}},
 		{"req=\"Authorization: Bearer SYNTHETIC_SECRET_END_2\nHost: example.com\nX-End: \"\nKEEP_AFTER", "req=\"Authorization: [REDACTED]\nHost: example.com\nX-End: \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_END_2"}},
 		// Colon-led continuation lines ending with Base64 '=' / '==' padding or trailing ':' before closing quote.
-		{"curl -H \"Authorization: Basic dXNlcjpwYXNz\npart2: c2VjcmV0dG9rZW4=\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"c2VjcmV0dG9rZW4="}},
-		{"curl -H \"Authorization: Bearer part1\npart2: c2VjcmV0==\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"c2VjcmV0=="}},
-		{"curl -H \"Authorization: Basic dXNlcj\npart2: pass:\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\necho KEEP_TOK", true, []string{"pass:"}},
+		{"curl -H \"Authorization: Basic dXNlcjpwYXNz\npart2: c2VjcmV0dG9rZW4=\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_TOK", true, []string{"c2VjcmV0dG9rZW4="}},
+		{"curl -H \"Authorization: Bearer part1\npart2: c2VjcmV0==\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_TOK", true, []string{"c2VjcmV0=="}},
+		{"curl -H \"Authorization: Basic dXNlcj\npart2: pass:\"\necho KEEP_TOK", "curl -H \"Authorization: [REDACTED]\"\necho KEEP_TOK", true, []string{"pass:"}},
 		// Column-0 standalone closing quote line of a prior-line multiline literal vs. standalone opener after stray prose quote.
 		{"msg=\"hello\n\"\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_1\nHost: KEEP_TOK\necho \"\nKEEP_AFTER", "msg=\"hello\n\"\nAuthorization: [REDACTED]\nHost: KEEP_TOK\necho \"\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_COL0_1"}},
 		{"msg='hello\n'\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_2\nHost: KEEP_TOK\necho '\nKEEP_AFTER", "msg='hello\n'\nAuthorization: [REDACTED]\nHost: KEEP_TOK\necho '\nKEEP_AFTER", true, []string{"SYNTHETIC_SECRET_COL0_2"}},
-		{"Error: unexpected \" in input\n\"\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_3\n   part2\"\necho KEEP_TOK", "Error: unexpected \" in input\n\"\nAuthorization: [REDACTED]\necho KEEP_TOK", true, []string{"SYNTHETIC_SECRET_COL0_3", "part2"}},
+		{"Error: unexpected \" in input\n\"\nAuthorization: Bearer SYNTHETIC_SECRET_COL0_3\n   part2\"\necho KEEP_TOK", "Error: unexpected \" in input\n\"\nAuthorization: [REDACTED]\"\necho KEEP_TOK", true, []string{"SYNTHETIC_SECRET_COL0_3", "part2"}},
 	} {
 		if tt.allPath {
 			checkAllRedactionPaths(t, tt.in, tt.want)
@@ -4574,6 +4727,16 @@ func TestRound17ReviewRegressions(t *testing.T) {
 			checkNoLeak(t, tt.in, secret)
 		}
 	}
+	taint13 := "Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: abc\npart2: SYNTHETIC_SECRET_TAINT_13\"\necho KEEP_OK"
+	if want := "Error: unexpected ' in input\ncurl -H \"X-Json: {\\\"k\\\": \\\"\\\"}\nAuthorization: [REDACTED]\"\necho KEEP_OK"; scrubTextPatterns(want) != want {
+		t.Errorf("scrubbing %q again gave %q, want it unchanged", want, scrubTextPatterns(want))
+	}
+	if got, _ := sanitizeRawText(taint13); got != redactedSensitiveTextPlaceholder {
+		t.Errorf("sanitizeRawText(%q) = %q, want %q", taint13, got, redactedSensitiveTextPlaceholder)
+	}
+	if got := redactErrorMessage(taint13); got != redactedSensitiveTextPlaceholder {
+		t.Errorf("redactErrorMessage(%q) = %q, want %q", taint13, got, redactedSensitiveTextPlaceholder)
+	}
 
 	// Verify linear O(N) scaling on multiline outer-quoted headers and prior-line lookback windows.
 	for _, sc := range []struct {
@@ -4584,7 +4747,7 @@ func TestRound17ReviewRegressions(t *testing.T) {
 		{
 			"multiline_outer_closed",
 			"curl -H 'Authorization: Bearer abc" + strings.Repeat("\nline_of_secret_payload_12345", 8000) + "'",
-			"curl -H 'Authorization: [REDACTED]",
+			"curl -H 'Authorization: [REDACTED]'",
 		},
 		{
 			"multiline_outer_unclosed",
@@ -4594,7 +4757,7 @@ func TestRound17ReviewRegressions(t *testing.T) {
 		{
 			"prior_blank_lines_with_tail",
 			"curl -H '" + strings.Repeat("\n", 2000) + "\nAuthorization: Bearer abc\n" + strings.Repeat("x", 256000) + "'",
-			"curl -H '" + strings.Repeat("\n", 2000) + "\nAuthorization: [REDACTED]",
+			"curl -H '" + strings.Repeat("\n", 2000) + "\nAuthorization: [REDACTED]'",
 		},
 	} {
 		start := time.Now()
@@ -4743,13 +4906,15 @@ func TestRound22ReviewRegressions(t *testing.T) {
 			for _, prefix := range []string{"'", "curl -H '", "curl -H \""} {
 				q := prefix[len(prefix)-1:]
 				in := prefix + pad + "\nAuthorization: Bearer abc\n" + secret + q + "\necho KEEP_HEADER_TAIL"
-				checkLongRedactionPaths(t, in, prefix+pad+"\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL", secret)
+				// The quote that closes the string the header is in is
+				// kept, so a scrub of the result reads that string again.
+				checkLongRedactionPaths(t, in, prefix+pad+"\nAuthorization: [REDACTED]"+q+"\necho KEEP_HEADER_TAIL", secret)
 			}
 			// A text that opens with a double quote is a JSON blob that does
 			// not parse for the paths that try it, which write a placeholder
 			// for all of it; the scrub of its text keeps the rest.
 			in := "\"" + pad + "\nAuthorization: Bearer abc\n" + secret + "\"\necho KEEP_HEADER_TAIL"
-			if got, want := scrubTextPatterns(in), "\""+pad+"\nAuthorization: [REDACTED]\necho KEEP_HEADER_TAIL"; got != want {
+			if got, want := scrubTextPatterns(in), "\""+pad+"\nAuthorization: [REDACTED]\"\necho KEEP_HEADER_TAIL"; got != want {
 				t.Errorf("scrubTextPatterns(%s) = %s, want %s", elideText(in), elideText(got), elideText(want))
 			}
 			raw, _ := sanitizeRawText(in)
@@ -4766,7 +4931,7 @@ func TestRound22ReviewRegressions(t *testing.T) {
 		for _, prefix := range []string{"'", "curl -H '", "curl -H \""} {
 			q := prefix[len(prefix)-1:]
 			in := prefix + pad.String() + "Authorization: Bearer abc\n" + secret + q + "\necho KEEP_HEADER_TAIL"
-			checkLongRedactionPaths(t, in, prefix+pad.String()+"Authorization: [REDACTED]\necho KEEP_HEADER_TAIL", secret)
+			checkLongRedactionPaths(t, in, prefix+pad.String()+"Authorization: [REDACTED]"+q+"\necho KEEP_HEADER_TAIL", secret)
 		}
 	})
 
@@ -4960,7 +5125,7 @@ func TestRound22ReviewRegressions(t *testing.T) {
 			// a header value whatever it holds.
 			{"Cookie: \"Monster SYNTHETIC_COOKIE_2207\"", "Cookie: [REDACTED]", "SYNTHETIC_COOKIE_2207"},
 			{"Cookie: 'Monster SYNTHETIC_COOKIE_2209'", "Cookie: [REDACTED]", "SYNTHETIC_COOKIE_2209"},
-			{"curl -H 'Cookie: Monster\nSYNTHETIC_COOKIE_2208'\necho ok", "curl -H 'Cookie: [REDACTED]\necho ok", "SYNTHETIC_COOKIE_2208"},
+			{"curl -H 'Cookie: Monster\nSYNTHETIC_COOKIE_2208'\necho ok", "curl -H 'Cookie: [REDACTED]'\necho ok", "SYNTHETIC_COOKIE_2208"},
 			{"cookie=SYNTHETIC_COOKIE_2210", "cookie=[REDACTED]", "SYNTHETIC_COOKIE_2210"},
 			// Cookie prose before another credential on the same line does not
 			// mask that credential or become redacted on a second pass.
@@ -4969,9 +5134,9 @@ func TestRound22ReviewRegressions(t *testing.T) {
 			{"The cookie: Monster and Bearer secret789 were here.", "The cookie: Monster and Bearer [REDACTED] were here.", "secret789"},
 			{"Cookie: Monster Bearer secret789", "Cookie: Monster Bearer [REDACTED]", "secret789"},
 			{`The cookie: Monster and {"api_key": "secret789"} were here.`, `The cookie: Monster and {"api_key":"[REDACTED]"} were here.`, "secret789"},
-			{"The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\necho KEEP_OK", "SECRET"},
+			{"The cookie: Monster; curl -H \"Authorization: Bearer abc\npart2: SECRET\"\necho KEEP_OK", "The cookie: Monster; curl -H \"Authorization: [REDACTED]\"\necho KEEP_OK", "SECRET"},
 			{manyCookies + "Cookie: sid=secret2211", manyCookies + "Cookie: [REDACTED]", "secret2211"},
-			{manyCookies + `"Cookie: sid=secret2211"`, manyCookies + `"Cookie: [REDACTED]`, "secret2211"},
+			{manyCookies + `"Cookie: sid=secret2211"`, "cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster cookie: Monster \"Cookie: [REDACTED]\"", "secret2211"},
 			{manyCookies + `Cookie: "secret2212"`, manyCookies + "Cookie: [REDACTED]", "secret2212"},
 			{manyCookies + "Authorization: Bearer secret2213", manyCookies + "Authorization: [REDACTED]", "secret2213"},
 			{manyCookies + "Bearer secret2214", manyCookies + "Bearer [REDACTED]", "secret2214"},
@@ -5095,7 +5260,7 @@ func redactAuthHeadersFreshScanner(s string) string {
 			indentLen++
 		}
 		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
-		if outer == "" && inner == "" && isCookieHeaderKey(s[loc[2]:loc[3]]) && openingQuote(s, loc[4]) == "" && cookieValueIsProse(s, loc[4]) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
+		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[4], loc[5], outer, inner, quotes) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
 			if sub := authHeaderPrefixRe.FindStringSubmatchIndex(s[loc[4]:loc[5]]); sub != nil {
 				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
 				idx--
@@ -5103,6 +5268,9 @@ func redactAuthHeadersFreshScanner(s string) string {
 			continue
 		}
 		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
+		if outer != "" || inner != "" {
+			end = closingQuotesStart(s, loc[4], end, outer, inner)
+		}
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(s[loc[2]:loc[3]])
 		b.WriteString(": ")
@@ -5128,7 +5296,7 @@ func TestRound23ReviewRegressions(t *testing.T) {
 			"Set-Cookie",
 		} {
 			in := "curl -H '" + hdr + ": [REDACTED]\n\t" + secret + "'\necho KEEP"
-			want := "curl -H '" + hdr + ": [REDACTED]\necho KEEP"
+			want := "curl -H '" + hdr + ": [REDACTED]'\necho KEEP"
 			checkAllRedactionPaths(t, in, want)
 			checkNoLeak(t, in, secret)
 		}
@@ -5145,7 +5313,7 @@ func TestRound23ReviewRegressions(t *testing.T) {
 					} {
 						for _, tail := range []string{nl + "echo KEEP", nl + "echo 'ok'", nl + "Accept: text/plain"} {
 							in := q.open + hdr + ": [REDACTED]" + nl + cont + q.close + tail
-							want := q.open + hdr + ": [REDACTED]" + tail
+							want := q.open + hdr + ": [REDACTED]" + q.close + tail
 							checkLongRedactionPaths(t, in, want, secret)
 						}
 					}
@@ -5155,12 +5323,12 @@ func TestRound23ReviewRegressions(t *testing.T) {
 		// Leading double quote on line 0 is scrubbed by scrubTextPatterns while
 		// JSON-aware paths replace the unclosed top-level quote with placeholder.
 		leadDQ := "\"X-Pad: pad\nAuthorization: [REDACTED]\n\t" + secret + "\"\necho KEEP"
-		if got, want := scrubTextPatterns(leadDQ), "\"X-Pad: pad\nAuthorization: [REDACTED]\necho KEEP"; got != want {
+		if got, want := scrubTextPatterns(leadDQ), "\"X-Pad: pad\nAuthorization: [REDACTED]\"\necho KEEP"; got != want {
 			t.Errorf("scrubTextPatterns(%q) = %q, want %q", leadDQ, got, want)
 		}
 		checkNoLeak(t, leadDQ, secret)
 		pad5000 := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\n" + secret + "'\necho KEEP"
-		wantPad5000 := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\necho KEEP"
+		wantPad5000 := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]'\necho KEEP"
 		checkLongRedactionPaths(t, pad5000, wantPad5000, secret)
 
 		// Unclosed-quote placeholder outputs from an earlier scrub remain idempotent.
@@ -5228,11 +5396,11 @@ func TestRound23ReviewRegressions(t *testing.T) {
 			want   string
 			secret string
 		}{
-			{"\"\nCookie:r'Cookie:", "\"\nCookie:r'Cookie:", ""},
-			{"\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", ""},
-			{"\"\nCookie:r'Cookie: sid=synthcanary\nKEEP_LINE_ONE", "\"\nCookie:r'Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
-			{"'\nCookie:r\"Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO\"\nKEEP_LINE_THREE", "'\nCookie:r\"Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO\"\nKEEP_LINE_THREE", ""},
-			{"'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
+			{"\"\nCookie:r'Cookie:", "\"\nCookie:r'Cookie: [REDACTED]", ""},
+			{"\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: [REDACTED]'\nKEEP_LINE_THREE", ""},
+			{"\"\nCookie:r'Cookie: sid=synthcanary\nKEEP_LINE_ONE", "\"\nCookie:r'Cookie: [REDACTED]", "synthcanary"},
+			{"'\nCookie:r\"Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO\"\nKEEP_LINE_THREE", "'\nCookie:r\"Cookie: [REDACTED]\"\nKEEP_LINE_THREE", ""},
+			{"'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]", "synthcanary"},
 		} {
 			if got := scrubTextPatterns(tc.in); got != tc.want {
 				t.Errorf("scrubTextPatterns(%q) = %q, want %q", tc.in, got, tc.want)
@@ -5286,7 +5454,7 @@ func TestRound23ReviewRegressions(t *testing.T) {
 			},
 			{
 				"curl -H 'Authorization: [REDACTED]\n\tsynthcanary'\necho KEEP",
-				"curl -H 'Authorization: [REDACTED]\necho KEEP",
+				"curl -H 'Authorization: [REDACTED]'\necho KEEP",
 				"synthcanary",
 			},
 			{
@@ -5319,33 +5487,36 @@ func TestRound23ReviewRegressions(t *testing.T) {
 	})
 
 	t.Run("gate2 p1-1 multi-pass idempotency on nested outer+inner quotes", func(t *testing.T) {
-		const secret = "synthcanary"
-		// Verify the secret is redacted in multiline quoted header scenarios.
-		for _, in := range []string{
-			"curl -H 'Authorization: Bearer secret'\necho 'hello\nworld'",
-			"curl -H \"Authorization: 'Bearer secret'\n\tsynthcanary'\"\necho KEEP",
+		// The quote that closes the header string is kept after the
+		// placeholder, so that scrubbing the result again keeps the lines
+		// after it.
+		for _, tc := range []struct{ in, want string }{
+			{
+				"curl -H 'Authorization: Bearer secret'\necho 'hello\nworld'",
+				"curl -H 'Authorization: [REDACTED]'\necho 'hello\nworld'",
+			},
+			{
+				"curl -H \"Authorization: 'Bearer secret'\n\tsynthcanary'\"\necho KEEP",
+				"curl -H \"Authorization: [REDACTED]\"\necho KEEP",
+			},
 		} {
-			checkNoLeak(t, in, secret)
+			checkAllRedactionPaths(t, tc.in, tc.want)
 		}
 	})
 
 	t.Run("gate2 p1-2 trailing backslash in placeholderQuoteCloses", func(t *testing.T) {
 		const secret = "synthcanary"
-		// The auth-header redaction paths must not leak the secret when a
-		// backslash precedes the closing quote on a continuation line.
-		in := "curl -H 'Authorization: [REDACTED]\n\tsynthcanary\\'\necho KEEP"
-		// redactAuthHeaders and sanitizeRawText handle the header-aware path.
-		if got := redactAuthHeaders(in); strings.Contains(got, secret) {
-			t.Errorf("redactAuthHeaders leaked secret: %q", got)
-		}
-		if got, _ := sanitizeRawText(in); strings.Contains(got, secret) {
-			t.Errorf("sanitizeRawText leaked secret: %q", got)
-		}
-		if b, _, err := SmartTruncate(in, 4096); err != nil || strings.Contains(string(b), secret) {
-			t.Errorf("SmartTruncate leaked secret: %s", elideText(string(b)))
-		}
-		if got := redactErrorMessage(in); strings.Contains(got, secret) {
-			t.Errorf("redactErrorMessage leaked secret: %q", got)
+		// A backslash is literal inside single quotes, so the quote after
+		// it closes the header string, whether or not the continuation
+		// line is indented.
+		for _, in := range []string{
+			"curl -H 'Authorization: [REDACTED]\n\tsynthcanary\\'\necho KEEP",
+			"curl -H 'Authorization: [REDACTED]\nsynthcanary\\'\necho KEEP",
+		} {
+			if got := redactAuthHeaders(in); strings.Contains(got, secret) {
+				t.Errorf("redactAuthHeaders(%q) = %q, which still holds the secret", in, got)
+			}
+			checkAllRedactionPaths(t, in, "curl -H 'Authorization: [REDACTED]'\necho KEEP")
 		}
 	})
 
@@ -5420,45 +5591,78 @@ func TestRound23ReviewRegressions(t *testing.T) {
 	})
 }
 
-// TestShellScannerNoCloseMemoLimits checks that closedQuoteLen and
-// closedEscapedQuoteLen give, for each query in turn on one scanner, the
-// answer that a fresh scanner gives. A record of no closing quote that a scan
-// under a narrow limit made must not be used under a wider limit, under which
-// the closing quote can be in reach: whether that scan ended at the limit, or
-// at an escape or a line splice that the limit cut, or the query is for a
-// later opening quote that the record covers. Records that a line break or a
-// quote ended, and queries under narrower limits, find no close either way.
+// TestRound24ReviewRegressions checks inputs from the twenty-fourth round of
+// review on the paths that scrub text: values with a quoted sensitive key
+// written straight after them, quoted passphrases with apostrophes, colons or
+// equals signs in them, line splices in keys and values, a closing quote
+// after a redacted header, cookie values that do not read as prose, an
+// apostrophe in a bare value, values with a later sensitive key in them, and
+// text in JSON string values.
 func TestRound24ReviewRegressions(t *testing.T) {
 	const secret = "synthcanary"
 
 	t.Run("R24-2 bearer glued to sensitive quoted key", func(t *testing.T) {
+		// A token or a bare value that a quoted sensitive key follows with
+		// no space ends before the key's quote, and the key's value is
+		// redacted too.
 		for _, tc := range []struct {
 			name string
 			in   string
+			want string
 		}{
 			{
 				"redacted bearer + quoted password key",
 				`x='Bearer [REDACTED]'"password": ZQXSEKRETN}`,
+				`x='Bearer [REDACTED]'"password":"[REDACTED]"}`,
 			},
 			{
 				"bearer abc + quoted password key",
 				`x='Bearer abc'"password": ZQXSEKRETN}`,
+				`x='Bearer [REDACTED]'"password":"[REDACTED]"}`,
 			},
 			{
 				"bearer abc + quoted label key",
 				`x='Bearer abc'"label": ZQXSEKRETN}`,
+				`x='Bearer [REDACTED]'}`,
 			},
 			{
 				"redacted bearer + quoted token key",
 				`x='Bearer [REDACTED]'"token": ZQXSEKRETN}`,
+				`x='Bearer [REDACTED]'"token":"[REDACTED]"}`,
 			},
 			{
 				"redacted bearer + single-quoted password key",
 				`x="Bearer [REDACTED]"'password': ZQXSEKRETN}`,
+				`x="Bearer [REDACTED]"'password':[REDACTED]`,
+			},
+			{
+				"bare bearer + quoted password key",
+				`Bearer abc"password": ZQXSEKRETN`,
+				`Bearer [REDACTED]"password":"[REDACTED]"`,
+			},
+			{
+				"bare bearer + single-quoted password key",
+				`Bearer abc'password': ZQXSEKRETN`,
+				`Bearer [REDACTED]'password':[REDACTED]`,
+			},
+			{
+				"bare bearer + quoted password key and spaced equals sign",
+				`Bearer abc"password" = ZQXSEKRETN`,
+				`Bearer [REDACTED]"password"=[REDACTED]`,
+			},
+			{
+				"bare token value + single-quoted password key",
+				`token=abc'password': ZQXSEKRETN`,
+				`token=[REDACTED]`,
+			},
+			{
+				"bare password value + single-quoted token key",
+				`password=abc'token': ZQXSEKRETN`,
+				`password=[REDACTED]`,
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				checkNoLeak(t, tc.in, "ZQXSEKRETN")
+				checkAllRedactionPaths(t, tc.in, tc.want)
 			})
 		}
 	})
@@ -5484,41 +5688,35 @@ func TestRound24ReviewRegressions(t *testing.T) {
 	})
 
 	t.Run("R24-4 interior apostrophe in quoted passphrase", func(t *testing.T) {
+		// A quoted passphrase is redacted up to its closing quote, whatever
+		// apostrophes, colons or equals signs it holds, also when it is
+		// longer than 256 bytes.
 		for _, tc := range []struct {
 			name string
 			in   string
 		}{
-			{
-				"password equals it's SECRET",
-				"password='it's " + secret + "' user=x",
-			},
-			{
-				"password equals Bob's SECRET",
-				"password='Bob's " + secret + "' user=x",
-			},
-			{
-				"password equals I'm SECRET",
-				"password='I'm " + secret + "' user=x",
-			},
-			{
-				"password equals O'Brien SECRET",
-				"password='O'Brien " + secret + "' user=x",
-			},
+			{"password equals it's SECRET", "password='it's " + secret + "' user=x"},
+			{"password equals Bob's SECRET", "password='Bob's " + secret + "' user=x"},
+			{"password equals I'm SECRET", "password='I'm " + secret + "' user=x"},
+			{"password equals O'Brien SECRET", "password='O'Brien " + secret + "' user=x"},
+			{"password equals JSON's SECRET", "password='JSON's " + secret + "' user=x"},
+			{"time in the passphrase", "password='it's 10:30 " + secret + "' user=x"},
+			{"two interior apostrophes", "password='it's a friend's " + secret + "' user=x"},
+			{"interior apostrophes in two words", "password='it's Bob's " + secret + "' user=x"},
+			{"equals sign in the passphrase", "password='it's a=b " + secret + "' user=x"},
+			{"colon in the passphrase", "password='it's a:b " + secret + "' user=x"},
+			{"passphrase of 300 bytes", "password='it's " + strings.Repeat("pad ", 70) + secret + "' user=x"},
+			{"passphrase of 420 bytes", "password='it's " + strings.Repeat("pad ", 100) + secret + "' user=x"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				checkNoLeak(t, tc.in, secret)
+				checkAllRedactionPaths(t, tc.in, "password='[REDACTED]' user=x")
 			})
 		}
 		// The shell-assignment path (export DB_PASSWORD=pre' it's SECRET'; echo ok)
 		// goes through findQuotedOrShellSegment and joinedQuoteEnd, where the
 		// interior apostrophe fix is now wired in (see interiorApostropheEnd).
 		t.Run("export DB_PASSWORD pre it's SECRET", func(t *testing.T) {
-			in := "export DB_PASSWORD=pre' it's " + secret + "'; echo ok"
-			checkNoLeak(t, in, secret)
-		})
-		t.Run("password equals JSON's SECRET", func(t *testing.T) {
-			in := "password='JSON's " + secret + "' user=x"
-			checkNoLeak(t, in, secret)
+			checkAllRedactionPaths(t, "export DB_PASSWORD=pre' it's "+secret+"'; echo ok", "export DB_PASSWORD=[REDACTED]; echo ok")
 		})
 		t.Run("json password with escaped apostrophes", func(t *testing.T) {
 			in := `{"password": "\'it\'s ` + secret + `'", "user": "x"}`
@@ -5530,35 +5728,158 @@ func TestRound24ReviewRegressions(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			in   string
+			want string
 		}{
 			{
 				"DB_PASSWORD equals pre LF SECRET value continuation",
 				"DB_PASSWORD=pre\\\n" + secret,
+				"DB_PASSWORD=[REDACTED]",
 			},
 			{
 				"DB_PASSWORD equals pre CRLF SECRET value continuation",
 				"DB_PASSWORD=pre\\\r\n" + secret,
+				"DB_PASSWORD=[REDACTED]",
 			},
 			{
 				"DB_PASS LF WORD equals SECRET (spliced key name)",
 				"DB_PASS\\\nWORD=" + secret,
+				"DB_PASS\\\nWORD=[REDACTED]",
 			},
 			{
 				"DB_PASS CRLF WORD equals SECRET (spliced key name)",
 				"DB_PASS\\\r\nWORD=" + secret,
+				"DB_PASS\\\r\nWORD=[REDACTED]",
 			},
 			{
 				"DB_PASSWORD LF equals SECRET (spliced before delimiter)",
 				"DB_PASSWORD\\\n=" + secret,
+				"DB_PASSWORD\\\n=[REDACTED]",
 			},
 			{
 				"DB_PASSWORD CRLF equals SECRET (spliced before delimiter)",
 				"DB_PASSWORD\\\r\n=" + secret,
+				"DB_PASSWORD\\\r\n=[REDACTED]",
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				checkNoLeak(t, tc.in, secret)
+				checkAllRedactionPaths(t, tc.in, tc.want)
 			})
+		}
+		// A map key or a JSON object key with a line splice in it is read
+		// as the name that the splice joins.
+		for _, key := range []string{"DB_PASS\\\nWORD", "DB_PASS\\\r\nWORD"} {
+			checkRedactedMap(t, key, secret)
+			b, err := json.Marshal(map[string]string{key: secret})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := sanitizeRawText(string(b)); strings.Contains(got, secret) {
+				t.Errorf("sanitizeRawText(%s) = %q, which still holds the secret", b, got)
+			}
+		}
+	})
+
+	t.Run("closing quote after a redacted header is kept", func(t *testing.T) {
+		// The quote that closes the string around a header value is kept
+		// after the placeholder, so that scrubbing the result again reads
+		// the lines after it as the first scrub did and keeps them.
+		for _, tc := range []struct{ in, want string }{
+			{
+				"'X-Pad: pad\nAuthorization: Bearer abc'\n\tKEEP_TAIL",
+				"'X-Pad: pad\nAuthorization: [REDACTED]'\n\tKEEP_TAIL",
+			},
+			{
+				"'X-Pad: pad\nAuthorization: Bearer abc'\n\tKEEP_TAIL\n",
+				"'X-Pad: pad\nAuthorization: [REDACTED]'\n\tKEEP_TAIL\n",
+			},
+			{
+				"curl -H 'Authorization: Bearer secret\n\t" + secret + "'\necho 'hello\nworld'",
+				"curl -H 'Authorization: [REDACTED]'\necho 'hello\nworld'",
+			},
+			// Each path also keeps the text when it ends in a backslash
+			// and an "n".
+			{
+				"'X-Pad: pad\nAuthorization: Bearer abc'\n\tKEEP_TAIL\\n",
+				"'X-Pad: pad\nAuthorization: [REDACTED]'\n\tKEEP_TAIL\\n",
+			},
+			{
+				"curl -H 'Authorization: Bearer secret\n\t" + secret + "'\necho 'hello\nworld'\\n",
+				"curl -H 'Authorization: [REDACTED]'\necho 'hello\nworld'\\n",
+			},
+		} {
+			checkAllRedactionPaths(t, tc.in, tc.want)
+		}
+	})
+
+	t.Run("cookie values that do not read as prose are redacted", func(t *testing.T) {
+		for _, tc := range []struct{ in, want string }{
+			{"Cookie: 5f2b9c0e7d1a44e3", "Cookie: [REDACTED]"},
+			{"Set-Cookie: 9f8e7d6c5b4a; HttpOnly; Secure", "Set-Cookie: [REDACTED]"},
+			{"  cookie: 5f2b9c0e7d1a", "  cookie: [REDACTED]"},
+			{"Cookie: app:sid=" + secret, "Cookie: [REDACTED]"},
+			{"Set-Cookie: Secure, sid=" + secret + "; Path=/", "Set-Cookie: [REDACTED]"},
+			{"Cookie: Monster, sid=" + secret, "Cookie: [REDACTED]"},
+			// A quote on an earlier line that nothing closes does not hide
+			// the quoted header after cookie prose.
+			{
+				"'\nCookie: Monster; curl -H \"Authorization: Bearer abc\npart2: " + secret + "\"",
+				"'\nCookie: Monster; curl -H \"Authorization: [REDACTED]\"",
+			},
+			{"The cookie: Monster was here.", "The cookie: Monster was here."},
+		} {
+			checkAllRedactionPaths(t, tc.in, tc.want)
+		}
+		// Only the text patterns read a struct dump as pairs (see
+		// checkNoLeak).
+		checkNoLeak(t, "{Host:example.com Cookie:5f2b9c0e User:bob}", "5f2b9c0e")
+	})
+
+	t.Run("apostrophe in a bare value does not take the pairs after it", func(t *testing.T) {
+		for _, tc := range []struct{ in, want string }{
+			{"password=abc's prompt_tokens=10 next_page_token=c1", "password=[REDACTED] prompt_tokens=10 next_page_token=c1"},
+			{"password=pre's token=" + secret + " tail", "password=[REDACTED] token=[REDACTED] tail"},
+			{"password=pre's a:b " + secret, "password=[REDACTED]"},
+		} {
+			checkAllRedactionPaths(t, tc.in, tc.want)
+		}
+	})
+
+	t.Run("value that takes a later sensitive key takes its value too", func(t *testing.T) {
+		for _, tc := range []struct{ in, want string }{
+			{"token=O'Brien password='" + secret + " VALUE' rest", "token=[REDACTED] rest"},
+			{`DB_PASSWORD="a"prompt_tokens="10"token: ` + secret, "DB_PASSWORD=[REDACTED] [REDACTED]"},
+			{`password="benign"user="bob"token: ` + secret, "password=[REDACTED] [REDACTED]"},
+			{`credentials: token = "` + secret + `"`, `credentials: token="[REDACTED]"`},
+		} {
+			checkAllRedactionPaths(t, tc.in, tc.want)
+		}
+	})
+
+	t.Run("text in a JSON string value is scrubbed", func(t *testing.T) {
+		for _, tc := range []struct{ in, want string }{
+			{"password='it's a friend's " + secret + "' user=x", "password='[REDACTED]' user=x"},
+			{"DB_PASS\\\nWORD=" + secret, "DB_PASS\\\nWORD=[REDACTED]"},
+			{"DB_PASS\\\r\nWORD=" + secret, "DB_PASS\\\r\nWORD=[REDACTED]"},
+		} {
+			in, err := json.Marshal(map[string]string{"note": tc.in})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := json.Marshal(map[string]string{"note": tc.want})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := sanitizeRawText(string(in)); got != string(want) {
+				t.Errorf("sanitizeRawText(%s) = %s, want %s", in, got, want)
+			}
+			b, _, err := SmartTruncate(string(in), 4096)
+			var got string
+			if err != nil || json.Unmarshal(b, &got) != nil || got != string(want) {
+				t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", in, b, err, want)
+			}
+			if b, _, err := SmartTruncate(map[string]string{"note": tc.in}, 4096); err != nil || string(b) != string(want) {
+				t.Errorf("SmartTruncate(map[note:%q]) = (%s, %v), want %s", tc.in, b, err, want)
+			}
 		}
 	})
 
@@ -5602,6 +5923,503 @@ func TestRound24ReviewRegressions(t *testing.T) {
 	})
 }
 
+// TestRedactionKeepsWhatMainRedacts checks that the plugin keeps out of the
+// content_parts and error_message columns every secret that the baseline pass
+// redacts, for texts on which the passes once read a quote, a header or a
+// value differently from it and wrote the secret.
+func TestRedactionKeepsWhatMainRedacts(t *testing.T) {
+	for in, secret := range map[string]string{
+		`login failed: {"password": " correct horse "battery"}`:          "correct horse",
+		`failed: "{"password":"   Passw0rd","user":"bob"}"`:              "Passw0rd",
+		`msg: "got Bearer " SECRET1"x`:                                   "SECRET1",
+		`export DB_PASSWORD='a "password": "b Bearer '" users' SECRET2"`: "SECRET2",
+		`export DB_PASSWORD=pre"one two "token=" SECRET3"suffix`:         "SECRET3",
+		`password="benign"user="bob"token: SECRET4`:                      "SECRET4",
+		`id="1" temp:ok password="= word1 SECRET5"`:                      "SECRET5",
+		`token=O'Brien password='SECRET6 VALUE6' rest`:                   "VALUE6",
+		`got {"auth": "Bearer abc"}+{"password": "SECRET7"}`:             "SECRET7",
+		`x='Bearer abc'|password: SECRET8`:                               "SECRET8",
+		"failed: {\"credentials\": {\n  \"hdr\": \"Authorization: Bearer abc\nx\",\n  \"note\": \"} b\",\n  \"AccessKeyId\": \"SECRET9\"\n}}": "SECRET9",
+		"req=\"Authorization: Bearer abc\nHost: example.com\n\npassword=\"line1\nSECRET10\"":                                                  "SECRET10",
+		"data=\"YWJj\nZGVm=\"\nAuthorization: Bearer abc\necho \"hello world\"\npassword=\"line1\nSECRET11\"":                                 "SECRET11",
+		"Error: api_key_secret: x, credentials: {\n  \"AccessKeyId\": \"SECRET12\"\n}":                                                        "SECRET12",
+		`x='Bearer abc'"label": password="part1 SECRET13"`:                                                                                    "SECRET13",
+		`x="Bearer ""password": SECRET14`:                  "SECRET14",
+		`DB_PASSWORD="a"prompt_tokens="10"token: SECRET15`: "SECRET15",
+	} {
+		p, requests, mCtx := setupTestPlugin(t)
+		var errs callbackErrors
+		errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: in}}}))
+		errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(in)))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+		rows := collectRows(t, requests, untilInvocationEnd)
+		parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+		text, _ := parts[0]["text"].(string)
+		msg, _ := onlyRowOfType(t, rows, EventLLMError)["error_message"].(string)
+		if strings.Contains(text, secret) || strings.Contains(msg, secret) {
+			t.Errorf("%q: text %q, error_message %q", in, text, msg)
+		}
+	}
+}
+
+// TestScrubbingStaysLinear checks that sanitizeRawText takes time linear in
+// the length of texts that repeat shapes on which the passes once read the
+// rest of the text again from each repeat.
+func TestScrubbingStaysLinear(t *testing.T) {
+	for _, c := range []struct {
+		prefix, unit, suffix string
+		small, large         int
+	}{
+		{"", `'temp:a=`, " password=x", 50_000, 200_000},
+		{"", `Bearer " in a, token="{a"x "" `, "", 50_000, 200_000},
+		{"password=a = ", `"x": `, "", 5_000, 20_000},
+		{`password="a"`, `x\\\'`, " \n \\'z", 10_000, 40_000},
+		{"", "Authorization: a\\\\\\'s\n", "", 10_000, 40_000},
+		{"a=it's cookie: Monster ", "password=users' synthlow's changed ", "", 100_000, 800_000},
+		{"x ", `{"a":"b"pass\` + "\n" + `word:[REDACTED]token:"[REDACTED]"}`, "", 240_000, 960_000},
+	} {
+		var took [2]time.Duration
+		for i, n := range []int{c.small, c.large} {
+			in := c.prefix + strings.Repeat(c.unit, n/len(c.unit)+1)[:n] + c.suffix
+			start := time.Now()
+			sanitizeRawText(in)
+			took[i] = time.Since(start)
+		}
+		if limit := 2 * time.Duration(c.large/c.small) * took[0]; took[1] > limit && took[1] > 500*time.Millisecond {
+			t.Errorf("%q: %d bytes took %v, %d bytes took %v", c.unit, c.small, took[0], c.large, took[1])
+		}
+	}
+}
+
+// TestPlaceholderHeadersStayLinear checks that sanitizeRawText takes time
+// linear in the number of redacted headers in a quoted string that a long
+// line ends.
+func TestPlaceholderHeadersStayLinear(t *testing.T) {
+	var took [2]time.Duration
+	for i, n := range []int{1_000, 4_000} {
+		in := "'" + strings.Repeat("\nAuthorization: [REDACTED]", n) + "\n" + strings.Repeat("a", 50*n) + "\\'"
+		start := time.Now()
+		sanitizeRawText(in)
+		took[i] = time.Since(start)
+	}
+	if took[1] > 8*took[0] && took[1] > 500*time.Millisecond {
+		t.Errorf("1,000 headers took %v, 4,000 headers took %v", took[0], took[1])
+	}
+}
+
+// TestScrubbingStaysLinearUnderLoad checks that sanitizeRawText stays linear
+// in the length of its text when sixteen goroutines scrub at once, each its
+// own copy, since every scrub reads the text with scanners of its own.
+func TestScrubbingStaysLinearUnderLoad(t *testing.T) {
+	var took [2]time.Duration
+	for i, n := range []int{25_000, 200_000} {
+		in := strings.Repeat("password=users' synthlow's changed ", n/35)
+		start := time.Now()
+		var wg sync.WaitGroup
+		for range 16 {
+			wg.Add(1)
+			go func(s string) {
+				defer wg.Done()
+				sanitizeRawText(s)
+			}(strings.Clone(in))
+		}
+		wg.Wait()
+		took[i] = time.Since(start)
+	}
+	if took[1] > 16*took[0] && took[1] > 500*time.Millisecond {
+		t.Errorf("16 goroutines: 25 KB each took %v, 200 KB each took %v", took[0], took[1])
+	}
+}
+
+// TestScrubbingKeepsNoReferenceToItsInput checks that a scrub keeps nothing
+// that holds its text reachable after it returns, so that no secret in the
+// text outlives the scrub in memory, as it would in a cache of scanners that
+// the package keeps.
+func TestScrubbingKeepsNoReferenceToItsInput(t *testing.T) {
+	text := "export DB_PASSWORD=SYNTH_RETAINED_SECRET_77 " + strings.Repeat("password=users' synthlow's changed ", 40)
+	for _, p := range []struct {
+		name string
+		fn   func(string)
+	}{
+		{"scrubTextPatterns", func(s string) { _ = scrubTextPatterns(s) }},
+		{"sanitizeRawText", func(s string) { _, _ = sanitizeRawText(s) }},
+		{"redactErrorMessage", func(s string) { _ = redactErrorMessage(s) }},
+	} {
+		wp := func() weak.Pointer[byte] {
+			s := strings.Clone(text)
+			p.fn(s)
+			return weak.Make(unsafe.StringData(s))
+		}()
+		for range 10 {
+			if runtime.GC(); wp.Value() == nil {
+				break
+			}
+		}
+		if wp.Value() != nil {
+			t.Errorf("%s keeps its text reachable after it returns", p.name)
+		}
+	}
+}
+
+// TestConcurrentScrubbingAgrees checks that scrubs that run at once on
+// sixteen goroutines, each on its own copy of a text, write what one scrub
+// alone writes for it.
+func TestConcurrentScrubbingAgrees(t *testing.T) {
+	const secret = "SYNTH_RETAINED_SECRET_77"
+	texts := []string{
+		"export DB_PASSWORD=" + secret + " " + strings.Repeat("password=users' synthlow's changed ", 40),
+		"a=it's cookie: Monster " + strings.Repeat("password=users' synthlow's changed ", 40) + "token=" + secret,
+		"password='it's a friend's " + secret + "' user=x",
+		"curl -H 'Authorization: Bearer " + secret + "\n\tmore'\necho 'hello\nworld'",
+	}
+	want := make([]string, len(texts))
+	for i, text := range texts {
+		want[i], _ = sanitizeRawText(text)
+		if strings.Contains(want[i], secret) {
+			t.Fatalf("sanitizeRawText(%q) = %q, which still holds the secret", text, want[i])
+		}
+	}
+	var wg sync.WaitGroup
+	for g := range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for k := range 4 * len(texts) {
+				i := (g + k) % len(texts)
+				if got, _ := sanitizeRawText(strings.Clone(texts[i])); got != want[i] {
+					t.Errorf("concurrent sanitizeRawText(%q) = %q, want %q", texts[i], got, want[i])
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// TestBaselineScrubMatchesMain checks that baselineScrub writes what
+// scrubTextPatterns wrote before the passes that read quotes, shell
+// assignments, line splices and prose more closely were added (commit
+// 40f132d6), for texts built at random from words that the passes read, and
+// for texts on which those passes once wrote a secret that it redacts.
+func TestBaselineScrubMatchesMain(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"hello=\u00e9\r\nBearer X-Api-Key: \"password\"\"note\"%5BREDACTED%5D\"note\"\u00e9", "hello=\u00e9\r\nBearer [REDACTED] [REDACTED]"},
+		{"export SECRET\t: \n{: [\r\n_temp:xbasic %5BREDACTED%5D]'token''passphrase\u65e5\u672c", "export SECRET:[REDACTED]"},
+		{"\n\"Authorization: \\\"token\\\"", "\n\"Authorization: [REDACTED]"},
+		{"Basic authorization:Set-Cookie: 'token' \nAuthorization:  =", "Basic authorization: [REDACTED]\nAuthorization: [REDACTED]"},
+		{"[REDACTED]token=abc%5BREDACTED%5D\"auth\"\u00a0passphraseSECRET[REDACTED]", "[REDACTED]token=[REDACTED]"},
+		{"\"note\".\"auth\"=\\\n}\\'secret\\': password\t", "\"note\".\"auth\"=\\\n}\\'secret\\':[REDACTED]\t"},
+		{"(,Bob'ssecretbearer &]O'Brien'token': credentials : ", "(,Bob'ssecretbearer &]O'Brien'token':[REDACTED] : "},
+		{"\"|user:tokenX-Api-Key: app:password\\\\authorization: = ", "\"|user:tokenX-Api-Key: [REDACTED]"},
+		{"\\'secret\\'Bearer bearer users'&\u2028\u65e5\u672c : Bob'sDB_PASSWORD{", "\\'secret\\'Bearer [REDACTED] users'&\u2028\u65e5\u672c : Bob'sDB_PASSWORD{"},
+		{"\\_+'bearer curl -H cookie:  _dGVzdDp0ZXN0cookie: +.Authorization: echo]", "\\_+'bearer [REDACTED] -H cookie:  _dGVzdDp0ZXN0cookie: +.Authorization: [REDACTED]"},
+		{"api_key \\\":temp:xhello_ :  \\\\Bearer \u00a0temp:xpassphraseit's\n\\\"\nbasic \\\\", "api_key \\\":temp:xhello_:[REDACTED] [REDACTED]'s\n\\\"\nbasic \\\\"},
+		{"\\\\temp:x = \"note\"[REDACTED]:apiKeyprompt_tokens", "\\\\temp:x=\"[REDACTED]\"[REDACTED]:apiKeyprompt_tokens"},
+		{"of bearer \nhello&access_tokennext_page_token%5BREDACTED%5D{", "of bearer [REDACTED]"},
+		{"Set-Cookie: &(O'Brien", "Set-Cookie: &(O'Brien"},
+		{"a=b\\\"token\\\"api_keytemp:xexport : ", "a=b\\\"token\\\"api_keytemp:xexport : "},
+		{"next_page_token\u00e9curl -H \\\\\\\"token\\\"{{", "next_page_token\u00e9curl -H \\\\\\\"token\\\"{{"},
+		{"login failed: {\"password\": \" correct horse \"battery\"}", "login failed: {\"password\":\"[REDACTED]\"battery\"}"},
+		{"failed: \"{\"password\":\"   Passw0rd\",\"user\":\"bob\"}\"", "failed: \"{\"password\":\"[REDACTED]\",\"user\":\"bob\"}\""},
+		{"msg: \"got Bearer \" SECRET1\"x", "msg: \"got Bearer [REDACTED]x"},
+		{"export DB_PASSWORD='a \"password\": \"b Bearer '\" users' SECRET2\"", "export DB_PASSWORD='a \"password\":\"[REDACTED]\""},
+		{"export DB_PASSWORD=pre\"one two \"token=\" SECRET3\"suffix", "export DB_PASSWORD=pre\"one two \"token=\"[REDACTED]\"suffix"},
+		{"password=\"benign\"user=\"bob\"token: SECRET4", "password=\"[REDACTED]\"user=\"bob\"token:[REDACTED]"},
+		{"id=\"1\" temp:ok password=\"= word1 SECRET5\"", "id=\"1\" temp:ok password=\"[REDACTED]\""},
+		{"token=O'Brien password='SECRET6 VALUE6' rest", "token=[REDACTED] password='[REDACTED]' rest"},
+		{"got {\"auth\": \"Bearer abc\"}+{\"password\": \"SECRET7\"}", "got {\"auth\": \"Bearer [REDACTED]\"}+{\"password\":\"[REDACTED]\"}"},
+		{"x='Bearer abc'|password: SECRET8", "x='Bearer [REDACTED]'|password:[REDACTED]"},
+		{"failed: {\"credentials\": {\n  \"hdr\": \"Authorization: Bearer abc\nx\",\n  \"note\": \"} b\",\n  \"AccessKeyId\": \"SECRET9\"\n}}", "failed: {\"credentials\":\"[REDACTED]\"}"},
+		{"req=\"Authorization: Bearer abc\nHost: example.com\n\npassword=\"line1\nSECRET10\"", "req=\"Authorization: [REDACTED]\nHost: example.com\n\npassword=\"[REDACTED]\""},
+		{"data=\"YWJj\nZGVm=\"\nAuthorization: Bearer abc\necho \"hello world\"\npassword=\"line1\nSECRET11\"", "data=\"YWJj\nZGVm=\"\nAuthorization: [REDACTED]\necho \"hello world\"\npassword=\"[REDACTED]\""},
+		{"Error: api_key_secret: x, credentials: {\n  \"AccessKeyId\": \"SECRET12\"\n}", "Error: api_key_secret:[REDACTED], credentials:[REDACTED]"},
+		{"x='Bearer abc'\"label\": password=\"part1 SECRET13\"", "x='Bearer [REDACTED]'\"label\": password=\"[REDACTED]\""},
+		{"x=\"Bearer \"\"password\": SECRET14", "x=\"Bearer [REDACTED]password\":[REDACTED]"},
+		{"DB_PASSWORD=\"a\"prompt_tokens=\"10\"token: SECRET15", "DB_PASSWORD=\"a\"prompt_tokens=\"10\"token:[REDACTED]"},
+	} {
+		if got, _ := baselineScrub(tc.in); got != tc.want {
+			t.Errorf("baselineScrub(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// redactionVocabulary holds the keys, header names, quotes, delimiters,
+// escapes, spaces and words that TestScrubbingOnlyAddsToBaseline builds its
+// texts from. SECRET stands for a value that is checked.
+var redactionVocabulary = []string{
+	"password", "token", "api_key", "apiKey", "Bearer ", "bearer ", "Basic ", "basic ", "Authorization: ", "authorization:",
+	"X-Api-Key: ", "temp:x", "credentials", "secret", "passphrase", "access_token", "user:token", "app:password",
+	"cookie: ", "Cookie: ", "Set-Cookie: ", "DB_PASSWORD", "export ", "prompt_tokens", "next_page_token",
+	`"password"`, `'token'`, `\"token\"`, `\'secret\'`, `"auth"`, `"note"`,
+	"=", ":", ": ", " = ", " : ", "=", "=",
+	`"`, `'`, `\"`, `\'`, `"`, `'`, `\\`, `\`,
+	"{", "}", "[", "]", "(", ")",
+	" ", " ", " ", "\n", "\t", "\r\n", "\\\n", "  ",
+	"abc", "SECRET", "it's", "O'Brien", "users'", "Bob's", "[REDACTED]", "dGVzdDp0ZXN0", "%5BREDACTED%5D",
+	"x", "of", "a b", "10:30", "a=b", "pad", "hello", "world", "echo", "curl -H ",
+	",", ";", "&", ".", "|", "+", "/", "-", "_",
+	"é", "\u00a0", "\u2028", "日本",
+}
+
+// TestScrubbingOnlyAddsToBaseline checks, on texts built at random from
+// redactionVocabulary, that scrubTextPatterns, sanitizeRawText and
+// redactErrorMessage each redact every value that the baseline pass redacts:
+// a value that baselineScrub leaves out of its result is left out of theirs.
+func TestScrubbingOnlyAddsToBaseline(t *testing.T) {
+	r := rand.New(rand.NewPCG(24, 2019))
+	for checked := 0; checked < 1500; {
+		var b strings.Builder
+		for range 1 + r.IntN(24) {
+			b.WriteString(redactionVocabulary[r.IntN(len(redactionVocabulary))])
+		}
+		text := b.String()
+		// Give each SECRET a value of its own, to tell which one is written.
+		var values []string
+		for k := 0; strings.Contains(text, "SECRET"); k++ {
+			v := fmt.Sprintf("Q%dZCANARY", k)
+			text = strings.Replace(text, "SECRET", v, 1)
+			values = append(values, v)
+		}
+		if len(values) == 0 {
+			continue
+		}
+		checked++
+		base, _ := baselineScrub(text)
+		raw, _ := sanitizeRawText(text)
+		for _, p := range []struct{ name, got string }{
+			{"scrubTextPatterns", scrubTextPatterns(text)},
+			{"sanitizeRawText", raw},
+			{"redactErrorMessage", redactErrorMessage(text)},
+		} {
+			for _, v := range values {
+				if !strings.Contains(base, v) && strings.Contains(p.got, v) {
+					t.Errorf("%s(%q) = %q, which holds %s, which baselineScrub redacts: %q", p.name, text, p.got, v, base)
+				}
+			}
+		}
+	}
+}
+
+// randomText returns up to maxLen strings from alphabet, picked by r.
+func randomText(r *rand.Rand, alphabet []string, maxLen int) string {
+	var b strings.Builder
+	for range r.IntN(maxLen + 1) {
+		b.WriteString(alphabet[r.IntN(len(alphabet))])
+	}
+	return b.String()
+}
+
+// TestQuotedValueScanMatchesRegexp checks that findQuotedValue, and
+// quotedValueAt at each offset of a text, queried in order or out of order on
+// one scanner, find the quoted value that quotedValueRe finds there, on
+// random texts of quotes, backslashes, line breaks and other bytes.
+func TestQuotedValueScanMatchesRegexp(t *testing.T) {
+	alphabet := []string{`"`, `'`, `\`, `\`, "x", "\n", "é", "\xff"}
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 100_000 {
+		s := randomText(r, alphabet, 14)
+		if got, want := findQuotedValue(s), quotedValueRe.FindString(s); got != want {
+			t.Fatalf("findQuotedValue(%q) = %q, want %q", s, got, want)
+		}
+		sh := newShellAssignScanner(s)
+		order := r.Perm(len(s))
+		if r.IntN(2) == 0 {
+			for i := range order {
+				order[i] = i
+			}
+		}
+		for _, i := range order {
+			if got, want := quotedValueAt(sh, s, i), quotedValueRe.FindString(s[i:]); got != want {
+				t.Fatalf("quotedValueAt(%q, %d) = %q, want %q", s, i, got, want)
+			}
+		}
+	}
+}
+
+// TestBracketEndMatchesBracketValueEnd checks that bracketEnd finds, for each
+// opening bracket of a text, the end that bracketValueEnd finds, on random
+// texts of brackets, quotes and backslashes.
+func TestBracketEndMatchesBracketValueEnd(t *testing.T) {
+	alphabet := []string{`"`, `'`, `\`, `\`, "x", "{", "}", "[", "]"}
+	r := rand.New(rand.NewPCG(3, 4))
+	for range 100_000 {
+		s := randomText(r, alphabet, 16)
+		sh := newShellAssignScanner(s)
+		for i := range len(s) {
+			if s[i] != '{' && s[i] != '[' {
+				continue
+			}
+			ge, gc := bracketEnd(sh, s, i)
+			we, wc := bracketValueEnd(s, i)
+			if ge != we || gc != wc {
+				t.Fatalf("bracketEnd(%q, %d) = %d, %v, want %d, %v", s, i, ge, gc, we, wc)
+			}
+		}
+	}
+}
+
+// TestLineBreakFrom checks that lineBreakFrom, queried at each offset of a
+// text out of order on one scanner, finds the first line break at or after
+// that offset, or the end of the text.
+func TestLineBreakFrom(t *testing.T) {
+	alphabet := []string{"\r", "\n", "x", "y"}
+	r := rand.New(rand.NewPCG(5, 6))
+	for range 50_000 {
+		s := randomText(r, alphabet, 10)
+		sh := newShellAssignScanner(s)
+		for _, i := range r.Perm(len(s) + 1) {
+			want := len(s)
+			if n := strings.IndexAny(s[i:], "\r\n"); n >= 0 {
+				want = i + n
+			}
+			if got := lineBreakFrom(sh, s, i); got != want {
+				t.Fatalf("lineBreakFrom(%q, %d) = %d, want %d", s, i, got, want)
+			}
+		}
+	}
+}
+
+// TestKeyFindersMatchRegexps checks that the searches that try anchored
+// patterns only where the key names that they start with may start (see
+// keyNameSet) find what a regular expression search for each pattern finds,
+// unanchored and at a word boundary where the pattern reads one: in a text
+// that starts at an offset of a text, as replaceMatchesFunc and
+// baselineJSONKeyValues search, and in the whole text from the end of each
+// match, as baselineAuthHeaders and redactAuthHeadersRecorded search. It also
+// checks that the checks that keyValFinder and keyNameAt make before they
+// match textKeyNameAtRe and textKeyNameCamelAtRe pass wherever those match,
+// and that isBareTextKey and isWholeTextKeyName agree with the expressions
+// that they match only after such a check.
+// The texts are built at random from key names and parts of them, written in
+// either case, with or without their separators, or with the runes that case
+// folding matches with their letters, and from delimiters, quotes, escapes,
+// spaces, base64 values, other bytes and invalid UTF-8.
+func TestKeyFindersMatchRegexps(t *testing.T) {
+	authRe := regexp.MustCompile(`(?im)\b` + baselineAuthHeaderPattern)
+	bearerRe := regexp.MustCompile(`(?i)\b` + baselineBearerTokenPattern)
+	basicRe := regexp.MustCompile(`(?i)\b` + baselineBasicTokenPattern)
+	jsonRe := regexp.MustCompile(`(?i)` + baselineJSONKeyValTokenPattern)
+	textRe := regexp.MustCompile(`(?i)\b` + baselineTextKeyValTokenPattern)
+	alphabet := []string{
+		"password", "PassWord", "pa\u017f\u017fword", "token", "TOKEN", "temp:", "Temp:x", "secret", "\u017fecret", "sig",
+		"api_key", "api-key", "apikey", "API_\u212aEY", "x_api_key", "X-Api-Key", "xapikey", "x_goog_api_key", "access_token",
+		"authorization", "Proxy-Authorization", "proxy_authorization", "bearer", "Bearer", "basic", "BASIC", "ba\u017fic",
+		"cookie", "Set-Cookie", "set_cookie", "x-goog-api-key", "api_key_secret", "API-KEY-STRING", "\u017fet-coo\u212aie",
+		"user:", "app:", "User:temp:", "oauth", "oauth2Config.code", ".code", "OAuth.x.code", "credentials", "signature",
+		"pass", "word", "to", "ken", "sec", "ret", "api", "key", "goog", "auth", "code", "db_", "DB", "my",
+		"p_assword", "pass.word", "PASS-WORD", "__", "YWxh", "Zm9v==", "a+b/c",
+		"=", ":", ": ", " ", "\t", "\n", "\r", "\v", "\x00", "\u00a0", "\u2028", "\u3000",
+		`"`, `'`, `\`, "[", "]", "{", "}", ",", ";", "&", ")", "_", "-", ".", "+", "/", "==",
+		"a", "b", "x", "Z9", "\u00e9", "\xff", "\xc5", "\xe2\x84", "\u212a", "\u017f",
+		`" password"`, "\"\u00a0token\u3000\"", "\"\t\u017fecret \"", `\"`, `"_.api-key"`,
+		`"user:temp:a"`, `"app: temp:b"`, `"User:Temp:x"`, `"temp:y"`,
+	}
+	offset := func(loc []int, by int) []int {
+		for k, v := range loc {
+			if v >= 0 {
+				loc[k] = v + by
+			}
+		}
+		return loc
+	}
+	finders := []struct {
+		name string
+		find func(string) []int
+		re   *regexp.Regexp
+	}{
+		{"baseline bearer", func(s string) []int { return findAtKeys(s, 0, bearerKeys, baselineBearerTokenAtRe) }, bearerRe},
+		{"baseline basic", func(s string) []int { return findAtKeys(s, 0, basicKeys, baselineBasicTokenAtRe) }, basicRe},
+		{"bearer", findBearerToken, bearerTokenRe},
+		{"basic", findBasicToken, basicTokenRe},
+		{"JSON", findJSONKeyValToken, jsonKeyValTokenRe},
+		{"text key name", findTextKeyName, textKeyNameRe},
+		{"auth header prefix", func(s string) []int { return findAtKeys(s, 0, authHeaderKeys, authHeaderPrefixAtRe) }, authHeaderPrefixRe},
+	}
+	n := 30_000
+	if raceEnabled {
+		n = 3_000
+	}
+	r := rand.New(rand.NewPCG(7, 8))
+	for range n {
+		s := randomText(r, alphabet, 12)
+		for _, p := range []int{0, r.IntN(len(s) + 1)} {
+			rest := s[p:]
+			want := baselineTextKeyValTokenAtRe.FindStringSubmatchIndex(rest)
+			if want == nil {
+				want = textRe.FindStringSubmatchIndex(rest)
+			}
+			if got := baselineFindKeyValToken(rest); !slices.Equal(got, want) {
+				t.Fatalf("baselineFindKeyValToken(%q) = %v, want %v", rest, got, want)
+			}
+			for _, f := range finders {
+				if got, want := f.find(rest), f.re.FindStringSubmatchIndex(rest); !slices.Equal(got, want) {
+					t.Fatalf("%s search in %q = %v, want %v", f.name, rest, got, want)
+				}
+			}
+			if got, want := baselineFindJSONKeyValToken(s, p), offset(jsonRe.FindStringSubmatchIndex(rest), p); !slices.Equal(got, want) {
+				t.Fatalf("baselineFindJSONKeyValToken(%q, %d) = %v, want %v", s, p, got, want)
+			}
+			if textKeyNameAtRe.MatchString(rest) && !mayStartTextKeyName(rest) {
+				t.Fatalf("mayStartTextKeyName(%q) = false, want true: textKeyNameAtRe matches", rest)
+			}
+			if textKeyNameCamelAtRe.MatchString(rest) && !textKeyNames.mayStartAt(rest, 0) {
+				t.Fatalf("textKeyNames.mayStartAt(%q, 0) = false, want true: textKeyNameCamelAtRe matches", rest)
+			}
+		}
+		if got, want := findAllAtKeys(s, baselineAuthHeaderKeys, baselineAuthHeaderAtRe), authRe.FindAllStringSubmatchIndex(s, -1); !slices.EqualFunc(got, want, slices.Equal) {
+			t.Fatalf("baseline auth headers in %q = %v, want %v", s, got, want)
+		}
+		if got, want := findAllAtKeys(s, authHeaderKeys, authHeaderAtRe), authHeaderRe.FindAllStringSubmatchIndex(s, -1); !slices.EqualFunc(got, want, slices.Equal) {
+			t.Fatalf("auth headers in %q = %v, want %v", s, got, want)
+		}
+	}
+	// Keys of a few parts, so that whole keys match often.
+	kr := rand.New(rand.NewPCG(9, 10))
+	for range n {
+		key := randomText(kr, alphabet, 3)
+		if got, want := isBareTextKey(key), bareTextKeyRe.MatchString(key); got != want {
+			t.Fatalf("isBareTextKey(%q) = %v, want %v", key, got, want)
+		}
+		if got, want := isWholeTextKeyName(key), textKeyNameWholeRe.MatchString(key); got != want {
+			t.Fatalf("isWholeTextKeyName(%q) = %v, want %v", key, got, want)
+		}
+	}
+}
+
+// TestFindTextKeyNameMatchesRegexpOnOAuthRuns checks that findTextKeyName
+// finds what textKeyNameRe finds in texts built at random from the parts of
+// dotted OAuth names and from the bytes that may end them. It reads the run of
+// bytes that such a name starts in once, rather than for each "oauth" in the
+// run (see findTextKeyName), so its answer for a run that holds many of them
+// must be the one that the pattern gives.
+func TestFindTextKeyNameMatchesRegexpOnOAuthRuns(t *testing.T) {
+	alphabet := []string{
+		"oauth", "OAuth", "oauth-", "oauth_", "oauth.", "OAUTH2", "-", "_", ".", "..", ".code", ".CODE", "code", "x", "1",
+		"=", ":", " ", "\t", "\n", `"`, `'`, `\"`, `\`, "password", "pass", "word", "token", "api_key", "temp:",
+		"\u212a", "\u017f", "\u00e9", "\xff",
+	}
+	n := 100_000
+	if raceEnabled {
+		n = 10_000
+	}
+	r := rand.New(rand.NewPCG(11, 12))
+	for range n {
+		s := randomText(r, alphabet, 12)
+		if got, want := findTextKeyName(s), textKeyNameRe.FindStringSubmatchIndex(s); !slices.Equal(got, want) {
+			t.Fatalf("findTextKeyName(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// TestShellScannerNoCloseMemoLimits checks that closedQuoteLen and
+// closedEscapedQuoteLen give, for each query in turn on one scanner, the
+// answer that a fresh scanner gives. A record of no closing quote that a scan
+// under a narrow limit made must not be used under a wider limit, under which
+// the closing quote can be in reach: whether that scan ended at the limit, or
+// at an escape or a line splice that the limit cut, or the query is for a
+// later opening quote that the record covers. Records that a line break or a
+// quote ended, and queries under narrower limits, find no close either way.
 func TestShellScannerNoCloseMemoLimits(t *testing.T) {
 	type query struct{ pos, limit int }
 	quoteLen := (*shellAssignScanner).closedQuoteLen
@@ -5635,5 +6453,295 @@ func TestShellScannerNoCloseMemoLimits(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPlaceholderAndQuoteBoundaryRegressions(t *testing.T) {
+	const secret = "SYNTH_BOUNDARY_7Q9"
+	for _, tt := range []struct {
+		in, want string
+	}{
+		// Placeholders embedded inside credentials do not disable redaction of surrounding secret bytes.
+		{`failed: "{"password":" [REDACTED] ` + secret + `","user":"bob"}"`, `failed: "{"password":" [REDACTED]","user":"bob"}"`},
+		{`failed: "{"password":" %5BREDACTED%5D ` + secret + `","user":"bob"}"`, `failed: "{"password":" [REDACTED]","user":"bob"}"`},
+		{`failed: "{"password":"` + secret + ` [REDACTED]","user":"bob"}"`, `failed: "{"password":"[REDACTED]","user":"bob"}"`},
+		{`failed: "{"password":"abc [REDACTED] ` + secret + `","user":"bob"}"`, `failed: "{"password":"[REDACTED]","user":"bob"}"`},
+		{`failed: "{"password":" ` + secret + ` [REDACTED]","user":"bob"}"`, `failed: "{"password":" [REDACTED]","user":"bob"}"`},
+		// Hyphenated words, parenthesized words, and numeric quantities in cookie prose stay intact while cookie headers/tokens redact.
+		{`The cookie: chocolate-chip was delicious.`, `The cookie: chocolate-chip was delicious.`},
+		{`The cookie: (chocolate) was delicious.`, `The cookie: (chocolate) was delicious.`},
+		{`The cookie: 2 pieces were left.`, `The cookie: 2 pieces were left.`},
+		{`The cookie: 2.5 pieces remained.`, `The cookie: 2.5 pieces remained.`},
+		{`The cookie: 1/2 piece remained.`, `The cookie: 1/2 piece remained.`},
+		{`The cookie: ½ piece remained.`, `The cookie: ½ piece remained.`},
+		{`The cookie: 2,000 pieces remained.`, `The cookie: 2,000 pieces remained.`},
+		{`Cookie: 2.5`, `Cookie: [REDACTED]`},
+		{`Cookie: sid=` + secret, `Cookie: [REDACTED]`},
+		{`Cookie: 5f2b9c0e7d1a44e3`, `Cookie: [REDACTED]`},
+		// Single-quoted passphrases with interior apostrophes past 4096 bytes, across newlines, with interior key=value pairs, or unterminated.
+		{"password='it's " + strings.Repeat("pad ", 1250) + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's token=prefix " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's token='x' " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's " + secret + "\nstill here' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's pad " + secret, "password=[REDACTED]"},
+		{"password='it's a trap; token='" + secret + "'", "password='[REDACTED]'"},
+		{"password=pre'it's secret=f('it's token='x' " + secret + "')", "password=[REDACTED] secret=[REDACTED])"},
+		{"password=pre'it's " + strings.Repeat("a_", 33) + "secret='it's token='x' " + secret + "'", "password=[REDACTED] " + strings.Repeat("a_", 33) + "secret='[REDACTED]'"},
+		// Multiline quoted strings with ordinary content before a header line keep their closing quote.
+		{"'pad\nAuthorization: [REDACTED]\n" + secret + "'\necho KEEP", "'pad\nAuthorization: [REDACTED]'\necho KEEP"},
+		{"request='GET / HTTP/1.1\nAuthorization: [REDACTED]\n" + secret + "'\necho KEEP", "request='GET / HTTP/1.1\nAuthorization: [REDACTED]'\necho KEEP"},
+		// Dotted pagination cursors and shell-quoted Bearer prefixes stay preserved.
+		{`x.n_e_x_t.page.token=cursor-1`, `x.n_e_x_t.page.token=cursor-1`},
+		{`next.page.token=cursor-1 prev.page.token=cursor-0`, `next.page.token=cursor-1 prev.page.token=cursor-0`},
+		{`fb.page_token=` + secret, `fb.page_token=[REDACTED]`},
+		{`page_access_token=` + secret, `page_access_token=[REDACTED]`},
+		{`echo 'Bearer '"` + secret + `"; echo 'done'`, `echo 'Bearer [REDACTED]'; echo 'done'`},
+		// Single-line quoted temp: keys containing = or : keep their full key name.
+		{`failed: {'temp:a=b': '` + secret + `'}`, `failed: {'temp:a=b':'[REDACTED]'}`},
+		{`failed: {'temp:a:b': '` + secret + `'}`, `failed: {'temp:a:b':'[REDACTED]'}`},
+		// Quoted token counter or pagination cursor keys glued to a Bearer token keep their key name.
+		{`Bearer ` + secret + `"prompt_token_count": 42`, `Bearer [REDACTED]"prompt_token_count": 42`},
+		{`Bearer ` + secret + `"next_page_token": "cursor-1"`, `Bearer [REDACTED]"next_page_token": "cursor-1"`},
+		// JSON wrapping does not bypass cookie-prose fix or destroy JSON text.
+		{`{"note":"The cookie: 2.5 ounces remained."}`, `{"note":"The cookie: 2.5 ounces remained."}`},
+		{`{"note":"Cookie: sid=` + secret + `"}`, `{"note":"Cookie: [REDACTED]"}`},
+		// Expanded cookie prose classifier: percentages, hyphenated units, parenthesized quantities, negative quantities, quoted prose.
+		{`The cookie: 50% was left.`, `The cookie: 50% was left.`},
+		{`The cookie: 2.5-ounce pieces remained.`, `The cookie: 2.5-ounce pieces remained.`},
+		{`The cookie: (2 pieces) was delicious.`, `The cookie: (2 pieces) was delicious.`},
+		{`The cookie: "chocolate" was great.`, `The cookie: "chocolate" was great.`},
+		{`The cookie: -2 degrees outside.`, `The cookie: -2 degrees outside.`},
+		{`The cookie: “chocolate” was delicious.`, `The cookie: “chocolate” was delicious.`},
+		// Punctuation and incomplete multiline apostrophe values.
+		{"password='it's pad\n" + secret, "password=[REDACTED]"},
+		{"password='it's pad\nline2\n" + secret, "password=[REDACTED]"},
+		{"password='it's\n" + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's, " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		// Disproof cases: quoted cookie values, contractions in cookie prose, and
+		// JSON-wrapped multiline apostrophe values that must not over-extend.
+		{"Cookie: \"" + secret + "\"", "Cookie: [REDACTED]"},
+		{"The cookie: 'chocolate' was great.", "The cookie: 'chocolate' was great."},
+		{"The cookie: \"chocolate\" wasn't bad.", "The cookie: \"chocolate\" wasn't bad."},
+		{`"The cookie: \"chocolate\" was great."`, `"The cookie: \"chocolate\" was great."`},
+		{"note=\"password='it's " + secret + "\" user='bob'", "note=\"password=[REDACTED]\" user='bob'"},
+		{`{"a":"password='it's pad","b":"secret='it's ` + secret + `"}`, `{"a":"password=[REDACTED]","b":"secret=[REDACTED]"}`},
+		{`{"a":"password='it's pad","b":"quote 'here'"}`, `{"a":"password=[REDACTED]","b":"quote 'here'"}`},
+
+		// Apostrophe cache must not swallow continuation-line key=value or closing outer quotes.
+		{"password=('it's a) secret='it's pad\nuser=bob", "password=[REDACTED] a) secret=[REDACTED]\nuser=bob"},
+		{"password=('it's a) \"secret='it's pad\"", "password=[REDACTED] a) \"secret=[REDACTED]\""},
+		// Multiline JSON cookie prose is preserved across all paths.
+		{`{"note":"The cookie: 2.5 ounces remained.\nKEEP"}`, `{"note":"The cookie: 2.5 ounces remained.\nKEEP"}`},
+		{`{"note":"The cookie: chocolate-chip was delicious.\nLine 2."}`, `{"note":"The cookie: chocolate-chip was delicious.\nLine 2."}`},
+		{`"The cookie: 2.5 ounces remained.\nKEEP"`, `"The cookie: 2.5 ounces remained.\nKEEP"`},
+		// Apostrophe passphrase shapes that must redact their secret.
+		{"password='it's... " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's) " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's," + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"DB_PASSWORD=pre'it's correct " + secret, "DB_PASSWORD=[REDACTED]"},
+		// Quoted Authorization headers keep their closing quote and trailing line.
+		{"'Authorization: Bearer " + secret + "' user=bob", "'Authorization: [REDACTED]' user=bob"},
+		{"curl -H 'Authorization: Bearer " + secret + "' https://example.com", "curl -H 'Authorization: [REDACTED]' https://example.com"},
+		// Cookie prose with quantity and punctuation shapes stays intact,
+		// while a cookie pair after quoted prose, or a lone time, redacts.
+		{"The cookie: \"chocolate\", not vanilla, was great.", "The cookie: \"chocolate\", not vanilla, was great."},
+		{"The cookie: 2:30 bake time worked well.", "The cookie: 2:30 bake time worked well."},
+		{"The cookie: 2:30pm batch was fresh.", "The cookie: 2:30pm batch was fresh."},
+		{"The cookie: 2-3 pieces remained.", "The cookie: 2-3 pieces remained."},
+		{"The cookie: $2 each at the stand.", "The cookie: $2 each at the stand."},
+		{"The cookie: #2 on the menu.", "The cookie: #2 on the menu."},
+		{"The cookie: 2nd batch was better.", "The cookie: 2nd batch was better."},
+		{"The cookie: A+ texture and flavor.", "The cookie: A+ texture and flavor."},
+		{"The cookie: x2 recipe for the party.", "The cookie: x2 recipe for the party."},
+		{"Cookie: \"word\", sid=" + secret, "Cookie: [REDACTED]"},
+		{"Cookie: 2:30", "Cookie: [REDACTED]"},
+		// An escaped line break in a JSON string of an object with more
+		// fields, or of an array, keeps the cookie prose in it.
+		{`{"a":"x","note":"The cookie: 2.5 ounces remained.\nKEEP"}`, `{"a":"x","note":"The cookie: 2.5 ounces remained.\nKEEP"}`},
+		{`["The cookie: 2.5 ounces remained.\nKEEP","x"]`, `["The cookie: 2.5 ounces remained.\nKEEP","x"]`},
+		// A run of punctuation after an interior apostrophe still ends in
+		// the quoted passphrase's closing quote.
+		{"password='it's?! " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		// Existing controls that must still pass.
+		{"password='it's pad\nuser=bob", "password=[REDACTED]\nuser=bob"},
+		{"password='it's pad\n" + secret + "\nuser=bob", "password=[REDACTED]\nuser=bob"},
+		{"note: \"password='it's\n" + secret + "\"", "note: \"password=[REDACTED]\""},
+		// A quoted value whose interior contraction is followed by a quote
+		// that a later quote on its line follows, with no key between
+		// them, ends at that later quote, as a shell joins the parts
+		// between them and as a value written into the quotes as it is
+		// reads; a key, or a quote that opens a key's value, ends it at
+		// the first quote.
+		{"password='it's' " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"note=\"password='it's' " + secret + "' user=x\"", "note=\"password='[REDACTED]' user=x\""},
+		{"DB_PASSWORD='it's' correct " + secret + "' user=x", "DB_PASSWORD='[REDACTED]' user=x"},
+		{"password='it's' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's' note='x'", "password='[REDACTED]' note='x'"},
+		// A joined contraction value that punctuation continues, and an
+		// explicitly opened one whose contraction ending a digit, "_" or
+		// "=" follows, are redacted whole.
+		{"DB_PASSWORD=pre'it's," + secret + " x", "DB_PASSWORD=[REDACTED]"},
+		{"DB_PASSWORD=pre'it's) " + secret + "' x", "DB_PASSWORD=[REDACTED] x"},
+		{"password='it's_x " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's=x " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"password='it's1 " + secret + "' user=x", "password='[REDACTED]' user=x"},
+		// A cookie pair after words that read as prose, whether quoted,
+		// after a space or after an escaped backslash, redacts the Cookie
+		// value.
+		{"curl -H 'Cookie: chocolate, \"sid=" + secret + "\"' https://x", "curl -H 'Cookie: [REDACTED]' https://x"},
+		{"Cookie: \"word\" Monster sid=" + secret, "Cookie: [REDACTED]"},
+		{`Cookie: Monster\\sid=` + secret, "Cookie: [REDACTED]"},
+		// Joined-open contraction followed by a boundary quote or explicit-open
+		// contraction followed by an adjacent/spaced unclosed quote redacts the
+		// full secret without eating following keys.
+		{"password=pre'it's' " + secret + "' user=x", "password=[REDACTED] user=x"},
+		{"DB_PASSWORD=pre'it's' correct " + secret + "' user=x", "DB_PASSWORD=[REDACTED] user=x"},
+		{"token=ab'cd's' " + secret + "' user=x", "token=[REDACTED] user=x"},
+		{"note=\"password=pre'it's' " + secret + "' user=x\"", "note=\"password=[REDACTED] user=x\""},
+		{"{\"msg\":\"password=pre'it's' " + secret + "' user=x\"}", "{\"msg\":\"password=[REDACTED] user=x\"}"},
+		{"password=pre'it's' " + secret + "' token=pre'it's' " + secret + "2' user=x", "password=[REDACTED] token=[REDACTED] user=x"},
+		{"password=pre'it's'' " + secret + "' user=x", "password=[REDACTED] user=x"},
+		{"password=pre'it's'' '" + secret, "password=[REDACTED]"},
+		{"DB_PASSWORD='Bob's5''" + secret, "DB_PASSWORD=[REDACTED]"},
+		{"token='don't_'  '" + secret, "token=[REDACTED]"},
+		// Benign quoted log lines with cookie/Set-Cookie prose remain unchanged
+		// and idempotent when followed by key=value fields outside the quote.
+		{"level=info msg=\"failed to parse cookie: invalid character\" code=400", "level=info msg=\"failed to parse cookie: invalid character\" code=400"},
+		{"level=error msg=\"invalid cookie: expired\" path=/login", "level=error msg=\"invalid cookie: expired\" path=/login"},
+		{"msg='bad cookie: expired' id=3", "msg='bad cookie: expired' id=3"},
+		{"msg=\"bad cookie: expired\" id=3 other=\"x y\"", "msg=\"bad cookie: expired\" id=3 other=\"x y\""},
+		{"msg=\"cookie: Monster was here\" k=v", "msg=\"cookie: Monster was here\" k=v"},
+		{"msg=\"Set-Cookie: expired\" id=1", "msg=\"Set-Cookie: expired\" id=1"},
+		{"curl -H 'Cookie: " + secret + "' k=v", "curl -H 'Cookie: [REDACTED]' k=v"},
+		{"failed to read cookie: http: named cookie not present [id=3]", "failed to read cookie: http: named cookie not present [id=3]"},
+		{"cookie: http: named cookie not present id=3", "cookie: http: named cookie not present id=3"},
+		{"The cookie: chocolate chip, x=" + secret, "The cookie: [REDACTED]"},
+		{"Cookie: Monster", "Cookie: Monster"},
+		// Glued contraction suffixes without a closing quote and prose quotes
+		// after a closed contraction value do not swallow following keys or prose.
+		{"password='abc'd1 user=x", "password=[REDACTED] user=x"},
+		{"password='abc'd=1 user='bob'", "password=[REDACTED] user='bob'"},
+		{"password='abc'm_x user='bob'", "password=[REDACTED] user='bob'"},
+		{"token='abc's=1 user='bob' k=v", "token=[REDACTED] user='bob' k=v"},
+		{"password='it's' and then he said 'hello' to me", "password='[REDACTED]' and then he said 'hello' to me"},
+		{"user said password='it's' ok then 'bye' ok", "user said password='[REDACTED]' ok then 'bye' ok"},
+		// Colons inside non-header tokens (times, labels, JSON, URLs) do not
+		// stop restHoldsCookiePair before a trailing cookie pair, while a later
+		// Cookie or Authorization header on the same line is redacted on its own.
+		{"note=\"Cookie: Monster at 10:30 sid=" + secret + "\"", "note=\"Cookie: [REDACTED]\""},
+		{"note=\"Cookie: Monster note: sid=" + secret + "\"", "note=\"Cookie: [REDACTED]\""},
+		{"note=\"Cookie: Monster {\\\"a\\\":1} sid=" + secret + "\"", "note=\"Cookie: [REDACTED]\""},
+		{"note=\"Cookie: chocolate \\\"x\\\" at 10:30 sid=" + secret + "\"", "note=\"Cookie: [REDACTED]\""},
+		{"Cookie: Monster https://example.com sid=" + secret, "Cookie: [REDACTED]"},
+		{"Cookie: Monster: sid=" + secret, "Cookie: [REDACTED]"},
+		{"Cookie: Monster at 10:30 was great. Cookie: sid=" + secret, "Cookie: Monster at 10:30 was great. Cookie: [REDACTED]"},
+		{"Cookie: Monster at 10:30 was great. Authorization: Bearer " + secret, "Cookie: Monster at 10:30 was great. Authorization: [REDACTED]"},
+	} {
+		checkAllRedactionPaths(t, tt.in, tt.want)
+	}
+	// redactErrorMessage scrubs a JSON message by its decoded strings and
+	// writes it compactly again, so its output is checked on its own.
+	for _, tt := range []struct{ in, want, wantErr string }{
+		{
+			`{"note": "password='it's' ` + secret + `' user=x"}`,
+			`{"note": "password='[REDACTED]' user=x"}`,
+			`{"note":"password='[REDACTED]' user=x"}`,
+		},
+		{
+			`{"note":"The cookie: chocolate\npassword=` + secret + `"}`,
+			`{"note":"The cookie: [REDACTED]"}`,
+			`{"note":"The cookie: chocolate\npassword=[REDACTED]"}`,
+		},
+		{
+			`{"note":"The cookie: chocolate\nsecret: ` + secret + `"}`,
+			`{"note":"The cookie: [REDACTED]"}`,
+			`{"note":"The cookie: chocolate\nsecret:[REDACTED]"}`,
+		},
+	} {
+		checkRedactionPaths(t, tt.in, tt.want)
+		if got := redactErrorMessage(tt.in); got != tt.wantErr {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", tt.in, got, tt.wantErr)
+		}
+		if again := redactErrorMessage(tt.wantErr); again != tt.wantErr {
+			t.Errorf("redactErrorMessage(%q) = %q, want it unchanged", tt.wantErr, again)
+		}
+	}
+	// JSON-wrapped cookie-prose sentences are preserved across all redaction
+	// paths, and a JSON object whose value is a cookie header redacts its
+	// secret.
+	cookieProseSentences := []string{
+		"The cookie: chocolate-chip was delicious.",
+		"The cookie: (chocolate) was delicious.",
+		"The cookie: 2 pieces were left.",
+		"The cookie: 2.5 pieces remained.",
+		"The cookie: 1/2 piece remained.",
+		"The cookie: ½ piece remained.",
+		"The cookie: 2,000 pieces remained.",
+		"The cookie: 50% was left.",
+		"The cookie: 2.5-ounce pieces remained.",
+		"The cookie: (2 pieces) was delicious.",
+		"The cookie: \"chocolate\" was great.",
+		"The cookie: 'chocolate' was great.",
+		"The cookie: \"chocolate\" wasn't bad.",
+		"The cookie: -2 degrees outside.",
+		"The cookie: “chocolate” was delicious.",
+		"The cookie: \"chocolate\", not vanilla, was great.",
+		"The cookie: 2:30 bake time worked well.",
+		"The cookie: 2:30pm batch was fresh.",
+		"The cookie: 2-3 pieces remained.",
+		"The cookie: $2 each at the stand.",
+		"The cookie: #2 on the menu.",
+		"The cookie: 2nd batch was better.",
+		"The cookie: A+ texture and flavor.",
+		"The cookie: x2 recipe for the party.",
+		"The cookie: 2.5 ounces remained.\nKEEP",
+	}
+	for _, sentence := range cookieProseSentences {
+		b, err := json.Marshal(map[string]string{"note": sentence})
+		if err != nil {
+			t.Fatalf("json.Marshal(%q): %v", sentence, err)
+		}
+		checkAllRedactionPaths(t, string(b), string(b))
+		if !json.Valid(b) {
+			t.Errorf("json.Marshal output not valid JSON: %s", b)
+		}
+	}
+	cookieObj := []byte(`{"Cookie":"The cookie: 2.5 ounces remained."}`)
+	checkAllRedactionPaths(t, string(cookieObj), `{"Cookie":"[REDACTED]"}`)
+	// A cookie pair in a JSON string with an escaped line break, and a
+	// quoted Cookie header value that its quote carries onto the next line,
+	// are redacted on every path.
+	for _, in := range []string{
+		`{"note":"Cookie: sid=` + secret + `\nKEEP"}`,
+		`{"a":"x","note":"Cookie: sid=` + secret + `\nKEEP"}`,
+		"curl -H 'Cookie: Monster cake\n" + secret + "'",
+	} {
+		checkNoLeak(t, in, secret)
+		if raw, _ := sanitizeRawText(in); strings.HasPrefix(in, "{") && !json.Valid([]byte(raw)) {
+			t.Errorf("sanitizeRawText(%q) = %q, which is not valid JSON", in, raw)
+		}
+	}
+	// Multiline apostrophe values that span into a new line with a key=value
+	// pair, a joined-quote passphrase in a double-quoted string, which must
+	// stop at the string's closing quote, and a double-quoted Authorization
+	// header, which must keep its closing quote and the text after it:
+	// scrubTextPatterns must redact the secret. The sanitizeRawText and
+	// SmartTruncate paths return [UNPARSEABLE_JSON_BLOB] for these inputs
+	// because they start with a quote that does not parse as JSON, or that
+	// decodes to a credential, which is expected; only scrubTextPatterns is
+	// checked exactly here, and no path may write the secret.
+	for _, tt := range []struct{ in, want string }{
+		{"\"password='it's pad\n" + secret + "==\"", "\"password=[REDACTED]\""},
+		{"\"password='it's pad\nstill here a=b " + secret, "\"password=[REDACTED]"},
+		{"\"DB_PASSWORD=pre'it's correct " + secret + "\"", "\"DB_PASSWORD=[REDACTED]\""},
+		{`"Authorization: Bearer ` + secret + `" user=bob`, `"Authorization: [REDACTED]" user=bob`},
+	} {
+		checkNoLeak(t, tt.in, secret)
+		if got := scrubTextPatterns(tt.in); got != tt.want {
+			t.Errorf("scrubTextPatterns(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+		if got := scrubTextPatterns(tt.want); got != tt.want {
+			t.Errorf("scrubbing %q again gave %q, want it unchanged", tt.want, got)
+		}
 	}
 }

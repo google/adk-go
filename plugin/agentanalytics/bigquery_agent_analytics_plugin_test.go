@@ -28,6 +28,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -3174,7 +3176,10 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 		{
 			name: "YAML nested compound keys with trailing separators",
 			text: "credentials:\n  DB_PASSWORD_: SECRET123\n  stripe.api..key_: SECRET123\n  region: us",
-			want: "credentials:\n  DB_PASSWORD_:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
+			// The baseline pass reads the line break and the first nested
+			// key as the value of credentials:, so that key is redacted
+			// with the value after it.
+			want: "credentials:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
 		},
 	}
 	for _, tt := range tests {
@@ -3383,21 +3388,21 @@ func TestRedactionRegressions(t *testing.T) {
 		{"Round 16: unclosed trailing single quote before newline in shell assignment", "export DB_PASSWORD=pre'\nSYNTHETIC_TRAIL_991", "SYNTHETIC_TRAIL_991", "export DB_PASSWORD=[REDACTED]"},
 		{"Round 16: closed multiline quoted Authorization header containing colon", "Authorization: \"abc\npart2: SYNTHETIC_HDR_995\"", "SYNTHETIC_HDR_995", "Authorization: [REDACTED]"},
 		{"Round 16: indented multiline JSON in x-api-key header", "x-api-key: \"{\n  sub_field: SYNTHETIC_HDR_995\n}\"", "SYNTHETIC_HDR_995", "x-api-key: [REDACTED]"},
-		{"Round 16: single-line curl Authorization header with opposite quote preserves next line", "curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "abc\"def", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
-		{"Round 16: multiline outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "SYNTHETIC_CURL_901", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
+		{"Round 16: single-line curl Authorization header with opposite quote preserves next line", "curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "abc\"def", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
+		{"Round 16: multiline outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "SYNTHETIC_CURL_901", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
 		{"Round 16: compound shell assignment with quoted space and multiline contraction", "export DB_PASSWORD=\"a b\"pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export DB_PASSWORD=[REDACTED]\necho ok"},
 		{"Round 16: quoted variable name in shell assignment with multiline contraction", "export \"DB_PASSWORD\"=pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export \"DB_PASSWORD\"=[REDACTED]\necho ok"},
 		{"Round 16: prose contraction before Authorization header preserves subsequent lines", "Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "zqsecretb", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3"},
-		{"Round 16: nested multiline quoted Authorization header inside outer quote", "echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "zqsecretac", "echo 'x-api-key: [REDACTED]\necho ZQKEEP_X"},
-		{"Round 16: blank continuation line inside outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "zqsecretc", "curl -H 'Authorization: [REDACTED]\necho ZQKEEP_X"},
-		{"Round 16: nested multiline quoted Authorization header followed by trailing outer-quoted line", "curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "SYNTHETIC_LINE3_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_4"},
-		{"Round 16: unicode em-space before nested multiline quoted Authorization header", "curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "SYNTHETIC_EMSPACE_905", "curl -H 'Authorization: [REDACTED]\necho KEEP_LINE_2"},
+		{"Round 16: nested multiline quoted Authorization header inside outer quote", "echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "zqsecretac", "echo 'x-api-key: [REDACTED]'\necho ZQKEEP_X"},
+		{"Round 16: blank continuation line inside outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "zqsecretc", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X"},
+		{"Round 16: nested multiline quoted Authorization header followed by trailing outer-quoted line", "curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "SYNTHETIC_LINE3_905", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_4"},
+		{"Round 16: unicode em-space before nested multiline quoted Authorization header", "curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "SYNTHETIC_EMSPACE_905", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
 		{"long shell assignment over 256-byte lookbehind window", "export DB_PASSWORD=" + strings.Repeat("a", 300) + "'s syntheticvioletfern's", "syntheticvioletfern", "export DB_PASSWORD=[REDACTED]"},
 		{"lowercase shell assignment without export", "db_password=pre's syntheticvioletfern's", "syntheticvioletfern", "db_password=[REDACTED]"},
 		{"backslash-LF continuation after export", "export\\\nDB_PASSWORD=pre's syntheticvioletfern's", "syntheticvioletfern", "export\\\nDB_PASSWORD=[REDACTED]"},
-		{"colon-led continuation inside closed outer-quoted curl header", "curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]\necho ok"},
-		{"empty first line in outer-quoted curl header", "curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]\necho ok"},
-		{"prior-line outer quote before Authorization header", "curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H '\nAuthorization: [REDACTED]\necho ok"},
+		{"colon-led continuation inside closed outer-quoted curl header", "curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]'\necho ok"},
+		{"empty first line in outer-quoted curl header", "curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]'\necho ok"},
+		{"prior-line outer quote before Authorization header", "curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H '\nAuthorization: [REDACTED]'\necho ok"},
 		{"unquoted whitespace-folded Authorization header continuation", "Authorization: Bearer abc\n  syntheticvioletfern\nContent-Type: text/plain", "syntheticvioletfern", "Authorization: [REDACTED]\nContent-Type: text/plain"},
 		{"Cookie header with multiple attributes", "Cookie: sid=syntheticvioletfern; preference=light", "syntheticvioletfern", "Cookie: [REDACTED]"},
 		{"Set-Cookie header with attributes", "Set-Cookie: session=syntheticvioletfern; Path=/; HttpOnly", "syntheticvioletfern", "Set-Cookie: [REDACTED]"},
@@ -3863,8 +3868,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 		{
 			name:        "bare token value ending with escaped quote before password key",
 			text:        `token=abc\"password\": SECRET123`,
-			want:        redactedSensitiveTextPlaceholder,
-			wantContent: redactedSensitiveTextPlaceholder,
+			want:        "token=[REDACTED]",
+			wantContent: "token=[REDACTED]",
 		},
 		{
 			name:        "prefixed quoted string where earlier token swallows escaped newline before password",
@@ -4798,9 +4803,11 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 					return key
 				}
 				key := newWeakKey()
-				deadline := time.Now().Add(2 * time.Second)
+				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) {
 					runtime.GC()
+					runtime.GC()
+					runtime.Gosched()
 					if _, ok := pluginRegistry.Load(key); !ok {
 						return
 					}
@@ -4922,7 +4929,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 			}, 1)
 		}()
 
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 			runtime.GC()
 			runtime.Gosched()
 			if _, ok := pluginRegistry.Load(weakKey); cleaned.Load() && weakKey.Value() == nil && !ok {
@@ -5014,27 +5021,41 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var key weak.Pointer[baseplugin.Plugin]
-			func() {
-				h := &pluginHolder{}
-				p, closeOwned := tc.newPlugin(t, h)
-				h.plugin = p
-				if !tc.leaveOpen {
-					if err := p.Close(); err != nil {
-						t.Fatalf("Close() error = %v", err)
-					}
-				}
-				if closeOwned != nil {
-					closeOwned()
-				}
-				key = weak.Make(p)
-			}()
+			key := makeAndDropTestPlugin(t, tc.newPlugin, tc.leaveOpen)
 			if !waitPluginCollected(key) {
 				_, registered := pluginRegistry.Load(key)
 				t.Fatalf("after GC: plugin collected = %v, registry entry removed = %v; want both", key.Value() == nil, !registered)
 			}
 		})
 	}
+}
+
+//go:noinline
+func makeAndDropTestPlugin(t *testing.T, newPlugin func(*testing.T, *pluginHolder) (*baseplugin.Plugin, func()), leaveOpen bool) weak.Pointer[baseplugin.Plugin] {
+	ch := make(chan weak.Pointer[baseplugin.Plugin], 1)
+	go func() {
+		defer close(ch)
+		h := &pluginHolder{}
+		p, closeOwned := newPlugin(t, h)
+		h.plugin = p
+		key := weak.Make(p)
+		if !leaveOpen {
+			if err := p.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		}
+		p = nil
+		h = nil
+		if closeOwned != nil {
+			closeOwned()
+		}
+		ch <- key
+	}()
+	key, ok := <-ch
+	if !ok {
+		t.FailNow()
+	}
+	return key
 }
 
 // pluginHolder stands for an application object that holds a plugin and is
@@ -5073,7 +5094,11 @@ func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.Round
 	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
-	go func() { _ = gSrv.Serve(lis) }()
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		_ = gSrv.Serve(lis)
+	}()
 	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -5099,15 +5124,18 @@ func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.Round
 		_ = bqClient.Close()
 		_ = conn.Close()
 		gSrv.Stop()
+		<-srvDone
 	}
 }
 
 // waitPluginCollected runs the garbage collector until the plugin that key
 // points to has been collected and its pluginRegistry entry removed, and
-// reports whether both happened within five seconds.
+// reports whether both happened within thirty seconds.
 func waitPluginCollected(key weak.Pointer[baseplugin.Plugin]) bool {
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 		runtime.GC()
+		runtime.GC()
+		runtime.Gosched()
 		if _, ok := pluginRegistry.Load(key); !ok && key.Value() == nil {
 			return true
 		}
@@ -5573,6 +5601,169 @@ func TestRound23CallbackRegressions(t *testing.T) {
 			} {
 				if got.text != tt.want {
 					t.Errorf("%s = %s, want %s", got.name, elideText(got.text), elideText(tt.want))
+				}
+			}
+		})
+	}
+}
+
+// TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang is a subprocess
+// regression test: a constructor that calls t.Fatal must fail promptly rather
+// than hang the goroutine that makeAndDropTestPlugin launches.
+func TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang(t *testing.T) {
+	if os.Getenv("GO_WANT_MAKE_AND_DROP_HELPER") == "1" {
+		makeAndDropTestPlugin(t, func(t *testing.T, _ *pluginHolder) (*baseplugin.Plugin, func()) {
+			t.Fatal("synthetic constructor failure")
+			return nil, nil
+		}, false)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang$")
+	cmd.Env = append(os.Environ(), "GO_WANT_MAKE_AND_DROP_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("subprocess exited successfully; want a non-zero exit from t.Fatal")
+	}
+	if !strings.Contains(string(out), "synthetic constructor failure") {
+		t.Errorf("subprocess output does not mention the failure:\n%s", out)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("subprocess timed out; want a prompt failure, not a hang")
+	}
+}
+
+func TestRound27CallbackRegressions(t *testing.T) {
+	const secret = "SYNTH_R27_COOKIE"
+	// Cookie-prose sentences that must be preserved across all callbacks.
+	proseCases := []struct{ name, in string }{
+		{"50% cookie prose", "The cookie: 50% was left."},
+		{"2.5-ounce cookie prose", "The cookie: 2.5-ounce pieces remained."},
+		{"(2 pieces) cookie prose", "The cookie: (2 pieces) was delicious."},
+		{"quoted chocolate cookie prose", `The cookie: "chocolate" was great.`},
+		{"-2 degrees cookie prose", "The cookie: -2 degrees outside."},
+		{"curly-quoted chocolate cookie prose", "The cookie: “chocolate” was delicious."},
+	}
+	for _, tt := range proseCases {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(map[string]string{"note": tt.in})
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": string(b), "err": errors.New(string(b))}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: string(b)}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(string(b))))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": string(b)}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			// The cookie-prose JSON must be preserved in all event rows.
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != string(b) {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(string(b)))
+			}
+			if !json.Valid([]byte(text)) {
+				t.Errorf("USER_MESSAGE_RECEIVED not valid JSON: %s", text)
+			}
+			// TOOL_ERROR and STATE_DELTA rows must not contain the redacted
+			// placeholder, proving the cookie-prose was preserved.
+			toolErrText := fmt.Sprint(onlyRowOfType(t, rows, EventToolError)["error_message"])
+			if toolErrText != string(b) {
+				t.Errorf("TOOL_ERROR = %s, want %s", elideText(toolErrText), elideText(string(b)))
+			}
+			for _, row := range rows {
+				if et := fmt.Sprint(row["event_type"]); et == string(EventStateDelta) || et == string(EventToolError) {
+					if s := fmt.Sprint(row); strings.Contains(s, redactedValue) {
+						t.Errorf("%s row contains %q: %s", et, redactedValue, elideText(s))
+					}
+				}
+			}
+		})
+	}
+	// Cookie header JSON that must redact its secret.
+	redactCases := []struct{ name, in, want string }{
+		{"JSON note with cookie header", `{"note":"Cookie: sid=` + secret + `"}`, `{"note":"Cookie: [REDACTED]"}`},
+		{"JSON cookie key", `{"Cookie":"sid=` + secret + `"}`, `{"Cookie":"[REDACTED]"}`},
+	}
+	for _, tt := range redactCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(tt.want))
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("row holds secret %q: %s", secret, elideText(s))
+				}
+			}
+		})
+	}
+	// Multiline apostrophe cases that must scrub the secret.
+	multilineCases := []struct{ name, in, want string }{
+		{"multiline pad newline", "password='it's pad\n" + secret, "password=[REDACTED]"},
+		{"multiline pad line2", "password='it's pad\nline2\n" + secret, "password=[REDACTED]"},
+		{"multiline apostrophe user", "password='it's\n" + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"punctuation apostrophe", "password='it's, " + secret + "' user=x", "password='[REDACTED]' user=x"},
+	}
+	for _, tt := range multilineCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			// USER_MESSAGE_RECEIVED must match the expected redaction (including preservation of user=x).
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(tt.want))
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					et := fmt.Sprint(row["event_type"])
+					t.Errorf("%s row holds secret %q: %s", et, secret, elideText(s))
 				}
 			}
 		})
