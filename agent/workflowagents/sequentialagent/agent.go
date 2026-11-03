@@ -218,7 +218,7 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 
 			if seqSess.setActiveSession(subSess) {
 				for ev, err := range innerIter {
-					if seqSess.isClosed() || !yield(ev, err) {
+					if !yield(ev, err) {
 						if err := subSess.Close(); err != nil {
 							log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 						}

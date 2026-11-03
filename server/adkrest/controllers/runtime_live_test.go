@@ -26,6 +26,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -418,6 +419,7 @@ func TestRunLiveHandler_ClientDisconnectStopsLiveRun(t *testing.T) {
 					defer func() { _ = tailSession.Close() }()
 					iteratorStarted := make(chan struct{})
 					iteratorDone := make(chan struct{})
+					var tailStarted atomic.Bool
 					leafName := testLiveAppName
 					if layout != "direct" {
 						leafName = "first"
@@ -441,6 +443,7 @@ func TestRunLiveHandler_ClientDisconnectStopsLiveRun(t *testing.T) {
 								t.Fatal(err)
 							}
 							children = append(children, &mockLiveAgent{Agent: tail, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+								tailStarted.Store(true)
 								return tailSession, func(func(*session.Event, error) bool) { <-tailSession.closed }, nil
 							}})
 						}
@@ -483,6 +486,9 @@ func TestRunLiveHandler_ClientDisconnectStopsLiveRun(t *testing.T) {
 						t.Fatal("live event iterator did not exit after the session was closed")
 					}
 					waitForHandlerExit(t, handlerDone)
+					if tailStarted.Load() {
+						t.Error("closed sequence started the next child")
+					}
 				})
 			}
 		})
@@ -1524,10 +1530,12 @@ func TestRunLiveHandler_ReadDeadlineClosesInFlightWrite(t *testing.T) {
 // live flow fails while a client Send is pending: closing the session unblocks
 // Send with io.EOF.
 type failingFlowLiveSession struct {
-	sendPending chan struct{}
-	pendingOnce sync.Once
-	done        chan struct{}
-	closeOnce   sync.Once
+	sendPending  chan struct{}
+	pendingOnce  sync.Once
+	done         chan struct{}
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+	readerClosed chan struct{}
 }
 
 func (s *failingFlowLiveSession) Send(agent.LiveRequest) error {
@@ -1538,35 +1546,89 @@ func (s *failingFlowLiveSession) Send(agent.LiveRequest) error {
 
 func (s *failingFlowLiveSession) Close() error {
 	s.closeOnce.Do(func() { close(s.done) })
+	if s.closeCalls.Add(1) == 2 {
+		close(s.readerClosed)
+	}
 	return nil
 }
 
 func TestRunLiveHandler_FlowErrorWhileClientSendsDeliversCloseFrame(t *testing.T) {
-	wantErr := errors.New("failed to connect live session: websocket: bad handshake")
-	sess := &failingFlowLiveSession{
-		sendPending: make(chan struct{}),
-		done:        make(chan struct{}),
+	for depth, layout := range []string{"direct", "sequential", "nested sequential"} {
+		t.Run(layout, func(t *testing.T) {
+			for _, order := range []string{"close before error", "error before close"} {
+				t.Run(order, func(t *testing.T) {
+					wantErr := errors.New("failed to connect live session: websocket: bad handshake")
+					sess := &failingFlowLiveSession{
+						sendPending:  make(chan struct{}),
+						done:         make(chan struct{}),
+						readerClosed: make(chan struct{}),
+					}
+					flowStarted := make(chan struct{})
+					leafName := testLiveAppName
+					if layout != "direct" {
+						leafName = "first"
+					}
+					base, err := agent.New(agent.Config{Name: leafName})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var root agent.Agent = &mockLiveAgent{Agent: base, runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+						return sess, func(yield func(*session.Event, error) bool) {
+							close(flowStarted)
+							flowError := make(chan error)
+							go func() {
+								<-sess.sendPending
+								if order == "close before error" {
+									_ = sess.Close()
+								}
+								flowError <- wantErr
+								if order == "error before close" {
+									_ = sess.Close()
+								}
+							}()
+							err := <-flowError
+							// Let the reader close the outer session before delivering
+							// the error already received from the running child.
+							select {
+							case <-sess.readerClosed:
+							case <-time.After(time.Second):
+								t.Error("reader did not close the live session after Send failed")
+							}
+							yield(nil, err)
+						}, nil
+					}}
+					for level := range depth {
+						sequenceName := "inner"
+						if level == depth-1 {
+							sequenceName = testLiveAppName
+						}
+						root, err = sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: sequenceName, SubAgents: []agent.Agent{root}}})
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					wsURL, handlerDone := startRunLiveServer(t, RuntimeAPIControllerConfig{AgentLoader: agent.NewSingleLoader(root)}, nil)
+					conn := dialLive(t, wsURL)
+					select {
+					case <-flowStarted:
+					case <-time.After(time.Second):
+						t.Fatal("live event iterator did not start")
+					}
+					if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pcm")); err != nil {
+						t.Fatalf("WriteMessage() failed: %v", err)
+					}
+					closeErr := readCloseError(t, conn)
+					if closeErr.Code != websocket.CloseInternalServerErr {
+						t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
+					}
+					if closeErr.Text != wantErr.Error() {
+						t.Errorf("close reason = %q, want %q", closeErr.Text, wantErr.Error())
+					}
+					waitForHandlerExit(t, handlerDone)
+				})
+			}
+		})
 	}
-	conn, handlerDone := dialRunLiveHandler(t, func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
-		return sess, func(yield func(*session.Event, error) bool) {
-			<-sess.sendPending
-			_ = sess.Close()
-			time.Sleep(5 * time.Millisecond)
-			yield(nil, wantErr)
-		}, nil
-	})
-
-	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pcm")); err != nil {
-		t.Fatalf("WriteMessage() failed: %v", err)
-	}
-	closeErr := readCloseError(t, conn)
-	if closeErr.Code != websocket.CloseInternalServerErr {
-		t.Errorf("close code = %d, want %d", closeErr.Code, websocket.CloseInternalServerErr)
-	}
-	if closeErr.Text != wantErr.Error() {
-		t.Errorf("close reason = %q, want %q", closeErr.Text, wantErr.Error())
-	}
-	waitForHandlerExit(t, handlerDone)
 }
 
 type deadlineRecordingConn struct {
