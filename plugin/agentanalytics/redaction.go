@@ -3466,8 +3466,9 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 			return s[loc[0]:loc[4]], loc[4]
 		}
 		if quoted&quoteKind(q) != 0 {
-			if q2 := openingQuote(s, loc[4]+len(q)); q2 != "" && q2 != q {
-				afterClose := quoted &^ quoteKind(q)
+			afterClose0 := quoted &^ quoteKind(q)
+			if q2 := openingQuote(s, loc[4]+len(q)); q2 != "" && q2 != q && !startsRedactedPair(s, loc[4]+len(q), afterClose0) {
+				afterClose := afterClose0
 				q2Start := loc[4] + len(q)
 				if m := quotedValueRe.FindString(s[q2Start:]); m != "" {
 					end = q2Start + len(m)
@@ -3523,8 +3524,9 @@ func redactBearerToken(s string, loc []int, quotes *openQuotes, pairs *sensitive
 	closeOuter := ""
 	if openingQuote(s, loc[4]) == "" {
 		if q := openingQuote(s, end); q != "" {
-			if q2 := openingQuote(s, end+len(q)); quoted&quoteKind(q) != 0 && q2 != "" {
-				afterClose := quoted &^ quoteKind(q)
+			afterClose2 := quoted &^ quoteKind(q)
+			if q2 := openingQuote(s, end+len(q)); quoted&quoteKind(q) != 0 && q2 != "" && !startsRedactedPair(s, end+len(q), afterClose2) {
+				afterClose := afterClose2
 				q2Start := end + len(q)
 				if m := quotedValueRe.FindString(s[q2Start:]); m != "" {
 					end = q2Start + len(m)
@@ -4203,12 +4205,87 @@ func placeholderCut(s string, start int) int {
 
 // bareValueEnd returns where the bare value that runs on through s[i:] ends,
 // as sensitiveValueRegex reads it: at the first whitespace, ",", ";" or "&",
-// or at the end of s.
+// or at the end of s. A backslash before a line break (\<LF> or \<CR><LF>) is a
+// shell line continuation, so the bare value runs on past it.
 func bareValueEnd(s string, i int) int {
-	if n := strings.IndexAny(s[i:], regexpSpace+",;&"); n >= 0 {
-		return i + n
+	for {
+		n := strings.IndexAny(s[i:], regexpSpace+",;&")
+		if n < 0 {
+			return len(s)
+		}
+		end := i + n
+		// Check for a backslash-newline or backslash-CRLF line splice.
+		if (s[end] == '\n' || s[end] == '\r') && end > i && s[end-1] == '\\' {
+			// Count preceding backslashes: an odd count means the line break
+			// is escaped (a line continuation), so skip past it.
+			bs := 0
+			for k := end - 1; k >= i && s[k] == '\\'; k-- {
+				bs++
+			}
+			if bs%2 == 1 {
+				if s[end] == '\r' && end+1 < len(s) && s[end+1] == '\n' {
+					i = end + 2
+				} else {
+					i = end + 1
+				}
+				continue
+			}
+		}
+		return end
 	}
-	return len(s)
+}
+
+// interiorApostropheEnd returns the end of the value that starts at s[start]
+// with opening quote q, when the closing quote at s[end-len(q):end] is an
+// interior word apostrophe (a letter immediately precedes it, as the one in
+// 'it's), by scanning forward on the same line for a later closing quote of
+// the same kind that ends at a value boundary. It returns end unchanged when
+// the closing quote is not an interior apostrophe, no later closing quote is
+// found on the same line, or the later closing quote does not end at a value
+// boundary.
+func interiorApostropheEnd(s string, start, end int, q string, quoted quoteKinds) int {
+	closing := end - len(q)
+	if closing <= start+len(q) {
+		return end
+	}
+	// A letter must precede the closing quote for it to be an interior apostrophe.
+	prev, _ := utf8.DecodeLastRuneInString(s[start+len(q) : closing])
+	if !unicode.IsLetter(prev) {
+		return end
+	}
+	// Scan forward on the same line for a later closing quote of the same kind.
+	lineEnd := strings.IndexAny(s[end:], "\r\n")
+	if lineEnd < 0 {
+		lineEnd = len(s) - end
+	}
+	lineEnd += end
+	// Look for a closing quote q on the rest of the line.
+	rest := s[end:lineEnd]
+	for {
+		idx := strings.Index(rest, q)
+		if idx < 0 {
+			return end
+		}
+		candEnd := end + idx + len(q)
+		// Check that this candidate closes the value: the text between the
+		// interior apostrophe and this candidate has no unpaired q.
+		segment := s[start:candEnd]
+		if !hasUnpairedQuoteOnLine(segment[len(q):candEnd-start-len(q)], q) {
+			// Check that it ends at a value boundary.
+			if quotedValueEnds(s[start:], candEnd-start, quoted) {
+				return candEnd
+			}
+			// Also accept if a quote opens at candEnd or the line ends.
+			if candEnd >= len(s) || s[candEnd] == '\n' || s[candEnd] == '\r' {
+				return candEnd
+			}
+			if oq := openingQuote(s, candEnd); oq != "" {
+				return candEnd
+			}
+		}
+		rest = rest[idx+len(q):]
+		end = candEnd
+	}
 }
 
 // textValueEnd returns the end of the value matched at s[start:end] after a
@@ -4238,6 +4315,16 @@ func textValueEnd(s string, start, end, open int, quoted quoteKinds) int {
 		if _, quote := unquoteValue(s[start:end]); quote != "" {
 			if quotedValueEnds(s[start:], end-start, quoted) {
 				return end
+			}
+			// Check for an interior apostrophe in a single-quoted value, as in
+			// password='it's SECRET': the closing quote is an interior word
+			// apostrophe (a letter precedes it), and a later same-line quote of
+			// the same kind closes the value. Extend end to that later closing
+			// quote so the full passphrase is redacted.
+			if q == "'" && end > start+len(q) {
+				if nextEnd := interiorApostropheEnd(s, start, end, q, quoted); nextEnd > end {
+					return nextEnd
+				}
 			}
 			return runOnValueEnd(s, start, end, open, quoted)
 		}
@@ -7180,15 +7267,27 @@ var (
 )
 
 // acquireShellScanner gets a scanner for s from the ring, reset unless it
-// last scanned s. Comparing the strings returns at once when they differ in
-// length or share their bytes; only strings of the same length that differ
-// read their common prefix, once a call.
+// last scanned s or a string that s is a prefix of (as when redactBearerToken
+// passes t = s[:at] for growing at values). Comparing the strings returns at
+// once when they differ in length or share their bytes; only strings of the
+// same length that differ read their common prefix, once a call. A prefix
+// slice of a cached full string shares the same backing bytes, so
+// sc.s[:len(s)] == s is an O(1) pointer-and-length comparison.
 func acquireShellScanner(s string) *shellAssignScanner {
 	shellScannerMu.Lock()
 	var sc *shellAssignScanner
 	for i := range shellScannerCache {
-		if shellScannerCache[i] != nil && shellScannerCache[i].s == s {
-			sc = shellScannerCache[i]
+		c := shellScannerCache[i]
+		if c == nil {
+			continue
+		}
+		if c.s == s {
+			sc = c
+			shellScannerCache[i] = nil
+			break
+		}
+		if len(s) <= len(c.s) && c.s[:len(s)] == s {
+			sc = c
 			shellScannerCache[i] = nil
 			break
 		}
@@ -7197,7 +7296,7 @@ func acquireShellScanner(s string) *shellAssignScanner {
 	if sc == nil {
 		sc = &shellAssignScanner{}
 	}
-	if sc.s != s {
+	if sc.s != s && !(len(s) <= len(sc.s) && sc.s[:len(s)] == s) {
 		sc.reset(s)
 	}
 	return sc
@@ -7565,12 +7664,12 @@ func (sc *shellAssignScanner) at(i int) bool {
 			}
 			if !lv.wordSawEq {
 				lv.wordSawEq = true
-				if lv.runValid && lv.runAtWordStart {
-					if !lv.runFirstDigit {
+				if lv.runValid && !lv.runFirstDigit {
+					if lv.runAtWordStart {
 						lv.wordLeading = true
-						if lv.runLetter && (!lv.runLower || lv.runUnderOrDigit) {
-							lv.wordHasEnv = true
-						}
+					}
+					if lv.runLetter && (!lv.runLower || lv.runUnderOrDigit) {
+						lv.wordHasEnv = true
 					}
 				} else if lv.pos-lv.wordStart <= 128 {
 					if name := stripShellNameQuotes(stripShellLineSplices(s[lv.wordStart:lv.pos])); isShellName(name) {
@@ -7733,7 +7832,12 @@ func stripShellNameQuotes(s string) string {
 // isShellWordBreak reports whether the byte c ends a shell word that
 // inShellAssignment reads: whitespace, or one of ";&|(`".
 func isShellWordBreak(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' || strings.IndexByte(";&|(`", c) >= 0
+	switch c {
+	case ' ', '\t', '\n', '\r', '\v', '\f', ';', '&', '|', '(', '`':
+		return true
+	default:
+		return false
+	}
 }
 
 // isShellNameByte reports whether c may stand in a shell variable name.
