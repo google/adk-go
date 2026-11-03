@@ -4226,13 +4226,13 @@ type testPanickingStringer struct{ p *int }
 func (s testPanickingStringer) String() string { return strconv.Itoa(*s.p) }
 
 func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
-	// Under redaction the method of an error or Stringer is called only for
-	// errors.New, whose text is the message it was made with; any other
+	// Under redaction the method of an error or Stringer is not called, not
+	// even for errors.New, whose text is the message it was made with: a
 	// value without exported fields keeps the structural form that
-	// reflection gives it. With redaction off, the text of a struct without
-	// exported fields is written; a value of another kind, such as an error
-	// of a string or integer kind, keeps the value that encoding/json gives
-	// it.
+	// reflection gives it, the {} that encoding/json writes for it too. With
+	// redaction off, the text of a struct without exported fields is
+	// written; a value of another kind, such as an error of a string or
+	// integer kind, keeps the value that encoding/json gives it.
 	tests := []struct {
 		name         string
 		in           any
@@ -4241,16 +4241,16 @@ func TestSmartTruncate_ErrorsAndStringers(t *testing.T) {
 		wantOff      string // the result with redaction off; want if empty
 		wantOffTrunc bool
 	}{
-		{name: "errors.New", in: errors.New("boom"), want: `"boom"`},
+		{name: "errors.New", in: errors.New("boom"), want: `{}`, wantOff: `"boom"`},
 		{name: "wrapped error", in: fmt.Errorf("outer: %w", errors.New("inner")), want: `{}`, wantOff: `"outer: inner"`},
 		{name: "pointer error type", in: &testErrorNoFields{"custom"}, want: `{}`, wantOff: `"custom"`},
 		{name: "value error type", in: testErrorValue{"value"}, want: `{}`, wantOff: `"value"`},
 		{name: "error of a string kind", in: testErrorCode("E42"), want: `"E42"`},
 		{name: "error of an integer kind", in: syscall.Errno(2), want: `2`},
-		{name: "error in a map", in: map[string]any{"err": errors.New("x")}, want: `{"err":"x"}`},
-		{name: "error in a slice", in: []error{errors.New("a"), errors.New("b")}, want: `["a","b"]`},
+		{name: "error in a map", in: map[string]any{"err": errors.New("x")}, want: `{"err":{}}`, wantOff: `{"err":"x"}`},
+		{name: "error in a slice", in: []error{errors.New("a"), errors.New("b")}, want: `[{},{}]`, wantOff: `["a","b"]`},
 		{
-			name: "credential in the error text", in: errors.New("dial failed: api_key=SECRET"), want: `"dial failed: api_key=[REDACTED]"`, wantTrunc: true,
+			name: "credential in the error text", in: errors.New("dial failed: api_key=SECRET"), want: `{}`,
 			wantOff: `"dial failed: api_key=SECRET"`,
 		},
 		{name: "stringer without exported fields", in: testStringerNoFields{7}, want: `{}`, wantOff: `"stringer n=7"`},
@@ -6274,16 +6274,28 @@ func TestReviewPlainErrorRegression(t *testing.T) {
 
 	for _, tc := range sensitiveErrors {
 		t.Run(tc.name, func(t *testing.T) {
+			// Under redaction the error keeps its structural form, and its
+			// text, as a string, is scrubbed.
 			b, _, err := SmartTruncate(tc.err, 1000)
+			if err != nil || string(b) != "{}" {
+				t.Errorf("SmartTruncate(%q) = (%s, %v), want {}", tc.err, b, err)
+			}
+			b, _, err = SmartTruncate(tc.err.Error(), 1000)
 			if err != nil {
-				t.Fatalf("SmartTruncate(%q) error = %v", tc.err, err)
+				t.Fatalf("SmartTruncate(%q) error = %v", tc.err.Error(), err)
 			}
 			if strings.Contains(string(b), "syntheticvioletfern") {
-				t.Errorf("SmartTruncate(%q) = %s, leaked secret", tc.err, b)
+				t.Errorf("SmartTruncate(%q) = %s, leaked secret", tc.err.Error(), b)
 			}
 			var got string
 			if err := json.Unmarshal(b, &got); err != nil || got != tc.want {
-				t.Errorf("SmartTruncate(%q) unmarshaled = (%q, %v), want %q", tc.err, got, err, tc.want)
+				t.Errorf("SmartTruncate(%q) unmarshaled = (%q, %v), want %q", tc.err.Error(), got, err, tc.want)
+			}
+			// With redaction off the error writes its text as it is.
+			b, _, err = smartTruncate(tc.err, 1000, false)
+			got = ""
+			if err != nil || json.Unmarshal(b, &got) != nil || got != tc.err.Error() {
+				t.Errorf("smartTruncate(%q, redact off) = (%s, %v), want the text of the error", tc.err, b, err)
 			}
 
 			p, requests, mCtx := setupTestPlugin(t)
@@ -6304,15 +6316,15 @@ func TestReviewPlainErrorRegression(t *testing.T) {
 		})
 	}
 
-	t.Run("ordinary non-sensitive error preserved", func(t *testing.T) {
+	t.Run("ordinary error keeps its text only with redaction off", func(t *testing.T) {
 		plainErr := errors.New("permission denied: dataset not found")
-		b, _, err := SmartTruncate(plainErr, 1000)
-		if err != nil {
-			t.Fatalf("SmartTruncate(%q) error = %v", plainErr, err)
+		if b, _, err := SmartTruncate(plainErr, 1000); err != nil || string(b) != "{}" {
+			t.Errorf("SmartTruncate(%q) = (%s, %v), want {}", plainErr, b, err)
 		}
+		b, _, err := smartTruncate(plainErr, 1000, false)
 		var got string
-		if err := json.Unmarshal(b, &got); err != nil || got != plainErr.Error() {
-			t.Errorf("SmartTruncate(%q) = (%q, %v), want %q", plainErr, got, err, plainErr.Error())
+		if err != nil || json.Unmarshal(b, &got) != nil || got != plainErr.Error() {
+			t.Errorf("smartTruncate(%q, redact off) = (%s, %v), want %q", plainErr, b, err, plainErr.Error())
 		}
 	})
 }
@@ -6359,42 +6371,59 @@ func round22SensitiveErrors() []struct{ name, in, want, secret string } {
 	}
 }
 
-// TestRound22PlainErrorRegression checks that SmartTruncate, which writes the
-// text of a plain error under redaction, writes the texts of
-// round22SensitiveErrors with their credentials redacted, whether the error
-// stands alone or in a map or a slice, and keeps the prose that the same
-// boundaries keep: a contraction after a long word whose visible part shows
-// that it is not a shell assignment, a possessive after it's, and the word
-// cookie and a colon with no cookie pair after them.
-func TestRound22PlainErrorRegression(t *testing.T) {
-	check := func(t *testing.T, in, want, secret string) {
-		t.Helper()
-		for _, v := range []struct {
-			name string
-			in   any
-			want any
-		}{
-			{"error", errors.New(in), want},
-			{"error in a map", map[string]any{"err": errors.New(in)}, map[string]any{"err": want}},
-			{"error in a slice", []any{errors.New(in)}, []any{want}},
-		} {
-			b, _, err := SmartTruncate(v.in, 2*len(in)+1000)
-			if secret != "" && bytes.Contains(b, []byte(secret)) {
-				t.Errorf("SmartTruncate(%s of %s) = %s, which holds %q", v.name, elideText(in), elideText(string(b)), secret)
-			}
-			var got any
-			if err != nil || json.Unmarshal(b, &got) != nil {
-				t.Errorf("SmartTruncate(%s of %s) = (%s, %v), want JSON", v.name, elideText(in), elideText(string(b)), err)
-				continue
-			}
-			if diff := cmp.Diff(v.want, got); diff != "" {
-				t.Errorf("SmartTruncate(%s of %s) mismatch (-want +got):\n%s", v.name, elideText(in), diff)
-			}
+// checkPlainErrorText checks that, under redaction, SmartTruncate writes
+// errors.New(in), whether it stands alone or in a map or a slice, as the {}
+// that encoding/json writes for it too, and writes in as a string in the same
+// places as want, the text that the scrub makes of it; that nothing that it
+// writes holds secret, if secret is not empty; and that with redaction off it
+// writes the text of the error as it is. Under redaction no text of an error
+// is written, scrubbed or not, as the text can hold a credential that the
+// scrub misses.
+func checkPlainErrorText(t *testing.T, in, want, secret string) {
+	t.Helper()
+	for _, v := range []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"error", errors.New(in), map[string]any{}},
+		{"error in a map", map[string]any{"err": errors.New(in)}, map[string]any{"err": map[string]any{}}},
+		{"error in a slice", []any{errors.New(in)}, []any{map[string]any{}}},
+		{"text", in, want},
+		{"text in a map", map[string]any{"err": in}, map[string]any{"err": want}},
+		{"text in a slice", []any{in}, []any{want}},
+	} {
+		b, _, err := SmartTruncate(v.in, 2*len(in)+1000)
+		if secret != "" && bytes.Contains(b, []byte(secret)) {
+			t.Errorf("SmartTruncate(%s of %s) = %s, which holds %q", v.name, elideText(in), elideText(string(b)), secret)
+		}
+		var got any
+		if err != nil || json.Unmarshal(b, &got) != nil {
+			t.Errorf("SmartTruncate(%s of %s) = (%s, %v), want JSON", v.name, elideText(in), elideText(string(b)), err)
+			continue
+		}
+		if diff := cmp.Diff(v.want, got); diff != "" {
+			t.Errorf("SmartTruncate(%s of %s) mismatch (-want +got):\n%s", v.name, elideText(in), diff)
 		}
 	}
+	b, _, err := smartTruncate(errors.New(in), 2*len(in)+1000, false)
+	var got string
+	if err != nil || json.Unmarshal(b, &got) != nil || got != in {
+		t.Errorf("smartTruncate(errors.New(%s), redact off) = (%s, %v), want the text of the error", elideText(in), elideText(string(b)), err)
+	}
+}
+
+// TestRound22PlainErrorRegression checks, with checkPlainErrorText, that
+// SmartTruncate writes a plain error that holds a text of
+// round22SensitiveErrors as {} under redaction, and the text itself with its
+// credentials redacted, and keeps the prose that the same boundaries keep: a
+// contraction after a long word whose visible part shows that it is not a
+// shell assignment, a possessive after it's, and the word cookie and a colon
+// with no cookie pair after them.
+func TestRound22PlainErrorRegression(t *testing.T) {
 	for _, tt := range round22SensitiveErrors() {
 		t.Run(tt.name, func(t *testing.T) {
-			check(t, tt.in, tt.want, tt.secret)
+			checkPlainErrorText(t, tt.in, tt.want, tt.secret)
 		})
 	}
 	prose := strings.Repeat("a", 300)
@@ -6409,7 +6438,7 @@ func TestRound22PlainErrorRegression(t *testing.T) {
 		{"capitalized cookie prose with later multiline quote", "Cookie: Monster said \"hello\nworld\" today.", "Cookie: Monster said \"hello\nworld\" today."},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			check(t, tt.in, tt.want, "")
+			checkPlainErrorText(t, tt.in, tt.want, "")
 		})
 	}
 }
@@ -6432,35 +6461,20 @@ func round23SensitiveErrors() []struct{ name, in, want, secret string } {
 	}
 }
 
+// TestRound23PlainErrorRegression checks, with checkPlainErrorText, that
+// SmartTruncate writes a plain error that holds a text of
+// round23SensitiveErrors as {} under redaction, and the text itself with its
+// credentials redacted, and keeps the prose of a contraction after a long
+// word and of cookie prose after a rejected quote. It then checks that a
+// plain error is {} for texts whose credential the text scrub can leave in
+// place: a quoted passphrase with an apostrophe in it, a shell value that a
+// separated contraction runs into, the same inside escaped JSON, and a
+// quoted Bearer value glued to a quoted key. Writing the scrubbed text of
+// such an error, as SmartTruncate once did, writes the credential.
 func TestRound23PlainErrorRegression(t *testing.T) {
-	check := func(t *testing.T, in, want, secret string) {
-		t.Helper()
-		for _, v := range []struct {
-			name string
-			in   any
-			want any
-		}{
-			{"error", errors.New(in), want},
-			{"error in a map", map[string]any{"err": errors.New(in)}, map[string]any{"err": want}},
-			{"error in a slice", []any{errors.New(in)}, []any{want}},
-		} {
-			b, _, err := SmartTruncate(v.in, 2*len(in)+1000)
-			if secret != "" && bytes.Contains(b, []byte(secret)) {
-				t.Errorf("SmartTruncate(%s of %s) = %s, which holds %q", v.name, elideText(in), elideText(string(b)), secret)
-			}
-			var got any
-			if err != nil || json.Unmarshal(b, &got) != nil {
-				t.Errorf("SmartTruncate(%s of %s) = (%s, %v), want JSON", v.name, elideText(in), elideText(string(b)), err)
-				continue
-			}
-			if diff := cmp.Diff(v.want, got); diff != "" {
-				t.Errorf("SmartTruncate(%s of %s) mismatch (-want +got):\n%s", v.name, elideText(in), diff)
-			}
-		}
-	}
 	for _, tt := range round23SensitiveErrors() {
 		t.Run(tt.name, func(t *testing.T) {
-			check(t, tt.in, tt.want, tt.secret)
+			checkPlainErrorText(t, tt.in, tt.want, tt.secret)
 		})
 	}
 	prose := strings.Repeat("a", 300)
@@ -6469,7 +6483,65 @@ func TestRound23PlainErrorRegression(t *testing.T) {
 		{"rejected prior-line quote before cookie prose keeps lines", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			check(t, tt.in, tt.want, "")
+			checkPlainErrorText(t, tt.in, tt.want, "")
+		})
+	}
+	const secret = "ZQXSEKRETN"
+	for _, tt := range []struct{ name, in string }{
+		{"passphrase with it's before a period", "login failed: password='it's " + secret + "'."},
+		{"passphrase with it's before a pair", "password='it's " + secret + "' user=x"},
+		{"shell passphrase with it's", "export DB_PASSWORD='it's " + secret + "'; echo ok"},
+		{"passphrase with a possessive", "password='Bob's " + secret + "' user=x"},
+		{"passphrase with I'm", "password='I'm " + secret + "' user=x"},
+		{"passphrase with the possessive of an acronym", "password='JSON's " + secret + "' user=x"},
+		{"passphrase with an apostrophe in a name", "password='O'Brien " + secret + "' user=x"},
+		{"separated contraction in a shell value", "export DB_PASSWORD=pre' it's " + secret + "'; echo ok"},
+		{"passphrase with it's in escaped JSON", `error: {\"msg\": \"password='it's ` + secret + `' user=x\"}`},
+		{"separated contraction in escaped JSON", `error: {\"cmd\": \"export DB_PASSWORD=pre' it's ` + secret + `'; echo ok\"}`},
+		{"quoted Bearer value glued to a quoted key", `x='Bearer abc'"password": ` + secret + `}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, v := range []struct {
+				name string
+				in   any
+				want string
+			}{
+				{"error", errors.New(tt.in), `{}`},
+				{"error in a map", map[string]any{"err": errors.New(tt.in)}, `{"err":{}}`},
+				{"error in a slice", []any{errors.New(tt.in)}, `[{}]`},
+				{"wrapped error", fmt.Errorf("outer: %w", errors.New(tt.in)), `{}`},
+			} {
+				if b, _, err := SmartTruncate(v.in, 1000); err != nil || string(b) != v.want {
+					t.Errorf("SmartTruncate(%s of %q) = (%s, %v), want %s", v.name, tt.in, b, err, v.want)
+				}
+			}
+			b, _, err := smartTruncate(errors.New(tt.in), 1000, false)
+			var got string
+			if err != nil || json.Unmarshal(b, &got) != nil || got != tt.in {
+				t.Errorf("smartTruncate(errors.New(%q), redact off) = (%s, %v), want the text of the error", tt.in, b, err)
+			}
+
+			// The rows of a tool call whose arguments and result hold the
+			// error do not hold the secret either.
+			p, requests, mCtx := setupTestPlugin(t)
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"err": errors.New(tt.in)}
+			if _, err := p.BeforeToolCallback()(mCtx, tl, args); err != nil {
+				t.Fatalf("BeforeToolCallback error = %v", err)
+			}
+			if _, err := p.AfterToolCallback()(mCtx, tl, args, map[string]any{"result_err": errors.New(tt.in)}, nil); err != nil {
+				t.Fatalf("AfterToolCallback error = %v", err)
+			}
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if len(rows) == 0 {
+				t.Fatal("no rows were written")
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row holds %q: %s", row["event_type"], secret, elideText(s))
+				}
+			}
 		})
 	}
 }

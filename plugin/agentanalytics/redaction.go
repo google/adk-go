@@ -7107,10 +7107,25 @@ func inShellAssignment(s string, i int) bool {
 	return sc.at(i)
 }
 
+// shellScannerPool holds the scanners of inShellAssignment between calls. A
+// scrub asks about many quotes of one string, each in a call of its own, and
+// a scanner that a call gets back for the string that it last scanned goes on
+// from its cursors and quote records; scanning each line again from its start
+// for every quote would make the scrub quadratic in the length of a line. So
+// a scanner keeps its last string when it is put back, and the pool keeps
+// that string reachable until a call for another string resets the scanner,
+// or until the pool drops the scanner, which takes at most two garbage
+// collections. Keying the scanner on the address of the string's bytes
+// instead would need package unsafe, and would still have to keep the string
+// to stop its bytes from being reused for another one.
 var shellScannerPool = sync.Pool{
 	New: func() any { return &shellAssignScanner{} },
 }
 
+// acquireShellScanner gets a scanner for s from the pool, reset unless it
+// last scanned s. Comparing the strings returns at once when they differ in
+// length or share their bytes; only strings of the same length that differ
+// read their common prefix, once a call.
 func acquireShellScanner(s string) *shellAssignScanner {
 	sc := shellScannerPool.Get().(*shellAssignScanner)
 	if sc.s != s {
@@ -7125,7 +7140,14 @@ func releaseShellScanner(sc *shellAssignScanner) {
 
 type shellQuoteMemo struct {
 	openPos, limit, closeEnd int
-	noCloseFrom, noCloseStop int
+	// noCloseFrom, noCloseStop and noCloseLimit record that a scan from the
+	// quote at noCloseFrom, under a limit of noCloseLimit, found no closing
+	// quote before noCloseStop. A scan from an opening quote of the same kind
+	// at or after noCloseFrom and before noCloseStop finds none either under
+	// a limit up to noCloseLimit, because it reads the same bytes, or fewer.
+	// Under a wider limit it can read on to a closing quote, so it scans
+	// again.
+	noCloseFrom, noCloseStop, noCloseLimit int
 }
 
 type shellScanLevel struct {
@@ -7212,7 +7234,7 @@ func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
 	if m.closeEnd > 0 && m.openPos == pos && m.limit == limit {
 		return m.closeEnd - pos
 	}
-	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit >= m.noCloseStop {
+	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit <= m.noCloseLimit {
 		return 0
 	}
 	switch q {
@@ -7220,7 +7242,7 @@ func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
 		for k := pos + 1; k < limit; k++ {
 			c := s[k]
 			if c == '\n' || c == '\r' {
-				m.noCloseFrom, m.noCloseStop = pos, k
+				m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, k, limit
 				return 0
 			}
 			if c == '\'' {
@@ -7228,17 +7250,17 @@ func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
 				return k + 1 - pos
 			}
 		}
-		m.noCloseFrom, m.noCloseStop = pos, limit
+		m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, limit, limit
 	case '"':
 		for k := pos + 1; k < limit; k++ {
 			c := s[k]
 			if c == '\n' || c == '\r' {
-				m.noCloseFrom, m.noCloseStop = pos, k
+				m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, k, limit
 				return 0
 			}
 			if c == '\\' {
 				if k+1 >= limit {
-					m.noCloseFrom, m.noCloseStop = pos, limit
+					m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, limit, limit
 					return 0
 				}
 				if s[k+1] == '\r' {
@@ -7246,7 +7268,7 @@ func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
 						k += 2
 						continue
 					}
-					m.noCloseFrom, m.noCloseStop = pos, k+1
+					m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, k+1, limit
 					return 0
 				}
 				k++
@@ -7257,7 +7279,7 @@ func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
 				return k + 1 - pos
 			}
 		}
-		m.noCloseFrom, m.noCloseStop = pos, limit
+		m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, limit, limit
 	}
 	return 0
 }
@@ -7276,18 +7298,18 @@ func (sc *shellAssignScanner) closedEscapedQuoteLen(pos, limit int) int {
 	if m.closeEnd > 0 && m.openPos == pos && m.limit == limit {
 		return m.closeEnd - pos
 	}
-	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit >= m.noCloseStop {
+	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit <= m.noCloseLimit {
 		return 0
 	}
 	for k := pos + 2; k < limit; k++ {
 		c := s[k]
 		if c == '\n' || c == '\r' || c == '"' || (q == '\'' && c == '\'') {
-			m.noCloseFrom, m.noCloseStop = pos, k
+			m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, k, limit
 			return 0
 		}
 		if c == '\\' {
 			if k+1 >= limit {
-				m.noCloseFrom, m.noCloseStop = pos, limit
+				m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, limit, limit
 				return 0
 			}
 			if s[k+1] == q {
@@ -7299,7 +7321,7 @@ func (sc *shellAssignScanner) closedEscapedQuoteLen(pos, limit int) int {
 					k += 2
 					continue
 				}
-				m.noCloseFrom, m.noCloseStop = pos, k+1
+				m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, k+1, limit
 				return 0
 			}
 			if s[k+1] == '\\' && k+2 < limit && s[k+2] == q {
@@ -7309,7 +7331,7 @@ func (sc *shellAssignScanner) closedEscapedQuoteLen(pos, limit int) int {
 			k++
 		}
 	}
-	m.noCloseFrom, m.noCloseStop = pos, limit
+	m.noCloseFrom, m.noCloseStop, m.noCloseLimit = pos, limit, limit
 	return 0
 }
 

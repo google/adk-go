@@ -1116,15 +1116,18 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 	}
 	// A struct that reflection would show as an empty object, because its
 	// fields are unexported, writes the text it has for itself instead, but
-	// only when redaction is off, or the value is of a standard library
-	// error type whose text is the message it was made with. Under redaction
-	// the method of any other type is not called: it can write a credential
-	// that no pattern can tell from prose (a bare value, a transformed
-	// password, a field of any name), and the sanitizer cannot read the
-	// private fields of a type to find it, which also bypasses the locks that
-	// protect them. Such a value keeps the structural form that reflection
-	// gives it, as in adk-python's fallback for unknown types, which does not
-	// call str or repr either. A value of any other kind, such as the number
+	// only when redaction is off. Under redaction its method is not called,
+	// not even for the type of errors.New, whose text is the message it was
+	// made with: the text can hold a credential that no pattern can tell from
+	// prose (a bare value, a transformed password, a field of any name, a
+	// quoted passphrase with an apostrophe in it), and the sanitizer
+	// cannot read the private fields of a type to find it, which also
+	// bypasses the locks that protect them. Such a value keeps the structural
+	// form that reflection gives it, which for an error is the empty object
+	// that encoding/json writes too, as in adk-python's fallback for unknown
+	// types, which does not call str or repr either. The message of an error
+	// that a callback reports goes to error_message instead, scrubbed by
+	// redactErrorMessage. A value of any other kind, such as the number
 	// of a syscall.Errno or the string of a defined string type, keeps its
 	// value as encoding/json writes it, whether redaction is on or off. Maps,
 	// slices and arrays are never intercepted here, even if they implement
@@ -1137,7 +1140,7 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 	// write them atomically or under a lock; until then only the method sets
 	// of the types are read (see hasMethod).
 	if !isContainerKind(v.Kind()) {
-		if (!s.redact || isPlainErrorType(v.Type())) && v.Kind() == reflect.Struct && hasMethod(v, errorType) && !showsExportedFields(v) {
+		if !s.redact && v.Kind() == reflect.Struct && hasMethod(v, errorType) && !showsExportedFields(v) {
 			if m, found := implementer(v, errorType); found {
 				return s.textOf(func() (string, error) { return errorText(m.(error)) }, depth)
 			}
@@ -1149,23 +1152,6 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, o
 		}
 	}
 	return nil, false, false
-}
-
-// plainErrorType is the standard library error type whose text is the
-// message it was made with, and whose method calls nothing else: the type of
-// errors.New, which fmt.Errorf also returns without %w. The text of such an
-// error is a string like any other, scrubbed for credential patterns. The
-// type of fmt.Errorf with %w is not plain: its message holds the text that
-// the Error method of the error it wraps wrote when it was made, which is the
-// output of an arbitrary method.
-var plainErrorType = reflect.TypeOf(errors.New("x")).Elem()
-
-// isPlainErrorType reports whether t is plainErrorType, or a pointer to it.
-func isPlainErrorType(t reflect.Type) bool {
-	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	return t == plainErrorType
 }
 
 // textOf sanitizes the text that get returns, or stands in for it with a

@@ -520,12 +520,12 @@ func TestRedactsCompoundCredentialsNestedUnderEnvelope(t *testing.T) {
 			if got, _ := sanitizeRawText(tt.in); strings.Contains(got, "SYNTHETIC_SECRET") {
 				t.Errorf("sanitizeRawText(%q) = %q, which holds the secret", tt.in, got)
 			}
-			got, _, err := SmartTruncate(errors.New(tt.in), 1000)
+			got, _, err := smartTruncateText(t, tt.in, 1000)
 			if err != nil {
-				t.Fatalf("SmartTruncate(error) error = %v", err)
+				t.Fatalf("SmartTruncate(%q) error = %v", tt.in, err)
 			}
 			if strings.Contains(string(got), "SYNTHETIC_SECRET") {
-				t.Errorf("SmartTruncate(error %q) = %s, which holds the secret", tt.in, got)
+				t.Errorf("SmartTruncate(%q) = %s, which holds the secret", tt.in, got)
 			}
 		})
 	}
@@ -566,7 +566,7 @@ func TestScrubsEveryUnicodeSpaceAfterScheme(t *testing.T) {
 // \u and \x escapes of whitespace beyond ASCII are decoded, so that a scheme
 // is told apart from its credential as in the decoded text, that other
 // escapes beyond ASCII are left alone, and that a credential after such an
-// escape in JSON text is kept out on the raw text and error paths.
+// escape in JSON text is kept out on the raw text and SmartTruncate paths.
 func TestCanonicalizeCredentialMarker_EscapedUnicodeWhitespace(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{
 		{`Bearer\u00a0X`, "Bearer\u00a0X"},
@@ -600,9 +600,9 @@ func TestCanonicalizeCredentialMarker_EscapedUnicodeWhitespace(t *testing.T) {
 		if got, _ := sanitizeRawText(tt.in); strings.Contains(got, tt.secret) {
 			t.Errorf("sanitizeRawText(%q) = %q, which holds the credential", tt.in, got)
 		}
-		b, _, err := SmartTruncate(errors.New(tt.in), 1000)
+		b, _, err := smartTruncateText(t, tt.in, 1000)
 		if err != nil || strings.Contains(string(b), tt.secret) {
-			t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), which holds the credential", tt.in, b, err)
+			t.Errorf("SmartTruncate(%q) = (%s, %v), which holds the credential", tt.in, b, err)
 		}
 	}
 }
@@ -766,6 +766,8 @@ func TestScrubTextPatterns_EnvelopeChildren(t *testing.T) {
 			raw, _ := sanitizeRawText(tt.in)
 			check("sanitizeRawText", raw)
 			for path, in := range map[string]any{
+				"text":                     tt.in,
+				"text in a map":            map[string]any{"msg": tt.in},
 				"error":                    errors.New(tt.in),
 				"struct with a text field": struct{ Text string }{tt.in},
 				"error in a map":           map[string]any{"err": errors.New(tt.in)},
@@ -1010,17 +1012,18 @@ func TestScrubTextPatterns_TempKeysInsideTempKeys(t *testing.T) {
 		if got, _ := sanitizeRawText(tt.in); got != tt.want {
 			t.Errorf("sanitizeRawText(%q) = %q, want %q", tt.in, got, tt.want)
 		}
-		b, _, err := SmartTruncate(errors.New(tt.in), 1000)
+		b, _, err := smartTruncateText(t, tt.in, 1000)
 		var got string
 		if err != nil || json.Unmarshal(b, &got) != nil || got != tt.want {
-			t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), want %q", tt.in, b, err, tt.want)
+			t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", tt.in, b, err, tt.want)
 		}
 	}
 }
 
-// checkRedactionPaths checks that scrubTextPatterns, sanitizeRawText and the
-// error serializer, SmartTruncate of errors.New, all write want for in, and
-// that scrubbing want again changes nothing.
+// checkRedactionPaths checks that scrubTextPatterns, sanitizeRawText and
+// SmartTruncate of in as a string all write want for in, that scrubbing want
+// again changes nothing, and that SmartTruncate writes errors.New(in) as {}
+// (see smartTruncateText).
 func checkRedactionPaths(t *testing.T, in, want string) {
 	t.Helper()
 	if got := scrubTextPatterns(in); got != want {
@@ -1032,18 +1035,32 @@ func checkRedactionPaths(t *testing.T, in, want string) {
 	if got, _ := sanitizeRawText(in); got != want {
 		t.Errorf("sanitizeRawText(%q) = %q, want %q", in, got, want)
 	}
-	b, _, err := SmartTruncate(errors.New(in), 1000)
+	b, _, err := smartTruncateText(t, in, 1000)
 	var got string
 	if err != nil || json.Unmarshal(b, &got) != nil || got != want {
-		t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), want %q", in, b, err, want)
+		t.Errorf("SmartTruncate(%q) = (%s, %v), want %q", in, b, err, want)
 	}
 }
 
+// smartTruncateText returns what SmartTruncate writes for in as a string,
+// which the sanitizer scrubs as it scrubs every string value, after checking
+// that SmartTruncate writes errors.New(in) as {}: under redaction the
+// sanitizer does not call the Error method of an error, so no text of an
+// error, scrubbed or not, reaches its output (see sanitizer.marshaled).
+func smartTruncateText(t *testing.T, in string, maxLength int) ([]byte, bool, error) {
+	t.Helper()
+	if b, _, err := SmartTruncate(errors.New(in), maxLength); err != nil || string(b) != "{}" {
+		t.Errorf("SmartTruncate(errors.New(%s)) = (%s, %v), want {}", elideText(in), elideText(string(b)), err)
+	}
+	return SmartTruncate(in, maxLength)
+}
+
 // checkAllRedactionPaths checks, as checkRedactionPaths does, that
-// scrubTextPatterns, sanitizeRawText and SmartTruncate of an error write want
-// for in, and that scrubbing want again changes nothing, and that
-// redactErrorMessage, which scrubs the message of an error before
-// error_message holds it, writes want for in too, and for want itself.
+// scrubTextPatterns, sanitizeRawText and SmartTruncate of in as a string
+// write want for in, that scrubbing want again changes nothing, and that
+// SmartTruncate writes errors.New(in) as {}, and that redactErrorMessage,
+// which scrubs the message of an error before error_message holds it, writes
+// want for in too, and for want itself.
 func checkAllRedactionPaths(t *testing.T, in, want string) {
 	t.Helper()
 	checkRedactionPaths(t, in, want)
@@ -1056,15 +1073,16 @@ func checkAllRedactionPaths(t *testing.T, in, want string) {
 }
 
 // checkNoLeak checks that none of scrubTextPatterns, sanitizeRawText,
-// redactErrorMessage and SmartTruncate of an error writes the secret in in.
-// It is for texts that the paths write differently, as they do for a JSON
-// object that is not valid, which only the text patterns read as pairs.
+// redactErrorMessage and SmartTruncate of in as a string writes the secret in
+// in, and that SmartTruncate writes errors.New(in) as {}. It is for texts that
+// the paths write differently, as they do for a JSON object that is not
+// valid, which only the text patterns read as pairs.
 func checkNoLeak(t *testing.T, in, secret string) {
 	t.Helper()
 	raw, _ := sanitizeRawText(in)
-	smart, _, err := SmartTruncate(errors.New(in), 1000)
+	smart, _, err := smartTruncateText(t, in, 1000)
 	if err != nil {
-		t.Errorf("SmartTruncate(errors.New(%q)) error = %v", in, err)
+		t.Errorf("SmartTruncate(%q) error = %v", in, err)
 	}
 	for _, p := range []struct{ name, got string }{
 		{"scrubTextPatterns", scrubTextPatterns(in)},
@@ -1343,8 +1361,8 @@ func TestScrubTextPatterns_UnclosedQuotedValues(t *testing.T) {
 	if raw, _ := sanitizeRawText(quoteLedAuth); strings.Contains(raw, "R7_SYNTHETIC_CREDENTIAL_9327") {
 		t.Errorf("sanitizeRawText(%q) = %q, leaked credential", quoteLedAuth, raw)
 	}
-	if b, _, err := SmartTruncate(errors.New(quoteLedAuth), 1000); err != nil || strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327") {
-		t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), leaked credential", quoteLedAuth, b, err)
+	if b, _, err := smartTruncateText(t, quoteLedAuth, 1000); err != nil || strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327") {
+		t.Errorf("SmartTruncate(%q) = (%s, %v), leaked credential", quoteLedAuth, b, err)
 	}
 }
 
@@ -1888,9 +1906,9 @@ func TestScrubTextPatterns_DottedNamesAfterLongRunsOfSeparators(t *testing.T) {
 						}
 					}
 					in := name + "=R8_SYNTHETIC_CREDENTIAL_49173"
-					b, _, err := SmartTruncate(errors.New(in), 1<<20)
+					b, _, err := smartTruncateText(t, in, 1<<20)
 					if got := err == nil && !strings.Contains(string(b), "R8_SYNTHETIC_CREDENTIAL_49173"); got != want {
-						t.Errorf("SmartTruncate(errors.New(%q…%q)) redacted the value: %v, want %v as for the map key (err %v)", prefix, last, got, want, err)
+						t.Errorf("SmartTruncate(%q…%q) redacted the value: %v, want %v as for the map key (err %v)", prefix, last, got, want, err)
 					}
 				}
 			}
@@ -1936,9 +1954,9 @@ func TestScrubTextPatterns_DottedNamesAgreeWithMapKeys(t *testing.T) {
 			if got := !strings.Contains(scrubTextPatterns(in), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
 				t.Errorf("scrubTextPatterns(%q) redacted the value: %v, want %v as for the map key", in, got, want)
 			}
-			b, _, err := SmartTruncate(errors.New(in), 1000)
+			b, _, err := smartTruncateText(t, in, 1000)
 			if got := err == nil && !strings.Contains(string(b), "R7_SYNTHETIC_CREDENTIAL_9327"); got != want {
-				t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), redacted the value: %v, want %v as for the map key", in, b, err, got, want)
+				t.Errorf("SmartTruncate(%q) = (%s, %v), redacted the value: %v, want %v as for the map key", in, b, err, got, want)
 			}
 		}
 	}
@@ -1995,8 +2013,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		n    int
 	}{
 		{
-			"repeated camel case pairs through an error", func(n int) string { return strings.Repeat("x dbPassword=synthetic ", n) },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+			"repeated camel case pairs through SmartTruncate", func(n int) string { return strings.Repeat("x dbPassword=synthetic ", n) },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 2000,
 		},
 		{
 			"repeated camel case pairs", func(n int) string { return strings.Repeat("x dbPassword=synthetic ", n) },
@@ -2015,8 +2033,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 40000,
 		},
 		{
-			"long run of oauth boundaries with an inner dot through an error", func(n int) string { return "x " + strings.Repeat("xOauth", n) + ".x.code=x" },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 40000,
+			"long run of oauth boundaries with an inner dot through SmartTruncate", func(n int) string { return "x " + strings.Repeat("xOauth", n) + ".x.code=x" },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 40000,
 		},
 		{
 			"long run of oauth boundaries before a delimiter", func(n int) string { return strings.Repeat("aOauth", n) + "=x" },
@@ -2037,10 +2055,10 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 400,
 		},
 		{
-			"spaced oversized keys through an error", func(n int) string {
+			"spaced oversized keys through SmartTruncate", func(n int) string {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat(strings.Repeat("x_", 70)+"PASSWORD=", n) + " x"
 			},
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 400,
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 400,
 		},
 		{
 			"oversized key with many dots", func(n int) string {
@@ -2080,10 +2098,10 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 1600,
 		},
 		{
-			"oversized run of dotted names that are not credentials through an error", func(n int) string {
+			"oversized run of dotted names that are not credentials through SmartTruncate", func(n int) string {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat("x.next_page_token:", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
 			},
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 1600,
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 1600,
 		},
 		{
 			"oversized run of dotted names, then a dotted key", func(n int) string {
@@ -2098,8 +2116,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 1600,
 		},
 		{
-			"bare run of dotted names that are not credentials through an error", func(n int) string { return strings.Repeat("x.next_page_token:", n) },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 1600,
+			"bare run of dotted names that are not credentials through SmartTruncate", func(n int) string { return strings.Repeat("x.next_page_token:", n) },
+			func(in string) { _, _, _ = SmartTruncate(in, 1<<20) }, 1600,
 		},
 		{
 			"bare run of names that are not credentials", func(n int) string { return strings.Repeat("next_page_token:", n) },
@@ -2182,10 +2200,10 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 8000,
 		},
 		{
-			"oversized run of dotted OAuth words through an error", func(n int) string {
+			"oversized run of dotted OAuth words through SmartTruncate", func(n int) string {
 				return "credentials:\n a_PASSWORD: " + strings.Repeat("oauth.", n) + strings.Repeat("x_", 70) + `PASSWORD="a b"`
 			},
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 8000,
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 8000,
 		},
 		{
 			// Each dotted name ends in a name that its complete dotted name
@@ -2194,8 +2212,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 1600,
 		},
 		{
-			"bare run of dotted cursor names through an error", func(n int) string { return strings.Repeat("x.next.page.token:", n) },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 1600,
+			"bare run of dotted cursor names through SmartTruncate", func(n int) string { return strings.Repeat("x.next.page.token:", n) },
+			func(in string) { _, _, _ = SmartTruncate(in, 1<<20) }, 1600,
 		},
 		{
 			"repeated dotted page access tokens", func(n int) string { return strings.Repeat("x.fb.page_token: v ", n) },
@@ -2206,8 +2224,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 10000,
 		},
 		{
-			"one long dotted run before a page access token through an error", func(n int) string { return strings.Repeat("a.", n) + "fb.page_token=v" },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
+			"one long dotted run before a page access token through SmartTruncate", func(n int) string { return strings.Repeat("a.", n) + "fb.page_token=v" },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 10000,
 		},
 		{
 			// The name is read whole, past the bound, from the first
@@ -2216,8 +2234,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 40000,
 		},
 		{
-			"one long run of dots before a page access token through an error", func(n int) string { return "a" + strings.Repeat(".", n) + "page_token=v" },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 40000,
+			"one long run of dots before a page access token through SmartTruncate", func(n int) string { return "a" + strings.Repeat(".", n) + "page_token=v" },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 40000,
 		},
 		{
 			"one long word before a dotted page token", func(n int) string { return strings.Repeat("a", n) + ".page_token=v" },
@@ -2300,8 +2318,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 10000,
 		},
 		{
-			"one long run of strings joined to a credential through an error", func(n int) string { return "password=" + strings.Repeat(`'a'"b"`, n) },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 10000,
+			"one long run of strings joined to a credential through SmartTruncate", func(n int) string { return "password=" + strings.Repeat(`'a'"b"`, n) },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 10000,
 		},
 		{
 			"repeated multi-word dotted page tokens after long dot runs", func(n int) string {
@@ -2328,10 +2346,10 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 1000,
 		},
 		{
-			"repeated multi-separator credential keys through an error", func(n int) string {
+			"repeated multi-separator credential keys through SmartTruncate", func(n int) string {
 				return strings.Repeat("stripe.api..key=v ", n)
 			},
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 2000,
 		},
 		{
 			"repeated punctuation-continued quoted values", func(n int) string {
@@ -2352,10 +2370,10 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 1000,
 		},
 		{
-			"repeated compound keys with mixed trailing separators through an error", func(n int) string {
+			"repeated compound keys with mixed trailing separators through SmartTruncate", func(n int) string {
 				return strings.Repeat("stripe.api..key_.-=v ", n)
 			},
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 2000,
 		},
 		{
 			"repeated semicolon-containing contraction credentials", func(n int) string {
@@ -2442,8 +2460,8 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			func(in string) { _ = scrubTextPatterns(in) }, 2000,
 		},
 		{
-			"one word of redacted pairs through an error", func(n int) string { return strings.Repeat("password=[REDACTED]", n) },
-			func(in string) { _, _, _ = SmartTruncate(errors.New(in), 100) }, 2000,
+			"one word of redacted pairs through SmartTruncate", func(n int) string { return strings.Repeat("password=[REDACTED]", n) },
+			func(in string) { _, _, _ = SmartTruncate(in, 100) }, 2000,
 		},
 		{
 			"one word of redacted compound and plain pairs", func(n int) string {
@@ -2549,7 +2567,7 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			func(in string) {
 				_ = scrubTextPatterns(in)
-				_, _, _ = SmartTruncate(errors.New(in), 100)
+				_, _, _ = SmartTruncate(in, 100)
 			}, 1200,
 		},
 		{
@@ -2576,7 +2594,7 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			func(in string) {
 				_ = scrubTextPatterns(in)
-				_, _, _ = SmartTruncate(errors.New(in), 100)
+				_, _, _ = SmartTruncate(in, 100)
 			}, 1200,
 		},
 		{
@@ -2828,7 +2846,7 @@ func TestScrubTextPatterns_PunctuationContinuedQuotedValues(t *testing.T) {
 }
 
 // TestTrailingSeparatorKeyPolicyAgreement checks that structured maps, structs,
-// free text, raw text, error messages, and plain errors agree on key names with
+// free text, raw text, error messages, and string values agree on key names with
 // trailing "_", "-" and "." separators (including compound, camelCase, acronym,
 // dotted, state-prefixed, and oversized keys) while preserving counters,
 // pagination cursors, and non-credential names with trailing separators.
@@ -4083,10 +4101,10 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 	// Round 15e Item 2: In a double-quoted JSON value, the word joined to a bearer token ends at the quote that closes the value, which stays in place.
 	jsonIn := `{"auth": "Bearer abc'` + secret + `"}`
 	raw, _ := sanitizeRawText(jsonIn)
-	smart, _, smartErr := SmartTruncate(errors.New(jsonIn), 1000)
+	smart, _, smartErr := smartTruncateText(t, jsonIn, 1000)
 	var smartText string
 	if smartErr != nil || json.Unmarshal(smart, &smartText) != nil {
-		t.Errorf("SmartTruncate(errors.New(%q)) = (%s, %v), want a JSON string", jsonIn, smart, smartErr)
+		t.Errorf("SmartTruncate(%q) = (%s, %v), want a JSON string", jsonIn, smart, smartErr)
 	}
 	for _, p := range []struct{ name, got, want string }{
 		{"scrubTextPatterns", scrubTextPatterns(jsonIn), `{"auth": "Bearer [REDACTED]"}`},
@@ -4154,7 +4172,7 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 		in := "export DB_PASSWORD=pre' " + secret + "\\'\nexport API_KEY=pre2' ASTRA_SECOND_935817'"
 		checkNoLeak(t, in, secret)
 		raw, _ := sanitizeRawText(in)
-		smart, _, _ := SmartTruncate(errors.New(in), 1000)
+		smart, _, _ := smartTruncateText(t, in, 1000)
 		for _, got := range []string{raw, redactErrorMessage(in), string(smart)} {
 			if strings.Contains(got, "ASTRA_SECOND_935817") {
 				t.Errorf("redacting %q gave %q, which still holds the second secret", in, got)
@@ -4211,7 +4229,7 @@ func TestScrubTextPatterns_QuotedKeyChainsAfterPrefixes(t *testing.T) {
 		{func(s string) string { return `'token': ' a b '` + s + `'` }, `'token':'[REDACTED]'`},
 	}
 	// A word starts each text that would otherwise start with a double quote,
-	// which the error path reads as a JSON text that does not parse; those
+	// which SmartTruncate reads as a JSON text that does not parse; those
 	// texts are checked on the text patterns alone below.
 	prefixes := []struct{ in, want string }{
 		{"msg ", "msg "},
@@ -4593,15 +4611,16 @@ func TestRound17ReviewRegressions(t *testing.T) {
 
 // checkLongRedactionPaths checks, as checkAllRedactionPaths does, that
 // scrubTextPatterns, sanitizeRawText, redactErrorMessage and SmartTruncate of
-// an error write want for in, and that the scrubs leave want as it is, with a
-// SmartTruncate budget that holds all of in, for texts longer than the budget
-// of checkRedactionPaths allows, and that none of them writes the secrets.
+// in as a string write want for in, that SmartTruncate writes errors.New(in)
+// as {}, and that the scrubs leave want as it is, with a SmartTruncate budget
+// that holds all of in, for texts longer than the budget of
+// checkRedactionPaths allows, and that none of them writes the secrets.
 func checkLongRedactionPaths(t *testing.T, in, want string, secrets ...string) {
 	t.Helper()
 	raw, _ := sanitizeRawText(in)
 	var smart string
-	if b, _, err := SmartTruncate(errors.New(in), 2*len(in)+1000); err != nil || json.Unmarshal(b, &smart) != nil {
-		t.Errorf("SmartTruncate(errors.New(%s)) = (%s, %v), want a JSON string", elideText(in), elideText(string(b)), err)
+	if b, _, err := smartTruncateText(t, in, 2*len(in)+1000); err != nil || json.Unmarshal(b, &smart) != nil {
+		t.Errorf("SmartTruncate(%s) = (%s, %v), want a JSON string", elideText(in), elideText(string(b)), err)
 	}
 	for _, p := range []struct{ name, in, got string }{
 		{"scrubTextPatterns", in, scrubTextPatterns(in)},
@@ -4632,8 +4651,8 @@ func elideText(s string) string {
 }
 
 // TestRound22ReviewRegressions checks the boundaries of the text scrub that
-// the direct, error and error-object paths share, for headers, shell
-// assignments and prose:
+// the direct, error message and SmartTruncate text paths share, for headers,
+// shell assignments and prose:
 //
 //   - a whitespace-folded header value runs on over a line of spaces or tabs
 //     alone to the folded lines after it, and past a first line that holds
@@ -4734,7 +4753,7 @@ func TestRound22ReviewRegressions(t *testing.T) {
 				t.Errorf("scrubTextPatterns(%s) = %s, want %s", elideText(in), elideText(got), elideText(want))
 			}
 			raw, _ := sanitizeRawText(in)
-			smart, _, err := SmartTruncate(errors.New(in), 2*len(in)+1000)
+			smart, _, err := smartTruncateText(t, in, 2*len(in)+1000)
 			if err != nil || strings.Contains(raw, secret) || strings.Contains(string(smart), secret) || strings.Contains(redactErrorMessage(in), secret) {
 				t.Errorf("a path wrote %q for %s: %s / %s / %v", secret, elideText(in), elideText(raw), elideText(string(smart)), err)
 			}
@@ -4989,9 +5008,9 @@ func TestRound22ReviewRegressions(t *testing.T) {
 			{"headers in prior-line quotes", func(n int) string {
 				return strings.Repeat("'\nAuthorization: Bearer abc\nsyntheticlookback'\n", n)
 			}, scrub, 3200},
-			{"headers in prior-line quotes through an error", func(n int) string {
+			{"headers in prior-line quotes through SmartTruncate", func(n int) string {
 				return strings.Repeat("'\nAuthorization: Bearer abc\nsyntheticlookback'\n", n)
-			}, func(in string) { _, _, _ = SmartTruncate(errors.New(in), 1<<20) }, 3200},
+			}, func(in string) { _, _, _ = SmartTruncate(in, 1<<20) }, 3200},
 			{"headers after an unclosed quote", func(n int) string {
 				return "'" + strings.Repeat("\nAuthorization: Bearer abc", n)
 			}, scrub, 3200},
@@ -5286,7 +5305,7 @@ func TestRound23ReviewRegressions(t *testing.T) {
 							t.Errorf("concurrent scrubTextPatterns() = %q, want %q", elideText(got), elideText(tc.want))
 							return
 						}
-						if b, _, err := SmartTruncate(errors.New(tc.in), 4096); err != nil || (tc.secret != "" && strings.Contains(string(b), tc.secret)) {
+						if b, _, err := SmartTruncate(tc.in, 4096); err != nil || (tc.secret != "" && strings.Contains(string(b), tc.secret)) {
 							t.Errorf("concurrent SmartTruncate() = (%s, %v)", elideText(string(b)), err)
 							return
 						}
@@ -5342,4 +5361,48 @@ func TestRound23ReviewRegressions(t *testing.T) {
 			})
 		}
 	})
+}
+
+// TestShellScannerNoCloseMemoLimits checks that closedQuoteLen and
+// closedEscapedQuoteLen give, for each query in turn on one scanner, the
+// answer that a fresh scanner gives. A record of no closing quote that a scan
+// under a narrow limit made must not be used under a wider limit, under which
+// the closing quote can be in reach: whether that scan ended at the limit, or
+// at an escape or a line splice that the limit cut, or the query is for a
+// later opening quote that the record covers. Records that a line break or a
+// quote ended, and queries under narrower limits, find no close either way.
+func TestShellScannerNoCloseMemoLimits(t *testing.T) {
+	type query struct{ pos, limit int }
+	quoteLen := (*shellAssignScanner).closedQuoteLen
+	escapedQuoteLen := (*shellAssignScanner).closedEscapedQuoteLen
+	for _, tt := range []struct {
+		name    string
+		s       string
+		f       func(sc *shellAssignScanner, pos, limit int) int
+		queries []query
+	}{
+		{"single quote cut by a narrow limit", "'abc'", quoteLen, []query{{0, 3}, {0, 5}}},
+		{"double quote cut by a narrow limit", `"abc"`, quoteLen, []query{{0, 3}, {0, 5}}},
+		{"double quote with an escape that the limit cuts", `"a\"b"`, quoteLen, []query{{0, 3}, {0, 6}}},
+		{"double quote with a line splice that the limit cuts", "\"a\\\r\nb\"", quoteLen, []query{{0, 4}, {0, 7}}},
+		{"later double quote that a narrow record covers", `"a\"bc"`, quoteLen, []query{{0, 5}, {3, 7}}},
+		{"escaped single quote cut by a narrow limit", `\'abc\'`, escapedQuoteLen, []query{{0, 5}, {0, 7}}},
+		{"escaped double quote cut by a narrow limit", `\"abc\"`, escapedQuoteLen, []query{{0, 5}, {0, 7}}},
+		{"escaped quote with a line splice that the limit cuts", "\\'a\\\r\nb\\'", escapedQuoteLen, []query{{0, 5}, {0, 9}}},
+		{"single quote that a line break ends", "'ab\ncd'", quoteLen, []query{{0, 7}, {0, 2}, {0, 3}, {0, 7}}},
+		{"escaped quote that a quote ends", `\'ab"cd\'`, escapedQuoteLen, []query{{0, 9}, {0, 4}, {0, 9}}},
+		{"wide record, then a narrow query", "'abc'", quoteLen, []query{{0, 5}, {0, 3}, {0, 5}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var sc shellAssignScanner
+			sc.reset(tt.s)
+			for i, q := range tt.queries {
+				var fresh shellAssignScanner
+				fresh.reset(tt.s)
+				if got, want := tt.f(&sc, q.pos, q.limit), tt.f(&fresh, q.pos, q.limit); got != want {
+					t.Errorf("query %d (pos %d, limit %d) on %q = %d, want %d as from a fresh scanner", i, q.pos, q.limit, tt.s, got, want)
+				}
+			}
+		})
+	}
 }
