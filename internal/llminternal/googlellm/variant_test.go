@@ -99,6 +99,29 @@ func TestIsGeminiModel(t *testing.T) {
 	}
 }
 
+func TestIsGemini3xLive(t *testing.T) {
+	testCases := []struct {
+		model string
+		want  bool
+	}{
+		{"gemini-3.1-flash-live-preview", true},
+		{"gemini-3.8-live", true},
+		{"models/gemini-3.8-live", true},
+		{"projects/p/locations/l/models/gemini-3.1-flash-live-preview", true},
+		{"models/gemini-3.5-live-translate-preview", false},
+		{"gemini-3.5-live-translate", false},
+		{"gemini-3.1-pro-preview", false},
+		{"gemini-2.0-flash-live-001", false},
+	}
+
+	for _, tc := range testCases {
+		got := isGemini3xLive(tc.model)
+		if got != tc.want {
+			t.Errorf("isGemini3xLive(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
 func TestNeedsOutputSchemaProcessor(t *testing.T) {
 	testCases := []struct {
 		name    string

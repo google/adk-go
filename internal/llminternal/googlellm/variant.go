@@ -115,6 +115,17 @@ func NeedsOutputSchemaProcessor(llm model.LLM) bool {
 	return IsGeminiModel(llm.Name()) && !CanUseOutputSchemaWithTools(llm)
 }
 
+// isGemini3xLive returns true for Gemini 3.x Live models other than Live
+// Translate. Mirrors adk-python's _is_gemini_3_x_live.
+func isGemini3xLive(model string) bool {
+	name := extractModelName(model)
+	return strings.HasPrefix(name, "gemini-3.") && strings.Contains(name, "-live") && !isGemini35LiveTranslate(model)
+}
+
+func isGemini35LiveTranslate(model string) bool {
+	return strings.HasPrefix(extractModelName(model), "gemini-3.5-live-translate")
+}
+
 func extractModelName(model string) string {
 	modelstring := model[strings.LastIndex(model, "/")+1:]
 	return strings.ToLower(modelstring)
