@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"testing"
 	"time"
 
@@ -294,6 +295,25 @@ func TestCommandTransportReconnect(t *testing.T) {
 		if err := conn.Close(); err != nil {
 			t.Fatalf("Close #%d error = %v", i+1, err)
 		}
+	}
+}
+
+// TestCommandTransportSpecIsIndependent checks that the saved copy of the
+// command does not share slices with the caller's command, so editing the
+// caller's Args or Env later does not change what a reconnect starts.
+func TestCommandTransportSpecIsIndependent(t *testing.T) {
+	cmd := exec.Command("server", "--flag")
+	cmd.Env = []string{"A=1"}
+	ct := newCommandTransport(&mcp.CommandTransport{Command: cmd})
+
+	cmd.Args[1] = "--changed"
+	cmd.Env[0] = "A=changed"
+
+	if got, want := ct.spec.Args, []string{"server", "--flag"}; !slices.Equal(got, want) {
+		t.Errorf("spec.Args = %v, want %v", got, want)
+	}
+	if got, want := ct.spec.Env, []string{"A=1"}; !slices.Equal(got, want) {
+		t.Errorf("spec.Env = %v, want %v", got, want)
 	}
 }
 

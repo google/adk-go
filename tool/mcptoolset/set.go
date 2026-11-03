@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"slices"
 	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -164,12 +165,12 @@ func newCommandTransport(t *mcp.CommandTransport) *commandTransport {
 	// expose them.
 	return &commandTransport{first: *t, spec: exec.Cmd{
 		Path:        src.Path,
-		Args:        src.Args,
-		Env:         src.Env,
+		Args:        slices.Clone(src.Args),
+		Env:         slices.Clone(src.Env),
 		Dir:         src.Dir,
 		Stdin:       src.Stdin,
 		Stderr:      src.Stderr,
-		ExtraFiles:  src.ExtraFiles,
+		ExtraFiles:  slices.Clone(src.ExtraFiles),
 		SysProcAttr: src.SysProcAttr,
 		WaitDelay:   src.WaitDelay,
 		Err:         src.Err,
@@ -187,7 +188,12 @@ func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 		return t.first.Connect(ctx)
 	}
 	cmd := t.spec
-	return (&mcp.CommandTransport{Command: &cmd, TerminateDuration: t.first.TerminateDuration}).Connect(ctx)
+	// Copy the whole transport, so every setting on it (such as
+	// TerminateDuration) carries over, including ones added in later SDK
+	// versions. Only Command is replaced.
+	tr := t.first
+	tr.Command = &cmd
+	return tr.Connect(ctx)
 }
 
 // httpClient returns a shallow copy of base whose Transport adds the ADK
