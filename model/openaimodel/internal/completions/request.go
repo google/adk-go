@@ -265,10 +265,10 @@ const imageInputDetail = "auto"
 // Errors name the kind and the source and never the URI, which can be a
 // presigned URL.
 //
-// Unlike adk-python's Chat Completions converter, which sends every inline blob
-// as image_url and drops FileData with a non-HTTP URI, this converter uses the
-// declared media kind and rejects unsupported sources so files are not mislabeled
-// as images or silently lost.
+// adk-python's Chat Completions converter uses image_url for the inline blobs
+// it emits, regardless of MIME type, and drops FileData with non-HTTP URIs.
+// This converter uses the declared media kind and rejects unsupported sources
+// so files are not mislabeled as images or silently lost.
 func newMediaPart(m shared.Media) (openai.ChatCompletionContentPartUnionParam, error) {
 	switch m.Kind {
 	case shared.MediaKindImage:

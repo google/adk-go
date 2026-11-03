@@ -140,27 +140,45 @@ func TestBuildParams_ToolResponseBeforeMedia(t *testing.T) {
 			}
 			// All tool calls must be answered before another user message.
 			for i, role := range []string{"assistant", "tool", "user"} {
-				if msgs[i]["role"] != role {
-					t.Fatalf("message %d: expected role %s", i, role)
+				if got := msgs[i]["role"]; got != role {
+					t.Fatalf("message %d: role = %v, want %s", i, got, role)
 				}
 			}
-			if msgs[1]["tool_call_id"] != "c1" {
-				t.Error("tool response lost its call association")
+			if got := msgs[1]["tool_call_id"]; got != "c1" {
+				t.Errorf("tool_call_id = %v, want c1", got)
 			}
-			if msgs[1]["content"] != `{"ok":true}` {
-				t.Error("tool response content changed")
+			// Report payload sizes so failures do not echo tool results or media.
+			toolContent, ok := msgs[1]["content"].(string)
+			if !ok {
+				t.Fatalf("tool content type = %T, want string", msgs[1]["content"])
+			}
+			if want := `{"ok":true}`; toolContent != want {
+				t.Errorf("tool content differs from expected JSON: got %d bytes, want %d", len(toolContent), len(want))
 			}
 			content, ok := msgs[2]["content"].([]any)
-			if !ok || len(content) != 1 {
-				t.Fatal("expected one media content part")
+			if !ok {
+				t.Fatalf("media content type = %T, want []any", msgs[2]["content"])
+			}
+			if len(content) != 1 {
+				t.Fatalf("got %d media content parts, want 1", len(content))
 			}
 			part, ok := content[0].(map[string]any)
-			if !ok || part["type"] != "image_url" {
-				t.Fatal("expected an image content part")
+			if !ok {
+				t.Fatalf("media part type = %T, want map[string]any", content[0])
+			}
+			if got := part["type"]; got != "image_url" {
+				t.Fatalf("media part type = %v, want image_url", got)
 			}
 			imageURL, ok := part["image_url"].(map[string]any)
-			if !ok || imageURL["url"] != "data:image/png;base64,AQ==" {
-				t.Error("image content changed")
+			if !ok {
+				t.Fatalf("image_url type = %T, want map[string]any", part["image_url"])
+			}
+			url, ok := imageURL["url"].(string)
+			if !ok {
+				t.Fatalf("image URL type = %T, want string", imageURL["url"])
+			}
+			if want := "data:image/png;base64,AQ=="; url != want {
+				t.Errorf("image URL differs from expected data URL: got %d bytes, want %d", len(url), len(want))
 			}
 		})
 	}
@@ -182,10 +200,10 @@ func TestBuildParams_FunctionCallBeforeMediaRoleError(t *testing.T) {
 				req := &model.LLMRequest{Contents: []*genai.Content{{Role: role, Parts: tt.parts}}}
 				_, err := buildParams("m", req)
 				if err == nil {
-					t.Fatal("expected function call refusal")
+					t.Fatal("buildParams() err = nil, want function call refusal")
 				}
-				if !strings.Contains(err.Error(), "function call in a "+role+" turn") {
-					t.Errorf("expected function call refusal for %s before media role refusal", role)
+				if want := "function call in a " + role + " turn"; !strings.Contains(err.Error(), want) {
+					t.Errorf("buildParams() err = %q, want it to contain %q", err, want)
 				}
 			})
 		}
