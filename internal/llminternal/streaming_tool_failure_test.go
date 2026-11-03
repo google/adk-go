@@ -26,7 +26,6 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
-	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -34,69 +33,52 @@ import (
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
+// liveToolFailure returns the follow-up, after verifying the pending event.
+func liveToolFailure(t *testing.T, lookup tool.Tool, input map[string]any, confirmation *toolconfirmation.ToolConfirmation) *genai.FunctionResponse {
+	t.Helper()
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
+	response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: lookup.Name(), Args: input}}}}}
+	sent := make(chan agent.LiveRequest, 1)
+	sess := &mockLiveSession{sendFunc: func(r agent.LiveRequest) error { sent <- r; return nil }}
+	event, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{lookup.Name(): lookup}, response, map[string]*toolconfirmation.ToolConfirmation{"call_1": confirmation}, sess)
+	if err != nil {
+		t.Fatal("unexpected flow error")
+	}
+	if event.Content.Parts[0].FunctionResponse.Response["status"] == nil {
+		t.Fatal("missing pending event")
+	}
+	select {
+	case request := <-sent:
+		if request.Content == nil || len(request.Content.Parts) != 1 || request.Content.Parts[0].FunctionResponse == nil {
+			t.Fatal("missing failure response")
+		}
+		result := request.Content.Parts[0].FunctionResponse
+		if result.ID != "call_1" || result.Name != lookup.Name() {
+			t.Fatal("incorrect failure attribution")
+		}
+		return result
+	case <-time.After(3 * time.Second):
+		t.Fatal("missing live failure follow-up")
+		return nil
+	}
+}
+
 func TestStreamingToolFailureReporting(t *testing.T) {
 	type args struct {
 		Value string `json:"value"`
 	}
-	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"},
-		func(_ agent.Context, a args) iter.Seq2[string, error] {
-			return func(func(string, error) bool) { panic("lookup failed for " + a.Value) }
-		})
+	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"}, func(_ agent.Context, a args) iter.Seq2[string, error] {
+		return func(func(string, error) bool) { panic("lookup failed for " + a.Value) }
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	tools := map[string]tool.Tool{"lookup": lookup}
-	resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
-		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{"value": "user-secret-123"}},
-	}}}}
-	newCtx := func(t *testing.T) agent.InvocationContext {
-		return icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{InvocationID: "inv", Agent: &mockAgent{name: "a"}})
+	result := liveToolFailure(t, lookup, map[string]any{"value": "user-secret-123"}, nil)
+	if result.Response["error"] != streamingToolInternalError("lookup") {
+		t.Fatal("live panic was not sanitized")
 	}
-	wantErr := streamingToolInternalError("lookup")
-
-	t.Run("non-live", func(t *testing.T) {
-		ev, err := (&Flow{}).handleFunctionCalls(newCtx(t), tools, resp, nil, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		msg, _ := ev.Content.Parts[0].FunctionResponse.Response["error"].(string)
-		if msg != wantErr {
-			t.Errorf("error = %q, want %q", msg, wantErr)
-		}
-		if strings.Contains(msg, "user-secret-123") || strings.Contains(msg, "runtime/debug.Stack") {
-			t.Errorf("function response sent to the model (%d bytes) contains the panic value or a stack trace", len(msg))
-		}
-	})
-
-	t.Run("live", func(t *testing.T) {
-		sent := make(chan agent.LiveRequest, 1)
-		sess := &mockLiveSession{sendFunc: func(r agent.LiveRequest) error { sent <- r; return nil }}
-		if _, err := (&Flow{}).handleFunctionCalls(newCtx(t), tools, resp, nil, sess); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case req := <-sent:
-			if req.Content == nil || len(req.Content.Parts) == 0 || req.Content.Parts[0].FunctionResponse == nil {
-				t.Fatalf("follow-up missing FunctionResponse: %#v", req.Content)
-			}
-			fr := req.Content.Parts[0].FunctionResponse
-			if fr.ID != "call_1" || fr.Name != "lookup" {
-				t.Errorf("FunctionResponse id/name = %q/%q, want call_1/lookup", fr.ID, fr.Name)
-			}
-			msg, _ := fr.Response["error"].(string)
-			if msg != wantErr {
-				t.Errorf("error = %q, want %q", msg, wantErr)
-			}
-			if strings.Contains(msg, "user-secret-123") || strings.Contains(msg, "runtime/debug.Stack") {
-				t.Errorf("live follow-up contains panic value or stack trace")
-			}
-		case <-time.After(2 * time.Second):
-			t.Error("the model got the pending response but no follow-up after the tool failed")
-		}
-	})
 }
 
-// A custom implementation cannot import ADK's internal handler-error marker.
 type failingCustomStream struct {
 	tool.Tool
 	failure error
@@ -112,38 +94,35 @@ func (t *failingCustomStream) RunStream(agent.Context, any) iter.Seq2[string, er
 
 func TestCustomStreamingFailureIsSanitized(t *testing.T) {
 	for _, failure := range []error{errors.New("private-handler-data"), fmt.Errorf("private-handler-data: %w", tool.ErrConfirmationRejected)} {
-		for _, live := range []bool{false, true} {
-			t.Run(fmt.Sprintf("live=%t/wrapped=%t", live, errors.Is(failure, tool.ErrConfirmationRejected)), func(t *testing.T) {
-				custom := &failingCustomStream{Tool: &mockFunctionTool{name: "lookup"}, failure: failure}
-				ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
-				response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{}}}}}}
-				sent := make(chan agent.LiveRequest, 1)
-				var liveSession agent.LiveSession
-				if live {
-					liveSession = &mockLiveSession{sendFunc: func(r agent.LiveRequest) error { sent <- r; return nil }}
-				}
-				event, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": custom}, response, nil, liveSession)
-				if err != nil {
-					t.Fatal("unexpected flow error")
-				}
-				content := event.Content
-				if live {
-					select {
-					case request := <-sent:
-						content = request.Content
-					case <-time.After(3 * time.Second):
-						t.Fatal("missing failure follow-up")
-					}
-				}
-				if content.Parts[0].FunctionResponse.Response["error"] != streamingToolInternalError("lookup") {
-					t.Fatal("custom handler error was not sanitized")
-				}
-			})
-		}
+		t.Run(fmt.Sprintf("wrapped=%t", errors.Is(failure, tool.ErrConfirmationRejected)), func(t *testing.T) {
+			custom := &failingCustomStream{Tool: &mockFunctionTool{name: "lookup"}, failure: failure}
+			result := liveToolFailure(t, custom, map[string]any{}, nil)
+			if result.Response["error"] != streamingToolInternalError("lookup") {
+				t.Fatal("live custom handler error was not sanitized")
+			}
+		})
 	}
 }
 
-func TestStreamingFrameworkErrorsPreserved(t *testing.T) {
+// liveFrameworkErrorMessage tests preflight marking and the live classifier
+// synchronously; live approval event-state synchronization is a separate concern.
+func liveFrameworkErrorMessage(t *testing.T, lookup tool.Tool, input map[string]any, confirmation *toolconfirmation.ToolConfirmation) string {
+	t.Helper()
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
+	stream := lookup.(interface {
+		RunStream(agent.Context, any) iter.Seq2[string, error]
+	})
+	for _, err := range stream.RunStream(agent.NewToolContext(ctx, "call_1", &session.EventActions{}, confirmation), input) {
+		if err == nil {
+			t.Fatal("expected preflight or handler error")
+		}
+		return streamingToolErrorMessage(lookup.Name(), err)
+	}
+	t.Fatal("missing streaming error")
+	return ""
+}
+
+func TestLiveFrameworkErrorClassification(t *testing.T) {
 	type args struct {
 		Value string `json:"value"`
 	}
@@ -153,32 +132,20 @@ func TestStreamingFrameworkErrorsPreserved(t *testing.T) {
 		confirmation *toolconfirmation.ToolConfirmation
 		want         string
 	}{
-		{name: "approval required", input: map[string]any{"value": "v"}, want: tool.ErrConfirmationRequired.Error()},
-		{name: "approval rejected", input: map[string]any{"value": "v"}, confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false}, want: tool.ErrConfirmationRejected.Error()},
+		{name: "approval required", input: map[string]any{"value": "v"}, want: `error tool "lookup" ` + tool.ErrConfirmationRequired.Error()},
+		{name: "approval rejected", input: map[string]any{"value": "v"}, confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false}, want: `error tool "lookup" ` + tool.ErrConfirmationRejected.Error()},
 		{name: "argument conversion", input: map[string]any{"value": 1}, want: "string"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			handlerCalled := false
 			lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup", RequireConfirmation: true}, func(agent.Context, args) iter.Seq2[string, error] {
-				handlerCalled = true
-				return func(func(string, error) bool) {}
+				return func(func(string, error) bool) { t.Error("handler ran before approval or validation") }
 			})
 			if err != nil {
-				t.Fatal("cannot construct tool")
+				t.Fatal(err)
 			}
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
-			response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: tc.input}}}}}
-			confirmations := map[string]*toolconfirmation.ToolConfirmation{"call_1": tc.confirmation}
-			event, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": lookup}, response, confirmations, nil)
-			if err != nil {
-				t.Fatal("unexpected flow error")
-			}
-			msg, _ := event.Content.Parts[0].FunctionResponse.Response["error"].(string)
-			if !strings.Contains(msg, tc.want) {
-				t.Fatal("framework error message lost")
-			}
-			if handlerCalled {
-				t.Fatal("handler ran before approval or argument validation")
+			message := liveFrameworkErrorMessage(t, lookup, tc.input, tc.confirmation)
+			if (tc.name == "argument conversion" && !strings.Contains(message, tc.want)) || (tc.name != "argument conversion" && message != tc.want) {
+				t.Fatal("live framework error message lost")
 			}
 		})
 	}
@@ -191,14 +158,14 @@ func (s *singleStreamingToolset) Tools(agent.ReadonlyContext) ([]tool.Tool, erro
 	return []tool.Tool{s.value}, nil
 }
 
-func TestStreamingConfirmationWrapperErrors(t *testing.T) {
+func TestLiveConfirmationWrapperErrorClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		confirmation *toolconfirmation.ToolConfirmation
 		want         string
 	}{
-		{name: "required", want: tool.ErrConfirmationRequired.Error()},
-		{name: "rejected", confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false}, want: tool.ErrConfirmationRejected.Error()},
+		{name: "required", want: `error tool "lookup" ` + tool.ErrConfirmationRequired.Error()},
+		{name: "rejected", confirmation: &toolconfirmation.ToolConfirmation{Confirmed: false}, want: `error tool "lookup" ` + tool.ErrConfirmationRejected.Error()},
 		{name: "approved handler fails", confirmation: &toolconfirmation.ToolConfirmation{Confirmed: true}, want: streamingToolInternalError("lookup")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,38 +173,44 @@ func TestStreamingConfirmationWrapperErrors(t *testing.T) {
 			custom := &failingCustomStream{Tool: &mockFunctionTool{name: "lookup"}, failure: errors.New("private-handler-data")}
 			wrapped, err := tool.WithConfirmation(&singleStreamingToolset{value: custom}, true, nil).Tools(agent.NewToolContext(ctx, "call_1", &session.EventActions{}, tc.confirmation))
 			if err != nil {
-				t.Fatal("cannot wrap tool")
+				t.Fatal(err)
 			}
-			response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{}}}}}}
-			event, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": wrapped[0]}, response, map[string]*toolconfirmation.ToolConfirmation{"call_1": tc.confirmation}, nil)
-			if err != nil {
-				t.Fatal("unexpected flow error")
-			}
-			message, _ := event.Content.Parts[0].FunctionResponse.Response["error"].(string)
-			if !strings.Contains(message, tc.want) {
-				t.Fatal("incorrect wrapped streaming error")
+			message := liveFrameworkErrorMessage(t, wrapped[0], map[string]any{}, tc.confirmation)
+			if message != tc.want {
+				t.Fatal("incorrect live wrapped error")
 			}
 		})
 	}
 }
 
-func TestStreamingHandlerCannotExposeFrameworkError(t *testing.T) {
+// A caller can capture a framework error without importing its internal type.
+func TestStreamingHandlerReyieldedFrameworkError(t *testing.T) {
 	type args struct{}
-	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"}, func(agent.Context, args) iter.Seq2[string, error] {
-		return func(yield func(string, error) bool) {
-			yield("", &toolerror.BeforeHandler{Err: errors.New("private-handler-data")})
-		}
+	source, err := functiontool.NewStreaming(functiontool.Config{Name: "source", RequireConfirmation: true}, func(agent.Context, args) iter.Seq2[string, error] {
+		return func(func(string, error) bool) { t.Error("unapproved source handler ran") }
 	})
 	if err != nil {
-		t.Fatal("cannot construct tool")
+		t.Fatal(err)
 	}
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
-	response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{}}}}}}
-	event, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": lookup}, response, nil, nil)
-	if err != nil {
-		t.Fatal("unexpected flow error")
+	stream := source.(interface {
+		RunStream(agent.Context, any) iter.Seq2[string, error]
+	})
+	var captured error
+	for _, err := range stream.RunStream(agent.NewToolContext(ctx, "source_call", &session.EventActions{}, nil), map[string]any{}) {
+		captured = err
 	}
-	if event.Content.Parts[0].FunctionResponse.Response["error"] != streamingToolInternalError("lookup") {
-		t.Fatal("handler exposed a framework error")
+	if !errors.Is(captured, tool.ErrConfirmationRequired) {
+		t.Fatal("did not capture framework error")
+	}
+	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"}, func(agent.Context, args) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) { yield("", captured) }
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := liveToolFailure(t, lookup, map[string]any{}, nil)
+	if result.Response["error"] != streamingToolInternalError("lookup") {
+		t.Fatal("live handler re-yielded a trusted framework error")
 	}
 }

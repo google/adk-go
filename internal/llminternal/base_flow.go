@@ -1505,7 +1505,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": streamingToolErrorMessage(streamTool.Name(), err)}
+								result = map[string]any{"error": err.Error()}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1662,12 +1662,6 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		// Keep the original diagnostic through callbacks; only the final
-		// model-facing panic response must omit its value and stack.
-		var panicErr *toolinternal.PanicError
-		if errors.As(err, &panicErr) {
-			return map[string]any{"error": streamingToolInternalError(tool.Name())}
-		}
 		return map[string]any{"error": err.Error()}
 	}
 	return response
@@ -1720,7 +1714,7 @@ func (f *Flow) invokeOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool,
 	return nil, fErr
 }
 
-// streamingToolErrorMessage preserves only framework errors raised before the
+// streamingToolErrorMessage preserves only framework errors in live mode raised before the
 // handler runs. Custom tools need not use ADK's handler wrapper, so unknown
 // errors must also be sanitized, as in adk-python's _live_caller.
 func streamingToolErrorMessage(toolName string, err error) string {

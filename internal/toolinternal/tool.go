@@ -63,7 +63,7 @@ type SkipSummarizationResultDisplayer interface {
 
 // HandlerError marks an error that came from a streaming tool's handler,
 // including a recovered panic. Its text can carry handler output, argument
-// values or a stack, so the flow replaces it with a generic message before it
+// values or a stack, so the live flow replaces it with a generic message before it
 // reaches the model. Errors raised before the handler runs use the separate
 // toolerror.BeforeHandler marker and keep their own message.
 type HandlerError struct {
@@ -73,11 +73,3 @@ type HandlerError struct {
 func (e *HandlerError) Error() string { return e.Err.Error() }
 
 func (e *HandlerError) Unwrap() error { return e.Err }
-
-// PanicError retains a recovered non-streaming tool panic for callbacks. The
-// flow sanitizes it only when constructing the final model-facing response.
-type PanicError struct {
-	Message string
-}
-
-func (e *PanicError) Error() string { return e.Message }

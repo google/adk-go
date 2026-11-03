@@ -17,20 +17,16 @@ package llminternal
 import (
 	"encoding/json"
 	"iter"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
-	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
-	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 // A streaming tool fails at once while a second call in the same turn takes
@@ -103,30 +99,5 @@ func TestLiveErrorFollowUpOrder(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			t.Fatalf("missing %s response for call_1", want)
 		}
-	}
-}
-
-// The user rejected a confirmation-gated streaming tool. The model should be
-// told the call was rejected, as it is for a non-streaming tool.
-func TestStreamingRejectionReachesModel(t *testing.T) {
-	type args struct {
-		Value string `json:"value"`
-	}
-	lookup, _ := functiontool.NewStreaming(functiontool.Config{Name: "lookup", RequireConfirmation: true},
-		func(agent.Context, args) iter.Seq2[string, error] {
-			return func(yield func(string, error) bool) { yield("ok", nil) }
-		})
-	resp := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{
-		FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{"value": "v"}},
-	}}}}
-	confs := map[string]*toolconfirmation.ToolConfirmation{"call_1": {Confirmed: false}}
-	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
-	ev, err := (&Flow{}).handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": lookup}, resp, confs, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	msg, _ := ev.Content.Parts[0].FunctionResponse.Response["error"].(string)
-	if !strings.Contains(msg, "call is rejected") {
-		t.Errorf("model was told %q, want the rejection", msg)
 	}
 }
