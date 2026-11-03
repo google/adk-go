@@ -52,6 +52,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -328,17 +329,14 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	requestsChan := make(chan *storagepb.AppendRowsRequest, 100)
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requestsChan})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to dial test server: %v", err)
 	}
@@ -575,16 +573,13 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to dial test server: %v", err)
 	}
@@ -2324,15 +2319,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bq.NewClient: %v", err)
 			}
-			lis, err := net.Listen("tcp", "localhost:0")
-			if err != nil {
-				t.Fatalf("listen: %v", err)
-			}
+			lis := bufconn.Listen(1 << 20)
 			gSrv := grpc.NewServer()
 			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 			go func() { _ = gSrv.Serve(lis) }()
 			t.Cleanup(gSrv.Stop)
-			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatalf("dial: %v", err)
 			}
@@ -2547,15 +2539,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 // client was closed.
 func newTestWriteClient(t *testing.T) (*grpc.ClientConn, *bqstorage.BigQueryWriteClient) {
 	t.Helper()
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -2685,16 +2674,13 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bq.NewClient: %v", err)
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	requests := make(chan *storagepb.AppendRowsRequest, 10)
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -4481,16 +4467,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 
 	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
 		t.Helper()
-		lis, err := net.Listen("tcp", "localhost:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
+		lis := bufconn.Listen(1 << 20)
 		gSrv := grpc.NewServer()
 		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 		go func() { _ = gSrv.Serve(lis) }()
 		t.Cleanup(gSrv.Stop)
 
-		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -4628,16 +4611,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 	srv := &committedStreamTestServer{
 		createdStreamName: "projects/test-project/datasets/test_dataset/tables/test-table/streams/committed-http-1",
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -4903,17 +4883,14 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 			}
 			defer func() { _ = bqClient.Close() }()
 
-			lis, err := net.Listen("tcp", "localhost:0")
-			if err != nil {
-				t.Fatalf("failed to listen: %v", err)
-			}
+			lis := bufconn.Listen(1 << 20)
 			defer func() { _ = lis.Close() }()
 			gSrv := grpc.NewServer()
 			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)})
 			go func() { _ = gSrv.Serve(lis) }()
 			defer gSrv.Stop()
 
-			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatalf("failed to dial: %v", err)
 			}
@@ -5093,14 +5070,11 @@ func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.Round
 	if err != nil {
 		t.Fatalf("bq.NewClient: %v", err)
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 	go func() { _ = gSrv.Serve(lis) }()
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -5268,16 +5242,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 
 	newMockGRPCWriteConn := func(t *testing.T) *grpc.ClientConn {
 		t.Helper()
-		lis, err := net.Listen("tcp", "localhost:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
+		lis := bufconn.Listen(1 << 20)
 		gSrv := grpc.NewServer()
 		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 		go func() { _ = gSrv.Serve(lis) }()
 		t.Cleanup(gSrv.Stop)
 
-		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}

@@ -5318,6 +5318,63 @@ func TestRound23ReviewRegressions(t *testing.T) {
 		}
 	})
 
+	t.Run("gate2 p1-1 multi-pass idempotency on nested outer+inner quotes", func(t *testing.T) {
+		const secret = "synthcanary"
+		// Verify the secret is redacted in multiline quoted header scenarios.
+		for _, in := range []string{
+			"curl -H 'Authorization: Bearer secret'\necho 'hello\nworld'",
+			"curl -H \"Authorization: 'Bearer secret'\n\tsynthcanary'\"\necho KEEP",
+		} {
+			checkNoLeak(t, in, secret)
+		}
+	})
+
+	t.Run("gate2 p1-2 trailing backslash in placeholderQuoteCloses", func(t *testing.T) {
+		const secret = "synthcanary"
+		// The auth-header redaction paths must not leak the secret when a
+		// backslash precedes the closing quote on a continuation line.
+		in := "curl -H 'Authorization: [REDACTED]\n\tsynthcanary\\'\necho KEEP"
+		// redactAuthHeaders and sanitizeRawText handle the header-aware path.
+		if got := redactAuthHeaders(in); strings.Contains(got, secret) {
+			t.Errorf("redactAuthHeaders leaked secret: %q", got)
+		}
+		if got, _ := sanitizeRawText(in); strings.Contains(got, secret) {
+			t.Errorf("sanitizeRawText leaked secret: %q", got)
+		}
+		if b, _, err := SmartTruncate(in, 4096); err != nil || strings.Contains(string(b), secret) {
+			t.Errorf("SmartTruncate leaked secret: %s", elideText(string(b)))
+		}
+		if got := redactErrorMessage(in); strings.Contains(got, secret) {
+			t.Errorf("redactErrorMessage leaked secret: %q", got)
+		}
+	})
+
+	t.Run("gate2 p1-3 CRLF line continuation in shell assignment", func(t *testing.T) {
+		const secret = "synthcanary"
+		for _, tc := range []struct {
+			name string
+			in   string
+		}{
+			{
+				"DB_PASSWORD with CRLF continuation",
+				"DB_PASSWORD=foo\\\r\npassword:users' synthcanary's changed",
+			},
+			{
+				"DB_PASSWORD with CRLF continuation and auth header",
+				"DB_PASSWORD=foo\\\r\nbar'\r\nAuthorization: Bearer x\r\n\tsynthcanary'\r\necho KEEP",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				checkNoLeak(t, tc.in, secret)
+				// Verify idempotency.
+				got := scrubTextPatterns(tc.in)
+				if got != scrubTextPatterns(got) {
+					t.Errorf("scrubTextPatterns not idempotent: scrub(scrub(%q)) = %q, scrub(%q) = %q", tc.in, scrubTextPatterns(got), tc.in, got)
+				}
+			})
+		}
+	})
+
 	t.Run("linear scaling", func(t *testing.T) {
 		scrub := func(in string) { _ = scrubTextPatterns(in) }
 		for _, tt := range []struct {

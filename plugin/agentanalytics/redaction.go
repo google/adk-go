@@ -2310,8 +2310,10 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 	}
 	switch {
 	case outer == `'` && inner == "":
-		cp := h.closes[0].closePos
-		return !h.closes[0].rejects && (cp < 2 || h.s[cp-2] != '\\')
+		// In shell single-quote semantics a backslash is a literal byte, so
+		// a single quote always closes the string regardless of preceding
+		// backslashes. The rejects flag already captures line-level checks.
+		return !h.closes[0].rejects
 	case outer == `"`:
 		return !h.closes[1].rejects
 	case outer == "" && inner == `\'`:
@@ -2612,7 +2614,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				k++
 				continue
 			}
-			m := quotedValueRe.FindString(s[k:])
+			m := findQuotedValue(s[k:])
 			if m != "" && k+len(m) > end && q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) && crossesHeaderLine(s, end, k+len(m)) {
 				rest := s[k+len(m):]
 				if nl := strings.IndexAny(rest, "\r\n"); nl >= 0 {
@@ -2736,7 +2738,7 @@ func nestedQuotedValueEnd(s string, from, k, end int, outer, inner string) (int,
 	if q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) {
 		return 0, 0
 	}
-	m := quotedValueRe.FindString(s[k:])
+	m := findQuotedValue(s[k:])
 	if m == "" || k+len(m) <= end {
 		return 0, 0
 	}
@@ -2847,7 +2849,7 @@ func (f *keyValFinder) find(rest string) []int {
 		return cutQuotedPairAt(rest, qLoc)
 	}
 	if rest != "" && (isTextKeyByte(rest[0]) || rest[0] >= utf8.RuneSelf) {
-		if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && textValueStartRe.MatchString(rest[loc[1]:]) {
+		if loc := textKeyNameAtRe.FindStringSubmatchIndex(rest); loc != nil && hasTextValueStart(rest[loc[1]:]) {
 			return cutPairAtIf(textKeyAllowedAt(f.whole, pos+loc[2], pos+loc[3]), rest, loc, 0, textKeyValTokenAtRe)
 		}
 	}
@@ -3032,7 +3034,7 @@ func quotedKeyScanAt(s string, i int, quote string) ([]int, int) {
 	}
 	qEnd := closeQ + len(quote)
 	delim := skipDelimSpace(s, qEnd)
-	if delim >= len(s) || (s[delim] != ':' && s[delim] != '=') || !textValueStartRe.MatchString(s[delim+1:]) {
+	if delim >= len(s) || (s[delim] != ':' && s[delim] != '=') || !hasTextValueStart(s[delim+1:]) {
 		return nil, nextPos
 	}
 	return []int{keyStart, delim + 1, keyStart, closeQ, closeQ, qEnd, delim, delim + 1}, nextPos
@@ -3126,7 +3128,7 @@ func nextQuotedKeyName(s string, pos int) ([]int, int) {
 			qEnd := closeQ + len(quote)
 			delim := skipDelimSpace(s, qEnd)
 			if delim < len(s) && (s[delim] == ':' || s[delim] == '=') &&
-				quotedKeyAllowed(s[keyStart:closeQ]) && textValueStartRe.MatchString(s[delim+1:]) {
+				quotedKeyAllowed(s[keyStart:closeQ]) && hasTextValueStart(s[delim+1:]) {
 				return []int{keyStart, delim + 1, keyStart, closeQ, closeQ, qEnd, delim, delim + 1}, i
 			}
 		}
@@ -3157,7 +3159,7 @@ func nextKeyName(s string, pos int) []int {
 				loc[i] = v + pos
 			}
 		}
-		if textValueStartRe.MatchString(s[loc[1]:]) {
+		if hasTextValueStart(s[loc[1]:]) {
 			return loc
 		}
 		if len(s[loc[2]:loc[3]]) >= len(session.KeyPrefixTemp) &&
@@ -3291,7 +3293,7 @@ func camelScanStart(s string, t, e int) int {
 // textKeyNameCamelAtRe matches at s[i:], if a value follows them, or nil.
 func keyNameAt(s string, i int) []int {
 	loc := textKeyNameCamelAtRe.FindStringSubmatchIndex(s[i:])
-	if loc == nil || !textValueStartRe.MatchString(s[i+loc[1]:]) {
+	if loc == nil || !hasTextValueStart(s[i+loc[1]:]) {
 		return nil
 	}
 	for j, v := range loc {
@@ -3718,7 +3720,7 @@ func startsPairAfterBrackets(s string, i int, quoted quoteKinds) bool {
 		return false
 	}
 	loc := textKeyNameAtRe.FindStringSubmatchIndex(rest)
-	if loc == nil || !textValueStartRe.MatchString(rest[loc[1]:]) {
+	if loc == nil || !hasTextValueStart(rest[loc[1]:]) {
 		return false
 	}
 	return cutPairAtIf(textKeyAllowedAt(s, k+loc[2], k+loc[3]), rest, loc, 0, textKeyValTokenAtRe)[8] >= 0
@@ -4335,7 +4337,7 @@ func delimitedValueEnd(s string, i int, quoted quoteKinds) (int, bool) {
 	if quote == "" || closesString(s, at, quote, quoted) {
 		return -1, false
 	}
-	q := quotedValueRe.FindString(s[at:])
+	q := findQuotedValue(s[at:])
 	if q == "" {
 		if unclosedQuoteOpens(s, at, quote, true, quoted) {
 			return len(s), false
@@ -4540,7 +4542,7 @@ func spacedValueEnd(s string, end, open int, quoted quoteKinds) int {
 		if closesString(s, at, quote, quoted) {
 			return end
 		}
-		if q := quotedValueRe.FindString(s[at:]); q != "" {
+		if q := findQuotedValue(s[at:]); q != "" {
 			if !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(s, at+len(q), quoted) {
 				return runOnValueEnd(s, at, at+len(q), open, quoted)
 			}
@@ -4611,7 +4613,7 @@ func openedValueEnd(s string, start, end, open int, trailingQuoteOpens bool, quo
 			if checkClose && at+len(quote) >= end && closesString(s, at, quote, quoted) {
 				return end
 			}
-			q := quotedValueRe.FindString(s[at:])
+			q := findQuotedValue(s[at:])
 			if q == "" {
 				if n := contractionLen(s[at+len(quote):]); n > 0 && at == i+1 && s[i] == ':' && quote == "'" {
 					cEnd := at + len(quote) + n
@@ -4824,7 +4826,7 @@ func multilineContractionOpensPair(s string, i int, q string, quoted quoteKinds)
 		!opensLaterPairAfterSpace(line, s[closing+quoteLen:]) {
 		return false
 	}
-	nextQ := quotedValueRe.FindString(s[closing:])
+	nextQ := findQuotedValue(s[closing:])
 	if nextQ == "" || strings.ContainsAny(nextQ, "\r\n") || !quotedValueEnds(s[closing:], len(nextQ), quoted) {
 		return false
 	}
@@ -4873,7 +4875,7 @@ func hasUnpairedQuoteOnLine(line, quote string) bool {
 			case quote == "'" && q == `\'`:
 				return true
 			case q != "" && len(q) == len(quote):
-				m := quotedValueRe.FindString(line[k:])
+				m := findQuotedValue(line[k:])
 				if m == "" {
 					return true
 				}
@@ -4950,7 +4952,7 @@ const maxShellLineScan = 4096
 // than maxShellLineScan bytes after the shell's part, or that runs past its
 // line.
 func findQuotedOrShellSegment(s string, i int) string {
-	m := quotedValueRe.FindString(s[i:])
+	m := findQuotedValue(s[i:])
 	seg := shellQuotedSegment(s, i)
 	switch {
 	case m == "":
@@ -5000,7 +5002,7 @@ func opensQuotedPair(s string, closing, quoteLen int, inner string) bool {
 	if inner == "" || !isDelimSpace(last) || !allowedKeyAt(s, closing+quoteLen) {
 		return false
 	}
-	m := quotedValueRe.FindString(s[closing:])
+	m := findQuotedValue(s[closing:])
 	return m != "" && !strings.ContainsAny(m, "\r\n")
 }
 
@@ -5056,7 +5058,7 @@ func opensNestedValue(s string, i int, q string, quoted quoteKinds) bool {
 	if after := i + len(q); after == len(s) || skipDelimSpace(s, after) == after {
 		return false
 	}
-	m := quotedValueRe.FindString(s[i:])
+	m := findQuotedValue(s[i:])
 	inner, quote := unquoteValue(m)
 	if quote != q || !holdsValue(inner) || endsInSensitiveKeyDelimiter(inner) {
 		return false
@@ -5380,7 +5382,7 @@ func allowedKeyAt(s string, i int) bool {
 		return quotedKeyAllowed(s[i+qLoc[2] : i+qLoc[3]])
 	}
 	loc := textKeyNameAtRe.FindStringSubmatchIndex(s[i:])
-	return loc != nil && textKeyAllowedAt(s, i+loc[2], i+loc[3]) && textValueStartRe.MatchString(s[i+loc[1]:])
+	return loc != nil && textKeyAllowedAt(s, i+loc[2], i+loc[3]) && hasTextValueStart(s[i+loc[1]:])
 }
 
 // cutStatePrefix returns name without a "user:" or "app:" state prefix, as
@@ -5623,6 +5625,61 @@ func skipHorizDelimSpace(s string, i int) int {
 	return i
 }
 
+// hasTextValueStart reports whether s, the text after a key-value delimiter,
+// starts with a non-whitespace, non-delimiter byte, as textValueStartRe does.
+// It reads at most a few bytes rather than compiling a regex match.
+func hasTextValueStart(s string) bool {
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			if c > ' ' && c != '\x7f' && c != ',' && c != ';' && c != '&' {
+				return true
+			}
+			if c == '\n' || c == '\r' {
+				return false
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if !unicode.IsSpace(r) && r != ',' && r != ';' && r != '&' {
+			return true
+		}
+		if r == '\u0085' || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
+			return false
+		}
+		i += size
+	}
+	return false
+}
+
+// findQuotedValue returns the quoted-value match that quotedValueRe.FindString
+// returns for s, but without the regex overhead when the quote at s[0] is a
+// plain single or double quote whose body holds no backslash escape: the scan
+// walks to the matching close in one pass. When s starts with a backslash-
+// escaped quote (\" or \') or the body contains a backslash, it falls back to
+// quotedValueRe so the escape grammar stays in one place.
+func findQuotedValue(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	q := s[0]
+	if q != '\'' && q != '"' {
+		return quotedValueRe.FindString(s)
+	}
+	for j := 1; j < len(s); j++ {
+		c := s[j]
+		if c == '\\' {
+			return quotedValueRe.FindString(s)
+		}
+		if c == q {
+			return s[:j+1]
+		}
+	}
+	return s
+}
+
 // holdsValue reports whether v contains a rune other than delimiter whitespace
 // and closingPunctuation.
 func holdsValue(v string) bool {
@@ -5663,7 +5720,7 @@ func valueStartsAt(s string, i int, mayClose bool, quoted quoteKinds) bool {
 		if mayClose && closesString(s, at, quote, quoted) {
 			return false
 		}
-		q := quotedValueRe.FindString(s[at:])
+		q := findQuotedValue(s[at:])
 		if q != "" {
 			inner, _ := unquoteValue(q)
 			if holdsValue(inner) {
@@ -6134,7 +6191,7 @@ func opensLaterConstruct(s string, at, qLen, quoteLen int, inner string, quoted 
 	closing := at + qLen - quoteLen
 	if at > 0 && s[at-1] == ':' && quoteLen == 1 && s[at] == '\'' {
 		if n := contractionLen(inner); n > 0 && opensLaterPairAfterSpace(inner[n:], after) && endsInSensitiveKeyDelimiter(inner) {
-			if nextQ := quotedValueRe.FindString(s[closing:]); nextQ != "" && !strings.ContainsAny(nextQ, "\r\n") && quotedValueEnds(s[closing:], len(nextQ), quoted) {
+			if nextQ := findQuotedValue(s[closing:]); nextQ != "" && !strings.ContainsAny(nextQ, "\r\n") && quotedValueEnds(s[closing:], len(nextQ), quoted) {
 				return true
 			}
 		}
@@ -7017,7 +7074,7 @@ func closingQuoteJoins(s string, i int, q string, compound bool) bool {
 		return false
 	}
 	if last, _ := utf8.DecodeLastRuneInString(inner); isDelimSpace(last) {
-		m := quotedValueRe.FindString(s[closing:])
+		m := findQuotedValue(s[closing:])
 		return m == "" || strings.ContainsFunc(m, isDelimSpace) || strings.ContainsAny(m, "\r\n;,&|") || closing+len(m) >= len(s) || s[closing+len(m)] != '='
 	}
 	return true
@@ -7094,7 +7151,7 @@ func inShellAssignment(s string, i int) bool {
 		if c == '=' || c == '\'' || c == '"' || c == '\\' {
 			break
 		}
-		if isShellWordBreak(c) && (p == 0 || s[p-1] != '\\') {
+		if isShellWordBreak(c) && (p == 0 || s[p-1] != '\\') && !(c == '\n' && p >= 2 && s[p-1] == '\r' && s[p-2] == '\\') {
 			return false
 		}
 		p--
@@ -7107,27 +7164,39 @@ func inShellAssignment(s string, i int) bool {
 	return sc.at(i)
 }
 
-// shellScannerPool holds the scanners of inShellAssignment between calls. A
-// scrub asks about many quotes of one string, each in a call of its own, and
-// a scanner that a call gets back for the string that it last scanned goes on
-// from its cursors and quote records; scanning each line again from its start
-// for every quote would make the scrub quadratic in the length of a line. So
-// a scanner keeps its last string when it is put back, and the pool keeps
-// that string reachable until a call for another string resets the scanner,
-// or until the pool drops the scanner, which takes at most two garbage
-// collections. Keying the scanner on the address of the string's bytes
-// instead would need package unsafe, and would still have to keep the string
-// to stop its bytes from being reused for another one.
-var shellScannerPool = sync.Pool{
-	New: func() any { return &shellAssignScanner{} },
-}
+// shellScannerMu guards shellScannerCache, the ring of scanners that
+// inShellAssignment reuses between calls. A scrub asks about many quotes of
+// one string, each in a call of its own, and a scanner that a call gets back
+// for the string that it last scanned goes on from its cursors and quote
+// records; scanning each line again from its start for every quote would
+// make the scrub quadratic in the length of a line. A sync.Pool would serve,
+// but its Put drops roughly one in four items when the race detector is on,
+// which discards cached cursors and makes the scan quadratic under -race, so
+// a fixed-size ring under a mutex takes its place.
+var (
+	shellScannerMu    sync.Mutex
+	shellScannerCache  [8]*shellAssignScanner
+	shellScannerHand   int
+)
 
-// acquireShellScanner gets a scanner for s from the pool, reset unless it
+// acquireShellScanner gets a scanner for s from the ring, reset unless it
 // last scanned s. Comparing the strings returns at once when they differ in
 // length or share their bytes; only strings of the same length that differ
 // read their common prefix, once a call.
 func acquireShellScanner(s string) *shellAssignScanner {
-	sc := shellScannerPool.Get().(*shellAssignScanner)
+	shellScannerMu.Lock()
+	var sc *shellAssignScanner
+	for i := range shellScannerCache {
+		if shellScannerCache[i] != nil && shellScannerCache[i].s == s {
+			sc = shellScannerCache[i]
+			shellScannerCache[i] = nil
+			break
+		}
+	}
+	shellScannerMu.Unlock()
+	if sc == nil {
+		sc = &shellAssignScanner{}
+	}
 	if sc.s != s {
 		sc.reset(s)
 	}
@@ -7135,7 +7204,14 @@ func acquireShellScanner(s string) *shellAssignScanner {
 }
 
 func releaseShellScanner(sc *shellAssignScanner) {
-	shellScannerPool.Put(sc)
+	shellScannerMu.Lock()
+	old := shellScannerCache[shellScannerHand]
+	shellScannerCache[shellScannerHand] = sc
+	shellScannerHand = (shellScannerHand + 1) % len(shellScannerCache)
+	shellScannerMu.Unlock()
+	if old != nil {
+		old.reset("")
+	}
 }
 
 type shellQuoteMemo struct {
