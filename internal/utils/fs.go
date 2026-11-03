@@ -76,7 +76,8 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 	// On Windows IsLocal already refuses any ':' (a stream or a drive) and the
 	// leading separators of a UNC path. What it leaves to this block is the
 	// other characters a file name may not contain, and a trailing " " or "."
-	// on a component other than the last.
+	// on any component, the last included: IsLocal refuses that trailing dot
+	// or space only when the name is a reserved device name such as NUL or CON.
 	if runtime.GOOS == "windows" {
 		if strings.ContainsAny(rel, windowsForbiddenStandardChars) {
 			return "", "", fmt.Errorf("%w: rel path contains windows-specific invalid chars: %v", ErrNotValidRelativePath, windowsForbiddenStandardChars)
@@ -192,7 +193,14 @@ func followLinks(p string) (string, error) {
 		if follows > maxLinkFollows {
 			return "", fmt.Errorf("too many links in %q", p)
 		}
-		if !filepath.IsAbs(dest) {
+		switch {
+		case filepath.IsAbs(dest):
+		case dest != "" && os.IsPathSeparator(dest[0]):
+			// Windows only: a target such as \outside\x.yaml is rooted but has
+			// no drive, so IsAbs is false. The operating system reads it from the
+			// root of the drive the link sits on, not below the link's directory.
+			dest = filepath.VolumeName(cur) + dest
+		default:
 			dest = filepath.Join(cur, dest)
 		}
 		// Start over from the target, with what follows the link still to walk.
@@ -245,8 +253,9 @@ const (
 // straight past a ModeSymlink-only test.
 //
 // ModeIrregular is a broad term: it covers reparse tags that do not redirect
-// anywhere, such as cloud-provider placeholder files, and those are refused
-// along with the rest. It is not universal either — IO_REPARSE_TAG_AF_UNIX maps
+// anywhere, such as cloud-provider placeholder files. isLinkLike lets them
+// through to followLinks, which asks os.Readlink and, when it cannot read a
+// target, walks into the entry as an ordinary one. It is not universal either — IO_REPARSE_TAG_AF_UNIX maps
 // to ModeSocket and IO_REPARSE_TAG_DEDUP is reported as an ordinary file — but
 // neither of those redirects a read out of the directory, so neither matters
 // here.

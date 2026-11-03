@@ -18,6 +18,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -173,5 +175,41 @@ func TestSafeSubpath_FilesystemRoot(t *testing.T) {
 	}
 	if _, _, err := SafeSubpath(root, "../x"); !errors.Is(err, ErrNotValidRelativePath) {
 		t.Errorf("SafeSubpath(%q, ../x) = %v, want %v", root, err, ErrNotValidRelativePath)
+	}
+}
+
+// TestSafeSubpath_RootedLinkTargetWithoutDrive covers a Windows link whose
+// target starts with a separator but names no drive, such as \outside\x.yaml.
+// os.Readlink returns it unchanged and filepath.IsAbs is false for it, yet the
+// operating system reads it from the root of the link's own drive. Joining it
+// below the link's directory would judge one path while the load follows
+// another. Elsewhere such a target is simply absolute, so the test is
+// Windows-only.
+func TestSafeSubpath_RootedLinkTargetWithoutDrive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("a rooted target without a drive exists only on Windows")
+	}
+	base := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "x.yaml"), nil, 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	if filepath.VolumeName(base) != filepath.VolumeName(outside) {
+		t.Skip("base and outside are on different drives")
+	}
+	rooted := strings.TrimPrefix(outside, filepath.VolumeName(outside))
+	if filepath.IsAbs(rooted) {
+		t.Fatalf("%q is absolute; the case needs a target without a drive", rooted)
+	}
+	if err := os.Symlink(rooted, filepath.Join(base, "out")); err != nil {
+		t.Skipf("symlinks are not supported in this environment: %v", err)
+	}
+	for _, rel := range []string{"out/x.yaml", "out/missing.yaml"} {
+		if _, _, err := SafeSubpath(base, rel); !errors.Is(err, ErrSymlinkInRelativePath) {
+			t.Errorf("SafeSubpath(%q, %s) = %v, want %v", base, rel, err, ErrSymlinkInRelativePath)
+		}
 	}
 }
