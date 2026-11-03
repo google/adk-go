@@ -255,6 +255,15 @@ Body`,
 			},
 			wantInstruction: "Markdown Body",
 		},
+		{
+			name:  "null allowed-tools shadows allowed_tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools:\nallowed_tools: Write\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+			wantInstruction: "Markdown Body",
+		},
 	}
 
 	for _, testcase := range tests {
