@@ -264,6 +264,96 @@ Body`,
 			},
 			wantInstruction: "Markdown Body",
 		},
+		{
+			name:  "allowed-tools from a merge key",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read}\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from a merge key takes precedence over allowed_tools",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read}\nallowed_tools: Write\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from a merged anchor",
+			input: "---\nname: skill\ndescription: skill\nbase: &a {allowed-tools: Read}\n<<: *a\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed-tools from an alias key",
+			input: "---\nname: skill\ndescription: skill\nk: &k allowed-tools\n*k : Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "explicit allowed-tools overrides a merged one",
+			input: "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Write}\nallowed-tools: Read\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools integer is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: 42\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools mapping is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: {a: b}\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools sequence of mappings is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: [{name: x}]\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
+			name:  "allowed_tools unclosed parenthesis is ignored next to allowed-tools",
+			input: "---\nname: skill\ndescription: skill\nallowed-tools: Read\nallowed_tools: Bash(git:*\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:         "skill",
+				Description:  "skill",
+				AllowedTools: []string{"Read"},
+			},
+			wantInstruction: "Markdown Body",
+		},
 	}
 
 	for _, testcase := range tests {
@@ -344,7 +434,17 @@ func TestParse_InvalidFormat(t *testing.T) {
 		{
 			name:    "allowed_tools with unclosed opening parenthesis",
 			input:   "---\nname: skill\ndescription: skill\nallowed_tools: Bash(git:* Read\n---\n# Markdown\nBody",
-			wantErr: "unclosed '('",
+			wantErr: "allowed_tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unclosed '('",
+		},
+		{
+			name:    "allowed_tools integer",
+			input:   "---\nname: skill\ndescription: skill\nallowed_tools: 42\n---\n# Markdown\nBody",
+			wantErr: "allowed_tools must be a string or a sequence of strings",
+		},
+		{
+			name:    "allowed-tools from a merge key is validated",
+			input:   "---\nname: skill\ndescription: skill\n<<: {allowed-tools: Read)}\nallowed_tools: Write\n---\n# Markdown\nBody",
+			wantErr: "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): unexpected ')'",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",
