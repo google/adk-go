@@ -3982,7 +3982,7 @@ func TestRound15ShellAndTempKeyBoundaries(t *testing.T) {
 		{`echo 'Bearer abc'x' 9'; echo 'Bearer ` + secret + `'`, `echo 'Bearer [REDACTED]'; echo 'Bearer [REDACTED]'`},
 		{`x='Bearer abc'prompt_tokens=5 ok`, `x='Bearer [REDACTED]'prompt_tokens=5 ok`},
 		{`x='Bearer abc'next.page.token="cursor-1"`, `x='Bearer [REDACTED]'next.page.token="cursor-1"`},
-		{`x='Bearer abc'"token":"` + secret + `"`, `x='Bearer [REDACTED]'`},
+		{`x='Bearer abc'"token":"` + secret + `"`, `x='Bearer [REDACTED]'"token":"[REDACTED]"`},
 		// Round 15e Item 2: The joined word also stops before a later Bearer keyword, in unbalanced lines and exotic glue too.
 		{`ARGS=(x='Bearer ZQAAA7'tail;set a Bearer ZQBBB8';'Bearer ZQCCC9'x1) ok`, `ARGS=(x='Bearer [REDACTED]';set a Bearer [REDACTED]Bearer [REDACTED]`},
 		{`ARGS=(curl -H 'x: Bearer ZQAAA7''\'\;echo 'Bearer ZQBBB8',) 'q' w`, `ARGS=(curl -H 'x: Bearer [REDACTED]'Bearer [REDACTED]',) 'q' w`},

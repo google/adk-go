@@ -2323,10 +2323,18 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 	}
 	switch {
 	case outer == `'` && inner == "":
-		// In shell single-quote semantics a backslash is a literal byte, so
-		// a single quote always closes the string regardless of preceding
-		// backslashes. The rejects flag already captures line-level checks.
-		return !h.closes[0].rejects
+		cp := h.closes[0].closePos
+		if h.closes[0].rejects {
+			return false
+		}
+		if cp >= 2 && h.s[cp-2] == '\\' {
+			lineStart := strings.LastIndexAny(h.s[:cp-1], "\r\n") + 1
+			if lineStart < len(h.s) && (h.s[lineStart] == ' ' || h.s[lineStart] == '\t') {
+				return true
+			}
+			return strings.IndexByte(h.s[lineStart:cp-2], '\'') >= 0
+		}
+		return true
 	case outer == `"`:
 		return !h.closes[1].rejects
 	case outer == "" && inner == `\'`:
