@@ -47,16 +47,35 @@ type Frontmatter struct {
 
 // frontmatterYAML keeps the public Frontmatter representation stable while
 // accepting both the specification's scalar allowed-tools value and the YAML
-// sequence accepted by earlier ADK Go releases. allowed_tools is read as a
-// fallback spelling of allowed-tools, as adk-python's Frontmatter accepts it.
+// sequence accepted by earlier ADK Go releases. allowed_tools is read only when
+// the allowed-tools key is absent, as adk-python's Frontmatter does: an
+// allowed-tools key with a null value still shadows allowed_tools.
 type frontmatterYAML struct {
 	Name                   string            `yaml:"name"`
 	Description            string            `yaml:"description"`
 	License                string            `yaml:"license,omitempty"`
 	Compatibility          string            `yaml:"compatibility,omitempty"`
 	Metadata               map[string]string `yaml:"metadata,omitempty"`
-	AllowedTools           *allowedToolsYAML `yaml:"allowed-tools,omitempty"`
-	AllowedToolsUnderscore *allowedToolsYAML `yaml:"allowed_tools,omitempty"`
+	AllowedTools           allowedToolsYAML  `yaml:"allowed-tools,omitempty"`
+	AllowedToolsUnderscore allowedToolsYAML  `yaml:"allowed_tools,omitempty"`
+
+	// hasAllowedTools is set from the mapping keys because yaml.v3 does not
+	// call UnmarshalYAML for a null value, so the field alone cannot tell an
+	// absent key from "allowed-tools:".
+	hasAllowedTools bool
+}
+
+func (f *frontmatterYAML) UnmarshalYAML(node *yaml.Node) error {
+	type plain frontmatterYAML
+	if err := node.Decode((*plain)(f)); err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == "allowed-tools" {
+			f.hasAllowedTools = true
+		}
+	}
+	return nil
 }
 
 type allowedToolsYAML []string
@@ -131,20 +150,17 @@ func splitAllowedTools(value string) ([]string, error) {
 
 func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
 	allowedTools := f.AllowedTools
-	if allowedTools == nil {
+	if !f.hasAllowedTools {
 		allowedTools = f.AllowedToolsUnderscore
 	}
-	fm := &Frontmatter{
+	return &Frontmatter{
 		Name:          f.Name,
 		Description:   f.Description,
 		License:       f.License,
 		Compatibility: f.Compatibility,
 		Metadata:      f.Metadata,
+		AllowedTools:  []string(allowedTools),
 	}
-	if allowedTools != nil {
-		fm.AllowedTools = []string(*allowedTools)
-	}
-	return fm
 }
 
 // Parse reads and validates YAML frontmatter from a SKILL.md reader.
