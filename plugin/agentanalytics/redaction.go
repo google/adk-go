@@ -109,17 +109,20 @@ var sensitiveKeyNames = func() map[string]struct{} {
 	return names
 }()
 
+// credentialWhitespace includes Unicode White_Space, including vertical tab,
+// which Go regexp's \s omits.
+const credentialWhitespace = `[:space:]\p{Z}\x{0085}`
+
 var (
 	uriTokenRe   = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"'<>]+`)
 	authHeaderRe = regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
-	// Python's \s matches Unicode whitespace; Go's only matches ASCII.
 	// bearerTokenRe matches a bearer token. A bearer token (RFC 6750) never
 	// contains quotes, ")" or "]", so the bare value stops there and keeps
 	// the surrounding JSON or prose intact.
-	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)[\s\p{Z}\x{0085}]+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s\p{Z}\x{0085}]+\][^\s\p{Z}\x{0085},;)"']*|[^\s\p{Z}\x{0085},;)"'\]]+)`)
+	bearerTokenRe = regexp.MustCompile(`(?i)\b(bearer)[` + credentialWhitespace + `]+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]` + credentialWhitespace + `]+\][^` + credentialWhitespace + `,;)"']*|[^` + credentialWhitespace + `,;)"'\]]+)`)
 	// basicTokenRe matches a candidate basic credential, which
 	// redactBasicCredential redacts only if it is valid base64.
-	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)[\s\p{Z}\x{0085}]+([A-Za-z0-9+/]+={0,2})`)
+	basicTokenRe      = regexp.MustCompile(`(?i)\b(basic)[` + credentialWhitespace + `]+([A-Za-z0-9+/]+={0,2})`)
 	jsonKeyValTokenRe = regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + sensitiveKeyRegex() + `)[\s\p{Z}]*"\s*:\s*(` + sensitiveValueRegex(`\s,}`) + `)`)
 	// textKeyValTokenRe matches key=value and key: value pairs. As in
 	// adk-python, the key may be quoted (Python dict reprs use single
@@ -317,7 +320,8 @@ func isSensitiveKey(k string) bool {
 // for detection only: callers keep the original text unless the canonical
 // form exposes a credential construct.
 // Unlike adk-python's ASCII-only decoder, it also decodes Unicode whitespace
-// so escaped credential separators cannot bypass redaction.
+// in four-digit \u/\U and two-digit \x/\X escapes for credential detection.
+// Percent escapes remain ASCII-only: high bytes may be part of UTF-8.
 func canonicalizeCredentialMarker(s string) string {
 	if !strings.ContainsAny(s, `\%`) {
 		// Every escape starts with "\" or "%".
@@ -329,6 +333,7 @@ func canonicalizeCredentialMarker(s string) string {
 		for {
 			escapeStart := -1
 			var digits string
+			percent := false
 			n := len(output)
 			if n >= 6 && output[n-6] == '\\' && (output[n-5] == 'u' || output[n-5] == 'U') &&
 				isHexRune(output[n-4]) && isHexRune(output[n-3]) && isHexRune(output[n-2]) && isHexRune(output[n-1]) {
@@ -342,6 +347,7 @@ func canonicalizeCredentialMarker(s string) string {
 				isHexRune(output[n-2]) && isHexRune(output[n-1]) {
 				escapeStart = n - 3
 				digits = string(output[n-2:])
+				percent = true
 			} else if n >= 2 && output[n-2] == '\\' && (output[n-1] == '"' || output[n-1] == '\'') {
 				output = append(output[:n-2], output[n-1])
 				continue
@@ -350,7 +356,7 @@ func canonicalizeCredentialMarker(s string) string {
 				break
 			}
 			decoded, err := strconv.ParseUint(digits, 16, 32)
-			if err != nil || (decoded > 0x7F && !unicode.IsSpace(rune(decoded))) {
+			if err != nil || (decoded > 0x7F && (percent || !unicode.IsSpace(rune(decoded)))) {
 				break
 			}
 			output = append(output[:escapeStart], rune(decoded))
@@ -1349,12 +1355,17 @@ func replaceMatchesFunc(s string, find func(string) []int, repl func(s string, l
 }
 
 // redactBearerToken replaces a bearerTokenRe match. As in adk-python, "bearer
-// of" followed by a space is prose ("the bearer of bad news"), not a token.
+// of" followed by whitespace is prose. Unlike Python, a closing quote also
+// ends the bare word "of", preserving prose at the end of a JSON string.
 func redactBearerToken(s string, loc []int) (string, int) {
 	end := loc[5]
 	value := s[loc[4]:end]
-	if rest := s[loc[4]:]; len(rest) >= 2 && strings.EqualFold(rest[:2], "of") {
-		if r, _ := utf8.DecodeRuneInString(rest[2:]); len(rest) == 2 || unicode.IsSpace(r) {
+	if credentialValueStartsPattern(s, loc[4], end) {
+		return s[loc[0]:loc[4]], loc[4]
+	}
+	if strings.EqualFold(value, "of") {
+		r, _ := utf8.DecodeRuneInString(s[end:])
+		if end == len(s) || unicode.IsSpace(r) || r == '"' || r == '\'' {
 			return s[loc[0]:end], end
 		}
 	}
@@ -1375,6 +1386,9 @@ const maxBasicCredentialBytes = 16 * 1024
 func redactBasicCredential(s string, loc []int) (string, int) {
 	end := loc[5]
 	encoded := s[loc[4]:end]
+	if credentialValueStartsPattern(s, loc[4], end) {
+		return s[loc[0]:loc[4]], loc[4]
+	}
 	if end < len(s) && isBase64Byte(s[end]) {
 		return s[loc[0]:end], end
 	}
@@ -1385,6 +1399,31 @@ func redactBasicCredential(s string, loc []int) (string, int) {
 		}
 	}
 	return s[loc[2]:loc[3]] + " " + redactedValue, end
+}
+
+// credentialValueStartsPattern keeps a scheme from consuming a sensitive key
+// or another scheme before its own redaction pass can see it.
+func credentialValueStartsPattern(s string, start, end int) bool {
+	value := s[start:end]
+	key, quote := unquoteValue(value)
+	if quote == "" && textKeyValTokenRe.MatchString(value) {
+		return true
+	}
+	hasValue := valueFollowsDelimiter(s, end)
+	if quote == "" && strings.ContainsAny(value[len(value)-1:], ":=") {
+		key = value[:len(value)-1]
+		hasValue = valueStartsAt(s, end)
+	}
+	if hasValue {
+		if kind, _ := nestedKeyName(strings.TrimSpace(key), start, false); kind != notNestedKey {
+			return true
+		}
+	}
+	if !strings.EqualFold(value, "bearer") && !strings.EqualFold(value, "basic") {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s[end:])
+	return unicode.IsSpace(r)
 }
 
 func isBase64Byte(c byte) bool {
