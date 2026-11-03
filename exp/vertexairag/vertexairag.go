@@ -69,7 +69,8 @@ type Config struct {
 	// The backend deprecates this in favor of RagResources but still accepts
 	// it; adk-python supports both. Set at least one of RagCorpora or
 	// RagResources.
-	RagCorpora []string
+	// RagCorpora []string
+
 	// RagResources selects a corpus and, optionally, specific files within it.
 	// Set at least one of RagCorpora or RagResources.
 	RagResources []*genai.VertexRAGStoreRAGResource
@@ -100,22 +101,26 @@ func New(cfg Config) (tool.Tool, error) {
 	if cfg.Description == "" {
 		return nil, errors.New("vertexairag: Config.Description is required")
 	}
-	if len(cfg.RagCorpora) == 0 && len(cfg.RagResources) == 0 {
-		return nil, errors.New("vertexairag: at least one of Config.RagCorpora or Config.RagResources is required")
+	// if len(cfg.RagCorpora) == 0 && len(cfg.RagResources) == 0 {
+	if len(cfg.RagResources) == 0 {
+		return nil, errors.New("vertexairag: Config.RagResources is required")
+	}
+
+	res := make([]*genai.VertexRAGStoreRAGResource, len(cfg.RagResources))
+	for i, r := range cfg.RagResources {
+		res[i] = &genai.VertexRAGStoreRAGResource{
+			RAGCorpus:  r.RAGCorpus,
+			RAGFileIDs: r.RAGFileIDs,
+		}
 	}
 
 	return &ragRetrieval{
 		name:        cfg.Name,
 		description: cfg.Description,
-		store: &genai.VertexRAGStore{
-			RAGCorpora:              cfg.RagCorpora,
-			RAGResources:            cfg.RagResources,
-			SimilarityTopK:          cfg.SimilarityTopK,
-			VectorDistanceThreshold: cfg.VectorDistanceThreshold,
-		},
-		project:   cfg.Project,
-		location:  cfg.Location,
-		newClient: newVertexRagClient,
+		resources:   res,
+		project:     cfg.Project,
+		location:    cfg.Location,
+		newClient:   newVertexRagClient,
 	}, nil
 }
 
@@ -125,9 +130,10 @@ func New(cfg Config) (tool.Tool, error) {
 type ragRetrieval struct {
 	name        string
 	description string
-	store       *genai.VertexRAGStore
-	project     string
-	location    string
+	// store       *genai.VertexRAGStore
+	resources []*genai.VertexRAGStoreRAGResource
+	project   string
+	location  string
 
 	// newClient builds the retrieval client. It is a field so tests can supply
 	// a fake in place of the real Vertex AI RAG client.
@@ -181,7 +187,8 @@ func (t *ragRetrieval) ProcessRequest(ctx agent.Context, req *model.LLMRequest) 
 		req.Config = &genai.GenerateContentConfig{}
 	}
 	req.Config.Tools = append(req.Config.Tools, &genai.Tool{
-		Retrieval: &genai.Retrieval{VertexRAGStore: t.store},
+		Retrieval: &genai.Retrieval{VertexRAGStore: &genai.VertexRAGStore{
+			RAGResources: t.resources}},
 	})
 	return nil
 }
@@ -237,24 +244,23 @@ func (t *ragRetrieval) Run(toolCtx agent.Context, args any) (map[string]any, err
 // reserves that field on the store, so sending it there is rejected.
 func (t *ragRetrieval) retrieveRequest(project, location, query string) *aiplatformpb.RetrieveContextsRequest {
 	var ragResources []*aiplatformpb.RetrieveContextsRequest_VertexRagStore_RagResource
-	for _, r := range t.store.RAGResources {
+	for _, r := range t.resources {
 		ragResources = append(ragResources, &aiplatformpb.RetrieveContextsRequest_VertexRagStore_RagResource{
 			RagCorpus:  r.RAGCorpus,
 			RagFileIds: r.RAGFileIDs,
 		})
 	}
 	store := &aiplatformpb.RetrieveContextsRequest_VertexRagStore{
-		RagCorpora:              t.store.RAGCorpora,
-		RagResources:            ragResources,
-		VectorDistanceThreshold: t.store.VectorDistanceThreshold,
+		RagResources: ragResources,
+		// VectorDistanceThreshold: t.store.VectorDistanceThreshold,
 	}
 
 	q := &aiplatformpb.RagQuery{
 		Query: &aiplatformpb.RagQuery_Text{Text: query},
 	}
-	if t.store.SimilarityTopK != nil {
-		q.SimilarityTopK = *t.store.SimilarityTopK
-	}
+	// if t.store.SimilarityTopK != nil {
+	// 	q.SimilarityTopK = *t.store.SimilarityTopK
+	// }
 
 	return &aiplatformpb.RetrieveContextsRequest{
 		Parent:     fmt.Sprintf("projects/%s/locations/%s", project, location),
@@ -281,11 +287,8 @@ func (t *ragRetrieval) resolveProjectLocation() (string, string, error) {
 // firstCorpusName returns the first configured corpus name, preferring
 // RagCorpora, or "" when none is set.
 func (t *ragRetrieval) firstCorpusName() string {
-	if len(t.store.RAGCorpora) > 0 {
-		return t.store.RAGCorpora[0]
-	}
-	if len(t.store.RAGResources) > 0 {
-		return t.store.RAGResources[0].RAGCorpus
+	if len(t.resources) > 0 {
+		return t.resources[0].RAGCorpus
 	}
 	return ""
 }
