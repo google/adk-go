@@ -27,6 +27,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -1881,7 +1882,7 @@ func redactAuthHeaders(s string) string {
 			}
 			continue
 		}
-		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen)
+		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(s[loc[2]:loc[3]])
 		b.WriteString(": ")
@@ -2078,6 +2079,8 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 		}
 		st.scan(s, i, lineEnd, lineStart)
 	}
+	h.curLine = st
+	h.hasCurLine = true
 	outer, inner = st.outer, st.inner
 	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
 	if inner != "" && innerPriorLine && !quoteRestIsHeaderOrSpace(s, st.innerOpenEnd, i) {
@@ -2090,12 +2093,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 	}
 	if (outerPriorLine || innerPriorLine) && !h.quoteCloses(valStart, outer, inner) {
 		outer, inner = "", ""
-		outerPriorLine, innerPriorLine = false, false
 	}
-	st.outer, st.inner = outer, inner
-	st.outerPriorLine, st.innerPriorLine = outerPriorLine, innerPriorLine
-	h.curLine = st
-	h.hasCurLine = true
 	return outer, inner
 }
 
@@ -2288,16 +2286,41 @@ func (h *headerQuoteScanner) quoteCloses(from int, outer, inner string) bool {
 					break
 				}
 			}
-			if m.lastHdrLine >= 0 {
-				checkQuote := outer
-				if checkQuote == "" {
-					checkQuote = inner
-				}
+			checkQuote := outer
+			if checkQuote == "" {
+				checkQuote = inner
+			}
+			if checkQuote != "" {
 				m.rejects = closeLineRejects(s, closePos, checkQuote)
 			}
 		}
 	}
 	return m.closePos >= 0 && !(m.lastHdrLine > from && m.rejects)
+}
+
+// placeholderQuoteCloses reports whether outer and inner close after a header
+// line whose first-line value is already redactedValue, without pairing with
+// an opening quote on a later line (see closeLineRejects).
+func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner string) bool {
+	if inner != "" {
+		outer = ""
+	}
+	if !h.quoteCloses(from, outer, inner) {
+		return false
+	}
+	switch {
+	case outer == `'` && inner == "":
+		cp := h.closes[0].closePos
+		return !h.closes[0].rejects && (cp < 2 || h.s[cp-2] != '\\')
+	case outer == `"`:
+		return !h.closes[1].rejects
+	case outer == "" && inner == `\'`:
+		return !h.closes[2].rejects
+	case outer == "" && inner == `\"`:
+		return !h.closes[3].rejects
+	default:
+		return false
+	}
 }
 
 // isExplicitLineQuoteOpener reports whether the quote at s[k] on the line
@@ -2521,12 +2544,16 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 // isFoldedHeaderLine), even after a first line that holds only the redaction
 // placeholder, as the folded line of Authorization: [REDACTED]<CRLF>\tSECRET
 // does, since one redacted line does not show that the whole value is.
-func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int) int {
+func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int, quotes *headerQuoteScanner) int {
+	var closesChecked, closes bool
 	if !canFold && strings.TrimSpace(s[from:end]) == redactedValue {
-		return end
+		if outer == "" && inner == "" || quotes == nil || !quotes.placeholderQuoteCloses(end, outer, inner) {
+			return end
+		}
+		closesChecked = true
+		closes = true
 	}
 	nestedEnd := 0
-	var closesChecked, closes bool
 	for k := from; ; {
 		if k < end {
 			if outer != "" || inner != "" {
@@ -2627,7 +2654,11 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 		if (outer != "" || inner != "") && end < len(s) {
 			if !closesChecked {
 				closesChecked = true
-				closes = outerQuoteCloses(s, end, outer, inner)
+				if quotes != nil {
+					closes = quotes.quoteCloses(end, outer, inner)
+				} else {
+					closes = outerQuoteCloses(s, end, outer, inner)
+				}
 			}
 			next := end + 1
 			if s[end] == '\r' && next < len(s) && s[next] == '\n' {
@@ -7037,9 +7068,8 @@ func proseFollowsEnding(s string, k int) bool {
 	return unicode.IsLower(r)
 }
 
-// maxShellWordScan bounds how much inShellAssignment reads back from a quote,
-// for the word that holds it and for the words before that word, so that
-// telling a shell assignment costs at most that much for each quote.
+// maxShellWordScan bounds how much contractionStemIsProse reads back from a
+// quote.
 const maxShellWordScan = 256
 
 // inShellAssignment reports whether the quote at s[i] stands in the value of
@@ -7053,178 +7083,449 @@ const maxShellWordScan = 256
 // before an "=" in it is an environment or snake_case variable name (see
 // isEnvVarName), or the word starts with its name and follows export, env,
 // declare, local, readonly or typeset on its logical line, after options and
-// other assignments, as in export A=1 password=x. When the single unbroken
-// shell word containing s[i] extends past the bounded lookbehind window
-// without any unquoted shell word break and holds no "=" in the window, so
-// that its name may be one, inShellAssignment fails closed and returns true;
-// a word whose visible part shows that the name before its "=" is not one, as
-// the : before password in <300 bytes>:password=users' wasn't changed does,
-// is read as any other word is. It fails closed as well when the word starts
-// with its name and only options and other assignments stand before it in the
-// window, which starts after the start of the command, so that the word they
-// follow may follow export outside the window, as in
-// export X=1 X=1 <...> password=users' violetfern's.
+// other assignments, as in export A=1 password=x.
 func inShellAssignment(s string, i int) bool {
-	winStart := max(0, i-maxShellWordScan)
-	truncated := false
-	// sawCmdStart records whether the window reaches back to where a command
-	// may start: the start of s or of a logical line, or a command separator.
-	sawCmdStart := winStart == 0
-	if nl := lastUnescapedLineBreak(s, winStart, i); nl >= 0 {
-		winStart = nl
-		sawCmdStart = true
-	} else if winStart > 0 {
-		for steps := 0; winStart > 0 && steps < 16 && !isShellWordBreak(s[winStart-1]); steps++ {
-			winStart--
-		}
-		truncated = winStart > 0 && !isShellWordBreak(s[winStart-1])
-		sawCmdStart = winStart == 0 || strings.IndexByte(";&|(`", s[winStart-1]) >= 0 || lastUnescapedLineBreak(s, winStart-1, winStart) >= 0
-	}
-	var words []string
-	wordStart := -1
-	for k := winStart; k < i; k++ {
-		c := s[k]
-		if c == '\'' || c == '"' {
-			if n := closedQuoteIn(s[k:i]); n > 0 {
-				if wordStart < 0 {
-					wordStart = k
-				}
-				k += n - 1
-				continue
-			}
-			if wordStart >= 0 {
-				if w := stripShellLineSplices(s[wordStart:k]); w != "" {
-					words = append(words, w)
-				}
-				wordStart = -1
-			}
-			words = words[:0]
-			truncated = false
-			sawCmdStart = true
-			continue
-		}
-		if c == '\\' && k+1 < i {
-			if s[k+1] == '\n' || (s[k+1] == '\r' && k+2 < i && s[k+2] == '\n') {
-				if wordStart >= 0 {
-					if w := stripShellLineSplices(s[wordStart:k]); isShellDeclKeyword(w) {
-						words = append(words, w)
-						wordStart = -1
-					}
-				}
-				if s[k+1] == '\r' {
-					k += 2
-				} else {
-					k++
-				}
-				continue
-			}
-			if wordStart < 0 {
-				wordStart = k
-			}
-			k++
-			continue
-		}
-		if isShellWordBreak(c) {
-			if wordStart >= 0 {
-				if w := stripShellLineSplices(s[wordStart:k]); w != "" {
-					words = append(words, w)
-				}
-				wordStart = -1
-			}
-			if c != ' ' && c != '\t' {
-				words = words[:0]
-				truncated = false
-				sawCmdStart = sawCmdStart || strings.IndexByte(";&|(`", c) >= 0
-			}
-			continue
-		}
-		if wordStart < 0 {
-			wordStart = k
-		}
-	}
-	if wordStart < 0 {
+	if i <= 0 || i > len(s) {
 		return false
 	}
-	word := stripShellLineSplices(s[wordStart:i])
-	if word == "" {
-		return false
-	}
-	if truncated && wordStart == winStart && shellWordEq(word) < 0 {
-		return true
-	}
-	leading := false
-	if eq := strings.IndexByte(word, '='); eq > 0 {
-		if name := stripShellNameQuotes(word[:eq]); isShellName(name) {
-			if isEnvVarName(name) {
-				return true
-			}
-			leading = true
+	p := i - 1
+	for p >= 0 {
+		c := s[p]
+		if c == '=' || c == '\'' || c == '"' || c == '\\' {
+			break
 		}
-	}
-	for k := 0; k < len(word); k++ {
-		if word[k] == '\'' || word[k] == '"' {
-			if n := closedQuoteIn(word[k:]); n > 0 {
-				k += n - 1
-				continue
-			}
-		}
-		if word[k] != '=' {
-			continue
-		}
-		n := k
-		for n > 0 && isShellNameByte(word[n-1]) {
-			n--
-		}
-		if name := word[n:k]; isShellName(name) {
-			if isEnvVarName(name) {
-				return true
-			}
-			leading = leading || n == 0
-		}
-	}
-	if !leading {
-		return false
-	}
-	if len(words) == 0 && winStart > 0 && i-wordStart >= maxShellWordScan-16 {
-		return true
-	}
-	for j := len(words) - 1; j >= 0; j-- {
-		prev := words[j]
-		switch {
-		case isShellDeclKeyword(prev):
-			return true
-		case prev[0] == '-':
-		case strings.IndexByte(prev, '=') > 0 && isShellName(stripShellNameQuotes(prev[:strings.IndexByte(prev, '=')])):
-		case j == 0 && truncated && isTruncatedOptionOrAssignment(s, winStart, prev):
-		default:
+		if isShellWordBreak(c) && (p == 0 || s[p-1] != '\\') {
 			return false
 		}
+		p--
 	}
-	return !sawCmdStart
-}
-
-// isTruncatedOptionOrAssignment reports whether a shell word that was sliced
-// at winStart with visible tail suffix is an option flag or variable
-// assignment (or exceeds a second maxShellWordScan lookback window without a
-// shell word break).
-func isTruncatedOptionOrAssignment(s string, winStart int, suffix string) bool {
-	limit := max(0, winStart-maxShellWordScan)
-	start := winStart
-	for start > limit && !isShellWordBreak(s[start-1]) {
-		start--
-	}
-	if start > 0 && !isShellWordBreak(s[start-1]) {
-		return true
-	}
-	full := stripShellLineSplices(s[start:winStart] + suffix)
-	if full == "" {
+	if p < 0 {
 		return false
 	}
-	if full[0] == '-' {
-		return true
+	sc := acquireShellScanner(s)
+	defer releaseShellScanner(sc)
+	return sc.at(i)
+}
+
+var shellScannerPool = sync.Pool{
+	New: func() any { return &shellAssignScanner{} },
+}
+
+func acquireShellScanner(s string) *shellAssignScanner {
+	sc := shellScannerPool.Get().(*shellAssignScanner)
+	if sc.s != s {
+		sc.reset(s)
 	}
-	eq := strings.IndexByte(full, '=')
-	return eq > 0 && isShellName(stripShellNameQuotes(full[:eq]))
+	return sc
+}
+
+func releaseShellScanner(sc *shellAssignScanner) {
+	shellScannerPool.Put(sc)
+}
+
+type shellQuoteMemo struct {
+	openPos, limit, closeEnd int
+	noCloseFrom, noCloseStop int
+}
+
+type shellScanLevel struct {
+	pos, limit, quoteEnd int
+	wordStart            int
+	wordSawEq            bool
+	wordLeading          bool
+	wordHasEnv           bool
+	wordFirstByte        byte
+	runValid             bool
+	runAtWordStart       bool
+	runFirstDigit        bool
+	runLetter            bool
+	runLower             bool
+	runUnderOrDigit      bool
+	inDecl               bool
+}
+
+func (lv *shellScanLevel) resetWord() {
+	lv.wordStart = -1
+	lv.wordSawEq = false
+	lv.wordLeading = false
+	lv.wordHasEnv = false
+	lv.wordFirstByte = 0
+	lv.runValid = false
+}
+
+func (lv *shellScanLevel) finishWord(s string) {
+	if lv.wordStart < 0 {
+		return
+	}
+	if !lv.wordLeading && lv.wordFirstByte != '-' {
+		if !lv.wordSawEq && (lv.pos-lv.wordStart <= 64 || strings.IndexByte(s[lv.wordStart:lv.pos], '\\') >= 0) {
+			w := stripShellLineSplices(s[lv.wordStart:lv.pos])
+			switch {
+			case w == "" || w[0] == '-':
+			case isShellDeclKeyword(w):
+				lv.inDecl = true
+			default:
+				lv.inDecl = false
+			}
+		} else {
+			lv.inDecl = false
+		}
+	}
+	lv.resetWord()
+}
+
+type shellCursor struct {
+	curPos int
+	depth  int
+	levels [8]shellScanLevel
+}
+
+type shellAssignScanner struct {
+	s       string
+	cursors [8]shellCursor
+	quotes  [4]shellQuoteMemo
+}
+
+func (sc *shellAssignScanner) reset(s string) {
+	sc.s = s
+	for idx := range sc.cursors {
+		sc.cursors[idx] = shellCursor{
+			curPos: 0,
+			depth:  0,
+			levels: [8]shellScanLevel{{pos: 0, limit: len(s), quoteEnd: len(s), wordStart: -1}},
+		}
+	}
+	sc.quotes = [4]shellQuoteMemo{}
+}
+
+func (sc *shellAssignScanner) closedQuoteLen(pos, limit int) int {
+	s := sc.s
+	if pos+1 >= limit {
+		return 0
+	}
+	q := s[pos]
+	memoIdx := 0
+	if q == '"' {
+		memoIdx = 1
+	}
+	m := &sc.quotes[memoIdx]
+	if m.closeEnd > 0 && m.openPos == pos && m.limit == limit {
+		return m.closeEnd - pos
+	}
+	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit >= m.noCloseStop {
+		return 0
+	}
+	switch q {
+	case '\'':
+		for k := pos + 1; k < limit; k++ {
+			c := s[k]
+			if c == '\n' || c == '\r' {
+				m.noCloseFrom, m.noCloseStop = pos, k
+				return 0
+			}
+			if c == '\'' {
+				*m = shellQuoteMemo{openPos: pos, limit: limit, closeEnd: k + 1}
+				return k + 1 - pos
+			}
+		}
+		m.noCloseFrom, m.noCloseStop = pos, limit
+	case '"':
+		for k := pos + 1; k < limit; k++ {
+			c := s[k]
+			if c == '\n' || c == '\r' {
+				m.noCloseFrom, m.noCloseStop = pos, k
+				return 0
+			}
+			if c == '\\' {
+				if k+1 >= limit {
+					m.noCloseFrom, m.noCloseStop = pos, limit
+					return 0
+				}
+				if s[k+1] == '\r' {
+					if k+2 < limit && s[k+2] == '\n' {
+						k += 2
+						continue
+					}
+					m.noCloseFrom, m.noCloseStop = pos, k+1
+					return 0
+				}
+				k++
+				continue
+			}
+			if c == '"' {
+				*m = shellQuoteMemo{openPos: pos, limit: limit, closeEnd: k + 1}
+				return k + 1 - pos
+			}
+		}
+		m.noCloseFrom, m.noCloseStop = pos, limit
+	}
+	return 0
+}
+
+func (sc *shellAssignScanner) closedEscapedQuoteLen(pos, limit int) int {
+	s := sc.s
+	if pos+3 >= limit || s[pos] != '\\' {
+		return 0
+	}
+	q := s[pos+1]
+	memoIdx := 2
+	if q == '"' {
+		memoIdx = 3
+	}
+	m := &sc.quotes[memoIdx]
+	if m.closeEnd > 0 && m.openPos == pos && m.limit == limit {
+		return m.closeEnd - pos
+	}
+	if pos >= m.noCloseFrom && pos < m.noCloseStop && limit >= m.noCloseStop {
+		return 0
+	}
+	for k := pos + 2; k < limit; k++ {
+		c := s[k]
+		if c == '\n' || c == '\r' || c == '"' || (q == '\'' && c == '\'') {
+			m.noCloseFrom, m.noCloseStop = pos, k
+			return 0
+		}
+		if c == '\\' {
+			if k+1 >= limit {
+				m.noCloseFrom, m.noCloseStop = pos, limit
+				return 0
+			}
+			if s[k+1] == q {
+				*m = shellQuoteMemo{openPos: pos, limit: limit, closeEnd: k + 2}
+				return k + 2 - pos
+			}
+			if s[k+1] == '\r' {
+				if k+2 < limit && s[k+2] == '\n' {
+					k += 2
+					continue
+				}
+				m.noCloseFrom, m.noCloseStop = pos, k+1
+				return 0
+			}
+			if s[k+1] == '\\' && k+2 < limit && s[k+2] == q {
+				k += 2
+				continue
+			}
+			k++
+		}
+	}
+	m.noCloseFrom, m.noCloseStop = pos, limit
+	return 0
+}
+
+func (sc *shellAssignScanner) selectCursor(i int) *shellCursor {
+	var best *shellCursor
+	for idx := range sc.cursors {
+		c := &sc.cursors[idx]
+		if c.curPos <= i {
+			if best == nil || c.curPos >= best.curPos {
+				best = c
+			}
+		}
+	}
+	if best != nil {
+		return best
+	}
+	// All cursors are past i; reset the one farthest ahead.
+	victim := &sc.cursors[0]
+	for idx := 1; idx < len(sc.cursors); idx++ {
+		if sc.cursors[idx].curPos > victim.curPos {
+			victim = &sc.cursors[idx]
+		}
+	}
+	*victim = shellCursor{
+		curPos: 0,
+		depth:  0,
+		levels: [8]shellScanLevel{{pos: 0, limit: len(sc.s), quoteEnd: len(sc.s), wordStart: -1}},
+	}
+	return victim
+}
+
+func (sc *shellAssignScanner) at(i int) bool {
+	s := sc.s
+	c := sc.selectCursor(i)
+	if nl := lastUnescapedLineBreak(s, c.curPos, i); nl > c.curPos {
+		*c = shellCursor{
+			curPos: nl,
+			depth:  0,
+			levels: [8]shellScanLevel{{pos: nl, limit: len(sc.s), quoteEnd: len(sc.s), wordStart: -1}},
+		}
+	}
+	for c.depth > 0 && i >= c.levels[c.depth].quoteEnd {
+		qEnd := c.levels[c.depth].quoteEnd
+		c.depth--
+		lv := &c.levels[c.depth]
+		if lv.wordStart < 0 {
+			lv.wordStart = lv.pos
+			lv.wordFirstByte = s[lv.pos]
+		}
+		lv.runValid = false
+		lv.pos = qEnd
+	}
+	lv := &c.levels[c.depth]
+	for lv.pos < i {
+		ch := s[lv.pos]
+		if ch == '\'' || ch == '"' {
+			n := sc.closedQuoteLen(lv.pos, lv.limit)
+			if n > 0 && lv.pos+n <= i {
+				if lv.wordStart < 0 {
+					lv.wordStart = lv.pos
+					lv.wordFirstByte = ch
+				}
+				lv.runValid = false
+				lv.pos += n
+				continue
+			}
+			if n > 0 && c.depth+1 < len(c.levels) {
+				c.depth++
+				c.levels[c.depth] = shellScanLevel{
+					pos:       lv.pos + 1,
+					limit:     lv.pos + n - 1,
+					quoteEnd:  lv.pos + n,
+					wordStart: -1,
+				}
+				lv = &c.levels[c.depth]
+				continue
+			}
+			lv.resetWord()
+			lv.inDecl = false
+			lv.pos++
+			continue
+		}
+		if ch == '\\' {
+			if lv.pos+1 >= i {
+				if lv.wordStart < 0 {
+					lv.wordStart = lv.pos
+					lv.wordFirstByte = '\\'
+				}
+				lv.runValid = false
+				break
+			}
+			next := s[lv.pos+1]
+			if next == '\n' || (next == '\r' && lv.pos+2 < lv.limit && s[lv.pos+2] == '\n') {
+				spliceLen := 2
+				if next == '\r' {
+					spliceLen = 3
+				}
+				if lv.pos+spliceLen > i {
+					break
+				}
+				lv.pos += spliceLen
+				continue
+			}
+			if next == '\'' || next == '"' {
+				n := sc.closedEscapedQuoteLen(lv.pos, lv.limit)
+				if n > 0 && lv.pos+n <= i {
+					if lv.wordStart < 0 {
+						lv.wordStart = lv.pos
+						lv.wordFirstByte = '\\'
+					}
+					lv.runValid = false
+					lv.pos += n
+					continue
+				}
+				if n > 0 && c.depth+1 < len(c.levels) {
+					c.depth++
+					c.levels[c.depth] = shellScanLevel{
+						pos:       lv.pos + 2,
+						limit:     lv.pos + n - 2,
+						quoteEnd:  lv.pos + n,
+						wordStart: -1,
+					}
+					lv = &c.levels[c.depth]
+					continue
+				}
+				lv.resetWord()
+				lv.inDecl = false
+				lv.pos += 2
+				continue
+			}
+			if lv.wordStart < 0 {
+				lv.wordStart = lv.pos
+				lv.wordFirstByte = '\\'
+			}
+			lv.runValid = false
+			lv.pos += 2
+			continue
+		}
+		if isShellWordBreak(ch) {
+			lv.finishWord(s)
+			if ch != ' ' && ch != '\t' {
+				lv.inDecl = false
+			}
+			lv.pos++
+			continue
+		}
+		if ch == '=' {
+			if lv.wordStart < 0 {
+				lv.wordStart = lv.pos
+				lv.wordFirstByte = '='
+				lv.wordSawEq = true
+				lv.runValid = false
+				lv.pos++
+				continue
+			}
+			if !lv.wordSawEq {
+				lv.wordSawEq = true
+				if lv.runValid && lv.runAtWordStart {
+					if !lv.runFirstDigit {
+						lv.wordLeading = true
+						if lv.runLetter && (!lv.runLower || lv.runUnderOrDigit) {
+							lv.wordHasEnv = true
+						}
+					}
+				} else if lv.pos-lv.wordStart <= 128 {
+					if name := stripShellNameQuotes(stripShellLineSplices(s[lv.wordStart:lv.pos])); isShellName(name) {
+						lv.wordLeading = true
+						if isEnvVarName(name) {
+							lv.wordHasEnv = true
+						}
+					}
+				}
+			} else if lv.runValid && !lv.runFirstDigit {
+				if lv.runAtWordStart {
+					lv.wordLeading = true
+				}
+				if lv.runLetter && (!lv.runLower || lv.runUnderOrDigit) {
+					lv.wordHasEnv = true
+				}
+			}
+			lv.runValid = false
+			lv.pos++
+			continue
+		}
+		atWordStart := false
+		if lv.wordStart < 0 {
+			lv.wordStart = lv.pos
+			lv.wordFirstByte = ch
+			atWordStart = true
+		}
+		if isShellNameByte(ch) {
+			if !lv.runValid {
+				lv.runValid = true
+				lv.runAtWordStart = atWordStart
+				lv.runFirstDigit = '0' <= ch && ch <= '9'
+				lv.runLetter = ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z')
+				lv.runLower = 'a' <= ch && ch <= 'z'
+				lv.runUnderOrDigit = ch == '_' || ('0' <= ch && ch <= '9')
+			} else {
+				if ('a' <= ch && ch <= 'z') || ('A' <= ch && ch <= 'Z') {
+					lv.runLetter = true
+				}
+				if 'a' <= ch && ch <= 'z' {
+					lv.runLower = true
+				}
+				if ch == '_' || ('0' <= ch && ch <= '9') {
+					lv.runUnderOrDigit = true
+				}
+			}
+		} else {
+			lv.runValid = false
+		}
+		lv.pos++
+	}
+	c.curPos = i
+	return lv.wordStart >= 0 && (lv.wordHasEnv || (lv.wordLeading && lv.inDecl))
 }
 
 // stripShellLineSplices removes unquoted backslash-newline line continuations
@@ -7236,23 +7537,6 @@ func stripShellLineSplices(w string) string {
 	}
 	s := strings.ReplaceAll(w, "\\\r\n", "")
 	return strings.ReplaceAll(s, "\\\n", "")
-}
-
-// shellWordEq returns the offset of the first "=" in the shell word w that is
-// not in a closed quoted segment of it, or -1 if there is none.
-func shellWordEq(w string) int {
-	for k := 0; k < len(w); k++ {
-		if w[k] == '\'' || w[k] == '"' {
-			if n := closedQuoteIn(w[k:]); n > 0 {
-				k += n - 1
-				continue
-			}
-		}
-		if w[k] == '=' {
-			return k
-		}
-	}
-	return -1
 }
 
 // lastUnescapedLineBreak returns the byte offset immediately after the last
@@ -7315,7 +7599,7 @@ func closedQuoteIn(s string) int {
 // stripShellNameQuotes returns s with closed single- and double-quoted
 // segments unquoted, or "" if s contains an unclosed quote or backslash escape.
 func stripShellNameQuotes(s string) string {
-	if !strings.ContainsAny(s, `'"`) {
+	if !strings.ContainsAny(s, `'"\`) {
 		return s
 	}
 	var b strings.Builder
@@ -7328,6 +7612,19 @@ func stripShellNameQuotes(s string) string {
 			b.WriteString(s[i+1 : i+n-1])
 			i += n
 			continue
+		}
+		if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '\'' || s[i+1] == '"') {
+			q := s[i : i+2]
+			end := strings.Index(s[i+2:], q)
+			if end < 0 || strings.ContainsRune(s[i+2:i+2+end], '\\') {
+				return ""
+			}
+			b.WriteString(s[i+2 : i+2+end])
+			i += 4 + end
+			continue
+		}
+		if s[i] == '\\' {
+			return ""
 		}
 		b.WriteByte(s[i])
 		i++

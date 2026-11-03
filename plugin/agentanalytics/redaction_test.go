@@ -5051,3 +5051,295 @@ func TestRound22ReviewRegressions(t *testing.T) {
 		}
 	})
 }
+
+// redactAuthHeadersFreshScanner is a reference implementation of
+// redactAuthHeaders that constructs a fresh headerQuoteScanner for each header
+// match, used to verify that headerQuoteScanner's carried state is bit-for-bit
+// equivalent to a from-scratch scan on every match.
+func redactAuthHeadersFreshScanner(s string) string {
+	locs := authHeaderRe.FindAllStringSubmatchIndex(s, -1)
+	if locs == nil {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for idx := 0; idx < len(locs); idx++ {
+		loc := locs[idx]
+		if loc[0] < last {
+			continue
+		}
+		quotes := newHeaderQuoteScanner(s)
+		outer, inner := quotes.openBefore(loc[0], loc[4])
+		lineStart := strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
+		indentLen := 0
+		for lineStart+indentLen < loc[0] && (s[lineStart+indentLen] == ' ' || s[lineStart+indentLen] == '\t') {
+			indentLen++
+		}
+		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
+		if outer == "" && inner == "" && isCookieHeaderKey(s[loc[2]:loc[3]]) && openingQuote(s, loc[4]) == "" && cookieValueIsProse(s, loc[4]) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
+			if sub := authHeaderPrefixRe.FindStringSubmatchIndex(s[loc[4]:loc[5]]); sub != nil {
+				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
+				idx--
+			}
+			continue
+		}
+		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(s[loc[2]:loc[3]])
+		b.WriteString(": ")
+		b.WriteString(redactedValue)
+		last = end
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func TestRound23ReviewRegressions(t *testing.T) {
+	t.Run("placeholder-first multiline quoted headers", func(t *testing.T) {
+		const secret = "synthcanary"
+		for _, hdr := range []string{
+			"Authorization",
+			"Proxy-Authorization",
+			"Api-Key",
+			"X-Api-Key",
+			"X-Goog-Api-Key",
+			"Api-Key-Secret",
+			"Api-Key-String",
+			"Cookie",
+			"Set-Cookie",
+		} {
+			in := "curl -H '" + hdr + ": [REDACTED]\n\t" + secret + "'\necho KEEP"
+			want := "curl -H '" + hdr + ": [REDACTED]\necho KEEP"
+			checkAllRedactionPaths(t, in, want)
+			checkNoLeak(t, in, secret)
+		}
+		for _, hdr := range []string{"Authorization", "Cookie", "X-Api-Key"} {
+			for _, nl := range []string{"\n", "\r\n", "\r"} {
+				for _, cont := range []string{"\t" + secret, "  " + secret, secret, "part2: " + secret} {
+					for _, q := range []struct{ open, close string }{
+						{"curl -H '", "'"},
+						{`curl -H "`, `"`},
+						{`curl -H \'`, `\'`},
+						{`curl -H \"`, `\"`},
+						{"'X-Pad: pad" + nl, "'"},
+						{`curl -H "X-Pad: pad` + nl, `"`},
+					} {
+						for _, tail := range []string{nl + "echo KEEP", nl + "echo 'ok'", nl + "Accept: text/plain"} {
+							in := q.open + hdr + ": [REDACTED]" + nl + cont + q.close + tail
+							want := q.open + hdr + ": [REDACTED]" + tail
+							checkLongRedactionPaths(t, in, want, secret)
+						}
+					}
+				}
+			}
+		}
+		// Leading double quote on line 0 is scrubbed by scrubTextPatterns while
+		// JSON-aware paths replace the unclosed top-level quote with placeholder.
+		leadDQ := "\"X-Pad: pad\nAuthorization: [REDACTED]\n\t" + secret + "\"\necho KEEP"
+		if got, want := scrubTextPatterns(leadDQ), "\"X-Pad: pad\nAuthorization: [REDACTED]\necho KEEP"; got != want {
+			t.Errorf("scrubTextPatterns(%q) = %q, want %q", leadDQ, got, want)
+		}
+		checkNoLeak(t, leadDQ, secret)
+		pad5000 := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\n" + secret + "'\necho KEEP"
+		wantPad5000 := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\necho KEEP"
+		checkLongRedactionPaths(t, pad5000, wantPad5000, secret)
+
+		// Unclosed-quote placeholder outputs from an earlier scrub remain idempotent.
+		for _, idemp := range []string{
+			"curl -H 'Cookie: [REDACTED]\necho ok",
+			"curl -H 'Authorization: [REDACTED]\necho KEEP",
+			"curl -H 'Authorization: [REDACTED]\necho 'ok'",
+			`curl -H "Authorization: [REDACTED]` + "\necho \"ok\"",
+		} {
+			checkAllRedactionPaths(t, idemp, idemp)
+		}
+	})
+
+	t.Run("shell assignment lookbehind and quoted assignments", func(t *testing.T) {
+		const secret = "synthcanary"
+		for _, n := range []int{10, 255, 256, 257, 300, 1000, 5000} {
+			pad := strings.Repeat("a", n)
+			for _, closing := range []string{"synthcanary's changed", "synthcanary wasn't changed", "synthcanary it's changed"} {
+				for _, tc := range []struct{ prefix, wantPrefix string }{
+					{"export DB_PASSWORD=" + pad + ":password=users' ", "export DB_PASSWORD=[REDACTED] changed"},
+					{"export db_password=" + pad + ":password=users' ", "export db_password=[REDACTED] changed"},
+					{"DB_PASSWORD=" + pad + ":password=users' ", "DB_PASSWORD=[REDACTED] changed"},
+					{"db_password=" + pad + ":password=users' ", "db_password=[REDACTED] changed"},
+					{"export password=" + pad + ":password=users' ", "export password=[REDACTED] changed"},
+					{"export \"DB_PASSWORD\"=" + pad + ":password=users' ", "export \"DB_PASSWORD\"=[REDACTED] changed"},
+				} {
+					checkLongRedactionPaths(t, tc.prefix+closing, tc.wantPrefix, secret)
+				}
+			}
+			// Long non-assignment prefix before :password= preserves prose contraction and following metadata.
+			proseTail := " wasn't changed; prompt_token_count=10 next_page_token=c1"
+			checkLongRedactionPaths(t, pad+":password=users'"+proseTail, pad+":password=[REDACTED]"+proseTail)
+		}
+
+		for _, k := range []int{1, 10, 35, 40, 60, 100} {
+			for _, arg := range []string{
+				"A='foo bar' ",
+				`A="foo bar" `,
+				`A=\'foo bar\' `,
+				`A=\"foo bar\" `,
+				"--opt='foo bar' ",
+				`--opt="foo bar" `,
+			} {
+				prefix := "export " + strings.Repeat(arg, k)
+				for _, closing := range []string{"synthcanary's changed", "synthcanary wasn't changed"} {
+					checkLongRedactionPaths(t, prefix+"password=users' "+closing, prefix+"password=[REDACTED] changed", secret)
+				}
+			}
+		}
+
+		longQuotedPrefix := "export A='" + strings.Repeat("foo bar ", 80) + "' "
+		checkLongRedactionPaths(t, longQuotedPrefix+"password=users' synthcanary's changed", longQuotedPrefix+"password=[REDACTED] changed", secret)
+
+		// Outer quoted command followed by top-level non-assignment key-value pair:
+		// the inner password= inside msg="..." is in an export command (redacts synthcanary),
+		// while the outer token= after msg="..." is not in a declaration (preserves wasn't changed).
+		outerAndInner := `msg="export ` + strings.Repeat("A='foo bar' ", 40) + `password=users' synthcanary's changed" token=users' wasn't changed`
+		wantOuterAndInner := `msg="export ` + strings.Repeat("A='foo bar' ", 40) + `password=[REDACTED] changed" token=[REDACTED] wasn't changed`
+		checkLongRedactionPaths(t, outerAndInner, wantOuterAndInner, secret)
+	})
+
+	t.Run("same-line header quote scanner state", func(t *testing.T) {
+		for _, tc := range []struct {
+			in     string
+			want   string
+			secret string
+		}{
+			{"\"\nCookie:r'Cookie:", "\"\nCookie:r'Cookie:", ""},
+			{"\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", ""},
+			{"\"\nCookie:r'Cookie: sid=synthcanary\nKEEP_LINE_ONE", "\"\nCookie:r'Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
+			{"'\nCookie:r\"Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO\"\nKEEP_LINE_THREE", "'\nCookie:r\"Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO\"\nKEEP_LINE_THREE", ""},
+			{"'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
+		} {
+			if got := scrubTextPatterns(tc.in); got != tc.want {
+				t.Errorf("scrubTextPatterns(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if got := redactAuthHeaders(tc.in); got != redactAuthHeadersFreshScanner(tc.in) {
+				t.Errorf("redactAuthHeaders(%q) = %q != fresh scanner %q", tc.in, got, redactAuthHeadersFreshScanner(tc.in))
+			}
+			if tc.secret != "" {
+				checkNoLeak(t, tc.in, tc.secret)
+			}
+		}
+
+		// Differential fuzz/token-soup test: sequential headerQuoteScanner vs fresh per-header scanner.
+		tokens := []string{
+			"\"", "'", `\"`, "\n", "\r\n", " ", "Cookie:", "Cookie: Monster ", "Cookie: sid=x ",
+			"r'", `r"`, "Authorization: Bearer x", "KEEP_LINE",
+		}
+		var state uint64 = 0x9e3779b97f4a7c15
+		for i := range 2000 {
+			var sb strings.Builder
+			for range 12 {
+				state ^= state << 13
+				state ^= state >> 7
+				state ^= state << 17
+				sb.WriteString(tokens[state%uint64(len(tokens))])
+			}
+			in := sb.String()
+			gotSeq := redactAuthHeaders(in)
+			gotFresh := redactAuthHeadersFreshScanner(in)
+			if gotSeq != gotFresh {
+				t.Fatalf("case %d: redactAuthHeaders(%q) = %q, want fresh-scanner result %q", i, in, gotSeq, gotFresh)
+			}
+		}
+	})
+
+	t.Run("concurrent race stress", func(t *testing.T) {
+		inputs := []struct {
+			in     string
+			want   string
+			secret string
+		}{
+			{
+				"export DB_PASSWORD=" + strings.Repeat("a", 300) + ":password=users' synthcanary's changed",
+				"export DB_PASSWORD=[REDACTED] changed",
+				"synthcanary",
+			},
+			{
+				"export " + strings.Repeat("A='foo bar' ", 40) + "password=users' synthcanary's changed",
+				"export " + strings.Repeat("A='foo bar' ", 40) + "password=[REDACTED] changed",
+				"synthcanary",
+			},
+			{
+				"curl -H 'Authorization: [REDACTED]\n\tsynthcanary'\necho KEEP",
+				"curl -H 'Authorization: [REDACTED]\necho KEEP",
+				"synthcanary",
+			},
+			{
+				strings.Repeat("a", 300) + ":password=users' wasn't changed",
+				strings.Repeat("a", 300) + ":password=[REDACTED] wasn't changed",
+				"",
+			},
+		}
+		done := make(chan struct{})
+		for range 8 {
+			go func() {
+				defer func() { done <- struct{}{} }()
+				for range 25 {
+					for _, tc := range inputs {
+						if got := scrubTextPatterns(tc.in); got != tc.want {
+							t.Errorf("concurrent scrubTextPatterns() = %q, want %q", elideText(got), elideText(tc.want))
+							return
+						}
+						if b, _, err := SmartTruncate(errors.New(tc.in), 4096); err != nil || (tc.secret != "" && strings.Contains(string(b), tc.secret)) {
+							t.Errorf("concurrent SmartTruncate() = (%s, %v)", elideText(string(b)), err)
+							return
+						}
+					}
+				}
+			}()
+		}
+		for range 8 {
+			<-done
+		}
+	})
+
+	t.Run("linear scaling", func(t *testing.T) {
+		scrub := func(in string) { _ = scrubTextPatterns(in) }
+		for _, tt := range []struct {
+			name string
+			gen  func(n int) string
+			n    int
+		}{
+			{"placeholder-first quoted multiline headers", func(n int) string {
+				return strings.Repeat("curl -H 'Authorization: [REDACTED]\n\tsynthcanary'\necho KEEP\n", n)
+			}, 3200},
+			{"placeholder headers after unclosed quote", func(n int) string {
+				return "curl -H '" + strings.Repeat("\nAuthorization: [REDACTED]", n)
+			}, 3200},
+			{"quoted shell assignments before password", func(n int) string {
+				return "export " + strings.Repeat("A='foo bar' ", n) + "password=users' synthcanary's changed"
+			}, 3200},
+			{"long embedded-equals shell assignment", func(n int) string {
+				return "export DB_PASSWORD=" + strings.Repeat("aaaa", n) + ":password=users' synthcanary's changed"
+			}, 16000},
+			{"same-line cookie prose after rejected prior quote", func(n int) string {
+				return "\"\n" + strings.Repeat("Cookie:r' ", n) + "Cookie: Monster"
+			}, 3200},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				small, large := tt.gen(tt.n/4), tt.gen(tt.n)
+				scrub(small)
+				best := func(in string) time.Duration {
+					d := scrubTime(func() { scrub(in) })
+					for range 2 {
+						d = min(d, scrubTime(func() { scrub(in) }))
+					}
+					return d
+				}
+				ds, dl := best(small), best(large)
+				if dl > 10*ds && dl > 100*time.Millisecond {
+					t.Errorf("scrubbing %d repeats took %v and %d repeats took %v, which is more than linear", tt.n/4, ds, tt.n, dl)
+				}
+				if dl > 4*time.Second {
+					t.Errorf("scrubbing %d repeats took %v, want well under 4s", tt.n, dl)
+				}
+			})
+		}
+	})
+}

@@ -6413,3 +6413,63 @@ func TestRound22PlainErrorRegression(t *testing.T) {
 		})
 	}
 }
+
+func round23SensitiveErrors() []struct{ name, in, want, secret string } {
+	a := "export DB_PASSWORD=" + strings.Repeat("a", 300) + ":password=users' synthcanary's changed"
+	b := "export " + strings.Repeat("A='foo bar' ", 40) + "password=users' synthcanary's changed"
+	bDouble := "export " + strings.Repeat(`A="foo bar" `, 40) + "password=users' synthcanary's changed"
+	c := "curl -H 'Authorization: [REDACTED]\n\tsynthcanary'\necho KEEP"
+	cCookie := "curl -H 'Cookie: [REDACTED]\n\tsynthcanary'\necho KEEP"
+	cPad := "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\nsynthcanary'\necho KEEP"
+	return []struct{ name, in, want, secret string }{
+		{"embedded equals after long shell assignment value", a, "export DB_PASSWORD=[REDACTED] changed", "synthcanary"},
+		{"quoted shell assignments outside 256-byte lookbehind", b, "export " + strings.Repeat("A='foo bar' ", 40) + "password=[REDACTED] changed", "synthcanary"},
+		{"double-quoted shell assignments outside 256-byte lookbehind", bDouble, "export " + strings.Repeat(`A="foo bar" `, 40) + "password=[REDACTED] changed", "synthcanary"},
+		{"placeholder-first multiline quoted Authorization header", c, "curl -H 'Authorization: [REDACTED]\necho KEEP", "synthcanary"},
+		{"placeholder-first multiline quoted Cookie header", cCookie, "curl -H 'Cookie: [REDACTED]\necho KEEP", "synthcanary"},
+		{"placeholder-first multiline header inside 5000-byte prior quote", cPad, "'X-Pad: " + strings.Repeat("p", 5000) + "\nAuthorization: [REDACTED]\necho KEEP", "synthcanary"},
+		{"second real cookie after rejected prior-line quote and cookie prose", "'\nCookie:r\"Cookie: sid=synthcanary\nKEEP_LINE_ONE", "'\nCookie:r\"Cookie: [REDACTED]\nKEEP_LINE_ONE", "synthcanary"},
+	}
+}
+
+func TestRound23PlainErrorRegression(t *testing.T) {
+	check := func(t *testing.T, in, want, secret string) {
+		t.Helper()
+		for _, v := range []struct {
+			name string
+			in   any
+			want any
+		}{
+			{"error", errors.New(in), want},
+			{"error in a map", map[string]any{"err": errors.New(in)}, map[string]any{"err": want}},
+			{"error in a slice", []any{errors.New(in)}, []any{want}},
+		} {
+			b, _, err := SmartTruncate(v.in, 2*len(in)+1000)
+			if secret != "" && bytes.Contains(b, []byte(secret)) {
+				t.Errorf("SmartTruncate(%s of %s) = %s, which holds %q", v.name, elideText(in), elideText(string(b)), secret)
+			}
+			var got any
+			if err != nil || json.Unmarshal(b, &got) != nil {
+				t.Errorf("SmartTruncate(%s of %s) = (%s, %v), want JSON", v.name, elideText(in), elideText(string(b)), err)
+				continue
+			}
+			if diff := cmp.Diff(v.want, got); diff != "" {
+				t.Errorf("SmartTruncate(%s of %s) mismatch (-want +got):\n%s", v.name, elideText(in), diff)
+			}
+		}
+	}
+	for _, tt := range round23SensitiveErrors() {
+		t.Run(tt.name, func(t *testing.T) {
+			check(t, tt.in, tt.want, tt.secret)
+		})
+	}
+	prose := strings.Repeat("a", 300)
+	for _, tt := range []struct{ name, in, want string }{
+		{"long non-assignment prefix before colon-password", prose + ":password=users' wasn't changed; prompt_token_count=10 next_page_token=c1", prose + ":password=[REDACTED] wasn't changed; prompt_token_count=10 next_page_token=c1"},
+		{"rejected prior-line quote before cookie prose keeps lines", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE", "\"\nCookie:r'Cookie: Monster\nKEEP_LINE_ONE\nKEEP_LINE_TWO'\nKEEP_LINE_THREE"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			check(t, tt.in, tt.want, "")
+		})
+	}
+}
