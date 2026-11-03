@@ -121,6 +121,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
+	callIDs := functionCallIDs(allEvents)
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
@@ -140,6 +141,9 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		// Skip events that do not belong to the current branch.
 		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		if !eventBelongsToBranch(invocationBranch, ev) {
+			continue
+		}
+		if isToolSubBranchEvent(invocationBranch, ev, agentName, callIDs) {
 			continue
 		}
 		// Skip events outside the agent's isolation scope. Unlike branch
@@ -756,6 +760,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// Find the latest event that starts the current turn and process from there
+	callIDs := functionCallIDs(events)
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		// Events from a sibling branch are not part of this agent's
@@ -763,6 +768,12 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		// response after this agent's user input; treating that response as
 		// the pivot would slice the input out of the request.
 		if !eventBelongsToBranch(branch, event) {
+			continue
+		}
+		// A tool's sub-branch event is skipped in the contents, so it
+		// cannot start the turn either: it would cut off the call and
+		// the response that came before it.
+		if isToolSubBranchEvent(branch, event, agentName, callIDs) {
 			continue
 		}
 		// An out-of-scope event cannot start this agent's turn: it is

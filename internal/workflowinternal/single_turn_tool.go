@@ -16,6 +16,7 @@ package workflowinternal
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/genai"
 
@@ -76,12 +77,29 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
 	}
 
-	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, workflow.WithUseSubBranch())
+	// Key the run by the function call id, so the sub-agent's events go on
+	// "<agent>@<function_call_id>" and the calling agent's contents builder
+	// can tell them apart from a workflow node's branch. An id RunNode would
+	// reject falls back to the run counter, as in adk-python.
+	opts := []workflow.RunNodeOption{workflow.WithUseSubBranch()}
+	if id := toolCtx.FunctionCallID(); isUsableRunID(id) {
+		opts = append(opts, workflow.WithRunID(id))
+	}
+	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run agent node: %w", err)
 	}
 
 	return map[string]any{"result": result}, nil
+}
+
+// isUsableRunID reports whether id passes workflow.WithRunID's checks: it is
+// not empty, not purely numeric, and has no "/" or "@".
+func isUsableRunID(id string) bool {
+	if id == "" || strings.ContainsAny(id, "/@") {
+		return false
+	}
+	return strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' })
 }
 
 // Declaration returns the function declaration for the wrapped agent.
