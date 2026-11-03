@@ -31,8 +31,11 @@ import (
 )
 
 type artifactAggregation struct {
-	parts      []*genai.Part
-	builder    strings.Builder
+	parts []*genai.Part
+	// text holds the accumulated text of textPart, the part streamed chunks
+	// are being appended to, so appending does not recopy it on every chunk.
+	text       strings.Builder
+	textPart   *genai.Part
 	citations  *genai.CitationMetadata
 	grounding  *genai.GroundingMetadata
 	customMeta map[string]any
@@ -137,21 +140,21 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 					lastPart := agg.parts[len(agg.parts)-1]
 					// check if last part is a text block of the same 'Thought' type
 					if lastPart.Text != "" && lastPart.Thought == part.Thought {
-						if agg.builder.Len() == 0 {
-							agg.builder.WriteString(lastPart.Text)
+						if agg.textPart != lastPart {
+							agg.text.Reset()
+							agg.text.WriteString(lastPart.Text)
+							agg.textPart = lastPart
 						}
-						agg.builder.WriteString(part.Text)
-						lastPart.Text = agg.builder.String()
+						agg.text.WriteString(part.Text)
+						lastPart.Text = agg.text.String()
 						continue
 					}
 				}
-				agg.builder.Reset()
 				agg.parts = append(agg.parts, &genai.Part{
 					Text:    part.Text,
 					Thought: part.Thought,
 				})
 			} else {
-				agg.builder.Reset()
 				agg.parts = append(agg.parts, part)
 			}
 		}
