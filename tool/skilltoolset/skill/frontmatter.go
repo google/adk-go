@@ -48,65 +48,48 @@ type Frontmatter struct {
 // frontmatterYAML keeps the public Frontmatter representation stable while
 // accepting both the specification's scalar allowed-tools value and the YAML
 // sequence accepted by earlier ADK Go releases. allowed_tools is read only when
-// the allowed-tools key is absent, as adk-python's Frontmatter does: an
-// allowed-tools key with a null value still shadows allowed_tools.
+// no allowed-tools key is decoded, as adk-python's Frontmatter does: an
+// allowed-tools key with a null value still shadows allowed_tools, and an
+// allowed_tools value next to an allowed-tools key is neither read nor
+// validated.
+//
+// Both keys decode into yaml.Node because yaml.v3 fills a yaml.Node field for
+// a null value, a merge key and an alias key alike, so a non-zero Kind means
+// the key is present exactly when yaml.v3 would have decoded it.
 type frontmatterYAML struct {
 	Name                   string            `yaml:"name"`
 	Description            string            `yaml:"description"`
 	License                string            `yaml:"license,omitempty"`
 	Compatibility          string            `yaml:"compatibility,omitempty"`
 	Metadata               map[string]string `yaml:"metadata,omitempty"`
-	AllowedTools           allowedToolsYAML  `yaml:"allowed-tools,omitempty"`
-	AllowedToolsUnderscore allowedToolsYAML  `yaml:"allowed_tools,omitempty"`
-
-	// hasAllowedTools is set from the mapping keys because yaml.v3 does not
-	// call UnmarshalYAML for a null value, so the field alone cannot tell an
-	// absent key from "allowed-tools:".
-	hasAllowedTools bool
+	AllowedTools           yaml.Node         `yaml:"allowed-tools"`
+	AllowedToolsUnderscore yaml.Node         `yaml:"allowed_tools"`
 }
 
-func (f *frontmatterYAML) UnmarshalYAML(node *yaml.Node) error {
-	type plain frontmatterYAML
-	if err := node.Decode((*plain)(f)); err != nil {
-		return err
-	}
-	for i := 0; i+1 < len(node.Content); i += 2 {
-		if node.Content[i].Value == "allowed-tools" {
-			f.hasAllowedTools = true
-		}
-	}
-	return nil
-}
-
-type allowedToolsYAML []string
-
-const allowedToolsFormat = "allowed-tools must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression)"
-
-func (a *allowedToolsYAML) UnmarshalYAML(node *yaml.Node) error {
+// decodeAllowedTools decodes an allowed-tools value read under key, which
+// names the key in errors.
+func decodeAllowedTools(node *yaml.Node, key string) ([]string, error) {
 	switch node.Kind {
 	case yaml.SequenceNode:
 		var tools []string
 		if err := node.Decode(&tools); err != nil {
-			return err
+			return nil, fmt.Errorf("%s: %w", key, err)
 		}
-		*a = tools
-		return nil
+		return tools, nil
 	case yaml.ScalarNode:
 		if node.Tag == "!!null" {
-			*a = nil
-			return nil
+			return nil, nil
 		}
 		if node.Tag != "!!str" {
-			return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
+			return nil, fmt.Errorf("%s must be a string or a sequence of strings", key)
 		}
 		tools, err := splitAllowedTools(node.Value)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("%s must be a whitespace- or comma-separated list of Tool or Tool(well-balanced expression): %w", key, err)
 		}
-		*a = tools
-		return nil
+		return tools, nil
 	default:
-		return fmt.Errorf("allowed-tools must be a string or a sequence of strings")
+		return nil, fmt.Errorf("%s must be a string or a sequence of strings", key)
 	}
 }
 
@@ -131,7 +114,7 @@ func splitAllowedTools(value string) ([]string, error) {
 			current.WriteRune(r)
 		case r == ')':
 			if depth == 0 {
-				return nil, fmt.Errorf("%s: unexpected ')'", allowedToolsFormat)
+				return nil, errors.New("unexpected ')'")
 			}
 			depth--
 			current.WriteRune(r)
@@ -142,16 +125,23 @@ func splitAllowedTools(value string) ([]string, error) {
 		}
 	}
 	if depth != 0 {
-		return nil, fmt.Errorf("%s: unclosed '('", allowedToolsFormat)
+		return nil, errors.New("unclosed '('")
 	}
 	flush()
 	return tools, nil
 }
 
-func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
-	allowedTools := f.AllowedTools
-	if !f.hasAllowedTools {
-		allowedTools = f.AllowedToolsUnderscore
+func (f *frontmatterYAML) toFrontmatter() (*Frontmatter, error) {
+	node, key := &f.AllowedTools, "allowed-tools"
+	if node.Kind == 0 {
+		node, key = &f.AllowedToolsUnderscore, "allowed_tools"
+	}
+	var allowedTools []string
+	if node.Kind != 0 {
+		var err error
+		if allowedTools, err = decodeAllowedTools(node, key); err != nil {
+			return nil, err
+		}
 	}
 	return &Frontmatter{
 		Name:          f.Name,
@@ -159,8 +149,8 @@ func (f *frontmatterYAML) toFrontmatter() *Frontmatter {
 		License:       f.License,
 		Compatibility: f.Compatibility,
 		Metadata:      f.Metadata,
-		AllowedTools:  []string(allowedTools),
-	}
+		AllowedTools:  allowedTools,
+	}, nil
 }
 
 // Parse reads and validates YAML frontmatter from a SKILL.md reader.
@@ -192,12 +182,17 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 
 	// Keys outside the agentskills.io set are not an error: a SKILL.md shared
 	// with other agent runtimes carries their keys too. Frontmatter has no
-	// field for them, so they are dropped.
+	// field for them, so they are dropped. The one exception is allowed_tools,
+	// adk-python's spelling of allowed-tools: it fills AllowedTools when no
+	// allowed-tools key is present, and a malformed value is then an error.
 	fmYAML := frontmatterYAML{}
 	if err := yaml.Unmarshal(yamlBytes.Bytes(), &fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
-	fm := fmYAML.toFrontmatter()
+	fm, err := fmYAML.toFrontmatter()
+	if err != nil {
+		return nil, fmt.Errorf("parse frontmatter: %w", err)
+	}
 	if err := Validate(fm); err != nil {
 		return nil, fmt.Errorf("invalid frontmatter: %w", err)
 	}
