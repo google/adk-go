@@ -5440,8 +5440,12 @@ func TestRound24ReviewRegressions(t *testing.T) {
 				`x='Bearer [REDACTED]'"password": ZQXSEKRETN}`},
 			{"bearer abc + quoted password key",
 				`x='Bearer abc'"password": ZQXSEKRETN}`},
+			{"bearer abc + quoted label key",
+				`x='Bearer abc'"label": ZQXSEKRETN}`},
 			{"redacted bearer + quoted token key",
 				`x='Bearer [REDACTED]'"token": ZQXSEKRETN}`},
+			{"redacted bearer + single-quoted password key",
+				`x="Bearer [REDACTED]"'password': ZQXSEKRETN}`},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				checkNoLeak(t, tc.in, "ZQXSEKRETN")
@@ -5484,69 +5488,82 @@ func TestRound24ReviewRegressions(t *testing.T) {
 			})
 		}
 		// The shell-assignment path (export DB_PASSWORD=pre' it's SECRET'; echo ok)
-		// goes through findQuotedOrShellSegment, not textValueEnd. The interior
-		// apostrophe fix is wired into textValueEnd only. The redactErrorMessage
-		// path redacts the shell assignment value, which includes the secret
-		// even though the quote doesn't extend across the apostrophe.
+		// goes through findQuotedOrShellSegment and joinedQuoteEnd, where the
+		// interior apostrophe fix is now wired in (see interiorApostropheEnd).
 		t.Run("export DB_PASSWORD pre it's SECRET", func(t *testing.T) {
 			in := "export DB_PASSWORD=pre' it's " + secret + "'; echo ok"
-			// redactErrorMessage redacts DB_PASSWORD=pre but the interior
-			// apostrophe closes the shell-quoted segment, leaving the rest
-			// visible. This is a known limitation of the current fix scope.
-			got := redactErrorMessage(in)
-			if strings.Contains(got, "DB_PASSWORD=[REDACTED]") {
-				// At least the password key-value was redacted.
-				return
-			}
-			t.Errorf("redactErrorMessage did not redact DB_PASSWORD: %q", got)
+			checkNoLeak(t, in, secret)
+		})
+		t.Run("password equals JSON's SECRET", func(t *testing.T) {
+			in := "password='JSON's " + secret + "' user=x"
+			checkNoLeak(t, in, secret)
+		})
+		t.Run("json password with escaped apostrophes", func(t *testing.T) {
+			in := `{"password": "\'it\'s ` + secret + `'", "user": "x"}`
+			checkNoLeak(t, in, secret)
 		})
 	})
 
 	t.Run("R24-5 unquoted line splices in key=value text", func(t *testing.T) {
-		// The bareValueEnd fix handles line splices in the value part
-		// (DB_PASSWORD=pre\<LF>SECRET). The key-name matching path
-		// (nextKeyName) does not yet strip \<LF> from key names.
-		t.Run("DB_PASSWORD equals pre LF SECRET value continuation", func(t *testing.T) {
-			in := "DB_PASSWORD=pre\\\n" + secret
-			// scrubTextPatterns redacts DB_PASSWORD=pre but stops at the line
-			// break. The secret on the next line may still be visible.
-			// Verify scrubTextPatterns at least redacts the key-value pair.
-			got := scrubTextPatterns(in)
-			if !strings.Contains(got, "[REDACTED]") {
-				t.Errorf("scrubTextPatterns did not redact DB_PASSWORD: %q", got)
-			}
-		})
-		t.Run("DB_PASSWORD equals pre CRLF SECRET value continuation", func(t *testing.T) {
-			in := "DB_PASSWORD=pre\\\r\n" + secret
-			got := scrubTextPatterns(in)
-			if !strings.Contains(got, "[REDACTED]") {
-				t.Errorf("scrubTextPatterns did not redact DB_PASSWORD: %q", got)
-			}
-		})
+		for _, tc := range []struct {
+			name string
+			in   string
+		}{
+			{"DB_PASSWORD equals pre LF SECRET value continuation",
+				"DB_PASSWORD=pre\\\n" + secret},
+			{"DB_PASSWORD equals pre CRLF SECRET value continuation",
+				"DB_PASSWORD=pre\\\r\n" + secret},
+			{"DB_PASS LF WORD equals SECRET (spliced key name)",
+				"DB_PASS\\\nWORD=" + secret},
+			{"DB_PASS CRLF WORD equals SECRET (spliced key name)",
+				"DB_PASS\\\r\nWORD=" + secret},
+			{"DB_PASSWORD LF equals SECRET (spliced before delimiter)",
+				"DB_PASSWORD\\\n=" + secret},
+			{"DB_PASSWORD CRLF equals SECRET (spliced before delimiter)",
+				"DB_PASSWORD\\\r\n=" + secret},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				checkNoLeak(t, tc.in, secret)
+			})
+		}
 	})
 
 	t.Run("R24-1 bearer token linear scaling", func(t *testing.T) {
 		fragment := `msg="Bearer DB_PASSWORD=users' synthcanary's changed"; `
-		small := strings.Repeat(fragment, 500)
-		large := strings.Repeat(fragment, 2000)
+		small := strings.Repeat(fragment, 1000)
+		large := strings.Repeat(fragment, 4000)
 		// Warm up.
 		_ = scrubTextPatterns(small)
-		// Time small and large, taking the best of 2 runs each.
-		bestOf := func(in string) time.Duration {
-			d := scrubTime(func() { _ = scrubTextPatterns(in) })
-			for range 2 {
-				d = min(d, scrubTime(func() { _ = scrubTextPatterns(in) }))
+		_, _ = sanitizeRawText(small)
+		_ = redactErrorMessage(small)
+		// Time small and large across all three entry points, taking the
+		// best of 2 runs each.
+		bestOf := func(in string, fn func(string)) func() time.Duration {
+			return func() time.Duration {
+				d := scrubTime(func() { fn(in) })
+				for range 2 {
+					d = min(d, scrubTime(func() { fn(in) }))
+				}
+				return d
 			}
-			return d
 		}
-		ds, dl := bestOf(small), bestOf(large)
-		// The primary check: scaling should be roughly linear (4x data → ≤10x time).
-		if dl > 10*ds && dl > 100*time.Millisecond {
-			t.Errorf("scrubbing 500 fragments took %v, 2000 took %v, more than 10x linear", ds, dl)
-		}
-		// Secondary check: absolute time under -race should be reasonable.
-		if dl > 5*time.Second {
-			t.Errorf("scrubbing 2000 bearer fragments took %v, want < 5s", dl)
+		for _, p := range []struct {
+			name string
+			fn   func(string)
+		}{
+			{"scrubTextPatterns", func(s string) { _ = scrubTextPatterns(s) }},
+			{"sanitizeRawText", func(s string) { _, _ = sanitizeRawText(s) }},
+			{"redactErrorMessage", func(s string) { _ = redactErrorMessage(s) }},
+		} {
+			s, l := bestOf(small, p.fn)(), bestOf(large, p.fn)()
+			// The primary check: scaling should be roughly linear (4x data → ≤10x time).
+			if l > 10*s && l > 100*time.Millisecond {
+				t.Errorf("%s: 1000 fragments took %v, 4000 took %v, more than 10x linear", p.name, s, l)
+			}
+			// Secondary check: absolute time should be reasonable.
+			if l > 4*time.Second {
+				t.Errorf("%s: 4000 bearer fragments took %v, want < 4s", p.name, l)
+			}
 		}
 	})
 }
