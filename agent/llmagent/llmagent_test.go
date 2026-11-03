@@ -34,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -1414,4 +1415,110 @@ func TestThoughtOnlyTurnDoesNotEndInvocation(t *testing.T) {
 	if !strings.Contains(got.String(), "the answer") {
 		t.Errorf("surfaced text = %q, want it to contain %q", got.String(), "the answer")
 	}
+}
+
+func TestLLMAgent_Planner(t *testing.T) {
+	t.Parallel()
+
+	t.Run("built-in planner overrides GenerateContentConfig ThinkingConfig", func(t *testing.T) {
+		t.Parallel()
+
+		initialBudget := int32(128)
+		plannerBudget := int32(1024)
+		wantThinking := &genai.ThinkingConfig{
+			IncludeThoughts: true,
+			ThinkingBudget:  &plannerBudget,
+		}
+		m := &testutil.MockModel{
+			Responses: []*genai.Content{
+				genai.NewContentFromText("done", genai.RoleModel),
+			},
+		}
+		a, err := llmagent.New(llmagent.Config{
+			Name:  "builtin_agent",
+			Model: m,
+			GenerateContentConfig: &genai.GenerateContentConfig{
+				ThinkingConfig: &genai.ThinkingConfig{
+					ThinkingBudget: &initialBudget,
+				},
+			},
+			Planner: planner.NewBuiltInPlanner(wantThinking),
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, a)
+		texts, err := testutil.CollectTextParts(runner.Run(t, "session_1", "hello"))
+		if err != nil {
+			t.Fatalf("runner.Run: %v", err)
+		}
+		if diff := cmp.Diff([]string{"done"}, texts); diff != "" {
+			t.Errorf("texts mismatch (-want +got):\n%s", diff)
+		}
+		if len(m.Requests) != 1 {
+			t.Fatalf("len(m.Requests) = %d, want 1", len(m.Requests))
+		}
+		if diff := cmp.Diff(wantThinking, m.Requests[0].Config.ThinkingConfig); diff != "" {
+			t.Errorf("ThinkingConfig mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("plan-react planner rewrites response and strips thoughts on follow-up turn", func(t *testing.T) {
+		t.Parallel()
+
+		m := &testutil.MockModel{
+			Responses: []*genai.Content{
+				genai.NewContentFromText("/*PLANNING*/1. Compute answer./*FINAL_ANSWER*/42", genai.RoleModel),
+				genai.NewContentFromText("/*REASONING*/Already computed./*FINAL_ANSWER*/Still 42", genai.RoleModel),
+			},
+		}
+		a, err := llmagent.New(llmagent.Config{
+			Name:        "react_agent",
+			Model:       m,
+			Instruction: "Be concise.",
+			Planner:     planner.NewPlanReActPlanner(),
+			OutputKey:   "final_output",
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+
+		runner := testutil.NewTestAgentRunner(t, a)
+		events1, err := testutil.CollectEvents(runner.Run(t, "session_1", "what is the answer?"))
+		if err != nil {
+			t.Fatalf("turn 1 error: %v", err)
+		}
+		if len(events1) != 1 {
+			t.Fatalf("len(events1) = %d, want 1", len(events1))
+		}
+		wantParts1 := []*genai.Part{
+			{Text: "1. Compute answer.", Thought: true},
+			{Text: "42"},
+		}
+		if diff := cmp.Diff(wantParts1, events1[0].LLMResponse.Content.Parts); diff != "" {
+			t.Errorf("turn 1 parts mismatch (-want +got):\n%s", diff)
+		}
+		if got := events1[0].Actions.StateDelta["final_output"]; got != "42" {
+			t.Errorf("StateDelta[final_output] = %v, want %q", got, "42")
+		}
+
+		if _, err := testutil.CollectEvents(runner.Run(t, "session_1", "confirm")); err != nil {
+			t.Fatalf("turn 2 error: %v", err)
+		}
+		if len(m.Requests) != 2 {
+			t.Fatalf("len(m.Requests) = %d, want 2", len(m.Requests))
+		}
+		sysInst := m.Requests[0].Config.SystemInstruction.Parts[0].Text
+		if !strings.Contains(sysInst, "/*PLANNING*/") {
+			t.Errorf("SystemInstruction missing planning preamble: %q", sysInst)
+		}
+		for ci, c := range m.Requests[1].Contents {
+			for pi, p := range c.Parts {
+				if p.Thought {
+					t.Errorf("turn 2 request Contents[%d].Parts[%d].Thought = true, want false", ci, pi)
+				}
+			}
+		}
+	})
 }

@@ -32,6 +32,7 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/planner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -84,6 +85,7 @@ func New(cfg Config) (agent.Agent, error) {
 			Model:                     cfg.Model,
 			Mode:                      cfg.Mode,
 			GenerateContentConfig:     cfg.GenerateContentConfig,
+			Planner:                   cfg.Planner,
 			Tools:                     slices.Clone(cfg.Tools),
 			Toolsets:                  slices.Clone(cfg.Toolsets),
 			DisallowTransferToParent:  cfg.DisallowTransferToParent,
@@ -350,6 +352,13 @@ type Config struct {
 	//
 	// Default value is ModeChat as a sub-agent, ModeSingleTurn as a node in a workflow.
 	Mode Mode
+
+	// Planner instructs the agent to make a plan and execute it step by step.
+	//
+	// When a built-in planner ([planner.NewBuiltInPlanner]) is configured with a
+	// non-nil ThinkingConfig, its ThinkingConfig takes precedence over any
+	// ThinkingConfig set in GenerateContentConfig.
+	Planner planner.Planner
 }
 
 // Mode is the delegation mode of an LLMAgent. See [Config.Mode] for details.

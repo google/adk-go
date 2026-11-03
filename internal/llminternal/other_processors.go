@@ -18,13 +18,53 @@ import (
 	"iter"
 
 	"google.golang.org/adk/v2/agent"
+	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
+type thinkingConfigApplier interface {
+	ApplyThinkingConfig(req *model.LLMRequest)
+}
+
 func nlPlanningRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
-	// TODO: implement (adk-python src/google/adk/flows/llm_flows/_nl_plnning.py)
-	return func(yield func(*session.Event, error) bool) {}
+	return func(yield func(*session.Event, error) bool) {
+		llmAgent := asLLMAgent(ctx.Agent())
+		if llmAgent == nil {
+			return
+		}
+		p := llmAgent.internal().Planner
+		if p == nil {
+			return
+		}
+
+		if applier, ok := p.(thinkingConfigApplier); ok {
+			applier.ApplyThinkingConfig(req)
+			return
+		}
+
+		if inst := p.BuildPlanningInstruction(icontext.NewReadonlyContext(ctx), req); inst != "" {
+			utils.AppendInstructions(req, inst)
+		}
+		removeThoughtFromRequest(req)
+	}
+}
+
+func removeThoughtFromRequest(req *model.LLMRequest) {
+	if req == nil {
+		return
+	}
+	for _, content := range req.Contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil {
+				part.Thought = false
+			}
+		}
+	}
 }
 
 func codeExecutionRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
@@ -38,7 +78,28 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 }
 
 func nlPlanningResponseProcessor(ctx agent.InvocationContext, req *model.LLMRequest, resp *model.LLMResponse) error {
-	// TODO: implement (adk-python src/google/adk/_nl_planning.py)
+	if resp == nil || resp.Content == nil || len(resp.Content.Parts) == 0 {
+		return nil
+	}
+	llmAgent := asLLMAgent(ctx.Agent())
+	if llmAgent == nil {
+		return nil
+	}
+	p := llmAgent.internal().Planner
+	if p == nil {
+		return nil
+	}
+	if _, ok := p.(thinkingConfigApplier); ok {
+		return nil
+	}
+
+	// ResponseProcessors return only an error and cannot emit a separate
+	// state-delta event if ProcessPlanningResponse modifies session state,
+	// unlike adk-python's async generator response processor.
+	processedParts := p.ProcessPlanningResponse(icontext.NewCallbackContext(ctx), resp.Content.Parts)
+	if len(processedParts) > 0 {
+		resp.Content.Parts = processedParts
+	}
 	return nil
 }
 
