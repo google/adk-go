@@ -159,10 +159,16 @@ const maxLinkFollows = 255
 //     and which EvalSymlinks therefore does not follow (it fails with ENOTDIR
 //     when a junction sits in the middle of a path).
 //   - A link whose target does not exist is still followed, by name, and a
-//     component that does not exist, or sits below a non-directory, ends the
-//     walk with the remaining components appended and cleaned. Nothing below
-//     such a component can exist, so it can hide no link, and the caller's
-//     read is what reports the missing file.
+//     component that does not exist, or sits below a non-directory, is walked
+//     past as a plain name: it cannot be a link, so there is nothing to
+//     follow, and the caller's read is what reports the missing file. The
+//     walk does not stop there, because a ".." further on can climb back into
+//     a directory that exists, and the components after it must still be
+//     examined (a target such as "missing/../escape/y.yaml", with escape
+//     linking outside, would otherwise come back with escape unfollowed and
+//     be opened through it). The ".." behind a missing component is thus
+//     applied as text, as Windows resolves it; on Linux the operating system
+//     would report the missing component instead.
 func followLinks(p string) (string, error) {
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(p)
@@ -182,7 +188,9 @@ func followLinks(p string) (string, error) {
 		fi, err := os.Lstat(next)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-				return filepath.Join(append([]string{next}, rest[i+1:]...)...), nil
+				// Not a link, so nothing to follow; keep walking by name.
+				cur = next
+				continue
 			}
 			return "", err
 		}

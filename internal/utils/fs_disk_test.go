@@ -262,16 +262,28 @@ func TestSafeSubpath_DotDotAfterLinkInTarget(t *testing.T) {
 	link("sub1/sub2", filepath.Join(base, "d"))
 	link("d/../../in.yaml", filepath.Join(base, "back.yaml"))
 
-	for _, rel := range []string{"x.yaml", "chain.yaml"} {
+	// escape -> outside; gap.yaml -> "missing/../escape/y.yaml". Nothing is at
+	// "missing", but the ".." climbs back into base, and escape must still be
+	// followed: a walk that stopped at the missing component would hand back
+	// base/escape/y.yaml with escape unexamined, and the read would go through
+	// it. Found by a second review of the previous commit.
+	link(outside, filepath.Join(base, "escape"))
+	link("missing/../escape/y.yaml", filepath.Join(base, "gap.yaml"))
+	// stub.yaml -> "missing/../in.yaml" opens base/in.yaml by the same rule.
+	link("missing/../in.yaml", filepath.Join(base, "stub.yaml"))
+
+	for _, rel := range []string{"x.yaml", "chain.yaml", "gap.yaml"} {
 		if got, _, err := SafeSubpath(base, rel); !errors.Is(err, ErrSymlinkInRelativePath) {
 			t.Errorf("SafeSubpath(%q, %s) = (%q, %v), want %v: the link opens a file outside base", base, rel, got, err, ErrSymlinkInRelativePath)
 		}
 	}
-	got, _, err := SafeSubpath(base, "back.yaml")
-	if err != nil {
-		t.Fatalf("SafeSubpath(%q, back.yaml) = %v, want success: the link opens base/in.yaml", base, err)
-	}
-	if want := filepath.Join(base, "in.yaml"); got != want {
-		t.Errorf("SafeSubpath(%q, back.yaml) = %q, want %q, the file the link opens", base, got, want)
+	for _, rel := range []string{"back.yaml", "stub.yaml"} {
+		got, _, err := SafeSubpath(base, rel)
+		if err != nil {
+			t.Fatalf("SafeSubpath(%q, %s) = %v, want success: the link opens base/in.yaml", base, rel, err)
+		}
+		if want := filepath.Join(base, "in.yaml"); got != want {
+			t.Errorf("SafeSubpath(%q, %s) = %q, want %q, the file the link opens", base, rel, got, want)
+		}
 	}
 }
