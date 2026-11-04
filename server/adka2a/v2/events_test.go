@@ -790,3 +790,24 @@ func TestTransferToAgentFromMeta(t *testing.T) {
 		t.Errorf("TransferToAgentFromMeta(meta) = (%q, %v), want (\"a-2\", true)", got, ok)
 	}
 }
+
+// TestToSessionEvent_EmptyTextPart checks that a peer's empty text part, which
+// adk-python sends for a model's empty text part, does not fail the whole
+// event.
+func TestToSessionEvent_EmptyTextPart(t *testing.T) {
+	a2aAgent, err := agent.New(agent.Config{Name: "a2a agent"})
+	if err != nil {
+		t.Fatalf("failed to create an agent: %v", err)
+	}
+	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: a2aAgent})
+
+	input := &a2a.Message{Parts: a2a.ContentParts{a2a.NewTextPart("foo"), a2a.NewTextPart("")}}
+	got, err := ToSessionEvent(ictx, input)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() error = %v, want nil", err)
+	}
+	want := []*genai.Part{{Text: "foo"}, {Text: ""}}
+	if diff := cmp.Diff(want, got.Content.Parts); diff != "" {
+		t.Errorf("ToSessionEvent() parts mismatch (-want +got):\n%s", diff)
+	}
+}
