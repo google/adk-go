@@ -249,6 +249,65 @@ func TestRunSSEHandler(t *testing.T) {
 	}
 }
 
+func TestRunHandlersAutoCreateSession(t *testing.T) {
+	tests := []struct {
+		name              string
+		streaming         bool
+		autoCreateSession bool
+		wantStatus        int
+		wantSession       bool
+	}{
+		{name: "run creates the session", autoCreateSession: true, wantStatus: http.StatusOK, wantSession: true},
+		{name: "run_sse creates the session", streaming: true, autoCreateSession: true, wantStatus: http.StatusOK, wantSession: true},
+		{name: "run without auto-create", wantStatus: http.StatusNotFound},
+		{name: "run_sse without auto-create", streaming: true, wantStatus: http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeAgent, err := agent.New(agent.Config{
+				Name: "testApp",
+				Run:  testAgent([]testAgentResult{{event: makeEvent("invocation-1", "testApp", "Hello")}}),
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			sessionService := session.InMemoryService()
+			controller := NewRuntimeAPIControllerWithConfig(RuntimeAPIControllerConfig{
+				SessionService:    sessionService,
+				AgentLoader:       agent.NewSingleLoader(fakeAgent),
+				SSETimeout:        10 * time.Second,
+				AutoCreateSession: tt.autoCreateSession,
+			})
+
+			reqBytes, err := json.Marshal(models.RunAgentRequest{
+				AppName:    "testApp",
+				UserId:     "testUser",
+				SessionId:  "newSession",
+				Streaming:  tt.streaming,
+				NewMessage: genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Hello"}}},
+			})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/run", bytes.NewBuffer(reqBytes))
+			rr := httptest.NewRecorder()
+			if tt.streaming {
+				controller.RunSSEHandler(&recorderWithDeadline{rr}, req)
+			} else {
+				NewErrorHandler(controller.RunHandler)(rr, req)
+			}
+
+			if rr.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d; body: %s", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+			_, err = sessionService.Get(t.Context(), &session.GetRequest{AppName: "testApp", UserID: "testUser", SessionID: "newSession"})
+			if gotSession := err == nil; gotSession != tt.wantSession {
+				t.Errorf("session exists after the run = %v, want %v (Get error: %v)", gotSession, tt.wantSession, err)
+			}
+		})
+	}
+}
+
 func TestDecodeRequestBody_AcceptsFunctionCallEventID(t *testing.T) {
 	body := `{
 		"appName": "a",
