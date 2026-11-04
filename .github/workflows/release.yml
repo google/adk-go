@@ -31,8 +31,6 @@ jobs:
     # the guard every fork gets a failing run on each push to main.
     if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
-    # RELEASE_PAT is a secret of this environment, which only main and v1 may
-    # deploy to, so a workflow pushed on any other branch cannot read it.
     environment: release-please
     permissions:
       contents: write        # create the release branch, the tag and the release
