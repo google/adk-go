@@ -176,6 +176,14 @@ func (f *fileSystemSource) resolveWithinSkill(name, p string) (string, error) {
 			return "", fmt.Errorf("lstat %q: %w", cur, err)
 		}
 		if info.Mode()&fs.ModeSymlink == 0 {
+			// A regular file (or anything else that isn't a directory) can
+			// only be the final component resolved. Continuing past it --
+			// the way a later ".." or path segment would -- is invalid the
+			// same way the OS itself refuses it (ENOTDIR) when a path
+			// continues past a non-directory component.
+			if !info.IsDir() && len(pending) > 0 {
+				return "", fmt.Errorf("%w: %q: %q is not a directory", ErrInvalidResourcePath, p, cur)
+			}
 			continue // Ordinary file or directory component; keep walking.
 		}
 
@@ -279,15 +287,20 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 // approved directories and returns sanitized paths relative to the skill root.
 //
 // Every returned path is checked with resolveWithinSkill first, the same
-// check LoadResource applies, so a path this method returns can always be
-// opened by LoadResource: anything that would resolve outside the skill is
-// left out of the result instead of being returned and then refused. This
-// also covers resourceDirectoryPath (or, when it is empty, assets/,
-// references/, or scripts/ itself) being a symlink: fs.WalkDir and the
-// fs.Stat this method runs before it both follow such a link and walk
-// whatever it points at, but every name found that way is still checked
-// before being included, so one escaping entry no longer has to break
-// every skill a caller is trying to list or preload.
+// check LoadResource applies, so this method never returns a path that
+// resolves outside the skill's own directory: such a path is left out of
+// the result rather than returned and then refused by LoadResource for
+// that reason. This also covers resourceDirectoryPath (or, when it is
+// empty, assets/, references/, or scripts/ itself) being a symlink:
+// fs.WalkDir and the fs.Stat this method runs before it both follow such a
+// link and walk whatever it points at, but every name found that way is
+// still checked before being included.
+//
+// This does not guarantee a returned path can be read successfully: it may
+// name a directory rather than a file (a symlink that resolves to one, or
+// a resourceDirectoryPath argument that names one directly), or otherwise
+// be unreadable, independently of this check. LoadResource -- or reading
+// what it returns -- can still fail for a path this method returned.
 func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDirectoryPath string) ([]string, error) {
 	if err := f.validateSkill(name); err != nil {
 		return nil, err
@@ -334,9 +347,10 @@ func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDire
 				return nil
 			}
 			// Confirm this path resolves inside the skill the same way
-			// LoadResource would check it, so every name reported here is
-			// one LoadResource will actually serve; drop it silently
-			// otherwise rather than let it surface as a later failure.
+			// LoadResource would check it, and drop it silently if not,
+			// rather than including a path LoadResource would refuse for
+			// escaping the skill. This does not guarantee the path is
+			// otherwise readable; see this method's doc comment.
 			if _, err := f.resolveWithinSkill(name, path.Join(name, p)); err != nil {
 				return nil
 			}

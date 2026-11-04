@@ -758,3 +758,65 @@ type plainFS struct {
 func (p plainFS) Open(name string) (fs.File, error) {
 	return p.fs.Open(name)
 }
+
+// TestFileSystemSource_ListResources_FiltersEscapingSymlinks confirms
+// ListResources includes a symlink that stays inside the skill and
+// silently omits one that would resolve outside it, on a filesystem that
+// reports symlinks directly (unwrapped, so fs.ReadLinkFS is visible).
+func TestFileSystemSource_ListResources_FiltersEscapingSymlinks(t *testing.T) {
+	mapFS := fstest.MapFS{
+		"test-skill/SKILL.md":             &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+		"test-skill/references/shared.md": &fstest.MapFile{Data: []byte("shared")},
+		"outside/secret.txt":              &fstest.MapFile{Data: []byte("top-secret")},
+		"test-skill/assets/inskill.md": &fstest.MapFile{
+			Mode: fs.ModeSymlink,
+			Data: []byte("../references/shared.md"),
+		},
+		"test-skill/assets/escape.txt": &fstest.MapFile{
+			Mode: fs.ModeSymlink,
+			Data: []byte("../../outside/secret.txt"),
+		},
+	}
+
+	source := NewFileSystemSource(mapFS)
+	got, err := source.ListResources(t.Context(), "test-skill", ".")
+	if err != nil {
+		t.Fatalf("ListResources() error = %v, want nil", err)
+	}
+
+	want := []string{"assets/inskill.md", "references/shared.md"}
+	if diff := cmp.Diff(want, got, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+		t.Errorf("ListResources() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestFileSystemSource_LoadResource_SymlinkTargetThroughRegularFileRejected
+// covers a link target that continues past a regular file via "..", which
+// the OS refuses (ENOTDIR) since a regular file has no directory to "cd"
+// out of. resolveWithinSkill must refuse the same way, rather than
+// silently popping the regular file off as if it were a traversable
+// directory.
+func TestFileSystemSource_LoadResource_SymlinkTargetThroughRegularFileRejected(t *testing.T) {
+	mapFS := fstest.MapFS{
+		"test-skill/SKILL.md":                   &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+		"test-skill/references/nested/file.txt": &fstest.MapFile{Data: []byte("file-content")},
+		"test-skill/references/nested/doc.txt":  &fstest.MapFile{Data: []byte("doc-content")},
+		"test-skill/assets/sub": &fstest.MapFile{
+			Mode: fs.ModeSymlink,
+			Data: []byte("../references/nested/file.txt"), // resolves to a FILE, not a directory
+		},
+		"test-skill/assets/link": &fstest.MapFile{
+			Mode: fs.ModeSymlink,
+			Data: []byte("sub/../doc.txt"), // tries to go "up" out of sub, which is a file
+		},
+	}
+
+	source := NewFileSystemSource(mapFS)
+	resource, err := source.LoadResource(t.Context(), "test-skill", "assets/link")
+	if !errors.Is(err, ErrInvalidResourcePath) {
+		t.Fatalf("LoadResource(assets/link) error = %v, want %v", err, ErrInvalidResourcePath)
+	}
+	if resource != nil {
+		_ = resource.Close()
+	}
+}
