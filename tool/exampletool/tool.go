@@ -17,6 +17,8 @@ package exampletool
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -128,7 +130,10 @@ func buildExamplesSystemInstruction(examples []*Example, model string) string {
 			for _, part := range content.Parts {
 				if part.FunctionCall != nil {
 					args := []string{}
-					for k, v := range part.FunctionCall.Args {
+					// Sorted, because map order would make the instruction differ
+					// from one request to the next.
+					for _, k := range slices.Sorted(maps.Keys(part.FunctionCall.Args)) {
+						v := part.FunctionCall.Args[k]
 						if _, ok := v.(string); ok {
 							args = append(args, fmt.Sprintf("%s='%s'", k, v))
 						} else {
