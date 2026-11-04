@@ -28,7 +28,7 @@ import (
 func ExampleClient_StreamQuery() {
 	ctx := context.Background() // an entrypoint: examples and main may use it
 	client, err := agentengine.New(ctx, agentengine.Config{
-		Project: "my-project", Location: "us-central1", ReasoningEngine: "1234567890",
+		ProjectID: "my-project", Location: "us-central1", ReasoningEngine: "1234567890",
 	})
 	if err != nil {
 		log.Fatal(err)

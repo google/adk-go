@@ -347,7 +347,7 @@ func TestNewCallerEndpointOverridesRegional(t *testing.T) {
 	// Bounded so a client still pointed at the regional endpoint fails fast.
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	c, err := New(ctx, Config{Project: "p", Location: "us-central1", ReasoningEngine: "1"},
+	c, err := New(ctx, Config{ProjectID: "p", Location: "us-central1", ReasoningEngine: "1"},
 		option.WithEndpoint(lis.Addr().String()),
 		option.WithoutAuthentication(),
 		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())))
@@ -445,7 +445,7 @@ func newFakeClient(t *testing.T, srv *fakeExecServer) *Client {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	c, err := New(t.Context(), Config{Project: "p", Location: "us-central1", ReasoningEngine: "123"},
+	c, err := New(t.Context(), Config{ProjectID: "p", Location: "us-central1", ReasoningEngine: "123"},
 		option.WithGRPCConn(conn), option.WithoutAuthentication())
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)

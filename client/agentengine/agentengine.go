@@ -31,11 +31,11 @@ import (
 )
 
 // Config identifies the reasoning engine to call. Either set Name, or set
-// Project, Location and ReasoningEngine. Name wins when both are set. Each
+// ProjectID, Location and ReasoningEngine. Name wins when both are set. Each
 // segment is validated: the location picks the host the client dials, so it
 // may contain only lowercase letters, digits and '-'.
 type Config struct {
-	Project         string
+	ProjectID       string
 	Location        string
 	ReasoningEngine string
 	// Name is the full resource name,
@@ -61,10 +61,10 @@ var fullNameRE = regexp.MustCompile(`^projects/([^/]+)/locations/([a-z0-9-]+)/re
 func resourceName(cfg Config) (name, location string, err error) {
 	name = cfg.Name
 	if name == "" {
-		if cfg.Project == "" || cfg.Location == "" || cfg.ReasoningEngine == "" {
-			return "", "", fmt.Errorf("agentengine: Project, Location and ReasoningEngine are required when Name is empty (got %q, %q, %q)", cfg.Project, cfg.Location, cfg.ReasoningEngine)
+		if cfg.ProjectID == "" || cfg.Location == "" || cfg.ReasoningEngine == "" {
+			return "", "", fmt.Errorf("agentengine: ProjectID, Location and ReasoningEngine are required when Name is empty (got %q, %q, %q)", cfg.ProjectID, cfg.Location, cfg.ReasoningEngine)
 		}
-		data := &vertexaiutil.AgentEngineData{ProjectID: cfg.Project, Location: cfg.Location, ReasoningEngine: cfg.ReasoningEngine}
+		data := &vertexaiutil.AgentEngineData{ProjectID: cfg.ProjectID, Location: cfg.Location, ReasoningEngine: cfg.ReasoningEngine}
 		name = vertexaiutil.AgentEngineResource(data)
 	}
 	m := fullNameRE.FindStringSubmatch(name)

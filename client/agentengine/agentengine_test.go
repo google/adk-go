@@ -29,7 +29,7 @@ func TestResourceName(t *testing.T) {
 	}{
 		{
 			name:         "triple form",
-			cfg:          Config{Project: "p", Location: "us-central1", ReasoningEngine: "123"},
+			cfg:          Config{ProjectID: "p", Location: "us-central1", ReasoningEngine: "123"},
 			wantName:     "projects/p/locations/us-central1/reasoningEngines/123",
 			wantLocation: "us-central1",
 		},
@@ -41,26 +41,26 @@ func TestResourceName(t *testing.T) {
 		},
 		{
 			name:         "full name wins over triple",
-			cfg:          Config{Name: "projects/p/locations/europe-west1/reasoningEngines/456", Project: "x", Location: "y", ReasoningEngine: "z"},
+			cfg:          Config{Name: "projects/p/locations/europe-west1/reasoningEngines/456", ProjectID: "x", Location: "y", ReasoningEngine: "z"},
 			wantName:     "projects/p/locations/europe-west1/reasoningEngines/456",
 			wantLocation: "europe-west1",
 		},
 		{name: "missing project", cfg: Config{Location: "l", ReasoningEngine: "r"}, wantErr: "required"},
-		{name: "missing location", cfg: Config{Project: "p", ReasoningEngine: "r"}, wantErr: "required"},
-		{name: "missing engine", cfg: Config{Project: "p", Location: "l"}, wantErr: "required"},
+		{name: "missing location", cfg: Config{ProjectID: "p", ReasoningEngine: "r"}, wantErr: "required"},
+		{name: "missing engine", cfg: Config{ProjectID: "p", Location: "l"}, wantErr: "required"},
 		{name: "malformed full name", cfg: Config{Name: "reasoningEngines/456"}, wantErr: "valid segments"},
 		{name: "empty", cfg: Config{}, wantErr: "required"},
 		// The location becomes the endpoint host, so anything that could
 		// change the dial target is rejected.
 		{name: "host and port in location", cfg: Config{Name: "projects/p/locations/127.0.0.1:443#/reasoningEngines/1"}, wantErr: "valid segments"},
 		{name: "query marker in location", cfg: Config{Name: "projects/p/locations/us-central1?/reasoningEngines/1"}, wantErr: "valid segments"},
-		{name: "uppercase location", cfg: Config{Project: "p", Location: "US-Central1", ReasoningEngine: "1"}, wantErr: "valid segments"},
-		{name: "space in triple location", cfg: Config{Project: "p", Location: "us-central1 ", ReasoningEngine: "1"}, wantErr: "valid segments"},
-		{name: "full name passed as engine", cfg: Config{Project: "p", Location: "us-central1", ReasoningEngine: "projects/p/locations/us-central1/reasoningEngines/1"}, wantErr: "valid segments"},
-		{name: "slash in project", cfg: Config{Project: "p/q", Location: "us-central1", ReasoningEngine: "1"}, wantErr: "valid segments"},
+		{name: "uppercase location", cfg: Config{ProjectID: "p", Location: "US-Central1", ReasoningEngine: "1"}, wantErr: "valid segments"},
+		{name: "space in triple location", cfg: Config{ProjectID: "p", Location: "us-central1 ", ReasoningEngine: "1"}, wantErr: "valid segments"},
+		{name: "full name passed as engine", cfg: Config{ProjectID: "p", Location: "us-central1", ReasoningEngine: "projects/p/locations/us-central1/reasoningEngines/1"}, wantErr: "valid segments"},
+		{name: "slash in project", cfg: Config{ProjectID: "p/q", Location: "us-central1", ReasoningEngine: "1"}, wantErr: "valid segments"},
 		{
 			name:         "domain-scoped project",
-			cfg:          Config{Project: "google.com:my-proj", Location: "us-central1", ReasoningEngine: "1"},
+			cfg:          Config{ProjectID: "google.com:my-proj", Location: "us-central1", ReasoningEngine: "1"},
 			wantName:     "projects/google.com:my-proj/locations/us-central1/reasoningEngines/1",
 			wantLocation: "us-central1",
 		},
