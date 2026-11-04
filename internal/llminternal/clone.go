@@ -20,7 +20,14 @@ import (
 	"fmt"
 	"reflect"
 	"time"
+
+	"google.golang.org/genai"
 )
+
+// CloneSchema copies schema with the same semantics as [CloneGenerateContentConfig].
+func CloneSchema(schema *genai.Schema) (*genai.Schema, error) {
+	return clone(schema)
+}
 
 // clone copies src's data containers, with time.Time values copied by value.
 // Inside an empty interface, values with unexported fields are preserved as an
@@ -54,7 +61,6 @@ func (e *cloneJSONError) Error() string {
 
 func (e *cloneJSONError) Unwrap() error { return e.err }
 
-// deepCopy copies src to dst using reflect.
 func deepCopy(src, dst reflect.Value, depth int) error {
 	if depth > maxCloneDepth {
 		return fmt.Errorf("%w: limit %d (cyclic or excessively nested value)", errCloneDepth, maxCloneDepth)

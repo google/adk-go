@@ -21,6 +21,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"google.golang.org/genai"
+
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func mustClone[M any](t *testing.T, value M) M {
@@ -238,6 +243,51 @@ func TestCloneRecursionLimit(t *testing.T) {
 			}
 			if got != nil {
 				t.Fatal("clone() returned partial result")
+			}
+		})
+	}
+}
+
+func TestContentsCloneDepthBoundary(t *testing.T) {
+	// Fixed payload depths pin the history boundary, independently of maxCloneDepth.
+	for _, tt := range []struct {
+		name    string
+		maps    int
+		wantErr bool
+	}{
+		{name: "508 maps", maps: 508},
+		{name: "509 maps", maps: 509, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := map[string]any{"leaf": "value"}
+			for i := 1; i < tt.maps; i++ {
+				payload = map[string]any{"nested": payload}
+			}
+			call := genai.NewContentFromFunctionCall("lookup", map[string]any{}, "model")
+			response := genai.NewContentFromFunctionResponse("lookup", payload, "user")
+			call.Parts[0].FunctionCall.ID = "call-1"
+			response.Parts[0].FunctionResponse.ID = "call-1"
+			events := []*session.Event{
+				{Author: "agent", LLMResponse: model.LLMResponse{Content: call}},
+				{Author: "agent", LLMResponse: model.LLMResponse{Content: response}},
+			}
+			for range 2 {
+				contents, err := buildContentsDefault("agent", "", "", events, false, nil)
+				if tt.wantErr {
+					if !errors.Is(err, errCloneDepth) || contents != nil {
+						t.Fatal("history beyond the depth limit did not return a clone error")
+					}
+				} else {
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(contents) != len(events) || !reflect.DeepEqual(contents[1], response) {
+						t.Fatal("cloning changed history within the depth limit")
+					}
+				}
+				events = append(events, &session.Event{Author: "user", LLMResponse: model.LLMResponse{
+					Content: genai.NewContentFromText("next request", "user"),
+				}})
 			}
 		})
 	}
