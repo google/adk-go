@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -433,17 +434,39 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			)
 		}
 
-		// Fetch App and User states.
-		storageApp, err := fetchStorageAppState(tx, sess.AppName())
-		if err != nil {
-			return err
+		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+
+		// App and user state are shared with other sessions and written back
+		// whole, so lock their rows before reading them when this event changes
+		// them. Otherwise a concurrent append from another session reads the
+		// same row and the later write drops the earlier one's keys. This
+		// matches adk-python, which locks these rows FOR UPDATE.
+		//
+		// Lock and read the app row before touching the user row. Create
+		// writes app then user, and inserting the user row first would hold
+		// it while waiting for an app row lock that Create holds, so the two
+		// could deadlock.
+		appTx := tx
+		if len(appDelta) > 0 {
+			if appTx, err = lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+				return fmt.Errorf("failed to lock app state: %w", err)
+			}
 		}
-		storageUser, err := fetchStorageUserState(tx, sess.AppName(), sess.UserID())
+		storageApp, err := fetchStorageAppState(appTx, sess.AppName())
 		if err != nil {
 			return err
 		}
 
-		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+		userTx := tx
+		if len(userDelta) > 0 {
+			if userTx, err = lockStateRow(tx, &storageUserState{AppName: sess.AppName(), UserID: sess.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+				return fmt.Errorf("failed to lock user state: %w", err)
+			}
+		}
+		storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
+		if err != nil {
+			return err
+		}
 
 		// Merge state deltas and update the storage objects.
 		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
@@ -489,6 +512,17 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 	})
 
 	return err
+}
+
+// lockStateRow makes sure the state row exists and returns tx set to read it
+// FOR UPDATE. A missing row is inserted empty first, since FOR UPDATE cannot
+// lock a row that does not exist yet, and a concurrent insert of the same row
+// is ignored. SQLite ignores the locking clause; it serializes writers anyway.
+func lockStateRow(tx *gorm.DB, emptyRow any) (*gorm.DB, error) {
+	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(emptyRow).Error; err != nil {
+		return nil, err
+	}
+	return tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}), nil
 }
 
 func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error) {

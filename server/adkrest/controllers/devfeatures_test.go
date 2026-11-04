@@ -96,7 +96,7 @@ func TestNotImplementedHandlerOmitsEmptyDetail(t *testing.T) {
 }
 
 // TestMetricsInfoHandler asserts the raw bytes on purpose. A nil slice
-// serialises as null, and a decoded []any is nil either way, so a decoded
+// serializes as null, and a decoded []any is nil either way, so a decoded
 // comparison cannot tell an empty list from a missing one. The client can.
 func TestMetricsInfoHandler(t *testing.T) {
 	rr := serve(t, controllers.MetricsInfoHandler, "/dev/apps/test-app/metrics-info")

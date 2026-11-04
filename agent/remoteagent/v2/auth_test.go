@@ -965,7 +965,7 @@ func (e *wrappedRetrieveError) Unwrap() error { return e.inner }
 
 // quotingRetrieveError re-encodes the body instead of printing it verbatim.
 // No wrapper on any path this package uses does that today, which is exactly
-// why redaction must not depend on recognising the body in the message.
+// why redaction must not depend on recognizing the body in the message.
 type quotingRetrieveError struct {
 	inner *oauth2.RetrieveError
 }
@@ -1409,12 +1409,12 @@ func TestNewA2AOwnsAuthScope(t *testing.T) {
 }
 
 // TestMintGroupSingleFlight pins that a request arriving while a mint is in
-// flight joins it instead of starting another. Token() cannot be cancelled, so
+// flight joins it instead of starting another. Token() cannot be canceled, so
 // a caller released by its own deadline leaves the mint running; without the
 // single-flight, every request arriving while a token endpoint hangs would
 // start another one and park another goroutine.
 //
-// The joining callers carry an already-cancelled context, which makes the test
+// The joining callers carry an already-canceled context, which makes the test
 // deterministic: joining happens under the lock before the wait, so each one
 // returns at once and can be driven from the test goroutine with no window in
 // which it might have missed the in-flight call.
@@ -1725,7 +1725,7 @@ func TestRemoteAgent_AuthOverwritesACallerScope(t *testing.T) {
 }
 
 // TestMintGroupRetiresAnOverdueAttempt covers the attempt's own deadline. The
-// mint cannot be cancelled, so without retiring an overdue one its map entry
+// mint cannot be canceled, so without retiring an overdue one its map entry
 // would never be removed and every later request for that scope would join a
 // mint that can never finish — a token endpoint that hangs once would lock that
 // identity out for the life of the process.
@@ -2627,7 +2627,7 @@ func TestAuthTransportSharesAStepWithinAScope(t *testing.T) {
 		t.Fatal("no step recorded in flight for the scope while its Apply is running; the transport is not using its shared group")
 	}
 
-	// The second request carries an already-cancelled context, so it returns
+	// The second request carries an already-canceled context, so it returns
 	// as soon as it has joined or started a step, and the count below is read
 	// with no window in which it might still be starting one.
 	cancelled, cancel := context.WithCancel(scope)

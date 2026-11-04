@@ -15,13 +15,19 @@
 package llminternal
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 // socketErr rebuilds the error the net package returns for a failed read or
@@ -46,7 +52,55 @@ const (
 	wsaeConnReset   = syscall.Errno(10054)
 )
 
+// failingConn passes traffic through until fail is set, then returns err
+// from every Write.
+type failingConn struct {
+	net.Conn
+	fail atomic.Bool
+	err  error
+}
+
+func (c *failingConn) Write(b []byte) (int, error) {
+	if c.fail.Load() {
+		return 0, c.err
+	}
+	return c.Conn.Write(b)
+}
+
+// tlsWriteErr returns the error crypto/tls hands back when the socket under an
+// established TLS connection fails a write with sockErr. That is the error the
+// sender sees over wss://, and crypto/tls does not return the socket error
+// as is, so the test builds it for real rather than guessing its shape.
+func tlsWriteErr(t *testing.T, sockErr error) error {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	raw, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	fc := &failingConn{Conn: raw, err: sockErr}
+	cfg := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	cfg.ServerName = "example.com" // a name on the httptest certificate
+	conn := tls.Client(fc, cfg)
+	if err := conn.Handshake(); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	fc.fail.Store(true)
+	_, err = conn.Write([]byte("x"))
+	if err == nil {
+		t.Fatal("write on a failed socket succeeded")
+	}
+	if _, ok := err.(*net.OpError); ok {
+		t.Fatalf("crypto/tls returned the socket error unwrapped (%T); this case no longer covers the wss:// shape", err)
+	}
+	return err
+}
+
 func TestIsResumable(t *testing.T) {
+	wssWriteErr := tlsWriteErr(t, socketErr("write", "wsasend", wsaeConnAborted))
+
 	tests := []struct {
 		name string
 		err  error
@@ -64,7 +118,7 @@ func TestIsResumable(t *testing.T) {
 		},
 		{
 			name: "reader: policy violation 1008",
-			err:  errors.New("websocket: close 1008 (policy violation)"),
+			err:  fmt.Errorf("failed to receive message: %w", &websocket.CloseError{Code: websocket.ClosePolicyViolation}),
 			want: true,
 		},
 		{"reader: GoAway", errors.New("GoAway received"), true},
@@ -99,8 +153,13 @@ func TestIsResumable(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "sender: wrapped socket error still resumable",
-			err:  fmt.Errorf("sending realtime input: %w", socketErr("write", "wsasend", wsaeConnAborted)),
+			name: "sender: SendContent wrapper around a socket error",
+			err:  fmt.Errorf("failed to send content: %w", socketErr("write", "wsasend", wsaeConnAborted)),
+			want: true,
+		},
+		{
+			name: "sender: wss write error wrapped by crypto/tls",
+			err:  wssWriteErr,
 			want: true,
 		},
 
@@ -109,6 +168,19 @@ func TestIsResumable(t *testing.T) {
 		{
 			name: "protocol error 1002 is fatal",
 			err:  errors.New("websocket: close 1002 (protocol error): fatal"),
+			want: false,
+		},
+		{
+			// gorilla hides a temporary net.Error (hideTempErr) behind its own
+			// type, so only the text reaches isResumable, and the text carries
+			// the socket addresses.
+			name: "timeout with 1008 in a port is fatal",
+			err:  errors.New("failed to receive message: read tcp 127.0.0.1:41008->127.0.0.1:42207: i/o timeout"),
+			want: false,
+		},
+		{
+			name: "close frame with 1008 only in its reason is fatal",
+			err:  fmt.Errorf("failed to receive message: %w", &websocket.CloseError{Code: websocket.CloseProtocolError, Text: "error 1008"}),
 			want: false,
 		},
 		{

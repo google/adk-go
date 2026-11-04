@@ -29,7 +29,7 @@ const MaxServerTextRunes = 256
 // log; see the same reasoning at [google.golang.org/adk/v2/auth/gcp].
 func ClipServerText(s string) string {
 	s = strings.TrimSpace(s)
-	// Counted by ranging rather than by materialising []rune: an 8 MiB message
+	// Counted by ranging rather than by materializing []rune: an 8 MiB message
 	// would otherwise cost 32 MiB to yield at most a kilobyte. Ranging a string
 	// yields the byte index of each rune, so s[:i] never splits one.
 	n := 0

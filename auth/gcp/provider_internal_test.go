@@ -126,7 +126,7 @@ func TestResolveClientHonorsCallerDeadline(t *testing.T) {
 }
 
 // TestResolveClientBoundsWaitOnHungInit pins the initTimeout: an ADC lookup that
-// never returns cannot be cancelled, so a caller with no deadline of its own must
+// never returns cannot be canceled, so a caller with no deadline of its own must
 // still be released — while the attempt itself is kept.
 func TestResolveClientBoundsWaitOnHungInit(t *testing.T) {
 	p := newTestProvider(t)
@@ -488,11 +488,11 @@ func TestResolveClientBoundIsPerAttemptNotPerWaiter(t *testing.T) {
 // It reaches one case only: a result that landed before the caller arrived,
 // which the pre-check answers. Either that check or the timer arm's re-check
 // alone keeps this green, so deleting one leaves the test passing — which is
-// not a licence to delete the timer-arm one. It is the only cover for the case
+// not a license to delete the timer-arm one. It is the only cover for the case
 // this test cannot arrange, a result landing after the pre-check has fallen
 // through while the caller waits on the timer arm. Nothing pins that, so
 // removing it loses the window silently. The select's third arm carries a
-// re-check of its own for the same reason on the caller-cancelled path, which
+// re-check of its own for the same reason on the caller-canceled path, which
 // this test does not reach.
 func TestResolveClientPrefersALandedResultOverAnExpiredBound(t *testing.T) {
 	built := &Client{httpClient: http.DefaultClient}
@@ -585,7 +585,7 @@ func TestDefaultBuilderPassesItsArgumentToNewClient(t *testing.T) {
 	}
 }
 
-// markerTransport is recognised by pointer identity and never used to send
+// markerTransport is recognized by pointer identity and never used to send
 // anything.
 //
 // The name field names the marker in a failure, and it is also what keeps the
@@ -742,5 +742,61 @@ func TestCacheUntilBoundary(t *testing.T) {
 				t.Errorf("cacheUntil() = (%v, %v), want (%v, %v)", got, ok, tc.want, tc.wantOK)
 			}
 		})
+	}
+}
+
+// The sweep is the only thing that removes entries from p.refreshed, and the
+// cooldown is a constant, so no test reaches it by waiting. It must drop a slot
+// whose cooldown has run out and keep one still inside it, or the cooldown stops
+// holding for that slot.
+func TestAllowRefreshSweepsOnlyExpiredSlots(t *testing.T) {
+	now := time.Now()
+	p := &provider{
+		refreshed: map[string]time.Time{
+			"expired": now.Add(-2 * refreshCooldown),
+			"live":    now.Add(-refreshCooldown / 2),
+		},
+		refreshSwept: now.Add(-2 * refreshCooldown),
+	}
+
+	if !p.allowRefresh("new") {
+		t.Fatal("allowRefresh() for a slot never refreshed = false, want true")
+	}
+	if _, ok := p.refreshed["expired"]; ok {
+		t.Error("a slot past its cooldown survived the sweep")
+	}
+	if p.allowRefresh("live") {
+		t.Error("allowRefresh() for a slot inside its cooldown = true after a sweep, want false")
+	}
+}
+
+// hangingStore never answers a Delete until its context is done.
+type hangingStore struct {
+	auth.CredentialStore
+	deleteCtxErr chan error
+}
+
+func (s *hangingStore) Delete(ctx context.Context, _ auth.CredentialKey) error {
+	<-ctx.Done()
+	s.deleteCtxErr <- ctx.Err()
+	return ctx.Err()
+}
+
+// The eviction runs detached, so nothing else bounds it. A store that never
+// answers must not hold the request that triggered the refresh.
+func TestDropEntryDoesNotWaitOnAStoreForever(t *testing.T) {
+	store := &hangingStore{CredentialStore: auth.NewInMemoryCredentialStore(), deleteCtxErr: make(chan error, 1)}
+	p := &provider{store: store, evictTimeout: 20 * time.Millisecond}
+
+	done := make(chan struct{})
+	go func() { defer close(done); p.dropEntry(t.Context(), auth.CredentialKey{}) }()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dropEntry did not return; the detached delete is unbounded")
+	}
+	if err := <-store.deleteCtxErr; !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("the store's context ended with %v, want %v", err, context.DeadlineExceeded)
 	}
 }

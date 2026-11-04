@@ -27,7 +27,7 @@ import (
 	"google.golang.org/adk/v2/cmd/launcher/web/webui"
 )
 
-// NewLauncher returnes the most versatile universal launcher with all options built-in.
+// NewLauncher returns the most versatile universal launcher with all options built-in.
 func NewLauncher() launcher.Launcher {
 	return universal.NewLauncher(console.NewLauncher(), web.NewLauncher(webui.NewLauncher(), a2a.NewLauncher(), pubsub.NewLauncher(), eventarc.NewLauncher(), api.NewLauncher()))
 }
