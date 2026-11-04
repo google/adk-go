@@ -54,7 +54,6 @@ func (e *cloneJSONError) Error() string {
 
 func (e *cloneJSONError) Unwrap() error { return e.err }
 
-// deepCopy copies src to dst using reflect.
 func deepCopy(src, dst reflect.Value, depth int) error {
 	if depth > maxCloneDepth {
 		return fmt.Errorf("%w: limit %d (cyclic or excessively nested value)", errCloneDepth, maxCloneDepth)

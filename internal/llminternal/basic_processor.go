@@ -63,3 +63,12 @@ func basicRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest, f
 		//  populate LLMRequest LiveConnectConfig setting
 	}
 }
+
+// CloneGenerateContentConfig copies cfg's data containers recursively, including
+// values held in interfaces. A nil cfg produces a nil copy. Values with
+// unexported fields in empty interfaces may become JSON snapshots, changing
+// their dynamic Go type. Cyclic or excessively nested data and values that
+// cannot be copied return an error.
+func CloneGenerateContentConfig(cfg *genai.GenerateContentConfig) (*genai.GenerateContentConfig, error) {
+	return clone(cfg)
+}
