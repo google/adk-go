@@ -384,11 +384,12 @@ func resolveConfigReference(configDir, refPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("config reference %q: %w", refPath, err)
 	}
-	// A link that stays inside the directory is accepted, but the agent is keyed
-	// by the real path so one config cannot be registered under two spellings.
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = real
-	}
+	// abs is the path the check followed the reference to, links replaced by
+	// their targets. It is what gets read and what keys the registries, so the
+	// file judged is the file opened, and one config cannot be registered under
+	// two spellings. Resolving it again here by other rules (EvalSymlinks does
+	// not follow a Windows junction, and applies a ".." in a link target after
+	// the link before it) would reopen the gap between the check and the read.
 	return abs, nil
 }
 

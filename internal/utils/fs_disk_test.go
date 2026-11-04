@@ -213,3 +213,65 @@ func TestSafeSubpath_RootedLinkTargetWithoutDrive(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeSubpath_DotDotAfterLinkInTarget covers a link whose target contains a
+// ".." after another link, such as "s/../y.yaml". filepath.EvalSymlinks, and so
+// the loader, follows s first and applies ".." to what s points at; cleaning the
+// target as text instead drops "s/.." before anything looks at s, and judges a
+// y.yaml beside the link. Found in review.
+func TestSafeSubpath_DotDotAfterLinkInTarget(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	base := filepath.Join(root, "base")
+	outside := filepath.Join(root, "outside", "p")
+	for _, d := range []string{
+		base,
+		filepath.Join(base, "sub1", "sub2"),
+		filepath.Join(base, "deep"),
+		filepath.Join(outside, "q"),
+	} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) failed: %v", d, err)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(outside, "y.yaml"),
+		filepath.Join(base, "in.yaml"),
+		filepath.Join(root, "x.yaml"),
+	} {
+		if err := os.WriteFile(f, nil, 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) failed: %v", f, err)
+		}
+	}
+	link := func(dest, at string) {
+		if err := os.Symlink(dest, at); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+	}
+	// s -> a directory outside base; x.yaml -> "s/../y.yaml" opens outside/p/y.yaml.
+	link(filepath.Join(outside, "q"), filepath.Join(base, "s"))
+	link("s/../y.yaml", filepath.Join(base, "x.yaml"))
+	// deep/up -> "..", which stays inside; chain.yaml -> "deep/up/../x.yaml"
+	// opens root/x.yaml, one level above base, through links that each stay
+	// inside.
+	link("..", filepath.Join(base, "deep", "up"))
+	link("deep/up/../x.yaml", filepath.Join(base, "chain.yaml"))
+	// d -> sub1/sub2 (inside); back.yaml -> "d/../../in.yaml" opens base/in.yaml.
+	link("sub1/sub2", filepath.Join(base, "d"))
+	link("d/../../in.yaml", filepath.Join(base, "back.yaml"))
+
+	for _, rel := range []string{"x.yaml", "chain.yaml"} {
+		if got, _, err := SafeSubpath(base, rel); !errors.Is(err, ErrSymlinkInRelativePath) {
+			t.Errorf("SafeSubpath(%q, %s) = (%q, %v), want %v: the link opens a file outside base", base, rel, got, err, ErrSymlinkInRelativePath)
+		}
+	}
+	got, _, err := SafeSubpath(base, "back.yaml")
+	if err != nil {
+		t.Fatalf("SafeSubpath(%q, back.yaml) = %v, want success: the link opens base/in.yaml", base, err)
+	}
+	if want := filepath.Join(base, "in.yaml"); got != want {
+		t.Errorf("SafeSubpath(%q, back.yaml) = %q, want %q, the file the link opens", base, got, want)
+	}
+}

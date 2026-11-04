@@ -610,3 +610,57 @@ func TestFromConfigRefusesEscapingAgentReferences(t *testing.T) {
 		})
 	}
 }
+
+// TestFromConfigDotDotAfterLinkInTarget drives the review case through
+// FromConfig: a sub_agents reference to a link whose target is "s/../y.yaml",
+// with s linking outside the config directory, must be refused, and one whose
+// target is "d/../../in.yaml", which opens the directory's own in.yaml, must
+// load. The check judges the file the loader then opens.
+func TestFromConfigDotDotAfterLinkInTarget(t *testing.T) {
+	write := func(p, s string) {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll failed: %v", err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
+	}
+	link := func(dest, at string) {
+		if err := os.Symlink(dest, at); err != nil {
+			t.Skipf("symlinks are not supported in this environment: %v", err)
+		}
+	}
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	agentDir := filepath.Join(root, "agent")
+	outside := filepath.Join(root, "outside", "p")
+
+	// s -> a directory outside agentDir; x.yaml -> "s/../y.yaml", which the
+	// loader resolves to outside/p/y.yaml.
+	write(filepath.Join(outside, "y.yaml"), "agent_class: SequentialAgent\nname: outside_y\n")
+	write(filepath.Join(outside, "q", ".keep"), "")
+	write(filepath.Join(agentDir, ".keep"), "")
+	link(filepath.Join(outside, "q"), filepath.Join(agentDir, "s"))
+	link("s/../y.yaml", filepath.Join(agentDir, "x.yaml"))
+	write(filepath.Join(agentDir, "escape.yaml"), "agent_class: SequentialAgent\nname: root\nsub_agents:\n  - config_path: x.yaml\n")
+	_, err := FromConfig(context.Background(), filepath.Join(agentDir, "escape.yaml"))
+	if !errors.Is(err, utils.ErrSymlinkInRelativePath) {
+		t.Errorf("FromConfig(escape.yaml) = %v, want %v: x.yaml opens %s", err, utils.ErrSymlinkInRelativePath, filepath.Join(outside, "y.yaml"))
+	}
+	if err != nil && !strings.Contains(err.Error(), `config reference "x.yaml"`) {
+		t.Errorf("FromConfig(escape.yaml) = %q, want the error to name the reference", err)
+	}
+
+	// d -> sub1/sub2 (inside); back.yaml -> "d/../../in.yaml", which the loader
+	// resolves to agentDir/in.yaml.
+	write(filepath.Join(agentDir, "in.yaml"), "agent_class: SequentialAgent\nname: inside\n")
+	write(filepath.Join(agentDir, "sub1", "sub2", ".keep"), "")
+	link("sub1/sub2", filepath.Join(agentDir, "d"))
+	link("d/../../in.yaml", filepath.Join(agentDir, "back.yaml"))
+	write(filepath.Join(agentDir, "inside.yaml"), "agent_class: SequentialAgent\nname: root2\nsub_agents:\n  - config_path: back.yaml\n")
+	if _, err := FromConfig(context.Background(), filepath.Join(agentDir, "inside.yaml")); err != nil {
+		t.Errorf("FromConfig(inside.yaml) = %v, want success: back.yaml opens %s", err, filepath.Join(agentDir, "in.yaml"))
+	}
+}

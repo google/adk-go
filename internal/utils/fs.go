@@ -38,7 +38,11 @@ var (
 // SafeSubpath resolves rel below base and checks that the result stays inside it.
 //
 // The base path must be absolute and is trusted. rel is not. On success the
-// result is the normalized absolute path and its base-relative equivalent.
+// result is the absolute path the check followed rel to, every link on the way
+// replaced by its target, and the base-relative spelling of rel. A caller that
+// opens the returned path opens the file the check judged; opening another
+// spelling of it, or resolving it again by other rules, is what lets a check
+// and a read disagree.
 //
 // Returns ErrNotValidRelativePath iff rel is not a local path below base:
 // absolute, empty, escaping through "..", effectively empty, or (on Windows)
@@ -109,10 +113,11 @@ func SafeSubpath(base, rel string) (absPath, relPath string, resErr error) {
 		return "", "", fmt.Errorf("%w: not a subpath", ErrNotValidRelativePath)
 	}
 
-	if _, err := resolveInside(absBase, res); err != nil {
+	real, err := resolveInside(absBase, res)
+	if err != nil {
 		return "", "", err
 	}
-	return res, r, nil
+	return real, r, nil
 }
 
 // resolveInside follows the links in target and reports where it really lands.
@@ -139,9 +144,15 @@ func resolveInside(base, target string) (string, error) {
 const maxLinkFollows = 255
 
 // followLinks walks the absolute path p one component at a time and replaces
-// every link by its target, so the result names the entry the operating system
-// would open. It is filepath.EvalSymlinks with two differences that matter
-// here:
+// every link by its target. It follows links the way filepath.EvalSymlinks
+// does: a link's target is spliced into the path uncleaned and then walked
+// component by component, so a ".." applies to whatever the walk has reached
+// so far. In the target "s/../y.yaml" that is what s points at, not the
+// directory the link sits in; cleaning the target as text first would drop
+// "s/.." before looking at s and judge a different file. The result is what
+// the caller then opens, so the check and the read agree by construction.
+//
+// Two differences from EvalSymlinks matter here:
 //
 //   - A link is anything os.Readlink can read. On Windows that includes a
 //     directory junction, which since Go 1.23 os.Lstat reports as ModeIrregular
@@ -149,12 +160,9 @@ const maxLinkFollows = 255
 //     when a junction sits in the middle of a path).
 //   - A link whose target does not exist is still followed, by name, and a
 //     component that does not exist, or sits below a non-directory, ends the
-//     walk with the remaining components appended as written. Nothing below
+//     walk with the remaining components appended and cleaned. Nothing below
 //     such a component can exist, so it can hide no link, and the caller's
 //     read is what reports the missing file.
-//
-// A ".." after a link applies to the link's target, as the operating system
-// would apply it, not to the name of the link.
 func followLinks(p string) (string, error) {
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(p)
@@ -193,20 +201,25 @@ func followLinks(p string) (string, error) {
 		if follows > maxLinkFollows {
 			return "", fmt.Errorf("too many links in %q", p)
 		}
+		// Continue the walk from the target's components, then whatever followed
+		// the link. The target is not cleaned: a ".." in it is applied by the
+		// walk, after the component before it has been followed.
+		dest = filepath.FromSlash(dest)
 		switch {
 		case filepath.IsAbs(dest):
+			vol := filepath.VolumeName(dest)
+			cur = vol + sep
+			dest = dest[len(vol):]
 		case dest != "" && os.IsPathSeparator(dest[0]):
 			// Windows only: a target such as \outside\x.yaml is rooted but has
 			// no drive, so IsAbs is false. The operating system reads it from the
 			// root of the drive the link sits on, not below the link's directory.
-			dest = filepath.VolumeName(cur) + dest
+			cur = filepath.VolumeName(cur) + sep
 		default:
-			dest = filepath.Join(cur, dest)
+			// A relative target is read from the directory the link sits in,
+			// which is cur.
 		}
-		// Start over from the target, with what follows the link still to walk.
-		destVol := filepath.VolumeName(dest)
-		cur = destVol + sep
-		rest = append(strings.Split(strings.Trim(dest[len(destVol):], sep), sep), rest[i+1:]...)
+		rest = append(strings.Split(strings.Trim(dest, sep), sep), rest[i+1:]...)
 		i = -1
 	}
 	return filepath.Clean(cur), nil
