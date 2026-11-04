@@ -258,7 +258,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
-	var events []models.Event
+	// Not `var events []models.Event`: a nil slice encodes as JSON null, and
+	// clients expect a list, empty for a run that produced no events.
+	events := []models.Event{}
 	for _, event := range sessionEvents {
 		events = append(events, models.FromSessionEvent(*event))
 	}
