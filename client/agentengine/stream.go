@@ -67,6 +67,11 @@ func (c *Client) StreamQuery(ctx context.Context, req StreamQueryRequest) iter.S
 		}
 		stream, err := c.exec.StreamQueryReasoningEngine(streamCtx, pbReq)
 		if err != nil {
+			// grpc reports a per-RPC credential's failure as Unauthenticated,
+			// even when the failure is ctx ending.
+			if cerr := ctx.Err(); cerr != nil {
+				err = status.FromContextError(cerr).Err()
+			}
 			yield(nil, fmt.Errorf("agentengine: stream query %s: %w", c.name, err))
 			return
 		}

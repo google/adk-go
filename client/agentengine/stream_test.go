@@ -232,6 +232,55 @@ func TestStreamQueryContextDoneBeforeRange(t *testing.T) {
 	}
 }
 
+func TestStreamQueryOpenErrorKeepsItsStatus(t *testing.T) {
+	// With ctx still live, a failure to open the stream is reported as it is.
+	creds := failingCreds{err: status.Error(codes.Unauthenticated, "no token")}
+	c := newFakeClient(t, &fakeExecServer{chunks: []string{lineA}}, grpc.WithPerRPCCredentials(creds))
+	_, err := collect(t, c.StreamQuery(t.Context(), StreamQueryRequest{UserID: "u", SessionID: "s", Message: genai.NewContentFromText("x", genai.RoleUser)}))
+	if status.Code(err) != codes.Unauthenticated || !strings.Contains(err.Error(), "no token") {
+		t.Fatalf("error = %v, want status Unauthenticated carrying the credential's message", err)
+	}
+}
+
+func TestStreamQueryContextEndsDuringCredentials(t *testing.T) {
+	// grpc reports a per-RPC credential that fails on a done ctx as
+	// Unauthenticated, so opening the stream must report the ctx itself.
+	for _, tc := range []struct {
+		name string
+		err  error
+		code codes.Code
+	}{
+		{"cancel", context.Canceled, codes.Canceled},
+		{"deadline", context.DeadlineExceeded, codes.DeadlineExceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := &blockingCreds{fetching: make(chan struct{})}
+			c := newFakeClient(t, &fakeExecServer{chunks: []string{lineA}}, grpc.WithPerRPCCredentials(creds))
+			ctx := newManualCtx(t.Context())
+			done := make(chan error, 1)
+			go func() {
+				_, err := collect(t, c.StreamQuery(ctx, StreamQueryRequest{UserID: "u", SessionID: "s", Message: genai.NewContentFromText("x", genai.RoleUser)}))
+				done <- err
+			}()
+			select {
+			case <-creds.fetching:
+			case <-time.After(5 * time.Second):
+				t.Fatal("per-RPC credentials were never fetched")
+			}
+			ctx.end(tc.err)
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("StreamQuery() did not return after ctx ended")
+			}
+			if status.Code(err) != tc.code {
+				t.Fatalf("error = %v, want status %v", err, tc.code)
+			}
+		})
+	}
+}
+
 func TestStreamQueryDoneBetweenBufferedLinesNonStdlibCtx(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -426,7 +475,7 @@ func (f *fakeExecServer) callCount() int {
 }
 
 // newFakeClient serves srv over bufconn and returns a Client dialed to it.
-func newFakeClient(t *testing.T, srv *fakeExecServer) *Client {
+func newFakeClient(t *testing.T, srv *fakeExecServer, dialOpts ...grpc.DialOption) *Client {
 	t.Helper()
 	listener := bufconn.Listen(1024 * 1024)
 	server := grpc.NewServer()
@@ -436,10 +485,10 @@ func newFakeClient(t *testing.T, srv *fakeExecServer) *Client {
 		server.Stop()
 		_ = listener.Close()
 	})
-	conn, err := grpc.NewClient("passthrough:///bufnet",
+	conn, err := grpc.NewClient("passthrough:///bufnet", append([]grpc.DialOption{
 		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return listener.Dial() }),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
+	}, dialOpts...)...)
 	if err != nil {
 		t.Fatalf("grpc.NewClient() failed: %v", err)
 	}
@@ -482,3 +531,27 @@ func (m *manualCtx) end(err error) {
 	m.mu.Unlock()
 	close(m.done)
 }
+
+// blockingCreds is a per-RPC credential whose fetch waits for its ctx, like a
+// token refresh still in flight when the caller gives up.
+type blockingCreds struct {
+	once     sync.Once
+	fetching chan struct{}
+}
+
+func (b *blockingCreds) GetRequestMetadata(ctx context.Context, _ ...string) (map[string]string, error) {
+	b.once.Do(func() { close(b.fetching) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (*blockingCreds) RequireTransportSecurity() bool { return false }
+
+// failingCreds is a per-RPC credential whose fetch always fails with err.
+type failingCreds struct{ err error }
+
+func (f failingCreds) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return nil, f.err
+}
+
+func (failingCreds) RequireTransportSecurity() bool { return false }
