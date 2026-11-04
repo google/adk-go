@@ -204,6 +204,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	if event.Partial {
 		return nil
 	}
+	// A backend that persists events could not read this request back, so
+	// this one refuses it too.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("cannot append event: %w", err)
+	}
 	// Give the event an identity if it arrived without one, the same way a
 	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
 	// event built as a struct literal by an agent or a tool never goes through

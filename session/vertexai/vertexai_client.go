@@ -33,6 +33,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
@@ -294,6 +295,11 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	if event.Partial {
 		return nil
 	}
+	// A stored request that does not decode would fail every later read of
+	// the session.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("error appending event: %w", err)
+	}
 
 	reasoningEngine, err := c.getReasoningEngineID(appName)
 	if err != nil {
@@ -532,9 +538,6 @@ func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventAc
 	if len(event.Actions.RequestedAuthConfigs) > 0 {
 		configs, err := toStructPB(event.Actions.RequestedAuthConfigs)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
-		}
-		if _, err := aiplatformToSessionEventActions(&aiplatformpb.EventActions{RequestedAuthConfigs: configs}); err != nil {
 			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
 		}
 		actions.RequestedAuthConfigs = configs

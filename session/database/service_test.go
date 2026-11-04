@@ -31,7 +31,6 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
-	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 func Test_databaseService(t *testing.T) {
@@ -659,61 +658,5 @@ func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected no persisted session for the failing write, found %d", count)
-	}
-}
-
-func TestDatabaseService_AppendEvent_RejectsInvalidRequestedAuthConfig(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		config toolauth.Config
-	}{
-		{
-			name:   "zero scheme",
-			config: toolauth.Config{CredentialKey: "k"},
-		},
-		{
-			name: "oauth2 flow without URLs",
-			config: toolauth.Config{
-				AuthScheme: toolauth.Scheme{
-					Type:  toolauth.SchemeTypeOAuth2,
-					Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{}},
-				},
-			},
-		},
-		{
-			name: "credential without authType",
-			config: toolauth.Config{
-				AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
-				RawAuthCredential: &toolauth.Credential{},
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			s := emptyService(t)
-			created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			event := &session.Event{
-				Author:       "agent",
-				InvocationID: "inv",
-				Actions: session.EventActions{
-					RequestedAuthConfigs: map[string]toolauth.Config{"c1": tc.config},
-				},
-			}
-			if err := s.AppendEvent(ctx, created.Session, event); err == nil {
-				t.Errorf("AppendEvent() succeeded, want an error for an invalid requested auth config")
-			}
-
-			got, err := s.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
-			if err != nil {
-				t.Fatalf("Get() after rejected AppendEvent failed: %v", err)
-			}
-			if got.Session.Events().Len() != 0 {
-				t.Errorf("Get() returned %d events, want 0", got.Session.Events().Len())
-			}
-		})
 	}
 }

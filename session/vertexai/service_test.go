@@ -87,6 +87,12 @@ var casesWithoutReplay = map[string]string{
 	// and against adk-python's wire value, by
 	// TestVertexAiClientRequestedAuthConfigsMatchPython in vertexai_test.go.
 	"Test_vertexaiService_AppendEvent_requested_auth_configs_round_trip": "vertexai_test.go",
+	// Pinned offline against the in-process fake backends, with the same
+	// configs, by TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode
+	// and, for the caller's session, by
+	// TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched,
+	// both in vertexai_test.go.
+	"Test_vertexaiService_AppendEvent_requested_auth_config_that_does_not_decode_is_refused": "vertexai_test.go",
 }
 
 func Test_vertexaiService_AppendEvent_StructuralValidation(t *testing.T) {

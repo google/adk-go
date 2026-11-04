@@ -194,6 +194,33 @@ func TestRequestedAuthConfigsGoOutWithoutSecrets(t *testing.T) {
 			}`,
 		},
 		{
+			// Unknown keys keep the spelling they arrived with, so each secret
+			// name is dropped here only if the list holds that exact spelling.
+			name: "every secret key name as an unknown key",
+			in: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"credentialKey": "extra",
+				"keep": "me",
+				"password": "s", "token": "s",
+				"additionalHeaders": "s", "additional_headers": "s",
+				"clientSecret": "s", "client_secret": "s",
+				"authResponseUri": "s", "auth_response_uri": "s",
+				"authCode": "s", "auth_code": "s",
+				"accessToken": "s", "access_token": "s",
+				"refreshToken": "s", "refresh_token": "s",
+				"idToken": "s", "id_token": "s",
+				"codeVerifier": "s", "code_verifier": "s",
+				"privateKeyId": "s", "private_key_id": "s",
+				"privateKey": "s", "private_key": "s",
+				"apiKey": "s", "api_key": "s"
+			}`,
+			want: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"credentialKey": "extra",
+				"keep": "me"
+			}`,
+		},
+		{
 			name: "unknown key keeps its digits and loses nested secrets",
 			in: `{
 				"authScheme": {"type": "oauth2", "flows": {"clientCredentials": {

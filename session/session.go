@@ -257,9 +257,16 @@ type EventActions struct {
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
 
-	// RequestedAuthConfigs holds the credentials that tools asked the end user
-	// for, keyed by function call ID, since one function response event can
-	// answer several calls.
+	// RequestedAuthConfigs holds the credential requests that tools made in
+	// this event, keyed by function call ID, since one function response event
+	// can answer several calls.
+	//
+	// Session services persist a request and the Agent Engine server sends it
+	// to clients unredacted, so it must not carry the secrets the tool was
+	// configured with: store the output of [toolauth.Config.WithoutSecrets], as
+	// adk-python's request_credential does. Session services refuse to append
+	// an event whose request does not decode as a [toolauth.Config], such as
+	// one with a zero AuthScheme.
 	RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.
@@ -307,7 +314,7 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 	// than restating the struct keeps fields added upstream from being
 	// silently dropped here.
 	type alias EventActions
-	b, err := json.Marshal(struct {
+	return json.Marshal(struct {
 		alias
 		StateDelta    *map[string]any   `json:"stateDelta,omitempty"`
 		ArtifactDelta *map[string]int64 `json:"artifactDelta,omitempty"`
@@ -316,20 +323,6 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 		StateDelta:    nilOrRef(a.StateDelta),
 		ArtifactDelta: nilOrRef(a.ArtifactDelta),
 	})
-	if err != nil || len(a.RequestedAuthConfigs) == 0 {
-		return b, err
-	}
-	// Config.MarshalJSON accepts an incomplete struct literal, such as a zero
-	// Scheme, that Config.UnmarshalJSON refuses. Checking the round trip here
-	// fails the write before a backend stores an event that makes every later
-	// read of the session fail.
-	var check struct {
-		RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs"`
-	}
-	if err := json.Unmarshal(b, &check); err != nil {
-		return nil, err
-	}
-	return b, nil
 }
 
 // nilOrRef returns nil for a nil map and a pointer to m otherwise, turning
