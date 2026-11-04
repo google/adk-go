@@ -46,8 +46,19 @@ func TestSameTarget(t *testing.T) {
 		// is still each scheme's own default.
 		{name: "scheme upgraded to https, explicit http default to implicit", from: "http://h:80/rpc", to: "https://h/rpc", want: true},
 		{name: "scheme downgraded to http", from: "https://h/rpc", to: "http://h/rpc", want: false},
+		// The port is the same on both sides, only one side writes it out.
+		{name: "scheme upgraded to https, implicit http default to explicit", from: "http://h/rpc", to: "https://h:80/rpc", want: true},
+		{name: "scheme upgraded to https, explicit https default to implicit", from: "http://h:443/rpc", to: "https://h/rpc", want: true},
 		{name: "different host", from: "https://h/rpc", to: "https://other/rpc", want: false},
 		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
+		// net/http dials the IDNA ASCII form of a host, so two spellings that
+		// case-fold equal can still reach different names, and a Unicode host
+		// and its punycode form reach the same one.
+		{name: "sharp s and capital sharp s dial different names", from: "https://fa\u00df.example/rpc", to: "https://fa\u1e9e.example/rpc", want: false},
+		{name: "final sigma and sigma dial different names", from: "https://\u03b5\u03bb\u03bb\u03ac\u03c2.example/rpc", to: "https://\u03b5\u03bb\u03bb\u03ac\u03c3.example/rpc", want: false},
+		{name: "unicode host to its punycode form", from: "https://fa\u00df.example/rpc", to: "https://xn--fa-hia.example/rpc", want: true},
+		{name: "punycode host to its unicode form", from: "https://xn--fa-hia.example/rpc", to: "https://fa\u00df.example/rpc", want: true},
+		{name: "unicode host case differs", from: "https://M\u00fcnchen.example/rpc", to: "https://m\u00fcnchen.example/rpc", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"golang.org/x/net/idna"
 )
 
 // MaxRedirects is net/http's default cap on requests per redirect chain, which
@@ -52,7 +54,7 @@ func Check(req *http.Request, via []*http.Request) error {
 // scheme may only stay the same or be upgraded from http to https, which
 // strictly improves confidentiality.
 func sameTarget(from, to *url.URL) bool {
-	if !strings.EqualFold(from.Hostname(), to.Hostname()) {
+	if !strings.EqualFold(dialName(from), dialName(to)) {
 		return false
 	}
 	switch {
@@ -60,13 +62,25 @@ func sameTarget(from, to *url.URL) bool {
 		return defaultedPort(from) == defaultedPort(to)
 	case strings.EqualFold(from.Scheme, "http") && strings.EqualFold(to.Scheme, "https"):
 		// The default port differs between the two schemes, so an upgrade
-		// cannot be judged by comparing defaulted ports. It keeps the same
-		// endpoint when both sides use their own scheme's default, or when both
-		// name the same explicit port.
-		return isDefaultPort(from) && isDefaultPort(to) || from.Port() == to.Port()
+		// keeps the same endpoint when both sides use their own scheme's
+		// default, or when both name the same port, written out or implied.
+		return isDefaultPort(from) && isDefaultPort(to) || defaultedPort(from) == defaultedPort(to)
 	default:
 		return false
 	}
+}
+
+// dialName returns the host name net/http dials for u: the IDNA ASCII form of
+// a Unicode name, or the name itself when it is ASCII already or cannot be
+// mapped, which is net/http's own fallback. Comparing the written names
+// instead would let two spellings that case-fold equal reach different
+// names, and would keep a Unicode name apart from its punycode form.
+func dialName(u *url.URL) string {
+	host := u.Hostname()
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		return ascii
+	}
+	return host
 }
 
 // defaultedPort returns the URL's port with the scheme's default filled in, so
