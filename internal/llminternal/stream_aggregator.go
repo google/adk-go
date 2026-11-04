@@ -39,7 +39,7 @@ type streamingResponseAggregator struct {
 	currentThoughtSignature []byte
 
 	sequence             []*genai.Part
-	currentTextBuffer    string
+	currentTextBuffer    strings.Builder
 	currentTextIsThought bool
 	finishReason         genai.FinishReason
 
@@ -106,13 +106,13 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 			s.currentThoughtSignature = part.ThoughtSignature
 		}
 		if part.Text != "" {
-			if s.currentTextBuffer != "" && part.Thought != s.currentTextIsThought {
+			if s.currentTextBuffer.Len() > 0 && part.Thought != s.currentTextIsThought {
 				s.flushTextBufferToSequence()
 			}
-			if s.currentTextBuffer == "" {
+			if s.currentTextBuffer.Len() == 0 {
 				s.currentTextIsThought = part.Thought
 			}
-			s.currentTextBuffer += part.Text
+			s.currentTextBuffer.WriteString(part.Text)
 		} else if part.FunctionCall != nil {
 			// Process function call (handles both streaming Args and non-streaming Args
 			s.processFunctionCallPart(part)
@@ -407,13 +407,13 @@ func valueByPath(args map[string]any, segments []pathSegment) (any, bool) {
 
 func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 	// Check if buffer has content (strings.Builder.Len() is efficient)
-	if s.currentTextBuffer != "" {
+	if s.currentTextBuffer.Len() > 0 {
 		s.sequence = append(s.sequence, &genai.Part{
-			Text:    s.currentTextBuffer,
+			Text:    s.currentTextBuffer.String(),
 			Thought: s.currentTextIsThought,
 		})
 		// Reset the buffer and the state
-		s.currentTextBuffer = ""
+		s.currentTextBuffer.Reset()
 		s.currentTextIsThought = false
 	}
 }
