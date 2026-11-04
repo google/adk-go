@@ -427,7 +427,14 @@ func TestParseSecrets(t *testing.T) {
 		got[1].SecretRef.Secret != "s_2" || got[1].SecretRef.Version != "3" {
 		t.Errorf("unexpected result %v", got)
 	}
-	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:", "A=s:1,B=t:2", "A=s:1\r", "A=projects/p/secrets/s:3"} {
+	alias, err := parseSecrets([]string{"DB_PW=db_pw-2:prod-alias"})
+	if err != nil {
+		t.Fatalf("version alias rejected: %v", err)
+	}
+	if len(alias) != 1 || alias[0].SecretRef.Secret != "db_pw-2" || alias[0].SecretRef.Version != "prod-alias" {
+		t.Errorf("unexpected alias result %v", alias)
+	}
+	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:", "A=s:1,B=t:2", "A=s:1\r", "A=s:1:2", "A=projects/p/secrets/s:3"} {
 		if _, err := parseSecrets([]string{bad}); err == nil {
 			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
 		}
@@ -472,6 +479,14 @@ func TestComputeFlags_RejectsSecretWithAgentEngineID(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("rejected --secret left %d entries in the temp dir parent", len(entries))
+	}
+}
+
+func TestComputeFlags_AgentEngineIDWithoutSecret(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	flags.agentEngine.agentEngineID = "123"
+	if err := flags.computeFlags(); err != nil {
+		t.Fatalf("computeFlags() = %v, want nil for --agent_engine_id without --secret", err)
 	}
 }
 

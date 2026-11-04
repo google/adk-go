@@ -173,7 +173,7 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 				return err
 			}
 			if len(secretEnv) > 0 && f.agentEngine.agentEngineID != "" {
-				return errors.New("--secret is not supported with --agent_engine_id: updating an existing Agent Engine cannot configure secrets")
+				return errors.New("--secret is not supported with --agent_engine_id: this command cannot set secrets when updating an existing Agent Engine")
 			}
 			f.agentEngine.secretEnv = secretEnv
 
