@@ -45,20 +45,23 @@ func ExampleClient_StreamQuery() {
 			log.Print(err)
 			return
 		}
-		// A failed model call arrives as an event, not as an error.
-		if ev.ErrorMessage != "" {
-			log.Printf("%s: %s", ev.ErrorCode, ev.ErrorMessage)
-			return
-		}
 		// The final non-partial event repeats the text of the partial chunks.
-		if ev.Content == nil || ev.Partial {
+		if ev.Partial {
 			continue
 		}
-		for _, p := range ev.Content.Parts {
-			if p == nil || p.Text == "" {
-				continue
+		if ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p == nil || p.Text == "" {
+					continue
+				}
+				fmt.Print(p.Text)
 			}
-			fmt.Print(p.Text)
+		}
+		// ErrorCode marks a model call that did not end normally, so the text
+		// above may be cut short. ErrorMessage can be empty.
+		if ev.ErrorCode != "" {
+			log.Printf("reply ended early: %s %s", ev.ErrorCode, ev.ErrorMessage)
+			return
 		}
 	}
 }

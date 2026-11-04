@@ -29,7 +29,8 @@ import (
 )
 
 // ErrRemote marks a failure the agent reported in the stream itself, as
-// opposed to a transport or decoding error. Its message is the server's.
+// opposed to a transport or decoding error. The error the iterator returns
+// wraps it and carries the server's message, so test with errors.Is.
 var ErrRemote = errors.New("agentengine: remote error")
 
 // Event is one line of a stream-query response. It models the fields every
@@ -43,9 +44,11 @@ type Event struct {
 	// by one aggregated non-partial event carrying the full content, so
 	// consumers that want each reply once skip partial events.
 	Partial bool
-	// ErrorCode and ErrorMessage are set when the model call behind this
-	// event failed (a safety block, a malformed function call). Such an event
-	// is a regular line, not a remote error, and usually has no Content.
+	// ErrorCode and ErrorMessage describe a model call that did not end
+	// normally, such as a safety block or a malformed function call.
+	// ErrorMessage can be empty, so test ErrorCode. Such an event is a regular
+	// line, not a remote error, and can carry Content, such as the text the
+	// model produced before it stopped.
 	ErrorCode    string
 	ErrorMessage string
 	// Raw is the whole decoded line, for fields this type does not model.
