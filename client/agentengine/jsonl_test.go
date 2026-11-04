@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -148,15 +149,98 @@ func TestDecodeJSONLNullContent(t *testing.T) {
 }
 
 func TestDecodeJSONLErrorFields(t *testing.T) {
-	// Both runtimes report a failed model call as an ordinary event with
-	// snake_case error fields and no content, not as an error line.
-	line := `{"author":"root","error_code":"SAFETY","error_message":"blocked"}` + "\n"
+	// Both runtimes report a failed model call as an ordinary event, not as an
+	// error line.
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"snake_case", `{"author":"root","error_code":"SAFETY","error_message":"blocked"}`},
+		// The adk-go server's encoder falls back to the event's camelCase JSON
+		// tags when it meets a kind it has no case for, such as a uint.
+		{"camelCase fallback", `{"author":"root","content":{"role":"model"},"customMetadata":{"attempt":1},"errorCode":"SAFETY","errorMessage":"blocked"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := collect(t, decodeJSONL(chunksOf(tc.line+"\n")))
+			if err != nil || len(got) != 1 {
+				t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
+			}
+			if got[0].ErrorCode != "SAFETY" || got[0].ErrorMessage != "blocked" {
+				t.Errorf("ErrorCode, ErrorMessage = %q, %q; want SAFETY, blocked", got[0].ErrorCode, got[0].ErrorMessage)
+			}
+		})
+	}
+}
+
+func TestDecodeJSONLDurations(t *testing.T) {
+	// The adk-go server writes a time.Duration as integer nanoseconds and keeps
+	// zero values. Python agents write strings.
+	for _, tc := range []struct {
+		name, video, audio string
+	}{
+		{"adk-go", `{"end_offset":0,"fps":2,"start_offset":1500000000}`, `{"end_offset":2000000000,"start_offset":0,"text":"hi"}`},
+		{"python", `{"fps":2,"start_offset":"1.5s"}`, `{"end_offset":"2s","text":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := `{"author":"root","content":{"parts":[` +
+				`{"file_data":{"file_uri":"gs://b/v.mp4","mime_type":"video/mp4"},"media_processing":"","video_metadata":` + tc.video + `},` +
+				`{"audio_transcription":` + tc.audio + `,"media_processing":"","text":"hi"}],"role":"model"}}` + "\n"
+			got, err := collect(t, decodeJSONL(chunksOf(line)))
+			if err != nil || len(got) != 1 {
+				t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
+			}
+			parts := got[0].Content.Parts
+			if vm := parts[0].VideoMetadata; vm == nil || vm.StartOffset != 1500*time.Millisecond || vm.EndOffset != 0 || vm.FPS == nil || *vm.FPS != 2 {
+				t.Errorf("VideoMetadata = %+v, want StartOffset 1.5s, EndOffset 0, FPS 2", vm)
+			}
+			if tr := parts[1].AudioTranscription; tr == nil || tr.EndOffset != 2*time.Second || tr.StartOffset != 0 {
+				t.Errorf("AudioTranscription = %+v, want EndOffset 2s, StartOffset 0", tr)
+			}
+		})
+	}
+}
+
+func TestDecodeJSONLDurationsLeaveToolDataAlone(t *testing.T) {
+	// A tool result is user data, even when it looks like a duration field.
+	line := `{"author":"root","content":{"parts":[{"function_response":{"name":"probe","response":{"videoMetadata":{"startOffset":5}}}}]}}` + "\n"
 	got, err := collect(t, decodeJSONL(chunksOf(line)))
 	if err != nil || len(got) != 1 {
 		t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
 	}
-	if got[0].ErrorCode != "SAFETY" || got[0].ErrorMessage != "blocked" || got[0].Content != nil {
-		t.Errorf("Event = %+v, want ErrorCode SAFETY, ErrorMessage blocked, nil Content", got[0])
+	want := map[string]any{"videoMetadata": map[string]any{"startOffset": 5.0}}
+	if diff := cmp.Diff(want, got[0].Content.Parts[0].FunctionResponse.Response); diff != "" {
+		t.Errorf("Response mismatch (-want +got):\n%s", diff)
+	}
+	raw := got[0].Raw["content"].(map[string]any)["parts"].([]any)[0].(map[string]any)["function_response"].(map[string]any)["response"]
+	if diff := cmp.Diff(want, raw); diff != "" {
+		t.Errorf("Raw mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDecodeJSONLIntegerDurationEveryField(t *testing.T) {
+	paths := leafPaths(reflect.TypeOf(genai.Content{}), isDuration, nil, map[reflect.Type]bool{})
+	if len(paths) < 4 {
+		t.Fatalf("found %d duration paths under genai.Content, want at least 4: %v", len(paths), paths)
+	}
+	for _, path := range paths {
+		t.Run(strings.Join(path, "."), func(t *testing.T) {
+			content, err := json.Marshal(nest(path, 2_000_000_000))
+			if err != nil {
+				t.Fatal(err)
+			}
+			line := `{"author":"root","content":` + string(content) + `}` + "\n"
+			got, err := collect(t, decodeJSONL(chunksOf(line)))
+			if err != nil || len(got) != 1 {
+				t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
+			}
+			back, err := json.Marshal(got[0].Content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(back), `"2s"`) {
+				t.Errorf("decoded content %s does not carry the duration 2s", back)
+			}
+		})
 	}
 }
 
@@ -325,7 +409,7 @@ func TestDecodeJSONLURLSafeBase64(t *testing.T) {
 }
 
 func TestDecodeJSONLURLSafeBase64EveryBytesField(t *testing.T) {
-	paths := bytesPaths(reflect.TypeOf(genai.Content{}), nil, map[reflect.Type]bool{})
+	paths := leafPaths(reflect.TypeOf(genai.Content{}), isBytes, nil, map[reflect.Type]bool{})
 	if len(paths) < 3 {
 		t.Fatalf("found %d bytes paths under genai.Content, want at least 3: %v", len(paths), paths)
 	}
@@ -398,15 +482,15 @@ func texts(events []*Event) []string {
 	return out
 }
 
-// bytesPaths lists every []byte field reachable from genai.Content as a JSON
-// path, so TestDecodeJSONLURLSafeBase64EveryBytesField cannot fall behind the
-// type.
-func bytesPaths(t reflect.Type, prefix []string, seen map[reflect.Type]bool) [][]string {
-	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice {
-		if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
-			return [][]string{prefix}
-		}
+// leafPaths lists, as JSON paths, the fields reachable from t through structs,
+// pointers and slices whose type satisfies leaf, so the tests that walk
+// genai.Content cannot fall behind the type.
+func leafPaths(t reflect.Type, leaf func(reflect.Type) bool, prefix []string, seen map[reflect.Type]bool) [][]string {
+	for !leaf(t) && (t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice) {
 		t = t.Elem()
+	}
+	if leaf(t) {
+		return [][]string{prefix}
 	}
 	if t.Kind() != reflect.Struct || seen[t] {
 		return nil
@@ -421,13 +505,19 @@ func bytesPaths(t reflect.Type, prefix []string, seen map[reflect.Type]bool) [][
 			continue
 		}
 		path := append(append([]string(nil), prefix...), tag)
-		if f.Type.Kind() == reflect.Slice && f.Type.Elem().Kind() != reflect.Uint8 {
+		if f.Type.Kind() == reflect.Slice && !leaf(f.Type) {
 			path = append(path, "[]")
 		}
-		out = append(out, bytesPaths(f.Type, path, seen)...)
+		out = append(out, leafPaths(f.Type, leaf, path, seen)...)
 	}
 	return out
 }
+
+func isBytes(t reflect.Type) bool {
+	return t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8
+}
+
+func isDuration(t reflect.Type) bool { return t == reflect.TypeFor[time.Duration]() }
 
 // nest builds the JSON value that places leaf at path.
 func nest(path []string, leaf any) any {

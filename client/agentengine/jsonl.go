@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"strings"
+	"time"
 	"unicode"
 
 	"google.golang.org/genai"
@@ -109,13 +111,14 @@ func decodeLine(line []byte) (*Event, error) {
 	ev := &Event{Raw: raw}
 	ev.Author, _ = raw["author"].(string)
 	ev.Partial, _ = raw["partial"].(bool)
-	ev.ErrorCode, _ = raw["error_code"].(string)
-	ev.ErrorMessage, _ = raw["error_message"].(string)
+	ev.ErrorCode = stringField(raw, "error_code", "errorCode")
+	ev.ErrorMessage = stringField(raw, "error_message", "errorMessage")
 	if c, ok := raw["content"]; ok && c != nil {
 		// genai's JSON tags are camelCase, but servers emit snake_case keys,
 		// so normalize before decoding.
 		c = camelizeKeys(c)
 		stdBase64Fields(c)
+		stringDurations(c, reflect.TypeFor[genai.Content]())
 		b, err := json.Marshal(c)
 		if err != nil {
 			return nil, fmt.Errorf("agentengine: re-encoding content: %w", err)
@@ -127,6 +130,19 @@ func decodeLine(line []byte) (*Event, error) {
 		ev.Content = &content
 	}
 	return ev, nil
+}
+
+// stringField returns the first of keys whose value is a string. The adk-go
+// server writes snake_case keys, but falls back to the event's camelCase JSON
+// tags when its encoder meets a kind it has no case for. Of the fields Event
+// models, only the error fields are spelled differently in the two.
+func stringField(raw map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := raw[k].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // userKeyFields hold map-valued genai fields whose keys are user data (tool
@@ -227,4 +243,43 @@ func stdBase64(s string) string {
 		s += strings.Repeat("=", 4-r)
 	}
 	return s
+}
+
+var durationType = reflect.TypeFor[time.Duration]()
+
+// stringDurations rewrites in place every number under v that genai decodes
+// into a time.Duration, as a string such as "1.5s". The adk-go server writes a
+// time.Duration as integer nanoseconds, while genai decodes these fields only
+// from strings, so the whole line would otherwise fail. t is the Go type v
+// decodes into. Map-typed fields hold user data and are left alone. v must be
+// a value returned by camelizeKeys, which the caller owns.
+func stringDurations(v any, t reflect.Type) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	switch v := v.(type) {
+	case []any:
+		if t.Kind() == reflect.Slice {
+			for _, e := range v {
+				stringDurations(e, t.Elem())
+			}
+		}
+	case map[string]any:
+		if t.Kind() != reflect.Struct {
+			return
+		}
+		for i := range t.NumField() {
+			f := t.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			val, ok := v[name]
+			if !ok {
+				continue
+			}
+			if n, isNum := val.(float64); isNum && f.Type == durationType {
+				v[name] = time.Duration(n).String()
+				continue
+			}
+			stringDurations(val, f.Type)
+		}
+	}
 }
