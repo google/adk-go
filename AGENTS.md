@@ -356,15 +356,9 @@ subject to choose the next version and build the release notes, and it skips
 anything with no recognized type without reporting an error. A mistitled PR
 merges green and then goes missing from the changelog.
 
-The release notes link an issue only when the landed commit message ends with a
-line such as `Fixes #123`. Release tooling reads issue references from that
-final trailer block and nowhere else, and prints each one as "closes", so add
-the line only for an issue the PR fixes. On a single-commit PR, end that
-commit's message with it. On a PR with several commits, GitHub's squash message
-puts a `---------` line before the `Co-authored-by:` trailers, and a reference
-above that line is ignored, so the line has to be in the last block when the PR
-merges. `Closes: #123` in the PR description is separate: GitHub uses it to
-close the issue, and it never reaches the commit.
+To have the release notes link the issue a PR fixes, end the commit message with
+a `Fixes #123` line. Release tooling reads issue references only from that
+final trailer block, never from the PR description.
 
 ## Self-review
 
