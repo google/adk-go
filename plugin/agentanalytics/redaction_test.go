@@ -5241,41 +5241,53 @@ func TestRound22ReviewRegressions(t *testing.T) {
 // match, used to verify that headerQuoteScanner's carried state is bit-for-bit
 // equivalent to a from-scratch scan on every match.
 func redactAuthHeadersFreshScanner(s string) string {
-	locs := authHeaderRe.FindAllStringSubmatchIndex(s, -1)
-	if locs == nil {
-		return s
-	}
 	var b strings.Builder
 	last := 0
-	for idx := 0; idx < len(locs); idx++ {
-		loc := locs[idx]
-		if loc[0] < last {
-			continue
+	curLineStart, curLineEnd, curIndentLen := -1, -1, 0
+	for pos := 0; ; {
+		loc := findAtKeys(s, pos, authHeaderKeys, authHeaderPrefixAtRe)
+		if loc == nil {
+			break
 		}
 		quotes := newHeaderQuoteScanner(s)
-		outer, inner := quotes.openBefore(loc[0], loc[4])
-		lineStart := strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
-		indentLen := 0
-		for lineStart+indentLen < loc[0] && (s[lineStart+indentLen] == ' ' || s[lineStart+indentLen] == '\t') {
-			indentLen++
+		outer, inner := quotes.openBefore(loc[0], loc[1])
+		if loc[1] > curLineEnd {
+			curLineStart = strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
+			curLineEnd = len(s)
+			if nl := strings.IndexAny(s[loc[1]:], "\r\n"); nl >= 0 {
+				curLineEnd = loc[1] + nl
+			}
+			curIndentLen = 0
+			for curLineStart+curIndentLen < loc[0] && (s[curLineStart+curIndentLen] == ' ' || s[curLineStart+curIndentLen] == '\t') {
+				curIndentLen++
+			}
 		}
+		lineStart, lineEnd, indentLen := curLineStart, curLineEnd, curIndentLen
 		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
-		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[4], loc[5], outer, inner, quotes) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
-			if sub := authHeaderPrefixRe.FindStringSubmatchIndex(s[loc[4]:loc[5]]); sub != nil {
-				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
-				idx--
+		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[1], lineEnd, outer, inner, quotes) && !hasFoldedHeaderContinuation(s, lineEnd, canFold, indentLen) {
+			if sub := findAtKeys(s[loc[1]:lineEnd], 0, authHeaderKeys, authHeaderPrefixAtRe); sub != nil {
+				pos = loc[1] + sub[0]
+			} else {
+				pos = lineEnd
 			}
 			continue
 		}
-		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
+		end, closedQuotes := authHeaderValueEnd(s, loc[1], lineEnd, outer, inner, canFold, indentLen, quotes)
+		repl := s[loc[2]:loc[3]] + ": " + redactedValue
 		if outer != "" || inner != "" {
-			end = closingQuotesStart(s, loc[4], end, outer, inner)
+			cutEnd := closingQuotesStart(s, loc[1], end, outer, inner)
+			if closedQuotes != "" && cutEnd == end {
+				repl += closedQuotes
+			}
+			end = cutEnd
 		}
 		b.WriteString(s[last:loc[0]])
-		b.WriteString(s[loc[2]:loc[3]])
-		b.WriteString(": ")
-		b.WriteString(redactedValue)
+		b.WriteString(repl)
 		last = end
+		pos = max(end, loc[0]+1)
+	}
+	if last == 0 {
+		return s
 	}
 	b.WriteString(s[last:])
 	return b.String()
@@ -6296,6 +6308,7 @@ func TestLineBreakFrom(t *testing.T) {
 // folding matches with their letters, and from delimiters, quotes, escapes,
 // spaces, base64 values, other bytes and invalid UTF-8.
 func TestKeyFindersMatchRegexps(t *testing.T) {
+	authAtRe := regexp.MustCompile(`(?i)^` + baselineAuthHeaderPattern)
 	authRe := regexp.MustCompile(`(?im)\b` + baselineAuthHeaderPattern)
 	bearerRe := regexp.MustCompile(`(?i)\b` + baselineBearerTokenPattern)
 	basicRe := regexp.MustCompile(`(?i)\b` + baselineBasicTokenPattern)
@@ -6367,7 +6380,7 @@ func TestKeyFindersMatchRegexps(t *testing.T) {
 				t.Fatalf("textKeyNames.mayStartAt(%q, 0) = false, want true: textKeyNameCamelAtRe matches", rest)
 			}
 		}
-		if got, want := findAllAtKeys(s, baselineAuthHeaderKeys, baselineAuthHeaderAtRe), authRe.FindAllStringSubmatchIndex(s, -1); !slices.EqualFunc(got, want, slices.Equal) {
+		if got, want := findAllAtKeys(s, baselineAuthHeaderKeys, authAtRe), authRe.FindAllStringSubmatchIndex(s, -1); !slices.EqualFunc(got, want, slices.Equal) {
 			t.Fatalf("baseline auth headers in %q = %v, want %v", s, got, want)
 		}
 		if got, want := findAllAtKeys(s, authHeaderKeys, authHeaderAtRe), authHeaderRe.FindAllStringSubmatchIndex(s, -1); !slices.EqualFunc(got, want, slices.Equal) {
@@ -6742,6 +6755,888 @@ func TestPlaceholderAndQuoteBoundaryRegressions(t *testing.T) {
 		}
 		if got := scrubTextPatterns(tt.want); got != tt.want {
 			t.Errorf("scrubbing %q again gave %q, want it unchanged", tt.want, got)
+		}
+	}
+}
+
+func TestJoinedHeaderQuotesRedacted(t *testing.T) {
+	const secret = "SYNTH_REVIEW_ONLY_CREDENTIAL"
+	for _, tt := range []struct{ in, want, wantErr string }{
+		{
+			in:   `curl -H "Authorization: Digest username="bob", response="` + secret + `""`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix" ` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H 'Authorization: Digest username='bob', response='` + secret + `''`,
+			want: `curl -H 'Authorization: [REDACTED]'`,
+		},
+		{
+			in:   `curl -H 'X-Api-Key: 'prefix' ` + secret + `'`,
+			want: `curl -H 'X-Api-Key: [REDACTED]'`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer ""` + secret + `"; echo KEEP`,
+			want: `curl -H "Authorization: [REDACTED]"; echo KEEP`,
+		},
+		{
+			in:   `curl -H "Authorization: Digest username="bob", response="` + secret + `"" https://example.com`,
+			want: `curl -H "Authorization: [REDACTED]" https://example.com`,
+		},
+		// Multiple auth/cookie headers on the same line.
+		{
+			in:   `curl -H "X-Api-Key: first_key" -H "Authorization: Digest username="bob", response="` + secret + `""`,
+			want: `curl -H "X-Api-Key: [REDACTED]" -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer first_tok" -H "Authorization: Digest username="bob", response="` + secret + `""`,
+			want: `curl -H "Authorization: [REDACTED]" -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: first" -H "X-Goog-Api-Key: "prefix" ` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]" -H "X-Goog-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "Cookie: sid=first" -H "Cookie: "prefix" ` + secret + `"`,
+			want: `curl -H "Cookie: [REDACTED]" -H "Cookie: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer first" -H "Proxy-Authorization: Digest username="bob", response="` + secret + `""`,
+			want: `curl -H "Authorization: [REDACTED]" -H "Proxy-Authorization: [REDACTED]"`,
+		},
+		// Unspaced comma-joined shell fragments vs JSON sibling fields and array elements.
+		{
+			in:   `curl -H "Authorization: Digest username="bob,response="` + secret + `""`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "Authorization: Digest username="bob,"` + secret + `""`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix,` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix,"` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: ""prefix",` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: ""prefix","` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H 'X-Api-Key: 'prefix','` + secret + `'`,
+			want: `curl -H 'X-Api-Key: [REDACTED]'`,
+		},
+		{
+			in:      `{"h":"Authorization: Bearer ` + secret + `","b":"PUBLIC_KEEP"}`,
+			want:    `{"h":"Authorization: [REDACTED]","b":"PUBLIC_KEEP"}`,
+			wantErr: `{"b":"PUBLIC_KEEP","h":"Authorization: [REDACTED]"}`,
+		},
+		{
+			in:   `["Authorization: Bearer ` + secret + `",123,"PUBLIC_KEEP"]`,
+			want: `["Authorization: [REDACTED]",123,"PUBLIC_KEEP"]`,
+		},
+		{
+			in:   `["Authorization: Bearer ` + secret + `",true,null,-1,"PUBLIC_KEEP"]`,
+			want: `["Authorization: [REDACTED]",true,null,-1,"PUBLIC_KEEP"]`,
+		},
+		// Standalone and doubly-escaped quotes in log lines and JSON-wrapped commands.
+		{
+			in:   `ERROR: curl -H \"Authorization: Digest username=\"bob\", response=\"` + secret + `\"\" https://PUBLIC_KEEP.example.com`,
+			want: `ERROR: curl -H \"Authorization: [REDACTED]\" https://PUBLIC_KEEP.example.com`,
+		},
+		{
+			in:   `ERROR: curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com`,
+			want: `ERROR: curl -H \"Authorization: [REDACTED]\" https://PUBLIC_KEEP.example.com`,
+		},
+		{
+			in:   `ERROR: curl -H \"X-Api-Key: \\\"prefix\\\" ` + secret + `\" https://PUBLIC_KEEP.example.com`,
+			want: `ERROR: curl -H \"X-Api-Key: [REDACTED]\" https://PUBLIC_KEEP.example.com`,
+		},
+		{
+			in:   `{"b":"KEEP_B","h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com"}`,
+			want: `{"b":"KEEP_B","h":"curl -H \"Authorization: [REDACTED]\" https://PUBLIC_KEEP.example.com"}`,
+		},
+		{
+			in:   `{"b":"KEEP_B","h":"curl -H \"Authorization: Digest username=\"bob\", response=\"` + secret + `\"\" https://PUBLIC_KEEP.example.com"}`,
+			want: `{"b":"KEEP_B","h":"curl -H \"Authorization: [REDACTED]\" https://PUBLIC_KEEP.example.com"}`,
+		},
+		// Stranded opening quote idempotency and single-quote apostrophe disambiguation.
+		{
+			in:   `curl -H "Authorization: Bearer "` + secret + `; echo "PUBLIC_KEEP"`,
+			want: `curl -H "Authorization: [REDACTED]"; echo "PUBLIC_KEEP"`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "'` + secret + `' -H "X-Public: PUBLIC_KEEP"`,
+			want: `curl -H "Authorization: [REDACTED]" -H "X-Public: PUBLIC_KEEP"`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "bob's_` + secret + `; echo 'PUBLIC_KEEP'`,
+			want: `curl -H "Authorization: [REDACTED]"; echo 'PUBLIC_KEEP'`,
+		},
+		{
+			in:   `curl -H 'Authorization: Bearer 'bob's_` + secret + `; echo 'PUBLIC_KEEP'`,
+			want: `curl -H 'Authorization: [REDACTED]'; echo 'PUBLIC_KEEP'`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix' ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix'a ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "Authorization: Digest username="bob', response='` + secret + `"`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix"bob's_` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "prefix"bob's`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+	} {
+		checkNoLeak(t, tt.in, secret)
+		checkRedactionPaths(t, tt.in, tt.want)
+		if got, wantFresh := redactAuthHeaders(tt.in), redactAuthHeadersFreshScanner(tt.in); got != wantFresh {
+			t.Errorf("redactAuthHeaders(%q) = %q, freshScanner = %q", tt.in, got, wantFresh)
+		}
+		wantErr := tt.want
+		if tt.wantErr != "" {
+			wantErr = tt.wantErr
+		}
+		if got := redactErrorMessage(tt.in); got != wantErr {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", tt.in, got, wantErr)
+		}
+		if got := scrubTextPatterns(tt.want); got != tt.want {
+			t.Errorf("scrubTextPatterns idempotency(%q) = %q, want %q", tt.want, got, tt.want)
+		}
+		if raw, _, err := SmartTruncate(tt.in, 1<<20); err != nil || strings.Contains(string(raw), secret) {
+			t.Errorf("SmartTruncate(%q, 1<<20) = (%q, %v), leaked or errored", tt.in, raw, err)
+		}
+	}
+	for _, tt := range []struct {
+		in           string
+		wantValid    bool
+		malformedErr bool
+	}{
+		{
+			in:        `{"error": "curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\""}`,
+			wantValid: true,
+		},
+		{
+			in:        `{"h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\"","b":"PUBLIC_KEEP"}`,
+			wantValid: true,
+		},
+		{
+			in:        `{"error": "curl -H \"Authorization: Digest username=\"bob\", response=\"` + secret + `\"\""}`,
+			wantValid: true,
+		},
+		// Word-adjacent single-quoted shell fragments containing metacharacters or followed by unpaired/comment quotes.
+		{in: `curl -H "X-Api-Key: "prefix'a;` + secret + `'`},
+		{in: `curl -H "X-Api-Key: "prefix'a&` + secret + `'`},
+		{in: `curl -H "Authorization: Bearer "tok'SYNTH;` + secret + `' https://PUBLIC_KEEP.example.com`},
+		{in: `curl -H "X-Api-Key: "prefix'part1 ` + secret + `'; echo 'unclosed`},
+		{in: `curl -H "X-Api-Key: "prefix'part1 ` + secret + `' # user's_note`},
+		{in: `curl -H "Authorization: Bearer "tok'SYNTH ` + secret + `' # 'PUBLIC_KEEP`},
+		// Multiline JSON objects and arrays preserve braceDepth and siblings.
+		{
+			in:        "{\n  \"h\": \"Authorization: Bearer " + secret + "\",\"b\": \"PUBLIC_KEEP\"\n}",
+			wantValid: true,
+		},
+		{
+			in:        "[\n  \"Authorization: Bearer " + secret + "\",123,\"PUBLIC_KEEP\"\n]",
+			wantValid: true,
+		},
+		// JSON with sibling sensitive key and escaped auth header preserves valid JSON and public fields.
+		{
+			in:        `{"api_key":"k1","b":"PUBLIC_KEEP_B","h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com"}`,
+			wantValid: true,
+		},
+		// Word-joined single-quoted header preserves trailing URL.
+		{in: `curl -H 'X-API-Key: prefix'` + secret + ` https://PUBLIC_KEEP.example.com`},
+		// Standalone escaped quotes preserve subsequent lines and shell-separated commands.
+		{in: "ERROR: curl -H \\\"Authorization: Bearer \\\"'" + secret + "' https://PUBLIC_KEEP.example.com\nNEXT_LINE_KEEP \"quoted\""},
+		{in: `ERROR: curl -H \"X-Api-Key: \"prefix\"` + secret + `\"; echo PUBLIC_KEEP`},
+		{in: `ERROR: curl -H \"X-Api-Key: \"prefix\"\"` + secret + `\"; echo unclosed`},
+		// Escaped backslash before closing inner quote (bs%4 == 1) inside JSON string.
+		{
+			in:        `{"b":"PUBLIC_KEEP_B","h":"curl -H \"Authorization: Bearer ` + secret + `\\\\\" https://PUBLIC_KEEP.example.com"}`,
+			wantValid: true,
+		},
+		// Word-adjacent single-quoted shell fragments ending in '=', space, or ';' with trailing apostrophe comments.
+		{in: `curl -H "X-Api-Key: "prefix'a ` + secret + `=' # user's_note`},
+		{in: `curl -H "X-Api-Key: "prefix'a ` + secret + ` ' # user's_note`},
+		{in: `curl -H "X-Api-Key: "prefix'a ` + secret + ` '; echo 'unclosed`},
+		{in: `curl -H "X-Api-Key: "prefix'a;` + secret + `;' # user's_note`},
+		{in: `curl -H 'X-Api-Key: 'prefix'a ` + secret + ` ' # user's_note`},
+		{in: `curl -H "X-Api-Key: "prefix's ` + secret + `=' # user's_note`},
+		{in: `curl -H "X-Api-Key: "prefix's ` + secret + ` ' # user's_note`},
+		{in: `curl -H "X-Api-Key: "prefix's;` + secret + `;' # user's_note`},
+		// Unquoted possessive before a second -H header with even trailing single-quote parity.
+		{in: `curl -H "X-Api-Key: "user's -H 'X-Api-Key: ` + secret + `' # bob's`},
+		{in: `curl -H "X-Api-Key: "user's -H 'X-Api-Key: ` + secret + `'`},
+		// Contraction/possessive before command separator keeps subsequent quoted argument.
+		{in: `curl -H "Authorization: Bearer "bob's_` + secret + `; echo 'PUBLIC_KEEP' # bob's`},
+		// Prior-line unclosed quote inside multiline JSON container preserves braceDepth.
+		{
+			in:           "{\n  \"unclosed\": \"x\n  \"h\": \"Authorization: Bearer " + secret + "\",\"b\": \"PUBLIC_KEEP\"\n}",
+			malformedErr: true,
+		},
+	} {
+		checkNoLeak(t, tt.in, secret)
+		if got, fresh := redactAuthHeaders(tt.in), redactAuthHeadersFreshScanner(tt.in); got != fresh {
+			t.Errorf("redactAuthHeaders(%q) = %q != fresh %q", tt.in, got, fresh)
+		} else if tt.malformedErr && !strings.Contains(got, "PUBLIC_KEEP") {
+			t.Errorf("redactAuthHeaders(%q) = %q, lost PUBLIC_KEEP", tt.in, got)
+		}
+		if !tt.malformedErr && strings.Contains(tt.in, "PUBLIC_KEEP") {
+			if errMsg := redactErrorMessage(tt.in); !strings.Contains(errMsg, "PUBLIC_KEEP") {
+				t.Errorf("redactErrorMessage(%q) = %q, lost PUBLIC_KEEP", tt.in, errMsg)
+			}
+		}
+		if tt.wantValid {
+			raw, _ := sanitizeRawText(tt.in)
+			if !json.Valid([]byte(raw)) {
+				t.Errorf("sanitizeRawText(%q) = %q, want valid JSON", tt.in, raw)
+			}
+			if !strings.Contains(raw, "PUBLIC_KEEP") && strings.Contains(tt.in, "PUBLIC_KEEP") {
+				t.Errorf("sanitizeRawText(%q) = %q, lost PUBLIC_KEEP", tt.in, raw)
+			}
+		}
+		if raw, _, err := SmartTruncate(tt.in, 1<<20); err != nil || strings.Contains(string(raw), secret) {
+			t.Errorf("SmartTruncate(%q, 1<<20) = (%q, %v), leaked or errored", tt.in, raw, err)
+		}
+		col, _, err := SmartTruncate(map[string]any{"err": tt.in}, 1000)
+		if err != nil {
+			t.Fatalf("SmartTruncate(%q) error = %v", tt.in, err)
+		}
+		if strings.Contains(string(col), secret) {
+			t.Errorf("SmartTruncate(%q) = %q, which still holds the secret", tt.in, col)
+		}
+	}
+}
+
+func TestSameLineMultiHeaderScalesLinearly(t *testing.T) {
+	cases := []struct {
+		name     string
+		makeLine func(n int) string
+	}{
+		{
+			name: "multi-header",
+			makeLine: func(n int) string {
+				return strings.Repeat(`-H "X-Api-Key: k" `, n) + `-H "Authorization: Digest username="bob", response="SYNTH_REVIEW_ONLY_CREDENTIAL""`
+			},
+		},
+		{
+			name: "apostrophe-dense",
+			makeLine: func(n int) string {
+				return `curl -H "Authorization: Bearer "` + strings.Repeat("a'b", n) + ` 'unclosed`
+			},
+		},
+		{
+			name: "apostrophe-semicolon-200kb",
+			makeLine: func(n int) string {
+				return strings.Repeat("a'b; 'x' ", n*5) + `prefix's; -H 'X-Api-Key: ` + `SYNTH_REVIEW_ONLY_CREDENTIAL' 'PUBLIC_KEEP'`
+			},
+		},
+		{
+			name: "json-wrapped-multi-header",
+			makeLine: func(n int) string {
+				return `{"cmd":"curl ` + strings.Repeat(`-H \"X-Api-Key: k\" `, n) + `https://example.com"}`
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			small := tc.makeLine(500)
+			large := tc.makeLine(5000)
+			_ = scrubTextPatterns(small)
+
+			t0 := time.Now()
+			outSmall := scrubTextPatterns(small)
+			dSmall := time.Since(t0)
+
+			t1 := time.Now()
+			outLarge := scrubTextPatterns(large)
+			dLarge := time.Since(t1)
+
+			if strings.Contains(outSmall, "SYNTH_REVIEW_ONLY_CREDENTIAL") || strings.Contains(outLarge, "SYNTH_REVIEW_ONLY_CREDENTIAL") {
+				t.Fatalf("same-line %s input leaked secret", tc.name)
+			}
+			if dLarge > 50*time.Millisecond && (dSmall == 0 || dLarge > 30*dSmall) {
+				t.Errorf("non-linear scaling for 10x %s: n=500 took %v, n=5000 took %v", tc.name, dSmall, dLarge)
+			}
+		})
+	}
+
+	t.Run("ampersand-dense-5kb-vs-50kb", func(t *testing.T) {
+		makeAmpLine := func(n int) string {
+			return `curl -H "X-Api-Key: "user's ` + strings.Repeat("a&", n) + ` -H 'X-Api-Key: SYNTH_R30J_AMP_SECRET'`
+		}
+		small := makeAmpLine(2500)
+		large := makeAmpLine(25000)
+		_ = scrubTextPatterns(small)
+
+		t0 := time.Now()
+		outSmall := scrubTextPatterns(small)
+		dSmall := time.Since(t0)
+
+		t1 := time.Now()
+		outLarge := scrubTextPatterns(large)
+		dLarge := time.Since(t1)
+
+		if strings.Contains(outSmall, "SYNTH_R30J_AMP_SECRET") || strings.Contains(outLarge, "SYNTH_R30J_AMP_SECRET") {
+			t.Fatalf("ampersand-dense input leaked secret")
+		}
+		if dLarge > 500*time.Millisecond || (dLarge > 50*time.Millisecond && (dSmall == 0 || dLarge > 30*dSmall)) {
+			t.Errorf("non-linear scaling for 10x ampersand-dense: 5KB took %v, 50KB took %v", dSmall, dLarge)
+		}
+	})
+}
+
+func TestEncodedSensitiveJSONObjectKeys(t *testing.T) {
+	const secret = "SYNTH_PROBE_SECRET_99"
+	for _, in := range []string{
+		`{"pass%77ord": "` + secret + `"}`,
+		`{"api%5fkey": "` + secret + `"}`,
+		`{"%74emp:x": "` + secret + `"}`,
+		`{"pass\u0077ord": "` + secret + `"}`,
+		`{"pass\x77ord": "` + secret + `"}`,
+		`{"https%3A%2F%2Fadmin%3A` + secret + `%40db.internal":"ok"}`,
+		`{"api_key%3D` + secret + `":"ok"}`,
+		`{"Bearer\t` + secret + `":"ok"}`,
+	} {
+		if got := scrubErrorText(in); strings.Contains(got, secret) {
+			t.Errorf("scrubErrorText(%q) = %q, leaked secret", in, got)
+		}
+		if got, _ := sanitizeRawText(in); strings.Contains(got, secret) {
+			t.Errorf("sanitizeRawText(%q) = %q, leaked secret", in, got)
+		}
+		if got := redactErrorMessage(in); strings.Contains(got, secret) {
+			t.Errorf("redactErrorMessage(%q) = %q, leaked secret", in, got)
+		}
+		if raw, _, err := SmartTruncate(in, 1<<20); err != nil || strings.Contains(string(raw), secret) {
+			t.Errorf("SmartTruncate(%q, 1<<20) = (%q, %v), leaked or errored", in, raw, err)
+		}
+		if col, _, err := SmartTruncate(map[string]any{"v": in}, 1<<20); err != nil || strings.Contains(string(col), secret) {
+			t.Errorf("SmartTruncate(map, 1<<20) for %q = (%q, %v), leaked or errored", in, col, err)
+		}
+	}
+	for _, benign := range []string{
+		`{"line1\nline2":"PUBLIC_KEEP"}`,
+		`{"hello%20world":"PUBLIC_KEEP"}`,
+	} {
+		if got := scrubErrorText(benign); !strings.Contains(got, "PUBLIC_KEEP") {
+			t.Errorf("scrubErrorText(%q) = %q, lost PUBLIC_KEEP", benign, got)
+		}
+	}
+}
+
+func TestJSONMapKeyCredentials(t *testing.T) {
+	const secret = "SYNTH_GATE1_CRED_99"
+	for _, tc := range []struct {
+		in       string
+		wantKeep bool
+	}{
+		{in: `{"curl -H \"X-Api-Key: \"prefix\" ` + secret + `\"":"ok"}`, wantKeep: false},
+		{in: `{"Authorization: Bearer ` + secret + `":"ok","safe":"PUBLIC_KEEP"}`, wantKeep: true},
+		{in: `{"https://admin:` + secret + `@db.internal":"ok"}`, wantKeep: false},
+		{in: `{"api_key=` + secret + `":"ok"}`, wantKeep: false},
+	} {
+		if got := scrubErrorText(tc.in); strings.Contains(got, secret) {
+			t.Errorf("scrubErrorText(%q) = %q, leaked secret", tc.in, got)
+		}
+		if got := redactErrorMessage(tc.in); strings.Contains(got, secret) {
+			t.Errorf("redactErrorMessage(%q) = %q, leaked secret", tc.in, got)
+		} else if tc.wantKeep && !strings.Contains(got, "PUBLIC_KEEP") {
+			t.Errorf("redactErrorMessage(%q) = %q, lost PUBLIC_KEEP", tc.in, got)
+		}
+		if got, _ := sanitizeRawText(tc.in); strings.Contains(got, secret) {
+			t.Errorf("sanitizeRawText(%q) = %q, leaked secret", tc.in, got)
+		} else if tc.wantKeep && !strings.Contains(got, "PUBLIC_KEEP") {
+			t.Errorf("sanitizeRawText(%q) = %q, lost PUBLIC_KEEP", tc.in, got)
+		}
+		if raw, _, err := SmartTruncate(tc.in, 1<<20); err != nil || strings.Contains(string(raw), secret) {
+			t.Errorf("SmartTruncate(%q, 1<<20) = (%q, %v), leaked or errored", tc.in, raw, err)
+		} else if tc.wantKeep && !strings.Contains(string(raw), "PUBLIC_KEEP") {
+			t.Errorf("SmartTruncate(%q, 1<<20) = %q, lost PUBLIC_KEEP", tc.in, raw)
+		}
+		if col, _, err := SmartTruncate(map[string]any{"v": tc.in}, 1<<20); err != nil || strings.Contains(string(col), secret) {
+			t.Errorf("SmartTruncate(map, 1<<20) for %q = (%q, %v), leaked or errored", tc.in, col, err)
+		}
+	}
+	for _, m := range []map[string]any{
+		{"pass%77ord": secret, "safe": "PUBLIC_KEEP"},
+		{"\u0070assword": secret},
+		{"api\x5fkey": secret},
+		{"Authorization: Bearer " + secret: "ok", "safe": "PUBLIC_KEEP"},
+	} {
+		out, _, err := SmartTruncate(m, 1<<20)
+		if err != nil {
+			t.Fatalf("SmartTruncate(%#v) error = %v", m, err)
+		}
+		if strings.Contains(string(out), secret) {
+			t.Errorf("SmartTruncate(%#v) = %q, leaked secret", m, out)
+		}
+		if _, hasSafe := m["safe"]; hasSafe && !strings.Contains(string(out), "PUBLIC_KEEP") {
+			t.Errorf("SmartTruncate(%#v) = %q, lost PUBLIC_KEEP", m, out)
+		}
+	}
+}
+
+func TestJoinedHeaderQuotesApostropheFamilies(t *testing.T) {
+	const secret = "SYNTH_REVIEW_ONLY_CREDENTIAL"
+	const otherSecret = "SYNTH_SECOND_HEADER_CREDENTIAL"
+	cases := []struct {
+		name     string
+		in       string
+		wantKeep string
+	}{
+		{
+			name: "familyB_unclosed_single_quote_after_contraction",
+			in:   `user's -H 'X-Api-Key: ` + secret,
+		},
+		{
+			name: "familyB_hash_inside_single_quote_after_contraction",
+			in:   `user's -H 'X-Api-Key: pre # ` + secret + `'`,
+		},
+		{
+			name: "familyB_trailing_contraction_after_single_quote",
+			in:   `user's -H 'X-Api-Key: ` + secret + `'s`,
+		},
+		{
+			name:     "familyA_semicolon_header_before_quoted_keep",
+			in:       `prefix's; -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "familyA_flag_header_before_quoted_keep",
+			in:       `prefix's -a -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "familyA_plural_possessive_semicolon_header_before_quoted_keep",
+			in:       `prefixes'; -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_familyA_semicolon_header_before_quoted_keep",
+			in:       `curl -H "X-Api-Key: "prefix's; ` + secret + `=' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_familyA_flag_header_before_quoted_keep",
+			in:       `curl -H "X-Api-Key: "prefix's -a ` + secret + `=' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_familyA_semicolon_arg_header_before_quoted_keep",
+			in:       `curl -H "X-Api-Key: "prefix's; ` + secret + ` ' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_familyA_plural_possessive_semicolon_header_before_quoted_keep",
+			in:       `curl -H "X-Api-Key: "prefixes'; ` + secret + `=' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_familyA_space_inside_quoted_keep",
+			in:       `curl -H "X-Api-Key: "prefix's; ` + secret + `=' ' PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name: "curl_familyB_unclosed_single_quote_after_contraction",
+			in:   `curl -H "X-Api-Key: "user's -H 'X-Api-Key: ` + secret,
+		},
+		{
+			name: "curl_familyB_hash_inside_single_quote_after_contraction",
+			in:   `curl -H "X-Api-Key: "user's -H 'X-Api-Key: pre # ` + secret + `'`,
+		},
+		{
+			name: "curl_familyB_trailing_contraction_after_single_quote",
+			in:   `curl -H "X-Api-Key: "user's -H 'X-Api-Key: ` + secret + `'s`,
+		},
+		{
+			name: "curl_p0_2_double_quote_hash_note_bypass",
+			in:   `curl -H "X-Api-Key: "prefix's; ` + secret + `=' -d "users' # note"`,
+		},
+		{
+			name: "curl_p0_2_semicolon_echo_unclosed_single_quote",
+			in:   `curl -H "X-Api-Key: "prefix's; ` + secret + `='; echo ' unclosed`,
+		},
+		{
+			name: "curl_p0_2_flag_echo_unclosed_single_quote",
+			in:   `curl -H "X-Api-Key: "prefix's -a ` + secret + `='; echo ' unclosed`,
+		},
+		{
+			name: "curl_p0_2_semicolon_echo_empty_single_quote",
+			in:   `curl -H "X-Api-Key: "prefix's; ` + secret + `='; echo '`,
+		},
+		{
+			name: "curl_p0_2_plural_possessive_semicolon_echo_empty_single_quote",
+			in:   `curl -H "X-Api-Key: "prefixes'; ` + secret + `='; echo '`,
+		},
+		{
+			name: "curl_multi_header_short_flag_cluster_sS",
+			in:   `curl -H "X-Api-Key: "user's -sS -H 'X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_multi_header_long_flag_silent",
+			in:   `curl -H "X-Api-Key: "user's --silent -H 'X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_multi_header_flag_with_arg_X_POST",
+			in:   `curl -H "X-Api-Key: "user's -X POST -H 'X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_multi_header_url_arg_before_second_header",
+			in:   `curl -H "X-Api-Key: "user's https://api.example.com/v1 -H 'X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_multi_header_plural_possessive_insecure_goog_key",
+			in:   `curl -H "X-Api-Key: "users' --insecure -H 'X-Goog-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "wget_multi_header_qO_long_header",
+			in:   `wget --header="X-Api-Key: "user's -qO- --header='X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_multi_header_X_POST_unclosed_single_quote",
+			in:   `curl -H "X-Api-Key: "user's -X POST -H 'X-Api-Key: ` + secret,
+		},
+		{
+			name: "curl_multi_header_semicolon_curl_sS_H",
+			in:   `curl -H "X-Api-Key: "prefix's; curl -sS -H 'X-Api-Key: ` + secret + `'`,
+		},
+		{
+			name: "curl_semicolon_secret_before_H_header",
+			in:   `curl -H "X-Api-Key: "prefix's; ` + secret + ` -H 'X-Api-Key: ` + otherSecret + `'`,
+		},
+		{
+			name: "curl_semicolon_secret_eq_header",
+			in:   `curl -H "X-Api-Key: "prefix's; ` + secret + `='X-Api-Key: ` + otherSecret + `'`,
+		},
+		{
+			name:     "curl_multi_header_valued_flag_d_eq",
+			in:       `curl -H "X-Api-Key: "user's -d a=1 -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_valued_flag_long_data_eq",
+			in:       `curl -H "X-Api-Key: "user's --data foo=bar -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_valued_flag_F_eq",
+			in:       `curl -H "X-Api-Key: "user's -F mode=prod -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_valued_flag_b_eq",
+			in:       `curl -H "X-Api-Key: "user's -b theme=dark -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_non_auth_header_with_eq",
+			in:       `curl -H "X-Api-Key: "user's -H "X-Trace: k=v" -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_quoted_semicolon_in_header",
+			in:       `curl -H "X-Api-Key: "user's -H "Accept: text/html;q=0.9" -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_quoted_amp_in_data",
+			in:       `curl -H "X-Api-Key: "user's -d "a=1&b=2" -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_quoted_url_with_amp",
+			in:       `curl -H "X-Api-Key: "user's "https://api.example.com/v1?a=1&b=2" -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_fd_redirect_2_gt_amp_1",
+			in:       `curl -H "X-Api-Key: "user's 2>&1; curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_fd_redirect_amp_gt_dev_null",
+			in:       `curl -H "X-Api-Key: "user's &>/dev/null; curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_subshell_and_curl",
+			in:       `(curl -H "X-Api-Key: "user's) && curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_and_env_DEBUG_curl",
+			in:       `curl -H "X-Api-Key: "user's && env DEBUG=1 curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_semicolon_sudo_curl",
+			in:       `curl -H "X-Api-Key: "user's; sudo curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_semicolon_usr_bin_curl",
+			in:       `curl -H "X-Api-Key: "user's; /usr/bin/curl -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name: "curl_r30j_non_single_quote_double_quote_before_H",
+			in:   `curl -H 'X-Api-Key: 'prefix"; SYNTH_R30J_S1 -H "X-Api-Key: SYNTH_R30J_O1"`,
+		},
+		{
+			name: "curl_r30j_non_single_quote_double_quote_eq_header",
+			in:   `curl -H 'X-Api-Key: 'prefix"; SYNTH_R30J_S2="X-Api-Key: SYNTH_R30J_O2"`,
+		},
+		{
+			name: "curl_r30j_escaped_quote_before_H",
+			in:   `curl -H \"X-Api-Key: \"prefix\'s; SYNTH_R30J_S3 -H \'X-Api-Key: SYNTH_R30J_O3\'`,
+		},
+		{
+			name: "curl_r30j_long_space_padded_header_over_64_bytes",
+			in:   `curl -H 'X-Api-Key: 'prefix's; SYNTH_R30J_S4 -H 'X-Api-Key` + strings.Repeat(" ", 70) + `: SYNTH_R30J_O4'`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, fresh := redactAuthHeaders(tc.in), redactAuthHeadersFreshScanner(tc.in); got != fresh {
+				t.Errorf("redactAuthHeaders(%q) = %q != fresh %q", tc.in, got, fresh)
+			}
+
+			raw, _, err := SmartTruncate(tc.in, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(str) error = %v", err)
+			}
+			col, _, err := SmartTruncate(map[string]any{"err": tc.in}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(map) error = %v", err)
+			}
+			san, _ := sanitizeRawText(tc.in)
+			rem := redactErrorMessage(tc.in)
+			scrub := scrubErrorText(tc.in)
+
+			for label, out := range map[string]string{
+				"SmartTruncate(str)": string(raw),
+				"SmartTruncate(map)": string(col),
+				"sanitizeRawText":    san,
+				"redactErrorMessage": rem,
+				"scrubErrorText":     scrub,
+			} {
+				if strings.Contains(out, secret) {
+					t.Errorf("%s(%q) = %q, leaked secret", label, tc.in, out)
+				}
+				if strings.Contains(out, otherSecret) {
+					t.Errorf("%s(%q) = %q, leaked otherSecret", label, tc.in, out)
+				}
+				if strings.Contains(out, "SYNTH_R30J_S") || strings.Contains(out, "SYNTH_R30J_O") {
+					t.Errorf("%s(%q) = %q, leaked R30J secret", label, tc.in, out)
+				}
+				if tc.wantKeep != "" && !strings.Contains(out, tc.wantKeep) {
+					t.Errorf("%s(%q) = %q, lost %q", label, tc.in, out, tc.wantKeep)
+				}
+			}
+		})
+	}
+}
+
+func TestMapKeyCollisionWithSliceOrMapValues(t *testing.T) {
+	const secret = "SYNTH_G1_30E_SECRET_99"
+	k1 := "Bearer s1_" + secret
+	k2 := "Bearer s2_" + secret
+
+	cases := []struct {
+		name string
+		m    map[string]any
+		json string
+	}{
+		{
+			name: "equal_slice_values",
+			m:    map[string]any{k1: []any{"a", float64(1)}, k2: []any{"a", float64(1)}},
+			json: fmt.Sprintf(`{%q:["a",1],%q:["a",1]}`, k1, k2),
+		},
+		{
+			name: "unequal_slice_values",
+			m:    map[string]any{k1: []any{"a"}, k2: []any{"b"}},
+			json: fmt.Sprintf(`{%q:["a"],%q:["b"]}`, k1, k2),
+		},
+		{
+			name: "equal_map_values",
+			m:    map[string]any{k1: map[string]any{"x": "y"}, k2: map[string]any{"x": "y"}},
+			json: fmt.Sprintf(`{%q:{"x":"y"},%q:{"x":"y"}}`, k1, k2),
+		},
+		{
+			name: "unequal_map_values",
+			m:    map[string]any{k1: map[string]any{"x": "y1"}, k2: map[string]any{"x": "y2"}},
+			json: fmt.Sprintf(`{%q:{"x":"y1"},%q:{"x":"y2"}}`, k1, k2),
+		},
+		{
+			name: "equal_typed_string_slices",
+			m:    map[string]any{k1: []string{"p"}, k2: []string{"p"}},
+			json: fmt.Sprintf(`{%q:["p"],%q:["p"]}`, k1, k2),
+		},
+		{
+			name: "unequal_typed_string_slices",
+			m:    map[string]any{k1: []string{"p"}, k2: []string{"q"}},
+			json: fmt.Sprintf(`{%q:["p"],%q:["q"]}`, k1, k2),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < 50; i++ {
+				outMap, _, err := SmartTruncate(tc.m, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(map) error = %v", err)
+				}
+				outJSON, _, err := SmartTruncate(tc.json, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(json) error = %v", err)
+				}
+				errWrapped := "failed: " + tc.json
+				san, _ := sanitizeRawText(errWrapped)
+				rem := redactErrorMessage(errWrapped)
+				scrub := scrubErrorText(errWrapped)
+
+				for label, out := range map[string]string{
+					"SmartTruncate(map)":  string(outMap),
+					"SmartTruncate(json)": string(outJSON),
+					"sanitizeRawText":     san,
+					"redactErrorMessage":  rem,
+					"scrubErrorText":      scrub,
+				} {
+					if strings.Contains(out, secret) {
+						t.Errorf("%s leaked secret: %q", label, out)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTempPrefixedSensitiveMapKeys(t *testing.T) {
+	const keySecret = "SYNTH_G1_30E_KEY_SECRET_99"
+	const valSecret = "SYNTH_G1_30E_VAL_SECRET_88"
+	mapCases := []struct {
+		name string
+		m    map[string]any
+		raw  string
+	}{
+		{
+			name: "temp_api_key_assignment",
+			m:    map[string]any{"temp:api_key=" + keySecret: valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"temp:api_key=%s":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "percent_encoded_temp_bearer",
+			m:    map[string]any{"%74emp:Bearer%20" + keySecret: valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"%%74emp:Bearer%%20%s":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "percent_encoded_temp_userinfo_url",
+			m:    map[string]any{"%74emp:https%3A%2F%2Fadmin%3A" + keySecret + "%40db.internal": valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"%%74emp:https%%3A%%2F%%2Fadmin%%3A%s%%40db.internal":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "temp_bearer_header",
+			m:    map[string]any{"temp:Bearer " + keySecret: valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"temp:Bearer %s":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "user_temp_authorization_bearer",
+			m:    map[string]any{"user:temp:Authorization: Bearer " + keySecret: valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"user:temp:Authorization: Bearer %s":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "temp_redacted_prefix_encoded_userinfo_url",
+			m:    map[string]any{"temp:[REDACTED] https%3A%2F%2Fadmin%3A" + keySecret + "%40db.internal": valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"temp:[REDACTED] https%%3A%%2F%%2Fadmin%%3A%s%%40db.internal":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "temp_redacted_prefix_encoded_bearer",
+			m:    map[string]any{"temp:[REDACTED] Bearer%20" + keySecret: valSecret, "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"temp:[REDACTED] Bearer%%20%s":%q,"safe":"PUBLIC_KEEP"}`, keySecret, valSecret),
+		},
+		{
+			name: "redacted_prefix_encoded_userinfo_url",
+			m:    map[string]any{"[REDACTED] https%3A%2F%2Fadmin%3A" + keySecret + "%40db.internal": "ok", "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"[REDACTED] https%%3A%%2F%%2Fadmin%%3A%s%%40db.internal":"ok","safe":"PUBLIC_KEEP"}`, keySecret),
+		},
+		{
+			name: "redacted_prefix_encoded_api_key",
+			m:    map[string]any{"[REDACTED] api_key%3D" + keySecret: "ok", "safe": "PUBLIC_KEEP"},
+			raw:  fmt.Sprintf(`{"[REDACTED] api_key%%3D%s":"ok","safe":"PUBLIC_KEEP"}`, keySecret),
+		},
+	}
+
+	for _, tc := range mapCases {
+		t.Run(tc.name, func(t *testing.T) {
+			outMap, _, err := SmartTruncate(tc.m, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(map) error = %v", err)
+			}
+			outJSON, _, err := SmartTruncate(tc.raw, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(json) error = %v", err)
+			}
+			san, _ := sanitizeRawText(tc.raw)
+			rem := redactErrorMessage(tc.raw)
+			scrub := scrubErrorText(tc.raw)
+
+			for label, out := range map[string]string{
+				"SmartTruncate(map)":  string(outMap),
+				"SmartTruncate(json)": string(outJSON),
+				"sanitizeRawText":     san,
+				"redactErrorMessage":  rem,
+				"scrubErrorText":      scrub,
+			} {
+				if strings.Contains(out, keySecret) {
+					t.Errorf("%s leaked keySecret: %q", label, out)
+				}
+				if strings.Contains(out, valSecret) {
+					t.Errorf("%s leaked valSecret: %q", label, out)
+				}
+				if label != "scrubErrorText" && !strings.Contains(out, "PUBLIC_KEEP") {
+					t.Errorf("%s lost PUBLIC_KEEP: %q", label, out)
+				}
+			}
+		})
+	}
+
+	pyDict := fmt.Sprintf(`failed: {'temp:api_key=%s': '%s', 'safe': 'PUBLIC_KEEP'}`, keySecret, valSecret)
+	sanPy, _ := sanitizeRawText(pyDict)
+	for label, out := range map[string]string{
+		"sanitizeRawText(py)":    sanPy,
+		"redactErrorMessage(py)": redactErrorMessage(pyDict),
+		"scrubErrorText(py)":     scrubErrorText(pyDict),
+	} {
+		if strings.Contains(out, keySecret) {
+			t.Errorf("%s leaked keySecret: %q", label, out)
+		}
+		if strings.Contains(out, valSecret) {
+			t.Errorf("%s leaked valSecret: %q", label, out)
+		}
+		if !strings.Contains(out, "PUBLIC_KEEP") {
+			t.Errorf("%s lost PUBLIC_KEEP: %q", label, out)
 		}
 	}
 }

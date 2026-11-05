@@ -1348,14 +1348,18 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 				k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
 			}
 			truncated = true
-		} else if s.redact && isSensitiveKey(k) {
-			if !s.budget.take() {
-				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-				truncated = true
-				break
+		} else if s.redact {
+			sensitiveKey := isSensitiveJSONKey(k)
+			k = scrubJSONMapKey(k, depth)
+			if sensitiveKey {
+				if !s.budget.take() {
+					out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+					truncated = true
+					break
+				}
+				out[k] = redactedValue
+				continue
 			}
-			out[k] = redactedValue
-			continue
 		}
 		val, t := s.walk(iter.Value(), depth+1)
 		if str, ok := val.(string); ok && str == sanitizeBudgetPlaceholder && s.budget.remaining <= 0 {
@@ -1363,7 +1367,13 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		out[k] = val
+		if existing, exists := out[k]; exists {
+			if !reflect.DeepEqual(existing, val) {
+				out[k] = redactedValue
+			}
+		} else {
+			out[k] = val
+		}
 		truncated = truncated || t
 	}
 	return out, truncated

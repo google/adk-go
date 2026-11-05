@@ -24,6 +24,7 @@ import (
 	"io"
 	"maps"
 	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -1538,7 +1539,12 @@ func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, co
 				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 				return outMap, true, true
 			}
-			if isSensitiveKey(k) {
+			sensitiveKey := isSensitiveJSONKey(k)
+			newK := scrubJSONMapKey(k, depth)
+			if newK != k {
+				changed = true
+			}
+			if sensitiveKey {
 				if budget != nil && !budget.take() {
 					outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 					return outMap, true, true
@@ -1546,7 +1552,7 @@ func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, co
 				if str, ok := val.(string); !ok || str != redactedValue {
 					changed = true
 				}
-				outMap[k] = redactedValue
+				outMap[newK] = redactedValue
 				continue
 			}
 			newVal, c, lost := redactJSONValue(val, depth+1, budget)
@@ -1554,7 +1560,14 @@ func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, co
 				outMap[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 				return outMap, true, true
 			}
-			outMap[k] = newVal
+			if existing, exists := outMap[newK]; exists {
+				if !reflect.DeepEqual(existing, newVal) {
+					outMap[newK] = redactedValue
+				}
+				changed = true
+			} else {
+				outMap[newK] = newVal
+			}
 			changed = changed || c
 			contentLost = contentLost || lost
 		}
@@ -1712,8 +1725,19 @@ func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 		changed := false
 		out := make(map[string]any, len(x))
 		for k, val := range x {
+			newK := scrubJSONMapKey(k, depth)
+			if newK != k {
+				changed = true
+			}
 			newVal, c := scrubErrorJSONStrings(val, depth+1)
-			out[k] = newVal
+			if existing, exists := out[newK]; exists {
+				if !reflect.DeepEqual(existing, newVal) {
+					out[newK] = redactedValue
+				}
+				changed = true
+			} else {
+				out[newK] = newVal
+			}
 			changed = changed || c
 		}
 		return out, changed
@@ -1738,8 +1762,32 @@ func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 }
 
 func scrubErrorText(msg string) string {
+	return scrubErrorTextDepth(msg, 0)
+}
+
+func scrubErrorTextDepth(msg string, depth int) string {
+	if depth >= maxSanitizeDepth {
+		return redactedSensitiveTextPlaceholder
+	}
 	scrubbed := scrubErrorTokens(msg)
-	if hasEncodedCredentialMarker(scrubbed) || hasBackslashEscapedCredential(msg, scrubbed) {
+	if exposes, ok := jsonExposesCredentialDepth(msg, scrubbed, depth); ok {
+		if !exposes {
+			return scrubbed
+		}
+		if decoded, ok := decodeJSONDocument(trimBOMAndSpace(msg)); ok {
+			redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, &nodeBudget{remaining: maxSanitizeNodes})
+			if !valLost && valChanged {
+				scrubbedJSON, _ := scrubErrorJSONStrings(redacted, depth+1)
+				if b, err := json.Marshal(scrubbedJSON); err == nil {
+					if exposes2, ok2 := jsonExposesCredentialDepth(msg, string(b), depth); ok2 && !exposes2 {
+						return string(b)
+					}
+				}
+			}
+		}
+		return redactedSensitiveTextPlaceholder
+	}
+	if hasEncodedCredentialMarker(scrubbed) || hasBackslashEscapedCredentialDepth(msg, scrubbed, depth) {
 		return redactedSensitiveTextPlaceholder
 	}
 	return scrubbed
@@ -1799,10 +1847,17 @@ func unescapeCredentialStep(s string) string {
 // keys and strings of raw and scrubbed are decoded exactly and checked in
 // pairs instead (see jsonExposesCredential).
 func hasBackslashEscapedCredential(raw, scrubbed string) bool {
+	return hasBackslashEscapedCredentialDepth(raw, scrubbed, 0)
+}
+
+func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
+	if depth >= maxSanitizeDepth {
+		return true
+	}
 	if !strings.ContainsAny(raw, `\%`) {
 		return false
 	}
-	if exposes, ok := jsonExposesCredential(raw, scrubbed); ok {
+	if exposes, ok := jsonExposesCredentialDepth(raw, scrubbed, depth); ok {
 		return exposes
 	}
 	var parts []string
@@ -1856,6 +1911,13 @@ func hasBackslashEscapedCredential(raw, scrubbed string) bool {
 // leaves the quote of the string open across it, and a scrub of that text
 // then reads the prose in the string as a Cookie header's value.
 func jsonExposesCredential(raw, scrubbed string) (exposes, ok bool) {
+	return jsonExposesCredentialDepth(raw, scrubbed, 0)
+}
+
+func jsonExposesCredentialDepth(raw, scrubbed string, depth int) (exposes, ok bool) {
+	if depth >= maxSanitizeDepth {
+		return true, true
+	}
 	raw, scrubbed = trimBOMAndSpace(raw), trimBOMAndSpace(scrubbed)
 	if len(raw) > maxInspectableJSONTextBytes || !startsJSONDocument(raw) || !startsJSONDocument(scrubbed) ||
 		!utf8.ValidString(raw) || !utf8.ValidString(scrubbed) {
@@ -1876,7 +1938,7 @@ func jsonExposesCredential(raw, scrubbed string) (exposes, ok bool) {
 	if changed {
 		return true, true
 	}
-	return jsonValuesExpose(rawValue, scrubbedValue, 1)
+	return jsonValuesExpose(rawValue, scrubbedValue, depth+1)
 }
 
 // startsJSONDocument reports whether s, with no BOM or space around it,
@@ -1909,18 +1971,42 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 			return false, false
 		}
 		keys := make([]string, 0, len(r))
+		scrubbedKeys := make(map[string]string, len(r))
 		for k := range r {
+			sk := k
 			if _, found := s[k]; !found {
-				return false, false
+				sk = scrubJSONMapKey(k, depth+1)
+				if _, found := s[sk]; !found {
+					return false, false
+				}
 			}
+			scrubbedKeys[k] = sk
 			keys = append(keys, k)
 		}
 		slices.Sort(keys)
 		for _, k := range keys {
-			if jsonStringExposes(k, k) {
+			sk := scrubbedKeys[k]
+			if isSensitiveJSONKey(k) && s[sk] != redactedValue {
 				return true, true
 			}
-			if exposes, ok := jsonValuesExpose(r[k], s[k], depth+1); exposes || !ok {
+			if !isKnownSentinel(sk) {
+				if scrubJSONMapKey(sk, depth+1) != sk {
+					return true, true
+				}
+				if prefix, rawSuffix, ok := splitTempKeyPrefix(k); ok {
+					if strings.HasPrefix(sk, prefix) {
+						skSuffix := sk[len(prefix):]
+						if !isKnownSentinel(skSuffix) && jsonStringExposes(rawSuffix, skSuffix, depth+1) {
+							return true, true
+						}
+					} else if jsonStringExposes(rawSuffix, sk, depth+1) {
+						return true, true
+					}
+				} else if jsonStringExposes(k, sk, depth+1) {
+					return true, true
+				}
+			}
+			if exposes, ok := jsonValuesExpose(r[k], s[sk], depth+1); exposes || !ok {
 				return exposes, ok
 			}
 		}
@@ -1941,7 +2027,7 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 		if !isString {
 			return false, false
 		}
-		return jsonStringExposes(r, s), true
+		return jsonStringExposes(r, s, depth+1), true
 	default:
 		return false, raw == scrubbed
 	}
@@ -1954,14 +2040,394 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 // scrubErrorText still redacts scrubbed, or redacts a part of raw that
 // scrubbed keeps (see keptInOrder), as for a scrub of the escaped text that
 // reads secret: a\npassword: SECRET as one value and keeps SECRET.
-func jsonStringExposes(raw, scrubbed string) bool {
-	if raw == scrubbed {
-		return !isKnownSentinel(raw) && scrubErrorText(raw) != raw
-	}
-	if !isKnownSentinel(scrubbed) && scrubErrorText(scrubbed) != scrubbed {
+func jsonStringExposes(raw, scrubbed string, depth int) bool {
+	if depth >= maxSanitizeDepth {
 		return true
 	}
-	return !keptInOrder(keptLiterals(scrubbed), scrubErrorText(raw))
+	if raw == scrubbed {
+		return !isKnownSentinel(raw) && scrubErrorTextDepth(raw, depth) != raw
+	}
+	if !isKnownSentinel(scrubbed) && scrubErrorTextDepth(scrubbed, depth) != scrubbed {
+		return true
+	}
+	return !keptInOrder(keptLiterals(scrubbed), scrubErrorTextDepth(raw, depth))
+}
+
+func splitTempKeyPrefix(k string) (prefix, suffix string, ok bool) {
+	i := 0
+	for i < len(k) {
+		r, w := utf8.DecodeRuneInString(k[i:])
+		if !isDelimSpace(r) {
+			break
+		}
+		i += w
+	}
+	lower := strings.ToLower(k[i:])
+	if strings.HasPrefix(lower, session.KeyPrefixTemp) {
+		cut := i + len(session.KeyPrefixTemp)
+		return k[:cut], k[cut:], true
+	}
+	if strings.HasPrefix(lower, session.KeyPrefixUser) {
+		i += len(session.KeyPrefixUser)
+	} else if strings.HasPrefix(lower, session.KeyPrefixApp) {
+		i += len(session.KeyPrefixApp)
+	} else {
+		return "", "", false
+	}
+	for i < len(k) {
+		r, w := utf8.DecodeRuneInString(k[i:])
+		if !isDelimSpace(r) {
+			break
+		}
+		i += w
+	}
+	if strings.HasPrefix(strings.ToLower(k[i:]), session.KeyPrefixTemp) {
+		cut := i + len(session.KeyPrefixTemp)
+		return k[:cut], k[cut:], true
+	}
+	return "", "", false
+}
+
+func mayContainKeyCredential(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c <= ' ' || c >= utf8.RuneSelf {
+			return true
+		}
+		switch c {
+		case ':', '=', '%', '\\', '{', '[', '"', '\'':
+			return true
+		}
+	}
+	return false
+}
+
+func scrubJSONMapKey(k string, depth int) string {
+	if depth >= maxSanitizeDepth {
+		return redactedSensitiveTextPlaceholder
+	}
+	if isKnownSentinel(k) || !mayContainKeyCredential(k) {
+		return k
+	}
+	if prefix, suffix, ok := splitTempKeyPrefix(k); ok {
+		if suffix == "" || isKnownSentinel(suffix) || !mayContainKeyCredential(suffix) {
+			return k
+		}
+		return prefix + scrubErrorTextDepth(suffix, depth)
+	}
+	return scrubErrorTextDepth(k, depth)
+}
+
+func isSensitiveJSONKey(k string) bool {
+	if isSensitiveKey(k) {
+		return true
+	}
+	if !strings.ContainsAny(k, `\%`) {
+		return false
+	}
+	cur := k
+	for range 2 * maxCanonicalUnescapePasses {
+		if !strings.ContainsAny(cur, `\%`) {
+			return false
+		}
+		next := unescapeCredentialStep(cur)
+		if next == cur {
+			return false
+		}
+		if isSensitiveKey(next) {
+			return true
+		}
+		cur = next
+	}
+	return unescapeCredentialStep(cur) != cur
+}
+
+func hasUnquotedShellComment(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '#' && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int) bool {
+	if h.balLineEnd != lineEnd || h.balMemo == nil {
+		h.balLineEnd = lineEnd
+		h.balMemo = make(map[int]bool)
+	}
+	var visited []int
+	stamp := func(res bool) bool {
+		for _, pos := range visited {
+			h.balMemo[pos] = res
+		}
+		return res
+	}
+	s := h.s
+	p := start
+	for p < lineEnd {
+		if v, ok := h.balMemo[p]; ok {
+			return stamp(v)
+		}
+		visited = append(visited, p)
+		c := s[p]
+		switch c {
+		case '\\':
+			p += 2
+		case '\'':
+			end := strings.IndexByte(s[p+1:lineEnd], '\'')
+			if end < 0 {
+				return stamp(false)
+			}
+			p += 1 + end + 1
+		case '"':
+			j := p + 1
+			for j < lineEnd {
+				if s[j] == '\\' {
+					j += 2
+					continue
+				}
+				if s[j] == '"' {
+					break
+				}
+				j++
+			}
+			if j >= lineEnd {
+				return stamp(false)
+			}
+			p = j + 1
+		case '#':
+			if p == 0 || s[p-1] == ' ' || s[p-1] == '\t' || strings.IndexByte(";&|()", s[p-1]) >= 0 {
+				return stamp(true)
+			}
+			p++
+		default:
+			p++
+		}
+	}
+	return stamp(true)
+}
+
+func isHeaderFlagGap(gap string) bool {
+	if len(gap) == 0 {
+		return false
+	}
+	if gap[0] != ' ' && gap[0] != '\t' && strings.IndexByte(";&|<>()", gap[0]) < 0 {
+		return false
+	}
+	last := gap[len(gap)-1]
+	var trimmed string
+	switch last {
+	case '=':
+		if !strings.HasSuffix(gap, "--header=") && !strings.HasSuffix(gap, "-H=") {
+			return false
+		}
+		trimmed = gap[:len(gap)-1]
+	case ' ', '\t':
+		trimmed = gap
+	default:
+		return false
+	}
+	var segs []string
+	segStart := 0
+	inDouble := false
+	curTokEnd := -1
+	curTokHasScheme := false
+	isTokDelim := func(c byte) bool {
+		switch c {
+		case ' ', '\t', ';', '|', '(', ')', '<', '>', '"':
+			return true
+		default:
+			return false
+		}
+	}
+	for i := 0; i < len(trimmed); i++ {
+		c := trimmed[i]
+		if inDouble {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch c {
+		case '\\':
+			i++
+		case '"':
+			inDouble = true
+		case ';':
+			segs = append(segs, trimmed[segStart:i])
+			segStart = i + 1
+		case '|':
+			segs = append(segs, trimmed[segStart:i])
+			if i+1 < len(trimmed) && trimmed[i+1] == '|' {
+				i++
+			}
+			segStart = i + 1
+		case '&':
+			if i+1 < len(trimmed) && trimmed[i+1] == '&' {
+				segs = append(segs, trimmed[segStart:i])
+				i++
+				segStart = i + 1
+				continue
+			}
+			if (i > 0 && trimmed[i-1] == '>') || (i+1 < len(trimmed) && trimmed[i+1] == '>') {
+				continue
+			}
+			if i >= curTokEnd {
+				tokStart := i
+				for tokStart > 0 && !isTokDelim(trimmed[tokStart-1]) {
+					tokStart--
+				}
+				curTokEnd = i + 1
+				for curTokEnd < len(trimmed) && !isTokDelim(trimmed[curTokEnd]) {
+					curTokEnd++
+				}
+				curTokHasScheme = strings.Contains(trimmed[tokStart:curTokEnd], "://")
+			}
+			if curTokHasScheme {
+				continue
+			}
+			segs = append(segs, trimmed[segStart:i])
+			segStart = i + 1
+		}
+	}
+	if inDouble {
+		return false
+	}
+	if len(segs) == 0 {
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			return false
+		}
+		lastTok := strings.TrimLeft(fields[len(fields)-1], "(")
+		return lastTok == "-H" || lastTok == "--header"
+	}
+	segs = append(segs, trimmed[segStart:])
+	if strings.TrimSpace(segs[len(segs)-1]) == "" {
+		return false
+	}
+	startsAfterUnquotedSep := strings.TrimSpace(segs[0]) == ""
+	var lastSegFields []string
+	for idx, seg := range segs {
+		segFields := strings.Fields(seg)
+		if len(segFields) == 0 {
+			continue
+		}
+		if idx > 0 || startsAfterUnquotedSep {
+			pos := 0
+			for pos < len(segFields) {
+				tok := strings.TrimLeft(segFields[pos], "(")
+				switch tok {
+				case "env":
+					pos++
+					for pos < len(segFields) {
+						next := strings.TrimLeft(segFields[pos], "(")
+						if strings.HasPrefix(next, "-") || (strings.IndexByte(next, '=') > 0 && next[0] != '-') {
+							pos++
+							continue
+						}
+						break
+					}
+				case "sudo", "command", "nohup", "time", "xargs", "nice":
+					pos++
+					for pos < len(segFields) && strings.HasPrefix(strings.TrimLeft(segFields[pos], "("), "-") {
+						pos++
+					}
+				default:
+					goto checkedWrapper
+				}
+			}
+		checkedWrapper:
+			if pos >= len(segFields) {
+				return false
+			}
+			cmd := strings.TrimLeft(segFields[pos], "(")
+			if cmd != "curl" && cmd != "wget" && cmd != "-H" && cmd != "--header" &&
+				!strings.HasSuffix(cmd, "/curl") && !strings.HasSuffix(cmd, "/wget") {
+				return false
+			}
+		}
+		lastSegFields = segFields
+	}
+	if len(lastSegFields) == 0 {
+		return false
+	}
+	lastTok := strings.TrimLeft(lastSegFields[len(lastSegFields)-1], "(")
+	return lastTok == "-H" || lastTok == "--header"
+}
+
+func isBenignCommandGap(gap string) bool {
+	if len(gap) == 0 || strings.IndexByte(";&|", gap[0]) < 0 {
+		return false
+	}
+	last := gap[len(gap)-1]
+	if last != ' ' && last != '\t' {
+		return false
+	}
+	cmd := strings.Trim(gap, ";&| \t")
+	return cmd == "echo" || cmd == "printf"
+}
+
+func startsAuthHeaderPrefix(sub string) bool {
+	return authHeaderKeys.mayStartAt(sub, 0) && authHeaderPrefixAtRe.FindStringIndex(sub) != nil
+}
+
+func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd int) bool {
+	s := h.s
+	isWordOrEq := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '=' }
+	if !startsContractionBefore(s, k, 1, isWordOrEq) && !isTrailingApostrophe(s, k) {
+		return false
+	}
+	tokEnd := k + 1
+	for tokEnd < closePos-1 {
+		r, w := utf8.DecodeRuneInString(s[tokEnd : closePos-1])
+		if isDelimSpace(r) || strings.IndexByte(";&|<>()", s[tokEnd]) >= 0 {
+			break
+		}
+		tokEnd += w
+	}
+	if tokEnd >= closePos-1 {
+		return false
+	}
+	gap := s[tokEnd : closePos-1]
+	if hasUnquotedShellComment(gap) {
+		return false
+	}
+	if closePos < 2 || (s[closePos-2] != ' ' && s[closePos-2] != '\t' && strings.IndexByte("=;&|(", s[closePos-2]) < 0 && !opensPrefixedString(s, closePos-1)) {
+		return false
+	}
+	if startsAuthHeaderPrefix(s[closePos:lineEnd]) {
+		return isHeaderFlagGap(gap)
+	}
+	if !isBenignCommandGap(gap) {
+		return false
+	}
+	if closePos < lineEnd && s[closePos] == '#' {
+		return false
+	}
+	nextClose := quoteCloseScan(s[:lineEnd], closePos, "'", "")
+	if nextClose < 0 {
+		return false
+	}
+	inner := s[closePos : nextClose-1]
+	if len(inner) == 0 || hasUnquotedShellComment(inner) || strings.ContainsAny(inner, "\"\\") {
+		return false
+	}
+	firstRune, _ := utf8.DecodeRuneInString(inner)
+	if isDelimSpace(firstRune) || strings.IndexByte(";&|<>()", inner[0]) >= 0 {
+		return false
+	}
+	if nextClose < lineEnd {
+		r, _ := utf8.DecodeRuneInString(s[nextClose:lineEnd])
+		if !isDelimSpace(r) && strings.IndexByte(";&|<>(),}]", s[nextClose]) < 0 {
+			return false
+		}
+	}
+	return h.isShellBalancedFrom(tokEnd, lineEnd)
 }
 
 // unescapeBackslashControls decodes the standard backslash escapes in s. A
@@ -2520,11 +2986,12 @@ func baselineValueRegex(bareStop string) string {
 // keyNameSet): a regular expression search for them reads every byte of the
 // text with each of their many alternatives.
 var (
-	baselineAuthHeaderPattern      = `((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`
-	baselineBearerTokenPattern     = `(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`
-	baselineBasicTokenPattern      = `(basic)\s+([A-Za-z0-9+/]+={0,2})`
-	baselineJSONKeyValTokenPattern = `"[\s\p{Z}]*(` + baselineKeyRegex(`"'\s\r\n,}`) + `)[\s\p{Z}]*"\s*:\s*(` + baselineValueRegex(`\s,}`) + `)`
-	baselineTextKeyValTokenPattern = `(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + baselineValueRegex(`\s,;&`) + `)`
+	baselineAuthHeaderPrefixPattern = `((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*`
+	baselineAuthHeaderPattern       = baselineAuthHeaderPrefixPattern + `[^\r\n]*`
+	baselineBearerTokenPattern      = `(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`
+	baselineBasicTokenPattern       = `(basic)\s+([A-Za-z0-9+/]+={0,2})`
+	baselineJSONKeyValTokenPattern  = `"[\s\p{Z}]*(` + baselineKeyRegex(`"'\s\r\n,}`) + `)[\s\p{Z}]*"\s*:\s*(` + baselineValueRegex(`\s,}`) + `)`
+	baselineTextKeyValTokenPattern  = `(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + baselineValueRegex(`\s,;&`) + `)`
 )
 
 // The key names that the patterns of the baseline pass start with, after
@@ -2545,14 +3012,14 @@ var (
 )
 
 var (
-	baselineAuthHeaderAtRe      = regexp.MustCompile(`(?i)^` + baselineAuthHeaderPattern)
-	baselineBearerTokenAtRe     = regexp.MustCompile(`(?i)^` + baselineBearerTokenPattern)
-	baselineBasicTokenAtRe      = regexp.MustCompile(`(?i)^` + baselineBasicTokenPattern)
-	baselineJSONKeyValTokenAtRe = regexp.MustCompile(`(?i)^` + baselineJSONKeyValTokenPattern)
-	baselineTextKeyValTokenAtRe = regexp.MustCompile(`(?i)^` + baselineTextKeyValTokenPattern)
-	baselineNestedKeyNameRe     = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)?(` + baselineFixedKeyRegex() + `)$`)
-	baselineCompoundKeyNameRe   = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:[^\s"'\\]*[^\w\s"'\\])?(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)$`)
-	baselineQuotedValueRe       = regexp.MustCompile(`^(?:` + baselineQuotedValueRegex() + `)`)
+	baselineAuthHeaderPrefixAtRe = regexp.MustCompile(`(?i)^` + baselineAuthHeaderPrefixPattern)
+	baselineBearerTokenAtRe      = regexp.MustCompile(`(?i)^` + baselineBearerTokenPattern)
+	baselineBasicTokenAtRe       = regexp.MustCompile(`(?i)^` + baselineBasicTokenPattern)
+	baselineJSONKeyValTokenAtRe  = regexp.MustCompile(`(?i)^` + baselineJSONKeyValTokenPattern)
+	baselineTextKeyValTokenAtRe  = regexp.MustCompile(`(?i)^` + baselineTextKeyValTokenPattern)
+	baselineNestedKeyNameRe      = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:` + regexp.QuoteMeta(session.KeyPrefixUser) + `|` + regexp.QuoteMeta(session.KeyPrefixApp) + `)?(` + baselineFixedKeyRegex() + `)$`)
+	baselineCompoundKeyNameRe    = regexp.MustCompile(`(?i)^(?:\\?["'])?(?:[^\s"'\\]*[^\w\s"'\\])?(` + baselineKeyRegex(`=:"'\s\r\n,}`) + `)$`)
+	baselineQuotedValueRe        = regexp.MustCompile(`^(?:` + baselineQuotedValueRegex() + `)`)
 )
 
 // baselineDelimSpace holds the bytes that [\s[:cntrl:]] matches around the
@@ -2608,20 +3075,29 @@ func baselineScrub(s string) (string, []textRange) {
 }
 
 // baselineAuthHeaders replaces the value of each Authorization or API-key
-// header that baselineAuthHeaderAtRe matches at a word boundary, to the end of
-// its line, with the redaction placeholder.
+// header that baselineAuthHeaderPrefixAtRe matches at a word boundary, to the
+// end of its line, with the redaction placeholder.
 func baselineAuthHeaders(s string, rec *passRecorder) string {
-	locs := findAllAtKeys(s, baselineAuthHeaderKeys, baselineAuthHeaderAtRe)
-	if locs == nil {
-		rec.copied(0, len(s))
-		return s
-	}
 	var b strings.Builder
+	var quotes *headerQuoteScanner
 	last := 0
-	quotes := newHeaderQuoteScanner(s)
-	for _, loc := range locs {
+	curLineEnd := -1
+	for pos := 0; ; {
+		loc := findAtKeys(s, pos, baselineAuthHeaderKeys, baselineAuthHeaderPrefixAtRe)
+		if loc == nil {
+			break
+		}
+		if quotes == nil {
+			quotes = newHeaderQuoteScanner(s)
+		}
+		if loc[1] > curLineEnd {
+			curLineEnd = len(s)
+			if nl := strings.IndexAny(s[loc[1]:], "\r\n"); nl >= 0 {
+				curLineEnd = loc[1] + nl
+			}
+		}
 		repl := s[loc[2]:loc[3]] + ": " + redactedValue
-		end := loc[1]
+		end := curLineEnd
 		// A header in a string that is open before it, as the one of
 		// curl -H 'Authorization: Bearer abc' https://x is, ends at the
 		// quote on its line that closes that string, so that
@@ -2631,8 +3107,38 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 		// single quote between two letters, as the one of Bob's is, reads
 		// as an apostrophe and leaves the cut at the end of the line.
 		if outer, inner := quotes.openBefore(loc[0], loc[3]); outer != "" || inner != "" {
-			if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] && !quoteJoinsLetters(s, k-1) {
-				end = closingQuotesStart(s, loc[3], k, outer, inner)
+			if outer == `"` && inner == `\"` {
+				if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEnd(loc[3], end); ok {
+					cutInner := inner
+					cutOuter := ""
+					if len(closedQuotes) > len(inner) {
+						cutOuter = outer
+					}
+					cutEnd := closingQuotesStart(s, loc[3], endPos, cutOuter, cutInner)
+					if closedQuotes != "" && cutEnd == endPos {
+						repl += closedQuotes
+					}
+					end = cutEnd
+				}
+			} else if outer == "" && inner != "" {
+				if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
+					k, unclosed := quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON())
+					if unclosed == "" && k < end && (s[k] == ' ' || s[k] == '\t' || s[k] == ';' || s[k] == '&' || s[k] == '|') {
+						cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
+						if cutEnd == k {
+							repl += inner
+						}
+						end = cutEnd
+					}
+				}
+			} else if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
+				var unclosed string
+				k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON())
+				cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
+				if unclosed == "" && cutEnd == k {
+					repl += inner + outer
+				}
+				end = cutEnd
 			}
 		}
 		b.WriteString(s[last:loc[0]])
@@ -2640,6 +3146,11 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 		rec.copied(last, loc[0]-last)
 		rec.replaced(s, loc[0], end, repl)
 		last = end
+		pos = max(end, loc[0]+1)
+	}
+	if last == 0 {
+		rec.copied(0, len(s))
+		return s
 	}
 	b.WriteString(s[last:])
 	rec.copied(last, len(s)-last)
@@ -2733,6 +3244,15 @@ func baselineJSONKeyValues(s string, rec *passRecorder) string {
 // baselineRedactJSONKeyValue replaces a baselineJSONKeyValTokenAtRe match with
 // "key":"[REDACTED]".
 func baselineRedactJSONKeyValue(s string, loc []int) (string, int) {
+	if pEnd := placeholderCut(s, loc[4]); pEnd > 0 {
+		if pEnd == len(s) || quotesEndLine(s, pEnd) || ((s[pEnd] == '"' || s[pEnd] == '\'') && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0)) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd]) >= 0 {
+			return s[loc[0]:pEnd], pEnd
+		}
+		if q := openingQuote(s, pEnd); len(q) == 2 && pEnd+2 < len(s) && s[pEnd+2] == q[1] &&
+			(pEnd+3 >= len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+3]) >= 0) {
+			return s[loc[0]:pEnd], pEnd
+		}
+	}
 	end := baselineSensitiveValueEnd(s, loc[4], loc[5])
 	if inner, _ := unquoteValue(s[loc[4]:end]); isRedactedValue(inner) {
 		return s[loc[0]:end], end
@@ -3141,6 +3661,22 @@ func baselineRedactTextKeyValue(s string, loc []int, brackets *openBrackets) (st
 	}
 	open := brackets.before(s, loc[0])
 	start, end := loc[8], loc[9]
+	if pEnd := placeholderCut(s, start); pEnd > 0 {
+		if pEnd == len(s) || quotesEndLine(s, pEnd) || len(openingQuote(s, pEnd)) == 2 || ((s[pEnd] == '"' || s[pEnd] == '\'') && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0)) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd]) >= 0 {
+			brackets.skip(pEnd)
+			return s[loc[0]:pEnd], pEnd
+		}
+		if q := openingQuote(s, pEnd); len(q) == 2 && pEnd+2 < len(s) && s[pEnd+2] == q[1] {
+			k := pEnd + 3
+			for k < len(s) && (s[k] == '"' || s[k] == '\'') {
+				k++
+			}
+			if k >= len(s) || strings.IndexByte(" \t\r\n,;)]}", s[k]) >= 0 {
+				brackets.skip(pEnd)
+				return s[loc[0]:pEnd], pEnd
+			}
+		}
+	}
 	switch kind, pair := baselineNestsSensitiveKey(s, start, end, startsLine(s, loc[7], start)); kind {
 	case nestedKey:
 		return s[loc[0]:start], start
@@ -3435,51 +3971,57 @@ func redactAuthHeaders(s string) string {
 // if it is not nil, which bytes of the result are copies of s (see
 // passRecorder).
 func redactAuthHeadersRecorded(s string, rec *passRecorder) string {
-	locs := findAllAtKeys(s, authHeaderKeys, authHeaderAtRe)
-	if locs == nil {
-		rec.copied(0, len(s))
-		return s
-	}
 	var b strings.Builder
-	quotes := newHeaderQuoteScanner(s)
+	var quotes *headerQuoteScanner
 	last := 0
 	curLineStart, curLineEnd, curIndentLen := -1, -1, 0
-	for idx := 0; idx < len(locs); idx++ {
-		loc := locs[idx]
-		if loc[0] < last {
-			continue
+	for pos := 0; ; {
+		loc := findAtKeys(s, pos, authHeaderKeys, authHeaderPrefixAtRe)
+		if loc == nil {
+			break
 		}
-		outer, inner := quotes.openBefore(loc[0], loc[4])
-		if loc[5] != curLineEnd {
+		if quotes == nil {
+			quotes = newHeaderQuoteScanner(s)
+		}
+		outer, inner := quotes.openBefore(loc[0], loc[1])
+		if loc[1] > curLineEnd {
 			curLineStart = strings.LastIndexAny(s[:loc[0]], "\r\n") + 1
-			curLineEnd = loc[5]
+			curLineEnd = len(s)
+			if nl := strings.IndexAny(s[loc[1]:], "\r\n"); nl >= 0 {
+				curLineEnd = loc[1] + nl
+			}
 			curIndentLen = 0
 			for curLineStart+curIndentLen < loc[0] && (s[curLineStart+curIndentLen] == ' ' || s[curLineStart+curIndentLen] == '\t') {
 				curIndentLen++
 			}
 		}
-		lineStart, indentLen := curLineStart, curIndentLen
+		lineStart, lineEnd, indentLen := curLineStart, curLineEnd, curIndentLen
 		canFold := outer == "" && inner == "" && lineStart+indentLen == loc[0]
-		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[4], loc[5], outer, inner, quotes) && !hasFoldedHeaderContinuation(s, loc[5], canFold, indentLen) {
-			if sub := findAtKeys(s[loc[4]:loc[5]], 0, authHeaderKeys, authHeaderPrefixAtRe); sub != nil {
-				locs[idx] = []int{loc[4] + sub[0], loc[5], loc[4] + sub[2], loc[4] + sub[3], loc[4] + sub[1], loc[5]}
-				idx--
+		if isCookieHeaderKey(s[loc[2]:loc[3]]) && cookieLineProseAllowed(s, loc[1], lineEnd, outer, inner, quotes) && !hasFoldedHeaderContinuation(s, lineEnd, canFold, indentLen) {
+			if sub := findAtKeys(s[loc[1]:lineEnd], 0, authHeaderKeys, authHeaderPrefixAtRe); sub != nil {
+				pos = loc[1] + sub[0]
+			} else {
+				pos = lineEnd
 			}
 			continue
 		}
-		end := authHeaderValueEnd(s, loc[4], loc[5], outer, inner, canFold, indentLen, quotes)
+		end, closedQuotes := authHeaderValueEnd(s, loc[1], lineEnd, outer, inner, canFold, indentLen, quotes)
+		repl := s[loc[2]:loc[3]] + ": " + redactedValue
 		if outer != "" || inner != "" {
-			end = closingQuotesStart(s, loc[4], end, outer, inner)
+			cutEnd := closingQuotesStart(s, loc[1], end, outer, inner)
+			if closedQuotes != "" && cutEnd == end {
+				repl += closedQuotes
+			}
+			end = cutEnd
 		}
 		b.WriteString(s[last:loc[0]])
-		b.WriteString(s[loc[2]:loc[3]])
-		b.WriteString(": ")
-		b.WriteString(redactedValue)
+		b.WriteString(repl)
 		if rec != nil {
 			rec.copied(last, loc[0]-last)
-			rec.replaced(s, loc[0], end, s[loc[2]:loc[3]]+": "+redactedValue)
+			rec.replaced(s, loc[0], end, repl)
 		}
 		last = end
+		pos = max(end, loc[0]+1)
 	}
 	if last == 0 {
 		// Every header read as prose: s is returned as it is, not as a
@@ -4008,6 +4550,8 @@ type headerQuoteScanner struct {
 	// from curLine.k rather than rescanning from lineStart.
 	curLine    lineQuoteState
 	hasCurLine bool
+	balLineEnd int
+	balMemo    map[int]bool
 	// closes caches where the quotes that stay open into a header from a line
 	// before it close, by kind of quote (see quoteCloses).
 	closes [4]quoteCloseMemo
@@ -4018,11 +4562,29 @@ type headerQuoteScanner struct {
 	// this scan alone, so that its cursors are never evicted by another
 	// scrub and nothing keeps s once the scan is done.
 	shell *shellAssignScanner
+	// joinedFrom, joinedLineEnd, joinedEnd, joinedEntryOuter, and
+	// joinedUnclosed memoize the most recent joinedHeaderArgEnd scan on a
+	// line so repeated headers on the same line never rescan the same
+	// suffix.
+	joinedFrom, joinedLineEnd, joinedEnd int
+	joinedEntryOuter, joinedUnclosed     string
+	joinedInJSON                         bool
+	curOuterJSON                         bool
+	jsonOuterFrom, jsonOuterLineEnd      int
+	jsonOuterEnd                         int
+	sqLineEnd                            int
+	sqPositions                          []int
 }
 
 // newHeaderQuoteScanner returns a headerQuoteScanner for s.
 func newHeaderQuoteScanner(s string) *headerQuoteScanner {
 	return &headerQuoteScanner{s: s, lines: newLineQuoteState(s, 0, len(s)), shell: newShellAssignScanner(s)}
+}
+
+// inJSON reports whether the outer quote open before the most recent
+// openBefore call opened inside a JSON container.
+func (h *headerQuoteScanner) inJSON() bool {
+	return h != nil && h.curOuterJSON
 }
 
 // shellScanner returns the scanner that answers inShellAssignment for the
@@ -4032,6 +4594,197 @@ func (h *headerQuoteScanner) shellScanner() *shellAssignScanner {
 		return nil
 	}
 	return h.shell
+}
+
+func (h *headerQuoteScanner) singleQuoteOddFrom(pos, lineEnd int) bool {
+	if h == nil || pos >= lineEnd {
+		return false
+	}
+	if h.sqLineEnd != lineEnd {
+		h.sqLineEnd = lineEnd
+		h.sqPositions = h.sqPositions[:0]
+		lineStart := strings.LastIndexAny(h.s[:lineEnd], "\r\n") + 1
+		for p := lineStart; p < lineEnd; p++ {
+			if h.s[p] == '\'' {
+				h.sqPositions = append(h.sqPositions, p)
+			}
+		}
+	}
+	idx, _ := slices.BinarySearch(h.sqPositions, pos)
+	return (len(h.sqPositions)-idx)%2 == 1
+}
+
+// jsonWrappedInnerHeaderEndAt resolves where an inner escaped-quoted header
+// (such as -H \"Authorization: ...\" inside an outer JSON string) ends on
+// s[k:lineEnd] once inner has closed at k while outer (") remains open.
+func (h *headerQuoteScanner) jsonWrappedInnerHeaderEndAt(k, lineEnd int, entryOuter, entryInner string) (int, string, bool) {
+	if h == nil || k > lineEnd {
+		return 0, "", false
+	}
+	s := h.s
+	outerEnd := -1
+	if h.jsonOuterLineEnd == lineEnd && k >= h.jsonOuterFrom && k <= h.jsonOuterEnd {
+		outerEnd = h.jsonOuterEnd
+	} else {
+		for p := k; p < lineEnd; {
+			if s[p] == '\\' {
+				bs := 0
+				for p+bs < lineEnd && s[p+bs] == '\\' {
+					bs++
+				}
+				if p+bs < lineEnd && (s[p+bs] == '"' || s[p+bs] == '\'') {
+					if bs%2 == 1 {
+						p += bs + 1
+					} else {
+						p += bs
+					}
+				} else {
+					p += bs
+				}
+				continue
+			}
+			if s[p] == '"' {
+				outerEnd = p
+				break
+			}
+			p++
+		}
+		if outerEnd >= 0 {
+			h.jsonOuterFrom, h.jsonOuterLineEnd, h.jsonOuterEnd = k, lineEnd, outerEnd
+		}
+	}
+	if outerEnd < 0 {
+		return 0, "", false
+	}
+	endPos, unclosed := h.joinedHeaderArgEnd(k, outerEnd, entryOuter, false)
+	if unclosed == "" && endPos < outerEnd {
+		return endPos, entryInner, true
+	}
+	if outerEnd < lineEnd {
+		return outerEnd + 1, entryInner + entryOuter, true
+	}
+	return outerEnd, entryInner, true
+}
+
+// jsonWrappedInnerHeaderEnd scans s[from:lineEnd] for an inner escaped-quoted
+// header closing inside an outer JSON string and returns its end offset and
+// closed quote suffix.
+func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int) (int, string, bool) {
+	if h == nil || from >= lineEnd {
+		return 0, "", false
+	}
+	s := h.s
+	inner := `\"`
+	for k := from; k < lineEnd; {
+		if inner == "" {
+			return h.jsonWrappedInnerHeaderEndAt(k, lineEnd, `"`, `\"`)
+		}
+		c := s[k]
+		if c == '\\' {
+			bs := 0
+			for k+bs < lineEnd && s[k+bs] == '\\' {
+				bs++
+			}
+			if k+bs < lineEnd && (s[k+bs] == '"' || s[k+bs] == '\'') {
+				if bs%2 == 1 {
+					if bs%4 == 1 && s[k+bs] == '"' {
+						inner = ""
+					}
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			} else {
+				k += bs
+			}
+			continue
+		}
+		if c == '"' {
+			return 0, "", false
+		}
+		k++
+	}
+	if inner == "" {
+		return h.jsonWrappedInnerHeaderEndAt(lineEnd, lineEnd, `"`, `\"`)
+	}
+	return 0, "", false
+}
+
+// joinedHeaderArgEnd advances k across any bare or quoted shell-word fragments
+// on the header's line (up to lineEnd) that immediately continue a quoted
+// header argument after its apparent closing quote, and returns the end offset
+// of the joined argument along with any quote that remained unclosed at
+// lineEnd.
+func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter string, inJSON bool) (int, string) {
+	if h == nil || k >= lineEnd {
+		return k, ""
+	}
+	s := h.s
+	if h.joinedLineEnd == lineEnd && h.joinedEntryOuter == entryOuter && h.joinedInJSON == inJSON && k >= h.joinedFrom && k <= h.joinedEnd {
+		return h.joinedEnd, h.joinedUnclosed
+	}
+	start := k
+	if (s[k] == '.' || s[k] == '!' || s[k] == '?') && (k+1 >= lineEnd || func() bool { r, _ := utf8.DecodeRuneInString(s[k+1:]); return isDelimSpace(r) }()) {
+		return k, ""
+	}
+	for k < lineEnd {
+		if q := openingQuote(s, k); q != "" {
+			var qOuter, qInner string
+			if len(q) == 1 {
+				qOuter = q
+			} else {
+				qInner = q
+			}
+			closePos := quoteCloseScan(s[:lineEnd], k+len(q), qOuter, qInner)
+			if closePos < 0 {
+				if q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) {
+					k++
+					continue
+				}
+				if after := k + len(q); after < lineEnd && (s[after] == '}' || s[after] == ']' || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
+					break
+				}
+				h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON = start, lineEnd, lineEnd, entryOuter, q, inJSON
+				return lineEnd, q
+			}
+			if q == "'" && h.isCandidateHeaderApostrophe(k, closePos, lineEnd) {
+				k++
+				continue
+			}
+			if startsAuthHeaderPrefix(s[closePos:lineEnd]) {
+				k = closePos
+				break
+			}
+			k = closePos
+			continue
+		}
+		if s[k] == '\\' {
+			if k+1 < lineEnd {
+				k += 2
+			} else {
+				k++
+			}
+			continue
+		}
+		if s[k] == '}' || s[k] == ']' {
+			break
+		}
+		if k == start && inJSON && (s[k] == ',' || s[k] == ':') {
+			break
+		}
+		if s[k] == ',' {
+			if k+1 >= lineEnd || s[k+1] == ' ' || s[k+1] == '\t' {
+				break
+			}
+		}
+		r, w := utf8.DecodeRuneInString(s[k:])
+		if isDelimSpace(r) || strings.IndexByte(";&|<>()", s[k]) >= 0 {
+			break
+		}
+		k += w
+	}
+	h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON = start, lineEnd, k, entryOuter, "", inJSON
+	return k, ""
 }
 
 // lineQuoteState is the state of a scan of the lines of s for the quotes that
@@ -4047,6 +4800,8 @@ type lineQuoteState struct {
 	innerOpenPos, innerOpenEnd     int
 	outerPriorLine, innerPriorLine bool
 	closingExplicitOuter           byte
+	braceDepth                     int
+	outerJSON                      bool
 }
 
 // newLineQuoteState returns the state of a scan of s from the start of a line
@@ -4087,17 +4842,23 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 		if nl := strings.IndexAny(s[lineStart:], "\r\n"); nl >= 0 {
 			lineEnd = lineStart + nl
 		}
-		if lineStart > 0 && quoteRestIsHeaderOrSpace(s, lineStart, i) {
-			// The scan of the lines before is shared by all headers up to the
-			// line break before the header's line, which, as the header's line,
-			// it reads for this header alone, up to i.
+		if lineStart > 0 {
+			// Advance the shared line state up to the preceding line break so
+			// braceDepth is preserved across multiline JSON containers even
+			// when the current line does not carry over an open quote.
 			brk := lineStart - 1
 			if brk > 0 && s[brk] == '\n' && s[brk-1] == '\r' {
 				brk--
 			}
 			h.lines.scan(h.shell, s, brk, len(s), len(s)+1)
-			st = h.lines
-			st.lineLim = lineEnd
+			if quoteRestIsHeaderOrSpace(s, lineStart, i) {
+				st = h.lines
+				st.lineLim = lineEnd
+			} else {
+				st = newLineQuoteState(s, lineStart, len(s))
+				st.lineLim = lineEnd
+				st.braceDepth = h.lines.braceDepth
+			}
 		} else {
 			st = newLineQuoteState(s, lineStart, len(s))
 			st.lineLim = lineEnd
@@ -4106,6 +4867,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 	}
 	h.curLine = st
 	h.hasCurLine = true
+	h.curOuterJSON = st.outerJSON
 	outer, inner = st.outer, st.inner
 	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
 	if inner != "" && innerPriorLine && !quoteRestIsHeaderOrSpace(s, st.innerOpenEnd, i) {
@@ -4115,6 +4877,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 	if outer != "" && outerPriorLine && inner == "" && !quoteRestIsHeaderOrSpace(s, st.outerOpenEnd, i) {
 		outer = ""
 		outerPriorLine = false
+		h.curOuterJSON = false
 	}
 	if (outerPriorLine || innerPriorLine) && !h.quoteCloses(valStart, outer, inner) {
 		// A quote from a line before that never closes holds no string, so
@@ -4126,11 +4889,27 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 		lineLim := st.lineLim
 		st = newLineQuoteState(s, lineStart, len(s))
 		st.lineLim = lineLim
+		st.braceDepth = h.lines.braceDepth
 		st.scan(h.shell, s, i, lineLim, lineStart)
 		h.curLine = st
+		h.curOuterJSON = st.outerJSON
 		outer, inner = st.outer, st.inner
 	}
 	return outer, inner
+}
+
+func isJSONStringOpener(s string, lineStart, k int) bool {
+	if k >= len(s) || s[k] != '"' {
+		return false
+	}
+	p := k - 1
+	for p >= lineStart && (s[p] == ' ' || s[p] == '\t') {
+		p--
+	}
+	if p < lineStart {
+		return true
+	}
+	return s[p] == ':' || s[p] == '[' || s[p] == ',' || s[p] == '{'
 }
 
 // scan advances st over s up to to, reading s up to bound, for the header
@@ -4143,6 +4922,7 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 	innerOpenPos, innerOpenEnd := st.innerOpenPos, st.innerOpenEnd
 	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
 	closingExplicitOuter := st.closingExplicitOuter
+	braceDepth, outerJSON := st.braceDepth, st.outerJSON
 	for k < to {
 		c := s[k]
 		if c == '\r' || c == '\n' {
@@ -4179,6 +4959,7 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outer = ""
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
+				outerJSON = false
 			}
 			continue
 		}
@@ -4188,26 +4969,40 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outer = ""
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
+				outerJSON = false
 			}
 			k++
 		case c == '\\':
-			if q := openingQuote(s, k); q != "" && k+len(q) <= bound {
-				switch inner {
-				case q:
-					inner = ""
-					innerOpenPos, innerOpenEnd = -1, -1
-					innerPriorLine = false
-				case "":
-					if outer == "" && !canOpenPriorLineQuote(sh, s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(sh, s, k) {
-						break
-					}
-					inner = q
-					innerOpenPos = k
-					innerOpenEnd = k + len(q)
-					innerPriorLine = false
-				}
+			bs := 0
+			for k+bs < bound && s[k+bs] == '\\' {
+				bs++
 			}
-			if k+1 < bound && s[k+1] != '\r' && s[k+1] != '\n' {
+			if k+bs < bound && (s[k+bs] == '"' || s[k+bs] == '\'') {
+				if bs%2 == 1 {
+					if bs%4 == 1 {
+						q := s[k+bs-1 : k+bs+1]
+						switch inner {
+						case q:
+							inner = ""
+							innerOpenPos, innerOpenEnd = -1, -1
+							innerPriorLine = false
+						case "":
+							if outer == "" && !canOpenPriorLineQuote(sh, s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(sh, s, k) {
+								break
+							}
+							inner = q
+							innerOpenPos = k
+							innerOpenEnd = k + len(q)
+							innerPriorLine = false
+						}
+					}
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			} else if bs > 1 {
+				k += bs
+			} else if k+1 < bound && s[k+1] != '\r' && s[k+1] != '\n' {
 				k += 2
 			} else {
 				k++
@@ -4218,6 +5013,7 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outerOpenPos, outerOpenEnd = -1, -1
 				innerOpenPos, innerOpenEnd = -1, -1
 				outerPriorLine, innerPriorLine = false, false
+				outerJSON = false
 			}
 			k++
 		case c == '"' || c == '\'':
@@ -4242,13 +5038,22 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outerOpenPos = k
 				outerOpenEnd = k + 1
 				outerPriorLine = false
+				outerJSON = braceDepth > 0 && isJSONStringOpener(s, curLineStart, k)
 			} else if c == outer[0] {
 				outer = ""
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
+				outerJSON = false
 			}
 			k++
 		default:
+			if outer == "" && inner == "" {
+				if c == '{' || c == '[' {
+					braceDepth++
+				} else if (c == '}' || c == ']') && braceDepth > 0 {
+					braceDepth--
+				}
+			}
 			k++
 		}
 	}
@@ -4259,6 +5064,8 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 		innerOpenPos: innerOpenPos, innerOpenEnd: innerOpenEnd,
 		outerPriorLine: outerPriorLine, innerPriorLine: innerPriorLine,
 		closingExplicitOuter: closingExplicitOuter,
+		braceDepth:           braceDepth,
+		outerJSON:            outerJSON,
 	}
 }
 
@@ -4485,15 +5292,28 @@ func quoteCloseScan(s string, from int, outer, inner string) int {
 			}
 			k++
 		case c == '\\':
-			if q := openingQuote(s, k); q != "" {
-				switch inner {
-				case q:
-					inner = ""
-				case "":
-					inner = q
-				}
+			bs := 0
+			for k+bs < len(s) && s[k+bs] == '\\' {
+				bs++
 			}
-			if k+1 < len(s) && s[k+1] != '\r' && s[k+1] != '\n' {
+			if k+bs < len(s) && (s[k+bs] == '"' || s[k+bs] == '\'') {
+				if bs%2 == 1 {
+					if bs%4 == 1 {
+						q := s[k+bs-1 : k+bs+1]
+						switch inner {
+						case q:
+							inner = ""
+						case "":
+							inner = q
+						}
+					}
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			} else if bs > 1 {
+				k += bs
+			} else if k+1 < len(s) && s[k+1] != '\r' && s[k+1] != '\n' {
 				k += 2
 			} else {
 				k++
@@ -4595,12 +5415,12 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 // isFoldedHeaderLine), even after a first line that holds only the redaction
 // placeholder, as the folded line of Authorization: [REDACTED]<CRLF>\tSECRET
 // does, since one redacted line does not show that the whole value is.
-func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int, quotes *headerQuoteScanner) int {
+func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int, quotes *headerQuoteScanner) (int, string) {
 	sh := quotes.shellScanner()
 	var closesChecked, closes bool
 	if !canFold && strings.TrimSpace(s[from:end]) == redactedValue {
 		if outer == "" && inner == "" || quotes == nil || !quotes.placeholderQuoteCloses(end, outer, inner) {
-			return end
+			return end, ""
 		}
 		closesChecked = true
 		closes = true
@@ -4624,15 +5444,28 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					}
 					k++
 				case c == '\\':
-					if q := openingQuote(s, k); q != "" && k+len(q) <= end {
-						switch inner {
-						case q:
-							inner = ""
-						case "":
-							inner = q
-						}
+					bs := 0
+					for k+bs < end && s[k+bs] == '\\' {
+						bs++
 					}
-					if k+1 < end {
+					if k+bs < end && (s[k+bs] == '"' || s[k+bs] == '\'') {
+						if bs%2 == 1 {
+							if bs%4 == 1 {
+								q := s[k+bs-1 : k+bs+1]
+								switch inner {
+								case q:
+									inner = ""
+								case "":
+									inner = q
+								}
+							}
+							k += bs + 1
+						} else {
+							k += bs
+						}
+					} else if bs > 1 {
+						k += bs
+					} else if k+1 < end {
 						k += 2
 					} else {
 						k++
@@ -4648,10 +5481,31 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					}
 					k++
 				}
+				if outer == `"` && entryInner == `\"` && inner == "" && k <= lineEnd {
+					if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEndAt(k, lineEnd, entryOuter, entryInner); ok {
+						return endPos, closedQuotes
+					}
+				}
 				if outer == "" && inner == "" {
 					nestedEnd = 0
-					if entryOuter != "" && entryInner == "" && k <= lineEnd {
-						return k
+					if entryOuter != "" && k <= lineEnd {
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, lineEnd, entryOuter, quotes.inJSON())
+						if unclosed == "" || endPos == len(s) {
+							return endPos, entryInner + entryOuter
+						}
+						if len(unclosed) == 1 {
+							outer = unclosed
+						} else {
+							inner = unclosed
+						}
+						k = endPos
+						continue
+					}
+					if entryOuter == "" && entryInner != "" && k <= lineEnd {
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, lineEnd, entryOuter, false)
+						if unclosed == "" && endPos < lineEnd && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == ';' || s[endPos] == '&' || s[endPos] == '|') {
+							return endPos, entryInner
+						}
 					}
 				}
 				continue
@@ -4697,7 +5551,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 						end = next + nl
 					}
 				}
-				return end
+				return end, ""
 			}
 			k += len(m)
 			if k > end {
@@ -4766,9 +5620,9 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 		break
 	}
 	if (outer != "" || inner != "") && nestedEnd > 0 {
-		return nestedEnd
+		return nestedEnd, ""
 	}
-	return end
+	return end, ""
 }
 
 // nestedQuotedValueEnd checks whether s[k:], at the start of a token in the
@@ -6139,6 +6993,7 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 		return s[loc[0]:next], next
 	}
 	colon := loc[3] + 1 + max(0, strings.IndexByte(s[loc[3]+1:loc[4]], ':'))
+	keyName := scrubJSONMapKey(s[loc[2]:loc[3]], 0)
 	switch kind, pair := nestsSensitiveKey(s, loc[4], loc[5], startsLine(s, colon+1, loc[4]), true, quoted); kind {
 	case nestedKey:
 		return s[loc[0]:loc[4]], loc[4]
@@ -6148,7 +7003,14 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 			quotes.drop()
 		}
 		quotes.skip(s, end)
-		return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
+		return `"` + keyName + `":"` + redactedValue + `"`, end
+	}
+	if pEnd := placeholderCut(s, loc[4]); pEnd > 0 && placeholderEnds(s, pEnd, quoted) {
+		if closes && pEnd > loc[4] {
+			quotes.drop()
+		}
+		quotes.skip(s, pEnd)
+		return s[loc[0]:loc[2]] + keyName + s[loc[3]:pEnd], pEnd
 	}
 	end := textValueEnd(sh, s, loc[4], loc[5], 0, quoted)
 	if closes && end > loc[4] {
@@ -6159,9 +7021,9 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 		return s[loc[0]:end], end
 	}
 	if inner, _ := unquoteValue(s[loc[4]:end]); isRedactedValue(inner) || isRedactedValue(trimTrailingClosingQuote(s[loc[4]:end], s, end, quoted)) {
-		return s[loc[0]:end], end
+		return s[loc[0]:loc[2]] + keyName + s[loc[3]:end], end
 	}
-	return `"` + s[loc[2]:loc[3]] + `":"` + redactedValue + `"`, end
+	return `"` + keyName + `":"` + redactedValue + `"`, end
 }
 
 // redactTextKeyValue replaces a pair from keyValFinder, keeping the key, its
@@ -6197,19 +7059,29 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 	open := brackets.before(s, loc[0])
 	start, end := loc[8], loc[9]
 	quoted := quotes.before(s, start)
-	if placeholderCut(s, start) == end {
-		// keyValFinder has read the value only up to the end of the
-		// redaction placeholder that starts it. A value that ends with the
-		// placeholder is kept up to there, as redactedPrefixEnd keeps it; any
-		// other is read to its end. Neither textBetweenStrings nor
-		// nestsSensitiveKey reads a value that starts with "[" as anything
-		// other than a value.
-		if placeholderEnds(s, end, quoted) {
+	keyName := scrubJSONMapKey(s[loc[2]:loc[3]], 0)
+	if pEnd := placeholderCut(s, start); pEnd > 0 {
+		if loc[4] == loc[5] && loc[2] > 0 && s[loc[2]-1] == '"' && pEnd < len(s) && s[pEnd] == '"' {
+			brackets.skip(loc[7])
+			quotes.skip(s, loc[7])
+			return s[loc[0]:loc[7]], loc[7]
+		}
+		if pEnd <= end && (s[start] == '"' || s[start] == '\'') && pEnd < len(s) && s[pEnd] == s[start] && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0) {
+			end = pEnd + 1
 			brackets.skip(end)
 			quotes.skip(s, end)
-			return s[loc[0]:end], end
+			return s[loc[0]:loc[2]] + keyName + s[loc[3]:end], end
 		}
-		end = bareValueEnd(s, end)
+		// keyValFinder may read past the redaction placeholder that starts
+		// the value when non-whitespace characters follow it. If the
+		// placeholder ends there, keep it up to pEnd; otherwise read the
+		// full value to its end.
+		if placeholderEnds(s, pEnd, quoted) {
+			brackets.skip(pEnd)
+			quotes.skip(s, pEnd)
+			return s[loc[0]:loc[2]] + keyName + s[loc[3]:pEnd], pEnd
+		}
+		end = bareValueEnd(s, pEnd)
 	}
 	if loc[4] < loc[5] && (quoted&quoteKind(openingQuote(s, start)) != 0 || s[loc[5]:loc[7]] != "=") {
 		// The value of a quoted key that is the text between two strings, as
@@ -6233,12 +7105,12 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		end = nestedPairEndWith(sh, s, pair, end, open, quoted)
 		brackets.skip(end)
 		quotes.skip(s, end)
-		return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+		return keyName + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
 	}
 	if redEnd := redactedPrefixEnd(s, start, end, quoted); redEnd >= 0 {
 		brackets.skip(redEnd)
 		quotes.skip(s, redEnd)
-		return s[loc[0]:redEnd], redEnd
+		return s[loc[0]:loc[2]] + keyName + s[loc[3]:redEnd], redEnd
 	}
 	end = textValueEnd(sh, s, start, end, open, quoted)
 	brackets.skip(end)
@@ -6255,9 +7127,9 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 	}
 	inner, quote := unquoteValue(s[start:end])
 	if isRedactedValue(inner) || isRedactedValue(trimTrailingClosingQuote(s[start:end], s, end, quoted)) {
-		return s[loc[0]:end], end
+		return s[loc[0]:loc[2]] + keyName + s[loc[3]:end], end
 	}
-	return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
+	return keyName + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
 }
 
 // redactedPrefixEnd returns where the redaction placeholder that starts the
@@ -6307,13 +7179,27 @@ func placeholderEnds(s string, end int, quoted quoteKinds) bool {
 	// enclosing quote kind so that password=[REDACTED]" secret" (where
 	// no quote is open before [REDACTED]) still redacts " secret".
 	if quoted != 0 {
-		if q := openingQuote(s, end); q != "" && quoted&quoteKind(q) != 0 {
+		if q := openingQuote(s, end); q != "" {
 			k := end + len(q)
-			if k >= len(s) {
-				return true
+			matched := quoted&quoteKind(q) != 0
+			if !matched && len(q) == 2 && quoted&quoteKind(q[1:2]) != 0 {
+				if k < len(s) && s[k] == q[1] {
+					k++
+				}
+				matched = true
+			} else if matched && len(q) == 2 && k < len(s) && (s[k] == '"' || s[k] == '\'') && quoted&quoteKind(s[k:k+1]) != 0 {
+				k++
 			}
-			if s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r' || s[k] == ',' || s[k] == ';' || s[k] == ')' || s[k] == ']' || s[k] == '}' {
-				return true
+			if matched {
+				for k < len(s) && (s[k] == '"' || s[k] == '\'') && quoted&quoteKind(s[k:k+1]) != 0 {
+					k++
+				}
+				if k >= len(s) {
+					return true
+				}
+				if s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r' || s[k] == ',' || s[k] == ';' || s[k] == ')' || s[k] == ']' || s[k] == '}' {
+					return true
+				}
 			}
 		}
 	}

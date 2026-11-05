@@ -3181,6 +3181,16 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			// with the value after it.
 			want: "credentials:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
 		},
+		{
+			name: "joined double quotes in Digest Authorization header",
+			text: `curl -H "Authorization: Digest username="bob", response="SECRET123""`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			name: "joined double quotes in X-Api-Key header",
+			text: `curl -H "X-Api-Key: "prefix" SECRET123"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5764,6 +5774,88 @@ func TestRound27CallbackRegressions(t *testing.T) {
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
 					et := fmt.Sprint(row["event_type"])
 					t.Errorf("%s row holds secret %q: %s", et, secret, elideText(s))
+				}
+			}
+		})
+	}
+}
+
+func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
+	const secret = "SYNTH_REVIEW_ONLY_CREDENTIAL"
+	inputs := []struct {
+		name string
+		in   string
+	}{
+		{
+			name: "Digest Authorization joined double quotes",
+			in:   `curl -H "Authorization: Digest username="bob", response="` + secret + `""`,
+		},
+		{
+			name: "X-Api-Key joined double quotes",
+			in:   `curl -H "X-Api-Key: "prefix" ` + secret + `"`,
+		},
+		{
+			name: "JSON-wrapped Digest Authorization joined quotes",
+			in:   `{"error": "curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\""}`,
+		},
+		{
+			name: "Same-line multi-header Digest Authorization joined quotes",
+			in:   `curl -H "X-Api-Key: first_key" -H "Authorization: Digest username="bob", response="` + secret + `""`,
+		},
+		{
+			name: "Unspaced comma-joined Digest Authorization quotes",
+			in:   `curl -H "Authorization: Digest username="bob,response="` + secret + `""`,
+		},
+		{
+			name: "Unspaced comma-joined X-Api-Key quotes",
+			in:   `curl -H "X-Api-Key: "prefix,"` + secret + `"`,
+		},
+		{
+			name: "Single-quoted apostrophe before semicolon",
+			in:   `curl -H 'Authorization: Bearer 'bob's_` + secret + `; echo 'PUBLIC_KEEP'`,
+		},
+		{
+			name: "Doubly-escaped JSON-wrapped Digest Authorization with trailing URL",
+			in:   `{"b":"KEEP_B","h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com"}`,
+		},
+	}
+	for _, tt := range inputs {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in}
+			llmReq := &model.LLMRequest{
+				Model:    "gemini-test",
+				Contents: []*genai.Content{textContent("user", tt.in)},
+			}
+			llmResp := &model.LLMResponse{
+				Content: textContent("model", tt.in),
+			}
+			ev := &session.Event{
+				ID:          "ev-joined-quotes",
+				Author:      "test-agent",
+				Actions:     session.EventActions{StateDelta: map[string]any{"cmd": tt.in}},
+				LLMResponse: *llmResp,
+			}
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.in)))
+			errs.add(p.BeforeRunCallback()(mCtx))
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.BeforeModelCallback()(mCtx, llmReq))
+			errs.add(p.AfterModelCallback()(mCtx, llmResp, nil))
+			errs.add(p.OnModelErrorCallback()(mCtx, llmReq, errors.New(tt.in)))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, ev))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
 				}
 			}
 		})
