@@ -358,7 +358,7 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 					ProtocolVersion: tc.version,
 				}},
 			}
-			factory := a2aClientFactory(card, http.DefaultClient)
+			factory := a2aClientFactory(http.DefaultClient)
 			client, err := factory.CreateFromCard(t.Context(), card)
 			if err != nil {
 				t.Fatalf("CreateFromCard(%s@%s) error = %v, want a client", tc.binding, tc.version, err)
