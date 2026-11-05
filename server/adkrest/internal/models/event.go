@@ -35,6 +35,7 @@ type EventActions struct {
 	SkipSummarization          bool                                         `json:"skipSummarization,omitempty"`
 	TransferToAgent            string                                       `json:"transferToAgent,omitempty"`
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+	RequestedAuthConfigs       authConfigs                                  `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
 }
 
@@ -145,6 +146,10 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			// text into it as a model turn. Only the runner writes these.
 			// FromSessionEvent still returns them, so a client can read
 			// summaries it did not author.
+			// Actions.RequestedAuthConfigs is not mapped inbound either. Only a
+			// tool writes a credential request, and one taken from a request body
+			// would claim a sign-in no tool asked for, which compaction then
+			// holds open as an unanswered call.
 		},
 	}, nil
 }
@@ -187,6 +192,7 @@ func FromSessionEvent(event session.Event) Event {
 			SkipSummarization:          event.Actions.SkipSummarization,
 			TransferToAgent:            event.Actions.TransferToAgent,
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
+			RequestedAuthConfigs:       event.Actions.RequestedAuthConfigs,
 			Compaction:                 event.Actions.Compaction,
 		},
 	}

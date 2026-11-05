@@ -33,6 +33,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -387,6 +388,11 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	// ignore partial events
 	if event.Partial {
 		return nil
+	}
+	// A stored request that does not decode would fail every later read of
+	// the session. Checked before the local session takes the event.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("cannot append event: %w", err)
 	}
 	// Give the event an identity if it arrived without one, matching the
 	// in-memory service. An event built as a struct literal by an agent or a
