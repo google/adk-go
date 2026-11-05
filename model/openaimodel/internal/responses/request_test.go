@@ -856,11 +856,14 @@ func modelContent(parts ...*genai.Part) *genai.Content {
 // must not go out as a location for the server to fetch, which would be a
 // request for a string that is not a URL.
 func TestBuildParams_Media(t *testing.T) {
+	const secretURL = "https://example.com/report.pdf?X-Amz-Signature=SECRET"
 	tests := []struct {
 		name        string
+		role        string
 		part        *genai.Part
 		want        []string
 		wantErr     error
+		wantNotErr  error
 		wantErrText string
 	}{
 		{
@@ -969,12 +972,58 @@ func TestBuildParams_Media(t *testing.T) {
 			},
 			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
 		},
+		{
+			// System and developer messages take input_text only. The
+			// Completions path already refuses media in those roles; sending
+			// input_image here would be a 400 from the API instead.
+			name:        "image_in_a_system_message_is_refused",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: image/png",
+		},
+		{
+			name:        "image_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a developer message is not supported: image/png",
+		},
+		{
+			name:        "file_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
+			wantErrText: "media in a developer message is not supported: application/pdf",
+		},
+		{
+			// The role is checked before the media type, as in Completions,
+			// so audio gets the role error and not ErrUnsupportedMIMEType.
+			name:        "audio_in_a_system_message_gets_the_role_error",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantNotErr:  shared.ErrUnsupportedMIMEType,
+			wantErrText: "media in a system message is not supported: audio/mpeg",
+		},
+		{
+			name: "text_in_a_system_message_is_kept",
+			role: "system",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/system:be terse"},
+		},
+		{
+			name: "text_in_a_developer_message_is_kept",
+			role: "developer",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/developer:be terse"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			role := tt.role
+			if role == "" {
+				role = string(genai.RoleUser)
+			}
 			params, err := buildParams("fallback", &model.LLMRequest{
-				Contents: []*genai.Content{userContent(tt.part)},
+				Contents: []*genai.Content{{Role: role, Parts: []*genai.Part{tt.part}}},
 			})
 			if tt.wantErr != nil || tt.wantErrText != "" {
 				if err == nil {
@@ -983,8 +1032,14 @@ func TestBuildParams_Media(t *testing.T) {
 				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
 				}
+				if tt.wantNotErr != nil && errors.Is(err, tt.wantNotErr) {
+					t.Errorf("buildParams() err = %v, want it not to match %v", err, tt.wantNotErr)
+				}
 				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
 					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				if strings.Contains(err.Error(), "SECRET") {
+					t.Errorf("buildParams() err = %q leaks the file uri", err)
 				}
 				return
 			}
@@ -1603,6 +1658,58 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
+			}
+		})
+	}
+}
+
+// systemInstructionAcceptedFields are the genai.Part fields a system-instruction
+// part may carry beside its text. Like accountedForFields, the list is restated
+// rather than derived from the code, so a field genai adds later is absent from
+// it and the walk below demands it be refused.
+var systemInstructionAcceptedFields = map[string]string{
+	"Thought":          "a marker no wire field carries; the text is sent, as adk-python does",
+	"ThoughtSignature": "no request field on either endpoint carries one",
+	"PartMetadata":     "caller bookkeeping, never content",
+	"VideoMetadata":    "qualifies media, and the part carries none",
+	"MediaResolution":  "qualifies media, and the part carries none",
+}
+
+// Every genai.Part field riding on a system-instruction text part is either
+// accepted above or refused by name, because instructions carries text only.
+func TestBuildParams_SystemInstructionWalksEveryPartField(t *testing.T) {
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		if field.Name == "Text" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			if !field.IsExported() {
+				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
+					"check by hand whether a system instruction should refuse it", field.Name)
+			}
+			part := &genai.Part{Text: "describe it"}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+			params, err := buildParams("fallback", &model.LLMRequest{
+				Contents: []*genai.Content{userContent(&genai.Part{Text: "hi"})},
+				Config: &genai.GenerateContentConfig{
+					SystemInstruction: &genai.Content{Parts: []*genai.Part{part}},
+				},
+			})
+			if why, accepted := systemInstructionAcceptedFields[field.Name]; accepted {
+				if err != nil {
+					t.Fatalf("buildParams() err = %v for a text part carrying %s, want nil: %s", err, field.Name, why)
+				}
+				if got, want := params.Instructions, param.NewOpt("describe it"); got != want {
+					t.Errorf("Instructions = %q for a text part carrying %s, want %q: %s", got.Value, field.Name, want.Value, why)
+				}
+				return
+			}
+			// HasSuffix rather than Contains: one field name can prefix another.
+			want := "unsupported system instruction part: " + field.Name
+			if err == nil || !strings.HasSuffix(err.Error(), want) {
+				t.Errorf("buildParams() err = %v for a text part carrying %s, want it to end with %q", err, field.Name, want)
 			}
 		})
 	}
