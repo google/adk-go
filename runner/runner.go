@@ -38,10 +38,12 @@ import (
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
 	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/memory"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
@@ -486,6 +488,20 @@ func fromPlugin(original, modified *session.Event, record *session.EventCompacti
 	return modified
 }
 
+// stampTimestamp gives an event that an agent yielded, or a plugin returned in
+// its place, without a timestamp the time the runner received it, as
+// adk-python's Event does on construction.
+//
+// An event built as a struct literal never passes through session.NewEvent.
+// Stored with a zero timestamp it moves the session's last update time back to
+// year 1, and a backend that orders events by time, such as session/database,
+// reads it back ahead of every message before it.
+func stampTimestamp(ctx context.Context, event *session.Event) {
+	if event.Timestamp.IsZero() {
+		event.Timestamp = platform.Now(ctx)
+	}
+}
+
 // compactionRuntime returns the runtime that the request processors read off
 // the context, both to gate prompt assembly on compaction being configured and
 // to run intra-invocation compaction. It is nil when compaction is disabled for
@@ -538,6 +554,12 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
+	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
+		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
+	})
+}
+
+func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	// TODO(hakim): we need to validate whether cfg is compatible with the Agent.
 	//   see adk-python/src/google/adk/runners.py Runner._new_invocation_context.
 	// TODO: setup tracer.
@@ -644,7 +666,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 		// Compaction has to happen however iteration ends. Breaking out of the
@@ -741,6 +763,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 				yield(nil, err)
 				return
 			}
+			stampTimestamp(ctx, event)
 
 			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -764,6 +787,7 @@ func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.C
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
+				stampTimestamp(ctx, event) // a replacement may be a struct literal too
 			}
 
 			// only commit non-partial event to a session service
@@ -818,6 +842,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
+	stampTimestamp(ctx, event) // a replacement may be a struct literal
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -922,7 +947,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
 		Live:          &cfg,
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a
@@ -957,21 +982,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	})
 
 	if r.pluginManager != nil {
-		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
+		// The reply goes through OnEvent and the run through AfterRun, as on
+		// Run. adk-python runs a live agent through the same
+		// Runner._exec_with_plugin as run_async (runners.py).
+		earlyExitEvent, err := r.runBeforeRunCallback(iCtx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEvent(iCtx, iCtx.InvocationID())
-			earlyExitEvent.Author = agentToRun.Name()
-			earlyExitEvent.LLMResponse = model.LLMResponse{
-				Content: earlyExitResult,
-			}
-			if err := r.sessionService.AppendEvent(iCtx, storedSession, earlyExitEvent); err != nil {
-				return nil, nil, fmt.Errorf("failed to add event to session: %w", err)
-			}
-
+		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
 			return &closedLiveSession{}, earlyExitIter, nil
@@ -1012,6 +1032,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				yield(nil, err)
 				return
 			}
+			stampTimestamp(iCtx, event)
 
 			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -1034,6 +1055,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
+				stampTimestamp(iCtx, event) // a replacement may be a struct literal too
 			}
 
 			// Chronological event buffering logic for Live streaming.
@@ -1326,4 +1348,18 @@ func hasInlineData(event *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// withPluginManager puts this runner's plugin manager in ctx, which is where
+// tools and callbacks look it up. The one exception is a runner without plugins
+// that agenttool starts for a sub-agent: it keeps the plugin manager of the run
+// that called the tool, so that run's plugins also see the sub-agent. Any other
+// runner uses only its own plugins. Run-level callbacks always stay with
+// r.pluginManager.
+func (r *Runner) withPluginManager(ctx context.Context) context.Context {
+	ctx, inherited := plugininternal.TakeInheritedPlugins(ctx)
+	if !r.pluginManager.HasPlugins() && inherited.HasPlugins() {
+		return plugininternal.ToContext(ctx, inherited)
+	}
+	return plugininternal.ToContext(ctx, r.pluginManager)
 }
