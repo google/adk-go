@@ -198,6 +198,7 @@ func (r *Runner) runNode(
 		if event.Author == "" {
 			event.Author = agentToRun.Name()
 		}
+		stampTimestamp(ictx, event)
 
 		if event != nil && !event.LLMResponse.Partial {
 			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -220,6 +221,7 @@ func (r *Runner) runNode(
 				continue
 			}
 			event = fromPlugin(event, modifiedEvent, record)
+			stampTimestamp(ictx, event) // a replacement may be a struct literal too
 		}
 
 		if !event.LLMResponse.Partial {

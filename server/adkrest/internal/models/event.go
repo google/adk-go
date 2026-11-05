@@ -16,6 +16,9 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -38,6 +41,7 @@ type EventActions struct {
 // Event represents a single event in a session.
 type Event struct {
 	ID                  string                                      `json:"id"`
+	Timestamp           float64                                     `json:"timestamp"`
 	InvocationID        string                                      `json:"invocationId"`
 	Branch              string                                      `json:"branch,omitempty"`
 	Author              string                                      `json:"author"`
@@ -63,10 +67,46 @@ type Event struct {
 	RequestedInput      *session.RequestInput                       `json:"requestedInput,omitempty"`
 }
 
-// ToSessionEvent maps Event data struct to session.Event
-func ToSessionEvent(event Event) *session.Event {
+// The calendar bounds for an event timestamp, in epoch microseconds: the first
+// and last instants of years 1 and 9999. They match the bounds the
+// session.Event JSON decoder applies to a numeric timestamp, which
+// TestToSessionEventTimestampBoundsMatchSessionDecoder pins.
+const (
+	minTimestampMicros = -62135596800 * 1e6
+	maxTimestampMicros = 253402300799 * 1e6
+)
+
+// timestampFromEpochSeconds converts a REST event timestamp to a time.Time.
+// Zero means the client sent none and maps to the zero time.Time.
+//
+// A value outside years 1 to 9999 is an error rather than an instant. It is
+// most often epoch milliseconds sent as seconds (JavaScript's Date.now()), or
+// a number too large for the int64 conversion, which overflows into a negative
+// time. Session services store such an instant without complaint, but some
+// cannot read it back, so the session it lands in can no longer be fetched or
+// listed.
+func timestampFromEpochSeconds(secs float64) (time.Time, error) {
+	if secs == 0 {
+		return time.Time{}, nil
+	}
+	micros := math.Round(secs * 1e6)
+	if math.IsNaN(micros) || micros < minTimestampMicros || micros > maxTimestampMicros {
+		return time.Time{}, fmt.Errorf("event timestamp %v is not a plausible date: want epoch seconds between years 1 and 9999", secs)
+	}
+	return time.UnixMicro(int64(micros)).UTC(), nil
+}
+
+// ToSessionEvent maps Event data struct to session.Event. It returns an error
+// when the event's timestamp is not a plausible date; see
+// timestampFromEpochSeconds.
+func ToSessionEvent(event Event) (*session.Event, error) {
+	ts, err := timestampFromEpochSeconds(event.Timestamp)
+	if err != nil {
+		return nil, err
+	}
 	return &session.Event{
 		ID:                 event.ID,
+		Timestamp:          ts,
 		InvocationID:       event.InvocationID,
 		Branch:             event.Branch,
 		Author:             event.Author,
@@ -106,13 +146,18 @@ func ToSessionEvent(event Event) *session.Event {
 			// FromSessionEvent still returns them, so a client can read
 			// summaries it did not author.
 		},
-	}
+	}, nil
 }
 
 // FromSessionEvent maps session.Event to Event data struct
 func FromSessionEvent(event session.Event) Event {
+	var ts float64
+	if !event.Timestamp.IsZero() {
+		ts = float64(event.Timestamp.UnixMicro()) / 1e6
+	}
 	return Event{
 		ID:                  event.ID,
+		Timestamp:           ts,
 		InvocationID:        event.InvocationID,
 		Branch:              event.Branch,
 		Author:              event.Author,
