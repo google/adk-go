@@ -87,7 +87,7 @@ func createTaskAgentFuncDeclaration(curAgent agent.Agent) *genai.FunctionDeclara
 				curAgent.Description())),
 	}
 
-	agentInputSchema := getInputSchema(curAgent)
+	agentInputSchema := InputSchema(curAgent)
 	if agentInputSchema != nil {
 		decl.Parameters = agentInputSchema
 	} else {

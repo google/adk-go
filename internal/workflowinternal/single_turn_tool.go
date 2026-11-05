@@ -96,14 +96,16 @@ func (t *SingleTurnTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest
 	return toolutils.PackTool(req, t)
 }
 
-func getInputSchema(cur agent.Agent) *genai.Schema {
+// InputSchema returns the input schema of an LLM agent, or of the first
+// sub-agent of any other agent, and nil when there is none.
+func InputSchema(cur agent.Agent) *genai.Schema {
 	llmAgent, ok := cur.(llminternal.Agent)
 	if ok && llmAgent != nil {
 		return llminternal.Reveal(llmAgent).InputSchema
 	}
 
 	if len(cur.SubAgents()) > 0 {
-		return getInputSchema(cur.SubAgents()[0])
+		return InputSchema(cur.SubAgents()[0])
 	}
 
 	return nil
@@ -129,7 +131,7 @@ func MakeFunctionDeclaration(curAgent agent.Agent) *genai.FunctionDeclaration {
 		Description: curAgent.Description(),
 	}
 
-	agentInputSchema := getInputSchema(curAgent)
+	agentInputSchema := InputSchema(curAgent)
 
 	if agentInputSchema != nil {
 		decl.Parameters = agentInputSchema
