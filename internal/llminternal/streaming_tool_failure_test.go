@@ -183,36 +183,34 @@ func TestLiveConfirmationWrapperErrorClassification(t *testing.T) {
 	}
 }
 
-// A panicking non-streaming tool gets the same generic message, and
-// OnToolError callbacks still receive the panic value and the stack.
-func TestFunctionToolPanicIsSanitized(t *testing.T) {
-	type args struct {
-		Value string `json:"value"`
-	}
-	type result struct{}
-	lookup, err := functiontool.New(functiontool.Config{Name: "lookup"}, func(_ agent.Context, a args) (result, error) {
-		panic("lookup failed for " + a.Value)
+// A caller can capture a framework error without importing its internal type.
+func TestStreamingHandlerReyieldedFrameworkError(t *testing.T) {
+	type args struct{}
+	source, err := functiontool.NewStreaming(functiontool.Config{Name: "source", RequireConfirmation: true}, func(agent.Context, args) iter.Seq2[string, error] {
+		return func(func(string, error) bool) { t.Error("unapproved source handler ran") }
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var callbackErr error
-	f := &Flow{OnToolErrorCallbacks: []OnToolErrorCallback{
-		func(_ agent.Context, _ tool.Tool, _ map[string]any, err error) (map[string]any, error) {
-			callbackErr = err
-			return nil, nil
-		},
-	}}
 	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockAgent{name: "a"}})
-	response := &model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{"value": "user-secret-123"}}}}}}
-	event, err := f.handleFunctionCalls(ctx, map[string]tool.Tool{"lookup": lookup}, response, nil, nil)
+	stream := source.(interface {
+		RunStream(agent.Context, any) iter.Seq2[string, error]
+	})
+	var captured error
+	for _, err := range stream.RunStream(agent.NewToolContext(ctx, "source_call", &session.EventActions{}, nil), map[string]any{}) {
+		captured = err
+	}
+	if !errors.Is(captured, tool.ErrConfirmationRequired) {
+		t.Fatal("did not capture framework error")
+	}
+	lookup, err := functiontool.NewStreaming(functiontool.Config{Name: "lookup"}, func(agent.Context, args) iter.Seq2[string, error] {
+		return func(yield func(string, error) bool) { yield("", captured) }
+	})
 	if err != nil {
-		t.Fatal("unexpected flow error")
+		t.Fatal(err)
 	}
-	if got := event.Content.Parts[0].FunctionResponse.Response["error"]; got != toolInternalError("lookup") {
-		t.Errorf("model got %q, want the generic message", got)
-	}
-	if callbackErr == nil || !strings.Contains(callbackErr.Error(), "user-secret-123") || !strings.Contains(callbackErr.Error(), "stack:") {
-		t.Error("OnToolError callback did not get the panic value and stack")
+	result := liveToolFailure(t, lookup, map[string]any{}, nil)
+	if result.Response["error"] != streamingToolInternalError("lookup") {
+		t.Fatal("live handler re-yielded a trusted framework error")
 	}
 }

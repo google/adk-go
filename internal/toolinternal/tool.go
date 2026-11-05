@@ -61,11 +61,15 @@ type SkipSummarizationResultDisplayer interface {
 	DisplayResultOnSkipSummarization() bool
 }
 
-// PanicError is a panic recovered from a tool's handler. Its message carries
-// the panic value and the stack for callbacks and plugins. The flow replaces
-// it with a generic message before it reaches the model.
-type PanicError struct {
-	Message string
+// HandlerError marks an error that came from a streaming tool's handler,
+// including a recovered panic. Its text can carry handler output, argument
+// values or a stack, so the live flow replaces it with a generic message before it
+// reaches the model. Errors raised before the handler runs use the separate
+// toolerror.BeforeHandler marker and keep their own message.
+type HandlerError struct {
+	Err error
 }
 
-func (e *PanicError) Error() string { return e.Message }
+func (e *HandlerError) Error() string { return e.Err.Error() }
+
+func (e *HandlerError) Unwrap() error { return e.Err }
