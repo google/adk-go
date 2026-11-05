@@ -258,7 +258,9 @@ func (c *RuntimeAPIController) RunHandler(rw http.ResponseWriter, req *http.Requ
 	if err != nil {
 		return err
 	}
-	var events []models.Event
+	// Not `var events []models.Event`: a nil slice encodes as JSON null, and
+	// clients expect a list, empty for a run that produced no events.
+	events := []models.Event{}
 	for _, event := range sessionEvents {
 		events = append(events, models.FromSessionEvent(*event))
 	}
@@ -421,7 +423,15 @@ func flashEvent(rc *http.ResponseController, rw http.ResponseWriter, data string
 	return nil
 }
 
+// validateSessionExists answers 404 before a run starts when the session is
+// missing.
 func (c *RuntimeAPIController) validateSessionExists(ctx context.Context, appName, userID, sessionID string) error {
+	// When AutoCreateSession is enabled, the runner is responsible for
+	// creating a missing session. Skip the existence check so the request
+	// can reach the runner, matching ADK-Python behavior.
+	if c.autoCreateSession {
+		return nil
+	}
 	_, err := c.sessionService.Get(ctx, &session.GetRequest{
 		AppName:   appName,
 		UserID:    userID,

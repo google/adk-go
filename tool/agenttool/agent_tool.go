@@ -115,16 +115,11 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		}
 	}
 
-	var agentInputSchema *genai.Schema
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := workflowinternal.InputSchema(t.agent)
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
 
 	var content *genai.Content
 	var err error

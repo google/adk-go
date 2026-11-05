@@ -174,6 +174,7 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 		name       string
 		events     []*session.Event
 		wantEvents []*session.Event
+		wantErr    bool
 	}{
 		{
 			name:       "NoEvents",
@@ -236,6 +237,86 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 				},
 			},
 		},
+		// A client that has already decoded the JSON sends the wrapper's value
+		// as an object rather than a string. adk-python accepts it
+		// (tool_confirmation.py, ToolConfirmation.from_response_dict).
+		{
+			name: "SuccessWithParsedResponseWrapper",
+			events: func() []*session.Event {
+				events := createConfirmationEvents(true)
+				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{
+					"response": map[string]any{"confirmed": true},
+				}
+				return events
+			}(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     mockToolName,
+										ID:       mockFunctionCallID,
+										Response: map[string]any{"result": "Mock tool result with test"},
+									},
+								},
+							},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
+		// A decoded "no" must reject the tool just as the string form does.
+		{
+			name: "ToolNotConfirmedWithParsedResponseWrapper",
+			events: func() []*session.Event {
+				events := createConfirmationEvents(true)
+				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{
+					"response": map[string]any{"confirmed": false},
+				}
+				return events
+			}(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     mockToolName,
+										ID:       mockFunctionCallID,
+										Response: map[string]any{"error": "Tool execution not confirmed"},
+									},
+								},
+							},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "ParsedResponseWrapperScalar",
+			events: func() []*session.Event {
+				events := createConfirmationEvents(true)
+				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{"response": 123}
+				return events
+			}(),
+			wantErr: true,
+		},
+		{
+			name: "NullResponseWrapper",
+			events: func() []*session.Event {
+				events := createConfirmationEvents(true)
+				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{"response": nil}
+				return events
+			}(),
+			wantErr: true,
+		},
 		{
 			name:   "ToolNotConfirmed",
 			events: createConfirmationEvents(false),
@@ -277,11 +358,22 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 			iter := llminternal.RequestConfirmationRequestProcessor(invocationContext, llmRequest, &llminternal.Flow{Tools: tools})
 
 			var gotEvents []*session.Event
+			var gotErr error
 			for event, err := range iter {
 				if err != nil {
-					t.Fatalf("RequestConfirmationRequestProcessor() unexpected error: %v", err)
+					gotErr = err
+					break
 				}
 				gotEvents = append(gotEvents, event)
+			}
+			if tt.wantErr {
+				if gotErr == nil {
+					t.Fatal("RequestConfirmationRequestProcessor() error = nil, want an error")
+				}
+				return
+			}
+			if gotErr != nil {
+				t.Fatalf("RequestConfirmationRequestProcessor() unexpected error: %v", gotErr)
 			}
 
 			// Validate Count

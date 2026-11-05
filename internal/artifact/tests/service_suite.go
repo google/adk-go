@@ -183,6 +183,16 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		}
 	})
 
+	t.Run(fmt.Sprintf("LoadNonexistentVersion_%s", testSuffix), func(t *testing.T) {
+		got, err := srv.Load(ctx, &artifact.LoadRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+			Version: 99,
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Load('file1', ver=99) = (%v, %v), want error(%v)", got, err, fs.ErrNotExist)
+		}
+	})
+
 	t.Run(fmt.Sprintf("List_%s", testSuffix), func(t *testing.T) {
 		resp, err := srv.List(ctx, &artifact.ListRequest{
 			AppName: appName, UserID: userID, SessionID: sessionID,
@@ -232,6 +242,14 @@ func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service
 		want := genai.NewPartFromBytes([]byte("file v2"), "text/plain")
 		if diff := cmp.Diff(got, want); diff != "" {
 			t.Fatalf("Load('file1') = (%v, %v), want (%v, nil)", got, err, want)
+		}
+
+		deleted, err := srv.Load(ctx, &artifact.LoadRequest{
+			AppName: appName, UserID: userID, SessionID: sessionID, FileName: "file1",
+			Version: 3,
+		})
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("Load('file1', ver=3) = (%v, %v), want error(%v)", deleted, err, fs.ErrNotExist)
 		}
 	})
 
