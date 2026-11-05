@@ -28,6 +28,8 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 )
@@ -163,6 +165,104 @@ func TestRunner_RunLive_NilEventYieldedTerminatesRun(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("RunLive() did not terminate after a nil event")
+	}
+}
+
+// TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp checks that RunLive
+// stores an event built as a struct literal, whether the live agent yielded it
+// or a plugin returned it in its place, with the run's current time, and that
+// an event that already carries a timestamp keeps it.
+func TestRunner_RunLive_StampsEventsYieldedWithoutTimestamp(t *testing.T) {
+	runTime := time.Date(2026, time.March, 2, 10, 0, 0, 0, time.UTC)
+	ownTime := time.Date(2026, time.March, 1, 9, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		// own is the timestamp the live agent gives its event; zero means none.
+		own time.Time
+		// replace makes a plugin swap the agent's event for a struct literal
+		// copy, which has no timestamp whatever the original carried.
+		replace bool
+		want    time.Time
+	}{
+		{name: "agent event", want: runTime},
+		{name: "plugin replacement", replace: true, want: runTime},
+		{name: "own timestamp", own: ownTime, want: ownTime},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const appName, userID, sessionID = "testApp", "testUser", "testSession"
+			ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return runTime })
+			sessionService := session.InMemoryService()
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{
+				AppName:   appName,
+				UserID:    userID,
+				SessionID: sessionID,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// Plugins see the event as it will be stored, timestamp included.
+			sawUnstamped := false
+			p, err := plugin.New(plugin.Config{
+				Name: "observe_and_replace",
+				OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+					sawUnstamped = sawUnstamped || ev.Timestamp.IsZero()
+					if !tt.replace {
+						return nil, nil
+					}
+					return &session.Event{Author: ev.Author, LLMResponse: ev.LLMResponse}, nil
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := New(Config{
+				AppName: appName,
+				Agent: &mockLiveAgent{
+					Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+					runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+						return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
+							yield(&session.Event{
+								Author:      "test_agent",
+								Timestamp:   tt.own,
+								LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("reply", genai.RoleModel)},
+							}, nil)
+						}, nil
+					},
+				},
+				SessionService: sessionService,
+				PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{p}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, stream, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+			if err != nil {
+				t.Fatalf("RunLive() error = %v", err)
+			}
+			for _, err := range stream {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var sawReply bool
+			for ev := range getRunLiveTestEvents(t, sessionService, sessionID).All() {
+				if ev.Author != "test_agent" {
+					continue
+				}
+				sawReply = true
+				if !ev.Timestamp.Equal(tt.want) {
+					t.Errorf("stored event has timestamp %v, want %v", ev.Timestamp, tt.want)
+				}
+			}
+			if !sawReply {
+				t.Fatal("no event from the live agent was stored")
+			}
+			if sawUnstamped {
+				t.Error("OnEventCallback saw the live agent's event with a zero timestamp")
+			}
+		})
 	}
 }
 

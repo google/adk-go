@@ -837,6 +837,7 @@ func (r *Runner) runBeforeRunCallback(ctx agent.InvocationContext) (*session.Eve
 	maps.Copy(reply.CustomMetadata, event.CustomMetadata)
 	reply.CustomMetadata[plugininternal.BeforeRunReplyKey] = true
 	event = &reply
+	stampTimestamp(ctx, event) // a replacement may be a struct literal
 	if !event.Partial {
 		if err := r.sessionService.AppendEvent(ctx, ctx.Session(), event); err != nil {
 			return nil, fmt.Errorf("failed to add event to session: %w", err)
@@ -1031,6 +1032,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 				yield(nil, err)
 				return
 			}
+			stampTimestamp(iCtx, event)
 
 			if !event.LLMResponse.Partial {
 				if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -1053,6 +1055,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 					continue
 				}
 				event = fromPlugin(event, modifiedEvent, record)
+				stampTimestamp(iCtx, event) // a replacement may be a struct literal too
 			}
 
 			// Chronological event buffering logic for Live streaming.
