@@ -1834,7 +1834,7 @@ func unescapeCredentialStep(s string) string {
 	return s
 }
 
-// hasBackslashEscapedCredential reports whether unescaping standard backslash
+// hasBackslashEscapedCredentialDepth reports whether unescaping standard backslash
 // escapes (\b, \f, \n, \r, \t, \/, \", \' and \\), or canonicalizing percent,
 // \x or \u escapes, exposes a credential that scrubErrorTokens or
 // hasEncodedCredentialMarker catches, including when scrubErrorTokens on raw
@@ -1845,11 +1845,7 @@ func unescapeCredentialStep(s string) string {
 // 2*maxCanonicalUnescapePasses are run, failing closed if escapes still change
 // past that depth. When raw and scrubbed are each one JSON document, the
 // keys and strings of raw and scrubbed are decoded exactly and checked in
-// pairs instead (see jsonExposesCredential).
-func hasBackslashEscapedCredential(raw, scrubbed string) bool {
-	return hasBackslashEscapedCredentialDepth(raw, scrubbed, 0)
-}
-
+// pairs instead (see jsonExposesCredentialDepth).
 func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
 	if depth >= maxSanitizeDepth {
 		return true
@@ -1897,7 +1893,7 @@ func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
 	return unescapeCredentialStep(curRaw) != curRaw
 }
 
-// jsonExposesCredential reports, when raw and scrubbed are each one JSON
+// jsonExposesCredentialDepth reports, when raw and scrubbed are each one JSON
 // document (an object, an array or a string) of the same shape, whether
 // scrubbed, decoded exactly, still holds a credential: a value under a
 // sensitive key, or JSON text in a string that holds one (see
@@ -1910,10 +1906,6 @@ func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
 // {"note":"The cookie: 2.5 ounces remained.\nKEEP"} becomes a line break that
 // leaves the quote of the string open across it, and a scrub of that text
 // then reads the prose in the string as a Cookie header's value.
-func jsonExposesCredential(raw, scrubbed string) (exposes, ok bool) {
-	return jsonExposesCredentialDepth(raw, scrubbed, 0)
-}
-
 func jsonExposesCredentialDepth(raw, scrubbed string, depth int) (exposes, ok bool) {
 	if depth >= maxSanitizeDepth {
 		return true, true
@@ -3155,17 +3147,6 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 	b.WriteString(s[last:])
 	rec.copied(last, len(s)-last)
 	return b.String()
-}
-
-// quoteJoinsLetters reports whether s[i] is a single quote between two
-// letters, as the apostrophe of Bob's is.
-func quoteJoinsLetters(s string, i int) bool {
-	if i <= 0 || i+1 >= len(s) || s[i] != '\'' {
-		return false
-	}
-	prev, _ := utf8.DecodeLastRuneInString(s[:i])
-	next, _ := utf8.DecodeRuneInString(s[i+1:])
-	return unicode.IsLetter(prev) && unicode.IsLetter(next)
 }
 
 // baselineRedactBearerToken replaces a baselineBearerTokenAtRe match. "bearer
@@ -4572,8 +4553,6 @@ type headerQuoteScanner struct {
 	curOuterJSON                         bool
 	jsonOuterFrom, jsonOuterLineEnd      int
 	jsonOuterEnd                         int
-	sqLineEnd                            int
-	sqPositions                          []int
 }
 
 // newHeaderQuoteScanner returns a headerQuoteScanner for s.
@@ -4594,24 +4573,6 @@ func (h *headerQuoteScanner) shellScanner() *shellAssignScanner {
 		return nil
 	}
 	return h.shell
-}
-
-func (h *headerQuoteScanner) singleQuoteOddFrom(pos, lineEnd int) bool {
-	if h == nil || pos >= lineEnd {
-		return false
-	}
-	if h.sqLineEnd != lineEnd {
-		h.sqLineEnd = lineEnd
-		h.sqPositions = h.sqPositions[:0]
-		lineStart := strings.LastIndexAny(h.s[:lineEnd], "\r\n") + 1
-		for p := lineStart; p < lineEnd; p++ {
-			if h.s[p] == '\'' {
-				h.sqPositions = append(h.sqPositions, p)
-			}
-		}
-	}
-	idx, _ := slices.BinarySearch(h.sqPositions, pos)
-	return (len(h.sqPositions)-idx)%2 == 1
 }
 
 // jsonWrappedInnerHeaderEndAt resolves where an inner escaped-quoted header
