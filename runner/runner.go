@@ -661,7 +661,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 		// Compaction has to happen however iteration ends. Breaking out of the
@@ -942,7 +942,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
 		Live:          &cfg,
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a
@@ -1325,4 +1325,18 @@ func hasInlineData(event *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// withPluginManager puts this runner's plugin manager in ctx, which is where
+// tools and callbacks look it up. The one exception is a runner without plugins
+// that agenttool starts for a sub-agent: it keeps the plugin manager of the run
+// that called the tool, so that run's plugins also see the sub-agent. Any other
+// runner uses only its own plugins. Run-level callbacks always stay with
+// r.pluginManager.
+func (r *Runner) withPluginManager(ctx context.Context) context.Context {
+	ctx, inherited := plugininternal.TakeInheritedPlugins(ctx)
+	if !r.pluginManager.HasPlugins() && inherited.HasPlugins() {
+		return plugininternal.ToContext(ctx, inherited)
+	}
+	return plugininternal.ToContext(ctx, r.pluginManager)
 }
