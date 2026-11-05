@@ -20,6 +20,7 @@ import (
 	"iter"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -359,6 +360,114 @@ func TestProgressiveSSEPreservesThoughtSignature(t *testing.T) {
 	}
 	if string(fcPart.ThoughtSignature) != string(testThoughtSignature) {
 		t.Errorf("expected thought signature %s, got %s", string(testThoughtSignature), string(fcPart.ThoughtSignature))
+	}
+}
+
+// TestTextThoughtSignatureSurvivesMerge checks that a thought signature
+// streamed on a text chunk stays on the part the chunks are merged into, as
+// adk-python's StreamingResponseAggregator keeps it.
+func TestTextThoughtSignatureSurvivesMerge(t *testing.T) {
+	textChunk := func(text string, thought bool, signature string, finishReason genai.FinishReason) *genai.GenerateContentResponse {
+		part := &genai.Part{Text: text, Thought: thought}
+		if signature != "" {
+			part.ThoughtSignature = []byte(signature)
+		}
+		return &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{part}},
+				FinishReason: finishReason,
+			}},
+		}
+	}
+	callChunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{Name: "lookup", Args: map[string]any{"q": "dog"}}},
+			}},
+			FinishReason: genai.FinishReasonStop,
+		}},
+	}
+	tests := []struct {
+		name   string
+		chunks []*genai.GenerateContentResponse
+		want   []*genai.Part
+	}{
+		{
+			name: "signature_on_first_chunk",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "text-signature", ""),
+				textChunk("the presenter speaks.", false, "", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("text-signature")},
+			},
+		},
+		{
+			name: "signature_on_later_chunk",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "", ""),
+				textChunk("the presenter speaks.", false, "late-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("late-signature")},
+			},
+		},
+		{
+			name: "first_signature_of_a_run_wins",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("At minute 5 ", false, "first-signature", ""),
+				textChunk("the presenter speaks.", false, "second-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "At minute 5 the presenter speaks.", ThoughtSignature: []byte("first-signature")},
+			},
+		},
+		{
+			name: "thought_and_answer_keep_their_own_signatures",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("Let me check.", true, "thought-signature", ""),
+				textChunk("It is a dog.", false, "answer-signature", genai.FinishReasonStop),
+			},
+			want: []*genai.Part{
+				{Text: "Let me check.", Thought: true, ThoughtSignature: []byte("thought-signature")},
+				{Text: "It is a dog.", ThoughtSignature: []byte("answer-signature")},
+			},
+		},
+		{
+			// The function call still gets the signature too, as it did before
+			// the text part kept it.
+			name: "signed_text_then_unsigned_call",
+			chunks: []*genai.GenerateContentResponse{
+				textChunk("Let me look.", false, "text-signature", ""),
+				callChunk,
+			},
+			want: []*genai.Part{
+				{Text: "Let me look.", ThoughtSignature: []byte("text-signature")},
+				{
+					FunctionCall:     &genai.FunctionCall{Name: "lookup", Args: map[string]any{"q": "dog"}},
+					ThoughtSignature: []byte("text-signature"),
+				},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			for _, chunk := range tt.chunks {
+				for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+					if err != nil {
+						t.Fatalf("unexpected error processing chunk: %v", err)
+					}
+				}
+			}
+			finalResponse := aggregator.Close()
+			if finalResponse == nil {
+				t.Fatal("expected a final aggregated response, got nil")
+			}
+			if diff := cmp.Diff(tt.want, finalResponse.Content.Parts); diff != "" {
+				t.Errorf("aggregated parts mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -1149,6 +1258,50 @@ func TestUsageMetadataRetainedWhenLaterChunkHasNoUsageMetadata(t *testing.T) {
 	}
 }
 
+// Verify that a later chunk with non-nil UsageMetadata correctly overwrites an earlier one.
+func TestUsageMetadataUpdatedByLaterChunkWithValue(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	ctx := t.Context()
+
+	// Chunk 1: initial usage.
+	chunk1 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "Hello"}}}},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 100},
+	}
+
+	// Chunk 2: updated usage (cumulative), as typically sent by Gemini.
+	chunk2 := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content:      &genai.Content{Role: "model", Parts: []*genai.Part{{Text: " world"}}},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{TotalTokenCount: 200},
+	}
+
+	for _, chunk := range []*genai.GenerateContentResponse{chunk1, chunk2} {
+		for _, err := range aggregator.ProcessResponse(ctx, chunk) {
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		}
+	}
+
+	final := aggregator.Close()
+	if final == nil {
+		t.Fatal("expected a final aggregated response, got nil")
+	}
+	if final.UsageMetadata == nil {
+		t.Fatal("UsageMetadata should not be nil")
+	}
+	if final.UsageMetadata.TotalTokenCount != 200 {
+		t.Errorf("expected TotalTokenCount=200 (from last chunk), got %d", final.UsageMetadata.TotalTokenCount)
+	}
+}
+
 func TestFinishReasonUnexpectedToolCallPreservesErrorCode(t *testing.T) {
 	aggregator := llminternal.NewStreamingResponseAggregator()
 	ctx := t.Context()
@@ -1351,5 +1504,18 @@ func TestStreamedArgumentOutOfRangeIndexDropped(t *testing.T) {
 	want := `{"title":"kept"}`
 	if args != want {
 		t.Errorf("assembled arguments\n got %s\nwant %s", args, want)
+	}
+}
+
+// TestProcessResponseNilCandidate is a regression test: a streamed chunk whose
+// first candidate is nil (degenerate chunks are reachable per converters.go)
+// must not panic when checking FinishReason.
+func TestProcessResponseNilCandidate(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{nil}}
+	for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+		if err != nil {
+			t.Fatalf("ProcessResponse yielded error: %v", err)
+		}
 	}
 }

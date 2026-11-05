@@ -15,6 +15,7 @@
 package shared
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/genai"
@@ -97,6 +98,63 @@ func TestNormalizeSchema(t *testing.T) {
 			}
 			if !tc.wantErr && got["type"] != tc.want["type"] {
 				t.Fatalf("NormalizeSchema() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResponseFormatName(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema *genai.Schema
+		want   string
+	}{
+		{
+			name:   "nil schema",
+			schema: nil,
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "no title",
+			schema: &genai.Schema{Type: genai.TypeObject},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "title already a legal name",
+			schema: &genai.Schema{Title: "Custom-Title_2"},
+			want:   "Custom-Title_2",
+		},
+		{
+			name:   "title of exactly 64 characters is kept",
+			schema: &genai.Schema{Title: strings.Repeat("a", 64)},
+			want:   strings.Repeat("a", 64),
+		},
+		{
+			name:   "title with a space falls back to the default",
+			schema: &genai.Schema{Title: "Weather Report"},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "title with a trailing newline falls back to the default",
+			schema: &genai.Schema{Title: "Weather\n"},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "non-ascii title falls back to the default",
+			schema: &genai.Schema{Title: "天気予報"},
+			want:   DefaultResponseFormatName,
+		},
+		{
+			name:   "title longer than 64 characters falls back to the default",
+			schema: &genai.Schema{Title: strings.Repeat("a", 65)},
+			want:   DefaultResponseFormatName,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResponseFormatName(tc.schema); got != tc.want {
+				t.Errorf("ResponseFormatName() = %q, want %q", got, tc.want)
 			}
 		})
 	}
