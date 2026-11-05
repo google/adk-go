@@ -63,6 +63,7 @@ func TestBuildTransport(t *testing.T) {
 		MaxRetries:           9,
 		DisableStandaloneSSE: true,
 	}
+	callerSSE := &mcp.SSEClientTransport{Endpoint: testEndpoint, HTTPClient: base}
 	callerCommand := &mcp.CommandTransport{}
 	// sentinelRT stands in for a caller's existing HTTP transport, to assert the
 	// auth transport chains onto it rather than replacing it.
@@ -125,8 +126,12 @@ func TestBuildTransport(t *testing.T) {
 				if !ok {
 					t.Fatalf("HTTPClient.Transport = %T, want *auth.Transport", st.HTTPClient.Transport)
 				}
-				if at.Base != sentinelRT {
-					t.Errorf("auth.Transport.Base = %v, want the caller's original transport", at.Base)
+				trk, ok := at.Base.(*trackingTransport)
+				if !ok {
+					t.Fatalf("auth.Transport.Base = %T, want *trackingTransport", at.Base)
+				}
+				if trk.base != sentinelRT {
+					t.Errorf("trackingTransport.base = %v, want the caller's original transport", trk.base)
 				}
 			},
 		},
@@ -141,20 +146,78 @@ func TestBuildTransport(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "endpoint without auth builds a streamable client with no HTTP client",
+			name: "endpoint without auth builds a streamable client carrying only the tracking transport",
 			cfg:  Config{Endpoint: testEndpoint},
 			check: func(t *testing.T, tr mcp.Transport) {
 				st := mustStreamable(t, tr)
 				if st.Endpoint != testEndpoint {
 					t.Errorf("Endpoint = %q, want %q", st.Endpoint, testEndpoint)
 				}
-				if st.HTTPClient != nil {
-					t.Errorf("HTTPClient = %v, want nil without Auth", st.HTTPClient)
+				if st.HTTPClient == nil {
+					t.Fatal("HTTPClient = nil, want a client carrying the tracking transport")
+				}
+				if _, ok := st.HTTPClient.Transport.(*trackingTransport); !ok {
+					t.Errorf("HTTPClient.Transport = %T, want *trackingTransport", st.HTTPClient.Transport)
 				}
 			},
 		},
 		{
-			name: "no auth passes the caller transport through unchanged",
+			name: "SSE transport is copied without mutating the caller's",
+			cfg:  Config{Transport: callerSSE},
+			check: func(t *testing.T, tr mcp.Transport) {
+				sse, ok := tr.(*mcp.SSEClientTransport)
+				if !ok {
+					t.Fatalf("transport = %T, want *mcp.SSEClientTransport", tr)
+				}
+				if sse == callerSSE || sse.HTTPClient == base {
+					t.Error("caller SSE transport or its client was not copied")
+				}
+				if sse.Endpoint != testEndpoint || sse.HTTPClient.Timeout != 7*time.Second {
+					t.Errorf("preserved fields lost: endpoint %q, timeout %v", sse.Endpoint, sse.HTTPClient.Timeout)
+				}
+				if callerSSE.HTTPClient != base || base.Transport != nil {
+					t.Error("caller's SSE transport/client was mutated")
+				}
+			},
+		},
+		{
+			name:    "auth with an SSE transport is an error",
+			cfg:     Config{Transport: &mcp.SSEClientTransport{Endpoint: testEndpoint}, Auth: auth.StaticToken("tok")},
+			wantErr: true,
+		},
+		{
+			name: "streamable transport without auth is copied without mutating the caller's",
+			cfg:  Config{Transport: callerStreamable},
+			check: func(t *testing.T, tr mcp.Transport) {
+				st := mustStreamable(t, tr)
+				if st == callerStreamable || st.HTTPClient == base {
+					t.Error("caller streamable transport or its client was not copied")
+				}
+				if st.Endpoint != testEndpoint || st.MaxRetries != 9 || !st.DisableStandaloneSSE || st.HTTPClient.Timeout != 7*time.Second {
+					t.Errorf("preserved fields lost: %+v, timeout %v", st, st.HTTPClient.Timeout)
+				}
+				if callerStreamable.HTTPClient != base || base.Transport != nil {
+					t.Error("caller's streamable transport/client was mutated")
+				}
+			},
+		},
+		{
+			name:    "typed-nil streamable transport is an error",
+			cfg:     Config{Transport: (*mcp.StreamableClientTransport)(nil)},
+			wantErr: true,
+		},
+		{
+			name:    "typed-nil streamable transport with auth is an error",
+			cfg:     Config{Transport: (*mcp.StreamableClientTransport)(nil), Auth: auth.StaticToken("tok")},
+			wantErr: true,
+		},
+		{
+			name:    "typed-nil SSE transport is an error",
+			cfg:     Config{Transport: (*mcp.SSEClientTransport)(nil)},
+			wantErr: true,
+		},
+		{
+			name: "a non-HTTP transport is passed through unchanged",
 			cfg:  Config{Transport: callerCommand},
 			check: func(t *testing.T, tr mcp.Transport) {
 				if tr != callerCommand {

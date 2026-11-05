@@ -91,6 +91,114 @@ func Test_inMemoryService_SearchMemory(t *testing.T) {
 			},
 		},
 		{
+			name: "matches punctuation and non-space whitespace",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-punctuation", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Error: connection\ntimeout! Please\tretry.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{
+				AppName: "app1",
+				UserID:  "user1",
+				Query:   "error timeout retry",
+			},
+			wantResp: &memory.SearchResponse{
+				Memories: []memory.Entry{
+					{Content: genai.NewContentFromText("Error: connection\ntimeout! Please\tretry.", genai.RoleModel)},
+				},
+			},
+		},
+		{
+			name: "splits newline independently",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-newline-only", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("prefix\nzebra", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "zebra"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("prefix\nzebra", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "splits tab independently",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-tab-only", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("prefix\twalrus", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "walrus"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("prefix\twalrus", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "splits internal punctuation",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-internal-punctuation", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "timeout built"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("error,timeout Use the built-in tool.", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "keeps digits as words",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-digits", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Error 404.", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "404"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("Error 404.", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "preserves combining marks and underscores",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-marks", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("CAFE\u0301TERIA snake_case", genai.RoleModel)}},
+				}),
+			},
+			req: &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe\u0301 snake_case"},
+			wantResp: &memory.SearchResponse{Memories: []memory.Entry{
+				{Content: genai.NewContentFromText("CAFE\u0301TERIA snake_case", genai.RoleModel)},
+			}},
+		},
+		{
+			name: "does not treat leading Unicode marks as words",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-leading-mark", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("⚠️ disk full", genai.RoleModel)}},
+				}),
+			},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "thanks ❤️"},
+			wantResp: &memory.SearchResponse{},
+		},
+		{
+			name: "preserves combining mark boundary",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-combining-negative", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Je bois un cafe\u0301.", genai.RoleModel)}},
+				}),
+			},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "cafe"},
+			wantResp: &memory.SearchResponse{},
+		},
+		{
+			name: "preserves underscore boundary",
+			initSessions: []session.Session{
+				makeSession(t, "app1", "user1", "sess-underscore-negative", []*session.Event{
+					{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("call snake_case now", genai.RoleModel)}},
+				}),
+			},
+			req:      &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "snake"},
+			wantResp: &memory.SearchResponse{},
+		},
+		{
 			name: "no leakage for different appName",
 			initSessions: []session.Session{
 				makeSession(t, "app1", "user1", "sess3", []*session.Event{

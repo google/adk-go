@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -106,6 +107,13 @@ func confirmationEvent(id, invocationID string, ts int, callID string) *session.
 	return ev
 }
 
+// withAuthRequest attaches a credential request for callID to ev. A tool puts
+// the request on its own response for that call.
+func withAuthRequest(ev *session.Event, callID string) *session.Event {
+	ev.Actions.RequestedAuthConfigs = map[string]toolauth.Config{callID: {}}
+	return ev
+}
+
 // compactionEvent builds a stored compaction event: it sits at timestamp ts in
 // the stream and covers the inclusive range [start, end].
 // compactionEvent builds a stored record covering [start, end] except for
@@ -128,7 +136,7 @@ func compactionEvent(id string, ts, start, end int, summary string, excluded ...
 }
 
 // fakeSummarizer records the windows it is handed and returns a canned summary,
-// so window-selection behaviour can be tested without a model.
+// so window-selection behavior can be tested without a model.
 type fakeSummarizer struct {
 	// summary is the text of the returned summary. Empty means "decline",
 	// which makes SummarizeEvents return no content.

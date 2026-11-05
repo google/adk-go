@@ -29,7 +29,7 @@ import (
 )
 
 // An agent that declares no mode gets one from its placement, and the
-// contents processor must honour the mode bound to THAT agent rather than
+// contents processor must honor the mode bound to THAT agent rather than
 // the agent's blank declaration: a single_turn placement sees the current
 // turn only, a chat placement sees the whole conversation. A binding made
 // for a different agent must be ignored.

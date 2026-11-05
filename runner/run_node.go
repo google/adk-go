@@ -31,9 +31,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	imemory "google.golang.org/adk/v2/internal/memory"
-	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/utils"
-	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
@@ -120,7 +118,7 @@ func (r *Runner) runNode(
 	}
 	defer func() {
 		if err := compactOnce(); err != nil {
-			log.Printf("adk: %v", err)
+			log.Printf("adk: %v", err) //nolint:forbidigo // pre-slog call site
 		}
 	}()
 
@@ -160,18 +158,8 @@ func (r *Runner) runNode(
 	if pluginManager != nil {
 		defer pluginManager.RunAfterRunCallback(ictx)
 
-		earlyExitResult, err := pluginManager.RunBeforeRunCallback(ictx)
-		if earlyExitResult != nil || err != nil {
-			earlyExitEvent := session.NewEvent(ictx, ictx.InvocationID())
-			earlyExitEvent.Author = "user"
-			earlyExitEvent.LLMResponse = model.LLMResponse{
-				Content: msg,
-			}
-			if appendErr := r.sessionService.AppendEvent(ictx, storedSession, earlyExitEvent); appendErr != nil {
-				yield(nil, fmt.Errorf("failed to add event to session: %w", appendErr))
-				return
-			}
-			yield(earlyExitEvent, err)
+		if event, err := r.runBeforeRunCallback(ictx); event != nil || err != nil {
+			yield(event, err)
 			return
 		}
 	}
@@ -209,6 +197,7 @@ func (r *Runner) runNode(
 		if event.Author == "" {
 			event.Author = agentToRun.Name()
 		}
+		stampTimestamp(ictx, event)
 
 		if event != nil && !event.LLMResponse.Partial {
 			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -231,6 +220,7 @@ func (r *Runner) runNode(
 				continue
 			}
 			event = fromPlugin(event, modifiedEvent, record)
+			stampTimestamp(ictx, event) // a replacement may be a struct literal too
 		}
 
 		if !event.LLMResponse.Partial {
@@ -277,8 +267,9 @@ func (r *Runner) newNodeInvocationContext(
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+		MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 
 	var artifacts agent.Artifacts
 	if r.artifactService != nil {

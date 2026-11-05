@@ -16,6 +16,7 @@ package exampletool
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,11 +72,17 @@ func (m *mockToolContext) Actions() *session.EventActions {
 func (m *mockToolContext) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
 	return nil, nil
 }
-func (m *mockToolContext) AgentName() string                                       { return "mock_agent" }
-func (m *mockToolContext) InvocationID() string                                    { return "mock_invocation" }
-func (m *mockToolContext) AppName() string                                         { return "mock_app" }
-func (m *mockToolContext) Branch() string                                          { return "mock_branch" }
-func (m *mockToolContext) SessionID() string                                       { return "mock_session" }
+
+func (m *mockToolContext) AgentName() string { return "mock_agent" }
+
+func (m *mockToolContext) InvocationID() string { return "mock_invocation" }
+
+func (m *mockToolContext) AppName() string { return "mock_app" }
+
+func (m *mockToolContext) Branch() string { return "mock_branch" }
+
+func (m *mockToolContext) SessionID() string { return "mock_session" }
+
 func (m *mockToolContext) UserID() string                                          { return "mock_user" }
 func (m *mockToolContext) WithContext(ctx context.Context) agent.InvocationContext { return m }
 
@@ -283,6 +290,113 @@ Begin example
 [user]
 call func
 [model]
+` + "```" + `
+my_tool(arg1='val1')
+` + "```" + `
+[user]
+` + "```" + `
+&{<nil>  []  my_tool map[result:ok]}
+` + "```" + `
+End example
+
+End few-shot
+<EXAMPLES>`,
+		},
+		{
+			name: "FunctionCallExample_NoModel",
+			examples: []*Example{
+				{
+					Input: genai.NewContentFromText("call func", "user"),
+					Output: []*genai.Content{
+						{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "my_tool",
+										Args: map[string]any{"arg1": "val1"},
+									},
+								},
+							},
+						},
+						{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     "my_tool",
+										Response: map[string]any{"result": "ok"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			userContent: genai.NewContentFromText("query", "user"),
+			wantInstruct: `<EXAMPLES>
+Begin few-shot
+The following are examples of user queries and model responses using the available tools.
+
+EXAMPLE 1:
+Begin example
+[user]
+call func
+[model]
+` + "```" + `
+my_tool(arg1='val1')
+` + "```" + `
+[user]
+` + "```" + `
+&{<nil>  []  my_tool map[result:ok]}
+` + "```" + `
+End example
+
+End few-shot
+<EXAMPLES>`,
+		},
+		{
+			name: "FunctionCallExample_NonGemini",
+			examples: []*Example{
+				{
+					Input: genai.NewContentFromText("call func", "user"),
+					Output: []*genai.Content{
+						{
+							Role: "model",
+							Parts: []*genai.Part{
+								{
+									FunctionCall: &genai.FunctionCall{
+										Name: "my_tool",
+										Args: map[string]any{"arg1": "val1"},
+									},
+								},
+							},
+						},
+						{
+							Role: "user",
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     "my_tool",
+										Response: map[string]any{"result": "ok"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			userContent: genai.NewContentFromText("query", "user"),
+			model:       "claude-sonnet-4-5",
+			wantInstruct: `<EXAMPLES>
+Begin few-shot
+The following are examples of user queries and model responses using the available tools.
+
+EXAMPLE 1:
+Begin example
+[user]
+call func
+[model]
 ` + "```tool_code" + `
 my_tool(arg1='val1')
 ` + "```" + `
@@ -334,6 +448,50 @@ End few-shot
 				t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestExampleTool_ProcessRequestStableArgumentOrder checks that an example
+// function call's arguments are written in the same order on every request, so
+// the system instruction does not change from one request to the next.
+func TestExampleTool_ProcessRequestStableArgumentOrder(t *testing.T) {
+	et, err := New(ExampleToolConfig{Examples: []*Example{{
+		Input: genai.NewContentFromText("book a flight", "user"),
+		Output: []*genai.Content{{
+			Role: "model",
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					Name: "book_flight",
+					Args: map[string]any{
+						"origin":      "SFO",
+						"destination": "JFK",
+						"date":        "2026-11-01",
+						"passengers":  2,
+						"cabin":       "economy",
+						"refundable":  true,
+					},
+				},
+			}},
+		}},
+	}}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	const wantCall = "book_flight(cabin='economy', date='2026-11-01', destination='JFK', origin='SFO', passengers=2, refundable=true)"
+	// Repeated so that a map order that happens to come out sorted once
+	// cannot pass the test.
+	for range 20 {
+		req := &model.LLMRequest{Model: "gemini-2.5-flash"}
+		ctx := &mockToolContext{
+			Context:     t.Context(),
+			userContent: genai.NewContentFromText("query", "user"),
+		}
+		if err := et.ProcessRequest(ctx, req); err != nil {
+			t.Fatalf("ProcessRequest() error = %v", err)
+		}
+		if got := req.Config.SystemInstruction.Parts[0].Text; !strings.Contains(got, wantCall) {
+			t.Fatalf("system instruction does not contain %q:\n%s", wantCall, got)
+		}
 	}
 }
 

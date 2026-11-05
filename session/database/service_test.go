@@ -17,6 +17,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
@@ -33,7 +35,7 @@ import (
 )
 
 func Test_databaseService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, ChecksRequestedAuthConfigs: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyService(t)
 	})
@@ -293,7 +295,7 @@ func TestNewSessionServiceFromDB(t *testing.T) {
 }
 
 func Test_databaseServiceFromDB(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, ChecksRequestedAuthConfigs: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyServiceFromDB(t)
 	})
@@ -509,5 +511,268 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 	slices.Reverse(reversed)
 	if cmp.Diff(reversed, first) == "" {
 		t.Errorf("tied events came back in reverse insertion order:\n%v", first)
+	}
+}
+
+// App and user state are shared across sessions and stored as one JSON
+// document per row, so AppendEvent reads, merges and writes the whole row.
+// Without a row lock, two sessions appending at once on Postgres or MySQL both
+// read the old row and the later write drops the earlier one's keys. SQLite
+// serializes writers and drops the FOR UPDATE clause, so this test checks the
+// statements AppendEvent issues rather than reproducing the race: only the
+// scopes the event changes are inserted and locked, and the app row is locked
+// before the user row is touched, the order Create writes them in.
+func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delta map[string]any
+		want  []string
+	}{
+		{
+			name: "no delta",
+			want: []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "session only",
+			delta: map[string]any{"s": 1},
+			want:  []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "app only",
+			delta: map[string]any{"app:a": 1},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"select user_states",
+			},
+		},
+		{
+			name:  "user only",
+			delta: map[string]any{"user:u": 2},
+			want: []string{
+				"select app_states",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+		{
+			name:  "app and user",
+			delta: map[string]any{"app:a": 1, "user:u": 2, "s": 3},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := emptyService(t)
+			created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			got := recordStateRowStatements(t, s)
+
+			event := &session.Event{
+				ID:        "e1",
+				Author:    "user",
+				Timestamp: time.Now(),
+				Actions:   session.EventActions{StateDelta: tc.delta},
+			}
+			if err := s.AppendEvent(t.Context(), created.Session, event); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+
+			if !slices.Equal(*got, tc.want) {
+				t.Errorf("AppendEvent state statements:\n got %q\nwant %q", *got, tc.want)
+			}
+
+			resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			for key, want := range tc.delta {
+				if v, err := resp.Session.State().Get(key); err != nil || v != float64(want.(int)) {
+					t.Errorf("state[%q] = %v, %v; want %v", key, v, err, want)
+				}
+			}
+		})
+	}
+}
+
+// Create writes the same shared rows as AppendEvent, so it needs the same
+// locks. Without them, two sessions created at once for a new user both read
+// no row and the later write replaces the earlier one's keys, and a Create
+// racing an AppendEvent from another session can drop the append's keys.
+func TestDatabaseService_Create_LocksSharedStateRows(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state map[string]any
+		want  []string
+	}{
+		{
+			name: "no state",
+			want: []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "session only",
+			state: map[string]any{"s": 1},
+			want:  []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "app only",
+			state: map[string]any{"app:a": 1},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"select user_states",
+			},
+		},
+		{
+			name:  "user only",
+			state: map[string]any{"user:u": 2},
+			want: []string{
+				"select app_states",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+		{
+			name:  "app and user",
+			state: map[string]any{"app:a": 1, "user:u": 2, "s": 3},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := emptyService(t)
+			got := recordStateRowStatements(t, s)
+
+			created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: tc.state})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if !slices.Equal(*got, tc.want) {
+				t.Errorf("Create state statements:\n got %q\nwant %q", *got, tc.want)
+			}
+
+			resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			for key, want := range tc.state {
+				if v, err := resp.Session.State().Get(key); err != nil || v != float64(want.(int)) {
+					t.Errorf("state[%q] = %v, %v; want %v", key, v, err, want)
+				}
+			}
+		})
+	}
+}
+
+// When the shared rows already exist, Create must keep the keys another
+// session wrote there and return them in the new session's state.
+func TestDatabaseService_Create_KeepsExistingSharedState(t *testing.T) {
+	s := emptyService(t)
+	if _, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:a": 1, "user:u": 10}}); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+
+	created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:b": 2, "user:v": 20}})
+	if err != nil {
+		t.Fatalf("second Create: %v", err)
+	}
+
+	resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := map[string]float64{"app:a": 1, "user:u": 10, "app:b": 2, "user:v": 20}
+	for name, state := range map[string]session.State{"Create": created.Session.State(), "Get": resp.Session.State()} {
+		for key, w := range want {
+			if v, err := state.Get(key); err != nil || fmt.Sprint(v) != fmt.Sprint(w) {
+				t.Errorf("%s state[%q] = %v, %v; want %v", name, key, v, err, w)
+			}
+		}
+	}
+}
+
+// recordStateRowStatements records the inserts and selects s issues against
+// the app_states and user_states tables from now until the test ends, noting
+// the ON CONFLICT and FOR UPDATE clauses that make them safe to run
+// concurrently. Updates are not recorded.
+func recordStateRowStatements(t *testing.T, s *databaseService) *[]string {
+	t.Helper()
+	var got []string
+	record := func(op string) func(*gorm.DB) {
+		return func(tx *gorm.DB) {
+			table := tx.Statement.Table
+			if table != "app_states" && table != "user_states" {
+				return
+			}
+			stmt := op + " " + table
+			if c, ok := tx.Statement.Clauses["ON CONFLICT"]; ok {
+				if onConflict, _ := c.Expression.(clause.OnConflict); onConflict.DoNothing {
+					stmt += " on conflict do nothing"
+				} else {
+					stmt += " on conflict do update"
+				}
+			}
+			if _, ok := tx.Statement.Clauses["FOR"]; ok {
+				stmt += " for update"
+			}
+			got = append(got, stmt)
+		}
+	}
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:record_query", record("select")); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:record_query") })
+	if err := s.db.Callback().Create().Before("gorm:create").Register("test:record_create", record("insert")); err != nil {
+		t.Fatalf("register create callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Create().Remove("test:record_create") })
+	return &got
+}
+
+// TestDatabaseService_NonJSONStateErrorSurfaces guards against the
+// GormValuer path discarding json.Marshal errors: stateMap.GormValue used to
+// do `data, _ := json.Marshal(sm)` and bind an empty payload, and because
+// GORM dispatches GormValuer before driver.Valuer, the error-returning
+// Value() path was never reached. A NaN state value must fail the write at
+// the boundary instead of silently persisting an empty state (#1537).
+func TestDatabaseService_NonJSONStateErrorSurfaces(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	if _, err := s.Create(ctx, &session.CreateRequest{
+		AppName: "app",
+		UserID:  "user-bad",
+		State:   map[string]any{"bad": math.NaN()},
+	}); err == nil {
+		t.Fatalf("expected an error writing non-JSON state (NaN), got nil")
+	}
+
+	// The session row for the bad write must not exist: the write must fail
+	// at the boundary, not persist an empty payload.
+	var count int64
+	if err := s.db.Model(&storageSession{}).Where("app_name = ? AND user_id = ?", "app", "user-bad").Count(&count).Error; err != nil {
+		t.Fatalf("count sessions: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected no persisted session for the failing write, found %d", count)
 	}
 }

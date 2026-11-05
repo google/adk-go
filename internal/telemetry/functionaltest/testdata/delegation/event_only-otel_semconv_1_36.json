@@ -61,6 +61,7 @@
                 ],
                 "role": "model"
               },
+              "finish_reason": "STOP",
               "index": 0
             },
             "attributes": {}
@@ -242,6 +243,7 @@
                 ],
                 "role": "model"
               },
+              "finish_reason": "STOP",
               "index": 0
             },
             "attributes": {}

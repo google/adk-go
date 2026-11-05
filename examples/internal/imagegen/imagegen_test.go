@@ -39,6 +39,13 @@ func TestImageBytes(t *testing.T) {
 			wantErr:  "image generation returned no images",
 		},
 		{
+			name: "empty generated images",
+			response: &genai.GenerateImagesResponse{
+				GeneratedImages: []*genai.GeneratedImage{},
+			},
+			wantErr: "image generation returned no images",
+		},
+		{
 			name: "nil generated image",
 			response: &genai.GenerateImagesResponse{
 				GeneratedImages: []*genai.GeneratedImage{nil},
@@ -118,6 +125,22 @@ func TestImageBytes(t *testing.T) {
 				},
 			},
 			want:     []byte("first image"),
+			wantMIME: "image/jpeg",
+		},
+		{
+			name: "usable image with a filtering reason",
+			response: &genai.GenerateImagesResponse{
+				GeneratedImages: []*genai.GeneratedImage{
+					{
+						Image: &genai.Image{
+							ImageBytes: []byte("image"),
+							MIMEType:   "image/jpeg",
+						},
+						RAIFilteredReason: "filtered",
+					},
+				},
+			},
+			want:     []byte("image"),
 			wantMIME: "image/jpeg",
 		},
 		{

@@ -75,7 +75,7 @@ func (m *resilientModel) GenerateContent(ctx context.Context, req *model.LLMRequ
 			}
 			lastErr = err
 
-			// A cancelled parent context is a real abort, not our
+			// A canceled parent context is a real abort, not our
 			// per-attempt timeout: propagate it instead of failing open.
 			if ctx.Err() != nil {
 				yield(nil, ctx.Err())

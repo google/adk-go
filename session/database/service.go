@@ -31,7 +31,9 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
@@ -120,16 +122,31 @@ func (s *databaseService) Create(ctx context.Context, req *session.CreateRequest
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		storageApp, err := fetchStorageAppState(tx, req.AppName)
-		if err != nil {
-			return fmt.Errorf("error on create session: %w", err)
-		}
-		storageUser, err := fetchStorageUserState(tx, req.AppName, req.UserID)
-		if err != nil {
-			return fmt.Errorf("error on create session: %w", err)
-		}
-
 		appDelta, userDelta, sessionState := extractStateDeltas(req.State)
+
+		var err error
+		// Lock the shared rows this session's state changes, app before user,
+		// for the same reasons and in the same order as applyEvent.
+		appTx := tx
+		if len(appDelta) > 0 {
+			if appTx, err = lockStateRow(tx, &storageAppState{AppName: req.AppName, State: map[string]any{}, UpdateTime: createdSession.UpdateTime}); err != nil {
+				return fmt.Errorf("failed to lock app state: %w", err)
+			}
+		}
+		storageApp, err := fetchStorageAppState(appTx, req.AppName)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
+		}
+		userTx := tx
+		if len(userDelta) > 0 {
+			if userTx, err = lockStateRow(tx, &storageUserState{AppName: req.AppName, UserID: req.UserID, State: map[string]any{}, UpdateTime: createdSession.UpdateTime}); err != nil {
+				return fmt.Errorf("failed to lock user state: %w", err)
+			}
+		}
+		storageUser, err := fetchStorageUserState(userTx, req.AppName, req.UserID)
+		if err != nil {
+			return fmt.Errorf("error on create session: %w", err)
+		}
 
 		// apply state delta
 		if len(appDelta) > 0 {
@@ -372,6 +389,11 @@ func (s *databaseService) AppendEvent(ctx context.Context, curSession session.Se
 	if event.Partial {
 		return nil
 	}
+	// A stored request that does not decode would fail every later read of
+	// the session. Checked before the local session takes the event.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("cannot append event: %w", err)
+	}
 	// Give the event an identity if it arrived without one, matching the
 	// in-memory service. An event built as a struct literal by an agent or a
 	// tool never passes through session.NewEvent, and anything that identifies
@@ -433,17 +455,39 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 			)
 		}
 
-		// Fetch App and User states.
-		storageApp, err := fetchStorageAppState(tx, sess.AppName())
-		if err != nil {
-			return err
+		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+
+		// App and user state are shared with other sessions and written back
+		// whole, so lock their rows before reading them when this event changes
+		// them. Otherwise a concurrent append from another session reads the
+		// same row and the later write drops the earlier one's keys. This
+		// matches adk-python, which locks these rows FOR UPDATE.
+		//
+		// Lock and read the app row before touching the user row. Create
+		// writes app then user, and inserting the user row first would hold
+		// it while waiting for an app row lock that Create holds, so the two
+		// could deadlock.
+		appTx := tx
+		if len(appDelta) > 0 {
+			if appTx, err = lockStateRow(tx, &storageAppState{AppName: sess.AppName(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+				return fmt.Errorf("failed to lock app state: %w", err)
+			}
 		}
-		storageUser, err := fetchStorageUserState(tx, sess.AppName(), sess.UserID())
+		storageApp, err := fetchStorageAppState(appTx, sess.AppName())
 		if err != nil {
 			return err
 		}
 
-		appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
+		userTx := tx
+		if len(userDelta) > 0 {
+			if userTx, err = lockStateRow(tx, &storageUserState{AppName: sess.AppName(), UserID: sess.UserID(), State: map[string]any{}, UpdateTime: event.Timestamp}); err != nil {
+				return fmt.Errorf("failed to lock user state: %w", err)
+			}
+		}
+		storageUser, err := fetchStorageUserState(userTx, sess.AppName(), sess.UserID())
+		if err != nil {
+			return err
+		}
 
 		// Merge state deltas and update the storage objects.
 		// GORM's .Save() method will correctly perform an INSERT or UPDATE.
@@ -489,6 +533,17 @@ func (s *databaseService) applyEvent(ctx context.Context, sess *localSession, ev
 	})
 
 	return err
+}
+
+// lockStateRow makes sure the state row exists and returns tx set to read it
+// FOR UPDATE. A missing row is inserted empty first, since FOR UPDATE cannot
+// lock a row that does not exist yet, and a concurrent insert of the same row
+// is ignored. SQLite ignores the locking clause; it serializes writers anyway.
+func lockStateRow(tx *gorm.DB, emptyRow any) (*gorm.DB, error) {
+	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(emptyRow).Error; err != nil {
+		return nil, err
+	}
+	return tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}), nil
 }
 
 func fetchStorageAppState(tx *gorm.DB, appName string) (*storageAppState, error) {

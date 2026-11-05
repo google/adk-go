@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/v2/session"
@@ -97,6 +98,9 @@ func (s TestSession) LastUpdateTime() time.Time {
 }
 
 type FakeSessionService struct {
+	// mu guards Sessions so the fake is safe under concurrent handler calls
+	// (e.g. the PubSub/Eventarc MaxConcurrentRuns tests).
+	mu       sync.Mutex
 	Sessions map[SessionKey]TestSession
 }
 
@@ -107,6 +111,8 @@ type SessionKey struct {
 }
 
 func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequest) (*session.CreateResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.Sessions[SessionKey{AppName: req.AppName, UserID: req.UserID, SessionID: req.SessionID}]; ok {
 		return nil, fmt.Errorf("session already exists")
 	}
@@ -135,6 +141,8 @@ func (s *FakeSessionService) Create(ctx context.Context, req *session.CreateRequ
 }
 
 func (s *FakeSessionService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if sess, ok := s.Sessions[SessionKey{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
@@ -148,6 +156,8 @@ func (s *FakeSessionService) Get(ctx context.Context, req *session.GetRequest) (
 }
 
 func (s *FakeSessionService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	result := []session.Session{}
 	for _, session := range s.Sessions {
 		if session.Id.AppName != req.AppName || session.Id.UserID != req.UserID {
@@ -161,6 +171,8 @@ func (s *FakeSessionService) List(ctx context.Context, req *session.ListRequest)
 }
 
 func (s *FakeSessionService) Delete(ctx context.Context, req *session.DeleteRequest) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	id := SessionKey{
 		AppName:   req.AppName,
 		UserID:    req.UserID,
@@ -174,6 +186,8 @@ func (s *FakeSessionService) Delete(ctx context.Context, req *session.DeleteRequ
 }
 
 func (s *FakeSessionService) AppendEvent(ctx context.Context, curSession session.Session, event *session.Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	testSession, ok := curSession.(*TestSession)
 	if !ok {
 		return fmt.Errorf("invalid session type")

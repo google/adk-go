@@ -379,7 +379,7 @@ func TestCheckForwardedHeaders(t *testing.T) {
 			// No origins configured, so the same-origin comparison is the only
 			// thing that can accept these, and the forwarded headers are the
 			// only record of what the browser addressed. Host is the internal
-			// address the proxy dialled, which is not what the browser saw.
+			// address the proxy dialed, which is not what the browser saw.
 			r := on("192.168.1.5", "10.0.0.7:8080")
 			for name, value := range tc.headers {
 				r.Header.Set(name, value)
@@ -411,7 +411,7 @@ func TestLoopbackBindBehindLocalProxy(t *testing.T) {
 
 // TestForwardedHeadersCannotDefeatHostGuard pins that the rebinding check reads
 // only the real Host header. A page may set X-Forwarded-Host and Forwarded on a
-// same-origin fetch, so honouring them there would hand the attacker the guard.
+// same-origin fetch, so honoring them there would hand the attacker the guard.
 func TestForwardedHeadersCannotDefeatHostGuard(t *testing.T) {
 	for _, header := range []string{"X-Forwarded-Host", "Forwarded"} {
 		t.Run(header, func(t *testing.T) {

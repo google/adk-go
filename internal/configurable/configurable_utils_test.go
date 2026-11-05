@@ -178,7 +178,7 @@ func TestResolveToolReferenceMcpToolsetNonStringArgs(t *testing.T) {
 }
 
 // TestResolveAgentReferenceRelativeParentPath covers a parent path that is not
-// absolute, which the containment check must normalise before comparing.
+// absolute, which the containment check must normalize before comparing.
 func TestResolveAgentReferenceRelativeParentPath(t *testing.T) {
 	_, parentPath := newAgentDir(t)
 	agentDir := filepath.Dir(parentPath)

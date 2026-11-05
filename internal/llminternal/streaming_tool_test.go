@@ -310,7 +310,7 @@ func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
 	gotCancels := cancelCount
 	cancelMu.Unlock()
 	if gotCancels != 2 {
-		t.Errorf("expected exactly 2 goroutines to be cancelled, got: %d", gotCancels)
+		t.Errorf("expected exactly 2 goroutines to be canceled, got: %d", gotCancels)
 	}
 
 	liveSess.mu.Lock()

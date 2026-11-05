@@ -21,6 +21,7 @@ package llmagent
 import (
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -83,8 +84,8 @@ func New(cfg Config) (agent.Agent, error) {
 			Model:                     cfg.Model,
 			Mode:                      cfg.Mode,
 			GenerateContentConfig:     cfg.GenerateContentConfig,
-			Tools:                     cfg.Tools,
-			Toolsets:                  cfg.Toolsets,
+			Tools:                     slices.Clone(cfg.Tools),
+			Toolsets:                  slices.Clone(cfg.Toolsets),
 			DisallowTransferToParent:  cfg.DisallowTransferToParent,
 			DisallowTransferToPeers:   cfg.DisallowTransferToPeers,
 			InputSchema:               cfg.InputSchema,
@@ -127,6 +128,9 @@ func New(cfg Config) (agent.Agent, error) {
 	state := agentinternal.Reveal(internalAgent)
 	state.AgentType = agentinternal.TypeLLMAgent
 	state.Config = cfg
+	// A before-agent callback that returns content short-circuits the run, so its
+	// event never reaches llmAgent.run. Give it the same output_key handling.
+	state.OnBeforeAgentCallbackEvent = a.maybeSaveOutputToState
 
 	if err := installTaskTools(a); err != nil {
 		return nil, err
@@ -194,19 +198,12 @@ type Config struct {
 	// allow agent transferring across the tree.
 	SubAgents []agent.Agent
 
-	// BeforeAgentCallbacks is a list of callbacks that are called sequentially
-	// before the agent starts its run.
-	//
-	// If any callback returns non-nil content or error, then the agent run and
-	// the remaining callbacks will be skipped, and a new event will be created
-	// from the content or error of that callback.
+	// BeforeAgentCallbacks are called sequentially before the agent starts its
+	// run. See [agent.BeforeAgentCallback] for how return values affect execution.
 	BeforeAgentCallbacks []agent.BeforeAgentCallback
-	// AfterAgentCallbacks is a list of callbacks that are called sequentially
-	// after the agent has completed its run.
-	//
-	// If any callback returns non-nil content or error, then a new event will be
-	// created from the content or error of that callback and the remaining
-	// callbacks will be skipped.
+	// AfterAgentCallbacks are called sequentially after the agent completes its
+	// run. See [agent.AfterAgentCallback] for when they are skipped and how return
+	// values affect execution.
 	AfterAgentCallbacks []agent.AfterAgentCallback
 
 	// GenerateContentConfig is for the additional content generation
@@ -248,6 +245,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -277,6 +276,8 @@ type Config struct {
 	//    treated as a literal.
 	//  - {artifact.key_name} can be used to insert the text content of the
 	//    artifact named key_name.
+	//  - A placeholder directly preceded by $ or \ is treated as a literal,
+	//    so "${key_name}", "${{key_name}}" and "\{key_name}" are left as is.
 	//
 	// If the state variable or artifact does not exist, the agent will raise an
 	// error. If you want to ignore the error, you can append a ? to the
@@ -375,7 +376,10 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
-// is replaced with the returned response/error.
+// is replaced with the returned response/error. A replacement keeps the
+// Partial, TurnComplete and UsageMetadata of the response it replaces unless
+// it sets them itself; since Partial and TurnComplete are bools, setting them
+// to false has no effect.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.

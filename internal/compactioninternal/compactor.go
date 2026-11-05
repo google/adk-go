@@ -20,8 +20,6 @@ import (
 	"reflect"
 	"slices"
 
-	"go.opentelemetry.io/otel/codes"
-
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/internal/telemetry"
@@ -89,7 +87,7 @@ func SlidingWindow(ctx context.Context, cfg *compaction.Config, sess session.Ses
 //
 // A summarization is not over when the summarizer returns. The caller still has
 // to decide whether to keep the result, and it can throw it away for half a
-// dozen reasons: a cancelled turn, a failed re-read, a competing compaction, a
+// dozen reasons: a canceled turn, a failed re-read, a competing compaction, a
 // plugin rejecting it, or a failed append. Ending the span at the summarizer
 // left every one of those reporting success, with a result_event_id naming an
 // event that exists in no session.
@@ -159,8 +157,7 @@ func summarizeTraced(ctx context.Context, cfg *compaction.Config, sess session.S
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("summarizer panicked: %v", r)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			telemetry.RecordError(span, err)
 			span.End()
 			finished = true
 			panic(r)
