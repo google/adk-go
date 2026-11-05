@@ -293,13 +293,16 @@ func TestGenerateContent(t *testing.T) {
 }
 
 // TestGenerateContentWithRequestModel checks the URL a request is sent to when
-// LLMRequest.Model holds the model's Name(), which is what the LLM flow sets.
+// LLMRequest.Model holds the model's Name(), which is what the LLM flow sets,
+// or another model, which a BeforeModelCallback may set.
 func TestGenerateContentWithRequestModel(t *testing.T) {
 	tests := []struct {
 		name      string
 		modelName string
-		vertexAI  bool
-		wantURL   string
+		// requestModel is the LLMRequest.Model to send. Empty means Name().
+		requestModel string
+		vertexAI     bool
+		wantURL      string
 	}{
 		{
 			name:      "model_id_only",
@@ -321,6 +324,18 @@ func TestGenerateContentWithRequestModel(t *testing.T) {
 			modelName: "apigee/vertex_ai/v1beta1/gemini-2.5-flash",
 			vertexAI:  true,
 			wantURL:   proxyURL + "/v1beta1/projects/test-project/locations/test-location/publishers/google/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:         "request_model_differs_from_wrapper_model",
+			modelName:    "apigee/v1/gemini-2.5-flash",
+			requestModel: "gemini-2.5-pro",
+			wantURL:      proxyURL + "/v1/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:         "request_model_with_apigee_path_differs_from_wrapper_model",
+			modelName:    "apigee/v1/gemini-2.5-flash",
+			requestModel: "apigee/v1/gemini-2.5-pro",
+			wantURL:      proxyURL + "/v1/models/gemini-2.5-pro:generateContent",
 		},
 	}
 	for _, tt := range tests {
@@ -344,8 +359,12 @@ func TestGenerateContentWithRequestModel(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewModel(%q) error = %v", tt.modelName, err)
 			}
+			requestModel := tt.requestModel
+			if requestModel == "" {
+				requestModel = m.Name()
+			}
 			req := &model.LLMRequest{
-				Model:    m.Name(),
+				Model:    requestModel,
 				Contents: genai.Text("What is the capital of France? One word."),
 			}
 			for _, err := range m.GenerateContent(t.Context(), req, false) {
