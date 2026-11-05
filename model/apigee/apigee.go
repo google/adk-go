@@ -128,6 +128,11 @@ func (m *apigeeModel) Name() string {
 
 // GenerateContent calls the underlying model.
 func (m *apigeeModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	// The flow sets req.Model to Name(), the full "apigee/..." string, and the
+	// delegate prefers req.Model over the model ID it was built with. Only the
+	// model ID, the last path component, names a model on the proxy, as in
+	// adk-python's ApigeeLlm._preprocess_request.
+	req.Model = req.Model[strings.LastIndex(req.Model, "/")+1:]
 	return m.delegate.GenerateContent(ctx, req, stream)
 }
 
