@@ -119,6 +119,14 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 			wantText: "hel", wantFinish: genai.FinishReasonMaxTokens,
 		},
 		{
+			name: "incomplete terminal recovers invalid arguments without diagnostic",
+			events: []string{
+				evDelta1, added, argsDone,
+				`{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[` + badCall + `]}}`,
+			},
+			wantText: "hel", wantCall: true, wantFinish: genai.FinishReasonMaxTokens,
+		},
+		{
 			name:   "consumer stops before terminal",
 			events: []string{evDelta1, completed("[" + unsupported + "]")}, stopEarly: true,
 		},
@@ -156,6 +164,9 @@ func TestModel_GenerateStream_TerminalConversionDiagnostic(t *testing.T) {
 						if resp.Partial {
 							partials++
 						} else {
+							// InstrumentGenerateContent ends its span before
+							// yielding the final response to the caller.
+							span.End()
 							final = resp
 							finals++
 						}
