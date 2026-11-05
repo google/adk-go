@@ -76,6 +76,11 @@ type SuiteOptions struct {
 	SupportsUserProvidedSessionID bool
 	ProvidesServerAssignedEventID bool
 	AppName                       string
+	// SupportsGetUserState indicates the service implements
+	// [session.UserStateGetter]. When false, the GetUserState battery is
+	// skipped; the Vertex AI service is the in-tree case, because it exposes
+	// user state only as merged into a session.
+	SupportsGetUserState bool
 }
 
 // RunServiceTests runs a battery of standard tests against a Session.Service.
@@ -1066,6 +1071,93 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 			if got := stored.Actions.StateDelta["sk"]; got != "v2" {
 				t.Errorf("non-temp key dropped from the stored event delta: got %v, want %q", stored.Actions.StateDelta, "v2")
+			}
+		})
+	})
+
+	if !opts.SupportsGetUserState {
+		return
+	}
+
+	t.Run("GetUserState", func(t *testing.T) {
+		ctx := t.Context()
+		appName := testAppName
+
+		// newService returns a fresh service and its user-state capability,
+		// checking that the option and the implementation agree.
+		newService := func(t *testing.T) (session.Service, session.UserStateGetter) {
+			t.Helper()
+			svc := setup(t)
+			getter, ok := svc.(session.UserStateGetter)
+			if !ok {
+				t.Fatalf("SupportsGetUserState is set but %T does not implement session.UserStateGetter", svc)
+			}
+			return svc, getter
+		}
+
+		t.Run("no_state_returns_empty_map", func(t *testing.T) {
+			_, getter := newService(t)
+			resp, err := getter.GetUserState(ctx, &session.GetUserStateRequest{AppName: appName, UserID: "no-such-user"})
+			if err != nil {
+				t.Fatalf("GetUserState() error = %v", err)
+			}
+			if len(resp.State) != 0 {
+				t.Errorf("GetUserState() state = %v, want empty", resp.State)
+			}
+		})
+
+		t.Run("reflects_user_state_without_active_session", func(t *testing.T) {
+			s, getter := newService(t)
+			s1, err := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", State: map[string]any{"user:k1": "v1"}})
+			if err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			if err := s.AppendEvent(ctx, s1.Session, &session.Event{
+				ID:           "event1",
+				Author:       "user",
+				InvocationID: "inv1",
+				Actions:      session.EventActions{StateDelta: map[string]any{"user:k2": "v2"}},
+			}); err != nil {
+				t.Fatalf("AppendEvent failed: %v", err)
+			}
+
+			resp, err := getter.GetUserState(ctx, &session.GetUserStateRequest{AppName: appName, UserID: "u1"})
+			if err != nil {
+				t.Fatalf("GetUserState() error = %v", err)
+			}
+			if resp.State["k1"] != "v1" || resp.State["k2"] != "v2" {
+				t.Errorf("GetUserState() state = %v, want k1=v1, k2=v2 (unprefixed)", resp.State)
+			}
+			if _, exists := resp.State["user:k1"]; exists {
+				t.Errorf("GetUserState() state = %v, want no user: prefixed keys", resp.State)
+			}
+		})
+
+		t.Run("is_scoped_per_user", func(t *testing.T) {
+			s, getter := newService(t)
+			if _, err := s.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "u1", State: map[string]any{"user:k1": "v1"}}); err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+
+			resp, err := getter.GetUserState(ctx, &session.GetUserStateRequest{AppName: appName, UserID: "u2"})
+			if err != nil {
+				t.Fatalf("GetUserState() error = %v", err)
+			}
+			if _, exists := resp.State["k1"]; exists {
+				t.Errorf("GetUserState() leaked user1 state to user2, got: %v", resp.State)
+			}
+		})
+
+		t.Run("rejects_missing_identifiers", func(t *testing.T) {
+			_, getter := newService(t)
+			for _, req := range []*session.GetUserStateRequest{
+				nil,
+				{AppName: appName},
+				{UserID: "u1"},
+			} {
+				if _, err := getter.GetUserState(ctx, req); err == nil {
+					t.Errorf("GetUserState(%+v) error = nil, want a validation error", req)
+				}
 			}
 		})
 	})

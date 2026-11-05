@@ -34,7 +34,7 @@ import (
 )
 
 func Test_databaseService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, SupportsGetUserState: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyService(t)
 	})
@@ -294,7 +294,7 @@ func TestNewSessionServiceFromDB(t *testing.T) {
 }
 
 func Test_databaseServiceFromDB(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, SupportsGetUserState: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyServiceFromDB(t)
 	})

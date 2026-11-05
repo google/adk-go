@@ -157,3 +157,8 @@ func (s *vertexAiService) AppendEvent(ctx context.Context, sess session.Session,
 	}
 	return nil
 }
+
+// The Vertex AI session service does not implement [session.UserStateGetter]:
+// Vertex AI exposes user-scoped state only as merged into individual sessions,
+// not as an independently queryable resource. This mirrors adk-python, whose
+// VertexAiSessionService raises NotImplementedError.
