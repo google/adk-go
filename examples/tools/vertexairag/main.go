@@ -68,9 +68,8 @@ func main() {
 	}
 
 	ragTool, err := vertexairag.New(vertexairag.Config{
-		Name:        "documentation_retrieval",
 		Description: "Retrieves relevant passages from the documentation corpus.",
-		RagResources: []*genai.VertexRAGStoreRAGResource{
+		RAGResources: []*genai.VertexRAGStoreRAGResource{
 			{RAGCorpus: corpus},
 		},
 	})

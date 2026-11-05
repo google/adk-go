@@ -15,6 +15,7 @@
 package vertexairag_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -28,75 +29,67 @@ import (
 
 const testCorpus = "projects/test-project/locations/us-central1/ragCorpora/test-corpus"
 
-// mustNewTool builds a tool with a fixed, valid config for ProcessRequest and
-// Declaration tests.
-func mustNewTool(t *testing.T) tool.Tool {
-	t.Helper()
-	topK := int32(3)
-	tl, err := vertexairag.New(vertexairag.Config{
-		Name:           "rag_retrieval",
-		Description:    "Retrieves documentation.",
-		RagCorpora:     []string{testCorpus},
-		SimilarityTopK: &topK,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	return tl
-}
-
 func TestNew(t *testing.T) {
-	topK := int32(5)
-	tests := []struct {
-		name    string
-		cfg     vertexairag.Config
-		wantErr bool
+	testCases := []struct {
+		name        string
+		cfg         vertexairag.Config
+		wantErrText string // substring; empty means no error expected
 	}{
 		{
-			name:    "missing name",
-			cfg:     vertexairag.Config{Description: "d", RagCorpora: []string{testCorpus}},
-			wantErr: true,
+			name:        "missing description",
+			cfg:         vertexairag.Config{RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}}},
+			wantErrText: "Config.Description is required",
 		},
 		{
-			name:    "missing description",
-			cfg:     vertexairag.Config{Name: "rag_retrieval", RagCorpora: []string{testCorpus}},
-			wantErr: true,
+			name:        "nil resources",
+			cfg:         vertexairag.Config{Description: "d"},
+			wantErrText: "Config.RAGResources is required",
 		},
 		{
-			name:    "no corpus source",
-			cfg:     vertexairag.Config{Name: "rag_retrieval", Description: "d"},
-			wantErr: true,
+			name:        "empty resources",
+			cfg:         vertexairag.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{}},
+			wantErrText: "Config.RAGResources is required",
 		},
 		{
-			name: "valid with corpora",
+			name:        "nil resource element",
+			cfg:         vertexairag.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}, nil}},
+			wantErrText: "Config.RAGResources cannot be nil",
+		},
+		{
+			name: "minimal config",
 			cfg: vertexairag.Config{
-				Name:           "rag_retrieval",
-				Description:    "Retrieves documentation.",
-				RagCorpora:     []string{testCorpus},
-				SimilarityTopK: &topK,
+				Description:  "Retrieves documentation.",
+				RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}},
 			},
 		},
 		{
-			name: "valid with resources",
+			name: "full config",
 			cfg: vertexairag.Config{
-				Name:         "rag_retrieval",
-				Description:  "Retrieves documentation.",
-				RagResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}},
+				Description:             "Retrieves documentation.",
+				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+				SimilarityTopK:          genai.Ptr[int32](5),
+				VectorDistanceThreshold: genai.Ptr(0.4),
 			},
 		},
 	}
 
-	for _, tt := range tests {
+	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := vertexairag.New(tt.cfg)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("New() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
+			if tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("New() error = nil, want error containing %q", tt.wantErrText)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("New() error = %q, want it to contain %q", err, tt.wantErrText)
+				}
 				return
 			}
-			if got.Name() != tt.cfg.Name {
-				t.Errorf("Name() = %q, want %q", got.Name(), tt.cfg.Name)
+			if err != nil {
+				t.Fatalf("New() unexpected error = %v", err)
+			}
+			if got.Name() != "ragtool" {
+				t.Errorf("Name() = %q, want %q", got.Name(), "ragtool")
 			}
 			if got.Description() != tt.cfg.Description {
 				t.Errorf("Description() = %q, want %q", got.Description(), tt.cfg.Description)
@@ -107,81 +100,99 @@ func TestNew(t *testing.T) {
 			if _, ok := got.(toolinternal.RequestProcessor); !ok {
 				t.Error("tool does not implement toolinternal.RequestProcessor")
 			}
+			// The tool is a model-side built-in only; it must not be offered to
+			// the model as a callable function.
+			if _, ok := got.(toolinternal.FunctionTool); ok {
+				t.Error("tool implements toolinternal.FunctionTool, want built-in only")
+			}
 		})
 	}
 }
 
-func TestDeclaration(t *testing.T) {
-	ft, ok := mustNewTool(t).(toolinternal.FunctionTool)
-	if !ok {
-		t.Fatal("tool does not implement toolinternal.FunctionTool")
+func TestProcessRequest(t *testing.T) {
+	cfg := vertexairag.Config{
+		Description:             "Retrieves documentation.",
+		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		SimilarityTopK:          genai.Ptr[int32](3),
+		VectorDistanceThreshold: genai.Ptr(0.5),
 	}
-	decl := ft.Declaration()
-	if decl.Name != "rag_retrieval" {
-		t.Errorf("Declaration().Name = %q, want %q", decl.Name, "rag_retrieval")
-	}
-	if diff := cmp.Diff([]string{"query"}, decl.Parameters.Required); diff != "" {
-		t.Errorf("Declaration().Parameters.Required mismatch (-want +got):\n%s", diff)
-	}
-	q, ok := decl.Parameters.Properties["query"]
-	if !ok {
-		t.Fatal("Declaration() has no \"query\" parameter")
-	}
-	if q.Type != genai.TypeString {
-		t.Errorf("query parameter type = %q, want %q", q.Type, genai.TypeString)
-	}
-}
+	retrieval := &genai.Tool{Retrieval: &genai.Retrieval{VertexRAGStore: &genai.VertexRAGStore{
+		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		SimilarityTopK:          genai.Ptr[int32](3),
+		VectorDistanceThreshold: genai.Ptr(0.5),
+	}}}
 
-func TestProcessRequest_Gemini(t *testing.T) {
-	topK := int32(3)
-	wantStore := &genai.VertexRAGStore{
-		RAGCorpora:     []string{testCorpus},
-		SimilarityTopK: &topK,
-	}
-
-	tests := []struct {
-		name      string
-		req       *model.LLMRequest
-		wantTools []*genai.Tool
-		wantErr   bool
+	testCases := []struct {
+		name        string
+		req         *model.LLMRequest
+		wantTools   []*genai.Tool
+		wantErrText string // substring; empty means no error expected
 	}{
 		{
-			name: "empty request",
-			req:  &model.LLMRequest{Model: "gemini-2.5-flash"},
-			wantTools: []*genai.Tool{
-				{Retrieval: &genai.Retrieval{VertexRAGStore: wantStore}},
-			},
+			name:      "gemini adds retrieval to request without config",
+			req:       &model.LLMRequest{Model: "gemini-2.5-flash"},
+			wantTools: []*genai.Tool{retrieval},
 		},
 		{
-			name: "appends to existing tools",
+			name: "gemini adds retrieval alongside existing tools",
 			req: &model.LLMRequest{
 				Model: "gemini-2.5-flash",
 				Config: &genai.GenerateContentConfig{
 					Tools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
 				},
 			},
-			wantTools: []*genai.Tool{
-				{GoogleSearch: &genai.GoogleSearch{}},
-				{Retrieval: &genai.Retrieval{VertexRAGStore: wantStore}},
-			},
+			wantTools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}, retrieval},
 		},
 		{
-			name:    "nil request",
-			req:     nil,
-			wantErr: true,
+			name:      "path-based gemini model resolves and adds retrieval",
+			req:       &model.LLMRequest{Model: "projects/p/locations/global/publishers/google/models/gemini-2.5-flash"},
+			wantTools: []*genai.Tool{retrieval},
+		},
+		{
+			name:        "non-gemini model is unsupported",
+			req:         &model.LLMRequest{Model: "gpt-4o"},
+			wantErrText: "ragtool tool is not supported for model gpt-4o",
+		},
+		{
+			name:        "bare gemini is unsupported",
+			req:         &model.LLMRequest{Model: "gemini"},
+			wantErrText: "ragtool tool is not supported for model gemini",
+		},
+		{
+			name:        "empty model is unsupported",
+			req:         &model.LLMRequest{},
+			wantErrText: "ragtool tool is not supported for model",
+		},
+		{
+			name:        "nil request errors",
+			req:         nil,
+			wantErrText: "llm request is nil",
 		},
 	}
 
-	for _, tt := range tests {
+	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			rp := mustNewTool(t).(toolinternal.RequestProcessor)
-
-			err := rp.ProcessRequest(nil, tt.req)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ProcessRequest() error = %v, wantErr %v", err, tt.wantErr)
+			tl, err := vertexairag.New(cfg)
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
 			}
-			if tt.wantErr {
+			rp := tl.(toolinternal.RequestProcessor)
+
+			err = rp.ProcessRequest(nil, tt.req)
+			if tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("ProcessRequest() error = nil, want error containing %q", tt.wantErrText)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Fatalf("ProcessRequest() error = %q, want it to contain %q", err, tt.wantErrText)
+				}
+				if tt.req != nil && tt.req.Config != nil {
+					t.Errorf("ProcessRequest() set req.Config = %+v on error, want nil", tt.req.Config)
+				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("ProcessRequest() unexpected error = %v", err)
 			}
 			if diff := cmp.Diff(tt.wantTools, tt.req.Config.Tools); diff != "" {
 				t.Errorf("ProcessRequest() tools mismatch (-want +got):\n%s", diff)
@@ -190,44 +201,78 @@ func TestProcessRequest_Gemini(t *testing.T) {
 	}
 }
 
-// TestProcessRequest_NonGemini verifies the fallback path: a non-Gemini model
-// cannot use the model-side built-in, so the tool is registered as a function
-// the model can call (handled by Run) rather than a grounding entry.
-func TestProcessRequest_NonGemini(t *testing.T) {
-	rp := mustNewTool(t).(toolinternal.RequestProcessor)
-	req := &model.LLMRequest{Model: "claude-3-5-sonnet"}
-
-	if err := rp.ProcessRequest(nil, req); err != nil {
+// processStore runs ProcessRequest on a fresh Gemini request and returns the
+// Vertex RAG store it added.
+func processStore(t *testing.T, tl tool.Tool) *genai.VertexRAGStore {
+	t.Helper()
+	req := &model.LLMRequest{Model: "gemini-2.5-flash"}
+	if err := tl.(toolinternal.RequestProcessor).ProcessRequest(nil, req); err != nil {
 		t.Fatalf("ProcessRequest() error = %v", err)
 	}
+	if len(req.Config.Tools) != 1 || req.Config.Tools[0].Retrieval == nil {
+		t.Fatalf("ProcessRequest() tools = %+v, want one Retrieval tool", req.Config.Tools)
+	}
+	return req.Config.Tools[0].Retrieval.VertexRAGStore
+}
 
-	if _, ok := req.Tools["rag_retrieval"]; !ok {
-		t.Errorf("req.Tools does not contain the registered tool; got keys %v", keys(req.Tools))
-	}
-
-	var gotDecl bool
-	for _, gt := range req.Config.Tools {
-		for _, fd := range gt.FunctionDeclarations {
-			if fd.Name == "rag_retrieval" {
-				gotDecl = true
-			}
-		}
-	}
-	if !gotDecl {
-		t.Error("req.Config.Tools has no function declaration named \"rag_retrieval\"")
-	}
-	// The grounding entry must not be present on the non-Gemini path.
-	for _, gt := range req.Config.Tools {
-		if gt.Retrieval != nil {
-			t.Error("req.Config.Tools unexpectedly contains a Retrieval grounding entry")
-		}
+// wantStore is the store built from the config used by the copy tests.
+func wantStore() *genai.VertexRAGStore {
+	return &genai.VertexRAGStore{
+		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		SimilarityTopK:          genai.Ptr[int32](3),
+		VectorDistanceThreshold: genai.Ptr(0.5),
 	}
 }
 
-func keys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// TestNew_CopiesConfig verifies that changing the caller's Config after New
+// does not change what the tool sends.
+func TestNew_CopiesConfig(t *testing.T) {
+	fileIDs := []string{"file-1"}
+	resources := []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: fileIDs}}
+	topK := int32(3)
+	threshold := 0.5
+	tl, err := vertexairag.New(vertexairag.Config{
+		Description:             "d",
+		RAGResources:            resources,
+		SimilarityTopK:          &topK,
+		VectorDistanceThreshold: &threshold,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
 	}
-	return out
+
+	fileIDs[0] = "changed-file"
+	resources[0].RAGCorpus = "projects/other/locations/us-east1/ragCorpora/mutated"
+	resources[0] = &genai.VertexRAGStoreRAGResource{RAGCorpus: "projects/other/locations/us-east1/ragCorpora/replaced"}
+	topK = 99
+	threshold = 0.9
+
+	if diff := cmp.Diff(wantStore(), processStore(t, tl)); diff != "" {
+		t.Errorf("ProcessRequest() store mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestProcessRequest_CopiesStorePerRequest verifies that modifying the store
+// added to one request does not change what later requests send.
+func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
+	tl, err := vertexairag.New(vertexairag.Config{
+		Description:             "d",
+		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
+		SimilarityTopK:          genai.Ptr[int32](3),
+		VectorDistanceThreshold: genai.Ptr(0.5),
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	first := processStore(t, tl)
+	first.RAGResources[0].RAGCorpus = "projects/other/locations/us-east1/ragCorpora/mutated"
+	first.RAGResources[0].RAGFileIDs[0] = "changed-file"
+	first.RAGResources = append(first.RAGResources, &genai.VertexRAGStoreRAGResource{RAGCorpus: "extra"})
+	*first.SimilarityTopK = 99
+	*first.VectorDistanceThreshold = 0.9
+
+	if diff := cmp.Diff(wantStore(), processStore(t, tl)); diff != "" {
+		t.Errorf("second ProcessRequest() store mismatch (-want +got):\n%s", diff)
+	}
 }
