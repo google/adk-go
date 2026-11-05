@@ -95,17 +95,23 @@ const (
 	fallbackExtension = ".bin"
 
 	// maxGCSObjectNameBytes is Cloud Storage's 1,024-byte UTF-8 object name
-	// limit. maxGCSPrefixBytes and maxPathSegmentBytes bound the prefix and
-	// each identifier segment, which keeps the names of the objects that the
-	// plugin uploads at 905 bytes or less (see gcsObjectPathFromCleanPrefix),
-	// but not every name: a direct gcsObjectPath call that combines a long
-	// prefix with long identifiers, or that passes an oversized extension,
-	// assembles a longer name, which gcsObjectPath cuts to
-	// maxGCSObjectNameBytes.
-	maxGCSObjectNameBytes    = 1024
-	maxGCSPrefixBytes        = 750
-	maxPathSegmentBytes      = 128
-	pathSegmentHashSuffixLen = 65 // "~" + 64 lowercase hex digits (256-bit SHA-256)
+	// limit. maxGCSPrefixBytes and maxPathSegmentBytes bound an unchanged
+	// prefix and each identifier segment, which keeps the names of the objects
+	// that the plugin uploads at 905 bytes or less (see
+	// gcsObjectPathFromCleanPrefix), but not every name: a direct gcsObjectPath
+	// call that combines a long unchanged prefix with long identifiers, or that
+	// passes an oversized extension, assembles a longer name, which gcsObjectPath
+	// cuts to maxGCSObjectNameBytes. maxGCSRewrittenPrefixBytes bounds a
+	// rewritten prefix (at most 402 readable UTF-8 bytes plus the 65-byte
+	// "~<sha256>" suffix) so that with the 45 folder bytes
+	// "/<YYYY-MM-DD>/<32-hex-trace-id>/" that the plugin appends after the
+	// prefix, the folder part of the object name stays within the 512-byte
+	// folder limit of Cloud Storage buckets with hierarchical namespace.
+	maxGCSObjectNameBytes      = 1024
+	maxGCSPrefixBytes          = 750
+	maxGCSRewrittenPrefixBytes = 467
+	maxPathSegmentBytes        = 128
+	pathSegmentHashSuffixLen   = 65 // "~" + 64 lowercase hex digits (256-bit SHA-256)
 
 	// defaultMaxPendingUploadBytes caps total bytes held in memory by pending
 	// uploads across queued rows (256 MiB).
@@ -269,7 +275,7 @@ func pathSegmentHashSuffix(s string) string {
 // results of at most maxBytes bytes. The suffix holds the full 256-bit
 // SHA-256 digest, which gives about 128-bit collision resistance. maxBytes
 // must be at least pathSegmentHashSuffixLen: callers pass
-// maxPathSegmentBytes, maxGCSPrefixBytes, maxGCSObjectNameBytes, or
+// maxPathSegmentBytes, maxGCSRewrittenPrefixBytes, maxGCSObjectNameBytes, or
 // maxGCSObjectNameBytes less the length of an extension that gcsObjectPath
 // has checked is short enough. base must be valid UTF-8: the cut keeps it
 // valid but does not make it so, while raw may be any bytes.
@@ -355,10 +361,12 @@ func hasReservedACMEPrefix(s string) bool {
 // Cloud Storage reserves (a second segment such as "acme-challenge-x" is kept
 // as is). Any other prefix has '~' and those bytes and runes replaced with '_'
 // and a leading ".well-known" segment before "acme-challenge" renamed
-// "_well-known", and is cut to fit maxGCSPrefixBytes with the "~<sha256>"
-// suffix of the trimmed prefix appended, so distinct trimmed prefixes do not
-// collapse onto the same object prefix and unchanged and rewritten prefixes
-// occupy strictly disjoint namespaces.
+// "_well-known", and is cut to fit maxGCSRewrittenPrefixBytes with the
+// "~<sha256>" suffix of the trimmed prefix appended, so distinct trimmed
+// prefixes do not collapse onto the same object prefix, the folder part of
+// the plugin's object names fits the 512-byte folder limit on
+// hierarchical-namespace buckets, and unchanged and rewritten prefixes occupy
+// strictly disjoint namespaces.
 func cleanGCSPrefix(prefix string) string {
 	cleaned, _ := cleanGCSPrefixWithReason(prefix)
 	return cleaned
@@ -418,7 +426,7 @@ func cleanGCSPrefixWithReason(prefix string) (cleaned, reason string) {
 	if len(reasons) == 0 {
 		return cleaned, ""
 	}
-	return truncateWithHash(cleaned, trimmed, maxGCSPrefixBytes), strings.Join(reasons, "; ")
+	return truncateWithHash(cleaned, trimmed, maxGCSRewrittenPrefixBytes), strings.Join(reasons, "; ")
 }
 
 // resolveGCSPathPrefix returns cleanGCSPrefix(c.GCSPathPrefix) and logs a
@@ -505,8 +513,9 @@ func gcsObjectPathFromCleanPrefix(cleanPrefix string, ts time.Time, traceID, spa
 	// the longest int ordinals (20 bytes each), and an extension that
 	// isSafeExtension accepts (at most 17 bytes from extensionForMIME), out is at
 	// most 905 bytes when cleanGCSPrefix fits maxGCSPrefixBytes (750 bytes). Only
-	// a direct call with long pathSegment identifiers or an oversized or unsafe
-	// extension reaches the cap below.
+	// a direct call with a long unchanged prefix and long pathSegment
+	// identifiers, or with an oversized or unsafe extension, reaches the cap
+	// below.
 	//
 	// A name is returned as is only if its extension is empty or safe. The
 	// name of any other extension ends in the hash of out, however short it

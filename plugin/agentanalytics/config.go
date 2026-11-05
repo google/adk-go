@@ -377,14 +377,16 @@ type Config struct {
 	// '~', each byte that is not valid UTF-8, and each of those control or
 	// line/paragraph-separator characters is replaced with '_', a leading
 	// ".well-known" segment before "acme-challenge" becomes "_well-known", the
-	// result is cut to at most 685 bytes on a UTF-8 rune boundary, and "~"
+	// result is cut to at most 402 bytes on a UTF-8 rune boundary, and "~"
 	// followed by the 64 lowercase hex digits of the SHA-256 digest of the
-	// trimmed prefix is appended, so distinct trimmed prefixes keep distinct
-	// destinations, assembled object names stay within Cloud Storage's
-	// 1,024-byte limit, and raw and rewritten prefix namespaces are strictly
-	// disjoint. Because '~' is reserved, passing a rewritten "<base>~<sha256>"
-	// output back into GCSPathPrefix rewrites it again rather than aliasing
-	// the original rewritten prefix.
+	// trimmed prefix is appended (at most 467 rewritten prefix bytes total),
+	// so distinct trimmed prefixes keep distinct destinations, the folder part
+	// of "<prefix>/<YYYY-MM-DD>/<trace_id>/" fits the 512-byte folder limit on
+	// hierarchical-namespace Cloud Storage buckets, assembled object names stay
+	// within Cloud Storage's 1,024-byte limit, and raw and rewritten prefix
+	// namespaces are strictly disjoint. Because '~' is reserved, passing a
+	// rewritten "<base>~<sha256>" output back into GCSPathPrefix rewrites it
+	// again rather than aliasing the original rewritten prefix.
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example

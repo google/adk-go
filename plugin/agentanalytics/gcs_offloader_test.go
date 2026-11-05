@@ -1765,8 +1765,8 @@ func TestPathSegment(t *testing.T) {
 }
 
 func TestCleanGCSPrefix(t *testing.T) {
-	// "aa" and 260 three-byte runes (782 bytes): the cut at 685 bytes falls
-	// inside the 228th rune and backs up to 683 bytes.
+	// "aa" and 260 three-byte runes (782 bytes): the cut at 402 bytes falls
+	// inside the 134th rune and backs up to 401 bytes.
 	cjk := "aa" + strings.Repeat("日", 260)
 	tests := []struct {
 		name, prefix, want string
@@ -1786,11 +1786,14 @@ func TestCleanGCSPrefix(t *testing.T) {
 		{"a .well-known without acme-challenge is kept", ".well-known/x", ".well-known/x"},
 		{"a .well-known/acme-challenge-x lookalike segment is kept", ".well-known/acme-challenge-x", ".well-known/acme-challenge-x"},
 		{"a .well-known//acme-challenge with empty second segment is kept", ".well-known//acme-challenge", ".well-known//acme-challenge"},
+		{"402 bytes with tilde keeps all 402 sanitized bytes", strings.Repeat("a", 401) + "~", strings.Repeat("a", 401) + "_" + pathSegmentHashSuffix(strings.Repeat("a", 401)+"~")},
+		{"403 bytes with tilde cuts readable base to 402 bytes", strings.Repeat("a", 402) + "~", strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 402)+"~")},
+		{"467 bytes with tilde cuts readable base to 402 bytes", strings.Repeat("a", 466) + "~", strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 466)+"~")},
 		{"513 bytes (kept under 750-byte cap)", strings.Repeat("a", 513), strings.Repeat("a", 513)},
 		{"exactly 750 bytes", strings.Repeat("a", 750), strings.Repeat("a", 750)},
-		{"751 bytes", strings.Repeat("a", 751), strings.Repeat("a", 685) + pathSegmentHashSuffix(strings.Repeat("a", 751))},
-		{"900 bytes", strings.Repeat("a", 900), strings.Repeat("a", 685) + pathSegmentHashSuffix(strings.Repeat("a", 900))},
-		{"the cut backs up to a rune boundary", cjk, "aa" + strings.Repeat("日", 227) + pathSegmentHashSuffix(cjk)},
+		{"751 bytes", strings.Repeat("a", 751), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 751))},
+		{"900 bytes", strings.Repeat("a", 900), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 900))},
+		{"the cut backs up to a rune boundary", cjk, "aa" + strings.Repeat("日", 133) + pathSegmentHashSuffix(cjk)},
 		{"a tab", "logs\tx", "logs_x" + pathSegmentHashSuffix("logs\tx")},
 		{"a newline", "logs\nx", "logs_x" + pathSegmentHashSuffix("logs\nx")},
 		{"a carriage return", "logs\rx", "logs_x" + pathSegmentHashSuffix("logs\rx")},
@@ -1823,6 +1826,9 @@ func TestCleanGCSPrefix(t *testing.T) {
 					t.Errorf("cleanGCSPrefix(%q) = %q was rewritten on second pass to %q", got, got, again)
 				}
 			} else {
+				if len(got) > maxGCSRewrittenPrefixBytes {
+					t.Errorf("cleanGCSPrefix(%q) = %q (%d bytes), want rewritten prefix of at most %d bytes", tt.prefix, got, len(got), maxGCSRewrittenPrefixBytes)
+				}
 				suffix := pathSegmentHashSuffix(trimmed)
 				if !strings.HasSuffix(got, suffix) {
 					t.Errorf("cleanGCSPrefix(%q) = %q, rewritten without the hash suffix of %q", tt.prefix, got, trimmed)
@@ -6095,8 +6101,12 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 		if len(gotPluginMax) != wantPluginMax || len(gotPluginMax) > 905 || !strings.HasPrefix(gotPluginMax, maxPrefix+"/") || !strings.HasSuffix(gotPluginMax, safeExt) {
 			t.Errorf("gcsObjectPath with 750-byte prefix and plugin hex IDs = %q (%d bytes), want %d bytes (<= 905) starting with prefix and ending in %q", gotPluginMax, len(gotPluginMax), wantPluginMax, safeExt)
 		}
-		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantObjectLimit || !strings.HasSuffix(got, safeExt) {
-			t.Errorf("gcsObjectPath with the longest direct-call parts and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), wantObjectLimit, safeExt)
+		if got := gcsObjectPath(maxPrefix, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantObjectLimit || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with the longest unchanged prefix, direct-call parts, and a safe extension = %q (%d bytes), want %d bytes ending in %q", got, len(got), wantObjectLimit, safeExt)
+		}
+		wantRewrittenDirectMax := 886 + 2*len(strconv.Itoa(math.MinInt))
+		if got := gcsObjectPath(longA, ts, longA, longA, longA, math.MinInt, math.MinInt, safeExt); len(got) != wantRewrittenDirectMax || len(got) > 926 || !strings.HasSuffix(got, safeExt) {
+			t.Errorf("gcsObjectPath with a rewritten prefix, direct-call parts, and a safe extension = %q (%d bytes), want %d bytes (<= 926) ending in %q", got, len(got), wantRewrittenDirectMax, safeExt)
 		}
 		// Focused exact-1,024-byte cap check across safe, empty, and oversized
 		// extensions so changing maxGCSObjectNameBytes away from 1,024 fails
@@ -6412,7 +6422,7 @@ func TestGCSObjectPath_SanitizationAndBounds(t *testing.T) {
 			{`~team\prod/v~1`, `_team\prod/v_1` + pathSegmentHashSuffix(`~team\prod/v~1`) + `/2026-03-04/`},
 			{".well-known/acme-challenge-x", ".well-known/acme-challenge-x/2026-03-04/"},
 			{strings.Repeat("a", 750), strings.Repeat("a", 750) + "/2026-03-04/"},
-			{strings.Repeat("a", 751), strings.Repeat("a", 685) + pathSegmentHashSuffix(strings.Repeat("a", 751)) + "/2026-03-04/"},
+			{strings.Repeat("a", 751), strings.Repeat("a", 402) + pathSegmentHashSuffix(strings.Repeat("a", 751)) + "/2026-03-04/"},
 			{".well-known/acme-challenge/x", "_well-known/acme-challenge/x" + pathSegmentHashSuffix(".well-known/acme-challenge/x") + "/2026-03-04/"},
 			{"/.well-known/ACME-CHALLENGE/x", "_well-known/ACME-CHALLENGE/x" + pathSegmentHashSuffix(".well-known/ACME-CHALLENGE/x") + "/2026-03-04/"},
 			{"logs\ninjected/part\r\n2\x00", "logs_injected/part__2_" + pathSegmentHashSuffix("logs\ninjected/part\r\n2\x00") + "/2026-03-04/"},
@@ -6844,6 +6854,35 @@ func TestBatchProcessor_ObjectPathCachesEffectivePrefix(t *testing.T) {
 			}
 			if allocs := testing.AllocsPerRun(100, func() { sink = bp.objectPath(row, upload) }); allocs > 20 {
 				t.Errorf("bp.objectPath() allocs/op = %v, want <= 20", allocs)
+			}
+		})
+	}
+}
+
+func TestGCSOffload_RewrittenPrefixFitsHierarchicalNamespaceFolderLimit(t *testing.T) {
+	for _, n := range []int{402, 403, 467} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			prefix := strings.Repeat("a", n-1) + "~"
+			off := &fakeOffloader{
+				hook: func(_ context.Context, req GCSUploadRequest) error {
+					folderLen := strings.LastIndexByte(req.Path, '/') + 1
+					baseLen := len(req.Path[folderLen:])
+					if folderLen > 512 || baseLen > 512 {
+						return fmt.Errorf("HNS limit exceeded: folder=%dB base=%dB path=%q", folderLen, baseLen, req.Path)
+					}
+					return nil
+				},
+			}
+			p, requests, mCtx := offloadingPlugin(t, off, func(c *Config) {
+				c.GCSPathPrefix = prefix
+				c.Logger = &recordingLogger{}
+			})
+			row := logRequest(t, p, requests, mCtx, &model.LLMRequest{
+				Contents: []*genai.Content{imageContent(1, 2, 3)},
+			})
+			parts := contentPartsOf(t, row)
+			if len(parts) != 1 || parts[0]["storage_mode"] != "GCS_REFERENCE" {
+				t.Fatalf("prefix len %d: content_parts = %v, want 1 GCS_REFERENCE part", n, parts)
 			}
 		})
 	}
