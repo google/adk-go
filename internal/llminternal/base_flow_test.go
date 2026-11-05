@@ -111,6 +111,9 @@ type testCase struct {
 	afterToolCallbacks   []AfterToolCallback
 	onToolErrorCallbacks []OnToolErrorCallback
 	want                 map[string]any
+	// check runs after the result has been compared, for a row that asserts on
+	// more than the result.
+	check func(t *testing.T)
 }
 
 func TestCallTool(t *testing.T) {
@@ -120,7 +123,10 @@ func TestCallTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var panicCallbackErr error
+	// Both callback kinds run before the flow replaces the panic error with the
+	// generic message, so each records the error it was handed for the row's
+	// check to assert on.
+	panicCallbackErrs := map[string]error{}
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
@@ -150,11 +156,18 @@ func TestCallTool(t *testing.T) {
 			args: map[string]any{},
 			onToolErrorCallbacks: []OnToolErrorCallback{
 				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
-					panicCallbackErr = err
+					panicCallbackErrs["OnToolError"] = err
 					return nil, nil
 				},
 			},
-			want: map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					panicCallbackErrs["AfterTool"] = err
+					return nil, nil
+				},
+			},
+			want:  map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			check: checkPanicCallbackErrs(panicCallbackErrs),
 		},
 		{
 			name: "before callback returns result",
@@ -453,16 +466,34 @@ func TestCallTool(t *testing.T) {
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
+			if tc.check != nil {
+				tc.check(t)
+			}
 		})
 	}
-	// The model gets the generic message, but callbacks still need the panic
-	// value and the stack frames to diagnose it.
-	if panicCallbackErr == nil {
-		t.Fatal("OnToolError callback was not called for the panic")
-	}
-	for _, want := range []string{"boom", "stack:", "runtime/debug.Stack"} {
-		if !strings.Contains(panicCallbackErr.Error(), want) {
-			t.Errorf("OnToolError callback error is missing %q", want)
+}
+
+// checkPanicCallbackErrs asserts that every callback recorded in errs was
+// called and was handed the panic value and the stack, which they need to
+// diagnose a panic the model only sees as a generic message.
+func checkPanicCallbackErrs(errs map[string]error) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		for _, kind := range []string{"OnToolError", "AfterTool"} {
+			err, ok := errs[kind]
+			if !ok {
+				t.Errorf("%s callback was not called for the panic", kind)
+				continue
+			}
+			if err == nil {
+				t.Errorf("%s callback got a nil error for the panic", kind)
+				continue
+			}
+			for _, want := range []string{"boom", "stack:", "runtime/debug.Stack"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s callback error is missing %q", kind, want)
+				}
+			}
 		}
 	}
 }
