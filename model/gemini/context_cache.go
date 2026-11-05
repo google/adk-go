@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -28,6 +29,7 @@ import (
 
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 )
@@ -69,14 +71,22 @@ const cacheCleanupTimeout = 30 * time.Second
 //   - The cached fields are left on the caller's request. A copy without them
 //     is sent, because the flow and its telemetry read the request after the
 //     model call.
-//   - A cache made unusable is deleted only once the response that replaces it
-//     has reached the caller, and a cache created for a response that never
-//     reaches the caller is deleted at once. adk-python deletes first, so a
-//     failed call leaves the session naming a cache that no longer exists,
-//     and a later request whose prefix matches it again is sent with it and
-//     rejected.
+//   - Under a runner nothing is deleted during the call. The caches it created
+//     or stopped using are settled once the invocation's events are stored,
+//     keeping those the stored records name. adk-python deletes a cache it
+//     stops using before the call, so a call whose response is never stored
+//     leaves the session naming a cache that no longer exists, and a cache it
+//     creates for a response that is never stored stays until its TTL runs
+//     out.
+//   - A request naming a cache the provider no longer holds is sent again
+//     without it. adk-python returns the error, so the turn fails, and every
+//     later turn until the recorded expiry does the same.
 //   - A request that already names a cache in its config is sent as it is.
 //     adk-python replaces that cache with its own.
+//   - The caller of an agent tool keeps caching to itself: the agent tool's
+//     own runner has no ContextCache config, so its agent runs uncached.
+//     adk-python passes the caller's config on, with the TTL capped at five
+//     minutes (tools/agent_tool.py).
 //   - Nothing is logged when a cache cannot be created or deleted, since
 //     ADK Go library code has no logger. The request goes ahead uncached, as
 //     in adk-python.
@@ -96,13 +106,36 @@ type cachePlan struct {
 	// metadata is what to record on the response, nil when caching does not
 	// apply to the request.
 	metadata *model.CacheMetadata
-	// created names a cache made for this request. It is deleted if the
-	// response never reaches the caller, since nothing records it then.
+	// created names a cache made for this request, which only a stored
+	// response can record.
 	created string
-	// stale names a cache this request replaced. It is deleted once the
-	// response reaches the caller, and kept otherwise, because the session
-	// still names it until a response replaces that record.
+	// stale names a cache this request stopped using, which the session goes
+	// on naming until a stored response replaces that record.
 	stale string
+}
+
+// fingerprintOnly returns m without the fields of an active cache, recording
+// only the prefix it fingerprints.
+func fingerprintOnly(m *model.CacheMetadata) *model.CacheMetadata {
+	return &model.CacheMetadata{Fingerprint: m.Fingerprint, ContentsCount: m.ContentsCount}
+}
+
+// isMissingCacheError reports whether err is the provider rejecting a request
+// because the cache it names does not exist. The Gemini API answers 404 or,
+// for a name it cannot resolve, 403 with a message naming the cached content.
+func isMissingCacheError(err error) bool {
+	var apiErr genai.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Code {
+	case http.StatusNotFound:
+		return true
+	case http.StatusForbidden:
+		return strings.Contains(strings.ToLower(apiErr.Message), "cachedcontent")
+	default:
+		return false
+	}
 }
 
 // prepare decides which cache req uses, creating a cache on the provider when
@@ -169,21 +202,36 @@ func (c *contextCache) isValid(ctx context.Context, req *model.LLMRequest, prefi
 	return prefix != "" && prefix == m.Fingerprint
 }
 
-// finish deletes the cache plan leaves behind, which depends on whether the
-// response carrying its metadata reached the caller. It runs after the
-// request has ended, so it uses a context that outlives a cancellation.
-func (c *contextCache) finish(ctx context.Context, plan cachePlan, delivered bool) {
-	name := plan.created
-	if delivered {
-		name = plan.stale
+// track hands the named cache to the invocation's ledger, which deletes it
+// once the invocation ends unless a stored event names it.
+func (c *contextCache) track(ledger *llminternal.ContextCacheLedger, name string) {
+	if name == "" {
+		return
 	}
+	ledger.Track(name, func(ctx context.Context) { c.deleteCache(ctx, name) })
+}
+
+// finish deletes the cache plan leaves behind when no runner settles it:
+// the cache it stopped using once a complete response reached the caller, and
+// the cache it created when none did.
+func (c *contextCache) finish(ctx context.Context, plan cachePlan, responded bool) {
+	if responded {
+		c.deleteCache(ctx, plan.stale)
+	} else {
+		c.deleteCache(ctx, plan.created)
+	}
+}
+
+// deleteCache deletes the named cache. It runs once the request that decided
+// to delete it has ended, possibly by cancellation, so it uses a context that
+// outlives one. A failure is ignored: the cache expires on its own when its
+// TTL runs out.
+func (c *contextCache) deleteCache(ctx context.Context, name string) {
 	if name == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cacheCleanupTimeout)
 	defer cancel()
-	// A failure is ignored: the cache expires on its own when its TTL runs
-	// out.
 	_, _ = c.client.Caches.Delete(ctx, name, &genai.DeleteCachedContentConfig{HTTPOptions: c.httpOptions(nil)})
 }
 
@@ -347,8 +395,13 @@ func (c *contextCache) createCache(ctx context.Context, req *model.LLMRequest, c
 	}
 
 	ttl := cacheTTL(cfg)
+	createOpts := c.httpOptions(cfg.CreateHTTPOptions)
+	// The cache holds the same contents a generation sends, so its body needs
+	// the same request-body handling: the caller's or client's extras provider,
+	// and the go-genai#931 workaround for parts that carry only a signature.
+	createOpts.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(createOpts.ExtrasRequestProvider, c.client.ClientConfig().HTTPOptions.ExtrasRequestProvider)
 	createCfg := &genai.CreateCachedContentConfig{
-		HTTPOptions:       c.httpOptions(cfg.CreateHTTPOptions),
+		HTTPOptions:       createOpts,
 		TTL:               ttl,
 		DisplayName:       fmt.Sprintf("adk-cache-%d-%dcontents", platform.Now(ctx).Unix(), count),
 		SystemInstruction: req.Config.SystemInstruction,

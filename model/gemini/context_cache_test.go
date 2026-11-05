@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -29,8 +31,10 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/session"
 )
 
 // cacheTestNow is the clock every context cache test runs at.
@@ -48,6 +52,14 @@ type fakeCacheAPI struct {
 	emptyReply bool
 	// expireTime is the expiry a created cache reports. Zero leaves it out.
 	expireTime time.Time
+	// gone names caches the provider no longer holds. A generation naming one
+	// fails with goneStatus, 404 when zero, and the message the Gemini API
+	// gives for a cache it cannot find.
+	gone       map[string]bool
+	goneStatus int
+	// goneMessage replaces the message, so a 403 can be one about something
+	// other than the cache.
+	goneMessage string
 
 	mu            sync.Mutex
 	calls         []string
@@ -69,6 +81,25 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 	fail := func(status int) {
 		w.WriteHeader(status)
 		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": "refused", "status": "INVALID_ARGUMENT"}}`, status)
+	}
+	// failGone answers a generation that names a cache the provider no longer
+	// holds, and reports whether it did.
+	failGone := func() bool {
+		name, _ := decoded["cachedContent"].(string)
+		if !f.gone[name] {
+			return false
+		}
+		status := f.goneStatus
+		if status == 0 {
+			status = http.StatusNotFound
+		}
+		message := f.goneMessage
+		if message == "" {
+			message = "CachedContent not found (or permission denied)"
+		}
+		w.WriteHeader(status)
+		_, _ = fmt.Fprintf(w, `{"error": {"code": %d, "message": %q, "status": "NOT_FOUND"}}`, status, message)
+		return true
 	}
 	switch {
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/cachedContents"):
@@ -95,6 +126,9 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			fail(f.generateStatus)
 			return
 		}
+		if failGone() {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		for _, chunk := range []string{"Hel", "lo"} {
 			data, _ := json.Marshal(map[string]any{"candidates": []any{map[string]any{
@@ -114,6 +148,9 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 			fail(f.generateStatus)
 			return
 		}
+		if failGone() {
+			return
+		}
 		if f.emptyReply {
 			_, _ = fmt.Fprint(w, `{"candidates": [{"finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 10}}`)
 			return
@@ -128,12 +165,19 @@ func (f *fakeCacheAPI) serve(w http.ResponseWriter, r *http.Request) {
 // newCacheTestModel returns a model named modelName that talks to api.
 func newCacheTestModel(t *testing.T, api *fakeCacheAPI, modelName string) *geminiModel {
 	t.Helper()
+	return newCacheTestModelWithProvider(t, api, modelName, nil)
+}
+
+// newCacheTestModelWithProvider returns a model named modelName that talks to
+// api, whose client sets provider as its extras request provider.
+func newCacheTestModelWithProvider(t *testing.T, api *fakeCacheAPI, modelName string, provider genai.ExtrasRequestProvider) *geminiModel {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(api.serve))
 	t.Cleanup(srv.Close)
 	m, err := NewModel(t.Context(), modelName, &genai.ClientConfig{
 		APIKey:      "key",
 		Backend:     genai.BackendGeminiAPI,
-		HTTPOptions: genai.HTTPOptions{BaseURL: srv.URL},
+		HTTPOptions: genai.HTTPOptions{BaseURL: srv.URL, ExtrasRequestProvider: provider},
 	})
 	if err != nil {
 		t.Fatalf("NewModel: %v", err)
@@ -393,7 +437,6 @@ func TestGenerateContent_ContextCache(t *testing.T) {
 	tests := []struct {
 		name         string
 		cfg          *model.ContextCacheConfig
-		modelName    string
 		createStatus int
 		metadata     *model.CacheMetadata
 		promptTokens int32
@@ -658,24 +701,40 @@ func TestGenerateContent_ContextCacheDefaults(t *testing.T) {
 }
 
 // TestGenerateContent_ContextCacheLeavesSharedOptions checks that the options
-// the runner shares between requests are not written to. genai adds a header
-// map to options that have none.
+// a request's config shares with the caller are not written to. genai adds a
+// header map to options that have none, and ADK sets its tracking headers in
+// the map the options have.
 func TestGenerateContent_ContextCacheLeavesSharedOptions(t *testing.T) {
-	api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
-	m := newCacheTestModel(t, api, "test-model")
-	timeout := 10 * time.Second
-	shared := &genai.HTTPOptions{Timeout: &timeout}
-	req := cacheTestRequest(&model.ContextCacheConfig{CreateHTTPOptions: shared})
-	req.PreviousPromptTokenCount = 5000
-	req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
-
-	generateOnce(t, cacheTestContext(t), m, req)
-
-	if len(api.creates) != 1 {
-		t.Fatal("no cache was created, so this test checks nothing")
+	tests := []struct {
+		name    string
+		headers http.Header
+	}{
+		{name: "no header map"},
+		{name: "a header map of the caller's", headers: http.Header{"X-Caller": []string{"yes"}}},
 	}
-	if shared.Headers != nil {
-		t.Errorf("shared CreateHTTPOptions.Headers = %v after a create, want it untouched", shared.Headers)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+			m := newCacheTestModel(t, api, "test-model")
+			timeout := 10 * time.Second
+			shared := &genai.HTTPOptions{Timeout: &timeout, Headers: tt.headers}
+			want := tt.headers.Clone()
+			req := cacheTestRequest(&model.ContextCacheConfig{CreateHTTPOptions: shared})
+			req.PreviousPromptTokenCount = 5000
+			req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, cacheTestRequest(nil), 2), ContentsCount: 2}
+
+			generateOnce(t, cacheTestContext(t), m, req)
+
+			if len(api.creates) != 1 {
+				t.Fatal("no cache was created, so this test checks nothing")
+			}
+			if diff := cmp.Diff(want, shared.Headers); diff != "" {
+				t.Errorf("shared CreateHTTPOptions.Headers changed by a create (-want +got):\n%s", diff)
+			}
+			if got := api.createHeaders[0].Get("X-Caller"); tt.headers != nil && got != "yes" {
+				t.Errorf("caller's header on the create call = %q, want it sent", got)
+			}
+		})
 	}
 }
 
@@ -766,27 +825,239 @@ func TestGenerateContent_ContextCacheConsumerStops(t *testing.T) {
 	}
 }
 
-// TestGenerateContent_ContextCacheEmptyReply checks the caches a reply with no
-// content leaves behind. The flow drops such a reply without storing an event,
-// so nothing records a cache created for it, and the session still names the
-// cache it replaced.
-func TestGenerateContent_ContextCacheEmptyReply(t *testing.T) {
-	api := &fakeCacheAPI{emptyReply: true, expireTime: cacheTestNow.Add(time.Hour)}
-	m := newCacheTestModel(t, api, "test-model")
-	req := cacheTestRequest(&model.ContextCacheConfig{})
-	req.PreviousPromptTokenCount = 5000
-	req.CacheMetadata = &model.CacheMetadata{
-		CacheName:       "cachedContents/old",
-		ExpireTime:      cacheTestNow,
-		InvocationsUsed: 1,
-		Fingerprint:     fingerprintOf(m, cacheTestRequest(nil), 2),
-		ContentsCount:   2,
+// cacheEvents is a session's events for settling a ledger.
+type cacheEvents []*session.Event
+
+func (e cacheEvents) All() iter.Seq[*session.Event] { return slices.Values(e) }
+func (e cacheEvents) Len() int                      { return len(e) }
+func (e cacheEvents) At(i int) *session.Event       { return e[i] }
+
+// storedRecord returns a stored model event of one agent recording metadata.
+func storedRecord(metadata *model.CacheMetadata) *session.Event {
+	return &session.Event{Author: "assistant", LLMResponse: model.LLMResponse{CacheMetadata: metadata}}
+}
+
+// TestGenerateContent_ContextCacheLedger checks that under a runner the model
+// deletes nothing itself: the caches a call created or stopped using go into
+// the ledger, and settling it against what the session stored keeps those a
+// stored record names and deletes the rest.
+func TestGenerateContent_ContextCacheLedger(t *testing.T) {
+	old := func(fp string) *model.CacheMetadata {
+		return &model.CacheMetadata{CacheName: "cachedContents/old", ExpireTime: cacheTestNow, InvocationsUsed: 1, Fingerprint: fp, ContentsCount: 2}
 	}
+	tests := []struct {
+		name string
+		// metadata is the agent's latest record before the call.
+		metadata func(fp string) *model.CacheMetadata
+		// emptyReply makes the model answer with no content.
+		emptyReply bool
+		// stored is what the session stored for the call, given the
+		// response's metadata. Nil stores nothing.
+		stored      func(resp, before *model.CacheMetadata) []*session.Event
+		wantDeleted []string
+	}{
+		{
+			name:     "a created cache the session stored is kept",
+			metadata: func(fp string) *model.CacheMetadata { return &model.CacheMetadata{Fingerprint: fp, ContentsCount: 2} },
+			stored: func(resp, _ *model.CacheMetadata) []*session.Event {
+				return []*session.Event{storedRecord(resp)}
+			},
+		},
+		{
+			name:        "a created cache the session did not store is deleted",
+			metadata:    func(fp string) *model.CacheMetadata { return &model.CacheMetadata{Fingerprint: fp, ContentsCount: 2} },
+			wantDeleted: []string{"cachedContents/1"},
+		},
+		{
+			name:     "a replaced cache is deleted once its replacement is stored",
+			metadata: old,
+			stored: func(resp, before *model.CacheMetadata) []*session.Event {
+				return []*session.Event{storedRecord(before), storedRecord(resp)}
+			},
+			wantDeleted: []string{"cachedContents/old"},
+		},
+		{
+			name:     "a replaced cache is kept while the session still names it",
+			metadata: old,
+			stored: func(_, before *model.CacheMetadata) []*session.Event {
+				return []*session.Event{storedRecord(before)}
+			},
+			wantDeleted: []string{"cachedContents/1"},
+		},
+		{
+			// The flow drops an empty reply, and a callback may fill it in:
+			// either way the stored events alone decide.
+			name:       "an empty reply a callback filled in is stored and kept",
+			metadata:   old,
+			emptyReply: true,
+			stored: func(resp, before *model.CacheMetadata) []*session.Event {
+				return []*session.Event{storedRecord(before), storedRecord(resp)}
+			},
+			wantDeleted: []string{"cachedContents/old"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{emptyReply: tt.emptyReply, expireTime: cacheTestNow.Add(time.Hour)}
+			m := newCacheTestModel(t, api, "test-model")
+			req := cacheTestRequest(&model.ContextCacheConfig{})
+			req.PreviousPromptTokenCount = 5000
+			before := tt.metadata(fingerprintOf(m, cacheTestRequest(nil), 2))
+			req.CacheMetadata = before
+			ledger := llminternal.NewContextCacheLedger()
+			ctx := llminternal.WithContextCacheLedger(cacheTestContext(t), ledger)
+
+			resp := generateOnce(t, ctx, m, req)
+
+			if diff := cmp.Diff([]string{"create", "generate"}, api.calls); diff != "" {
+				t.Fatalf("API calls before settling mismatch (-want +got):\n%s", diff)
+			}
+			var events cacheEvents
+			if tt.stored != nil {
+				events = tt.stored(resp.CacheMetadata, before)
+			}
+			ledger.Settle(ctx, events)
+			var deleted []string
+			for _, call := range api.calls[2:] {
+				deleted = append(deleted, strings.TrimPrefix(call, "delete "))
+			}
+			if diff := cmp.Diff(tt.wantDeleted, deleted); diff != "" {
+				t.Errorf("caches deleted on settling mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestGenerateContent_ContextCacheMissingCache checks that a request naming a
+// cache the provider no longer holds is sent again without the cache, and that
+// its fingerprint is kept so the next request can create a cache at once.
+func TestGenerateContent_ContextCacheMissingCache(t *testing.T) {
+	tests := []struct {
+		name        string
+		stream      bool
+		goneStatus  int
+		goneMessage string
+		wantRetry   bool
+	}{
+		{name: "not found", goneStatus: http.StatusNotFound, wantRetry: true},
+		{name: "not found while streaming", stream: true, goneStatus: http.StatusNotFound, wantRetry: true},
+		{name: "forbidden naming the cache", goneStatus: http.StatusForbidden, wantRetry: true},
+		// A key without access to the model fails the same way without the
+		// cache, so sending the request again would only fail twice.
+		{name: "forbidden for another reason", goneStatus: http.StatusForbidden, goneMessage: "Permission denied on resource project", wantRetry: false},
+		{name: "another error", goneStatus: http.StatusBadRequest, wantRetry: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{gone: map[string]bool{"cachedContents/gone": true}, goneStatus: tt.goneStatus, goneMessage: tt.goneMessage}
+			m := newCacheTestModel(t, api, "test-model")
+			fp := fingerprintOf(m, cacheTestRequest(nil), 2)
+			req := cacheTestRequest(&model.ContextCacheConfig{})
+			req.PreviousPromptTokenCount = 5000
+			req.CacheMetadata = &model.CacheMetadata{CacheName: "cachedContents/gone", ExpireTime: cacheTestNow.Add(time.Hour), InvocationsUsed: 1, Fingerprint: fp, ContentsCount: 2}
+
+			var last *model.LLMResponse
+			var lastErr error
+			for resp, err := range m.GenerateContent(cacheTestContext(t), req, tt.stream) {
+				if resp != nil && !resp.Partial {
+					last = resp
+				}
+				lastErr = err
+			}
+
+			if !tt.wantRetry {
+				if lastErr == nil {
+					t.Fatal("GenerateContent() error = nil, want the provider's error")
+				}
+				if len(api.generates) != 1 {
+					t.Errorf("generations = %d, want 1 with no retry", len(api.generates))
+				}
+				return
+			}
+			if lastErr != nil {
+				t.Fatalf("GenerateContent() error = %v, want the retry to succeed", lastErr)
+			}
+			if len(api.generates) != 2 {
+				t.Fatalf("generations = %d, want 2", len(api.generates))
+			}
+			if _, ok := api.generates[1]["cachedContent"]; ok {
+				t.Error("the retry named a cache, want it sent whole")
+			}
+			if _, ok := api.generates[1]["systemInstruction"]; !ok {
+				t.Error("the retry has no systemInstruction, want the full request")
+			}
+			if diff := cmp.Diff(&model.CacheMetadata{Fingerprint: fp, ContentsCount: 2}, last.CacheMetadata); diff != "" {
+				t.Errorf("response CacheMetadata mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestGenerateContent_ContextCacheDefaultIntervals checks the number of
+// invocations a zero config lets one cache serve.
+func TestGenerateContent_ContextCacheDefaultIntervals(t *testing.T) {
+	tests := []struct {
+		name            string
+		invocationsUsed int
+		wantCreates     int
+	}{
+		{name: "the tenth invocation reuses the cache", invocationsUsed: 10, wantCreates: 0},
+		{name: "the eleventh replaces it", invocationsUsed: 11, wantCreates: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+			m := newCacheTestModel(t, api, "test-model")
+			req := cacheTestRequest(&model.ContextCacheConfig{})
+			req.PreviousPromptTokenCount = 5000
+			req.CacheMetadata = &model.CacheMetadata{
+				CacheName:       "cachedContents/old",
+				ExpireTime:      cacheTestNow.Add(time.Hour),
+				InvocationsUsed: tt.invocationsUsed,
+				Fingerprint:     fingerprintOf(m, cacheTestRequest(nil), 2),
+				ContentsCount:   2,
+			}
+
+			generateOnce(t, cacheTestContext(t), m, req)
+
+			if len(api.creates) != tt.wantCreates {
+				t.Errorf("caches created = %d, want %d", len(api.creates), tt.wantCreates)
+			}
+		})
+	}
+}
+
+// TestGenerateContent_ContextCacheCreateBody checks that a cache creation gets
+// the request-body handling a generation does: the client's extras provider,
+// which genai drops when it merges per-call options, and the go-genai#931
+// workaround for parts that carry only a thought signature.
+func TestGenerateContent_ContextCacheCreateBody(t *testing.T) {
+	api := &fakeCacheAPI{expireTime: cacheTestNow.Add(time.Hour)}
+	m := newCacheTestModelWithProvider(t, api, "test-model", func(body map[string]any) map[string]any {
+		body["adkTestMarker"] = "client"
+		return body
+	})
+	req := cacheTestRequest(&model.ContextCacheConfig{})
+	req.Contents[1] = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "", ThoughtSignature: []byte("signature")}}}
+	req.PreviousPromptTokenCount = 5000
+	req.CacheMetadata = &model.CacheMetadata{Fingerprint: fingerprintOf(m, req, 2), ContentsCount: 2}
 
 	generateOnce(t, cacheTestContext(t), m, req)
 
-	if diff := cmp.Diff([]string{"create", "generate", "delete cachedContents/1"}, api.calls); diff != "" {
-		t.Errorf("API calls mismatch (-want +got):\n%s", diff)
+	if len(api.creates) != 1 {
+		t.Fatalf("caches created = %d, want 1", len(api.creates))
+	}
+	create := api.creates[0]
+	if got := create["adkTestMarker"]; got != "client" {
+		t.Errorf("create body adkTestMarker = %v, want the client provider's %q", got, "client")
+	}
+	contents, _ := create["contents"].([]any)
+	if len(contents) != 2 {
+		t.Fatalf("cached contents = %d, want 2", len(contents))
+	}
+	part, _ := contents[1].(map[string]any)["parts"].([]any)[0].(map[string]any)
+	if _, ok := part["text"]; !ok {
+		t.Errorf("cached signature-only part = %v, want an empty text field", part)
 	}
 }
 

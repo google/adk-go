@@ -16,6 +16,7 @@ package llminternal_test
 
 import (
 	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -174,6 +175,17 @@ func TestContextCacheRequestProcessor(t *testing.T) {
 			wantTokens:   900,
 		},
 		{
+			// The walk goes on past the newer count to reach the metadata,
+			// and the older count it passes must not replace the newer one.
+			name: "an older token count does not replace a newer one",
+			events: []cacheEvent{
+				{invocationID: "earlier", metadata: fingerprintOnly, promptTokens: 100},
+				{invocationID: "earlier", promptTokens: 900},
+			},
+			wantMetadata: fingerprintOnly,
+			wantTokens:   900,
+		},
+		{
 			name: "other authors are ignored",
 			events: []cacheEvent{
 				{invocationID: "earlier", metadata: fingerprintOnly, promptTokens: 300},
@@ -242,16 +254,23 @@ func TestContextCacheRequestProcessor_Disabled(t *testing.T) {
 // gets copies: a model editing what it was handed must change neither the
 // runner's config nor the metadata stored on the session's event.
 func TestContextCacheRequestProcessor_DoesNotShareState(t *testing.T) {
-	cfg := &model.ContextCacheConfig{CacheIntervals: 3}
+	cfg := &model.ContextCacheConfig{
+		CacheIntervals:    3,
+		CreateHTTPOptions: &genai.HTTPOptions{Headers: http.Header{"X-Runner": []string{"yes"}}},
+	}
 	stored := activeCache(1)
 	req := runContextCacheProcessor(t, cfg, "", []cacheEvent{
 		{invocationID: "current", metadata: stored, promptTokens: 5000},
 	})
 
 	req.CacheConfig.CacheIntervals = 99
+	req.CacheConfig.CreateHTTPOptions.Headers.Set("X-Callback", "yes")
 	req.CacheMetadata.InvocationsUsed = 99
 	if cfg.CacheIntervals != 3 {
 		t.Errorf("runner config CacheIntervals = %d after editing the request's copy, want 3", cfg.CacheIntervals)
+	}
+	if got := cfg.CreateHTTPOptions.Headers.Get("X-Callback"); got != "" {
+		t.Errorf("runner config gained header X-Callback = %q from the request's copy, want it untouched", got)
 	}
 	if stored.InvocationsUsed != 1 {
 		t.Errorf("stored metadata InvocationsUsed = %d after editing the request's copy, want 1", stored.InvocationsUsed)

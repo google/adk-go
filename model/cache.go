@@ -100,8 +100,11 @@ func (c *ContextCacheConfig) Validate() error {
 // UsageMetadata, whose CachedContentTokenCount reports what the cache served.
 //
 // Its JSON encoding is adk-python's: snake_case keys, and times as seconds
-// since the Unix epoch. Sessions shared with adk-python therefore read and
-// write the same records.
+// since the Unix epoch. So adk-python can read a Vertex AI session that ADK Go
+// wrote, which stores the whole event, and ADK Go one that adk-python wrote.
+// The database services do not share records: adk-python's schemas have no
+// cache_metadata column or keep the whole event in one JSON column. Neither
+// runtime can reuse a cache the other made, since their fingerprints differ.
 type CacheMetadata struct {
 	// CacheName is the provider's resource name for the cache, for example
 	// "projects/123/locations/us-central1/cachedContents/456". Empty when no

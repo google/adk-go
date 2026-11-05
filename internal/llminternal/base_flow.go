@@ -1089,7 +1089,6 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 
 			if callbackResp != nil {
-				callbackResp = keepCacheMetadata(callbackResp, resp.LLMResponse)
 				resp := &responseWithEventID{
 					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
 					eventID:     resp.eventID,
@@ -1122,14 +1121,21 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 // streamed delta looks final: SSE clients render each delta as a complete
 // turn and the runner persists each one as a separate session event. If it
 // drops TurnComplete, clients never see the turn end. If it drops
-// UsageMetadata, the call disappears from token accounting.
+// UsageMetadata, the call disappears from token accounting, and context
+// caching, which sizes a cache from the previous prompt's token count, never
+// creates one. If it drops CacheMetadata, the session loses track of the cache
+// the call used: the next turn creates another instead of reusing it.
 //
 // Partial and TurnComplete are plain bools, so an unset value cannot be told
 // apart from an explicit false; a delta is never final while the stream
 // continues, so a partial original keeps its replacement partial, and a
 // response that ended the turn keeps its replacement ending it. UsageMetadata
-// set on the replacement is respected. The replacement is copied rather than
-// modified, and returned as is when nothing needs filling.
+// and CacheMetadata set on the replacement are respected. The replacement is
+// copied rather than modified, and returned as is when nothing needs filling.
+//
+// adk-python carries the first three fields but not the cache state
+// (flows/llm_flows/core/_finalizer.py, _inherit_unset_model_fields), so a
+// callback that replaces every reply leaves it caching nothing.
 func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
 	if original == nil {
 		return replacement
@@ -1137,7 +1143,8 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	inheritPartial := original.Partial && !replacement.Partial
 	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
 	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
-	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
+	inheritCache := original.CacheMetadata != nil && replacement.CacheMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage && !inheritCache {
 		return replacement
 	}
 	merged := *replacement
@@ -1149,6 +1156,9 @@ func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResp
 	}
 	if inheritUsage {
 		merged.UsageMetadata = original.UsageMetadata
+	}
+	if inheritCache {
+		merged.CacheMetadata = original.CacheMetadata
 	}
 	return &merged
 }
@@ -1183,21 +1193,6 @@ func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMReq
 			}
 		}
 	})
-}
-
-// keepCacheMetadata returns replacement carrying the context cache state of
-// the model's response, so that a callback rewriting the response does not
-// drop it. Without it the session keeps naming the cache the request replaced,
-// which the model has already deleted. A replacement that sets its own state
-// is returned as it is, and so is one when the model's response has none. The
-// replacement is copied rather than changed, since the callback may hold it.
-func keepCacheMetadata(replacement, original *model.LLMResponse) *model.LLMResponse {
-	if replacement.CacheMetadata != nil || original == nil || original.CacheMetadata == nil {
-		return replacement
-	}
-	out := *replacement
-	out.CacheMetadata = original.CacheMetadata
-	return &out
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {

@@ -13,6 +13,31 @@
 // limitations under the License.
 
 // Package gemini implements the [model.LLM] interface for Gemini models.
+//
+// # Context caching
+//
+// A request whose CacheConfig is set, which the runner arranges when
+// runner.Config.ContextCache is, is sent through an explicit Gemini context
+// cache when one applies. See [model.ContextCacheConfig] for turning it on.
+//
+// A cache holds the system instruction, the tools and their config, and the
+// leading contents: everything before the trailing run of user contents,
+// which is the turn being answered. It is created only once two consecutive
+// requests of an agent agree on that prefix, since a prefix seen once may not
+// be seen again, and only when the earlier request's prompt reached MinTokens
+// and the prefix is estimated to reach the model's own minimum: 2048 tokens
+// for Gemini 2.5 and 4096 for Gemini 3. Every later request with the same
+// prefix names the cache instead of sending what it holds, until the cache
+// expires, has served CacheIntervals invocations, or the prefix changes. Then
+// it is replaced.
+//
+// Under a runner, a cache is deleted only once the invocation that stopped
+// using it has stored its events, and only if no stored record still names
+// it. A cache created for a reply that was never stored is deleted then too.
+// A request naming a cache that the provider no longer holds is sent again
+// once without it, and the next request creates a new cache.
+//
+// A request that already names a cache in its own config is sent as it is.
 package gemini
 
 import (
@@ -111,50 +136,78 @@ func (m *geminiModel) GenerateContent(ctx context.Context, req *model.LLMRequest
 // complete response. Partial streaming chunks are not stored as events, so
 // they carry nothing.
 //
-// Whether a response the flow will store reached the consumer decides which
-// cache is deleted afterwards. If one did, the session now records the new
-// state, and a cache it replaced can go. If none did, nothing records a cache
-// created for this call, so that one goes instead.
+// Under a runner, the caches this call created or stopped using go into the
+// invocation's ledger, and the runner deletes those that no stored event names
+// once the invocation ends. Only the runner can tell, because callbacks,
+// plugins and the session write all sit between this response and the stored
+// event. Called without a runner, the model deletes on its own: a cache it
+// replaced once a complete response has reached the caller, and a cache it
+// created when none has.
 //
-// The model cannot see two later outcomes. If a post-processing step or an
-// after-model callback returns an error for a response this call delivered,
-// the session never records it, so the cache it replaced is deleted while the
-// session still names it, and the new one stays until its TTL runs out.
+// A request naming a cache that the provider no longer holds, for example one
+// deleted elsewhere or expired early, is sent again once without the cache, so
+// that one missing cache costs a cache creation rather than every turn until
+// the recorded expiry.
 func (m *geminiModel) generateWithContextCache(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		cache := &contextCache{client: m.client, model: m.modelName(req), trackingHeader: m.versionHeaderValue}
 		plan := cache.prepare(ctx, req)
-		delivered := false
-		defer func() { cache.finish(ctx, plan, delivered) }()
-		record := func(resp *model.LLMResponse) {
-			if resp == nil || resp.Partial || plan.metadata == nil {
-				return
-			}
-			recorded := *plan.metadata
-			resp.CacheMetadata = &recorded
-			// The flow drops a response with no content, error or interruption
-			// without storing an event, so its metadata is recorded nowhere.
-			if resp.Content != nil || resp.ErrorCode != "" || resp.Interrupted {
-				delivered = true
-			}
+
+		ledger := llminternal.ContextCacheLedgerFromContext(ctx)
+		responded := false
+		if ledger != nil {
+			cache.track(ledger, plan.created)
+			cache.track(ledger, plan.stale)
+		} else {
+			defer func() { cache.finish(ctx, plan, responded) }()
 		}
 
-		if !stream {
-			resp, err := m.generate(ctx, plan.req)
-			if err == nil {
-				record(resp)
+		yielded := false
+		// attempt sends r and yields what comes back. It reports whether r
+		// named a cache the provider no longer holds and nothing has been
+		// yielded yet, so the request can be sent again without it.
+		attempt := func(r *model.LLMRequest) (retry bool) {
+			for resp, err := range m.callModel(ctx, r, stream) {
+				if err != nil && !yielded && r != req && isMissingCacheError(err) {
+					return true
+				}
+				if err == nil && resp != nil && !resp.Partial && plan.metadata != nil {
+					recorded := *plan.metadata
+					resp.CacheMetadata = &recorded
+					responded = true
+				}
+				yielded = true
+				if !yield(resp, err) {
+					return false
+				}
 			}
-			yield(resp, err)
+			return false
+		}
+
+		if !attempt(plan.req) {
 			return
 		}
-		for resp, err := range m.generateStream(ctx, plan.req) {
-			if err == nil {
-				record(resp)
-			}
-			if !yield(resp, err) {
-				return
-			}
+		missing := plan.req.Config.CachedContent
+		if ledger != nil {
+			cache.track(ledger, missing)
+		} else {
+			cache.deleteCache(ctx, missing)
 		}
+		// The prefix is unchanged, so the next request can create a cache for
+		// it straight away.
+		plan = cachePlan{req: req, metadata: fingerprintOnly(plan.metadata), stale: plan.stale}
+		attempt(plan.req)
+	}
+}
+
+// callModel sends req and yields its responses, streamed or not.
+func (m *geminiModel) callModel(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	if stream {
+		return m.generateStream(ctx, req)
+	}
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
 	}
 }
 
@@ -233,20 +286,29 @@ func configPreservingEmptyTextThoughtSignatures(config *genai.GenerateContentCon
 	if config.HTTPOptions != nil {
 		*httpOptions = *config.HTTPOptions
 	}
+	httpOptions.ExtrasRequestProvider = providerPreservingEmptyTextThoughtSignatures(httpOptions.ExtrasRequestProvider, fallbackProvider)
+	configCopy.HTTPOptions = httpOptions
+	return &configCopy
+}
 
-	provider := httpOptions.ExtrasRequestProvider
+// providerPreservingEmptyTextThoughtSignatures returns an extras provider that
+// runs provider, or fallbackProvider when provider is nil, and then restores
+// the empty text of thought-signature parts in the body's contents.
+//
+// The fallback is the client's own provider, which genai drops when it merges
+// per-call options. Every request whose body carries contents needs both: a
+// cache creation sends the same contents a generation does.
+func providerPreservingEmptyTextThoughtSignatures(provider, fallbackProvider genai.ExtrasRequestProvider) genai.ExtrasRequestProvider {
 	if provider == nil {
 		provider = fallbackProvider
 	}
-	httpOptions.ExtrasRequestProvider = func(body map[string]any) map[string]any {
+	return func(body map[string]any) map[string]any {
 		if provider != nil {
 			body = provider(body)
 		}
 		preserveEmptyTextThoughtSignatureParts(body)
 		return body
 	}
-	configCopy.HTTPOptions = httpOptions
-	return &configCopy
 }
 
 func preserveEmptyTextThoughtSignatureParts(body map[string]any) {

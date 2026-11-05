@@ -98,6 +98,9 @@ func TestCacheMetadata_MarshalJSON(t *testing.T) {
 		// adk-python has no default for contents_count, so it is written even
 		// when zero.
 		{name: "fingerprint only", m: model.CacheMetadata{Fingerprint: "abc"}, want: pythonFingerprintOnlyJSON},
+		// adk-python requires the fingerprint, so an empty one, which a request
+		// that could not be encoded leaves, is written too.
+		{name: "empty fingerprint", m: model.CacheMetadata{}, want: `{"fingerprint":"","contents_count":0}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
