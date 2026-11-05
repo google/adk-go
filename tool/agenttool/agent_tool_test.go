@@ -17,6 +17,7 @@ package agenttool_test
 import (
 	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -204,6 +206,77 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 	want := map[string]any{"is_valid": true, "message": "success"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestAgentTool_Run_CompositeAgentInputSchema checks that a wrapped workflow
+// agent whose first sub-agent has an InputSchema takes the arguments its
+// declaration advertises, as adk-python's AgentTool does with
+// _get_input_schema.
+func TestAgentTool_Run_CompositeAgentInputSchema(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"is_magic": {Type: "BOOLEAN"},
+		},
+		Required: []string{"is_magic"},
+	}
+	tests := []struct {
+		name    string
+		args    map[string]any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name: "valid_arguments",
+			args: map[string]any{"is_magic": true},
+			want: map[string]any{"result": "magic"},
+		},
+		{
+			name:    "invalid_arguments",
+			args:    map[string]any{"is_magic": "yes"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testLLM := &testutil.MockModel{
+				Responses: []*genai.Content{genai.NewContentFromText("magic", genai.RoleModel)},
+			}
+			pipeline, err := sequentialagent.New(sequentialagent.Config{
+				AgentConfig: agent.Config{
+					Name:        "pipeline",
+					Description: "Runs the math agent.",
+					SubAgents:   []agent.Agent{createAgentWithModel(t, inputSchema, nil, testLLM)},
+				},
+			})
+			if err != nil {
+				t.Fatalf("sequentialagent.New() failed: %v", err)
+			}
+			toolImpl, ok := agenttool.New(pipeline, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+			if diff := cmp.Diff(inputSchema, toolImpl.Declaration().Parameters); diff != "" {
+				t.Fatalf("Declaration().Parameters diff (-want +got):\n%s", diff)
+			}
+
+			got, err := toolImpl.Run(createToolContext(t, pipeline), tt.args)
+			if tt.wantErr {
+				// The schema rejects the arguments, rather than the missing
+				// "request" the declaration never asked for.
+				if err == nil || !strings.Contains(err.Error(), "argument validation failed") {
+					t.Fatalf("Run(%v) error = %v, want an argument validation error", tt.args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run(%v) failed unexpectedly: %v", tt.args, err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

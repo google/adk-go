@@ -462,3 +462,91 @@ func TestParallelFunctionCallsWithPartialHITL(t *testing.T) {
 		t.Errorf("Expected summarizing model event, got: %v", finalModelEvent.Content.Parts[0])
 	}
 }
+
+// TestConfirmedToolWithSkipSummarizationEndsTheTurn pins that a confirmed
+// tool that sets SkipSummarization ends the turn on resume, as it does when
+// the tool needs no confirmation. RequestConfirmationRequestProcessor runs the
+// confirmed tool before the model call, so its final response event comes out
+// of preprocessing; the model must not be called again to summarize it.
+// adk-python stops on the same condition (base_llm_flow.py, _run_one_step_async,
+// preprocess_yielded_final_response).
+func TestConfirmedToolWithSkipSummarizationEndsTheTurn(t *testing.T) {
+	secureTool, err := functiontool.New(functiontool.Config{
+		Name:                "secure_action",
+		Description:         "performs a sensitive/secure action",
+		RequireConfirmation: true,
+	}, func(ctx agent.Context, input SecureActionArgs) (SecureActionResult, error) {
+		ctx.Actions().SkipSummarization = true
+		return SecureActionResult{Executed: true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mockModel := &hitlMockModel{}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "hitl_tester",
+		Model: mockModel,
+		Tools: []tool.Tool{secureTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{Agent: a, SessionService: sessionService, AppName: "testApp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Turn 1: both calls ask for confirmation.
+	var confirmCallIDs []string
+	for ev, err := range r.Run(t.Context(), "testUser", "testSession", genai.NewContentFromText("Please run prod deploy and db delete", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, fc := range ev.Content.Parts {
+			if fc.FunctionCall != nil && fc.FunctionCall.Name == toolconfirmation.FunctionCallName {
+				confirmCallIDs = append(confirmCallIDs, fc.FunctionCall.ID)
+			}
+		}
+	}
+	if len(confirmCallIDs) != 2 {
+		t.Fatalf("turn 1 asked for %d confirmations, want 2", len(confirmCallIDs))
+	}
+
+	// Turn 2: the user approves both.
+	confirmationJSON, err := json.Marshal(toolconfirmation.ToolConfirmation{Confirmed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := &genai.Content{Role: genai.RoleUser}
+	for _, id := range confirmCallIDs {
+		reply.Parts = append(reply.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{
+			Name:     toolconfirmation.FunctionCallName,
+			ID:       id,
+			Response: map[string]any{"response": string(confirmationJSON)},
+		}})
+	}
+	var turn2Events []*session.Event
+	for ev, err := range r.Run(t.Context(), "testUser", "testSession", reply, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		turn2Events = append(turn2Events, ev)
+	}
+
+	if mockModel.Calls != 1 {
+		t.Errorf("model calls = %d, want 1: the confirmed tool's SkipSummarization response must end turn 2 without another model call", mockModel.Calls)
+	}
+	if len(turn2Events) != 1 {
+		t.Fatalf("turn 2 yielded %d events, want 1 (the confirmed tool responses)", len(turn2Events))
+	}
+	if !turn2Events[0].IsFinalResponse() {
+		t.Errorf("turn 2 event IsFinalResponse() = false, want true")
+	}
+}
