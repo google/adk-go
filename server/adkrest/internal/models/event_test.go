@@ -15,6 +15,7 @@
 package models_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	ev := session.Event{
 		ID:             "e1",
+		Timestamp:      time.UnixMicro(1733040000123456).UTC(),
 		Author:         "agent",
 		IsolationScope: "scope-1",
 		Routes:         []string{"next-node", "fallback"},
@@ -44,7 +46,41 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		},
 	}
 
-	back := models.ToSessionEvent(models.FromSessionEvent(ev))
+	restEvent := models.FromSessionEvent(ev)
+	if restEvent.Timestamp != 1733040000.123456 {
+		t.Errorf("FromSessionEvent().Timestamp = %f, want 1733040000.123456", restEvent.Timestamp)
+	}
+	rawJSON, err := json.Marshal(restEvent)
+	if err != nil {
+		t.Fatalf("json.Marshal(restEvent) failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rawJSON, &wire); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON) failed: %v", err)
+	}
+	if gotTS, ok := wire["timestamp"].(float64); !ok || gotTS != 1733040000.123456 {
+		t.Errorf("wire[\"timestamp\"] = %v, want 1733040000.123456", wire["timestamp"])
+	}
+	var decodedRestEvent models.Event
+	if err := json.Unmarshal(rawJSON, &decodedRestEvent); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON, &decodedRestEvent) failed: %v", err)
+	}
+
+	back, err := models.ToSessionEvent(decodedRestEvent)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+
+	if !back.Timestamp.Equal(ev.Timestamp) {
+		t.Errorf("Timestamp = %v, want %v", back.Timestamp, ev.Timestamp)
+	}
+	zeroBack, err := models.ToSessionEvent(models.FromSessionEvent(session.Event{}))
+	if err != nil {
+		t.Fatalf("ToSessionEvent(zero event) failed: %v", err)
+	}
+	if !zeroBack.Timestamp.IsZero() {
+		t.Errorf("zero Timestamp round-trip = %v, want zero time.Time", zeroBack.Timestamp)
+	}
 
 	if back.IsolationScope != ev.IsolationScope {
 		t.Errorf("IsolationScope = %q, want %q", back.IsolationScope, ev.IsolationScope)
@@ -82,7 +118,11 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 
 	// Inbound: a client-supplied record must not survive.
 	in := models.Event{Actions: models.EventActions{Compaction: record}}
-	if got := models.ToSessionEvent(in); got.Actions.Compaction != nil {
+	got, err := models.ToSessionEvent(in)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.Compaction != nil {
 		t.Error("ToSessionEvent kept a client-supplied compaction record; it must be dropped")
 	}
 
@@ -94,5 +134,47 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
 		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
+	}
+}
+
+// TestToSessionEventTimestampBoundsMatchSessionDecoder pins the timestamps
+// ToSessionEvent accepts to the ones the session.Event JSON decoder accepts, so
+// the two bounds cannot drift apart. Zero is left out: the REST model reads it
+// as "no timestamp", while the session decoder reads it as the epoch.
+func TestToSessionEventTimestampBoundsMatchSessionDecoder(t *testing.T) {
+	for _, secs := range []float64{
+		0.5,
+		-0.5,
+		1,
+		1733040000.123456,
+		1733040000123, // epoch milliseconds, as JavaScript's Date.now() returns
+		1e13,          // overflows the int64 conversion without a bound
+		-1e13,
+		1e300,
+		-1e300,
+		-62135596800,        // first second of year 1
+		-62135596800.000001, // just before it
+		253402300799,        // last second of year 9999
+		253402300799.999999, // rounds up into year 10000
+		253402300800,        // first second of year 10000
+	} {
+		_, restErr := models.ToSessionEvent(models.Event{Timestamp: secs})
+		var decoded session.Event
+		raw, err := json.Marshal(map[string]any{"timestamp": secs})
+		if err != nil {
+			t.Fatalf("json.Marshal(%v) failed: %v", secs, err)
+		}
+		decodeErr := json.Unmarshal(raw, &decoded)
+		if (restErr == nil) != (decodeErr == nil) {
+			t.Errorf("timestamp %v: ToSessionEvent error = %v, session.Event decoder error = %v; want both nil or both non-nil", secs, restErr, decodeErr)
+			continue
+		}
+		if restErr != nil {
+			continue
+		}
+		got, _ := models.ToSessionEvent(models.Event{Timestamp: secs})
+		if !got.Timestamp.Equal(decoded.Timestamp) {
+			t.Errorf("timestamp %v: ToSessionEvent = %v, session.Event decoder = %v", secs, got.Timestamp, decoded.Timestamp)
+		}
 	}
 }
