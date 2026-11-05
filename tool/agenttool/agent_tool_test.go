@@ -15,7 +15,9 @@
 package agenttool_test
 
 import (
+	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -23,6 +25,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -206,6 +209,77 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 	}
 }
 
+// TestAgentTool_Run_CompositeAgentInputSchema checks that a wrapped workflow
+// agent whose first sub-agent has an InputSchema takes the arguments its
+// declaration advertises, as adk-python's AgentTool does with
+// _get_input_schema.
+func TestAgentTool_Run_CompositeAgentInputSchema(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"is_magic": {Type: "BOOLEAN"},
+		},
+		Required: []string{"is_magic"},
+	}
+	tests := []struct {
+		name    string
+		args    map[string]any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name: "valid_arguments",
+			args: map[string]any{"is_magic": true},
+			want: map[string]any{"result": "magic"},
+		},
+		{
+			name:    "invalid_arguments",
+			args:    map[string]any{"is_magic": "yes"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testLLM := &testutil.MockModel{
+				Responses: []*genai.Content{genai.NewContentFromText("magic", genai.RoleModel)},
+			}
+			pipeline, err := sequentialagent.New(sequentialagent.Config{
+				AgentConfig: agent.Config{
+					Name:        "pipeline",
+					Description: "Runs the math agent.",
+					SubAgents:   []agent.Agent{createAgentWithModel(t, inputSchema, nil, testLLM)},
+				},
+			})
+			if err != nil {
+				t.Fatalf("sequentialagent.New() failed: %v", err)
+			}
+			toolImpl, ok := agenttool.New(pipeline, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+			if diff := cmp.Diff(inputSchema, toolImpl.Declaration().Parameters); diff != "" {
+				t.Fatalf("Declaration().Parameters diff (-want +got):\n%s", diff)
+			}
+
+			got, err := toolImpl.Run(createToolContext(t, pipeline), tt.args)
+			if tt.wantErr {
+				// The schema rejects the arguments, rather than the missing
+				// "request" the declaration never asked for.
+				if err == nil || !strings.Contains(err.Error(), "argument validation failed") {
+					t.Fatalf("Run(%v) error = %v, want an argument validation error", tt.args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run(%v) failed unexpectedly: %v", tt.args, err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	testLLM := &testutil.MockModel{
 		Responses: []*genai.Content{
@@ -235,6 +309,87 @@ func TestAgentTool_Run_WithoutSchema(t *testing.T) {
 	want := map[string]any{"result": "First text part is returned This should not be ignored"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestAgentTool_Run_CodeParts(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts []*genai.Part
+		want  map[string]any
+	}{
+		{
+			name: "code execution output",
+			parts: []*genai.Part{
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "\n 42 \n\n"}},
+			},
+			want: map[string]any{"result": "\n 42 "},
+		},
+		{
+			name: "executable code",
+			parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(42)\n"}},
+			},
+			want: map[string]any{"result": "print(42)\n"},
+		},
+		{
+			name: "mixed content",
+			parts: []*genai.Part{
+				{Text: "Calculating."},
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(42)"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "42\n"}},
+				{Text: "Done."},
+			},
+			want: map[string]any{"result": "Calculating.\nprint(42)\n42\nDone."},
+		},
+		{
+			name: "empty and thought parts",
+			parts: []*genai.Part{
+				nil,
+				{},
+				{CodeExecutionResult: &genai.CodeExecutionResult{}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "\n\n"}},
+				{ExecutableCode: &genai.ExecutableCode{}},
+				{Thought: true, CodeExecutionResult: &genai.CodeExecutionResult{Output: "hidden"}},
+				{Thought: true, ExecutableCode: &genai.ExecutableCode{Code: "hidden"}},
+			},
+			want: map[string]any{},
+		},
+		{
+			name: "text and code precedence",
+			parts: []*genai.Part{
+				{Text: "text", CodeExecutionResult: &genai.CodeExecutionResult{Output: "unused"}, ExecutableCode: &genai.ExecutableCode{Code: "unused"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{Output: "output"}, ExecutableCode: &genai.ExecutableCode{Code: "unused"}},
+				{CodeExecutionResult: &genai.CodeExecutionResult{}, ExecutableCode: &genai.ExecutableCode{Code: "code"}},
+			},
+			want: map[string]any{"result": "text\noutput\ncode"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			child, err := agent.New(agent.Config{
+				Name: "calculator",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						event := session.NewEvent(ctx, ctx.InvocationID())
+						event.Author = "calculator"
+						event.Content = &genai.Content{Role: genai.RoleModel, Parts: tt.parts}
+						yield(event, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New failed: %v", err)
+			}
+			wrapped := agenttool.New(child, nil).(toolinternal.FunctionTool)
+			got, err := wrapped.Run(createToolContext(t, child), map[string]any{"request": "calculate"})
+			if err != nil {
+				t.Fatalf("Run failed: %v", err)
+			}
+			if !cmp.Equal(got, tt.want) {
+				t.Error("Run returned an unexpected tool result")
+			}
+		})
 	}
 }
 

@@ -16,17 +16,24 @@ package adkrest_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	"google.golang.org/adk/v2/server/adkrest"
 	"google.golang.org/adk/v2/server/authn"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/database"
 )
 
 // unknownLengthReader hides the underlying reader's size so net/http uses chunked transfer encoding.
@@ -344,4 +351,132 @@ func listSessionIDs(t *testing.T, listURL string) []string {
 		ids = append(ids, s.ID)
 	}
 	return ids
+}
+
+// TestCreateSessionEventTimestamps pins that whatever number a client sends as
+// an event timestamp, create-session either refuses it with a 400 and stores
+// nothing, or stores a session that GET and the list endpoint still return.
+//
+// It runs against the in-memory and the SQLite session services because they
+// fail differently. A timestamp in the first second of 1970 broke both, through
+// the REST model's conversion, while an out-of-range one is stored by both but
+// SQLite cannot read the session back.
+func TestCreateSessionEventTimestamps(t *testing.T) {
+	services := map[string]func(t *testing.T) session.Service{
+		"inmemory": func(*testing.T) session.Service { return session.InMemoryService() },
+		"sqlite":   newSQLiteSessionService,
+	}
+	tests := []struct {
+		name      string
+		timestamp string
+		wantOK    bool
+	}{
+		{name: "sub-second after epoch", timestamp: "0.5", wantOK: true},
+		{name: "sub-second before epoch", timestamp: "-0.5", wantOK: true},
+		{name: "epoch seconds with microseconds", timestamp: "1733040000.123456", wantOK: true},
+		{name: "first second of year 1", timestamp: "-62135596800", wantOK: true},
+		{name: "last second of year 9999", timestamp: "253402300799", wantOK: true},
+		{name: "epoch milliseconds", timestamp: "1733040000123", wantOK: false},
+		{name: "overflows int64 microseconds", timestamp: "1e13", wantOK: false},
+		{name: "year 10000", timestamp: "253402300800", wantOK: false},
+		{name: "before year 1", timestamp: "-62135596801", wantOK: false},
+	}
+	for serviceName, newService := range services {
+		for _, tt := range tests {
+			t.Run(serviceName+"/"+tt.name, func(t *testing.T) {
+				server, err := adkrest.NewServer(adkrest.ServerConfig{
+					SessionService: newService(t),
+					Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+						return &authn.Caller{UserID: "u"}, nil
+					}),
+				})
+				if err != nil {
+					t.Fatalf("adkrest.NewServer() failed: %v", err)
+				}
+				testServer := httptest.NewServer(server)
+				t.Cleanup(testServer.Close)
+				base := testServer.URL + "/apps/app/users/u/sessions"
+
+				// The create route without a session ID: a 500 there would not
+				// carry the generated ID, leaving the client no way to find the
+				// session again.
+				status, body := doTimestampRequest(t, http.MethodPost, base,
+					`{"events":[{"author":"user","timestamp":`+tt.timestamp+`}]}`)
+				if !tt.wantOK {
+					if status != http.StatusBadRequest {
+						t.Fatalf("create with timestamp %s = %d, want 400; body: %s", tt.timestamp, status, body)
+					}
+					if status, body := doTimestampRequest(t, http.MethodGet, base, ""); status != http.StatusOK || strings.TrimSpace(body) != "[]" {
+						t.Errorf("list after refused create = %d %s, want 200 []", status, body)
+					}
+					return
+				}
+				if status != http.StatusOK {
+					t.Fatalf("create with timestamp %s = %d, want 200; body: %s", tt.timestamp, status, body)
+				}
+				var created struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal([]byte(body), &created); err != nil {
+					t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+				}
+				if status, body := doTimestampRequest(t, http.MethodGet, base+"/"+created.ID, ""); status != http.StatusOK {
+					t.Errorf("GET created session = %d, want 200; body: %s", status, body)
+				}
+				if status, body := doTimestampRequest(t, http.MethodGet, base, ""); status != http.StatusOK || !strings.Contains(body, created.ID) {
+					t.Errorf("list after create = %d %s, want 200 listing %q", status, body, created.ID)
+				}
+			})
+		}
+	}
+}
+
+var sqliteDBCounter atomic.Int64
+
+func newSQLiteSessionService(t *testing.T) session.Service {
+	t.Helper()
+	// A named shared-cache database per test, so tests do not see each
+	// other's sessions.
+	dsn := fmt.Sprintf("file:adkrest-timestamps-%d?mode=memory&cache=shared", sqliteDBCounter.Add(1))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	if err != nil {
+		t.Fatalf("gorm.Open() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := db.DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	service, err := database.NewSessionServiceFromDB(db)
+	if err != nil {
+		t.Fatalf("database.NewSessionServiceFromDB() failed: %v", err)
+	}
+	if err := database.AutoMigrate(service); err != nil {
+		t.Fatalf("database.AutoMigrate() failed: %v", err)
+	}
+	return service
+}
+
+func doTimestampRequest(t *testing.T, method, target, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext(%s, %s) failed: %v", method, target, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, target, err)
+	}
+	respBody, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("io.ReadAll(response body) failed: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("response body Close() failed: %v", closeErr)
+	}
+	return resp.StatusCode, string(respBody)
 }

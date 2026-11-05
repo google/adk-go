@@ -115,16 +115,11 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		}
 	}
 
-	var agentInputSchema *genai.Schema
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := workflowinternal.InputSchema(t.agent)
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
 
 	var content *genai.Content
 	var err error
@@ -219,8 +214,20 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	lastContent := lastEvent.LLMResponse.Content
 	var textParts []string
 	for _, part := range lastContent.Parts {
-		if part != nil && part.Text != "" && !part.Thought {
-			textParts = append(textParts, part.Text)
+		if part == nil || part.Thought {
+			continue
+		}
+		var text string
+		switch {
+		case part.Text != "":
+			text = part.Text
+		case part.CodeExecutionResult != nil && part.CodeExecutionResult.Output != "":
+			text = strings.TrimRight(part.CodeExecutionResult.Output, "\n")
+		case part.ExecutableCode != nil:
+			text = part.ExecutableCode.Code
+		}
+		if text != "" {
+			textParts = append(textParts, text)
 		}
 	}
 	outputText := strings.Join(textParts, "\n")
