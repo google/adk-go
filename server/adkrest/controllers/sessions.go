@@ -84,7 +84,19 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			})
 		}
 	}
-	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest)
+	// Convert every event before creating anything, so an event the request
+	// cannot carry is a 400 with no session left behind, rather than a 500
+	// after the session is already stored.
+	events := make([]*session.Event, 0, len(createSessionRequest.Events))
+	for i, event := range createSessionRequest.Events {
+		sessionEvent, err := models.ToSessionEvent(event)
+		if err != nil {
+			http.Error(rw, fmt.Sprintf("events[%d]: %v", i, err), http.StatusBadRequest)
+			return
+		}
+		events = append(events, sessionEvent)
+	}
+	respSession, err := c.createSession(req.Context(), sessionID, createSessionRequest.State, events)
 	if err != nil {
 		http.Error(rw, err.Error(), http.StatusInternalServerError)
 		return
@@ -92,18 +104,18 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	EncodeJSONResponse(respSession, http.StatusOK, rw)
 }
 
-func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, createSessionRequest models.CreateSessionRequest) (models.Session, error) {
+func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, state map[string]any, events []*session.Event) (models.Session, error) {
 	session, err := c.service.Create(ctx, &session.CreateRequest{
 		AppName:   sessionID.AppName,
 		UserID:    sessionID.UserID,
 		SessionID: sessionID.ID,
-		State:     createSessionRequest.State,
+		State:     state,
 	})
 	if err != nil {
 		return models.Session{}, err
 	}
-	for _, event := range createSessionRequest.Events {
-		err = c.service.AppendEvent(ctx, session.Session, models.ToSessionEvent(event))
+	for _, event := range events {
+		err = c.service.AppendEvent(ctx, session.Session, event)
 		if err != nil {
 			return models.Session{}, err
 		}
