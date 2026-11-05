@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -115,12 +116,30 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 // or deleted; an ID ending in "/" even made DELETE remove the session without
 // the slash. A {session_id} taken from the URL cannot take these values, so only
 // the body needs the check. An empty ID is allowed and means "generate one".
+//
+// The routes also carry the ID in the request line, which net/http refuses with
+// 431 Request Header Fields Too Large once the request line and headers exceed
+// the server's MaxHeaderBytes. The ID's percent-encoded form is therefore capped
+// at maxBodySessionIDPathBytes. The body itself may be far larger, and one byte
+// of the ID can take three in the URL.
 func validateBodySessionID(id string) error {
 	if strings.Contains(id, "/") || id == "." || id == ".." {
 		return fmt.Errorf(`sessionId %q in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`, id)
 	}
+	if n := len(url.PathEscape(id)); n > maxBodySessionIDPathBytes {
+		// The ID is not echoed back: it can be most of a megabyte.
+		return fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", n, maxBodySessionIDPathBytes)
+	}
 	return nil
 }
+
+// maxBodySessionIDPathBytes is the longest percent-encoded sessionId the create
+// session endpoint accepts in its request body.
+//
+// It is half of http.DefaultMaxHeaderBytes, the limit the web launcher's server
+// runs with. That leaves the other half for the method, the app name, the user
+// ID and the request headers of a later GET, PATCH or DELETE on the session.
+const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, state map[string]any, events []*session.Event) (models.Session, error) {
 	session, err := c.service.Create(ctx, &session.CreateRequest{

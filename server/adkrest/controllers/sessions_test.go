@@ -158,6 +158,10 @@ func TestGetSession(t *testing.T) {
 	}
 }
 
+// maxBodySessionIDPathBytes mirrors the limit in sessions.go: the longest
+// percent-encoded sessionId the create endpoint accepts in its request body.
+const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
+
 func TestCreateSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",
@@ -340,6 +344,40 @@ func TestCreateSession(t *testing.T) {
 			},
 			wantStatus: http.StatusBadRequest,
 			wantErr:    fmt.Errorf(`sessionId ".." in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`),
+		},
+		{
+			name:           "request body session id at the length limit",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("a", maxBodySessionIDPathBytes),
+			},
+			wantSession: models.Session{
+				ID:      strings.Repeat("a", maxBodySessionIDPathBytes),
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// Each "ü" is two bytes in the body and six once percent-encoded,
+			// so the limit applies to the encoded form, not the body.
+			name:           "request body session id too long once percent-encoded",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("ü", maxBodySessionIDPathBytes/6+1),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", (maxBodySessionIDPathBytes/6+1)*6, maxBodySessionIDPathBytes),
 		},
 		{
 			name:           "user id is missing",
