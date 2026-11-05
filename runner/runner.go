@@ -977,21 +977,16 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	})
 
 	if r.pluginManager != nil {
-		earlyExitResult, err := r.pluginManager.RunBeforeRunCallback(iCtx)
+		// The reply goes through OnEvent and the run through AfterRun, as on
+		// Run. adk-python runs a live agent through the same
+		// Runner._exec_with_plugin as run_async (runners.py).
+		earlyExitEvent, err := r.runBeforeRunCallback(iCtx)
 		if err != nil {
 			return nil, nil, err
 		}
-		if earlyExitResult != nil {
-			earlyExitEvent := session.NewEvent(iCtx, iCtx.InvocationID())
-			earlyExitEvent.Author = agentToRun.Name()
-			earlyExitEvent.LLMResponse = model.LLMResponse{
-				Content: earlyExitResult,
-			}
-			if err := r.sessionService.AppendEvent(iCtx, storedSession, earlyExitEvent); err != nil {
-				return nil, nil, fmt.Errorf("failed to add event to session: %w", err)
-			}
-
+		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
 			return &closedLiveSession{}, earlyExitIter, nil
