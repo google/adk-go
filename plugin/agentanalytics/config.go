@@ -326,6 +326,9 @@ type Config struct {
 	// CustomMetadataAllowlist selects the model response and event
 	// CustomMetadata keys written to attributes.custom_metadata. An entry
 	// ending in "*" matches keys by prefix; other entries match exactly.
+	// EventAgentStateCheckpoint rows read their reserved checkpoint keys
+	// directly from CustomMetadata, while attributes.custom_metadata still
+	// includes only allowlisted keys.
 	CustomMetadataAllowlist []string
 
 	// FinalResponseToolNames lists tools whose successful completion is also

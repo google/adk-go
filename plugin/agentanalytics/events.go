@@ -1043,15 +1043,16 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 	}
 
 	// 4. AGENT_STATE_CHECKPOINT.
-	if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(cleanCustomMeta); ok {
-		p.logSessionEvent(ctx, id, EventAgentStateCheckpoint, span, func(d *eventData) {
-			applyEventBase(d)
-			d.content = map[string]any{
-				"agent_state":  stateVal,
-				"end_of_agent": endOfAgent,
-			}
-			d.contentTruncated = a2aTrunc
-		})
+	if p.shouldLogSessionEvent(EventAgentStateCheckpoint) {
+		if stateVal, endOfAgent, ok := extractAgentStateCheckpoint(ev.CustomMetadata); ok {
+			p.logSessionEvent(ctx, id, EventAgentStateCheckpoint, span, func(d *eventData) {
+				applyEventBase(d)
+				d.content = map[string]any{
+					"agent_state":  stateVal,
+					"end_of_agent": endOfAgent,
+				}
+			})
+		}
 	}
 
 	// 5. HITL Requests, TOOL_PAUSED, and HITL Completions.

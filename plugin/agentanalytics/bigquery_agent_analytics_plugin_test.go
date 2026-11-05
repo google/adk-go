@@ -52,10 +52,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockTransport struct {
@@ -5032,4 +5034,370 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
 		}
 	})
+}
+
+type callbackTestLLM struct {
+	name string
+	gen  func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error]
+}
+
+func (m *callbackTestLLM) Name() string { return m.name }
+
+func (m *callbackTestLLM) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return m.gen(ctx, req, stream)
+}
+
+func TestPlugin_ToolResultIsError(t *testing.T) {
+	t.Run("top-level boolean true isError and is_error emit TOOL_ERROR", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			result map[string]any
+		}{
+			{
+				name:   "isError true",
+				result: map[string]any{"isError": true, "details": "upstream error"},
+			},
+			{
+				name:   "is_error true",
+				result: map[string]any{"is_error": true, "details": "upstream error"},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"submit_answer"}
+				})
+				mCtx.functionCallID = "call-err-flag"
+				submitTool := &fakeTool{name: "submit_answer"}
+				args := map[string]any{"answer": "draft"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, submitTool, args))
+				errs.add(p.AfterToolCallback()(mCtx, submitTool, args, tc.result, nil))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				wantTypes := []string{EventToolStarting, EventToolError, EventInvocationCompleted}
+				if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+					t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+				}
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != "Tool returned an MCP result with isError=true." {
+					t.Errorf("error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+				}
+				content := jsonObjectColumn(t, row, "content")
+				checkJSON(t, "TOOL_ERROR content", content,
+					`{"tool":"submit_answer","args":{"answer":"draft"},"tool_origin":"UNKNOWN"}`)
+				if _, hasResult := content["result"]; hasResult {
+					t.Errorf("TOOL_ERROR content unexpectedly has result field: %v", content)
+				}
+				checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), `"call-err-flag"`, "adk", "function_call_id")
+				if got, want := row["span_id"], onlyRowOfType(t, rows, EventToolStarting)["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR span_id = %v, want TOOL_STARTING span_id %v", got, want)
+				}
+				if _, ok := row[columnLatencyMS]; !ok {
+					t.Error("TOOL_ERROR row missing latency_ms")
+				}
+			})
+		}
+	})
+
+	t.Run("runner functiontool returning is_error true emits TOOL_ERROR and suppresses AGENT_RESPONSE", func(t *testing.T) {
+		type toolArgs struct {
+			Query string `json:"query"`
+		}
+		fnTool, err := functiontool.New(
+			functiontool.Config{Name: "final_lookup", Description: "Looks up final answer"},
+			func(_ agent.Context, in toolArgs) (map[string]any, error) {
+				return map[string]any{"is_error": true, "query": in.Query}, nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("functiontool.New: %v", err)
+		}
+		p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.FinalResponseToolNames = []string{"final_lookup"}
+		})
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{fnTool},
+			Model: &scriptedLLM{
+				responses: []*model.LLMResponse{
+					{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call-fn-1",
+									Name: "final_lookup",
+									Args: map[string]any{"query": "status"},
+								},
+							}},
+						},
+					},
+					{Content: textContent("model", "handled failure"), TurnComplete: true},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New: %v", err)
+		}
+		for _, runErr := range newTestRunner(t, bot, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 0 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 0; events: %v", got, eventTypes(rows))
+		}
+		errRow := onlyRowOfType(t, rows, EventToolError)
+		if got := errRow["error_message"]; got != "Tool returned an MCP result with isError=true." {
+			t.Errorf("error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+		}
+		// Only the final model turn text should emit AGENT_RESPONSE, not final_lookup.
+		agentResp := onlyRowOfType(t, rows, EventAgentResponse)
+		if _, hasSourceTool := lookup(jsonObjectColumn(t, agentResp, "attributes"), "source_tool"); hasSourceTool {
+			t.Errorf("AGENT_RESPONSE unexpectedly emitted for failed FinalResponseToolNames tool: %v", agentResp["attributes"])
+		}
+	})
+
+	t.Run("finish_task returning is_error true does not call noteTaskFinished", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var runCount atomic.Int32
+		injectErrPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "inject_finish_task_is_error",
+			AfterToolCallback: func(ctx agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+				if err == nil && tl != nil && tl.Name() == "finish_task" && ctx.FunctionCallID() == "call-shared" && runCount.Load() == 2 {
+					delete(result, "result")
+					result["is_error"] = true
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New: %v", err)
+		}
+
+		// Run 1 calls finish_task("call-shared") and succeeds.
+		// Run 2 (started while Run 1's finish_task response event is still held back,
+		// so Run 2 sits above Run 1 on agentStack) first calls finish_task("call-shared")
+		// which injectErrPlugin turns into {"is_error": true}, and then calls
+		// finish_task("call-second") which succeeds. If Run 2's failed "call-shared"
+		// wrongly called noteTaskFinished, both activations would claim "call-shared"
+		// and finishedTaskLocked would fall back to the top-of-stack activation (Run 2)
+		// instead of closing Run 1's span on Run 1's event.
+		var turn atomic.Int32
+		taskModel := &callbackTestLLM{
+			name: "task-model",
+			gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+				return func(yield func(*model.LLMResponse, error) bool) {
+					n := turn.Add(1)
+					callID := "call-shared"
+					if n == 3 {
+						callID = "call-second"
+					}
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   callID,
+									Name: "finish_task",
+									Args: map[string]any{"result": "done"},
+								},
+							}},
+						},
+					}, nil)
+				}
+			},
+		}
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task",
+			Mode:  llmagent.ModeTask,
+			Model: taskModel,
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(task): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var held []*session.Event
+					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+					for i := 0; i < 2; i++ {
+						runCount.Add(1)
+						for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+							if err != nil {
+								yield(nil, err)
+								return
+							}
+							if hasTaskCompletedResponse(ev.Content) {
+								held = append(held, ev)
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, ev := range held {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		toolErrRow := onlyRowOfType(t, rows, EventToolError)
+		if got := toolErrRow["error_message"]; got != "Tool returned an MCP result with isError=true." {
+			t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 2 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 2; events: %v", got, eventTypes(rows))
+		}
+		starts := agentRowsOfType(rows, EventAgentStarting, "task")
+		ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+		if len(starts) != 2 || len(ends) != 2 {
+			t.Fatalf("task rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want 2 of each", len(starts), len(ends))
+		}
+		if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
+			t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
+		}
+		if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
+			t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
+		}
+	})
+
+	t.Run("false, non-boolean, and nested is_error values emit TOOL_COMPLETED", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			result map[string]any
+		}{
+			{name: "isError false", result: map[string]any{"isError": false}},
+			{name: "is_error false", result: map[string]any{"is_error": false}},
+			{name: "is_error string true", result: map[string]any{"is_error": "true"}},
+			{name: "isError string true", result: map[string]any{"isError": "true"}},
+			{name: "is_error int 1", result: map[string]any{"is_error": 1}},
+			{name: "isError int 1", result: map[string]any{"isError": 1}},
+			{name: "nested is_error true", result: map[string]any{"nested": map[string]any{"is_error": true, "isError": true}}},
+			{name: "nil result", result: nil},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"submit_answer"}
+				})
+				mCtx.functionCallID = "call-ok"
+				submitTool := &fakeTool{name: "submit_answer"}
+				args := map[string]any{"answer": "ok"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, submitTool, args))
+				errs.add(p.AfterToolCallback()(mCtx, submitTool, args, tc.result, nil))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				wantTypes := []string{EventToolStarting, EventToolCompleted, EventAgentResponse, EventInvocationCompleted}
+				if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+					t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+				}
+				if got := onlyRowOfType(t, rows, EventToolCompleted)["status"]; got != "OK" {
+					t.Errorf("TOOL_COMPLETED status = %v, want OK", got)
+				}
+			})
+		}
+	})
+}
+
+type emptyMsgErr struct{}
+
+func (emptyMsgErr) Error() string { return "" }
+
+func TestPlugin_ToolErrorEmptyMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{
+			name:    "value error with empty message falls back to type name",
+			err:     emptyMsgErr{},
+			wantMsg: "agentanalytics.emptyMsgErr",
+		},
+		{
+			name:    "pointer error with empty message falls back to pointer type name",
+			err:     &emptyMsgErr{},
+			wantMsg: "*agentanalytics.emptyMsgErr",
+		},
+		{
+			name:    "non-empty error message is preserved",
+			err:     errors.New("boom"),
+			wantMsg: "boom",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("onToolError and afterTool", func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				mCtx.functionCallID = "call-empty-1"
+				tl := &fakeTool{name: "lookup"}
+				args := map[string]any{"q": "test"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+				errs.add(p.OnToolErrorCallback()(mCtx, tl, args, tc.err))
+				errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, tc.err))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != tc.wantMsg {
+					t.Errorf("error_message = %v (%T), want %q", got, got, tc.wantMsg)
+				}
+			})
+
+			t.Run("afterTool fallback when OnToolErrorCallback was short-circuited", func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				mCtx.functionCallID = "call-empty-2"
+				tl := &fakeTool{name: "lookup"}
+				args := map[string]any{"q": "test"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+				errs.add(p.AfterToolCallback()(mCtx, tl, args, nil, tc.err))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				row := onlyRowOfType(t, rows, EventToolError)
+				if got := row["status"]; got != "ERROR" {
+					t.Errorf("status = %v, want ERROR", got)
+				}
+				if got := row["error_message"]; got != tc.wantMsg {
+					t.Errorf("error_message = %v (%T), want %q", got, got, tc.wantMsg)
+				}
+			})
+		})
+	}
 }
