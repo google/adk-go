@@ -326,6 +326,96 @@ func TestRunner_RunLive_EarlyExit(t *testing.T) {
 	}
 }
 
+// TestRunner_RunLive_EarlyExitRunsOnEventAndAfterRun pins that a BeforeRun
+// reply on the live path goes through the same plugin hooks as on Run: OnEvent
+// sees it before it is stored and yielded, and AfterRun closes the run.
+// adk-python runs a live agent through Runner._exec_with_plugin, which sends
+// the reply through _process_and_append_event and then runs after_run
+// (runners.py).
+func TestRunner_RunLive_EarlyExitRunsOnEventAndAfterRun(t *testing.T) {
+	ctx := t.Context()
+	appName, userID, sessionID := "testApp", "testUser", "testSession"
+
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID}); err != nil {
+		t.Fatal(err)
+	}
+
+	cachedReply := genai.NewContentFromText("cached answer", genai.RoleModel)
+	redactedReply := genai.NewContentFromText("redacted answer", genai.RoleModel)
+	onEventCalls, afterRunCalls := 0, 0
+	p, err := plugin.New(plugin.Config{
+		Name: "cache",
+		BeforeRunCallback: func(agent.InvocationContext) (*genai.Content, error) {
+			return cachedReply, nil
+		},
+		OnEventCallback: func(_ agent.InvocationContext, ev *session.Event) (*session.Event, error) {
+			onEventCalls++
+			modified := *ev
+			modified.Content = redactedReply
+			return &modified, nil
+		},
+		AfterRunCallback: func(agent.InvocationContext) {
+			afterRunCalls++
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mockLive := &mockLiveAgent{
+		Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+		runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			t.Error("the agent ran although BeforeRun replied")
+			return &dummyLiveSession{}, func(func(*session.Event, error) bool) {}, nil
+		},
+	}
+	r, err := New(Config{
+		AppName:        appName,
+		Agent:          mockLive,
+		SessionService: sessionService,
+		PluginConfig:   PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, events, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	var got []*session.Event
+	for ev, err := range events {
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, ev)
+	}
+
+	if onEventCalls != 1 {
+		t.Errorf("OnEvent calls = %d, want 1", onEventCalls)
+	}
+	if afterRunCalls != 1 {
+		t.Errorf("AfterRun calls = %d, want 1", afterRunCalls)
+	}
+	if len(got) != 1 {
+		t.Fatalf("yielded %d events, want 1", len(got))
+	}
+	if diff := cmp.Diff(redactedReply, got[0].Content); diff != "" {
+		t.Errorf("yielded reply mismatch (-want +got):\n%s", diff)
+	}
+	resp, err := sessionService.Get(ctx, &session.GetRequest{AppName: appName, UserID: userID, SessionID: sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := resp.Session.Events().Len(); n != 1 {
+		t.Fatalf("stored %d events, want 1", n)
+	}
+	if diff := cmp.Diff(redactedReply, resp.Session.Events().At(0).Content); diff != "" {
+		t.Errorf("stored reply mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestRunner_RunLive_ChronologicalBuffering(t *testing.T) {
 	ctx := t.Context()
 	appName, userID, sessionID := "testApp", "testUser", "testSession3"
