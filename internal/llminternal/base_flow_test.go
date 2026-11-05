@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 type mockFunctionTool struct {
@@ -735,6 +736,34 @@ func TestMergeEventActions(t *testing.T) {
 				SkipSummarization: true,
 				TransferToAgent:   "agent2",
 				Escalate:          true,
+			},
+		},
+		{
+			// Each parallel call records its own request under its own call ID,
+			// and the user has to answer all of them.
+			name: "requested auth configs from both calls kept",
+			base: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-a": {CredentialKey: "key-a"}},
+			},
+			other: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
+			},
+			want: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{
+					"call-a": {CredentialKey: "key-a"},
+					"call-b": {CredentialKey: "key-b"},
+				},
+			},
+		},
+		{
+			name: "requested auth configs kept when only the later call asks",
+			base: &session.EventActions{StateDelta: map[string]any{"key1": "value1"}},
+			other: &session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
+			},
+			want: &session.EventActions{
+				StateDelta:           map[string]any{"key1": "value1"},
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-b": {CredentialKey: "key-b"}},
 			},
 		},
 	}
