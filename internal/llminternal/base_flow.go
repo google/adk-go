@@ -1494,7 +1494,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": toolErrorText(streamTool.Name(), err)}
+								result = map[string]any{"error": toolinternal.ModelErrorText(streamTool.Name(), err)}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1651,26 +1651,9 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		return map[string]any{"error": toolErrorText(tool.Name(), err)}
+		return map[string]any{"error": toolinternal.ModelErrorText(tool.Name(), err)}
 	}
 	return response
-}
-
-// toolErrorText is the error text the model gets for a tool call that failed
-// with err. A panic recovered from the tool's handler becomes a generic
-// message, because its text carries the panic value and the stack. Any other
-// error keeps its text, because a returned error is how a Go tool tells the
-// model what went wrong.
-//
-// The generic message is the one adk-python's live caller sends for a failed
-// streaming tool. Outside live mode adk-python re-raises and ends the run,
-// while ADK Go keeps recovering the panic so that the run can continue.
-func toolErrorText(toolName string, err error) string {
-	var panicErr *toolinternal.PanicError
-	if errors.As(err, &panicErr) {
-		return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
-	}
-	return err.Error()
 }
 
 func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs map[string]any) (map[string]any, error) {
