@@ -794,18 +794,28 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 
 		// Preprocess before calling the LLM.
+		preprocessYieldedFinalResponse := false
 		for ev, err := range f.preprocess(ctx, req) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 			if ev != nil {
+				if len(utils.FunctionResponses(ev.Content)) > 0 && ev.IsFinalResponse() {
+					preprocessYieldedFinalResponse = true
+				}
 				if !yield(ev, nil) {
 					return
 				}
 			}
 		}
-		if ctx.Ended() {
+		// A preprocessor can run a tool itself, such as a call resumed after
+		// confirmation. When that tool's response is final, because the tool
+		// set SkipSummarization, the turn ends there, as it does when the tool
+		// runs after a model call; calling the model now would summarize what
+		// the tool asked to be the answer. adk-python stops on the same
+		// condition (base_llm_flow.py).
+		if ctx.Ended() || preprocessYieldedFinalResponse {
 			return
 		}
 		// Create event to pass to callback state delta
