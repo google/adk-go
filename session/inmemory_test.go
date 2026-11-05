@@ -796,7 +796,10 @@ func TestInMemoryService_Get_AfterWithOutOfOrderTimestamps(t *testing.T) {
 		want            []string
 	}{
 		{name: "after only", want: []string{"e40", "e30", "e50", "e60", "e70"}},
-		{name: "with num recent events", numRecentEvents: 5, want: []string{"e30", "e50", "e60", "e70"}},
+		{name: "with num recent events", numRecentEvents: 6, want: []string{"e40", "e30", "e50", "e60", "e70"}},
+		// The trim runs before the filter, in append order, so e40 falls out of
+		// a five-event window even though it is at or after After.
+		{name: "num recent events trims first", numRecentEvents: 5, want: []string{"e30", "e50", "e60", "e70"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

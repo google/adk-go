@@ -124,11 +124,15 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 	copiedSession.events = make([]*Event, 0, len(filteredEvents))
 	for _, event := range filteredEvents {
 		// Test every event rather than searching for a cut point: events are
-		// kept in append order, which need not be timestamp order, and a
-		// binary search over it could keep events from before req.After. This
-		// keeps every event at or after req.After, as the database backends
-		// do. adk-python's in-memory service keeps only the trailing run of
-		// such events, so it also drops one appended ahead of an older event.
+		// kept in append order, which need not be timestamp order, so a
+		// binary search over it could keep events from before req.After and
+		// drop ones at or after it. With NumRecentEvents unset, this returns
+		// every event at or after req.After, as the database and Vertex AI
+		// backends do. With it set, the trim above runs first, in append
+		// order, as in adk-python, while those backends filter first and
+		// then take the newest N. adk-python's in-memory filter scans back
+		// from the newest event to the first one before After, so it also
+		// drops a qualifying event appended ahead of that one.
 		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
 			continue
 		}
