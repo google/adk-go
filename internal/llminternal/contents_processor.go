@@ -755,19 +755,25 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 //	In multi-agent scenarios, the "current turn" for an agent starts from an
 //	actual user or from another agent.
 func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope string, events []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
+	// The IDs of every call in the session, an empty one included. Full-history
+	// mode pairs a result and a call that both lack an ID, so none mode tracks
+	// them too; skipping them, as adk-python does, would leave such a result
+	// with no call once a user turn sits between them.
 	callIDs := make(map[string]struct{})
 	for _, event := range events {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
-			if call.ID != "" {
-				callIDs[call.ID] = struct{}{}
-			}
+			callIDs[call.ID] = struct{}{}
 		}
 	}
 	// Find the latest event that starts the current turn and process from there.
 	// A tool result the caller posted back (a long-running tool's, say) is not
 	// a turn start, and the turn has to reach back to the call it answers, past
-	// any user turn sent while the tool was pending. As in adk-python's
-	// _get_current_turn_contents.
+	// any user turn sent while the tool was pending. This follows adk-python's
+	// _get_current_turn_contents, in a different order: adk-python records a
+	// posted-back result before its _should_include_event_in_context check and,
+	// for single-turn agents, collects call IDs from branch-filtered events.
+	// Here a result counts only once it passes the branch and isolation-scope
+	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
@@ -789,7 +795,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		}
 		if isSubmittedToolResult(event) {
 			for _, response := range utils.FunctionResponses(utils.Content(event)) {
-				if _, ok := callIDs[response.ID]; ok && response.ID != "" {
+				if _, ok := callIDs[response.ID]; ok {
 					unanswered[response.ID] = struct{}{}
 				}
 			}

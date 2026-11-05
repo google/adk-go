@@ -358,11 +358,19 @@ func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *tes
 	result := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
 		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "long_job", Response: map[string]any{"status": "done"}},
 	}}}
+	callWithoutID := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{Name: "long_job", Args: map[string]any{}},
+	}}}
+	resultWithoutID := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{Name: "long_job", Response: map[string]any{"status": "done"}},
+	}}}
 	orphan := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
 		FunctionResponse: &genai.FunctionResponse{ID: "no-such-call", Name: "long_job", Response: map[string]any{"status": "done"}},
 	}}}
 	question := genai.NewContentFromText("is it done yet?", genai.RoleUser)
 	notYet := genai.NewContentFromText("not yet", genai.RoleModel)
+	earlier := genai.NewContentFromText("hello", genai.RoleUser)
+	earlierReply := genai.NewContentFromText("hi, what should I run?", genai.RoleModel)
 	// A tool that asks for confirmation answers with an error, the agent asks
 	// the user, and the user's approval comes back as a function response.
 	confirmationError := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
@@ -403,6 +411,29 @@ func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *tes
 				ev("user", result),
 			},
 			want: []*genai.Content{start, call, result},
+		},
+		{
+			// A finished turn ahead of the call: the anchor is the user
+			// message that led to the call, not the first event.
+			name: "earlier turn ahead of the call",
+			events: []*session.Event{
+				ev("user", earlier), ev(agentName, earlierReply),
+				ev("user", start), ev(agentName, call),
+				ev("user", question), ev(agentName, notYet),
+				ev("user", result),
+			},
+			want: []*genai.Content{start, call, result},
+		},
+		{
+			// Full-history mode pairs a call and a result that both lack an
+			// ID, so none mode reaches back to such a call too.
+			name: "call and result without IDs",
+			events: []*session.Event{
+				ev("user", start), ev(agentName, callWithoutID),
+				ev("user", question), ev(agentName, notYet),
+				ev("user", resultWithoutID),
+			},
+			want: []*genai.Content{start, callWithoutID, resultWithoutID},
 		},
 		{
 			name: "tool resumed after the user confirms it",
