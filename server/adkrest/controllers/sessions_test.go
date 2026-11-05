@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -360,6 +361,16 @@ func TestCreateSessionValidatesInitializationEvents(t *testing.T) {
 			events:  []string{text, `{"author":"agent","actions":{"escalate":true}}`},
 			wantErr: "session initialization event 1 cannot include event actions",
 		},
+		{
+			name:    "ADK protocol call after a text part",
+			events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"text":"checking"},{"functionCall":{"id":"call-2","name":"adk_request_confirmation","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
+		{
+			name:    "ADK protocol response after a tool response",
+			events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{}}},{"functionResponse":{"id":"call-2","name":"adk_request_input","response":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
 	}
 	for _, name := range []string{"adk_request_confirmation", "adk_request_credential", "adk_request_input"} {
 		tests = append(tests,
@@ -412,6 +423,64 @@ func TestCreateSessionValidatesInitializationEvents(t *testing.T) {
 				t.Error("CreateSessionHandler() rejected the request but still created the session")
 			}
 		})
+	}
+}
+
+// TestCreateSessionRejectsEveryEventActionsField sets each field of
+// models.EventActions in turn, found by reflection, so a field added later is
+// tested without anyone writing a case for it.
+func TestCreateSessionRejectsEveryEventActionsField(t *testing.T) {
+	actionsType := reflect.TypeFor[models.EventActions]()
+	for i := range actionsType.NumField() {
+		t.Run(actionsType.Field(i).Name, func(t *testing.T) {
+			event := models.Event{Author: "agent"}
+			setNonZero(t, reflect.ValueOf(&event.Actions).Elem().Field(i))
+			body, err := json.Marshal(models.CreateSessionRequest{Events: []models.Event{event}})
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", bytes.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got, want := strings.TrimSpace(rr.Body.String()), "session initialization event 0 cannot include event actions"; got != want {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// setNonZero sets v to a value that still reads as set after a JSON round trip.
+func setNonZero(t *testing.T, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.Zero(v.Type().Key()), reflect.Zero(v.Type().Elem()))
+		v.Set(m)
+	case reflect.Slice:
+		v.Set(reflect.Append(reflect.MakeSlice(v.Type(), 0, 1), reflect.Zero(v.Type().Elem())))
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	default:
+		t.Fatalf("setNonZero has no value for a %v field; add one", v.Kind())
 	}
 }
 
