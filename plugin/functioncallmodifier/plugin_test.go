@@ -15,8 +15,10 @@
 package functioncallmodifier_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"strings"
@@ -32,7 +34,9 @@ import (
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/plugin/functioncallmodifier"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
@@ -335,6 +339,89 @@ func TestAfterModelCallback(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// contentlessModel answers every request with a response that carries no
+// content, as a model does when it stops on MAX_TOKENS or SAFETY.
+type contentlessModel struct{}
+
+func (contentlessModel) Name() string { return "contentless" }
+
+func (contentlessModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			FinishReason: genai.FinishReasonMaxTokens,
+			ErrorCode:    string(genai.FinishReasonMaxTokens),
+		}, nil)
+	}
+}
+
+// TestAfterModelCallback_ContentlessResponseKeepsChain pins that the plugin
+// leaves a response with nothing to rewrite to the rest of the after-model
+// chain, so an agent's own AfterModelCallbacks still see it.
+func TestAfterModelCallback_ContentlessResponseKeepsChain(t *testing.T) {
+	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+		Predicate: func(string) bool { return true },
+		Args:      map[string]*genai.Schema{"skill_id": {Type: genai.TypeString}},
+	})
+	if err != nil {
+		t.Fatalf("NewPlugin() error = %v", err)
+	}
+
+	const recovered = "recovered from an empty response"
+	agentCallbackCalls := 0
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: contentlessModel{},
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
+			func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				agentCallbackCalls++
+				if resp != nil && resp.Content == nil {
+					return &model.LLMResponse{Content: genai.NewContentFromText(recovered, genai.RoleModel)}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:        "app",
+		Agent:          a,
+		SessionService: sessionService,
+		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	var texts []string
+	for ev, err := range r.Run(t.Context(), "user", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.Text != "" {
+				texts = append(texts, part.Text)
+			}
+		}
+	}
+
+	if agentCallbackCalls != 1 {
+		t.Errorf("agent AfterModelCallback ran %d times, want 1", agentCallbackCalls)
+	}
+	if want := []string{recovered}; !slices.Equal(texts, want) {
+		t.Errorf("event texts = %q, want %q", texts, want)
 	}
 }
 

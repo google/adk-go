@@ -106,8 +106,11 @@ func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mod
 		if llmResponseError != nil {
 			return nil, llmResponseError // Pass through error
 		}
+		// Nothing to rewrite. A non-nil response here would replace the model's
+		// own and end the after-model chain, so the agent's callbacks and any
+		// later plugin's would never see it.
 		if llmResponse == nil || llmResponse.Content == nil || len(llmResponse.Content.Parts) == 0 {
-			return llmResponse, nil // No function calls to process
+			return nil, nil
 		}
 
 		for _, part := range llmResponse.Content.Parts {

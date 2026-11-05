@@ -16,6 +16,7 @@ package exampletool
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,6 +341,50 @@ End few-shot
 				t.Errorf("System instruction mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestExampleTool_ProcessRequestStableArgumentOrder checks that an example
+// function call's arguments are written in the same order on every request, so
+// the system instruction does not change from one request to the next.
+func TestExampleTool_ProcessRequestStableArgumentOrder(t *testing.T) {
+	et, err := New(ExampleToolConfig{Examples: []*Example{{
+		Input: genai.NewContentFromText("book a flight", "user"),
+		Output: []*genai.Content{{
+			Role: "model",
+			Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{
+					Name: "book_flight",
+					Args: map[string]any{
+						"origin":      "SFO",
+						"destination": "JFK",
+						"date":        "2026-11-01",
+						"passengers":  2,
+						"cabin":       "economy",
+						"refundable":  true,
+					},
+				},
+			}},
+		}},
+	}}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	const wantCall = "book_flight(cabin='economy', date='2026-11-01', destination='JFK', origin='SFO', passengers=2, refundable=true)"
+	// Repeated so that a map order that happens to come out sorted once
+	// cannot pass the test.
+	for range 20 {
+		req := &model.LLMRequest{Model: "gemini-2.5-flash"}
+		ctx := &mockToolContext{
+			Context:     t.Context(),
+			userContent: genai.NewContentFromText("query", "user"),
+		}
+		if err := et.ProcessRequest(ctx, req); err != nil {
+			t.Fatalf("ProcessRequest() error = %v", err)
+		}
+		if got := req.Config.SystemInstruction.Parts[0].Text; !strings.Contains(got, wantCall) {
+			t.Fatalf("system instruction does not contain %q:\n%s", wantCall, got)
+		}
 	}
 }
 
