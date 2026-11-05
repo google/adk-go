@@ -236,8 +236,10 @@ func ToGenAIPart(part *a2a.Part) (*genai.Part, error) {
 func ToGenAIParts(parts []*a2a.Part) ([]*genai.Part, error) {
 	result := make([]*genai.Part, len(parts))
 	for i, part := range parts {
-		if text := part.Text(); text != "" {
-			r := genai.NewPartFromText(text)
+		// Match the content type, not non-empty text: an empty text part is
+		// still a text part, as in adk-python's part_converter.
+		if text, ok := part.Content.(a2a.Text); ok {
+			r := genai.NewPartFromText(string(text))
 			if thought, ok := part.Meta()[ToA2AMetaKey("thought")].(bool); ok {
 				r.Thought = thought
 			}
