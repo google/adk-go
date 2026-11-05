@@ -1190,14 +1190,14 @@ func sanitizeRawText(raw string) (string, bool) {
 	budget := &nodeBudget{remaining: maxSanitizeNodes}
 	sanitized, changed, lost := redactJSONTextWithBudget(raw, 0, budget)
 	if !changed {
-		scrubbed := scrubErrorText(raw)
+		scrubbed := scrubErrorTextWithBudget(raw, 0, budget)
 		if scrubbed != raw {
 			return scrubbed, true
 		}
 		return raw, false
 	}
 	if sanitized != unparseableJSONPlaceholder {
-		scrubbed := scrubErrorText(sanitized)
+		scrubbed := scrubErrorTextWithBudget(sanitized, 0, budget)
 		if scrubbed != sanitized {
 			return scrubbed, true
 		}
@@ -1540,7 +1540,7 @@ func redactJSONValue(v any, depth int, budget *nodeBudget) (out any, changed, co
 				return outMap, true, true
 			}
 			sensitiveKey := isSensitiveJSONKey(k)
-			newK := scrubJSONMapKey(k, depth)
+			newK := scrubJSONMapKeyWithBudget(k, depth, budget)
 			if newK != k {
 				changed = true
 			}
@@ -1688,7 +1688,7 @@ func redactErrorMessage(msg string) string {
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 		if decoded, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(trimmed), budget); err == nil && !exceeded {
 			redacted, valChanged, valLost := redactJSONValue(decoded, 1, budget)
-			scrubbed, strChanged := scrubErrorJSONStrings(redacted, 1)
+			scrubbed, strChanged := scrubErrorJSONStringsWithBudget(redacted, 1, budget)
 			if valChanged || sawDuplicateKey || valLost || strChanged {
 				if b, err := json.Marshal(scrubbed); err == nil {
 					return string(b)
@@ -1701,7 +1701,7 @@ func redactErrorMessage(msg string) string {
 		if hasAnyCredentialMarker(trimmed) || hasEncodedCredentialMarker(trimmed) || hasCandidateQuotedSensitiveKey(trimmed, 0) {
 			return unparseableJSONPlaceholder
 		}
-		return scrubErrorText(msg)
+		return scrubErrorTextWithBudget(msg, 0, budget)
 	}
 	if strings.HasPrefix(trimmed, `"`) {
 		if redacted, ok, _ := redactJSONTextWithBudget(msg, 0, budget); ok {
@@ -1710,26 +1710,29 @@ func redactErrorMessage(msg string) string {
 			if redacted == unparseableJSONPlaceholder && isPositivelyHarmlessProse(msg, trimmed) {
 				return msg
 			}
-			return scrubErrorText(redacted)
+			return scrubErrorTextWithBudget(redacted, 0, budget)
 		}
 	}
-	return scrubErrorText(msg)
+	return scrubErrorTextWithBudget(msg, 0, budget)
 }
 
-func scrubErrorJSONStrings(v any, depth int) (any, bool) {
+func scrubErrorJSONStringsWithBudget(v any, depth int, budget *nodeBudget) (any, bool) {
 	if depth >= maxSanitizeDepth {
 		return v, false
+	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
 	switch x := v.(type) {
 	case map[string]any:
 		changed := false
 		out := make(map[string]any, len(x))
 		for k, val := range x {
-			newK := scrubJSONMapKey(k, depth)
+			newK := scrubJSONMapKeyWithBudget(k, depth, budget)
 			if newK != k {
 				changed = true
 			}
-			newVal, c := scrubErrorJSONStrings(val, depth+1)
+			newVal, c := scrubErrorJSONStringsWithBudget(val, depth+1, budget)
 			if existing, exists := out[newK]; exists {
 				if !reflect.DeepEqual(existing, newVal) {
 					out[newK] = redactedValue
@@ -1745,7 +1748,7 @@ func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 		changed := false
 		out := make([]any, len(x))
 		for i, val := range x {
-			newVal, c := scrubErrorJSONStrings(val, depth+1)
+			newVal, c := scrubErrorJSONStringsWithBudget(val, depth+1, budget)
 			out[i] = newVal
 			changed = changed || c
 		}
@@ -1754,7 +1757,7 @@ func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 		if isKnownSentinel(x) {
 			return x, false
 		}
-		scrubbed := scrubErrorText(x)
+		scrubbed := scrubErrorTextWithBudget(x, depth, budget)
 		return scrubbed, scrubbed != x
 	default:
 		return v, false
@@ -1762,24 +1765,36 @@ func scrubErrorJSONStrings(v any, depth int) (any, bool) {
 }
 
 func scrubErrorText(msg string) string {
-	return scrubErrorTextDepth(msg, 0)
+	return scrubErrorTextWithBudget(msg, 0, &nodeBudget{remaining: maxSanitizeNodes})
 }
 
-func scrubErrorTextDepth(msg string, depth int) string {
+func scrubErrorTextWithBudget(msg string, depth int, budget *nodeBudget) string {
 	if depth >= maxSanitizeDepth {
 		return redactedSensitiveTextPlaceholder
 	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
+	}
+	if cached, ok := budget.getErrorText(msg, depth); ok {
+		return cached
+	}
+	res := scrubErrorTextWithBudgetUncached(msg, depth, budget)
+	budget.putErrorText(msg, depth, res)
+	return res
+}
+
+func scrubErrorTextWithBudgetUncached(msg string, depth int, budget *nodeBudget) string {
 	scrubbed := scrubErrorTokens(msg)
-	if exposes, ok := jsonExposesCredentialDepth(msg, scrubbed, depth); ok {
+	if exposes, ok := jsonExposesCredentialWithBudget(msg, scrubbed, depth, budget); ok {
 		if !exposes {
 			return scrubbed
 		}
-		if decoded, ok := decodeJSONDocument(trimBOMAndSpace(msg)); ok {
-			redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, &nodeBudget{remaining: maxSanitizeNodes})
+		if decoded, ok := decodeJSONDocumentWithBudget(trimBOMAndSpace(msg), budget); ok {
+			redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, budget)
 			if !valLost && valChanged {
-				scrubbedJSON, _ := scrubErrorJSONStrings(redacted, depth+1)
+				scrubbedJSON, _ := scrubErrorJSONStringsWithBudget(redacted, depth+1, budget)
 				if b, err := json.Marshal(scrubbedJSON); err == nil {
-					if exposes2, ok2 := jsonExposesCredentialDepth(msg, string(b), depth); ok2 && !exposes2 {
+					if exposes2, ok2 := jsonExposesCredentialWithBudget(msg, string(b), depth, budget); ok2 && !exposes2 {
 						return string(b)
 					}
 				}
@@ -1787,7 +1802,7 @@ func scrubErrorTextDepth(msg string, depth int) string {
 		}
 		return redactedSensitiveTextPlaceholder
 	}
-	if hasEncodedCredentialMarker(scrubbed) || hasBackslashEscapedCredentialDepth(msg, scrubbed, depth) {
+	if hasEncodedCredentialMarker(scrubbed) || hasBackslashEscapedCredentialWithBudget(msg, scrubbed, depth, budget) {
 		return redactedSensitiveTextPlaceholder
 	}
 	return scrubbed
@@ -1846,14 +1861,17 @@ func unescapeCredentialStep(s string) string {
 // past that depth. When raw and scrubbed are each one JSON document, the
 // keys and strings of raw and scrubbed are decoded exactly and checked in
 // pairs instead (see jsonExposesCredentialDepth).
-func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
+func hasBackslashEscapedCredentialWithBudget(raw, scrubbed string, depth int, budget *nodeBudget) bool {
 	if depth >= maxSanitizeDepth {
 		return true
+	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
 	if !strings.ContainsAny(raw, `\%`) {
 		return false
 	}
-	if exposes, ok := jsonExposesCredentialDepth(raw, scrubbed, depth); ok {
+	if exposes, ok := jsonExposesCredentialWithBudget(raw, scrubbed, depth, budget); ok {
 		return exposes
 	}
 	var parts []string
@@ -1906,31 +1924,34 @@ func hasBackslashEscapedCredentialDepth(raw, scrubbed string, depth int) bool {
 // {"note":"The cookie: 2.5 ounces remained.\nKEEP"} becomes a line break that
 // leaves the quote of the string open across it, and a scrub of that text
 // then reads the prose in the string as a Cookie header's value.
-func jsonExposesCredentialDepth(raw, scrubbed string, depth int) (exposes, ok bool) {
+func jsonExposesCredentialWithBudget(raw, scrubbed string, depth int, budget *nodeBudget) (exposes, ok bool) {
 	if depth >= maxSanitizeDepth {
 		return true, true
+	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
 	raw, scrubbed = trimBOMAndSpace(raw), trimBOMAndSpace(scrubbed)
 	if len(raw) > maxInspectableJSONTextBytes || !startsJSONDocument(raw) || !startsJSONDocument(scrubbed) ||
 		!utf8.ValidString(raw) || !utf8.ValidString(scrubbed) {
 		return false, false
 	}
-	rawValue, ok := decodeJSONDocument(raw)
+	rawValue, ok := decodeJSONDocumentWithBudget(raw, budget)
 	if !ok {
 		return false, false
 	}
-	scrubbedValue, ok := decodeJSONDocument(scrubbed)
+	scrubbedValue, ok := decodeJSONDocumentWithBudget(scrubbed, budget)
 	if !ok {
 		return false, false
 	}
-	_, changed, lost := redactJSONValue(scrubbedValue, 1, &nodeBudget{remaining: maxSanitizeNodes})
+	_, changed, lost := redactJSONValue(scrubbedValue, depth+1, budget)
 	if lost {
 		return false, false
 	}
 	if changed {
 		return true, true
 	}
-	return jsonValuesExpose(rawValue, scrubbedValue, depth+1)
+	return jsonValuesExposeWithBudget(rawValue, scrubbedValue, depth+1, budget)
 }
 
 // startsJSONDocument reports whether s, with no BOM or space around it,
@@ -1941,8 +1962,11 @@ func startsJSONDocument(s string) bool {
 
 // decodeJSONDocument decodes s, one JSON document, as redactJSONValue reads
 // JSON: within its node budget, and with no key twice in an object.
-func decodeJSONDocument(s string) (any, bool) {
-	v, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(s), &nodeBudget{remaining: maxSanitizeNodes})
+func decodeJSONDocumentWithBudget(s string, budget *nodeBudget) (any, bool) {
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
+	}
+	v, sawDuplicateKey, exceeded, err := unmarshalJSONStrictWithBudget([]byte(s), budget)
 	return v, err == nil && !exceeded && !sawDuplicateKey
 }
 
@@ -1952,9 +1976,12 @@ func decodeJSONDocument(s string) (any, bool) {
 // (see jsonStringExposes). The keys of an object are read in sorted order.
 // ok is false when raw and scrubbed differ in shape, so that their keys and
 // strings cannot be paired. Past maxSanitizeDepth it reports true.
-func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
+func jsonValuesExposeWithBudget(raw, scrubbed any, depth int, budget *nodeBudget) (exposes, ok bool) {
 	if depth >= maxSanitizeDepth {
 		return true, true
+	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
 	switch r := raw.(type) {
 	case map[string]any:
@@ -1967,7 +1994,7 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 		for k := range r {
 			sk := k
 			if _, found := s[k]; !found {
-				sk = scrubJSONMapKey(k, depth+1)
+				sk = scrubJSONMapKeyWithBudget(k, depth, budget)
 				if _, found := s[sk]; !found {
 					return false, false
 				}
@@ -1982,23 +2009,23 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 				return true, true
 			}
 			if !isKnownSentinel(sk) {
-				if scrubJSONMapKey(sk, depth+1) != sk {
+				if scrubJSONMapKeyWithBudget(sk, depth, budget) != sk {
 					return true, true
 				}
 				if prefix, rawSuffix, ok := splitTempKeyPrefix(k); ok {
 					if strings.HasPrefix(sk, prefix) {
 						skSuffix := sk[len(prefix):]
-						if !isKnownSentinel(skSuffix) && jsonStringExposes(rawSuffix, skSuffix, depth+1) {
+						if !isKnownSentinel(skSuffix) && jsonStringExposesWithBudget(rawSuffix, skSuffix, depth, budget) {
 							return true, true
 						}
-					} else if jsonStringExposes(rawSuffix, sk, depth+1) {
+					} else if jsonStringExposesWithBudget(rawSuffix, sk, depth, budget) {
 						return true, true
 					}
-				} else if jsonStringExposes(k, sk, depth+1) {
+				} else if jsonStringExposesWithBudget(k, sk, depth, budget) {
 					return true, true
 				}
 			}
-			if exposes, ok := jsonValuesExpose(r[k], s[sk], depth+1); exposes || !ok {
+			if exposes, ok := jsonValuesExposeWithBudget(r[k], s[sk], depth+1, budget); exposes || !ok {
 				return exposes, ok
 			}
 		}
@@ -2009,7 +2036,7 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 			return false, false
 		}
 		for i := range r {
-			if exposes, ok := jsonValuesExpose(r[i], s[i], depth+1); exposes || !ok {
+			if exposes, ok := jsonValuesExposeWithBudget(r[i], s[i], depth+1, budget); exposes || !ok {
 				return exposes, ok
 			}
 		}
@@ -2019,7 +2046,7 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 		if !isString {
 			return false, false
 		}
-		return jsonStringExposes(r, s, depth+1), true
+		return jsonStringExposesWithBudget(r, s, depth, budget), true
 	default:
 		return false, raw == scrubbed
 	}
@@ -2032,17 +2059,20 @@ func jsonValuesExpose(raw, scrubbed any, depth int) (exposes, ok bool) {
 // scrubErrorText still redacts scrubbed, or redacts a part of raw that
 // scrubbed keeps (see keptInOrder), as for a scrub of the escaped text that
 // reads secret: a\npassword: SECRET as one value and keeps SECRET.
-func jsonStringExposes(raw, scrubbed string, depth int) bool {
+func jsonStringExposesWithBudget(raw, scrubbed string, depth int, budget *nodeBudget) bool {
 	if depth >= maxSanitizeDepth {
 		return true
 	}
-	if raw == scrubbed {
-		return !isKnownSentinel(raw) && scrubErrorTextDepth(raw, depth) != raw
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
-	if !isKnownSentinel(scrubbed) && scrubErrorTextDepth(scrubbed, depth) != scrubbed {
+	if raw == scrubbed {
+		return !isKnownSentinel(raw) && scrubErrorTextWithBudget(raw, depth, budget) != raw
+	}
+	if !isKnownSentinel(scrubbed) && scrubErrorTextWithBudget(scrubbed, depth, budget) != scrubbed {
 		return true
 	}
-	return !keptInOrder(keptLiterals(scrubbed), scrubErrorTextDepth(raw, depth))
+	return !keptInOrder(keptLiterals(scrubbed), scrubErrorTextWithBudget(raw, depth, budget))
 }
 
 func splitTempKeyPrefix(k string) (prefix, suffix string, ok bool) {
@@ -2095,19 +2125,34 @@ func mayContainKeyCredential(s string) bool {
 }
 
 func scrubJSONMapKey(k string, depth int) string {
+	return scrubJSONMapKeyWithBudget(k, depth, &nodeBudget{remaining: maxSanitizeNodes})
+}
+
+func scrubJSONMapKeyWithBudget(k string, depth int, budget *nodeBudget) string {
 	if depth >= maxSanitizeDepth {
 		return redactedSensitiveTextPlaceholder
+	}
+	if budget == nil {
+		budget = &nodeBudget{remaining: maxSanitizeNodes}
 	}
 	if isKnownSentinel(k) || !mayContainKeyCredential(k) {
 		return k
 	}
+	if cached, ok := budget.getKeyScrub(k, depth); ok {
+		return cached
+	}
+	var res string
 	if prefix, suffix, ok := splitTempKeyPrefix(k); ok {
 		if suffix == "" || isKnownSentinel(suffix) || !mayContainKeyCredential(suffix) {
-			return k
+			res = k
+		} else {
+			res = prefix + scrubErrorTextWithBudget(suffix, depth, budget)
 		}
-		return prefix + scrubErrorTextDepth(suffix, depth)
+	} else {
+		res = scrubErrorTextWithBudget(k, depth, budget)
 	}
-	return scrubErrorTextDepth(k, depth)
+	budget.putKeyScrub(k, depth, res)
+	return res
 }
 
 func isSensitiveJSONKey(k string) bool {
@@ -4689,6 +4734,9 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 		return k, ""
 	}
 	for k < lineEnd {
+		if startsAuthHeaderPrefix(s[k:lineEnd]) {
+			break
+		}
 		if q := openingQuote(s, k); q != "" {
 			var qOuter, qInner string
 			if len(q) == 1 {
@@ -4727,7 +4775,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			}
 			continue
 		}
-		if s[k] == '}' || s[k] == ']' {
+		if inJSON && (s[k] == '}' || s[k] == ']') {
 			break
 		}
 		if k == start && inJSON && (s[k] == ',' || s[k] == ':') {

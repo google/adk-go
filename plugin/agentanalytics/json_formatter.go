@@ -65,8 +65,51 @@ const maxFunctionNameSummaryLength = 256
 // exceed the maximum content length, which bounds each of its pieces.
 const responseSummarySlack = 4096
 
+type errorTextCacheKey struct {
+	s     string
+	depth int
+}
+
 type nodeBudget struct {
-	remaining int
+	remaining      int
+	errorTextCache map[errorTextCacheKey]string
+	keyScrubCache  map[errorTextCacheKey]string
+}
+
+func (b *nodeBudget) getErrorText(s string, depth int) (string, bool) {
+	if b == nil || b.errorTextCache == nil {
+		return "", false
+	}
+	res, ok := b.errorTextCache[errorTextCacheKey{s: s, depth: depth}]
+	return res, ok
+}
+
+func (b *nodeBudget) putErrorText(s string, depth int, res string) {
+	if b == nil {
+		return
+	}
+	if b.errorTextCache == nil {
+		b.errorTextCache = make(map[errorTextCacheKey]string)
+	}
+	b.errorTextCache[errorTextCacheKey{s: s, depth: depth}] = res
+}
+
+func (b *nodeBudget) getKeyScrub(s string, depth int) (string, bool) {
+	if b == nil || b.keyScrubCache == nil {
+		return "", false
+	}
+	res, ok := b.keyScrubCache[errorTextCacheKey{s: s, depth: depth}]
+	return res, ok
+}
+
+func (b *nodeBudget) putKeyScrub(s string, depth int, res string) {
+	if b == nil {
+		return
+	}
+	if b.keyScrubCache == nil {
+		b.keyScrubCache = make(map[errorTextCacheKey]string)
+	}
+	b.keyScrubCache[errorTextCacheKey{s: s, depth: depth}] = res
 }
 
 func (b *nodeBudget) take() bool {
@@ -1065,7 +1108,7 @@ func (s *sanitizer) stringValue(str string, depth int) (string, bool) {
 	var contentLost bool
 	if s.redact {
 		str, _, contentLost = redactJSONTextWithBudget(str, depth, s.budget)
-		scrubbed := scrubErrorText(str)
+		scrubbed := scrubErrorTextWithBudget(str, depth, s.budget)
 		if scrubbed != str {
 			str = scrubbed
 			contentLost = true
@@ -1340,25 +1383,32 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		k, ok := mapKeyString(iter.Key())
-		if !ok {
-			unsupportedKeys++
-			k = unsupportedKeyPlaceholder
-			if unsupportedKeys > 1 {
-				k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
-			}
+		var k string
+		var ok bool
+		if s.redact && mapKeyRedactsWhole(iter.Key()) {
+			k = redactedValue
 			truncated = true
-		} else if s.redact {
-			sensitiveKey := isSensitiveJSONKey(k)
-			k = scrubJSONMapKey(k, depth)
-			if sensitiveKey {
-				if !s.budget.take() {
-					out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-					truncated = true
-					break
+		} else {
+			k, ok = mapKeyString(iter.Key())
+			if !ok {
+				unsupportedKeys++
+				k = unsupportedKeyPlaceholder
+				if unsupportedKeys > 1 {
+					k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
 				}
-				out[k] = redactedValue
-				continue
+				truncated = true
+			} else if s.redact {
+				sensitiveKey := isSensitiveJSONKey(k)
+				k = scrubJSONMapKeyWithBudget(k, depth, s.budget)
+				if sensitiveKey {
+					if !s.budget.take() {
+						out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+						truncated = true
+						break
+					}
+					out[k] = redactedValue
+					continue
+				}
 			}
 		}
 		val, t := s.walk(iter.Value(), depth+1)
@@ -1377,6 +1427,43 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 		truncated = truncated || t
 	}
 	return out, truncated
+}
+
+// mapKeyRedactsWhole reports whether the map key k should be redacted whole
+// based on its type alone, without reading its scalar value or invoking its
+// text marshaler. It unwraps interfaces while checking redactsWhole on both
+// declared interface types and dynamic element types (and if the unwrapped
+// key is a non-nil pointer, also checks redactsWhole on its element type).
+func mapKeyRedactsWhole(k reflect.Value) bool {
+	for k.IsValid() && k.Kind() == reflect.Interface {
+		if redactsWhole(k) {
+			return true
+		}
+		if k.IsNil() {
+			return false
+		}
+		k = k.Elem()
+	}
+	if !k.IsValid() {
+		return false
+	}
+	if redactsWhole(k) {
+		return true
+	}
+	if k.Kind() == reflect.Pointer && !k.IsNil() {
+		if redactsWhole(k.Elem()) {
+			return true
+		}
+		if k.Elem().Kind() == reflect.Struct && isSensitiveKey(k.Elem().Type().Name()) && (hasMarshalerMethod(k) || hasMarshalerMethod(k.Elem())) {
+			return true
+		}
+	}
+	if k.Kind() == reflect.Struct && isSensitiveKey(k.Type().Name()) {
+		if reflect.PointerTo(k.Type()).Implements(textMarshalerType) || reflect.PointerTo(k.Type()).Implements(jsonMarshalerType) {
+			return true
+		}
+	}
+	return false
 }
 
 // mapKeyString returns the JSON object key for a map key: strings, text

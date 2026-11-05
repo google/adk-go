@@ -6557,3 +6557,157 @@ func TestRound23PlainErrorRegression(t *testing.T) {
 		})
 	}
 }
+
+type reviewMapToken string
+
+type reviewMapStructToken struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (r reviewMapStructToken) MarshalText() ([]byte, error) {
+	if r.called != nil {
+		r.called.Store(true)
+	}
+	return []byte(r.secret), nil
+}
+
+type reviewMapPtrToken struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (r *reviewMapPtrToken) MarshalText() ([]byte, error) {
+	if r != nil && r.called != nil {
+		r.called.Store(true)
+	}
+	if r == nil {
+		return nil, nil
+	}
+	return []byte(r.secret), nil
+}
+
+func TestSmartTruncate_CredentialNamedMapKeysRedactedWhole(t *testing.T) {
+	const secret = "SUPER_SECRET_TOKEN_XYZ_9876"
+
+	// 1. Defined-string key
+	mStr := map[reviewMapToken]string{reviewMapToken(secret): "val1"}
+	b, trunc, err := SmartTruncate(mStr, 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(map[reviewMapToken]string) error = %v", err)
+	}
+	if !trunc {
+		t.Errorf("SmartTruncate(map[reviewMapToken]string) trunc = false, want true")
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("SmartTruncate(map[reviewMapToken]string) leaked secret %q: %s", secret, string(b))
+	}
+	if string(b) != `{"[REDACTED]":"val1"}` {
+		t.Errorf("SmartTruncate(map[reviewMapToken]string) = %s, want %s", string(b), `{"[REDACTED]":"val1"}`)
+	}
+
+	// 2. Interface-held key
+	mAny := map[any]string{reviewMapToken(secret): "val2"}
+	b, trunc, err = SmartTruncate(mAny, 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(map[any]string with reviewMapToken) error = %v", err)
+	}
+	if !trunc {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapToken) trunc = false, want true")
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapToken) leaked secret %q: %s", secret, string(b))
+	}
+	if string(b) != `{"[REDACTED]":"val2"}` {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapToken) = %s, want %s", string(b), `{"[REDACTED]":"val2"}`)
+	}
+
+	// 3. Pointer-held struct key with pointer receiver MarshalText
+	calledPtr := &atomic.Bool{}
+	ptrKey := &reviewMapPtrToken{called: calledPtr, secret: secret}
+	mPtr := map[*reviewMapPtrToken]string{ptrKey: "val3"}
+	b, trunc, err = SmartTruncate(mPtr, 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(map[*reviewMapPtrToken]string) error = %v", err)
+	}
+	if !trunc {
+		t.Errorf("SmartTruncate(map[*reviewMapPtrToken]string) trunc = false, want true")
+	}
+	if calledPtr.Load() {
+		t.Errorf("MarshalText was called on *reviewMapPtrToken key during SmartTruncate with redaction")
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("SmartTruncate(map[*reviewMapPtrToken]string) leaked secret %q: %s", secret, string(b))
+	}
+	if string(b) != `{"[REDACTED]":"val3"}` {
+		t.Errorf("SmartTruncate(map[*reviewMapPtrToken]string) = %s, want %s", string(b), `{"[REDACTED]":"val3"}`)
+	}
+
+	// 4. Value-held struct key with value receiver MarshalText
+	calledVal := &atomic.Bool{}
+	valKey := reviewMapStructToken{called: calledVal, secret: secret}
+	mVal := map[reviewMapStructToken]string{valKey: "val4"}
+	b, trunc, err = SmartTruncate(mVal, 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(map[reviewMapStructToken]string) error = %v", err)
+	}
+	if !trunc {
+		t.Errorf("SmartTruncate(map[reviewMapStructToken]string) trunc = false, want true")
+	}
+	if calledVal.Load() {
+		t.Errorf("MarshalText was called on reviewMapStructToken key during SmartTruncate with redaction")
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("SmartTruncate(map[reviewMapStructToken]string) leaked secret %q: %s", secret, string(b))
+	}
+	if string(b) != `{"[REDACTED]":"val4"}` {
+		t.Errorf("SmartTruncate(map[reviewMapStructToken]string) = %s, want %s", string(b), `{"[REDACTED]":"val4"}`)
+	}
+
+	// 5. Interface-held struct key
+	calledIfVal := &atomic.Bool{}
+	mIfVal := map[any]string{reviewMapStructToken{called: calledIfVal, secret: secret}: "val5"}
+	b, trunc, err = SmartTruncate(mIfVal, 1000)
+	if err != nil {
+		t.Fatalf("SmartTruncate(map[any]string with reviewMapStructToken) error = %v", err)
+	}
+	if !trunc {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapStructToken) trunc = false, want true")
+	}
+	if calledIfVal.Load() {
+		t.Errorf("MarshalText was called on interface-held reviewMapStructToken key")
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapStructToken) leaked secret %q: %s", secret, string(b))
+	}
+	if string(b) != `{"[REDACTED]":"val5"}` {
+		t.Errorf("SmartTruncate(map[any]string with reviewMapStructToken) = %s, want %s", string(b), `{"[REDACTED]":"val5"}`)
+	}
+
+	// 6. BeforeToolCallback (TOOL_STARTING) row assertion
+	p, requests, mCtx := setupTestPlugin(t)
+	tl := &fakeTool{name: "run"}
+	calledTool := &atomic.Bool{}
+	args := map[string]any{
+		"token_map": map[reviewMapToken]string{reviewMapToken(secret): "arg_val"},
+		"struct_map": map[*reviewMapPtrToken]string{
+			{called: calledTool, secret: secret}: "arg_val2",
+		},
+	}
+	if _, err := p.BeforeToolCallback()(mCtx, tl, args); err != nil {
+		t.Fatalf("BeforeToolCallback error = %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if len(rows) == 0 {
+		t.Fatal("no rows collected from BeforeToolCallback")
+	}
+	if calledTool.Load() {
+		t.Errorf("MarshalText was called on tool argument map key during BeforeToolCallback")
+	}
+	for _, row := range rows {
+		if s := fmt.Sprint(row); strings.Contains(s, secret) {
+			t.Errorf("%v row holds %q: %s", row["event_type"], secret, elideText(s))
+		}
+	}
+}

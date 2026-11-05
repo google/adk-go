@@ -6907,6 +6907,36 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 			in:   `curl -H "X-Api-Key: "prefix"bob's`,
 			want: `curl -H "X-Api-Key: [REDACTED]"`,
 		},
+		// Closing bracket and brace boundary variants in shell words.
+		{
+			in:   `curl -H "X-Api-Key: "pre}` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "pre]` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "pre}` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "pre]` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Cookie: "pre}` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Cookie: "pre]` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		// Escaped quote multi-header command where bare scan must not consume next header.
+		{
+			in:   `curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]" [REDACTED]`,
+		},
 	} {
 		checkNoLeak(t, tt.in, secret)
 		checkRedactionPaths(t, tt.in, tt.want)
@@ -7638,5 +7668,89 @@ func TestTempPrefixedSensitiveMapKeys(t *testing.T) {
 		if !strings.Contains(out, "PUBLIC_KEEP") {
 			t.Errorf("%s lost PUBLIC_KEEP: %q", label, out)
 		}
+	}
+}
+
+// TestNestedJSONKeyScrubbingScalesLinearly checks that recursive scrubbing and
+// redaction across nested JSON key documents scales linearly with input size
+// without superlinear repetition.
+func TestNestedJSONKeyScrubbingScalesLinearly(t *testing.T) {
+	buildNestedDoc := func(levels int) string {
+		s := "public"
+		for range levels {
+			b, err := json.Marshal(map[string]any{s: "public"})
+			if err != nil {
+				t.Fatalf("json.Marshal failed: %v", err)
+			}
+			s = string(b)
+		}
+		return s
+	}
+
+	doc9 := buildNestedDoc(9)
+	doc11 := buildNestedDoc(11)
+
+	if len(doc9) != 2131 {
+		t.Fatalf("doc9 len = %d, want 2131", len(doc9))
+	}
+	if len(doc11) != 8293 {
+		t.Fatalf("doc11 len = %d, want 8293", len(doc11))
+	}
+
+	// 1. Verify exact benign-text preservation across all four operations.
+	for _, doc := range []string{doc9, doc11} {
+		if got := redactErrorMessage(doc); got != doc {
+			t.Errorf("redactErrorMessage changed benign nested JSON key document (len %d)", len(doc))
+		}
+		if got, changed := sanitizeRawText(doc); changed || got != doc {
+			t.Errorf("sanitizeRawText changed benign nested JSON key document (len %d)", len(doc))
+		}
+		if got := scrubErrorText(doc); got != doc {
+			t.Errorf("scrubErrorText changed benign nested JSON key document (len %d)", len(doc))
+		}
+		gotBytes, truncated, err := SmartTruncate(doc, len(doc)+1000)
+		if err != nil || truncated {
+			t.Errorf("SmartTruncate errored (%v) or truncated (%v) for len %d", err, truncated, len(doc))
+		}
+		var parsed string
+		if err := json.Unmarshal(gotBytes, &parsed); err != nil || parsed != doc {
+			t.Errorf("SmartTruncate JSON unmarshal mismatch for len %d", len(doc))
+		}
+	}
+
+	// 2. Best-of-3 timings asserting levels=11 < 50ms and growth <= 6x.
+	bestOf3 := func(doc string) time.Duration {
+		var best time.Duration
+		for i := range 3 {
+			start := time.Now()
+			_ = redactErrorMessage(doc)
+			_, _ = sanitizeRawText(doc)
+			_ = scrubErrorText(doc)
+			_, _, _ = SmartTruncate(doc, len(doc)+1000)
+			elapsed := time.Since(start)
+			if i == 0 || elapsed < best {
+				best = elapsed
+			}
+		}
+		return best
+	}
+
+	t9 := bestOf3(doc9)
+	t11 := bestOf3(doc11)
+
+	t.Logf("nested JSON key scrubbing timings: levels=9 (2131 bytes) took %v; levels=11 (8293 bytes) took %v", t9, t11)
+
+	if t11 >= 50*time.Millisecond {
+		t.Errorf("levels=11 took %v, want < 50ms", t11)
+	}
+
+	// Bounded growth check (document length grew 8293 / 2131 = 3.89x; growth must be <= 6x).
+	base9 := t9
+	if minFloor := 100 * time.Microsecond; base9 < minFloor {
+		base9 = minFloor
+	}
+	ratio := float64(t11) / float64(base9)
+	if ratio > 6.0 {
+		t.Errorf("timing growth levels=11 / levels=9 = %.2fx (%v / %v), want <= 6x", ratio, t11, t9)
 	}
 }

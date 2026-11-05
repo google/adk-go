@@ -5818,6 +5818,34 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 			name: "Doubly-escaped JSON-wrapped Digest Authorization with trailing URL",
 			in:   `{"b":"KEEP_B","h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com"}`,
 		},
+		{
+			name: "X-Api-Key joined quotes with closing brace before semicolon",
+			in:   `curl -H "X-Api-Key: "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "X-Api-Key joined quotes with closing bracket before semicolon",
+			in:   `curl -H "X-Api-Key: "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Authorization joined quotes with closing brace before semicolon",
+			in:   `curl -H "Authorization: Bearer "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Authorization joined quotes with closing bracket before semicolon",
+			in:   `curl -H "Authorization: Bearer "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quotes with closing brace before semicolon",
+			in:   `curl -H "Cookie: "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quotes with closing bracket before semicolon",
+			in:   `curl -H "Cookie: "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Escaped quote multi-header bare scan does not consume next header",
+			in:   `curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`,
+		},
 	}
 	for _, tt := range inputs {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5853,11 +5881,57 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			payloadEventTypes := map[string]bool{
+				string(EventUserMessageReceived): true,
+				string(EventLLMRequest):          true,
+				string(EventLLMResponse):         true,
+				string(EventLLMError):            true,
+				string(EventToolStarting):        true,
+				string(EventToolCompleted):       true,
+				string(EventToolError):           true,
+				string(EventStateDelta):          true,
+				string(EventAgentResponse):       true,
+			}
 			for _, row := range rows {
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
 					t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
 				}
+				if strings.Contains(tt.in, "PUBLIC_KEEP") {
+					evType, _ := row["event_type"].(string)
+					if payloadEventTypes[evType] {
+						if s := fmt.Sprint(row); !strings.Contains(s, "PUBLIC_KEEP") {
+							t.Errorf("%v row lost PUBLIC_KEEP: %s", evType, elideText(s))
+						}
+					}
+				}
 			}
 		})
+	}
+}
+
+func TestFileDataEscapedQuoteMultiHeaderRedacted(t *testing.T) {
+	const secret = "SYNTH_REVIEW_SECOND_SECRET_8402"
+	uri := `https://example.com/run?cmd=curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`
+	p, requests, mCtx := setupTestPlugin(t)
+	content := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{FileData: &genai.FileData{MIMEType: "text/plain", FileURI: uri}},
+		},
+	}
+	var errs callbackErrors
+	errs.add(p.OnUserMessageCallback()(mCtx, content))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+	if s := fmt.Sprint(userRow); strings.Contains(s, secret) {
+		t.Fatalf("USER_MESSAGE_RECEIVED row leaked %q: %s", secret, elideText(s))
+	}
+	for _, row := range rows {
+		if s := fmt.Sprint(row); strings.Contains(s, secret) {
+			t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
+		}
 	}
 }
