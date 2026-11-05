@@ -27,6 +27,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -49,7 +50,10 @@ func Test_inMemoryService_CreateUsesProviders(t *testing.T) {
 }
 
 func Test_inMemoryService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true} // InMemory supports custom IDs
+	opts := sessiontestsuite.SuiteOptions{
+		SupportsUserProvidedSessionID: true, // InMemory supports custom IDs
+		ChecksRequestedAuthConfigs:    true,
+	}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return session.InMemoryService()
 	})
@@ -540,6 +544,35 @@ func TestInMemoryService_AppendEvent_CopiesCompaction(t *testing.T) {
 	}
 	if txt := stored.CompactedContent.Parts[0].Text; txt != "summary" {
 		t.Errorf("stored summary = %q, want %q: the caller rewrote the stored content", txt, "summary")
+	}
+}
+
+// TestInMemoryService_AppendEvent_CopiesRequestedAuthConfigs pins that a
+// write to the map the caller passed in does not reach the stored event.
+func TestInMemoryService_AppendEvent_CopiesRequestedAuthConfigs(t *testing.T) {
+	ctx := t.Context()
+	service := session.InMemoryService()
+	createResp, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	apiKey := toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"}
+	event := &session.Event{ID: "e1", Author: "agent", Actions: session.EventActions{
+		RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {AuthScheme: apiKey, CredentialKey: "k1"}},
+	}}
+	if err := service.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	event.Actions.RequestedAuthConfigs["call-2"] = toolauth.Config{AuthScheme: apiKey, CredentialKey: "k2"}
+
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: createResp.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	stored := got.Session.Events().At(0).Actions.RequestedAuthConfigs
+	if _, ok := stored["call-2"]; ok || len(stored) != 1 {
+		t.Errorf("stored RequestedAuthConfigs has %d entries, want only call-1: the caller's write reached the stored event", len(stored))
 	}
 }
 

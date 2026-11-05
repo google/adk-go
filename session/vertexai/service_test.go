@@ -55,6 +55,7 @@ func Test_vertexaiService(t *testing.T) {
 	opts := sessiontestsuite.SuiteOptions{
 		SupportsUserProvidedSessionID: true,
 		ProvidesServerAssignedEventID: true,
+		ChecksRequestedAuthConfigs:    true,
 		AppName:                       EngineID,
 	} // VertexAI forbids custom IDs
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {

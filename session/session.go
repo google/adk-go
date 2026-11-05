@@ -264,9 +264,9 @@ type EventActions struct {
 	// Session services persist a request and the Agent Engine server sends it
 	// to clients unredacted, so it must not carry the secrets the tool was
 	// configured with: store the output of [toolauth.Config.WithoutSecrets], as
-	// adk-python's request_credential does. Session services refuse to append
-	// an event whose request does not decode as a [toolauth.Config], such as
-	// one with a zero AuthScheme.
+	// adk-python's request_credential does. The in-memory, database and Vertex
+	// AI session services refuse to append an event whose request does not
+	// decode as a [toolauth.Config], such as one with a zero AuthScheme.
 	RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.

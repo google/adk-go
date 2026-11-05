@@ -25,9 +25,10 @@ import (
 // not read back from storage as a [toolauth.Config]. A struct literal is not
 // checked when it is built, as adk-python checks an AuthConfig, and
 // [toolauth.Config.MarshalJSON] accepts configs that
-// [toolauth.Config.UnmarshalJSON] refuses. Every session service calls this
-// before it appends an event, so none of them stores a request it could not
-// load again, and all of them refuse the same events.
+// [toolauth.Config.UnmarshalJSON] refuses. The in-memory, database and Vertex
+// AI session services call this before they append an event, so none of them
+// stores a request it could not load again, and all of them refuse the same
+// events.
 //
 // The configs are read back with every number as a float64, as the Vertex AI
 // service stores them through structpb, so an int64 such as an ExpiresAt that

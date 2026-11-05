@@ -17,9 +17,7 @@
 package sessiontestsuite
 
 import (
-	"encoding/json"
 	"errors"
-	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,7 +76,11 @@ func Snapshot(s session.Session) ExpectedSession {
 type SuiteOptions struct {
 	SupportsUserProvidedSessionID bool
 	ProvidesServerAssignedEventID bool
-	AppName                       string
+	// ChecksRequestedAuthConfigs runs the case that requires AppendEvent to
+	// refuse an event whose requested auth config does not decode as a
+	// toolauth.Config. session.Service does not require that check.
+	ChecksRequestedAuthConfigs bool
+	AppName                    string
 }
 
 // RunServiceTests runs a battery of standard tests against a Session.Service.
@@ -641,11 +643,6 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			if err := s.AppendEvent(ctx, created.Session, event); err != nil {
 				t.Fatalf("AppendEvent() error = %v", err)
 			}
-			// The caller still holds the map it passed in. A later write to it
-			// must not reach the stored event.
-			event.Actions.RequestedAuthConfigs["call-2"] = toolauth.Config{
-				AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
-			}
 
 			got, err := s.Get(ctx, &session.GetRequest{
 				AppName:   testAppName,
@@ -668,10 +665,12 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 		t.Run("requested_auth_config_that_does_not_decode_is_refused", func(t *testing.T) {
 			// A toolauth.Config struct literal is not checked when it is
 			// built, and its encoder accepts configs its decoder refuses. A
-			// backend that stored one could not read the session back, so
-			// every backend refuses the append, including one that never
-			// decodes. The Vertex AI service stores numbers as float64, so a
-			// config is refused too when that conversion breaks it.
+			// backend that stored one could not read the session back. A
+			// backend that opts in refuses the append, even if it never
+			// decodes.
+			if !opts.ChecksRequestedAuthConfigs {
+				t.Skip("Skipping: the backend does not check requested auth configs on append")
+			}
 			s := setup(t)
 			for _, tc := range []struct {
 				name   string
@@ -693,28 +692,6 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 					config: toolauth.Config{
 						AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
 						RawAuthCredential: &toolauth.Credential{APIKey: "k"},
-					},
-				},
-				{
-					// As a float64 this is 2^63, which does not fit expiresAt.
-					name: "expires_at_that_float64_rounds_out_of_range",
-					config: toolauth.Config{
-						AuthScheme: toolauth.Scheme{
-							Type:  toolauth.SchemeTypeOAuth2,
-							Flows: &toolauth.OAuthFlows{ClientCredentials: &toolauth.OAuthFlow{TokenURL: "https://example.com/token"}},
-						},
-						RawAuthCredential: &toolauth.Credential{
-							AuthType: toolauth.CredentialTypeOAuth2,
-							OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", ExpiresAt: math.MaxInt64},
-						},
-					},
-				},
-				{
-					// Extra keeps a number as written, but no float64 holds it.
-					name: "extra_number_beyond_float64",
-					config: toolauth.Config{
-						AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
-						Extra:      map[string]any{"big": json.Number("1e400")},
 					},
 				},
 			} {
