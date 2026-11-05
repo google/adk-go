@@ -815,14 +815,18 @@ func TestToSessionEvent_EmptyTextPart(t *testing.T) {
 	}
 }
 
-// TestToSessionEvent_terminalTaskIsFinalResponse pins that a finished task is
-// the remote agent's final response even when its artifacts replay the tool
-// calls the peer made, as an ADK peer's do. Without SkipSummarization those
-// function call and response parts make IsFinalResponse report false, so
-// nothing that waits for the final response sees the answer. adk-python sets
-// skip_summarization for a completed, failed or canceled task with parts
-// (to_adk_event.py, convert_a2a_task_to_event).
-func TestToSessionEvent_terminalTaskIsFinalResponse(t *testing.T) {
+// TestToSessionEvent_finalResponseByTaskState pins that a completed, failed
+// or canceled task is the remote agent's final response even when its
+// artifacts replay the tool calls the peer made, as an ADK peer's do. Without
+// SkipSummarization those function call and response parts make
+// IsFinalResponse report false: the event is still emitted, but an LLM parent
+// calls its model again after the remote reply, and a workflow agent node
+// wrapping the remote agent gets no output. adk-python sets
+// skip_summarization for the same three states with parts
+// (to_adk_event.py, convert_a2a_task_to_event). Rejected and auth-required
+// tasks are not final here, as in Python, although a2a-go counts rejected as
+// terminal.
+func TestToSessionEvent_finalResponseByTaskState(t *testing.T) {
 	t.Parallel()
 	a2aAgent, err := agent.New(agent.Config{Name: "a2a agent"})
 	if err != nil {
@@ -843,6 +847,8 @@ func TestToSessionEvent_terminalTaskIsFinalResponse(t *testing.T) {
 		{state: a2a.TaskStateCompleted, wantFinal: true},
 		{state: a2a.TaskStateFailed, wantFinal: true},
 		{state: a2a.TaskStateCanceled, wantFinal: true},
+		{state: a2a.TaskStateRejected, wantFinal: false},
+		{state: a2a.TaskStateAuthRequired, wantFinal: false},
 		{state: a2a.TaskStateWorking, wantFinal: false},
 	}
 	for _, tc := range tests {
