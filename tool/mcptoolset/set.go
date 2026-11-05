@@ -262,6 +262,34 @@ func (*set) IsLongRunning() bool {
 	return false
 }
 
+// reservedToolNames are the names the framework synthesizes and interprets itself, and
+// never registers as a tool: the confirmation, credential-request and workflow-input
+// paths build these function calls directly (see toolconfirmation.FunctionCallName,
+// requestEUCFunctionCallName and workflow.WorkflowInputFunctionCallName) instead of
+// packaging a declaration into the request. Because nothing is ever registered under
+// them, no duplicate-name check downstream can notice a server that also answers to one,
+// and a model call carrying that name is resolved by the framework rather than by the
+// server. They are therefore withheld unconditionally.
+//
+// No other name belongs here. A name the framework *does* register goes into the request
+// as a tool, so a server tool sharing it is caught by appendTools or toolutils.PackTool,
+// which fail with "duplicate tool: %q" and name it. Withholding those here instead would
+// drop a server's tool for every agent that does not register the colliding one, which is
+// the common case: set_model_response is only injected for an agent with an output
+// schema, transfer_to_agent only when auto flow applies, and finish_task and
+// task_completed only inside the workflow agents.
+//
+// Names the application configures (the in-model built-ins google_search, url_context and
+// google_maps_grounding, and the exitlooptool, loadmemorytool and loadartifactstool
+// packages) are equally absent: they appear in the agent's own tool list, so the same
+// duplicate-name check reports a real collision and a server with no such built-in
+// configured keeps its tool.
+var reservedToolNames = map[string]struct{}{
+	"adk_request_confirmation": {},
+	"adk_request_credential":   {},
+	"adk_request_input":        {},
+}
+
 // Tools fetch MCP tools from the server, convert to adk tool.Tool and filter by name.
 func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 	mcpTools, err := s.mcpClient.ListTools(ctx)
@@ -271,6 +299,13 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
+		if _, reserved := reservedToolNames[mcpTool.Name]; reserved {
+			// One server advertising a framework-owned name must not cost the agent its
+			// whole tool listing, or the run. Drop the offending tool and keep the rest;
+			// a name the framework owns is never handed out to the model.
+			continue
+		}
+
 		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
