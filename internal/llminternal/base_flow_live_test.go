@@ -348,6 +348,39 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 			wantConns: 2,
 		},
 		{
+			// A close frame with code 1008 (policy violation) reaches
+			// isResumable as a *websocket.CloseError and must reconnect.
+			name: "policy violation close 1008 reconnects",
+			serveConn: func(connNum int, conn *websocket.Conn) {
+				if connNum == 1 {
+					deadline := time.Now().Add(time.Second)
+					_ = conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "policy violation"), deadline)
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentPong)); err != nil {
+					return
+				}
+				blockUntilClientCloses(conn)
+			},
+			drive: func(t *testing.T, sess agent.LiveSession, seq iter.Seq2[*session.Event, error], cancel context.CancelFunc) {
+				sawTurn := false
+				for ev, err := range seq {
+					if err != nil {
+						continue
+					}
+					if ev != nil && ev.LLMResponse.Content != nil {
+						sawTurn = true
+						cancel()
+					}
+				}
+				if !sawTurn {
+					t.Error("never received the post-reconnect model turn")
+				}
+			},
+			wantConns: 2,
+		},
+		{
 			// A close frame with a non-resumable code must surface as an error
 			// to the caller and terminate the flow after a single connection.
 			//

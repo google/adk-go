@@ -198,6 +198,7 @@ func (r *Runner) runNode(
 		if event.Author == "" {
 			event.Author = agentToRun.Name()
 		}
+		stampTimestamp(ictx, event)
 
 		if event != nil && !event.LLMResponse.Partial {
 			if event.NodeInfo != nil && event.NodeInfo.MessageAsOutput && event.LLMResponse.Content != nil {
@@ -220,6 +221,7 @@ func (r *Runner) runNode(
 				continue
 			}
 			event = fromPlugin(event, modifiedEvent, record)
+			stampTimestamp(ictx, event) // a replacement may be a struct literal too
 		}
 
 		if !event.LLMResponse.Partial {
@@ -266,6 +268,7 @@ func (r *Runner) newNodeInvocationContext(
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
+		MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 	})
 	ctx = plugininternal.ToContext(ctx, r.pluginManager)
 
