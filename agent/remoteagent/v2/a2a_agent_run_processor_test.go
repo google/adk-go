@@ -353,7 +353,7 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agnt := utils.Must(agent.New(agent.Config{}))
+			agnt := utils.Must(agent.New(agent.Config{Name: "test"}))
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				Agent: agnt,
 			})
