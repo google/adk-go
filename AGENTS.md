@@ -10,7 +10,7 @@ ADK Go (`google.golang.org/adk`) is an open-source, code-first Go toolkit for
 building, evaluating, and deploying AI agents. It is model-agnostic but
 optimized for Gemini, and is one of three ADK implementations — Go, Python, and
 Java — that share a conceptual model but are independent codebases. Requires
-Go 1.25+.
+the Go version declared in `go.mod`.
 
 ## Setup & core commands
 

@@ -41,6 +41,8 @@ This Go version of ADK is ideal for developers building cloud-native agent appli
 
 ## 🚀 Installation
 
+ADK Go requires Go 1.26.10 or later (see [go.mod](go.mod)).
+
 To add ADK Go to your project, run:
 
 ```bash
