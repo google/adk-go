@@ -345,3 +345,33 @@ func TestContinuation_GenerateStreamKeepsMetadata(t *testing.T) {
 	}
 	checkRequests(t, api, []string{"", "t1", "t2"})
 }
+
+// TestContinuation_MaxTokensNotResumed checks that a MAX_TOKENS stop that
+// carries a token is returned as it is, even after a CONTINUATION pause was
+// resumed, since resuming it makes the API return a 400.
+func TestContinuation_MaxTokensNotResumed(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			api := &fakeContinuationAPI{byToken: map[string][]map[string]any{
+				"":   {candidate("one ", "CONTINUATION", "t1")},
+				"t1": {candidate("two", "MAX_TOKENS", "t2")},
+			}}
+			var final *model.LLMResponse
+			for resp, err := range newContinuationModel(t, api).GenerateContent(t.Context(), continuationRequest(), stream) {
+				if err != nil {
+					t.Fatalf("GenerateContent: %v", err)
+				}
+				if !resp.Partial {
+					final = resp
+				}
+			}
+			if final == nil {
+				t.Fatal("no final response")
+			}
+			if final.FinishReason != genai.FinishReasonMaxTokens {
+				t.Errorf("finish reason = %q, want %q", final.FinishReason, genai.FinishReasonMaxTokens)
+			}
+			checkRequests(t, api, []string{"", "t1"})
+		})
+	}
+}

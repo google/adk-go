@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -124,6 +125,12 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		messages []openai.ChatCompletionMessageParamUnion
 		texts    []string
 		calls    []openai.ChatCompletionMessageToolCallUnionParam
+		// pieces holds the turn's text and media in arrival order, because a
+		// user message that carries media is a list of parts and "describe
+		// this:" has to stay ahead of the image it introduces. texts is the
+		// same text without the media, for the turns that stay a plain string.
+		pieces   []contentPiece
+		hasMedia bool
 	)
 	for _, part := range content.Parts {
 		if part == nil {
@@ -131,8 +138,20 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		}
 		// Checked first, so a field this package cannot send is named even when
 		// text or a call on the same part would otherwise carry it out unnoticed.
-		if field := shared.UnsupportedPayload(part); field != "" {
+		// Media is excluded from the report because it is emitted below.
+		if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
 			return nil, fmt.Errorf("openai: unsupported content part: %s", field)
+		}
+		// Classified before any of the part is emitted, so media that cannot be
+		// labeled fails the request instead of leaving with the text beside it.
+		media, err := shared.ClassifyMedia(part)
+		if err != nil {
+			return nil, err
+		}
+		if len(media) > 0 && part.FunctionResponse != nil {
+			// A tool message carries text only, so the media would be dropped
+			// without a word.
+			return nil, fmt.Errorf("openai: media on a function response part is not supported: %s", media[0].MIMEType)
 		}
 		// Text is read apart from a call or a response because one part can
 		// carry both. Reasoning and signatures are dropped, as on the Responses
@@ -140,6 +159,11 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		sendText := part.Text != "" && !part.Thought
 		if sendText {
 			texts = append(texts, part.Text)
+			pieces = append(pieces, contentPiece{text: part.Text})
+		}
+		for i := range media {
+			pieces = append(pieces, contentPiece{media: &media[i]})
+			hasMedia = true
 		}
 		switch {
 		case part.FunctionCall != nil:
@@ -154,7 +178,7 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 				return nil, err
 			}
 			messages = append(messages, *msg)
-		case !sendText && !shared.ReplayedReasoning(part):
+		case !sendText && len(media) == 0 && !shared.ReplayedReasoning(part):
 			return nil, errors.New("openai: unsupported content part: carries nothing to send")
 		}
 	}
@@ -162,6 +186,13 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		// Only an assistant message carries tool calls, and dropping them would
 		// leave their results answering calls the request never made.
 		return nil, fmt.Errorf("openai: function call in a %s turn: only model turns can carry calls", role)
+	}
+	if hasMedia {
+		userMsg, err := newMediaMessage(role, pieces)
+		if err != nil {
+			return nil, err
+		}
+		return append(messages, *userMsg), nil
 	}
 
 	text := joinText(texts)
@@ -184,6 +215,90 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		messages = append(messages, openai.UserMessage(text))
 	}
 	return messages, nil
+}
+
+// contentPiece is one piece of a message, held in the order it arrived: either
+// text or a classified media value, never both.
+type contentPiece struct {
+	text  string
+	media *shared.Media
+}
+
+// newMediaMessage builds the user message for a turn that carries media. Only a
+// user message can: an assistant message's content is text or a refusal, and a
+// system or developer message's is text, so media in those turns is refused
+// rather than dropped.
+func newMediaMessage(role string, pieces []contentPiece) (*openai.ChatCompletionMessageParamUnion, error) {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(pieces))
+	for _, piece := range pieces {
+		if piece.media == nil {
+			if strings.TrimSpace(piece.text) == "" {
+				continue
+			}
+			parts = append(parts, openai.TextContentPart(piece.text))
+			continue
+		}
+		switch role {
+		case roleAssistant:
+			return nil, fmt.Errorf("%w: %s", shared.ErrMediaOnAssistantTurn, piece.media.MIMEType)
+		case roleSystem, roleDeveloper:
+			return nil, fmt.Errorf("openai: media in a %s message is not supported: %s", role, piece.media.MIMEType)
+		}
+		part, err := newMediaPart(*piece.media)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	msg := openai.UserMessage(parts)
+	return &msg, nil
+}
+
+// imageInputDetail is the detail level every image input carries, named rather
+// than left to the server's default so that the request says what was meant.
+// genai.Part.MediaResolution is the caller's way to ask for a level, and it is
+// refused while media is sent rather than mapped onto this field; see
+// shared.UnsupportedPayload.
+const imageInputDetail = "auto"
+
+// newMediaPart builds the content part for one classified media value. The kind
+// picks the wire field and the source picks how that field names the bytes.
+// Errors name the kind and the source and never the URI, which can be a
+// presigned URL.
+func newMediaPart(m shared.Media) (openai.ChatCompletionContentPartUnionParam, error) {
+	switch m.Kind {
+	case shared.MediaKindImage:
+		image := openai.ChatCompletionContentPartImageImageURLParam{Detail: imageInputDetail}
+		switch m.Source {
+		case shared.MediaSourceData:
+			image.URL = m.DataURL()
+		case shared.MediaSourceURL:
+			image.URL = m.URL
+		default:
+			// image_url has no field for an uploaded file's id.
+			return openai.ChatCompletionContentPartUnionParam{}, fmt.Errorf("openai: unsupported media source for an image on Chat Completions: %s", m.Source)
+		}
+		return openai.ImageContentPart(image), nil
+	case shared.MediaKindFile:
+		file := openai.ChatCompletionContentPartFileFileParam{}
+		switch m.Source {
+		case shared.MediaSourceData:
+			file.FileData = param.NewOpt(m.DataURL())
+			if m.Filename != "" {
+				file.Filename = param.NewOpt(m.Filename)
+			}
+		case shared.MediaSourceFileID:
+			file.FileID = param.NewOpt(m.FileID)
+		default:
+			// The file part has file_data and file_id and no location to fetch.
+			return openai.ChatCompletionContentPartUnionParam{}, fmt.Errorf("openai: unsupported media source for a file on Chat Completions: %s", m.Source)
+		}
+		return openai.FileContentPart(file), nil
+	default:
+		// Audio and video are labeled by the classifier and refused here, as on
+		// the Responses endpoint.
+		return openai.ChatCompletionContentPartUnionParam{}, fmt.Errorf("%w: %s", shared.ErrUnsupportedMIMEType, m.MIMEType)
+	}
 }
 
 // normalizeRole maps a genai content role onto a Chat Completions message role. The
@@ -266,10 +381,10 @@ var serviceTiers = map[genai.ServiceTier]openai.ChatCompletionNewParamsServiceTi
 	genai.ServiceTierPriority:    openai.ChatCompletionNewParamsServiceTierPriority,
 }
 
-// unsupportedConfigFields is shared.UnsupportedConfigFields without the fields
-// Chat Completions can express, so this endpoint does not refuse a setting it
-// supports.
-var unsupportedConfigFields = shared.ConfigFieldsWithout("Seed")
+// supportedConfigFields adds the fields only Chat Completions can express to the
+// ones both endpoints support, so this endpoint does not refuse them.
+var supportedConfigFields = append(slices.Clone(shared.SupportedConfigFields),
+	"StopSequences", "PresencePenalty", "FrequencyPenalty", "Seed")
 
 // applyGenerationConfig translates the generation config onto Chat
 // Completions params. Stop sequences, the penalties and seed are translated
@@ -366,7 +481,7 @@ func applyGenerationConfig(params *openai.ChatCompletionNewParams, cfg *genai.Ge
 		return err
 	}
 	// Last, so the named errors above win when a caller sets both.
-	return shared.RejectConfigFields(unsupportedConfigFields, cfg)
+	return shared.RejectUnsupportedConfigFields(cfg, supportedConfigFields)
 }
 
 // newResponseFormat builds the response_format Chat Completions takes,
@@ -389,14 +504,10 @@ func newResponseFormat(cfg *genai.GenerateContentConfig) (*openai.ChatCompletion
 		return nil, err
 	}
 	shared.EnforceStrictOpenAISchema(schema)
-	name := "adk_response"
-	if cfg.ResponseSchema != nil && cfg.ResponseSchema.Title != "" {
-		name = cfg.ResponseSchema.Title
-	}
 	return &openai.ChatCompletionNewParamsResponseFormatUnion{
 		OfJSONSchema: &oaishared.ResponseFormatJSONSchemaParam{
 			JSONSchema: oaishared.ResponseFormatJSONSchemaJSONSchemaParam{
-				Name:   name,
+				Name:   shared.ResponseFormatName(cfg.ResponseSchema),
 				Schema: schema,
 				Strict: param.NewOpt(true),
 			},
