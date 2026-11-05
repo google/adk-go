@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -844,6 +845,82 @@ func TestSequentialAgent_RunLive_NestedSequentialOrchestration(t *testing.T) {
 	// Verify subSess2 is closed
 	if !subSess2.closed {
 		t.Errorf("expected sub_agent_2 session to be closed at the end")
+	}
+}
+
+// closeSignalingLiveSession is a sub-agent session whose events, like those of
+// a live model connection, keep coming until Close.
+type closeSignalingLiveSession struct {
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (s *closeSignalingLiveSession) Send(agent.LiveRequest) error { return nil }
+
+func (s *closeSignalingLiveSession) Close() error {
+	s.closeOnce.Do(func() { close(s.closed) })
+	return nil
+}
+
+func TestSequentialAgent_RunLive_CloseDuringSubAgentRunLive(t *testing.T) {
+	subSess := &closeSignalingLiveSession{closed: make(chan struct{})}
+	t.Cleanup(func() { _ = subSess.Close() })
+	runLiveStarted := make(chan struct{})
+	releaseRunLive := make(chan struct{})
+	subEventsStarted := make(chan struct{})
+	subAgent := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "sub_agent"})),
+		runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			close(runLiveStarted)
+			<-releaseRunLive
+			return subSess, func(func(*session.Event, error) bool) {
+				close(subEventsStarted)
+				<-subSess.closed
+			}, nil
+		},
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             newSequentialAgent(t, []agent.Agent{subAgent}, "pipeline"),
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSess, events, err := r.RunLive(t.Context(), "user_id", "session_id", agent.LiveRunConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		for range events {
+		}
+	}()
+
+	select {
+	case <-runLiveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent RunLive did not start")
+	}
+	// The sub-agent has no session yet, so this Close has nothing to close.
+	if err := liveSess.Close(); err != nil {
+		t.Fatalf("Close() failed: %v", err)
+	}
+	close(releaseRunLive)
+
+	select {
+	case <-eventsDone:
+	case <-subEventsStarted:
+		t.Fatal("closed sequence started reading the sub-agent session returned after Close")
+	case <-time.After(time.Second):
+		t.Fatal("live events did not end after Close")
+	}
+	select {
+	case <-subSess.closed:
+	default:
+		t.Error("sub-agent session returned after Close was left open")
 	}
 }
 
