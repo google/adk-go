@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -558,6 +559,152 @@ func TestParallelWorker_CancelDuringRetryDelay(t *testing.T) {
 	}
 	if hasFinalResult {
 		t.Error("expected no final result to be yielded when cancelled mid-retry")
+	}
+}
+
+// ignoresCancellation returns a node function that waits for its context to
+// end and then succeeds, like a wrapped node that does not check ctx.Err().
+func ignoresCancellation(started chan<- struct{}) func(agent.Context, int) (int, error) {
+	return func(ctx agent.Context, input int) (int, error) {
+		if started != nil {
+			started <- struct{}{}
+		}
+		<-ctx.Done()
+		return input, nil
+	}
+}
+
+func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
+	// With maxConcurrency 1, items 2 and 3 are still waiting for a slot when
+	// the caller cancels. The dispatch loop skips them without reporting an
+	// error, and item 1 succeeds, so no worker reports a failure.
+	started := make(chan struct{}, 1)
+	wrapped := NewFunctionNode("ignores_cancellation", ignoresCancellation(started), defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 1, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var gotOutput any
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3}) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				gotOutput = out
+			}
+		}
+		close(done)
+	}()
+
+	<-started
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation during dispatch to complete")
+	}
+
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("Run() error = %v, want %v", gotErr, context.Canceled)
+	}
+	if gotOutput != nil {
+		t.Errorf("Run() yielded output %v, want none", gotOutput)
+	}
+}
+
+func TestParallelWorker_FailureBeforeCancelIsReturned(t *testing.T) {
+	// Item 1 fails and cancels item 2. The caller cancels only after that,
+	// while item 2 is still running, so the failure has to win over
+	// ctx.Err().
+	errBoom := errors.New("boom")
+	sawFailFast := make(chan struct{})
+	release := make(chan struct{})
+	wrapped := NewFunctionNode("fails_then_cancels", func(ctx agent.Context, input int) (int, error) {
+		if input == 1 {
+			return 0, errBoom
+		}
+		<-ctx.Done()
+		close(sawFailFast)
+		<-release
+		return input, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	go func() {
+		for _, err := range pw.Run(exCtx, []any{1, 2}) {
+			if err != nil {
+				gotErr = err
+			}
+		}
+		close(done)
+	}()
+
+	<-sawFailFast
+	cancel()
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for Run to return")
+	}
+
+	if !errors.Is(gotErr, errBoom) {
+		t.Errorf("Run() error = %v, want %v", gotErr, errBoom)
+	}
+}
+
+func TestParallelWorker_TimeoutDuringDispatchInWorkflow(t *testing.T) {
+	// The node timeout cancels the ParallelWorker while the workflow's own
+	// context stays live, so the scheduler is not draining and would pass a
+	// partial result on to the caller. Whether it does depends on a select
+	// in runNode, so the scenario runs several times.
+	for range 20 {
+		itemsNode := NewFunctionNode("items", func(ctx agent.Context, input any) ([]any, error) {
+			return []any{1, 2, 3}, nil
+		}, defaultNodeConfig)
+		wrapped := NewFunctionNode("ignores_cancellation", ignoresCancellation(nil), defaultNodeConfig)
+		pw, err := NewParallelWorker("parallel", wrapped, 1, NodeConfig{Timeout: 10 * time.Millisecond})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := mustNew(t, []Edge{
+			{From: Start, To: itemsNode},
+			{From: itemsNode, To: pw},
+		})
+
+		var gotErr error
+		for ev, err := range w.Run(newMockCtx(t)) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				if items, ok := out.([]any); ok && slices.Contains(items, nil) {
+					t.Fatalf("workflow yielded partial ParallelWorker output %v after the node timed out", items)
+				}
+			}
+		}
+		if !errors.Is(gotErr, context.DeadlineExceeded) {
+			t.Fatalf("workflow error = %v, want %v", gotErr, context.DeadlineExceeded)
+		}
 	}
 }
 
