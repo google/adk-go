@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -429,7 +430,8 @@ func TestAfterModelCallback_ContentlessResponseKeepsChain(t *testing.T) {
 // edits only the request. A task agent tool hands out the same declaration on
 // every call, and an agent tool reuses its agent's InputSchema, so editing
 // them in place would wrap the description once more on every request and add
-// the arguments to the agent's own schema.
+// the arguments to the agent's own schema. It also pins that the request's
+// copy keeps every other field of the tool's declaration.
 func TestBeforeModelCallback_LeavesToolDeclarationUnchanged(t *testing.T) {
 	const prefix = "Accepts skill_id. "
 	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
@@ -478,12 +480,44 @@ func TestBeforeModelCallback_LeavesToolDeclarationUnchanged(t *testing.T) {
 			name: "cached declaration without parameters",
 			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{Name: "no_params", Description: "takes nothing"}},
 		},
+		{
+			name: "cached declaration with response schema and behavior",
+			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{
+				Name:        "full",
+				Description: "has a response schema and a behavior",
+				Behavior:    genai.BehaviorNonBlocking,
+				Parameters: &genai.Schema{
+					Type:        genai.TypeObject,
+					Description: "a query",
+					Required:    []string{"query"},
+					Properties:  map[string]*genai.Schema{"query": {Type: genai.TypeString}},
+				},
+				ResponseJsonSchema: map[string]any{"type": "string"},
+			}},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fnTool := tc.tool.(toolinternal.FunctionTool)
 			original := fnTool.Declaration()
 			originalDescription := original.Description
 			originalProperties := propertyNames(original)
+			// The request's copy may differ from the tool's declaration only in its
+			// description and the added skill_id, plus the object schema that holds
+			// skill_id when the declaration has no parameters.
+			wantDecl := *original
+			wantParams := genai.Schema{Type: genai.TypeObject}
+			if original.Parameters != nil {
+				wantParams = *original.Parameters
+			}
+			wantParams.Properties = maps.Clone(wantParams.Properties)
+			if wantParams.Properties == nil {
+				wantParams.Properties = map[string]*genai.Schema{}
+			}
+			wantDecl.Parameters = &wantParams
+			ignoreModified := cmp.Options{
+				cmpopts.IgnoreFields(genai.FunctionDeclaration{}, "Description"),
+				cmpopts.IgnoreMapEntries(func(name string, _ *genai.Schema) bool { return name == "skill_id" }),
+			}
 
 			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
 			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
@@ -501,6 +535,9 @@ func TestBeforeModelCallback_LeavesToolDeclarationUnchanged(t *testing.T) {
 				}
 				if !slices.Contains(propertyNames(decl), "skill_id") {
 					t.Errorf("request %d: declaration lacks skill_id", request)
+				}
+				if diff := cmp.Diff(&wantDecl, decl, ignoreModified); diff != "" {
+					t.Errorf("request %d: declaration differs beyond the description and skill_id (-tool +request):\n%s", request, diff)
 				}
 			}
 

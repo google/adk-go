@@ -77,11 +77,13 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mo
 }
 
 // modifiedDeclaration returns a copy of decl with the configured arguments
-// and description applied. decl itself is left alone: a tool can hand out the
-// same declaration on every call (the task and single_turn tools an LLM agent
-// installs for its sub-agents), or an agent's own schema as its parameters
-// (an agent tool built on an agent with an InputSchema), so editing it in
-// place would compound across requests and race between concurrent ones.
+// and description applied, and leaves decl alone. The task and single_turn
+// tools an LLM agent installs for its sub-agents hand out the same declaration
+// on every call, so editing it in place would wrap the description again on
+// every request and race between concurrent ones. An agent tool built on an
+// agent with an InputSchema rebuilds its declaration on each call but uses that
+// schema as its parameters, so an in-place edit would add the arguments to the
+// agent's own InputSchema.
 func modifiedDeclaration(cfg FunctionCallModifierConfig, decl *genai.FunctionDeclaration) *genai.FunctionDeclaration {
 	modified := *decl
 	params := genai.Schema{Type: "OBJECT"}
