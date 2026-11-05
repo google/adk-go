@@ -269,8 +269,38 @@ func TestRequestConfirmationRequestProcessor(t *testing.T) {
 				},
 			},
 		},
+		// A decoded "no" must reject the tool just as the string form does.
 		{
-			name: "ParsedResponseWrapperNotAConfirmation",
+			name: "ToolNotConfirmedWithParsedResponseWrapper",
+			events: func() []*session.Event {
+				events := createConfirmationEvents(true)
+				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{
+					"response": map[string]any{"confirmed": false},
+				}
+				return events
+			}(),
+			wantEvents: []*session.Event{
+				{
+					Author: "testAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Parts: []*genai.Part{
+								{
+									FunctionResponse: &genai.FunctionResponse{
+										Name:     mockToolName,
+										ID:       mockFunctionCallID,
+										Response: map[string]any{"error": "Tool execution not confirmed"},
+									},
+								},
+							},
+							Role: "user",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "ParsedResponseWrapperScalar",
 			events: func() []*session.Event {
 				events := createConfirmationEvents(true)
 				events[1].Content.Parts[0].FunctionResponse.Response = map[string]any{"response": 123}
