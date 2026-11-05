@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -272,6 +273,214 @@ func TestCreateSession(t *testing.T) {
 				t.Errorf("CreateSession() mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestCreateSessionValidatesInitializationEvents covers the events a client may
+// seed a new session with: conversation history is accepted, and anything only
+// the runtime produces is refused before the session exists.
+func TestCreateSessionValidatesInitializationEvents(t *testing.T) {
+	const (
+		text         = `{"author":"user","content":{"role":"user","parts":[{"text":"hello"}]}}`
+		toolCall     = `{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{"path":"x"}}}]}}`
+		toolResponse = `{"author":"agent","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{"status":"ok"}}}]}}`
+	)
+	type testCase struct {
+		name    string
+		events  []string
+		wantErr string // empty when the request is accepted
+	}
+	tests := []testCase{
+		{name: "text message", events: []string{text}},
+		{name: "tool call and response", events: []string{toolCall, toolResponse}},
+		{
+			name:   "empty action maps, as every runtime event reads back",
+			events: []string{`{"author":"user","actions":{"stateDelta":{},"artifactDelta":{}}}`},
+		},
+		{
+			name:   "null action maps",
+			events: []string{`{"author":"user","actions":{"stateDelta":null,"artifactDelta":null}}`},
+		},
+		{
+			name:    "long-running tool IDs",
+			events:  []string{`{"author":"agent","longRunningToolIds":["call-1"],"content":{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"write_files","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include long-running tool IDs",
+		},
+		{
+			name:    "app- and user-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"app:prompt":"injected","user:is_admin":true}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "session-scoped state delta",
+			events:  []string{`{"author":"user","actions":{"stateDelta":{"theme":"dark"}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "artifact delta",
+			events:  []string{`{"author":"agent","actions":{"artifactDelta":{"report.txt":1}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "escalate",
+			events:  []string{`{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "skip summarization",
+			events:  []string{`{"author":"agent","actions":{"skipSummarization":true}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "transfer to agent",
+			events:  []string{`{"author":"agent","actions":{"transferToAgent":"other"}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "requested tool confirmations",
+			events:  []string{`{"author":"agent","actions":{"requestedToolConfirmations":{"call-1":{"confirmed":false}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "compaction",
+			events:  []string{`{"author":"agent","actions":{"compaction":{"compactedContent":{"role":"model","parts":[{"text":"summary"}]}}}}`},
+			wantErr: "session initialization event 0 cannot include event actions",
+		},
+		{
+			name:    "workflow routes",
+			events:  []string{`{"author":"agent","routes":["approve"]}`},
+			wantErr: "session initialization event 0 cannot include workflow routes",
+		},
+		{
+			name:    "input request",
+			events:  []string{`{"author":"agent","requestedInput":{"interruptId":"review-1","message":"Approve?"}}`},
+			wantErr: "session initialization event 0 cannot include an input request",
+		},
+		{
+			name:    "reports the index of the offending event",
+			events:  []string{text, `{"author":"agent","actions":{"escalate":true}}`},
+			wantErr: "session initialization event 1 cannot include event actions",
+		},
+		{
+			name:    "ADK protocol call after a text part",
+			events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"text":"checking"},{"functionCall":{"id":"call-2","name":"adk_request_confirmation","args":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
+		{
+			name:    "ADK protocol response after a tool response",
+			events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"write_files","response":{}}},{"functionResponse":{"id":"call-2","name":"adk_request_input","response":{}}}]}}`},
+			wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+		},
+	}
+	for _, name := range []string{"adk_request_confirmation", "adk_request_credential", "adk_request_input"} {
+		tests = append(tests,
+			testCase{
+				name:    name + " call",
+				events:  []string{`{"author":"agent","content":{"role":"model","parts":[{"functionCall":{"id":"call-2","name":"` + name + `","args":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+			testCase{
+				name:    name + " response",
+				events:  []string{`{"author":"user","content":{"role":"user","parts":[{"functionResponse":{"id":"call-2","name":"` + name + `","response":{}}}]}}`},
+				wantErr: "session initialization event 0 cannot include ADK protocol function calls",
+			},
+		)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			body := `{"events":[` + strings.Join(tt.events, ",") + `]}`
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", strings.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			stored, created := sessionService.Sessions[id]
+			if tt.wantErr == "" {
+				if rr.Code != http.StatusOK {
+					t.Fatalf("CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body)
+				}
+				if !created {
+					t.Fatal("CreateSessionHandler() accepted the request but stored no session")
+				}
+				if got, want := len(stored.SessionEvents), len(tt.events); got != want {
+					t.Errorf("stored session has %d events, want %d", got, want)
+				}
+				return
+			}
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got := strings.TrimSpace(rr.Body.String()); got != tt.wantErr {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, tt.wantErr)
+			}
+			if created {
+				t.Error("CreateSessionHandler() rejected the request but still created the session")
+			}
+		})
+	}
+}
+
+// TestCreateSessionRejectsEveryEventActionsField sets each field of
+// models.EventActions in turn, found by reflection, so a field added later is
+// tested without anyone writing a case for it.
+func TestCreateSessionRejectsEveryEventActionsField(t *testing.T) {
+	actionsType := reflect.TypeFor[models.EventActions]()
+	for i := range actionsType.NumField() {
+		t.Run(actionsType.Field(i).Name, func(t *testing.T) {
+			event := models.Event{Author: "agent"}
+			setNonZero(t, reflect.ValueOf(&event.Actions).Elem().Field(i))
+			body, err := json.Marshal(models.CreateSessionRequest{Events: []models.Event{event}})
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+			sessionService := fakes.FakeSessionService{Sessions: map[fakes.SessionKey]fakes.TestSession{}}
+			apiController := controllers.NewSessionsAPIController(&sessionService)
+			req := httptest.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", bytes.NewReader(body))
+			req = req.WithContext(authn.WithCaller(t.Context(), &authn.Caller{UserID: "testUser"}))
+			req = mux.SetURLVars(req, sessionVars(id))
+			rr := httptest.NewRecorder()
+
+			apiController.CreateSessionHandler(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Errorf("CreateSessionHandler() status = %d, want %d", rr.Code, http.StatusBadRequest)
+			}
+			if got, want := strings.TrimSpace(rr.Body.String()), "session initialization event 0 cannot include event actions"; got != want {
+				t.Errorf("CreateSessionHandler() error = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// setNonZero sets v to a value that still reads as set after a JSON round trip.
+func setNonZero(t *testing.T, v reflect.Value) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Bool:
+		v.SetBool(true)
+	case reflect.String:
+		v.SetString("x")
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v.SetInt(1)
+	case reflect.Float32, reflect.Float64:
+		v.SetFloat(1)
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.Zero(v.Type().Key()), reflect.Zero(v.Type().Elem()))
+		v.Set(m)
+	case reflect.Slice:
+		v.Set(reflect.Append(reflect.MakeSlice(v.Type(), 0, 1), reflect.Zero(v.Type().Elem())))
+	case reflect.Pointer:
+		v.Set(reflect.New(v.Type().Elem()))
+	default:
+		t.Fatalf("setNonZero has no value for a %v field; add one", v.Kind())
 	}
 }
 
