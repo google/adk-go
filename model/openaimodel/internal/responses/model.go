@@ -170,6 +170,7 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		}
 
 		final := aggregator.Close()
+		var completedContent *genai.Content
 		if !shared.CarriesContent(final) && term.seen {
 			// The deltas contributed nothing that survived aggregation, but the
 			// terminal event can still hold the whole turn: a batched message,
@@ -196,9 +197,11 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 			// it as a delta. Keep the aggregate if the snapshot is unusable or
 			// omits content that was already streamed.
 			if genaiResp, err := convertResponse(term.resp); err == nil {
-				content := genaiResp.Candidates[0].Content
-				if shared.CompletedContentSupersedes(final.Content, content) {
-					final.Content = content
+				completedContent = genaiResp.Candidates[0].Content
+				// If the snapshot preserves the streamed content, use it before
+				// adoption so additional calls do not borrow streamed arguments.
+				if shared.CompletedContentSupersedes(final.Content, completedContent) {
+					final.Content = completedContent
 				}
 			}
 		}
@@ -209,6 +212,11 @@ func (m *Model) generateStream(ctx context.Context, params oairesponses.Response
 		if err := adoptTerminalCalls(final, term); err != nil {
 			yield(nil, err)
 			return
+		}
+		// Retry after adoption: when the snapshot restates the call's ID and
+		// arguments, correcting an item-ID fallback can make it supersede.
+		if shared.CompletedContentSupersedes(final.Content, completedContent) {
+			final.Content = completedContent
 		}
 		finalizeStreamResponse(final, term)
 		yield(final, nil)
