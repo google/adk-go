@@ -23,7 +23,8 @@ import (
 )
 
 // FlattenContentText joins a content's text parts with newlines, and errors on
-// a part without text.
+// a part without text or on a part that carries content besides its text, such
+// as media or a function call.
 func FlattenContentText(content *genai.Content) (string, error) {
 	if content == nil {
 		return "", nil
@@ -35,6 +36,21 @@ func FlattenContentText(content *genai.Content) (string, error) {
 		}
 		if part.Text == "" {
 			return "", fmt.Errorf("non-text system instruction part %T", part)
+		}
+		// Only the text is sent, so anything else on the part would be dropped
+		// while the text beside it goes out. adk-python drops it without an
+		// error, and the caller never learns the model did not see it.
+		// UnsupportedPayload counts a call and its result as sent, which holds
+		// for contents but not here.
+		field := UnsupportedPayload(part)
+		switch {
+		case part.FunctionCall != nil:
+			field = "FunctionCall"
+		case part.FunctionResponse != nil:
+			field = "FunctionResponse"
+		}
+		if field != "" {
+			return "", fmt.Errorf("unsupported system instruction part: %s", field)
 		}
 		if b.Len() > 0 {
 			b.WriteString("\n")
