@@ -43,14 +43,21 @@ const (
 
 	// summaryBuilderKey is the row key under which addContent attaches a
 	// contentSummaryBuilder when a row has pending text uploads. Like
-	// rawPartsKey, it is deleted by resolveUploads before Arrow encoding.
+	// rawPartsKey, it is deleted by resolveUploadsForBatch before Arrow
+	// encoding.
 	summaryBuilderKey = "_summary_builder"
 
-	// deferredUploadsKey holds a *deferredRowUploads on a row whose uploads
-	// were cut short by a depleted caller deadline (!pauseOnCallerDeadline), so
-	// that if the batch's subsequent BigQuery write in flushRunEnd also runs
-	// out of flushCtx and the batch is deferred to the next flush, those
-	// uploads are retried under the next flush's budget.
+	// deferredUploadsKey holds a *deferredRowUploads, which
+	// resolveUploadsForBatch attaches to every row with uploads. When canDefer
+	// is true and the end of the caller's context, rather than the batch's own
+	// upload timeout, ends the uploads of a batch that did not pause them, the
+	// row's uploads that returned an error are recorded on it (none if all of
+	// them succeeded), so that if the batch's subsequent BigQuery write in
+	// flushRunEnd also runs out of flushCtx and the batch is deferred to the
+	// next flush, that flush retries those uploads; the key then stays on the
+	// row until the caller requeues the uploads (requeueDeferredUploads) or
+	// clears them (clearDeferredUploads). Otherwise resolveUploadsForBatch
+	// removes it itself.
 	deferredUploadsKey = "_deferred_uploads"
 
 	// mediaOffloadedText is the text of an uploaded binary part.
@@ -291,30 +298,71 @@ type uploadTask struct {
 	err error
 }
 
-// resolveUploads uploads the payloads that were queued with the rows of batch
-// and rewrites the matching content_parts entries to refer to the objects. No
-// row is lost to a storage problem: a text part whose upload fails keeps its
-// truncated inline text, and a binary part whose upload fails gets the text
-// "[UPLOAD FAILED]", its raw bytes not being stored inline.
+// uploadResolveOptions configures how resolveUploadsForBatch handles a batch's
+// Cloud Storage uploads.
+type uploadResolveOptions struct {
+	pauseOnCallerDeadline bool
+	canDefer              bool
+}
+
+// resolveUploadsForBatch uploads the payloads that were queued with the rows of
+// batch and rewrites the matching content_parts entries to refer to the
+// objects. No row is lost to a storage problem: a text part whose upload fails
+// keeps its truncated inline text, and a binary part whose upload fails gets
+// the text "[UPLOAD FAILED]", its raw bytes not being stored inline.
 //
 // Uploads run concurrently, at most GCSMaxConcurrentUploads at a time, under a
-// single batch-level timeout that ctx can end sooner. If the batch's own
-// GCSUploadTimeout ends the uploads after at least one upload started and
-// either an in-flight upload timed out under the batch deadline or no upload
-// in the batch succeeded (or if pauseOnCallerDeadline is true and the fresh
-// deadline of ctx ends them first without any upload in the batch succeeding),
-// Cloud Storage is not keeping up: the uploads are paused for the length of the
-// timeout, and the batches resolved in that time do not call the offloader but
-// fall back at once, so neither a full Cloud Storage outage nor a partial
-// brownout makes every batch wait in turn. A depleted caller deadline
-// (pauseOnCallerDeadline == false), a caller deadline when at least one upload
-// succeeded, a ctx that is canceled, or a ctx that is already done before any
-// upload starts says nothing about Cloud Storage and pauses nothing.
-// resolveUploads does not reserve any of ctx for the caller's own work: a
-// caller that has to write the batch afterwards bounds ctx accordingly.
+// single batch-level timeout that ctx can end sooner. Cloud Storage is not
+// keeping up when at least one upload started and:
+//
+//   - the batch's own GCSUploadTimeout ended the uploads, and either an
+//     in-flight upload timed out under the batch deadline or no upload in the
+//     batch succeeded; or
+//   - opts.pauseOnCallerDeadline is true and the deadline of ctx ended the
+//     uploads first, and either no upload in the batch succeeded or the
+//     deadline cut short an upload that had been running for at least three
+//     quarters of the time that the batch had for its uploads, whether or not
+//     other uploads in the batch succeeded. An upload that the offloader
+//     failed with a deadline error of its own, such as a per-request timeout,
+//     while that deadline had not passed yet was not cut short by it.
+//
+// The uploads are then paused for the length of the timeout, and the batches
+// resolved in that time do not call the offloader but fall back at once, so
+// neither a full Cloud Storage outage nor a partial brownout makes every
+// batch wait in turn. A caller deadline when opts.pauseOnCallerDeadline is
+// false, a caller deadline that cuts short only uploads that ran for less than
+// that in a batch where another upload succeeded (such as uploads that started
+// late, after waiting for a free slot behind other uploads), a ctx that is
+// canceled, or a ctx that is already done before any upload starts says
+// nothing about Cloud Storage and pauses nothing. The cause of the batch's
+// context tells which deadline ended the uploads, and the time that an upload
+// ran is counted up to that deadline, so that neither depends on how soon the
+// offloader returns once the context is done.
+//
+// resolveUploadsForBatch attaches deferredUploadsKey to every row with uploads.
+// When opts.canDefer is true, ctx has ended the uploads (its deadline passed or
+// it was canceled) rather than the batch's own timeout, and the batch did not
+// pause them, every upload in the batch that returned an error (whether ctx cut
+// it short in flight or while it waited for a slot, or it had already failed
+// with another error) is recorded on its row's deferredUploadsKey and stays
+// reserved: a caller that defers the batch requeues these uploads with it
+// (requeueDeferredUploads), and one that writes or drops the batch releases
+// them (clearDeferredUploads). Until then, a row whose uploads all succeeded
+// keeps an empty deferredUploadsKey. Otherwise resolveUploadsForBatch removes
+// the key from every row and keeps none of the uploads; in particular, a batch
+// that paused the uploads keeps none of them, like the batches resolved during
+// the pause. An upload that returned no error but a URI that is not a gs:// URI
+// fails only when it is applied, and is not kept.
+// resolveUploadsForBatch does not reserve any of ctx for the caller's own work:
+// a caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+// The failure of a deferred upload is not logged yet; clearDeferredUploads and
+// requeueDeferredUploads log it once it is known whether the upload is
+// retried. A write that panics before the caller settles the deferred uploads
+// leaves them to dropDeferredUploadsQuietly, which the caller defers. The
+// failure of an upload that is not deferred is logged at once.
+func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
 		builder *contentSummaryBuilder
@@ -322,9 +370,12 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	var tasks []*uploadTask
 	var summaries []rowSummary
 	var reservedTotal, deferredReserved int64
+	// Deferred uploads that a caller left unsettled are dropped before the
+	// loop takes over the reservations of the queued payloads, so that a
+	// Logger that panics on their failures cannot leak any of those.
+	b.clearDeferredUploads(batch)
 	for i := range batch {
 		row := batch[i]
-		b.clearDeferredRowUploads(row)
 		builder, _ := row[summaryBuilderKey].(*contentSummaryBuilder)
 		delete(row, summaryBuilderKey)
 		pending, ok := row[rawPartsKey].([]pendingUpload)
@@ -350,11 +401,9 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			})
 		}
 		if hasRowTasks {
-			if !pauseOnCallerDeadline {
-				row[deferredUploadsKey] = &deferredRowUploads{
-					builder:              builder,
-					nonDeferredTruncated: origTruncated,
-				}
+			row[deferredUploadsKey] = &deferredRowUploads{
+				builder:              builder,
+				nonDeferredTruncated: origTruncated,
 			}
 			if builder != nil {
 				summaries = append(summaries, rowSummary{row: row, builder: builder})
@@ -364,6 +413,9 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	var completedNormally bool
 	defer func() {
 		if !completedNormally {
+			for _, row := range batch {
+				delete(row, deferredUploadsKey)
+			}
 			b.releaseUploadBytes(reservedTotal)
 		} else {
 			b.releaseUploadBytes(reservedTotal - deferredReserved)
@@ -372,7 +424,9 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 
 	offloader := b.config.GCSOffloader
 	if len(tasks) == 0 || offloader == nil {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		if offloader == nil {
 			for _, t := range tasks {
 				if t.pending.isText {
@@ -395,7 +449,9 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 
 	uploadTimeout := cmp.Or(b.uploadTimeout, b.config.GCSUploadTimeout, gcsUploadTimeout)
 	if until := b.uploadCooldownUntil.Load(); until > 0 && time.Now().UnixNano() < until {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		for _, t := range tasks {
 			t.err = errUploadCooldown
 			b.applyUpload(t, false)
@@ -406,8 +462,17 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		completedNormally = true
 		return
 	}
-	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
+	// The cause that WithTimeoutCause records tells which deadline ended the
+	// uploads, so that this does not depend on when the offloaders return.
+	now := time.Now()
+	uploadCtx, cancel := context.WithTimeoutCause(ctx, uploadTimeout, errBatchUploadTimeout)
 	defer cancel()
+	// An upload that the deadline ends is a stall if it had been running for at
+	// least three quarters of the time that the batch has for its uploads, which
+	// ends at the earlier of the batch's own timeout and the deadline of ctx.
+	// The time that it waited for a free slot before it started does not count.
+	deadline, _ := uploadCtx.Deadline()
+	stallAfter := max(deadline.Sub(now), 0) * 3 / 4
 
 	limit := b.config.GCSMaxConcurrentUploads
 	if limit <= 0 {
@@ -415,7 +480,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	}
 	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
-	var anyStarted, anySucceeded, anyStalledOnBatchTimeout atomic.Bool
+	var anyStarted, anySucceeded, anyCutShort, anyStalled atomic.Bool
 	for _, t := range tasks {
 		sem <- struct{}{}
 		wg.Add(1)
@@ -423,11 +488,24 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 			defer wg.Done()
 			defer func() { <-sem }()
 			var started bool
-			t.uri, t.err, started = b.upload(uploadCtx, offloader, t)
+			start := time.Now()
+			t.uri, started, t.err = b.upload(uploadCtx, offloader, t)
+			// Whether the deadline of uploadCtx had passed when the upload
+			// returned. An offloader can fail with a deadline error of its own,
+			// such as a per-request timeout, before that deadline, which then
+			// did not cut the upload short.
+			deadlinePassed := errors.Is(uploadCtx.Err(), context.DeadlineExceeded)
 			if started {
 				anyStarted.Store(true)
-				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && errors.Is(uploadCtx.Err(), context.DeadlineExceeded)) {
-					anyStalledOnBatchTimeout.Store(true)
+				if errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && deadlinePassed) {
+					anyCutShort.Store(true)
+					// Only an upload that the deadline cut short can have
+					// stalled until it. The offloader may return a while after
+					// the deadline, which is no time that the upload spent
+					// running.
+					if ran := min(time.Since(start), deadline.Sub(start)); deadlinePassed && ran >= stallAfter {
+						anyStalled.Store(true)
+					}
 				}
 			}
 			if t.err == nil && strings.HasPrefix(t.uri, "gs://") {
@@ -438,26 +516,48 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	wg.Wait()
 
 	// Pause uploads when at least one upload started and:
-	//   - the batch's own GCSUploadTimeout expired (ctx.Err() == nil) and either
-	//     an in-flight upload timed out under the batch deadline (brownout) or
-	//     no upload in the batch succeeded, or
-	//   - a fresh caller deadline allowed to pause (pauseOnCallerDeadline)
-	//     expired with no upload in the batch succeeding.
-	batchTimedOut := errors.Is(uploadCtx.Err(), context.DeadlineExceeded) &&
-		((ctx.Err() == nil && (anyStalledOnBatchTimeout.Load() || !anySucceeded.Load())) ||
-			(pauseOnCallerDeadline && !anySucceeded.Load()))
-	if anyStarted.Load() && batchTimedOut {
+	//   - the batch's own GCSUploadTimeout ended the uploads and either an
+	//     in-flight upload timed out under the batch deadline (brownout) or no
+	//     upload in the batch succeeded, or
+	//   - a caller deadline allowed to pause (opts.pauseOnCallerDeadline) ended
+	//     the uploads before the batch's own timeout and either no upload in the
+	//     batch succeeded or the deadline cut short an upload that had been
+	//     running for at least stallAfter, even if other uploads in the batch
+	//     succeeded (partial outage). An upload that failed with a deadline
+	//     error of its own before the deadline passed does not count.
+	ownTimeoutExpired := context.Cause(uploadCtx) == errBatchUploadTimeout
+	var batchTimedOut bool
+	switch {
+	case ownTimeoutExpired:
+		batchTimedOut = anyCutShort.Load() || !anySucceeded.Load()
+	case opts.pauseOnCallerDeadline && errors.Is(uploadCtx.Err(), context.DeadlineExceeded):
+		batchTimedOut = anyStalled.Load() || !anySucceeded.Load()
+	}
+	paused := anyStarted.Load() && batchTimedOut
+	if paused {
 		b.uploadCooldownUntil.Store(time.Now().Add(uploadTimeout).UnixNano())
 	} else if anySucceeded.Load() {
 		b.uploadCooldownUntil.Store(0)
 	}
 
-	callerExpired := !pauseOnCallerDeadline && ctx.Err() != nil
+	// When opts.canDefer is true and ctx has ended the uploads, rather than the
+	// batch's own timeout, every upload that returned an error in the batch is
+	// kept for a retry of the batch, unless this batch paused the uploads: the
+	// uploads that failed once ctx had ended them, and any that had already
+	// failed, so that a custom offloader that returns an opaque error when ctx
+	// ends is retried too. An upload that returned no error is not kept, even
+	// if its URI is not a gs:// URI.
+	keepCutShort := opts.canDefer && !ownTimeoutExpired && ctx.Err() != nil && !paused
 	for _, t := range tasks {
 		deferred := false
-		if callerExpired && (errors.Is(t.err, context.DeadlineExceeded) || (t.err != nil && uploadCtx.Err() != nil)) {
+		if keepCutShort && t.err != nil {
 			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
-				d.pending = append(d.pending, t.pending)
+				eventID, _ := t.row[eventIDField].(string)
+				d.pending = append(d.pending, deferredUpload{
+					upload:     t.pending,
+					eventID:    eventID,
+					errSummary: safeUploadErrorSummary(t.err),
+				})
 				deferredReserved += t.pending.reserved
 				deferred = true
 			}
@@ -469,7 +569,7 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 		}
 		b.applyUpload(t, deferred)
 	}
-	if !callerExpired {
+	if !keepCutShort {
 		b.clearDeferredUploads(batch)
 	}
 	for _, s := range summaries {
@@ -478,32 +578,68 @@ func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadli
 	completedNormally = true
 }
 
+// deferredUpload is a failed upload of a batch whose uploads returned after
+// the caller's context had ended, by an expired deadline or a cancellation,
+// without pausing uploads across flushes: either one that the end of the
+// context cut short or skipped, or one that had already failed with another
+// error while a sibling upload kept the batch running.
+// Its failure is logged only once it is known whether the upload is retried:
+// when clearDeferredUploads drops it, or when requeueDeferredUploads queues it
+// again for the next flush.
+type deferredUpload struct {
+	upload     pendingUpload
+	eventID    string
+	errSummary string
+}
+
+// deferredRowUploads is what deferredUploadsKey holds: the deferred uploads of
+// a row, and what requeueDeferredUploads needs to put the row back in the form
+// it was queued in.
 type deferredRowUploads struct {
-	pending              []pendingUpload
+	pending              []deferredUpload
 	builder              *contentSummaryBuilder
 	nonDeferredTruncated bool
 }
 
-func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
-	d, ok := row[deferredUploadsKey].(*deferredRowUploads)
-	delete(row, deferredUploadsKey)
-	if !ok {
-		return
-	}
+// clearDeferredUploads drops the deferred uploads of the rows of batch, whose
+// parts keep the inline form that resolveUploadsForBatch gave them, and logs
+// their failures as final. The reservations of all the rows are released before
+// anything is logged, so that a panicking Logger cannot leak any of them.
+func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
+	b.logDeferredUploadFailures(b.dropDeferredUploadsQuietly(batch), false)
+}
+
+// dropDeferredUploadsQuietly drops the deferred uploads of the rows of batch
+// and releases their reservations without logging anything, and returns the
+// dropped uploads. A caller that writes a batch with deferred uploads defers
+// it, so that a write that panics, as a panicking Logger makes it do, before
+// the caller settles the deferred uploads cannot leak their reservations. On
+// a batch whose deferred uploads are settled, it does nothing.
+func (b *BatchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []deferredUpload {
+	var dropped []deferredUpload
 	var total int64
-	for _, u := range d.pending {
-		total += u.reserved
+	for _, row := range batch {
+		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
+		delete(row, deferredUploadsKey)
+		if !ok {
+			continue
+		}
+		for _, du := range d.pending {
+			total += du.upload.reserved
+		}
+		dropped = append(dropped, d.pending...)
 	}
 	b.releaseUploadBytes(total)
+	return dropped
 }
 
-func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
-	for _, row := range batch {
-		b.clearDeferredRowUploads(row)
-	}
-}
-
+// requeueDeferredUploads queues the deferred uploads of the rows of batch
+// again, with their parts back in the form they were queued in, so that the
+// next flush of batch retries them; the uploads keep their reservations. Their
+// failures are logged as pending that retry, but only once every row has been
+// requeued, so that a panicking Logger cannot leave a row without its uploads.
 func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
+	var requeued []deferredUpload
 	for _, row := range batch {
 		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
 		delete(row, deferredUploadsKey)
@@ -511,8 +647,10 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 			continue
 		}
 		parts, _ := row[columnContentParts].([]map[string]any)
+		pending := make([]pendingUpload, 0, len(d.pending))
 		hasText := false
-		for _, u := range d.pending {
+		for _, du := range d.pending {
+			u := du.upload
 			if u.slot >= 0 && u.slot < len(parts) && !u.isText {
 				parts[u.slot]["text"] = inlineDataText
 			}
@@ -522,8 +660,9 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 					d.builder.omitTextFromSummary(u.contentOrd, u.partIdx)
 				}
 			}
+			pending = append(pending, u)
 		}
-		row[rawPartsKey] = d.pending
+		row[rawPartsKey] = pending
 		if d.builder != nil {
 			if hasText {
 				d.builder.applyToRow(row)
@@ -532,6 +671,16 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 		} else if hasText {
 			row["is_truncated"] = d.nonDeferredTruncated
 		}
+		requeued = append(requeued, d.pending...)
+	}
+	b.logDeferredUploadFailures(requeued, true)
+}
+
+// logDeferredUploadFailures logs the failures of deferred uploads that were
+// dropped or, if retry is true, requeued.
+func (b *BatchProcessor) logDeferredUploadFailures(uploads []deferredUpload, retry bool) {
+	for _, du := range uploads {
+		b.logUploadFailure(du.eventID, du.upload, du.errSummary, retry)
 	}
 }
 
@@ -570,6 +719,12 @@ func (e ownedUploadError) Unwrap() error {
 var (
 	errInvalidGCSURI  = errors.New("offloader returned a URI that is not a gs:// URI")
 	errUploadCooldown = errors.New("upload skipped during timeout cooldown")
+
+	// errBatchUploadTimeout is the cause of the context of the uploads of a
+	// batch when the batch's own timeout ended them, rather than the caller's
+	// context. It wraps context.DeadlineExceeded so an offloader returning
+	// context.Cause(ctx) logs a deadline error.
+	errBatchUploadTimeout = fmt.Errorf("batch upload timeout: %w", context.DeadlineExceeded)
 )
 
 // safeUploadErrorSummary returns diagnostic metadata for err without calling
@@ -623,14 +778,14 @@ func stripURIQueries(msg string) string {
 // panic in it is turned into an error that names only its type. Once ctx is
 // done the offloader is no longer called, which is what ends the uploads that
 // were still waiting for their turn.
-func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, err error, started bool) {
+func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			uri, err = "", offloaderPanicError{valueType: fmt.Sprintf("%T", r)}
 		}
 	}()
 	if cerr := ctx.Err(); cerr != nil {
-		return "", cerr, false
+		return "", false, cerr
 	}
 	started = true
 	uri, err = offloader.UploadContent(ctx, GCSUploadRequest{
@@ -638,12 +793,23 @@ func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffload
 		Data:        t.pending.payload(),
 		ContentType: t.pending.contentType(),
 	})
-	return uri, err, started
+	return uri, started, err
 }
 
-// applyUpload rewrites the content_parts entry of a successful upload to
-// refer to the object, and logs a failed one. The entry already has the MIME
-// type of the part, as it was queued with the one that is uploaded.
+// applyUpload rewrites the content_parts entry of a successful upload to refer
+// to the object, or records the fallback state of a failed upload on the row
+// and part. When err == nil and uri is a gs:// URI, the inline payload is
+// replaced with the GCS reference: the part carries storage_mode, uri, and
+// object_ref, a text part keeps a textPreview, and the summary drops the text
+// part (the entry already has the MIME type of the part, as it was queued with
+// the one that is uploaded). Otherwise the failure is logged at once unless the
+// upload is deferred (whether a deferred upload is retried is only known later,
+// so its failure is logged when clearDeferredUploads drops it or
+// requeueDeferredUploads queues it again), and the fallback state is recorded:
+// for a binary part the part text becomes [UPLOAD FAILED]; for a text part the
+// inline text is kept, the summary retains it via retainInlineSummary, and
+// is_truncated is set to true when fallbackTruncated indicates the inline
+// fallback was itself truncated.
 func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	u := t.pending
 	err := t.err
@@ -651,14 +817,6 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 		err = errInvalidGCSURI
 	}
 	if err != nil {
-		eventID, _ := t.row[eventIDField].(string)
-		if deferred {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
-				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
-		} else {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-				eventID, u.partIdx, u.size(), safeUploadErrorSummary(err))
-		}
 		if !u.isText {
 			t.part["text"] = uploadFailedText
 		} else {
@@ -669,6 +827,10 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 				fallbackText, _ := t.part["text"].(string)
 				t.builder.retainInlineSummary(u.contentOrd, u.partIdx, fallbackText, u.fallbackTruncated)
 			}
+		}
+		if !deferred {
+			eventID, _ := t.row[eventIDField].(string)
+			b.logUploadFailure(eventID, u, safeUploadErrorSummary(err), false)
 		}
 		return
 	}
@@ -683,6 +845,19 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	} else {
 		t.part["text"] = mediaOffloadedText
 	}
+}
+
+// logUploadFailure logs that the upload of part u of the row of eventID
+// failed, with its byte size and errSummary but nothing from its payload.
+// retry reports whether the upload is retried on the next flush.
+func (b *BatchProcessor) logUploadFailure(eventID string, u pendingUpload, errSummary string, retry bool) {
+	if retry {
+		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+			eventID, u.partIdx, u.size(), errSummary)
+		return
+	}
+	b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+		eventID, u.partIdx, u.size(), errSummary)
 }
 
 // gcsOffloader is the GCSContentOffloader that stores objects in a Cloud
