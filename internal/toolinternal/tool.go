@@ -70,26 +70,35 @@ type PanicError struct {
 	msg string
 }
 
-// NewPanicError formats the message once, when the panic is recovered, so
-// every reader gets the same text even if value changes later.
+// NewPanicError returns the error for the value a tool named toolName panicked
+// with, recovered at the stack given. It formats the message once, so every
+// reader gets the same text even if value changes later.
 func NewPanicError(toolName string, value any, stack []byte) *PanicError {
 	return &PanicError{msg: fmt.Sprintf("panic in tool %q: %v\nstack: %s", toolName, value, stack)}
 }
 
 func (e *PanicError) Error() string { return e.msg }
 
+// PanicErrorText is what a call of the tool named toolName shows the model in
+// place of a recovered panic.
+func PanicErrorText(toolName string) string {
+	return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
+}
+
 // ModelErrorText is the text a failed call of the tool named toolName may show
 // the model. A recovered panic becomes a generic message, because its own text
-// carries the panic value and the goroutine stack. Any other error keeps its
-// text, because returning an error is how a Go tool tells the model what went
-// wrong.
+// carries the panic value and the goroutine stack; that holds however deeply
+// it is wrapped, since a callback that handles the error and returns its own
+// is free to wrap it. Any other error keeps its text, because returning an
+// error is how a Go tool tells the model what went wrong.
 //
 // Anything that turns a tool error into a function response calls this: the
 // flow, and the plugins that answer OnToolError with a response of their own.
+// err must not be nil.
 func ModelErrorText(toolName string, err error) string {
 	var panicErr *PanicError
 	if errors.As(err, &panicErr) {
-		return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
+		return PanicErrorText(toolName)
 	}
 	return err.Error()
 }

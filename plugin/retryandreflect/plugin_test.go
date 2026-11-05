@@ -253,14 +253,24 @@ func TestRetryAndReflect_ToolPanic(t *testing.T) {
 
 	for _, tc := range []struct {
 		name string
+		err  error
 		// calls is how many times the tool fails; with maxRetries 1 the first
 		// failure builds the reflection response and the second the
 		// retry-limit-exceeded one.
 		calls             int
 		wantTopOfGuidance string
 	}{
-		{name: "reflection response", calls: 1, wantTopOfGuidance: "failed"},
-		{name: "retry limit exceeded response", calls: 2, wantTopOfGuidance: "exceeded"},
+		{name: "reflection response", err: panicErr, calls: 1, wantTopOfGuidance: "failed"},
+		{name: "retry limit exceeded response", err: panicErr, calls: 2, wantTopOfGuidance: "exceeded"},
+		{
+			// An earlier OnToolError callback is free to wrap the panic before
+			// this plugin sees it, as agenttool and the workflow tool node wrap
+			// the errors they pass on.
+			name:              "wrapped panic",
+			err:               fmt.Errorf("lookup failed: %w", panicErr),
+			calls:             1,
+			wantTopOfGuidance: "failed",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &retryAndReflect{
@@ -273,7 +283,7 @@ func TestRetryAndReflect_ToolPanic(t *testing.T) {
 
 			var res map[string]any
 			for range tc.calls {
-				res, _ = r.onToolError(ctx, tl, map[string]any{"order_id": "1"}, panicErr)
+				res, _ = r.onToolError(ctx, tl, map[string]any{"order_id": "1"}, tc.err)
 			}
 
 			if got, want := res["error_details"], "Invoking `test-tool()` failed with an internal error."; got != want {

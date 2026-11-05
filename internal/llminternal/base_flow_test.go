@@ -170,6 +170,20 @@ func TestCallTool(t *testing.T) {
 			check: checkPanicCallbackErrs(panicCallbackErrs),
 		},
 		{
+			// A callback that handles the panic and returns an error of its own
+			// is free to wrap it, as agenttool and the workflow tool node wrap
+			// the errors they pass on.
+			name: "wrapped tool panic is hidden from the model",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					return nil, fmt.Errorf("lookup failed: %w", err)
+				},
+			},
+			want: map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+		},
+		{
 			name: "before callback returns result",
 			tool: &mockFunctionTool{
 				name: "testTool",
