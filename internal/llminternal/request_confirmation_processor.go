@@ -71,15 +71,27 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				if funcResp.Response != nil {
 					resp, hasResponseKey := funcResp.Response["response"]
 					// ADK web client will send a request that is always encapsulated in a 'response' key.
+					// A client that has already decoded that JSON sends the decoded value
+					// instead, which adk-python accepts too (tool_confirmation.py,
+					// ToolConfirmation.from_response_dict).
 					if hasResponseKey && len(funcResp.Response) == 1 {
-						if jsonString, ok := resp.(string); ok {
-							err := json.Unmarshal([]byte(jsonString), &tc)
+						var jsonBytes []byte
+						switch v := resp.(type) {
+						case string:
+							jsonBytes = []byte(v)
+						case nil:
+							yield(nil, fmt.Errorf("error 'response' key found but value is null for confirmation function response for event id %q", event.ID))
+							return
+						default:
+							b, err := json.Marshal(v)
 							if err != nil {
-								yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
+								yield(nil, fmt.Errorf("error 'response' key found but failed marshaling its value for confirmation function response for event id %q: %w", event.ID, err))
 								return
 							}
-						} else {
-							yield(nil, fmt.Errorf("error 'response' key found but value is not a string for confirmation function response for event id %q", event.ID))
+							jsonBytes = b
+						}
+						if err := json.Unmarshal(jsonBytes, &tc); err != nil {
+							yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
 							return
 						}
 					} else {

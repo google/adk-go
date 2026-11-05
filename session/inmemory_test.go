@@ -16,6 +16,7 @@ package session_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -760,6 +761,64 @@ func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *tes
 			}
 			if canonical["keep"] != "y" {
 				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
+			}
+		})
+	}
+}
+
+// TestInMemoryService_Get_AfterWithOutOfOrderTimestamps checks the After filter
+// when events were not appended in timestamp order. An event carries the time
+// it was created, or one its producer set, not the time it was appended.
+func TestInMemoryService_Get_AfterWithOutOfOrderTimestamps(t *testing.T) {
+	ctx := t.Context()
+	s := session.InMemoryService()
+	created, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	// Minutes after base, in append order.
+	for i, minute := range []int{10, 40, 20, 30, 50, 60, 70} {
+		event := &session.Event{
+			ID:        fmt.Sprintf("e%d", minute),
+			Author:    "agent",
+			Timestamp: base.Add(time.Duration(minute) * time.Minute),
+		}
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%d) error = %v", i, err)
+		}
+	}
+
+	tests := []struct {
+		name            string
+		numRecentEvents int
+		want            []string
+	}{
+		{name: "after only", want: []string{"e40", "e30", "e50", "e60", "e70"}},
+		{name: "with num recent events", numRecentEvents: 6, want: []string{"e40", "e30", "e50", "e60", "e70"}},
+		// The trim runs before the filter, in append order, so e40 falls out of
+		// a five-event window even though it is at or after After.
+		{name: "num recent events trims first", numRecentEvents: 5, want: []string{"e30", "e50", "e60", "e70"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:         "app",
+				UserID:          "user",
+				SessionID:       "s",
+				NumRecentEvents: tt.numRecentEvents,
+				After:           base.Add(25 * time.Minute),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			var ids []string
+			for event := range got.Session.Events().All() {
+				ids = append(ids, event.ID)
+			}
+			if !slices.Equal(ids, tt.want) {
+				t.Errorf("Get() event IDs = %v, want %v", ids, tt.want)
 			}
 		})
 	}
