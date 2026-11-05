@@ -263,9 +263,10 @@ func TestRetryAndReflect_ToolPanic(t *testing.T) {
 		{name: "reflection response", err: panicErr, calls: 1, wantTopOfGuidance: "failed"},
 		{name: "retry limit exceeded response", err: panicErr, calls: 2, wantTopOfGuidance: "exceeded"},
 		{
-			// An earlier OnToolError callback is free to wrap the panic before
-			// this plugin sees it, as agenttool and the workflow tool node wrap
-			// the errors they pass on.
+			// An error on its way out of a tool is wrapped more than once:
+			// agenttool wraps what the sub-agent run returned, and an earlier
+			// OnToolError callback is free to wrap it before this plugin sees
+			// it.
 			name:              "wrapped panic",
 			err:               fmt.Errorf("lookup failed: %w", panicErr),
 			calls:             1,
@@ -289,7 +290,7 @@ func TestRetryAndReflect_ToolPanic(t *testing.T) {
 			if got, want := res["error_details"], "Invoking `test-tool()` failed with an internal error."; got != want {
 				t.Errorf("error_details = %v, want %q", got, want)
 			}
-			if got, want := res["error_type"], panicErrorType; got != want {
+			if got, want := res["error_type"], "panic"; got != want {
 				t.Errorf("error_type = %v, want %q", got, want)
 			}
 			guidance, _ := res["reflection_guidance"].(string)
@@ -375,6 +376,11 @@ func TestToolPanicThroughRunner(t *testing.T) {
 
 	if len(responses) == 0 {
 		t.Fatal("the run produced no function response")
+	}
+	// Without this the test would also pass when the plugin stopped answering
+	// and the flow's own substitution took over, which is not what it covers.
+	if !strings.Contains(responses[0], reflectAndRetryResponseType) {
+		t.Errorf("the plugin did not answer the failed call: %.200q", responses[0])
 	}
 	for _, got := range responses {
 		for _, leaked := range []string{"secret-user-data-123", "goroutine", "PanicError"} {

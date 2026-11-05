@@ -209,12 +209,10 @@ func (r *retryAndReflect) resetFailuresForTool(ctx agent.Context, toolName strin
 // the session and REST clients all see. A panic recovered from the tool's
 // handler, at any wrapping depth, becomes an opaque type and a generic
 // message, because the panic error's own text carries the panic value and the
-// goroutine stack. Callbacks that only observe the error still get the full
-// text.
+// goroutine stack.
 func modelError(toolName string, err error) (errType, details string) {
-	var panicErr *toolinternal.PanicError
-	if errors.As(err, &panicErr) {
-		return panicErrorType, toolinternal.PanicErrorText(toolName)
+	if text, panicked := toolinternal.ModelErrorText(toolName, err); panicked {
+		return panicErrorType, text
 	}
 	return fmt.Sprintf("%T", err), err.Error()
 }

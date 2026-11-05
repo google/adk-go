@@ -71,34 +71,29 @@ type PanicError struct {
 }
 
 // NewPanicError returns the error for the value a tool named toolName panicked
-// with, recovered at the stack given. It formats the message once, so every
-// reader gets the same text even if value changes later.
+// with, recovered at the stack given.
 func NewPanicError(toolName string, value any, stack []byte) *PanicError {
+	// Format the message now, so that every reader gets the same text even if
+	// value changes later.
 	return &PanicError{msg: fmt.Sprintf("panic in tool %q: %v\nstack: %s", toolName, value, stack)}
 }
 
 func (e *PanicError) Error() string { return e.msg }
 
-// PanicErrorText is what a call of the tool named toolName shows the model in
-// place of a recovered panic.
-func PanicErrorText(toolName string) string {
-	return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName)
-}
-
 // ModelErrorText is the text a failed call of the tool named toolName may show
-// the model. A recovered panic becomes a generic message, because its own text
-// carries the panic value and the goroutine stack; that holds however deeply
-// it is wrapped, since a callback that handles the error and returns its own
-// is free to wrap it. Any other error keeps its text, because returning an
-// error is how a Go tool tells the model what went wrong.
+// the model, and whether err turned out to be a recovered panic. A recovered
+// panic becomes a generic message, because its own text carries the panic
+// value and the goroutine stack; that holds however deeply it is wrapped,
+// since an error on its way out of a tool is wrapped more than once. Any other
+// error keeps its text, because returning an error is how a Go tool tells the
+// model what went wrong.
 //
-// Anything that turns a tool error into a function response calls this: the
-// flow, and the plugins that answer OnToolError with a response of their own.
-// err must not be nil.
-func ModelErrorText(toolName string, err error) string {
+// Call this wherever a tool error becomes a function response. err must not be
+// nil.
+func ModelErrorText(toolName string, err error) (text string, panicked bool) {
 	var panicErr *PanicError
 	if errors.As(err, &panicErr) {
-		return PanicErrorText(toolName)
+		return fmt.Sprintf("Invoking `%s()` failed with an internal error.", toolName), true
 	}
-	return err.Error()
+	return err.Error(), false
 }
