@@ -611,6 +611,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	testCases := []struct {
 		name              string
 		agentFn           func(*testing.T) agent.Agent
+		sessionService    session.Service
 		wantArtifactParts a2a.ContentParts
 		wantState         a2a.TaskState
 		wantStatusContain string
@@ -664,12 +665,14 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 			name: "internal error",
 			agentFn: func(t *testing.T) agent.Agent {
 				return utils.Must(agent.New(agent.Config{
+					Name: "internal_error",
 					Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
 						return func(yield func(*session.Event, error) bool) {}
 					},
 				}))
 			},
-			wantStatusContain: "app_name and user_id are required, got app_name: ",
+			sessionService:    failingCreateSessionService{Service: session.InMemoryService()},
+			wantStatusContain: "failed to create a session: session creation failed",
 			wantState:         a2a.TaskStateFailed,
 			wantArtifactParts: a2a.ContentParts{},
 		},
@@ -726,7 +729,7 @@ func TestA2ASingleHopFinalResponse(t *testing.T) {
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			executor := newAgentExecutor(tc.agentFn(t), nil, adka2a.OutputArtifactPerRun)
+			executor := newAgentExecutor(tc.agentFn(t), tc.sessionService, adka2a.OutputArtifactPerRun)
 			server := startA2AServer(executor)
 			defer server.Close()
 
@@ -1084,6 +1087,16 @@ func newRootAgent(name string, subAgent agent.Agent) agent.Agent {
 			},
 		},
 	}))
+}
+
+// failingCreateSessionService fails every session creation, so the executor
+// fails before the agent runs.
+type failingCreateSessionService struct {
+	session.Service
+}
+
+func (failingCreateSessionService) Create(context.Context, *session.CreateRequest) (*session.CreateResponse, error) {
+	return nil, errors.New("session creation failed")
 }
 
 func newAgentExecutor(agnt agent.Agent, service session.Service, mode adka2a.OutputMode) a2asrv.AgentExecutor {
