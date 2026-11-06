@@ -49,10 +49,11 @@ type Config struct {
 // If a direct sub-agent yields an event with Actions.Escalate, the agent yields
 // that event, cancels the remaining branches and ends. If an error that would
 // reach this agent has already been yielded by then, that error is returned
-// instead of the event. That covers an error a direct sub-agent yields, and an
-// error from inside a nested ParallelAgent reached through ParallelAgents,
-// SequentialAgents and LoopAgents only, even while the agents in between are
-// still cleaning up. Other agents, such as a workflow agent or a custom agent,
+// instead of the event. That covers an error a direct sub-agent yields,
+// including one a SequentialAgent or LoopAgent sub-agent passes up from its own
+// sub-agents, and an error from inside a nested ParallelAgent reached through
+// ParallelAgents, SequentialAgents and LoopAgents only, even while the agents
+// in between are still cleaning up. Other agents, such as a workflow agent or a custom agent,
 // can catch or retry an error, so an error from inside one counts only once
 // that agent has yielded it. An error from a branch that a nested ParallelAgent
 // canceled after its own escalation never counts. Escalations from deeper

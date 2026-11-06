@@ -1001,12 +1001,16 @@ func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
 	sequential := func(name string, subAgents ...agent.Agent) agent.Agent {
 		return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
 	}
+	loop := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(loopagent.New(loopagent.Config{MaxIterations: 1, AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
 	nestings := []struct {
 		name string
 		wrap func(failing agent.Agent) agent.Agent
 	}{
 		{"inner parallel", func(f agent.Agent) agent.Agent { return parallel("inner", f) }},
 		{"sequential then parallel", func(f agent.Agent) agent.Agent { return sequential("seq", parallel("inner", f)) }},
+		{"loop then parallel", func(f agent.Agent) agent.Agent { return loop("loop", parallel("inner", f)) }},
 		{"parallel, sequential, parallel", func(f agent.Agent) agent.Agent {
 			return parallel("mid", sequential("seq", parallel("inner", f)))
 		}},
