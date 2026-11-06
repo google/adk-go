@@ -143,17 +143,22 @@ func (r *retryAndReflect) afterTool(ctx agent.Context, tool tool.Tool, args, res
 }
 
 // afterRun drops the failure counts of an invocation once its run has ended.
-// Nothing reads them afterwards, so under the Invocation scope keeping them
-// would grow scopedFailureCounters with every invocation that saw a failure.
+// Nothing reads them afterwards, so keeping them would grow
+// scopedFailureCounters with every invocation that saw a failure. Every scope
+// but Global keys its counts by invocation ID, as scopeKey does.
 // The counts of a run that paused on an unanswered long-running call are kept:
 // the run that answers the call reuses the invocation ID and continues the
 // same retry budget, as in adk-python.
 func (r *retryAndReflect) afterRun(ictx agent.InvocationContext) {
-	if r.scope != Invocation {
+	if r.scope == Global {
 		return
 	}
 	invocationID := ictx.InvocationID()
-	if hasOpenLongRunningCall(ictx.Session(), invocationID) {
+	r.mu.Lock()
+	_, tracked := r.scopedFailureCounters[invocationID]
+	r.mu.Unlock()
+	// Most runs record no failure; skip the scan of the session events for them.
+	if !tracked || hasOpenLongRunningCall(ictx.Session(), invocationID) {
 		return
 	}
 

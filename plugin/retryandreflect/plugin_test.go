@@ -22,9 +22,15 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockTool struct {
@@ -412,5 +418,185 @@ func TestRetryAndReflect_AfterRunKeepsGlobalCounts(t *testing.T) {
 
 	if count := r.scopedFailureCounters[globalScopeKey]["test-tool"]; count != 1 {
 		t.Errorf("expected the global counts to be kept, got count %d", count)
+	}
+}
+
+func TestRetryAndReflect_AfterRunDropsCountsOfEveryPerInvocationScope(t *testing.T) {
+	// WithTrackingScope accepts any value, and every scope but Global keys its
+	// counts by invocation ID.
+	tests := []struct {
+		name  string
+		scope TrackingScope
+	}{
+		{name: "Invocation", scope: Invocation},
+		{name: "empty", scope: ""},
+		{name: "upper case", scope: "INVOCATION"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &retryAndReflect{
+				maxRetries:            3,
+				scope:                 tt.scope,
+				scopedFailureCounters: make(map[string]map[string]int),
+			}
+			_, _ = r.onToolError(&mockContext{invocationID: "inv1"}, &mockTool{name: "test-tool"}, nil, errors.New("some error"))
+			if _, ok := r.scopedFailureCounters["inv1"]; !ok {
+				t.Fatal("expected the failure to be counted under invocation inv1")
+			}
+
+			r.afterRun(newRunContext(t, "inv1"))
+
+			if _, ok := r.scopedFailureCounters["inv1"]; ok {
+				t.Errorf("expected the counts of the ended invocation inv1 to be dropped")
+			}
+		})
+	}
+}
+
+// eventsCountingSession counts the reads of its events.
+type eventsCountingSession struct {
+	session.Session
+	eventsReads int
+}
+
+func (s *eventsCountingSession) Events() session.Events {
+	s.eventsReads++
+	return s.Session.Events()
+}
+
+func TestRetryAndReflect_AfterRunScansEventsOnlyOfInvocationWithCounts(t *testing.T) {
+	tests := []struct {
+		name             string
+		failedInvocation string
+		wantEventsReads  int
+	}{
+		{name: "no failure in the ended invocation", failedInvocation: "inv2", wantEventsReads: 0},
+		{name: "failure in the ended invocation", failedInvocation: "inv1", wantEventsReads: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &retryAndReflect{
+				maxRetries:            3,
+				scope:                 Invocation,
+				scopedFailureCounters: make(map[string]map[string]int),
+			}
+			_, _ = r.onToolError(&mockContext{invocationID: tt.failedInvocation}, &mockTool{name: "test-tool"}, nil, errors.New("some error"))
+			sess := &eventsCountingSession{Session: newRunContext(t, "inv1").Session()}
+
+			r.afterRun(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Session:      sess,
+				InvocationID: "inv1",
+			}))
+
+			if sess.eventsReads != tt.wantEventsReads {
+				t.Errorf("session events read %d times, want %d", sess.eventsReads, tt.wantEventsReads)
+			}
+		})
+	}
+}
+
+type noArgs struct{}
+
+// TestRetryAndReflect_RunnerContinuesCountsOfAnsweredRun runs the plugin
+// through runner.Run. The run that answers a long-running call reuses the
+// invocation ID of the paused run, so it continues that run's retry budget,
+// and the counts are dropped once it ends.
+func TestRetryAndReflect_RunnerContinuesCountsOfAnsweredRun(t *testing.T) {
+	flaky, err := functiontool.New(functiontool.Config{Name: "flaky", Description: "fails"},
+		func(agent.Context, noArgs) (map[string]any, error) {
+			return nil, errors.New("backend unavailable")
+		})
+	if err != nil {
+		t.Fatalf("Failed to create the flaky tool: %v", err)
+	}
+	askApproval, err := functiontool.New(functiontool.Config{Name: "ask_approval", Description: "asks the user", IsLongRunning: true},
+		func(agent.Context, noArgs) (map[string]any, error) {
+			return map[string]any{"status": "pending"}, nil
+		})
+	if err != nil {
+		t.Fatalf("Failed to create the long-running tool: %v", err)
+	}
+	mockModel := &testutil.MockModel{Responses: []*genai.Content{
+		// The paused run: a failure, then a call the user has not answered yet.
+		genai.NewContentFromFunctionCall("flaky", map[string]any{}, genai.RoleModel),
+		genai.NewContentFromFunctionCall("ask_approval", map[string]any{}, genai.RoleModel),
+		genai.NewContentFromText("waiting for approval", genai.RoleModel),
+		// The run that answers the call: the same tool fails again.
+		genai.NewContentFromFunctionCall("flaky", map[string]any{}, genai.RoleModel),
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: mockModel,
+		Tools: []tool.Tool{flaky, askApproval},
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the agent: %v", err)
+	}
+	r := &retryAndReflect{
+		maxRetries:            3,
+		scope:                 Invocation,
+		scopedFailureCounters: make(map[string]map[string]int),
+	}
+	p, err := plugin.New(plugin.Config{
+		Name:                "RetryAndReflectPlugin",
+		AfterToolCallback:   r.afterTool,
+		OnToolErrorCallback: r.onToolError,
+		AfterRunCallback:    r.afterRun,
+	})
+	if err != nil {
+		t.Fatalf("Failed to create the plugin: %v", err)
+	}
+	testRunner := testutil.NewTestAgentRunnerWithPluginManager(t, a, runner.PluginConfig{Plugins: []*plugin.Plugin{p}})
+	failureCount := func(invocationID string) (int, bool) {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		counts, ok := r.scopedFailureCounters[invocationID]
+		return counts["flaky"], ok
+	}
+
+	paused, err := testutil.CollectEvents(testRunner.Run(t, "ses1", "start"))
+	if err != nil {
+		t.Fatalf("Paused run failed: %v", err)
+	}
+	var callID, invocationID string
+	for _, ev := range paused {
+		if len(ev.LongRunningToolIDs) > 0 {
+			callID, invocationID = ev.LongRunningToolIDs[0], ev.InvocationID
+		}
+	}
+	if callID == "" {
+		t.Fatal("expected the first run to pause on a long-running call")
+	}
+	if count, ok := failureCount(invocationID); !ok || count != 1 {
+		t.Fatalf("after the paused run: count %d (kept %t), want 1 kept", count, ok)
+	}
+
+	answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+		ID: callID, Name: "ask_approval", Response: map[string]any{"approved": true},
+	}}}}
+	answered, err := testutil.CollectEvents(testRunner.RunContent(t, "ses1", answer))
+	if err != nil {
+		t.Fatalf("Answering run failed: %v", err)
+	}
+	var retryCount any
+	for _, ev := range answered {
+		if ev.InvocationID != invocationID {
+			t.Errorf("event of the answering run has invocation ID %q, want %q", ev.InvocationID, invocationID)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if fr := part.FunctionResponse; fr != nil && fr.Name == "flaky" {
+				retryCount = fr.Response["retry_count"]
+			}
+		}
+	}
+	if retryCount != 2 {
+		t.Errorf("retry_count of the failure in the answering run = %v, want 2", retryCount)
+	}
+	if count, ok := failureCount(invocationID); ok {
+		t.Errorf("after the answering run: count %d kept, want the counts dropped", count)
 	}
 }
