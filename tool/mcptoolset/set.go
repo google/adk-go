@@ -108,6 +108,9 @@ func New(cfg Config) (tool.Toolset, error) {
 // streamable HTTP or SSE transport is copied, and the copy's HTTP client sends
 // the ADK tracking headers. When Config.Auth is set, the client also applies a
 // per-request auth RoundTripper, which requires a streamable HTTP transport.
+// A *mcp.CommandTransport with a non-nil Command is wrapped so it can connect
+// more than once (see Config.Transport). Other transports are returned as
+// given.
 func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
@@ -136,7 +139,7 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 		sseCopy.HTTPClient = httpClient(t.HTTPClient, nil)
 		return &sseCopy, nil
 	case *mcp.CommandTransport:
-		// A nil Command is passed through so the SDK reports it as before.
+		// A nil Command is passed through, so it behaves as before.
 		if t != nil && t.Command != nil {
 			return newCommandTransport(t), nil
 		}
@@ -161,8 +164,10 @@ type commandTransport struct {
 func newCommandTransport(t *mcp.CommandTransport) *commandTransport {
 	src := t.Command
 	// Only the fields that configure a process are copied. The copy has no
-	// exec.CommandContext context or Cancel hook, because os/exec does not
-	// expose them.
+	// exec.CommandContext context, because os/exec does not expose it. Cancel
+	// is left out too: Start rejects a Cancel without a context, and the
+	// default Cancel of CommandContext would kill the caller's process, not
+	// the copy.
 	return &commandTransport{first: *t, spec: exec.Cmd{
 		Path:        src.Path,
 		Args:        slices.Clone(src.Args),
@@ -187,13 +192,18 @@ func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) 
 	if first {
 		return t.first.Connect(ctx)
 	}
+	return t.reconnectTransport().Connect(ctx)
+}
+
+// reconnectTransport returns the transport for every Connect after the first.
+// It copies the whole transport, so every setting on it (such as
+// TerminateDuration) carries over, including ones added in later SDK
+// versions. Only Command is replaced, with a fresh copy of spec.
+func (t *commandTransport) reconnectTransport() *mcp.CommandTransport {
 	cmd := t.spec
-	// Copy the whole transport, so every setting on it (such as
-	// TerminateDuration) carries over, including ones added in later SDK
-	// versions. Only Command is replaced.
 	tr := t.first
 	tr.Command = &cmd
-	return tr.Connect(ctx)
+	return &tr
 }
 
 // httpClient returns a shallow copy of base whose Transport adds the ADK
@@ -230,8 +240,26 @@ type Config struct {
 	// HTTPClient's own Transport runs after that. A User-Agent it
 	// sets with Header.Set replaces the labels, and one it adds with
 	// Header.Add is not sent, because net/http sends only the first value.
-	// Other transport types, including a wrapper such as *mcp.LoggingTransport,
-	// are used as given.
+	//
+	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
+	// called, so the server can be started again after the connection is
+	// lost (an *exec.Cmd can be started only once). The first connect runs
+	// the caller's command, and every later connect runs a copy of the
+	// command and transport taken at New. Callers can notice this in three
+	// ways:
+	//   - The transport is copied at New, so changing it afterwards (for
+	//     example TerminateDuration) has no effect, even on the first
+	//     connect. Changes to the command after New only reach the first
+	//     connect.
+	//   - The copy can't carry an exec.CommandContext context, so a server
+	//     built with CommandContext is started again after that context is
+	//     cancelled, and the new process ignores it. In the same way, a
+	//     server stopped by killing cmd.Process comes back on the next tool
+	//     call.
+	//   - A CommandTransport inside a wrapper such as *mcp.LoggingTransport
+	//     is used as given, so it still can't reconnect.
+	//
+	// Other transport types are used as given.
 	Transport mcp.Transport
 
 	// Endpoint, when set and Transport is nil, builds a streamable HTTP
