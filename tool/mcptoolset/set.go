@@ -84,8 +84,15 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var client sessionClient
+	if cfg.Auth != nil {
+		client = newCredentialSessions(cfg.Client, transport, cfg.Auth)
+	} else {
+		client = newConnectionRefresher(cfg.Client, transport)
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   client,
+		toolNamePrefix:              cfg.ToolNamePrefix,
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -178,6 +185,12 @@ type Config struct {
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
 	//
+	// With Auth set, each distinct credential the provider resolves gets an
+	// MCP session of its own, so a server that binds sessions to the user who
+	// created them serves every user, while a user-independent credential such
+	// as auth.StaticToken keeps one session. A session idle for 10 minutes is
+	// closed, and at most 64 are kept open unless more are in use at once.
+	//
 	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
 	// than a copy of http.DefaultClient, so the credential never reaches
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
@@ -189,8 +202,16 @@ type Config struct {
 	// would fight over the same request.
 	Auth auth.CredentialProvider
 
+	// ToolNamePrefix, when non-empty, exposes each tool as "<prefix>_<name>".
+	// For example, "docs" changes "search" to "docs_search". MCP calls still
+	// use the original server-side name. An empty prefix leaves names unchanged.
+	// Tool callbacks and confirmation providers receive the exposed name.
+	// When using tool.FilterToolset, predicates also see the exposed name.
+	ToolNamePrefix string
+
 	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
+	// It runs before ToolNamePrefix is applied, so predicates see original names.
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
@@ -217,8 +238,16 @@ type Config struct {
 	MetadataProvider MetadataProvider
 }
 
+// sessionClient is the MCP connection a set uses: one shared session, or one
+// per credential when Config.Auth is set.
+type sessionClient interface {
+	MCPClient
+	io.Closer
+}
+
 type set struct {
-	mcpClient                   *connectionRefresher
+	mcpClient                   sessionClient
+	toolNamePrefix              string
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
@@ -259,6 +288,11 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
 			continue
+		}
+
+		if s.toolNamePrefix != "" {
+			t.name = s.toolNamePrefix + "_" + t.originalName
+			t.funcDeclaration.Name = t.name
 		}
 
 		adkTools = append(adkTools, t)

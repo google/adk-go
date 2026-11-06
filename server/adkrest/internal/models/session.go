@@ -102,9 +102,12 @@ func (s Session) Validate() error {
 	if s.ID == "" {
 		return fmt.Errorf("session_id is empty in received session")
 	}
-	if s.UpdatedAt == 0 {
-		return fmt.Errorf("updated_at is empty")
-	}
+	// UpdatedAt is not checked. It started as a check that the time.Time was
+	// set, and became UpdatedAt == 0 when the field turned into epoch seconds.
+	// That form never catches an unset time, whose Unix() is -62135596800, but
+	// it rejects every last update in the first second of 1970. An event
+	// timestamp such as 0.5 puts a session there, which then failed every
+	// GET, and every list of its user's sessions, with a 500.
 	if s.State == nil {
 		return fmt.Errorf("state is nil")
 	}
