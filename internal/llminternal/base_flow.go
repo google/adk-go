@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -46,6 +47,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -353,13 +355,30 @@ func waitBeforeReconnect(ctx context.Context, sess *liveSessionImpl, d time.Dura
 //
 // Both the reader and the sender goroutine report into the same errChan and
 // the flow acts on whichever arrives first, so the two must classify the same
-// connection loss the same way. They do not produce the same text: the reader
-// sees the websocket close ("close 1006 ... unexpected EOF"), while the sender
-// sees the raw socket write failure, whose wording is platform-specific
-// ("write: broken pipe" on Linux, "wsasend: An established connection was
-// aborted by the software in your host machine." on Windows). Matching the
-// transport failure by type rather than by text keeps the verdict the same on
-// every platform.
+// connection loss the same way. They do not produce the same text. The reader
+// usually sees the websocket close ("close 1006 ... unexpected EOF"), and on a
+// reset it can get the raw socket error instead. The sender sees the raw
+// socket write failure, whose wording is platform-specific ("write: broken
+// pipe" on Linux, "wsasend: An established connection was aborted by the
+// software in your host machine." on Windows), and over wss:// it arrives
+// wrapped by crypto/tls. Matching the *net.OpError by type rather than by text
+// gives a dropped or reset connection the same verdict on both goroutines and
+// on every platform.
+//
+// A timed-out connection does not always get one verdict, because the kernel
+// reports the timeout to only one call. On Linux every later call sees a
+// closed connection instead: a read gets EOF, which gorilla reports as
+// close 1006, and a write gets EPIPE, and both resume. The call that does get
+// ETIMEDOUT is fatal if gorilla/websocket hides it, which it does for any
+// net.Error whose Temporary() is true (hideTempErr). That is the case for a
+// read over ws:// or wss:// and for a write over ws://. crypto/tls wraps a
+// failed write in an error whose Temporary() is always false, so a timed-out
+// write over wss:// keeps the *net.OpError and resumes. So on Linux a
+// timed-out connection resumes or ends depending on which goroutine reaches
+// errChan first, unless the timeout lands on a wss:// write. On Windows the
+// timeout is WSAETIMEDOUT (10060) and the other call gets WSAECONNRESET
+// (10054). Go treats neither as temporary, so both keep the *net.OpError and
+// the connection resumes whichever goroutine reports first.
 func isResumable(err error) bool {
 	if err == nil {
 		return false
@@ -374,12 +393,34 @@ func isResumable(err error) bool {
 	if errors.As(err, &opErr) {
 		return true
 	}
+	// Match the close code rather than the text: gorilla puts the socket
+	// addresses in its error text, so a port such as 41008 would match "1008".
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) && closeErr.Code == websocket.ClosePolicyViolation {
+		return true
+	}
 	errStr := err.Error()
 	return strings.Contains(errStr, "broken pipe") ||
 		strings.Contains(errStr, "connection reset") ||
 		strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "1008") ||
 		strings.Contains(errStr, "GoAway")
+}
+
+// hasRealtimeInput reports whether v should be passed to SendRealtime. A nil
+// pointer of one of the types LiveRequest.RealtimeInput documents carries no
+// input, as a None field in adk-python does.
+func hasRealtimeInput(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case *genai.Blob:
+		return v != nil
+	case *genai.ActivityStart:
+		return v != nil
+	case *genai.ActivityEnd:
+		return v != nil
+	}
+	return true
 }
 
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
@@ -607,7 +648,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								return
 							}
 						}
-						if req.RealtimeInput != nil {
+						if hasRealtimeInput(req.RealtimeInput) {
 							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
@@ -771,18 +812,28 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 		}
 
 		// Preprocess before calling the LLM.
+		preprocessYieldedFinalResponse := false
 		for ev, err := range f.preprocess(ctx, req) {
 			if err != nil {
 				yield(nil, err)
 				return
 			}
 			if ev != nil {
+				if len(utils.FunctionResponses(ev.Content)) > 0 && ev.IsFinalResponse() {
+					preprocessYieldedFinalResponse = true
+				}
 				if !yield(ev, nil) {
 					return
 				}
 			}
 		}
-		if ctx.Ended() {
+		// A preprocessor can run a tool itself, such as a call resumed after
+		// confirmation. When that tool's response is final, because the tool
+		// set SkipSummarization, the turn ends there, as it does when the tool
+		// runs after a model call; calling the model now would summarize what
+		// the tool asked to be the answer. adk-python stops on the same
+		// condition (base_llm_flow.py).
+		if ctx.Ended() || preprocessYieldedFinalResponse {
 			return
 		}
 		// Create event to pass to callback state delta
@@ -819,7 +870,7 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			// Build the event and yield.
-			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta)
+			modelResponseEvent := f.finalizeModelResponseEvent(ctx, resp, tools, stateDelta, artifactDelta)
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
@@ -997,6 +1048,14 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			useStream = rc.StreamingMode == agent.StreamingModeSSE
 		}
 
+		// Count this call against the invocation's budget before making it. The
+		// run config is absent when an agent is run directly rather than through
+		// the runner (issue #586), and that imposes no limit.
+		if err := runconfig.FromContext(ctx).IncrementAndEnforceLLMCallsLimit(); err != nil {
+			yield(nil, err)
+			return
+		}
+
 		for resp, err := range generateContent(ctx, f.Model, req, useStream) {
 			if err != nil {
 				cbResp, cbErr := f.runOnModelErrorCallbacks(ctx, req, stateDelta, artifactDelta, err)
@@ -1027,7 +1086,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 			if callbackResp != nil {
 				resp := &responseWithEventID{
-					LLMResponse: callbackResp,
+					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
 					eventID:     resp.eventID,
 				}
 				if !yield(resp, nil) {
@@ -1049,6 +1108,46 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 	}
 }
 
+// inheritModelFields carries fields that describe the model call, rather than
+// the response content, from a response onto the after-model callback's
+// replacement for it.
+//
+// A callback that rebuilds the response, for example to scrub its text, is
+// still answering the same model call. If the replacement drops Partial, every
+// streamed delta looks final: SSE clients render each delta as a complete
+// turn and the runner persists each one as a separate session event. If it
+// drops TurnComplete, clients never see the turn end. If it drops
+// UsageMetadata, the call disappears from token accounting.
+//
+// Partial and TurnComplete are plain bools, so an unset value cannot be told
+// apart from an explicit false; a delta is never final while the stream
+// continues, so a partial original keeps its replacement partial, and a
+// response that ended the turn keeps its replacement ending it. UsageMetadata
+// set on the replacement is respected. The replacement is copied rather than
+// modified, and returned as is when nothing needs filling.
+func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
+	if original == nil {
+		return replacement
+	}
+	inheritPartial := original.Partial && !replacement.Partial
+	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
+	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
+		return replacement
+	}
+	merged := *replacement
+	if inheritPartial {
+		merged.Partial = true
+	}
+	if inheritTurnComplete {
+		merged.TurnComplete = true
+	}
+	if inheritUsage {
+		merged.UsageMetadata = original.UsageMetadata
+	}
+	return &merged
+}
+
 type responseWithEventID struct {
 	*model.LLMResponse
 	eventID string
@@ -1057,56 +1156,28 @@ type responseWithEventID struct {
 // generateContent wraps the LLM call with tracing and logging.
 // The generate_content span should cover only calls to LLM. Plugins and callbacks should be outside of this span.
 func generateContent(ctx agent.InvocationContext, m model.LLM, req *model.LLMRequest, useStream bool) iter.Seq2[*responseWithEventID, error] {
-	return func(yield func(*responseWithEventID, error) bool) {
-		spanCtx, span := telemetry.StartGenerateContentSpan(ctx, telemetry.StartGenerateContentSpanParams{
-			ModelName:    m.Name(),
-			InvocationID: ctx.InvocationID(),
-			Request:      req,
-		})
-		ctx = ctx.WithContext(spanCtx)
-		backend := googlellm.GetGoogleLLMVariant(m)
-		// Log request before calling the model.
-		telemetry.LogRequest(ctx, req, backend)
-
-		var lastResponse responseWithEventID
-		var lastErr error
-		spanEnded := false
-		endSpanAndTrackResult := func() {
-			if spanEnded {
-				// Return to avoid spamming the logs with "span already ended" errors.
-				return
-			}
-			telemetry.TraceGenerateContentResult(span, telemetry.TraceGenerateContentResultParams{
-				Response: lastResponse.LLMResponse,
-				EventID:  lastResponse.eventID,
-				Error:    lastErr,
-			})
-			span.End()
-			spanEnded = true
-		}
-		// Ensure that the span is ended in case of error or if none final responses are yielded before the yield returns false.
-		defer endSpanAndTrackResult()
-		for resp, err := range m.GenerateContent(ctx, req, useStream) {
-			if resp == nil && err == nil {
-				// Third-party model implementations may yield an empty response.
-				continue
-			}
-			response := newResponseWithEventID(ctx, resp)
-			lastResponse = *response
-			lastErr = err
-			// Complete the span immediately to avoid capturing the upstream yield processing time.
-			if err != nil {
-				endSpanAndTrackResult()
-			} else if !resp.Partial {
-				// Log only final responses.
-				telemetry.LogResponse(ctx, resp, backend)
-				endSpanAndTrackResult()
-			}
-			if !yield(response, err) {
-				return
-			}
-		}
+	params := telemetry.GenerateContentParams{
+		ModelName:    m.Name(),
+		InvocationID: ctx.InvocationID(),
+		Request:      req,
+		Backend:      googlellm.GetGoogleLLMVariant(m),
+		Stream:       useStream,
 	}
+	response := func(r *responseWithEventID) (*model.LLMResponse, string) { return r.LLMResponse, r.eventID }
+	return telemetry.InstrumentGenerateContent(ctx, params, response, func(spanCtx context.Context) iter.Seq2[*responseWithEventID, error] {
+		ctx := ctx.WithContext(spanCtx)
+		return func(yield func(*responseWithEventID, error) bool) {
+			for resp, err := range m.GenerateContent(ctx, req, useStream) {
+				if resp == nil && err == nil {
+					// Third-party model implementations may yield an empty response.
+					continue
+				}
+				if !yield(newResponseWithEventID(ctx, resp), err) {
+					return
+				}
+			}
+		}
+	})
 }
 
 func (f *Flow) runAfterModelCallbacks(ctx agent.InvocationContext, llmResp *model.LLMResponse, stateDelta map[string]any, artifactDelta map[string]int64, llmErr error) (*model.LLMResponse, error) {
@@ -1177,7 +1248,7 @@ func (f *Flow) agentToRun(ctx agent.InvocationContext, agentName string) agent.A
 	return nil
 }
 
-func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any) *session.Event {
+func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *responseWithEventID, tools map[string]tool.Tool, stateDelta map[string]any, artifactDelta map[string]int64) *session.Event {
 	// FunctionCall & FunctionResponse matching algorithm assumes non-empty function call IDs
 	// but function call ID is optional in genai API and some models do not use the field.
 	// Generate function call ids. (see functions.populate_client_function_call_id in python SDK)
@@ -1189,6 +1260,7 @@ func (f *Flow) finalizeModelResponseEvent(ctx agent.InvocationContext, resp *res
 	ev.Branch = ctx.Branch()
 	ev.LLMResponse = *resp.LLMResponse
 	ev.Actions.StateDelta = stateDelta
+	ev.Actions.ArtifactDelta = artifactDelta
 
 	// Populate ev.LongRunningToolIDs
 	ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(resp.Content, tools)
@@ -1693,6 +1765,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
 		}
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
+	}
+	if other.RequestedAuthConfigs != nil {
+		if base.RequestedAuthConfigs == nil {
+			base.RequestedAuthConfigs = make(map[string]toolauth.Config)
+		}
+		maps.Copy(base.RequestedAuthConfigs, other.RequestedAuthConfigs)
 	}
 	return base
 }

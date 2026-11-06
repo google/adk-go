@@ -65,6 +65,10 @@ type agentEngineServiceFlags struct {
 	serverPort    int
 	agentEngineID string
 	memoryBank    memoryBankFlags
+	env           []string
+	defaultEnv    bool
+	envVars       []*aiplatformpb.EnvVar
+	updateEnv     bool
 }
 
 type buildFlags struct {
@@ -96,7 +100,9 @@ var agentEngineCmd = &cobra.Command{
 	Use:   "agentengine",
 	Short: "Deploys the application to Agent Engine.",
 	Long:  `Deploys the application to Agent Engine. It creates a source archive, uploads it to create a Reasoning Engine, and cleans up temporary files.`,
+	Args:  cobra.ExactArgs(0),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		flags.agentEngine.updateEnv = cmd.Flags().Changed("env") || cmd.Flags().Changed("default_env")
 		return flags.deployOnAgentEngine()
 	},
 }
@@ -114,16 +120,22 @@ func init() {
 	agentEngineCmd.PersistentFlags().StringVarP(&flags.source.sourceDir, "source_dir", "d", "", "Directory to archive, defaults to current working directory")
 	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.agentEngineID, "agent_engine_id", "", "ID of the Agent Engine instance to update if it exists (default: \"\", which means a new instance will be created).")
 	agentEngineCmd.PersistentFlags().BoolVar(&flags.agentEngine.memoryBank.deploy, "mem_deploy", false, "If set to true then memory bank will be deployed too")
-	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "publishers/google/models/gemini-2.5-flash", "Name of the model to be used for memory generation - for list you can GET"+
-		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models. It will be prefixed with projects/<project_name>/locations/<region> forming for instance full model name like "+
-		" 'projects/project_name/locations/us-central1/publishers/google/models/gemini-2.5-flash'")
+	agentEngineCmd.PersistentFlags().StringVar(&flags.agentEngine.memoryBank.model, "mem_model", "", "Name of the model to be used for memory generation, as publishers/google/models/<model_id>. If empty, Memory Bank uses its own default model."+
+		" A non-empty value is prefixed with projects/<project_name>/locations/<region>, so the model must be available in that region. To list models, GET"+
+		" https://${LOCATION_ID}-aiplatform.googleapis.com/v1beta1/publishers/google/models")
 	agentEngineCmd.PersistentFlags().DurationVar(&flags.agentEngine.memoryBank.ttl, "mem_ttl", time.Hour*24*365, "Time-To-Live for memories")
+	registerEnvironmentFlags(agentEngineCmd, &flags.agentEngine)
 }
 
 // computeFlags uses command line arguments to create a full config
 func (f *deployAgentEngineFlags) computeFlags() error {
 	return util.LogStartStop("Computing flags & preparing temp",
 		func(p util.Printer) error {
+			env, err := f.environmentVariables()
+			if err != nil {
+				return err
+			}
+			f.agentEngine.envVars = env
 			f.source.origEntryPointPath = f.source.entryPointPath
 			absp, err := filepath.Abs(f.source.entryPointPath)
 			if err != nil {
@@ -186,8 +198,10 @@ func (f *deployAgentEngineFlags) computeFlags() error {
 				f.agentEngine.displayName = "ADK Agent: " + dateTimeString
 			}
 
-			// add provided model as suffix
-			f.agentEngine.memoryBank.model = fmt.Sprintf("projects/%s/locations/%s/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.memoryBank.model)
+			// prefix an explicit model with the project and region
+			if f.agentEngine.memoryBank.model != "" {
+				f.agentEngine.memoryBank.model = fmt.Sprintf("projects/%s/locations/%s/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.memoryBank.model)
+			}
 
 			return nil
 		})
@@ -323,14 +337,35 @@ func (f *deployAgentEngineFlags) createArchive() error {
 		})
 }
 
+// memoryBankContextSpec returns the Memory Bank configuration that a deployment
+// with --mem_deploy sends. When --mem_model is empty it leaves GenerationConfig
+// unset, so Memory Bank picks the model and its endpoint, as it does for
+// adk-python's deploy, rather than the CLI hardcoding a model that retires.
+func (f *deployAgentEngineFlags) memoryBankContextSpec() *aiplatformpb.ReasoningEngineContextSpec {
+	cfg := &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
+		TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
+			Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
+				DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
+			},
+		},
+	}
+	if f.agentEngine.memoryBank.model != "" {
+		cfg.GenerationConfig = &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
+			Model: f.agentEngine.memoryBank.model,
+		}
+	}
+	return &aiplatformpb.ReasoningEngineContextSpec{MemoryBankConfig: cfg}
+}
+
 // gcloudDeployToAgentEngine invokes gcloud to deploy source on agentEngine
-func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
+func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine(opts ...option.ClientOption) error {
 	return util.LogStartStop("Deploying to Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
 			parent := fmt.Sprintf("projects/%s/locations/%s", f.gcloud.projectName, f.gcloud.region)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
-			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			opts = append([]option.ClientOption{option.WithEndpoint(endpoint)}, opts...)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, opts...)
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
 			}
@@ -374,12 +409,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 						},
 						AgentFramework: "google-adk",
 						DeploymentSpec: &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{
-							Env: []*aiplatformpb.EnvVar{
-								{Name: "GOOGLE_CLOUD_REGION", Value: f.gcloud.region},
-								{Name: "NUM_WORKERS", Value: "1"},
-								{Name: "GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY", Value: "true"},
-								{Name: "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", Value: "true"},
-							},
+							Env: f.agentEngine.envVars,
 						},
 						ClassMethods: methods,
 					},
@@ -387,18 +417,7 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 			}
 
 			if f.agentEngine.memoryBank.deploy {
-				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
-					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
-						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
-							Model: f.agentEngine.memoryBank.model,
-						},
-						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
-							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
-								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
-							},
-						},
-					},
-				}
+				req.ReasoningEngine.ContextSpec = f.memoryBankContextSpec()
 			}
 
 			p("Sending CreateReasoningEngine request...")
@@ -427,13 +446,14 @@ func (f *deployAgentEngineFlags) gcloudDeployToAgentEngine() error {
 }
 
 // gcloudUpdateAgentEngine invokes gcloud to update source on agentEngine
-func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
+func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine(opts ...option.ClientOption) error {
 	return util.LogStartStop("Updating Agent Engine",
 		func(p util.Printer) error {
 			ctx := context.Background()
 			name := fmt.Sprintf("projects/%s/locations/%s/reasoningEngines/%s", f.gcloud.projectName, f.gcloud.region, f.agentEngine.agentEngineID)
 			endpoint := fmt.Sprintf("%s-aiplatform.googleapis.com:443", f.gcloud.region)
-			client, err := aiplatform.NewReasoningEngineClient(ctx, option.WithEndpoint(endpoint))
+			opts = append([]option.ClientOption{option.WithEndpoint(endpoint)}, opts...)
+			client, err := aiplatform.NewReasoningEngineClient(ctx, opts...)
 			if err != nil {
 				return fmt.Errorf("cannot create ReasoningEngineClient: %w", err)
 			}
@@ -480,19 +500,13 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 				UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"spec.source_code_spec", "spec.class_methods"}},
 			}
 
+			if f.agentEngine.updateEnv {
+				req.ReasoningEngine.Spec.DeploymentSpec = &aiplatformpb.ReasoningEngineSpec_DeploymentSpec{Env: f.agentEngine.envVars}
+				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.deployment_spec.env")
+			}
+
 			if f.agentEngine.memoryBank.deploy {
-				req.ReasoningEngine.ContextSpec = &aiplatformpb.ReasoningEngineContextSpec{
-					MemoryBankConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig{
-						GenerationConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_GenerationConfig{
-							Model: f.agentEngine.memoryBank.model,
-						},
-						TtlConfig: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig{
-							Ttl: &aiplatformpb.ReasoningEngineContextSpec_MemoryBankConfig_TtlConfig_DefaultTtl{
-								DefaultTtl: durationpb.New(f.agentEngine.memoryBank.ttl),
-							},
-						},
-					},
-				}
+				req.ReasoningEngine.ContextSpec = f.memoryBankContextSpec()
 				req.UpdateMask.Paths = append(req.UpdateMask.Paths, "spec.context_spec")
 			}
 
@@ -521,8 +535,6 @@ func (f *deployAgentEngineFlags) gcloudUpdateAgentEngine() error {
 
 // deployOnAgentEngine executes the sequence of actions preparing and deploying the agent to agentEngine
 func (f *deployAgentEngineFlags) deployOnAgentEngine() error {
-	fmt.Println(flags)
-
 	err := f.computeFlags()
 	if err != nil {
 		return err
