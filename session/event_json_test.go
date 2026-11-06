@@ -26,6 +26,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 func fullyPopulatedEvent() *session.Event {
@@ -476,5 +477,38 @@ func TestEventActionsJSONDeltaMapEncoding(t *testing.T) {
 					got.Actions.ArtifactDelta == nil, tt.actions.ArtifactDelta == nil)
 			}
 		})
+	}
+}
+
+// TestEventJSONEncodesRequestedAuthConfigsAsGiven pins that encoding an event
+// does not check its credential requests, so json.Marshal does not fail on
+// such an event for every caller that encodes one. Session services check a
+// request when the event is appended instead; sessiontestsuite pins that for
+// every backend.
+func TestEventJSONEncodesRequestedAuthConfigsAsGiven(t *testing.T) {
+	// toolauth.Config.UnmarshalJSON refuses this config: its scheme has no type.
+	event := &session.Event{ID: "e", Author: "a", Actions: session.EventActions{
+		RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {CredentialKey: "k"}},
+	}}
+
+	b, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal() failed: %v", err)
+	}
+
+	var wire struct {
+		Actions struct {
+			RequestedAuthConfigs map[string]any `json:"requestedAuthConfigs"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("Unmarshal() failed: %v", err)
+	}
+	want := map[string]any{"call-1": map[string]any{
+		"authScheme":    map[string]any{"type": ""},
+		"credentialKey": "k",
+	}}
+	if diff := cmp.Diff(want, wire.Actions.RequestedAuthConfigs); diff != "" {
+		t.Errorf("actions.requestedAuthConfigs mismatch (-want +got):\n%s", diff)
 	}
 }

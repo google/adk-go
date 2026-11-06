@@ -171,7 +171,20 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 					}
 					state.Tools = append(state.Tools, taskCompletedTool)
 					instructionSuffix := "\nIf you finished the user's request according to its description, call the task_completed function to exit so the next agents can take over. When calling this function, do not generate any text other than the function call."
-					state.Instruction += instructionSuffix
+					// InstructionProvider takes over Instruction when both are set,
+					// so the suffix goes on whichever one the agent's requests use,
+					// as in adk-python's _append_instruction.
+					if provider := state.InstructionProvider; provider != nil {
+						state.InstructionProvider = func(ctx agent.ReadonlyContext) (string, error) {
+							instruction, err := provider(ctx)
+							if err != nil {
+								return instruction, err
+							}
+							return instruction + instructionSuffix, nil
+						}
+					} else {
+						state.Instruction += instructionSuffix
+					}
 				})
 			} else if _, live := subAgent.(liveRunner); live && len(subAgent.SubAgents()) > 0 {
 				injectSubAgents(subAgent.SubAgents())
@@ -204,7 +217,8 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 			seqSess.setActiveSession(subSess)
 
 			for ev, err := range innerIter {
-				if !yield(ev, err) {
+				// A failed sub-agent ends the sequence, as in Run.
+				if !yield(ev, err) || err != nil {
 					if err := subSess.Close(); err != nil {
 						log.Printf("error closing sub-session: %v\n", err) //nolint:forbidigo // pre-slog call site
 					}
