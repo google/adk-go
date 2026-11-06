@@ -23118,21 +23118,21 @@ func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
 
 // TestLateCauseRetiresWithoutRootToolCall verifies that the failure cause of a
 // late activation right under the invocation span keeps it only while a tool
-// call under the invocation span is still open (see retireLateSettledLocked):
-// o's tool call runs g on a branch outside o's, as a tool that runs an agent
-// with agent.InvocationContextDelta.Branch does, so g runs under the
-// invocation span (see parentFor), and g carries the cause that b, a parallel
-// branch below it whose context a failing sibling canceled, left on it when b
-// ended. Once o's call returns, g is settled, and as no tool call under the
-// invocation span is open, nothing that is open can read the cause (see
-// heldByCause and endToolRunsLocked), so g leaves the late state while o
-// stays open. A tool call under the invocation span that starts after o's
-// call returned, as a call of the root agent in RunLive may, finds g
-// already retired, so its end writes no AGENT_ERROR row for g, whereas on a
-// live trace, which retireLateSettledLocked leaves alone, g is still open
-// and the end of such a call writes one. Such a call that is open when o's
-// call returns keeps g, and the end of the last such call writes the row, as
-// in TestLateCauseHeldWhileRootToolCallOpen.
+// call is still open that may end with the invocation span as its owner (see
+// retireLateSettledLocked): o's tool call runs g on a branch outside o's, as a
+// tool that runs an agent with agent.InvocationContextDelta.Branch does, so g
+// runs under the invocation span (see parentFor), and g carries the cause that
+// b, a parallel branch below it whose context a failing sibling canceled,
+// left on it when b ended. Once o's call returns, g is settled, and as no tool
+// call is open, nothing that is open can read the cause (see heldByCause and
+// endToolRunsLocked), so g leaves the late state while o stays open. A tool
+// call under the invocation span that starts after o's call returned, as a call
+// of the root agent in RunLive may, finds g already retired, so its end writes
+// no AGENT_ERROR row for g, whereas on a live trace, which
+// retireLateSettledLocked leaves alone, g is still open and the end of such a
+// call writes one. Such a call that is open when o's call returns keeps g, and
+// the end of the last such call writes the row, as in
+// TestLateCauseHeldWhileRootToolCallOpen.
 func TestLateCauseRetiresWithoutRootToolCall(t *testing.T) {
 	ctx := context.Background()
 	tm := newTraceManager()
@@ -23604,4 +23604,59 @@ func TestLateCauseKeepsLineageWhileReaderOpen(t *testing.T) {
 			t.Errorf("%d AGENT_ERROR rows after call-2 returned, want none", len(purged))
 		}
 	})
+}
+
+// TestRetiredCallerReadsCause verifies that a tool call whose agent ended
+// before the call did resolves its owner to the invocation span upon completion
+// (see endToolRunsLocked) and reports failure causes of settled activations
+// right under the invocation span, whether the caller ends before or after
+// earlier tool calls return (see heldByCause and retireLateSettledLocked).
+func TestRetiredCallerReadsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		callerEndsBeforeCall1 bool
+	}{
+		{name: "caller ends before call-1 returns", callerEndsBeforeCall1: true},
+		{name: "call-1 returns before caller ends", callerEndsBeforeCall1: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-retired-caller"
+			lateReviewEnded(tm, invID)
+			o := identity{invocationID: invID, agentName: "o", path: "o", branch: "o"}
+			q := identity{invocationID: invID, agentName: "q", path: "q", branch: "q"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+			siblingErr := errors.New("sibling branch failed")
+			tm.pushAgentSpan(ctx, o)
+			tm.pushAgentSpan(ctx, q)
+			c1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, c1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			cq := toolKey(q, "call-q", "t") // starts after g, so it did not run g
+			tm.pushToolSpan(ctx, q, cq)
+
+			var p1, p2 []unclosedAgentSpan
+			if tc.callerEndsBeforeCall1 {
+				tm.popAgentSpan(ctx, q) // q ends while call-q is open
+				_, p1, _ = tm.popToolSpan(ctx, o, c1, false)
+				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
+			} else {
+				_, p1, _ = tm.popToolSpan(ctx, o, c1, false)
+				tm.popAgentSpan(ctx, q) // q ends while call-q is open
+				_, p2, _ = tm.popToolSpan(ctx, q, cq, false)
+			}
+			for _, p := range append(p1, p2...) {
+				if p.agentName == "g" && errors.Is(p.err, siblingErr) {
+					return
+				}
+			}
+			t.Error("no AGENT_ERROR row for g; main and the live state write one")
+		})
+	}
 }
