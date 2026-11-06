@@ -864,11 +864,42 @@ func TestDatabaseService_ListOrderedByLastUpdateTime(t *testing.T) {
 	}
 }
 
+// TestDatabaseService_ListOrdersMixedOffsetsByInstant stores update times in
+// two zones. SQLite keeps each as RFC 3339 text with its own offset, so text
+// order puts "early" (14:00+02:00) after "late" (13:00Z).
+func TestDatabaseService_ListOrdersMixedOffsetsByInstant(t *testing.T) {
+	svc := emptyService(t)
+	instant := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		id string
+		at time.Time
+	}{
+		{"early", instant.In(time.FixedZone("CEST", 2*3600))},
+		{"late", instant.Add(time.Hour)},
+	} {
+		ctx := platform.WithTimeProvider(t.Context(), func() time.Time { return c.at })
+		if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: c.id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := svc.List(t.Context(), &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.ID())
+	}
+	if want := []string{"early", "late"}; !slices.Equal(got, want) {
+		t.Errorf("List() order = %v, want %v (by instant, not by stored text)", got, want)
+	}
+}
+
 func TestDatabaseService_ListTieBreaksByUserThenID(t *testing.T) {
 	svc := emptyService(t)
 	// Without this SQLite serves the app_name filter from the composite primary
-	// key index and its sorter is stable, so ties already arrive in (user_id, id)
-	// order and a dropped tie-break would stay green.
+	// key index, so ties already arrive in (user_id, id) order and a dropped
+	// tie-break would stay green.
 	if err := svc.db.Exec("CREATE INDEX IF NOT EXISTS idx_test_sessions_app_update ON sessions(app_name, update_time)").Error; err != nil {
 		t.Fatal(err)
 	}

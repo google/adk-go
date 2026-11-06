@@ -94,8 +94,12 @@ func TestSortSessionsByLastUpdate(t *testing.T) {
 	mk := func(user, id string, d time.Duration) session.Session {
 		return &localSession{userID: user, sessionID: id, updatedAt: base.Add(d)}
 	}
+	// At time 0, u2/a ties with u1/a and u1/b. Its session ID sorts before
+	// u1/b's but its user ID after, so only user ID then session ID gives the
+	// want.
 	sessions := []session.Session{
-		mk("u2", "a", time.Minute),
+		mk("u2", "x", time.Minute),
+		mk("u2", "a", 0),
 		mk("u1", "b", 0),
 		mk("u1", "c", time.Hour),
 		mk("u1", "a", 0),
@@ -105,7 +109,7 @@ func TestSortSessionsByLastUpdate(t *testing.T) {
 	for _, s := range sessions {
 		got = append(got, s.UserID()+"/"+s.ID())
 	}
-	if want := []string{"u1/a", "u1/b", "u2/a", "u1/c"}; !slices.Equal(got, want) {
+	if want := []string{"u1/a", "u1/b", "u2/a", "u2/x", "u1/c"}; !slices.Equal(got, want) {
 		t.Errorf("sortSessionsByLastUpdate() = %v, want %v", got, want)
 	}
 }

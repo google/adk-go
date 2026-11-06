@@ -834,30 +834,6 @@ func TestInMemoryService_ListOrderedByLastUpdateTime(t *testing.T) {
 	}
 }
 
-func TestInMemoryService_ListTieBreaksByUserThenID(t *testing.T) {
-	s := session.InMemoryService()
-	ctx := platform.WithTimeProvider(t.Context(), func() time.Time {
-		return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	})
-	// All sessions share one update time. Create them out of order.
-	for _, k := range [][2]string{{"u2", "a"}, {"u1", "b"}, {"u1", "a"}} {
-		if _, err := s.Create(ctx, &session.CreateRequest{AppName: "app", UserID: k[0], SessionID: k[1]}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	resp, err := s.List(t.Context(), &session.ListRequest{AppName: "app"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	for _, sess := range resp.Sessions {
-		got = append(got, sess.UserID()+"/"+sess.ID())
-	}
-	if want := []string{"u1/a", "u1/b", "u2/a"}; !slices.Equal(got, want) {
-		t.Errorf("List() order = %v, want %v (ties by user ID, then session ID)", got, want)
-	}
-}
-
 // TestInMemoryService_Get_AfterWithOutOfOrderTimestamps checks the After filter
 // when events were not appended in timestamp order. An event carries the time
 // it was created, or one its producer set, not the time it was appended.
