@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -32,6 +33,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/plugin/functioncallmodifier"
@@ -40,6 +42,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 type SimpleArgs struct {
@@ -421,6 +424,154 @@ func TestAfterModelCallback_ContentlessResponseKeepsChain(t *testing.T) {
 	if want := []string{recovered}; !slices.Equal(texts, want) {
 		t.Errorf("event texts = %q, want %q", texts, want)
 	}
+}
+
+// TestBeforeModelCallback_LeavesToolDeclarationUnchanged pins that the plugin
+// edits only the request. A task agent tool hands out the same declaration on
+// every call, and an agent tool reuses its agent's InputSchema, so editing
+// them in place would wrap the description once more on every request and add
+// the arguments to the agent's own schema. It also pins that the request's
+// copy keeps every other field of the tool's declaration.
+func TestBeforeModelCallback_LeavesToolDeclarationUnchanged(t *testing.T) {
+	const prefix = "Accepts skill_id. "
+	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+		Predicate: func(string) bool { return true },
+		Args:      map[string]*genai.Schema{"skill_id": {Type: genai.TypeString}},
+		OverrideDescription: func(original string) string {
+			return prefix + original
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlugin() error = %v", err)
+	}
+
+	inputSchema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"query": {Type: genai.TypeString}},
+	}
+	schemaAgent, err := llmagent.New(llmagent.Config{
+		Name:        "schema_agent",
+		Description: "answers queries",
+		InputSchema: inputSchema,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:        "task_agent",
+		Description: "runs a task",
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	taskTool, err := workflowinternal.NewTaskAgentTool(taskAgent)
+	if err != nil {
+		t.Fatalf("NewTaskAgentTool() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		tool tool.Tool
+	}{
+		{name: "task agent tool", tool: taskTool},
+		{name: "agent tool with input schema", tool: agenttool.New(schemaAgent, nil)},
+		{
+			name: "cached declaration without parameters",
+			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{Name: "no_params", Description: "takes nothing"}},
+		},
+		{
+			name: "cached declaration with response schema and behavior",
+			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{
+				Name:        "full",
+				Description: "has a response schema and a behavior",
+				Behavior:    genai.BehaviorNonBlocking,
+				Parameters: &genai.Schema{
+					Type:        genai.TypeObject,
+					Description: "a query",
+					Required:    []string{"query"},
+					Properties:  map[string]*genai.Schema{"query": {Type: genai.TypeString}},
+				},
+				ResponseJsonSchema: map[string]any{"type": "string"},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fnTool := tc.tool.(toolinternal.FunctionTool)
+			original := fnTool.Declaration()
+			originalDescription := original.Description
+			originalProperties := propertyNames(original)
+			// The request's copy may differ from the tool's declaration only in its
+			// description and the added skill_id, plus the object schema that holds
+			// skill_id when the declaration has no parameters.
+			wantDecl := *original
+			wantParams := genai.Schema{Type: genai.TypeObject}
+			if original.Parameters != nil {
+				wantParams = *original.Parameters
+			}
+			wantParams.Properties = maps.Clone(wantParams.Properties)
+			if wantParams.Properties == nil {
+				wantParams.Properties = map[string]*genai.Schema{}
+			}
+			wantDecl.Parameters = &wantParams
+			ignoreModified := cmp.Options{
+				cmpopts.IgnoreFields(genai.FunctionDeclaration{}, "Description"),
+				cmpopts.IgnoreMapEntries(func(name string, _ *genai.Schema) bool { return name == "skill_id" }),
+			}
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+			for request := range 2 {
+				req := &model.LLMRequest{}
+				if err := toolutils.PackTool(req, fnTool); err != nil {
+					t.Fatalf("PackTool() error = %v", err)
+				}
+				if _, err := p.BeforeModelCallback()(ctx, req); err != nil {
+					t.Fatalf("BeforeModelCallback() error = %v", err)
+				}
+				decl := findDeclaration(req, tc.tool.Name())
+				if want := prefix + originalDescription; decl.Description != want {
+					t.Errorf("request %d: description = %q, want %q", request, decl.Description, want)
+				}
+				if !slices.Contains(propertyNames(decl), "skill_id") {
+					t.Errorf("request %d: declaration lacks skill_id", request)
+				}
+				if diff := cmp.Diff(&wantDecl, decl, ignoreModified); diff != "" {
+					t.Errorf("request %d: declaration differs beyond the description and skill_id (-tool +request):\n%s", request, diff)
+				}
+			}
+
+			after := fnTool.Declaration()
+			if after.Description != originalDescription {
+				t.Errorf("tool description = %q, want %q", after.Description, originalDescription)
+			}
+			if got := propertyNames(after); !slices.Equal(got, originalProperties) {
+				t.Errorf("tool parameters = %q, want %q", got, originalProperties)
+			}
+		})
+	}
+	if _, ok := inputSchema.Properties["skill_id"]; ok {
+		t.Error("agent InputSchema gained skill_id")
+	}
+}
+
+// cachedDeclarationTool hands out one declaration on every call, as the task
+// and single_turn tools do.
+type cachedDeclarationTool struct {
+	decl *genai.FunctionDeclaration
+}
+
+func (c *cachedDeclarationTool) Name() string                                   { return c.decl.Name }
+func (c *cachedDeclarationTool) Description() string                            { return c.decl.Description }
+func (c *cachedDeclarationTool) IsLongRunning() bool                            { return false }
+func (c *cachedDeclarationTool) Declaration() *genai.FunctionDeclaration        { return c.decl }
+func (c *cachedDeclarationTool) Run(agent.Context, any) (map[string]any, error) { return nil, nil }
+
+func propertyNames(decl *genai.FunctionDeclaration) []string {
+	if decl.Parameters == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(decl.Parameters.Properties))
 }
 
 // Mock agent for testing agenttool
