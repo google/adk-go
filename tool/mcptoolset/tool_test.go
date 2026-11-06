@@ -462,7 +462,7 @@ func TestMCPToolRunContent(t *testing.T) {
 			want: map[string]any{"output": "[MCP image: mimeType=\"image/png\", size=1 bytes]\nnotes"},
 		},
 		{
-			name: "structured output keeps non-text content blocks under output",
+			name: "structured output keeps output and adds content blocks",
 			result: &mcp.CallToolResult{
 				StructuredContent: map[string]any{"sha": "abc123"},
 				Content: []mcp.Content{
@@ -474,11 +474,11 @@ func TestMCPToolRunContent(t *testing.T) {
 					}},
 				},
 			},
-			want: map[string]any{"output": map[string]any{
-				"structuredContent": map[string]any{"sha": "abc123"},
-				"content": "downloaded\n[MCP embedded resource: uri=\"repo://owner/project/file.txt\", " +
+			want: map[string]any{
+				"output": map[string]any{"sha": "abc123"},
+				"contentBlocks": "downloaded\n[MCP embedded resource: uri=\"repo://owner/project/file.txt\", " +
 					"mimeType=\"text/plain\"]\nfile contents",
-			}},
+			},
 		},
 		{
 			name: "structured output with text only remains compatible",
@@ -750,17 +750,13 @@ func TestMCPToolRunStructuredContentKeepsContentBlocks(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: Run() error = %v", name, err)
 			}
-			if len(got) != 1 {
-				t.Errorf("%s: Run() keys = %d, want only \"output\"", name, len(got))
+			if _, ok := got["content"]; ok || len(got) != 2 {
+				t.Errorf("%s: Run() keys = %d, want only output and contentBlocks", name, len(got))
 			}
-			out, ok := got["output"].(map[string]any)
-			if !ok {
-				t.Fatalf("%s: output type = %T, want map", name, got["output"])
+			if diff := cmp.Diff(map[string]any{"status": "ok"}, got["output"]); diff != "" {
+				t.Errorf("%s: output mismatch (-want +got):\n%s", name, diff)
 			}
-			if diff := cmp.Diff(map[string]any{"status": "ok"}, out["structuredContent"]); diff != "" {
-				t.Errorf("%s: structuredContent mismatch (-want +got):\n%s", name, diff)
-			}
-			if c, _ := out["content"].(string); !strings.Contains(c, "status") || len(c) <= len("status") {
+			if c, _ := got["contentBlocks"].(string); !strings.Contains(c, "status") || len(c) <= len("status") {
 				t.Errorf("%s: content missing blocks (len %d)", name, len(c))
 			}
 		}
