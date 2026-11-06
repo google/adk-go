@@ -5846,6 +5846,42 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 			name: "Escaped quote multi-header bare scan does not consume next header",
 			in:   `curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`,
 		},
+		{
+			name: "X-Api-Key multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"X-Api-Key: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote newline after quote",
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"Authorization: Bearer \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote newline after quote",
+			in:   "curl -H \"Authorization: Bearer \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"Cookie: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote newline after quote",
+			in:   "curl -H \"Cookie: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
 	}
 	for _, tt := range inputs {
 		t.Run(tt.name, func(t *testing.T) {

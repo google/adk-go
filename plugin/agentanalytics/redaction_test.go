@@ -6937,6 +6937,72 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 			in:   `curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`,
 			want: `curl -H "X-Api-Key: [REDACTED]" [REDACTED]`,
 		},
+		// Multiline joined single quotes closing on a subsequent line.
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		// Embedded mid-word header names where bare scan must not split credential without word boundary.
+		{
+			in:   `curl -H "X-Api-Key: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "preauthorization:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "preCookie:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Authorization: Bearer "precookie:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "X-Goog-Api-Key: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "X-Goog-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Cookie: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   `curl -H "Set-Cookie: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
+			want: `curl -H "Set-Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
 	} {
 		checkNoLeak(t, tt.in, secret)
 		checkRedactionPaths(t, tt.in, tt.want)

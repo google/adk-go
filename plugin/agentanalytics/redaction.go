@@ -3171,11 +3171,15 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 			} else if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
 				var unclosed string
 				k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON())
-				cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
-				if unclosed == "" && cutEnd == k {
-					repl += inner + outer
+				if unclosed == "" {
+					cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
+					if cutEnd == k {
+						repl += inner + outer
+					}
+					end = cutEnd
+				} else {
+					end = k
 				}
-				end = cutEnd
 			}
 		}
 		b.WriteString(s[last:loc[0]])
@@ -4734,7 +4738,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 		return k, ""
 	}
 	for k < lineEnd {
-		if startsAuthHeaderPrefix(s[k:lineEnd]) {
+		if wordBoundaryAt(s, k) && startsAuthHeaderPrefix(s[k:lineEnd]) {
 			break
 		}
 		if q := openingQuote(s, k); q != "" {
@@ -4746,7 +4750,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			}
 			closePos := quoteCloseScan(s[:lineEnd], k+len(q), qOuter, qInner)
 			if closePos < 0 {
-				if q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) {
+				if q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) && !h.singleQuoteClosesAfterLine(lineEnd) {
 					k++
 					continue
 				}
@@ -5151,6 +5155,22 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 	return false
 }
 
+// singleQuoteClosesAfterLine reports whether a single quote that stays open at
+// lineEnd closes on a subsequent line without closeLineRejects rejecting the
+// closing line.
+func (h *headerQuoteScanner) singleQuoteClosesAfterLine(lineEnd int) bool {
+	if h == nil || lineEnd >= len(h.s) {
+		return false
+	}
+	if !h.quoteCloses(lineEnd, "'", "") {
+		return false
+	}
+	if m := closeSlot(&h.closes, "'", ""); m != nil {
+		return !m.rejects
+	}
+	return true
+}
+
 // closeSlot returns the entry of memos that caches the close of the quotes
 // outer and inner (see quoteCloses), or nil if their close is not cached.
 func closeSlot(memos *[4]quoteCloseMemo, outer, inner string) *quoteCloseMemo {
@@ -5437,6 +5457,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 	nestedEnd := 0
 	lineEnd := end
 	entryOuter, entryInner := outer, inner
+	joinedMultiline := false
 	for k := from; ; {
 		if k < end {
 			if outer != "" || inner != "" {
@@ -5497,8 +5518,8 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				}
 				if outer == "" && inner == "" {
 					nestedEnd = 0
-					if entryOuter != "" && k <= lineEnd {
-						endPos, unclosed := quotes.joinedHeaderArgEnd(k, lineEnd, entryOuter, quotes.inJSON())
+					if entryOuter != "" && (k <= lineEnd || joinedMultiline) {
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, quotes.inJSON())
 						if unclosed == "" || endPos == len(s) {
 							return endPos, entryInner + entryOuter
 						}
@@ -5507,13 +5528,26 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 						} else {
 							inner = unclosed
 						}
+						joinedMultiline = true
+						closesChecked = false
 						k = endPos
 						continue
 					}
-					if entryOuter == "" && entryInner != "" && k <= lineEnd {
-						endPos, unclosed := quotes.joinedHeaderArgEnd(k, lineEnd, entryOuter, false)
-						if unclosed == "" && endPos < lineEnd && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == ';' || s[endPos] == '&' || s[endPos] == '|') {
+					if entryOuter == "" && entryInner != "" && (k <= lineEnd || joinedMultiline) {
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, false)
+						if unclosed == "" && endPos < end && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == ';' || s[endPos] == '&' || s[endPos] == '|') {
 							return endPos, entryInner
+						}
+						if unclosed != "" && endPos < len(s) {
+							if len(unclosed) == 1 {
+								outer = unclosed
+							} else {
+								inner = unclosed
+							}
+							joinedMultiline = true
+							closesChecked = false
+							k = endPos
+							continue
 						}
 					}
 				}
