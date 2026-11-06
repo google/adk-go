@@ -66,7 +66,8 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 // returned is not specified.
 //
 // If ctx is done by the time the workers finish and no item has failed, Run
-// returns ctx.Err() and yields no output, even if every item succeeded.
+// returns ctx.Err() and yields no output, even if every item succeeded. An
+// empty input starts no workers and always yields an empty list.
 //
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
@@ -172,7 +173,8 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 
 		// Items skipped at dispatch, and workers that return without an error
 		// once ctx is done, report no failure, so firstErr stays nil. Without
-		// this check Run would yield a partial result as a success.
+		// this check Run would yield a partial or post-cancellation result as
+		// a success.
 		if firstErr == nil && ctx.Err() != nil {
 			firstErr = ctx.Err()
 		}
