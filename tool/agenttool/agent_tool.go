@@ -20,6 +20,8 @@ package agenttool
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"google.golang.org/genai"
@@ -28,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/runconfig"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/llminternal"
+	"google.golang.org/adk/v2/internal/plugininternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/internal/workflowinternal"
@@ -109,16 +112,11 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		return nil, fmt.Errorf("agentTool expects map[string]any arguments, got %T", args)
 	}
 
-	var agentInputSchema *genai.Schema
+	// The same lookup as Declaration, so that a workflow agent takes the
+	// arguments of its first sub-agent's input schema.
+	agentInputSchema := workflowinternal.InputSchema(t.agent)
 	llmAgent, ok := t.agent.(llminternal.Agent)
 	isLllmAgent := (ok && llmAgent != nil)
-	if isLllmAgent {
-		internalLlmAgent, ok := t.agent.(llminternal.Agent)
-		if !ok {
-			return nil, fmt.Errorf("internal error: failed to convert to llm agent")
-		}
-		agentInputSchema = llminternal.Reveal(internalLlmAgent).InputSchema
-	}
 
 	var content *genai.Content
 	var err error
@@ -196,12 +194,18 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 	}
 
 	// TODO(dpasiukevich): verify agent loop termination.
-	eventCh := r.Run(toolCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
+	// Only this sub-runner keeps the calling run's plugins, so they also see
+	// the sub-agent's agents, models and tools.
+	eventCh := r.Run(plugininternal.WithInheritedPlugins(toolCtx), subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
 		StreamingMode: agent.StreamingModeSSE,
 		MaxLLMCalls:   maxLLMCalls,
 	})
 
 	var lastEvent *session.Event
+	// Long-running calls that are never answered before the run ends (e.g. a
+	// tool confirmation) leave the sub-agent paused. Its session is discarded,
+	// so the pause can never be resumed.
+	pendingIDs := map[string]bool{}
 	for event, err := range eventCh {
 		if err != nil {
 			return nil, fmt.Errorf("error during execution of sub-agent %s: %w", t.agent.Name(), err)
@@ -209,9 +213,28 @@ func (t *agentTool) Run(toolCtx agent.Context, args any) (map[string]any, error)
 		if event.ErrorCode != "" || event.ErrorMessage != "" {
 			return nil, fmt.Errorf("error from sub-agent %q (code: %q, message: %q)", t.agent.Name(), event.ErrorCode, event.ErrorMessage)
 		}
+		// Partial chunks carry IDs the flow never acts on; a streamed call
+		// gets its final ID only on the aggregated event.
+		if !event.Partial {
+			for _, id := range event.LongRunningToolIDs {
+				pendingIDs[id] = true
+			}
+			for _, fr := range utils.FunctionResponses(event.LLMResponse.Content) {
+				delete(pendingIDs, fr.ID)
+			}
+		}
 		if event.LLMResponse.Content != nil {
 			lastEvent = event
 		}
+	}
+
+	if len(pendingIDs) > 0 {
+		// The parent model must see this error, so don't end its turn here,
+		// whatever set SkipSummarization on this call.
+		if actions := toolCtx.Actions(); actions != nil {
+			actions.SkipSummarization = false
+		}
+		return nil, fmt.Errorf("sub-agent %q stopped waiting on unresolved long-running tool calls %v, which AgentTool cannot resume", t.agent.Name(), slices.Sorted(maps.Keys(pendingIDs)))
 	}
 
 	if lastEvent == nil {
