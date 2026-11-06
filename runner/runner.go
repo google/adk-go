@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
@@ -719,9 +720,12 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// the branch it ran on (adk-python find_agent_to_run and
 		// restore_branch_from_history). Re-running the root would run agents
 		// that never saw the call, and they fail on the unmatched response.
+		// A call made inside a graph workflow is the exception: the root runs
+		// so the workflow can resume the interrupted node and the rest of the
+		// graph.
 		agentToRun, branch := r.rootAgent, ""
 		if ev := handleUserFunctionCallResponse(storedSession.Events(), msg); ev != nil {
-			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil {
+			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
 			}
 		}
@@ -1332,6 +1336,17 @@ func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *
 		}
 	}
 	return nil
+}
+
+// isInGraphWorkflow reports whether a or one of its ancestors is a graph
+// workflow agent built by workflowagent.New.
+func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
+	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
+		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
+			return true
+		}
+	}
+	return false
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.
