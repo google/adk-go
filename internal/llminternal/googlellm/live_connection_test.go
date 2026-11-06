@@ -177,6 +177,31 @@ func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
 			wantTurnComplete: true,
 		},
 		{
+			// turnComplete has to follow the last surviving turn, not the last
+			// turn of the history as it arrived: here the history ends in a
+			// model turn that is filtered away, leaving a user turn.
+			name: "TurnCompleteFollowsLastSurvivingTurn",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1.pcm#0", MIMEType: "audio/pcm"}},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
+		{
 			name: "DropsInlineAudioButKeepsNonLiveArtifactAudio",
 			history: []*genai.Content{
 				{

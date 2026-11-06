@@ -664,6 +664,70 @@ func TestContentsRequestProcessor(t *testing.T) {
 			},
 		},
 		{
+			// With SaveLiveBlob on, the output-audio event is authored by the
+			// agent that spoke, so another agent sees it as a foreign event.
+			// ConvertForeignEvent must not turn it into a bare "For context:"
+			// turn: an event whose only parts are internal live refs has to
+			// behave as if it were not in the session at all.
+			name: "DropForeignAdkLiveArtifactOnlyContent",
+			events: []*session.Event{
+				{
+					Author: "user",
+					LLMResponse: model.LLMResponse{
+						Content: genai.NewContentFromText("hi", "user"),
+					},
+				},
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("hi", "user"),
+			},
+		},
+		{
+			// A foreign event that also says something keeps the spoken part
+			// and loses only the internal ref.
+			name: "FilterForeignAdkLiveArtifactKeepsText",
+			events: []*session.Event{
+				{
+					Author: "otherAgent",
+					LLMResponse: model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{Text: "here is the summary"},
+								{FileData: &genai.FileData{
+									FileURI:  "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1700000000000.pcm#0",
+									MIMEType: "audio/pcm",
+								}},
+							},
+						},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "For context:"},
+						{Text: "[otherAgent] said: here is the summary"},
+					},
+				},
+			},
+		},
+		{
 			// A user-visible artifact outside the _adk_live namespace stays.
 			name: "KeepNonLiveArtifactRefs",
 			events: []*session.Event{

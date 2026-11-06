@@ -250,9 +250,9 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			if p == nil || reflect.ValueOf(*p).IsZero() {
 				return true
 			}
-			// The live audio cache records its blobs as artifact:// references
-			// the model cannot resolve, so replaying one turns the URI into
-			// literal user input.
+			// The live audio cache records its blobs as artifact:// refs that
+			// are ADK bookkeeping, not conversation content; replaying one
+			// fails the request (#1764).
 			return googlellm.IsInternalLiveArtifactPart(p)
 		})
 		if len(content.Parts) == 0 {
@@ -817,6 +817,15 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
 		if p.Thought {
+			continue
+		}
+		// The live audio cache authors its blob events as the agent that
+		// spoke, so another agent sees them as foreign events. Skipping the
+		// refs here, rather than only after conversion, lets an event whose
+		// only parts are internal refs convert to nil: the default arm below
+		// would otherwise carry the ref past the header-only check and leave
+		// a bare "For context:" turn once the part filter strips it.
+		if googlellm.IsInternalLiveArtifactPart(p) {
 			continue
 		}
 		switch {

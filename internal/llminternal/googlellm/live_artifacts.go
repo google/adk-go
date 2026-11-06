@@ -34,10 +34,11 @@ const (
 // to a blob the live flow cached for itself, such as the recorded input and
 // output audio the audio cache manager saves.
 //
-// Those references are ADK bookkeeping, not conversation content: no model can
-// resolve an artifact:// URI, so replaying one as history makes the model treat
-// the literal string as user input. Anything that hands a session's contents to
-// a model drops these parts first.
+// These references are ADK bookkeeping rather than conversation content, which
+// is what separates them from the user-visible artifact:// references the same
+// history carries and keeps. The API rejects them either way - see #1764, where
+// replaying one answers generateContent with a 400 and closes the Live socket -
+// so callers that hand a session's contents to a model drop them first.
 func IsInternalLiveArtifactPart(part *genai.Part) bool {
 	if part == nil || part.FileData == nil {
 		return false
