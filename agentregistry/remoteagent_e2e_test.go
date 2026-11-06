@@ -38,10 +38,12 @@ import (
 // TestRemoteAgent_E2E is an end-to-end round trip: a real in-process A2A server
 // (adka2a over an offline canned agent) is fronted by a faked registry record,
 // and RemoteAgent resolves that record, connects over A2A, and exchanges a
-// message. It exercises both agentCard shapes — an embedded A2A_AGENT_CARD and
-// discrete protocols — both bindings (JSONRPC, HTTP+JSON), and both protocol
-// versions: a record without protocolVersion defaults to 0.3.0 and must speak
-// A2A 0.3 on the wire, while an explicit 1.0 record speaks 1.0.
+// message. It exercises both agentCard shapes — an embedded A2A_AGENT_CARD
+// (whose streaming capability takes the streaming client path) and discrete
+// protocols — both bindings (JSONRPC, HTTP+JSON), and both protocol versions: a
+// record without protocolVersion defaults to 0.3.0 and must speak A2A 0.3 on
+// the wire, as must an explicit 0.3.0 record, while an explicit 1.0 record
+// speaks 1.0.
 func TestRemoteAgent_E2E(t *testing.T) {
 	const reply = "hello from the remote agent"
 
@@ -56,20 +58,23 @@ func TestRemoteAgent_E2E(t *testing.T) {
 			binding: a2a.TransportProtocolJSONRPC,
 			version: a2a.Version,
 			record: func(serverURL string) Agent {
-				card, err := json.Marshal(a2a.AgentCard{
-					Name:                "Echo",
-					Description:         "echoes a canned reply",
-					SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(serverURL, a2a.TransportProtocolJSONRPC)},
-					Capabilities:        a2a.AgentCapabilities{Streaming: true},
-				})
-				if err != nil {
-					t.Fatalf("marshaling embedded card: %v", err)
-				}
-				return Agent{
-					DisplayName: "Echo",
-					Description: "echoes a canned reply",
-					Card:        &Card{Type: cardTypeA2AAgentCard, Content: card},
-				}
+				return embeddedRecord(t, serverURL, a2a.TransportProtocolJSONRPC, a2a.Version)
+			},
+		},
+		{
+			name:    "embedded A2A_AGENT_CARD over JSONRPC 0.3",
+			binding: a2a.TransportProtocolJSONRPC,
+			version: a2av0.Version,
+			record: func(serverURL string) Agent {
+				return embeddedRecord(t, serverURL, a2a.TransportProtocolJSONRPC, a2av0.Version)
+			},
+		},
+		{
+			name:    "embedded A2A_AGENT_CARD over HTTP_JSON 0.3",
+			binding: a2a.TransportProtocolHTTPJSON,
+			version: a2av0.Version,
+			record: func(serverURL string) Agent {
+				return embeddedRecord(t, serverURL, a2a.TransportProtocolHTTPJSON, a2av0.Version)
 			},
 		},
 		{
@@ -83,6 +88,18 @@ func TestRemoteAgent_E2E(t *testing.T) {
 			binding: a2a.TransportProtocolJSONRPC,
 			version: a2av0.Version,
 			record:  func(serverURL string) Agent { return discreteRecord(serverURL, bindingJSONRPC, "") },
+		},
+		{
+			name:    "discrete protocols with version 0.3.0 over HTTP_JSON",
+			binding: a2a.TransportProtocolHTTPJSON,
+			version: a2av0.Version,
+			record:  func(serverURL string) Agent { return discreteRecord(serverURL, bindingHTTPJSON, string(a2av0.Version)) },
+		},
+		{
+			name:    "discrete protocols with version 0.3.0 over JSONRPC",
+			binding: a2a.TransportProtocolJSONRPC,
+			version: a2av0.Version,
+			record:  func(serverURL string) Agent { return discreteRecord(serverURL, bindingJSONRPC, string(a2av0.Version)) },
 		},
 		{
 			name:    "discrete protocols with version 1.0 over HTTP_JSON",
@@ -183,6 +200,31 @@ func TestRemoteAgent_OnTheWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// embeddedRecord is a registry record that carries an A2A_AGENT_CARD with a
+// single streaming-capable interface at serverURL, so the client takes the
+// streaming path.
+func embeddedRecord(t *testing.T, serverURL string, binding a2a.TransportProtocol, version a2a.ProtocolVersion) Agent {
+	t.Helper()
+	card, err := json.Marshal(a2a.AgentCard{
+		Name:        "Echo",
+		Description: "echoes a canned reply",
+		SupportedInterfaces: []*a2a.AgentInterface{{
+			URL:             serverURL,
+			ProtocolBinding: binding,
+			ProtocolVersion: version,
+		}},
+		Capabilities: a2a.AgentCapabilities{Streaming: true},
+	})
+	if err != nil {
+		t.Fatalf("marshaling embedded card: %v", err)
+	}
+	return Agent{
+		DisplayName: "Echo",
+		Description: "echoes a canned reply",
+		Card:        &Card{Type: cardTypeA2AAgentCard, Content: card},
 	}
 }
 

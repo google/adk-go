@@ -204,11 +204,12 @@ func (c *Client) RemoteAgent(ctx context.Context, name string, opts ...RemoteAge
 
 // a2aClientFactory builds an A2A client factory over httpClient that speaks
 // A2A 1.0 and 0.3. A registry record can carry a 0.3.x protocolVersion, and a
-// record without one is assumed to be 0.3.0 (as in adk-python). The 0.3 wire
-// format differs from 1.0 ("/v1" routes, proto-JSON payloads), so those
-// interfaces need the a2av0 transports rather than the current ones. The a2a-go
-// factory picks a transport by exact version and otherwise by semver major,
-// which maps 0.3.0 onto a2av0.Version.
+// record without one is assumed to be 0.3.0. The 0.3 wire format differs from
+// 1.0 (the HTTP+JSON binding routes under "/v1", JSON-RPC uses different method
+// names, and both carry different payloads), so those interfaces need the a2av0
+// transports rather than the current ones. The a2a-go factory picks a transport
+// by exact version and otherwise by semver major, which maps 0.3.0 onto
+// a2av0.Version.
 func a2aClientFactory(httpClient *http.Client) *a2aclient.Factory {
 	return a2aclient.NewFactory(
 		a2aclient.WithJSONRPCTransport(httpClient),
