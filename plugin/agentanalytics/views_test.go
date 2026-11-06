@@ -1546,9 +1546,9 @@ func TestViews_JSONPathsMatchEmittedPayloads(t *testing.T) {
 		cfg := applyDefaults(DefaultConfig())
 		cfg.RetryConfig.MaxRetries = 0
 
-		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(ctx, nil, "test_stream", cfg)
 		if err != nil {
-			t.Fatalf("NewBatchProcessor() error = %v", err)
+			t.Fatalf("newBatchProcessor() error = %v", err)
 		}
 		mStream := &mockStream{recvRes: &storagepb.AppendRowsResponse{}}
 		bp.streamWriter.stream = mStream

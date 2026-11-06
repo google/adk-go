@@ -85,14 +85,9 @@ const (
 // is written as it is.
 const defaultBinaryMIMEType = "application/octet-stream"
 
-// FormatContentParts formats Content parts into a map array for BigQuery logging.
-func FormatContentParts(content *genai.Content, maxLength int) []map[string]any {
-	parts, _ := formatContentParts(content, maxLength, true)
-	return parts
-}
-
-// formatContentParts is FormatContentParts that also reports whether any
-// part lost content to truncation or URI redaction.
+// formatContentParts formats Content parts into a map array for BigQuery
+// logging and reports whether any part lost content to truncation or URI
+// redaction.
 func formatContentParts(content *genai.Content, maxLength int, redact bool) ([]map[string]any, bool) {
 	c := partsCollector{opts: partsOptions{maxLen: maxLength, redact: redact}}
 	c.addContent(content, 0)
@@ -665,16 +660,12 @@ func orUnknown(s string) string {
 	return s
 }
 
-// SmartTruncate converts obj to JSON. Strings longer than maxLength runes are
-// truncated (maxLength < 0 means no limit) and the values of sensitive keys,
-// such as api_key or password, are replaced with "[REDACTED]". Cyclic,
-// overly deep and unsupported values are replaced with placeholders. The
-// bool result reports whether any content was truncated or dropped.
-func SmartTruncate(obj any, maxLength int) ([]byte, bool, error) {
-	return smartTruncate(obj, maxLength, true)
-}
-
-// smartTruncate is SmartTruncate with sensitive-key redaction optional.
+// smartTruncate converts obj to JSON. Strings longer than maxLength runes are
+// truncated (maxLength < 0 means no limit) and, when redact is true, the
+// values of sensitive keys, such as api_key or password, are replaced with
+// "[REDACTED]". Cyclic, overly deep and unsupported values are replaced with
+// placeholders. The bool result reports whether any content was truncated or
+// dropped.
 func smartTruncate(obj any, maxLength int, redact bool) ([]byte, bool, error) {
 	if obj == nil {
 		return []byte("null"), false, nil
@@ -686,7 +677,7 @@ func smartTruncate(obj any, maxLength int, redact bool) ([]byte, bool, error) {
 
 // sanitizeValue converts obj into a tree of JSON-native values (nil, bool,
 // string, json.Number, integers, finite floats, map[string]any and []any)
-// that json.Marshal always accepts, applying the rules of SmartTruncate.
+// that json.Marshal always accepts, applying the rules of smartTruncate.
 func sanitizeValue(obj any, maxLength int, redact bool) (any, bool) {
 	s := sanitizer{
 		maxLength: maxLength,

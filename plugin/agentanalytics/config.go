@@ -80,6 +80,8 @@ type Logger interface {
 // storage_mode is GCS_REFERENCE or text is not [UPLOAD FAILED]). Unfinished
 // batches during background or Close flushes are dropped directly.
 type RetryConfig struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_            struct{}
 	MaxRetries   int
 	InitialDelay time.Duration
 	MaxDelay     time.Duration
@@ -104,6 +106,8 @@ type ContentFormatter func(payload any, eventType string) (any, error)
 // bound. FormatterFailureDrops separately counts payload replacement or
 // omission, which does not itself discard a row.
 type DropStats struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
 	// QueueFullDrops counts events dropped because QueueMaxSize was reached.
 	QueueFullDrops int64 `json:"queue_full_drops"`
 	// AppendFailureDrops counts events dropped because a plugin callback or row
@@ -132,6 +136,8 @@ type DropStats struct {
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
 	// Path is the object name within the bucket; it already includes
 	// Config.GCSPathPrefix.
 	Path string
@@ -208,7 +214,7 @@ type GCSContentOffloader interface {
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
-// [DefaultConfig] when a plugin or batch processor is constructed.
+// [DefaultConfig] when a plugin is constructed.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
@@ -220,6 +226,9 @@ type GCSContentOffloader interface {
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
+
 	Enabled        bool
 	ProjectID      string
 	DatasetID      string

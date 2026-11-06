@@ -74,7 +74,7 @@ func createCommittedWriteStream(ctx context.Context, writeClient *bqstorage.BigQ
 }
 
 // dropCounters stores atomic event-drop and formatter-failure counters decoupled
-// from BatchProcessor so the global pluginRegistry does not retain unclosed
+// from batchProcessor so the global pluginRegistry does not retain unclosed
 // processors or their underlying gRPC resources.
 type dropCounters struct {
 	queueFullDrops        atomic.Int64
@@ -100,8 +100,8 @@ func (c *dropCounters) DropStats() DropStats {
 	}
 }
 
-// BatchProcessor handles asynchronous batching and writing of events to BigQuery.
-type BatchProcessor struct {
+// batchProcessor handles asynchronous batching and writing of events to BigQuery.
+type batchProcessor struct {
 	writeClient            *bqstorage.BigQueryWriteClient
 	streamWriter           *streamWriter
 	streamName             string
@@ -122,7 +122,7 @@ type BatchProcessor struct {
 	arrowSchema   *arrow.Schema
 	allocator     memory.Allocator
 
-	// baseCtx carries the values of the context that NewBatchProcessor was
+	// baseCtx carries the values of the context that newBatchProcessor was
 	// given, without its cancellation. Every append, and every upload made
 	// while Close drains the queue, runs under a context derived from it, and
 	// is bounded by its own timeout.
@@ -166,7 +166,7 @@ type BatchProcessor struct {
 	maxSerializedAppendBytes int
 }
 
-// NewBatchProcessor creates a new BatchProcessor instance. If config.GCSOffloader
+// newBatchProcessor creates a new batchProcessor instance. If config.GCSOffloader
 // is set, the payloads queued for upload with the rows are uploaded through it
 // before the rows are written.
 //
@@ -178,14 +178,14 @@ type BatchProcessor struct {
 // flight has finished, it uploads the payloads of the queued rows, for at most
 // half of Config.ShutdownTimeout in all, and writes the rows within
 // Config.ShutdownTimeout, which the uploads do not use up.
-func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config) (*BatchProcessor, error) {
+func newBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWriteClient, streamName string, config Config) (*batchProcessor, error) {
 	config = applyDefaults(config)
 	denied, err := validateConfig(config)
 	if err != nil {
 		return nil, err
 	}
-	arrowSchema := projectArrowSchema(denied)
-	schemaBytes, err := serializeArrowSchema(arrowSchema)
+	schema := projectArrowSchema(denied)
+	schemaBytes, err := serializeArrowSchema(schema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize arrow schema: %w", err)
 	}
@@ -209,7 +209,7 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		createdCommittedStream = true
 	}
 
-	return &BatchProcessor{
+	return &batchProcessor{
 		writeClient:            writeClient,
 		streamWriter:           newStreamWriter(ctx, writeClient, streamName, schemaBytes, config),
 		streamName:             streamName,
@@ -217,7 +217,7 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		config:                 config,
 		counters:               &dropCounters{},
 		queue:                  make(chan map[string]any, config.QueueMaxSize),
-		arrowSchema:            arrowSchema,
+		arrowSchema:            schema,
 		allocator:              memory.NewGoAllocator(), // Use Go memory allocator
 		baseCtx:                baseCtx,
 		uploadCtx:              uploadCtx,
@@ -230,7 +230,7 @@ func NewBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 // Start launches the background goroutine that flushes the queue every
 // Config.BatchFlushIntv. The goroutine runs until Close is called; later calls
 // to Start have no effect.
-func (b *BatchProcessor) Start() {
+func (b *batchProcessor) Start() {
 	if b.started.CompareAndSwap(false, true) {
 		go func() {
 			defer close(b.done)
@@ -249,7 +249,7 @@ func (b *BatchProcessor) Start() {
 	}
 }
 
-func (b *BatchProcessor) shutdownTimeout() time.Duration {
+func (b *batchProcessor) shutdownTimeout() time.Duration {
 	if b.config.ShutdownTimeout > 0 {
 		return b.config.ShutdownTimeout
 	}
@@ -258,7 +258,7 @@ func (b *BatchProcessor) shutdownTimeout() time.Duration {
 
 // tryReserveUploadBytes reserves n bytes in pendingUploadBytes if within the
 // pending upload byte cap.
-func (b *BatchProcessor) tryReserveUploadBytes(n int) bool {
+func (b *batchProcessor) tryReserveUploadBytes(n int) bool {
 	if n <= 0 {
 		return true
 	}
@@ -278,7 +278,7 @@ func (b *BatchProcessor) tryReserveUploadBytes(n int) bool {
 	}
 }
 
-func (b *BatchProcessor) releaseUploadBytes(n int64) {
+func (b *batchProcessor) releaseUploadBytes(n int64) {
 	if n <= 0 {
 		return
 	}
@@ -290,7 +290,7 @@ func (b *BatchProcessor) releaseUploadBytes(n int64) {
 
 // releaseRowUploads releases the uploads of row, which is dropped without
 // being written, as releaseBatchUploads does for a batch.
-func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
+func (b *batchProcessor) releaseRowUploads(row map[string]any) {
 	b.releaseBatchUploads([]map[string]any{row})
 }
 
@@ -299,7 +299,7 @@ func (b *BatchProcessor) releaseRowUploads(row map[string]any) {
 // deferred uploads that clearDeferredUploads drops. The reservations of the
 // queued payloads of all the rows are released before clearDeferredUploads
 // logs anything, so that a panicking Logger cannot leak any of them.
-func (b *BatchProcessor) releaseBatchUploads(batch []map[string]any) {
+func (b *batchProcessor) releaseBatchUploads(batch []map[string]any) {
 	var total int64
 	for _, row := range batch {
 		delete(row, summaryBuilderKey)
@@ -316,11 +316,11 @@ func (b *BatchProcessor) releaseBatchUploads(batch []map[string]any) {
 	b.clearDeferredUploads(batch)
 }
 
-func (b *BatchProcessor) hasPendingWorkLocked() bool {
+func (b *batchProcessor) hasPendingWorkLocked() bool {
 	return len(b.deferredBatch) > 0 || len(b.queue) > 0
 }
 
-func (b *BatchProcessor) nextBatchLocked() []map[string]any {
+func (b *batchProcessor) nextBatchLocked() []map[string]any {
 	if len(b.deferredBatch) > 0 {
 		batch := b.deferredBatch
 		b.deferredBatch = nil
@@ -331,7 +331,7 @@ func (b *BatchProcessor) nextBatchLocked() []map[string]any {
 
 // Append adds a row to the processor queue asynchronously. If the queue is
 // full, the row is dropped and a warning is logged.
-func (b *BatchProcessor) Append(row map[string]any) {
+func (b *batchProcessor) Append(row map[string]any) {
 	dropped, shouldFlush := b.enqueue(row)
 	// Log and flush only after enqueue has released appendMu, so that a
 	// panicking Logger cannot leave the lock held and block Close.
@@ -349,7 +349,7 @@ func (b *BatchProcessor) Append(row map[string]any) {
 // reached BatchSize rows. Rows offered after Close are discarded silently.
 // A row that is dropped or discarded is counted in DropStats and has its
 // pending uploads released.
-func (b *BatchProcessor) enqueue(row map[string]any) (dropped, shouldFlush bool) {
+func (b *batchProcessor) enqueue(row map[string]any) (dropped, shouldFlush bool) {
 	b.appendMu.RLock()
 	defer b.appendMu.RUnlock()
 	if b.closed.Load() {
@@ -367,25 +367,25 @@ func (b *BatchProcessor) enqueue(row map[string]any) (dropped, shouldFlush bool)
 	}
 }
 
-func (b *BatchProcessor) recordQueueFullDrop() {
+func (b *batchProcessor) recordQueueFullDrop() {
 	if b != nil && b.counters != nil {
 		b.counters.queueFullDrops.Add(1)
 	}
 }
 
-func (b *BatchProcessor) recordShutdownDrop(n int64) {
+func (b *batchProcessor) recordShutdownDrop(n int64) {
 	if b != nil && b.counters != nil {
 		b.counters.shutdownDrops.Add(n)
 	}
 }
 
-func (b *BatchProcessor) recordFormatterFailureDrop() {
+func (b *batchProcessor) recordFormatterFailureDrop() {
 	if b != nil && b.counters != nil {
 		b.counters.formatterFailureDrops.Add(1)
 	}
 }
 
-func (b *BatchProcessor) recordAppendFailureDrop(n int64) {
+func (b *batchProcessor) recordAppendFailureDrop(n int64) {
 	if b != nil && b.counters != nil {
 		b.counters.appendFailureDrops.Add(n)
 	}
@@ -397,7 +397,7 @@ func (b *BatchProcessor) recordAppendFailureDrop(n int64) {
 // include rows committed before an acknowledgment was lost, so it is an upper
 // bound. FormatterFailureDrops separately counts payload replacement or
 // omission, which does not itself discard a row.
-func (b *BatchProcessor) DropStats() DropStats {
+func (b *batchProcessor) DropStats() DropStats {
 	if b == nil || b.counters == nil {
 		return DropStats{}
 	}
@@ -405,7 +405,7 @@ func (b *BatchProcessor) DropStats() DropStats {
 }
 
 // drainQueue acquires up to BatchSize elements from the queue.
-func (b *BatchProcessor) drainQueue() []map[string]any {
+func (b *batchProcessor) drainQueue() []map[string]any {
 	queueLen := len(b.queue)
 	if queueLen == 0 {
 		return nil
@@ -431,7 +431,7 @@ Loop:
 }
 
 // writeAndLogBatch writes the batch and logs any errors.
-func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+func (b *batchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
@@ -440,7 +440,7 @@ func (b *BatchProcessor) writeAndLogBatch(uploadCtx, writeCtx context.Context, p
 	}
 }
 
-func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
+func (b *batchProcessor) writeBatchBounded(batch []map[string]any) {
 	if len(batch) == 0 {
 		return
 	}
@@ -449,7 +449,7 @@ func (b *BatchProcessor) writeBatchBounded(batch []map[string]any) {
 
 // flush drains any deferredBatch and full batches from the queue and appends
 // them. Uses TryLock to avoid blocking.
-func (b *BatchProcessor) flush() {
+func (b *batchProcessor) flush() {
 	// Ensure single flush execution at any moment
 	if !b.flushMu.TryLock() {
 		return
@@ -495,7 +495,7 @@ func (b *BatchProcessor) flush() {
 // other context expirations after a write is sent, retrying the request that
 // the budget cut short provides at-least-once delivery if the server had
 // already committed it.
-func (b *BatchProcessor) flushRunEnd() {
+func (b *batchProcessor) flushRunEnd() {
 	if !b.flushMu.TryLock() {
 		return
 	}
@@ -552,7 +552,7 @@ func (b *BatchProcessor) flushRunEnd() {
 // and the deferred uploads are dropped either way. If the append panics, as a
 // panicking Logger makes it do, the deferred uploads are dropped without being
 // logged, so that their reservations are not leaked.
-func (b *BatchProcessor) writeRunEndBatchLocked(flushCtx context.Context, retry bool, batch []map[string]any) (kept bool) {
+func (b *batchProcessor) writeRunEndBatchLocked(flushCtx context.Context, retry bool, batch []map[string]any) (kept bool) {
 	defer b.dropDeferredUploadsQuietly(batch)
 	// A deferred batch is counted in DropStats only if a later flush drops
 	// it, so that a batch that the next flush writes is not reported as
@@ -596,7 +596,7 @@ func (b *BatchProcessor) writeRunEndBatchLocked(flushCtx context.Context, retry 
 // and a half ShutdownTimeout. Unlike the uploads of the in-flight flush, which
 // Close cancels to end that wait, its uploads run under contexts that Close
 // leaves alone: the queued rows have not had their chance to upload yet.
-func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
+func (b *batchProcessor) flushAndWaitForInflightBatch() time.Duration {
 	b.flushMu.Lock()
 	defer b.flushMu.Unlock()
 
@@ -652,13 +652,13 @@ func (b *BatchProcessor) flushAndWaitForInflightBatch() time.Duration {
 // writeBatch allocates a new Apache Arrow RecordBuilder from the batch and commits the writes to BigQuery.
 // Payloads queued for offloading are uploaded to Cloud Storage first, so that
 // the rows are final by the time they are serialized.
-func (b *BatchProcessor) writeBatch(ctx context.Context, batch []map[string]any) error {
+func (b *batchProcessor) writeBatch(ctx context.Context, batch []map[string]any) error {
 	return b.writeBatchWithContexts(ctx, ctx, false, batch)
 }
 
 // writeBatchWithContexts uploads the payloads of batch under uploadCtx and
 // then appends the batch under writeCtx.
-func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) error {
+func (b *batchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) error {
 	if b.streamWriter.isRotationInCooldown() {
 		b.recordAppendFailureDrop(int64(len(batch)))
 		for _, row := range batch {
@@ -676,7 +676,7 @@ func (b *BatchProcessor) writeBatchWithContexts(uploadCtx, writeCtx context.Cont
 // writeCtx, and counts the rows of the batch that BigQuery did not confirm in
 // DropStats if the append fails. A writeCtx without a deadline gets one of
 // ShutdownTimeout.
-func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[string]any) error {
+func (b *batchProcessor) appendBatch(writeCtx context.Context, batch []map[string]any) error {
 	confirmed, err := b.tryAppendBatch(writeCtx, batch)
 	if err != nil {
 		b.recordAppendFailureDrop(int64(len(batch) - confirmed))
@@ -688,7 +688,7 @@ func (b *BatchProcessor) appendBatch(writeCtx context.Context, batch []map[strin
 // keeps a batch whose append failed, to retry it later, counts the batch only
 // once it gives up on it. It reports how many leading rows of batch BigQuery
 // confirmed, which is len(batch) when it returns no error.
-func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[string]any) (confirmed int, err error) {
+func (b *batchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[string]any) (confirmed int, err error) {
 	if _, ok := writeCtx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		writeCtx, cancel = context.WithTimeout(writeCtx, b.shutdownTimeout())
@@ -721,7 +721,7 @@ func (b *BatchProcessor) tryAppendBatch(writeCtx context.Context, batch []map[st
 // b.serializedAppendRequestByteLimit(), appendChunk halves the batch and
 // appends each half in order; a singleton row is sent as-is so splitting
 // always terminates.
-func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[string]any) error {
+func (b *batchProcessor) appendChunk(writeCtx context.Context, batch []map[string]any) error {
 	rotatedInBatch := false
 	_, err := b.appendChunkWithRotationBudget(writeCtx, batch, &rotatedInBatch)
 	return err
@@ -731,7 +731,7 @@ func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[strin
 // with the other chunks of the batch. It reports how many leading rows of
 // batch BigQuery confirmed: when the second half of a halved chunk fails,
 // the rows of the first half are confirmed.
-func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context, batch []map[string]any, rotatedInBatch *bool) (confirmed int, err error) {
+func (b *batchProcessor) appendChunkWithRotationBudget(writeCtx context.Context, batch []map[string]any, rotatedInBatch *bool) (confirmed int, err error) {
 	if rotatedInBatch == nil {
 		rotatedInBatch = new(bool)
 	}
@@ -774,7 +774,7 @@ func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context,
 	return len(batch), nil
 }
 
-func (b *BatchProcessor) buildRecordBatch(batch []map[string]any) arrow.RecordBatch {
+func (b *batchProcessor) buildRecordBatch(batch []map[string]any) arrow.RecordBatch {
 	builder := array.NewRecordBuilder(b.allocator, b.arrowSchema)
 	defer builder.Release()
 
@@ -802,7 +802,7 @@ func (b *BatchProcessor) buildRecordBatch(batch []map[string]any) arrow.RecordBa
 				continue
 			}
 
-			// Based on expected fields defined in ArrowSchema
+			// Based on expected fields defined in arrowSchema
 			switch f.Name {
 			case timestampField:
 				if v, ok := val.(time.Time); ok {
@@ -984,7 +984,7 @@ var projectedObjectRefStringFields = [...]string{
 
 // appendRequestByteLimit returns the estimated payload size above which a batch
 // is split.
-func (b *BatchProcessor) appendRequestByteLimit() int {
+func (b *batchProcessor) appendRequestByteLimit() int {
 	if b.maxAppendBytes > 0 {
 		return b.maxAppendBytes
 	}
@@ -993,7 +993,7 @@ func (b *BatchProcessor) appendRequestByteLimit() int {
 
 // serializedAppendRequestByteLimit returns the serialized protobuf request
 // size above which a multi-row chunk is halved before sending.
-func (b *BatchProcessor) serializedAppendRequestByteLimit() int {
+func (b *batchProcessor) serializedAppendRequestByteLimit() int {
 	if b.maxSerializedAppendBytes > 0 {
 		return b.maxSerializedAppendBytes
 	}
@@ -1264,7 +1264,7 @@ func (s *streamWriter) streamsToFinalize() []string {
 // server may not have had time to answer, so the cooldown stays unarmed and
 // the next batch retries the rotation with a fresh budget.
 // The retired stream's finalization keeps the values of the context given to
-// NewBatchProcessor, is bounded by rotateTimeout and by Close, and logs a
+// newBatchProcessor, is bounded by rotateTimeout and by Close, and logs a
 // failure.
 // Caller must hold s.mu.
 func (s *streamWriter) rotateCommittedStream(ctx context.Context) error {
@@ -1675,7 +1675,7 @@ func serializeRecord(record arrow.RecordBatch, logger Logger) []byte {
 	return buf.Bytes()
 }
 
-func (b *BatchProcessor) stopAcceptingRows() {
+func (b *batchProcessor) stopAcceptingRows() {
 	b.appendMu.Lock()
 	b.closed.Store(true)
 	close(b.stopCh)
@@ -1698,7 +1698,7 @@ func (b *BatchProcessor) stopAcceptingRows() {
 // exhausted it. Close can therefore block for up to about two and a half times
 // ShutdownTimeout: once for a write that was already in flight, and then for
 // the uploads and the writes of the drain.
-func (b *BatchProcessor) Close() {
+func (b *batchProcessor) Close() {
 	b.closeOnce.Do(func() {
 		b.stopAcceptingRows()
 		if b.started.Load() {
