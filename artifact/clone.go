@@ -22,8 +22,9 @@ import (
 
 // maxCloneDepth bounds the recursion in deepCopyValue. Each step through a
 // pointer, interface, map, slice, array or struct costs one unit, so a nested
-// map[string]any costs two per level and the copy reaches about 30 levels into
-// PartMetadata. A value below the bound is not copied and stays shared. The
+// map[string]any costs two per level and the copy reaches maxCloneDepth/2
+// (32) levels into PartMetadata. A value deeper than the bound is not copied
+// and stays shared. The
 // bound keeps a self-referencing value from recursing forever. It does not
 // limit the work for a cycle that branches, such as m["a"], m["b"] = m, m,
 // which JSON-shaped data never contains.
@@ -93,6 +94,8 @@ func deepCopyValue(v reflect.Value, depth int) reflect.Value {
 		}
 		return out
 	case reflect.Array:
+		// Only arrays whose element can alias get here: the mayAlias check
+		// above returns an array of plain values, such as [N]byte, as is.
 		out := reflect.New(v.Type()).Elem()
 		reflect.Copy(out, v)
 		for i := range v.Len() {
