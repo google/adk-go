@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
-	"runtime"
 	"strings"
 
 	"google.golang.org/genai"
@@ -69,14 +68,10 @@ func NewModel(ctx context.Context, modelName string, cfg *genai.ClientConfig) (m
 		}
 	}
 
-	// Create header value once, when the model is created
-	headerValue := fmt.Sprintf("google-adk/%s gl-go/%s", version.Version,
-		strings.TrimPrefix(runtime.Version(), "go"))
-
 	return &geminiModel{
 		name:               modelName,
 		client:             client,
-		versionHeaderValue: headerValue,
+		versionHeaderValue: version.TrackingHeader(),
 	}, nil
 }
 
@@ -133,10 +128,9 @@ func (m *geminiModel) generate(ctx context.Context, req *model.LLMRequest) (*mod
 	if err != nil {
 		return nil, fmt.Errorf("failed to call model: %w", err)
 	}
-	if len(resp.Candidates) == 0 {
-		// shouldn't happen?
-		return nil, fmt.Errorf("empty response")
-	}
+	// A response without candidates is not an error: a blocked prompt reports
+	// why in PromptFeedback, which Genai2LLMResponse turns into ErrorCode and
+	// ErrorMessage, as the streaming path already does.
 	return converters.Genai2LLMResponse(resp), nil
 }
 

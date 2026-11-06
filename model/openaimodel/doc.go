@@ -27,7 +27,9 @@
 // Every top-level field of genai.GenerateContentConfig is translated, rejected
 // with an error naming it, or ignored because it has no effect on these APIs,
 // the pre-existing errors being checked first
-// so existing errors.Is call sites are unaffected. Rejection keys on presence,
+// so existing errors.Is call sites are unaffected. A field this package does
+// not know, including one genai adds later, is rejected, as is an unknown field
+// of HTTPOptions or ThinkingConfig. Rejection keys on presence,
 // which is only observable where the zero value cannot itself be a setting, so
 // a plain bool or string carrying its zero — AudioTimestamp false, CachedContent
 // or MediaResolution empty — passes unremarked, as does HTTPOptions.Headers,
@@ -48,15 +50,21 @@
 //	            RoutingConfig, ModelSelectionConfig, ModelArmorConfig,
 //	            EnableEnhancedCivicAnswers, AudioTranscriptionConfig,
 //	            ContinuationToken, HTTPOptions apart from Timeout and Headers,
-//	            and on Responses also StopSequences, the penalties and Seed
-//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which resumes a
-//	            generation paused with CONTINUATION, as these APIs never do;
-//	            and on Chat Completions ThinkingConfig.IncludeThoughts, which
-//	            has no equivalent there
+//	            and on Responses also a non-empty StopSequences, the
+//	            penalties and Seed
+//	Ignored     HTTPOptions.Headers; AutomaticContinuation, which has no
+//	            effect because these APIs never pause a generation with
+//	            CONTINUATION; and on Chat Completions
+//	            ThinkingConfig.IncludeThoughts, which has no equivalent there
 //
 // Function tools are sent with strict parameter validation disabled, and that
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.
+//
+// A successful fallback from a response.completed conversion failure records
+// "openai.terminal_response_conversion_failed" on the active OpenTelemetry span
+// for unsupported output items, unsupported message content, or invalid
+// function-call arguments. The event contains only an "error.type" category.
 //
 // On the Responses API, model reasoning is reported to the caller as thought
 // parts; Chat Completions responses are read for text, refusals and tool calls

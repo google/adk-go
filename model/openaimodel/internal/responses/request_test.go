@@ -379,23 +379,98 @@ func TestBuildParams_UnsupportedPart(t *testing.T) {
 	// The leading turn is what makes this test bite: on its own the
 	// unsupported part leaves the request empty, so a build that skipped it
 	// silently would still fail with shared.ErrNoContents and look like a rejection.
+	//
+	// The part carries a server-side tool call rather than media or code:
+	// both of those have a way out of this endpoint now, and the walk below
+	// covers what is left.
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("q", genai.RoleUser),
 			{
 				Role: string(genai.RoleUser),
 				Parts: []*genai.Part{
-					{InlineData: &genai.Blob{Data: []byte{0x1}}},
+					{ToolCall: &genai.ToolCall{ID: "t1"}},
 				},
 			},
 		},
 	}
 	_, err := buildParams("fallback", req)
 	if err == nil {
-		t.Fatalf("expected error for inline data part")
+		t.Fatalf("expected error for a tool call part")
 	}
 	if errors.Is(err, shared.ErrNoContents) || !strings.Contains(err.Error(), "unsupported content part") {
 		t.Errorf("buildParams() err = %v, want an unsupported-content-part error", err)
+	}
+}
+
+// TestBuildParams_CodeExecutionAsText pins the regression for a Gemini
+// code-execution turn replayed into an OpenAI request: the parts used to
+// fail the whole request, and now go out as the fenced text adk-python sends.
+func TestBuildParams_CodeExecutionAsText(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		want     []string
+	}{
+		{
+			name: "code_and_result_on_a_model_turn",
+			contents: []*genai.Content{
+				modelContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)", Language: genai.LanguagePython}}),
+				modelContent(&genai.Part{CodeExecutionResult: &genai.CodeExecutionResult{Outcome: genai.OutcomeOK, Output: "1"}}),
+			},
+			want: []string{
+				"out/assistant:Code:```python\nprint(1)\n```",
+				"out/assistant:Execution Result:```code_output\n1\n```",
+			},
+		},
+		{
+			name: "text_keeps_its_place_ahead_of_the_code",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{Text: "For context:"},
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				),
+			},
+			want: []string{"in/user:For context:|Code:```python\nprint(1)\n```"},
+		},
+		{
+			name: "code_keeps_its_place_on_a_media_message",
+			contents: []*genai.Content{
+				userContent(
+					&genai.Part{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+					&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```|img/auto:image_url=data:image/png;base64,AQ=="},
+		},
+		{
+			name: "both_fields_on_one_part_render_code_then_result",
+			contents: []*genai.Content{
+				userContent(&genai.Part{
+					ExecutableCode:      &genai.ExecutableCode{Code: "print(1)"},
+					CodeExecutionResult: &genai.CodeExecutionResult{Output: "1"},
+				}),
+			},
+			want: []string{"in/user:Code:```python\nprint(1)\n```\nExecution Result:```code_output\n1\n```"},
+		},
+		{
+			name: "empty_code_is_still_sent",
+			contents: []*genai.Content{
+				userContent(&genai.Part{ExecutableCode: &genai.ExecutableCode{}}),
+			},
+			want: []string{"in/user:Code:```python\n\n```"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: tt.contents})
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -416,11 +491,16 @@ func describeInput(items oairesponses.ResponseInputParam) []string {
 		case item.OfMessage != nil:
 			texts := make([]string, 0, len(item.OfMessage.Content.OfInputItemContentList))
 			for _, c := range item.OfMessage.Content.OfInputItemContentList {
-				if c.OfInputText == nil {
+				switch {
+				case c.OfInputText != nil:
+					texts = append(texts, c.OfInputText.Text)
+				case c.OfInputImage != nil:
+					texts = append(texts, describeImage(c.OfInputImage))
+				case c.OfInputFile != nil:
+					texts = append(texts, describeFile(c.OfInputFile))
+				default:
 					texts = append(texts, "<non-text>")
-					continue
 				}
-				texts = append(texts, c.OfInputText.Text)
 			}
 			got = append(got, "in/"+string(item.OfMessage.Role)+":"+strings.Join(texts, "|"))
 		case item.OfOutputMessage != nil:
@@ -442,6 +522,53 @@ func describeInput(items oairesponses.ResponseInputParam) []string {
 		}
 	}
 	return got
+}
+
+// describeImage renders an image content part as
+// "img/<detail>:<field>=<value>".
+//
+// The field is named rather than just its value, because a mix-up between
+// fields moves a value without altering it: an uploaded image sent as
+// image_url carries the very same "file-…" string that file_id would carry,
+// so a rendering that showed only the value would pass either way.
+//
+// The detail is included in every case rather than tested once: the field is
+// api:"required" and omitzero at the same time, so a value that goes missing
+// is dropped from the request instead of failing to build, and only reading it
+// back off the param catches that.
+func describeImage(image *oairesponses.ResponseInputImageParam) string {
+	ref := "<no reference>"
+	switch {
+	case image.FileID.Valid():
+		ref = "file_id=" + image.FileID.Or("")
+	case image.ImageURL.Valid():
+		ref = "image_url=" + image.ImageURL.Or("")
+	}
+	return "img/" + string(image.Detail) + ":" + ref
+}
+
+// describeFile renders a file content part as "file:<field>=<value>", with
+// "#<name>" appended when a filename rode along, so a case can state which of
+// the three references carried the file and whether it was named.
+//
+// Presence is read off Valid rather than off the string, because an empty
+// filename that was set is sent as "filename":"" while one that was never set
+// is dropped from the request — a difference the value alone cannot show, and
+// the second mutation this renderer missed on its first pass.
+func describeFile(file *oairesponses.ResponseInputFileParam) string {
+	ref := "<no reference>"
+	switch {
+	case file.FileID.Valid():
+		ref = "file_id=" + file.FileID.Or("")
+	case file.FileData.Valid():
+		ref = "file_data=" + file.FileData.Or("")
+	case file.FileURL.Valid():
+		ref = "file_url=" + file.FileURL.Or("")
+	}
+	if file.Filename.Valid() {
+		ref += "#" + file.Filename.Or("")
+	}
+	return "file:" + ref
 }
 
 func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
@@ -585,9 +712,10 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			want: []string{"in/user:q"},
 		},
 		{
-			// Marking media as a thought must not smuggle it past the
-			// unsupported-part check and out of the request unannounced.
-			name: "thought_marked_media_is_still_rejected",
+			// Marking media as a thought must not make the media vanish with
+			// the reasoning: the drop is about text, and an image on a thought
+			// part is still an image the model is meant to see.
+			name: "thought_marked_media_is_still_sent",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -595,14 +723,13 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			// The same part with reasoning text riding on it. Suppressing the
-			// text must not also suppress the rejection, or the image leaves
-			// the request unannounced — the arm keys on what the part
-			// contributed, not on whether it had text.
-			name: "thought_text_riding_on_media_is_still_rejected",
+			// The same part with reasoning text riding on it: the text is
+			// dropped and the image is not, which is the one shape where the
+			// two halves of a part part ways.
+			name: "thought_text_riding_on_media_drops_only_the_text",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				userTurn(&genai.Part{
@@ -611,10 +738,12 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "in/user:img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			name: "thought_text_riding_on_code_is_still_rejected",
+			// Marking the part as a thought drops the scratchpad and leaves
+			// the code, the same split media already gets.
+			name: "thought_text_riding_on_code_drops_only_the_text",
 			contents: []*genai.Content{
 				genai.NewContentFromText("q", genai.RoleUser),
 				modelTurn(&genai.Part{
@@ -623,7 +752,7 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 					ExecutableCode: &genai.ExecutableCode{Code: "print(1)"},
 				}),
 			},
-			wantErrText: "unsupported content part",
+			want: []string{"in/user:q", "out/assistant:Code:```python\nprint(1)\n```"},
 		},
 		{
 			// Dropping the reasoning must not swallow the role error the same
@@ -667,29 +796,31 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 			wantErrText: `unsupported role "assistant"`,
 		},
 		{
-			// Not a thought at all: an image riding on ordinary text used to
-			// leave the request silently, because the text matched an arm and
-			// the rejection never ran. The check is independent of what the
-			// part contributed, so it is reported here too.
-			name: "media_riding_on_plain_text_is_rejected",
+			// An image riding on ordinary text keeps its place behind it: the
+			// words introduce the picture, and a content list that reordered
+			// them would change what was asked.
+			name: "media_riding_on_plain_text_keeps_its_place",
 			contents: []*genai.Content{
 				userTurn(&genai.Part{
 					Text:       "describe this",
 					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			want: []string{"in/user:describe this|img/auto:image_url=data:image/png;base64,AQ=="},
 		},
 		{
-			// Same hole on the call arm.
-			name: "media_riding_on_a_call_is_rejected",
+			// A model turn replays as an output message, whose content is
+			// output_text or a refusal — there is no field for an image, so
+			// this one is refused rather than dropped on the way out.
+			name: "media_on_a_replayed_assistant_turn_is_refused",
 			contents: []*genai.Content{
 				modelTurn(&genai.Part{
-					FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
-					InlineData:   &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+					Text:       "here it is",
+					InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
 				}),
 			},
-			wantErrText: "unsupported content part: InlineData",
+			wantErr:     shared.ErrMediaOnAssistantTurn,
+			wantErrText: "image/png",
 		},
 		{
 			// A part that carries only bookkeeping reaches nothing: it is not
@@ -779,6 +910,309 @@ func TestBuildParams_DropsReplayedThoughts(t *testing.T) {
 				t.Errorf("input items = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// userContent and modelContent wrap parts in a turn of the given role.
+func userContent(parts ...*genai.Part) *genai.Content {
+	return &genai.Content{Role: string(genai.RoleUser), Parts: parts}
+}
+
+func modelContent(parts ...*genai.Part) *genai.Content {
+	return &genai.Content{Role: string(genai.RoleModel), Parts: parts}
+}
+
+// TestBuildParams_Media drives every kind-and-source pair the classifier can
+// produce through the content field this endpoint has for it.
+//
+// Kind and source are crossed rather than sampled because they vary
+// independently and the pairing is what matters: an image behind a file id
+// must not go out as a location for the server to fetch, which would be a
+// request for a string that is not a URL.
+func TestBuildParams_Media(t *testing.T) {
+	const secretURL = "https://example.com/report.pdf?X-Amz-Signature=SECRET"
+	tests := []struct {
+		name        string
+		role        string
+		part        *genai.Part
+		want        []string
+		wantErr     error
+		wantNotErr  error
+		wantErrText string
+	}{
+		{
+			name: "inline_image_becomes_a_data_url",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ=="},
+		},
+		{
+			// The pairing the old code got wrong: an uploaded image stays a
+			// file id instead of being handed over as a location.
+			name: "uploaded_image_stays_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "image/png", FileURI: "file-abc123"}},
+			want: []string{"in/user:img/auto:file_id=file-abc123"},
+		},
+		{
+			name: "remote_image_becomes_an_image_url",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "image/jpeg", FileURI: "https://example.test/cat.jpg"}},
+			want: []string{"in/user:img/auto:image_url=https://example.test/cat.jpg"},
+		},
+		{
+			name: "inline_file_carries_its_display_name",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}, DisplayName: "report.pdf"}},
+			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#report.pdf"},
+		},
+		{
+			// Match adk-python's fallback for unnamed inline files.
+			name: "inline_file_without_a_display_name_falls_back_to_inline_data",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/pdf", Data: []byte{1}}},
+			want: []string{"in/user:file:file_data=data:application/pdf;base64,AQ==#inline_data"},
+		},
+		{
+			name: "uploaded_file_stays_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz"}},
+			want: []string{"in/user:file:file_id=file-xyz"},
+		},
+		{
+			// The filename rides only with inline data, as in adk-python: a
+			// file id already names the file.
+			name: "a_display_name_is_not_sent_with_a_file_id",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "file-xyz", DisplayName: "report.pdf"}},
+			want: []string{"in/user:file:file_id=file-xyz"},
+		},
+		{
+			// The one asymmetry between the two fields: input_file has a URL
+			// of its own, input_image reuses image_url.
+			name: "remote_file_becomes_a_file_url",
+			part: &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: "https://example.test/doc.pdf"}},
+			want: []string{"in/user:file:file_url=https://example.test/doc.pdf"},
+		},
+		{
+			// An unknown MIME type is a file rather than an error: the kind is
+			// read off the top-level type, and "file" is the endpoint's
+			// catch-all field, not a guess about the bytes.
+			name: "an_unrecognized_type_travels_as_a_file",
+			part: &genai.Part{InlineData: &genai.Blob{MIMEType: "application/x-tar", Data: []byte{1}}},
+			want: []string{"in/user:file:file_data=data:application/x-tar;base64,AQ==#inline_data"},
+		},
+		{
+			// Classified by the shared code, refused here: the rejection names
+			// the type the part declared, which says more than naming the
+			// field it arrived in.
+			name:        "audio_is_refused_by_its_declared_type",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantErr:     shared.ErrUnsupportedMIMEType,
+			wantErrText: "audio/mpeg",
+		},
+		{
+			name:        "video_is_refused_by_its_declared_type",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "video/mp4", FileURI: "file-v1"}},
+			wantErr:     shared.ErrUnsupportedMIMEType,
+			wantErrText: "video/mp4",
+		},
+		{
+			// Unlabeled bytes are refused rather than called
+			// application/octet-stream, which would tell the server they were
+			// opaque when in truth nobody had looked.
+			name:    "inline_media_without_a_mime_type_is_refused",
+			part:    &genai.Part{InlineData: &genai.Blob{Data: []byte{1}}},
+			wantErr: shared.ErrMediaMIMETypeRequired,
+		},
+		{
+			name:    "file_data_without_a_mime_type_is_refused",
+			part:    &genai.Part{FileData: &genai.FileData{FileURI: "file-abc"}},
+			wantErr: shared.ErrMediaMIMETypeRequired,
+		},
+		{
+			name:    "inline_media_without_bytes_is_refused",
+			part:    &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png"}},
+			wantErr: shared.ErrMediaDataRequired,
+		},
+		{
+			name:    "file_data_without_a_uri_is_refused",
+			part:    &genai.Part{FileData: &genai.FileData{MIMEType: "image/png"}},
+			wantErr: shared.ErrMediaURIRequired,
+		},
+		{
+			// Both fields on one part are both sent, inline first, because
+			// that is the order genai presents them and the content list has
+			// to keep it.
+			name: "a_part_carrying_both_fields_sends_both_in_order",
+			part: &genai.Part{
+				InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}},
+				FileData:   &genai.FileData{MIMEType: "application/pdf", FileURI: "file-p1"},
+			},
+			want: []string{"in/user:img/auto:image_url=data:image/png;base64,AQ==|file:file_id=file-p1"},
+		},
+		{
+			// System and developer messages take input_text only. The
+			// Completions path already refuses media in those roles; sending
+			// input_image here would be a 400 from the API instead.
+			name:        "image_in_a_system_message_is_refused",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a system message is not supported: image/png",
+		},
+		{
+			name:        "image_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+			wantErrText: "media in a developer message is not supported: image/png",
+		},
+		{
+			name:        "file_in_a_developer_message_is_refused",
+			role:        "developer",
+			part:        &genai.Part{FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
+			wantErrText: "media in a developer message is not supported: application/pdf",
+		},
+		{
+			// The role is checked before the media type, as in Completions,
+			// so audio gets the role error and not ErrUnsupportedMIMEType.
+			name:        "audio_in_a_system_message_gets_the_role_error",
+			role:        "system",
+			part:        &genai.Part{InlineData: &genai.Blob{MIMEType: "audio/mpeg", Data: []byte{1}}},
+			wantNotErr:  shared.ErrUnsupportedMIMEType,
+			wantErrText: "media in a system message is not supported: audio/mpeg",
+		},
+		{
+			name: "text_in_a_system_message_is_kept",
+			role: "system",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/system:be terse"},
+		},
+		{
+			name: "text_in_a_developer_message_is_kept",
+			role: "developer",
+			part: &genai.Part{Text: "be terse"},
+			want: []string{"in/developer:be terse"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			role := tt.role
+			if role == "" {
+				role = string(genai.RoleUser)
+			}
+			params, err := buildParams("fallback", &model.LLMRequest{
+				Contents: []*genai.Content{{Role: role, Parts: []*genai.Part{tt.part}}},
+			})
+			if tt.wantErr != nil || tt.wantErrText != "" {
+				if err == nil {
+					t.Fatalf("buildParams() err = nil, want an error")
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Fatalf("buildParams() err = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantNotErr != nil && errors.Is(err, tt.wantNotErr) {
+					t.Errorf("buildParams() err = %v, want it not to match %v", err, tt.wantNotErr)
+				}
+				if tt.wantErrText != "" && !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("buildParams() err = %q, want it to mention %q", err, tt.wantErrText)
+				}
+				if strings.Contains(err.Error(), "SECRET") {
+					t.Errorf("buildParams() err = %q leaks the file uri", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildParams_MediaKeepsItsPlaceAroundACall pins the order a flush has to
+// preserve: an image buffered in a turn leaves ahead of the call that follows
+// it, rather than after it or not at all.
+func TestBuildParams_MediaKeepsItsPlaceAroundACall(t *testing.T) {
+	params, err := buildParams("fallback", &model.LLMRequest{Contents: []*genai.Content{
+		userContent(
+			&genai.Part{Text: "look at this"},
+			&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+		),
+		modelContent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}}),
+	}})
+	if err != nil {
+		t.Fatalf("buildParams() err = %v", err)
+	}
+	want := []string{"in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "call:lookup/c1"}
+	if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, want) {
+		t.Errorf("input items = %q, want %q", got, want)
+	}
+}
+
+// TestBuildParams_MediaInOnePartKeepsItsPlace pins the order for a single part
+// that carries text, media and a call or a response together: the text, then
+// the media, in one message, then the call or its result. The cases before
+// this one put the media and the call in different contents, so the flush at
+// the end of a content would order them whatever the media loop did.
+func TestBuildParams_MediaInOnePartKeepsItsPlace(t *testing.T) {
+	image := &genai.Blob{MIMEType: "image/png", Data: []byte{1}}
+	tests := []struct {
+		name  string
+		prior []*genai.Content
+		part  *genai.Part
+		want  []string
+	}{
+		{
+			name: "call",
+			part: &genai.Part{
+				Text:         "look at this",
+				InlineData:   image,
+				FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"},
+			},
+			want: []string{"in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "call:lookup/c1"},
+		},
+		{
+			name:  "response",
+			prior: []*genai.Content{modelContent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: "lookup", ID: "c1"}})},
+			part: &genai.Part{
+				Text:             "look at this",
+				InlineData:       image,
+				FunctionResponse: &genai.FunctionResponse{Name: "lookup", ID: "c1", Response: map[string]any{"ok": true}},
+			},
+			want: []string{"call:lookup/c1", "in/user:look at this|img/auto:image_url=data:image/png;base64,AQ==", "output:c1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params, err := buildParams("fallback", &model.LLMRequest{Contents: append(tt.prior, userContent(tt.part))})
+			if err != nil {
+				t.Fatalf("buildParams() err = %v", err)
+			}
+			if got := describeInput(params.Input.OfInputItemList); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("input items = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildParams_ImageDetailReachesTheWire reads the detail off the marshaled
+// request rather than off the param.
+//
+// Detail is tagged api:"required" and omitzero together, so a value left
+// unset disappears during marshaling and the server, not the compiler, decides
+// what was meant. This test checks the bytes that would be sent.
+func TestBuildParams_ImageDetailReachesTheWire(t *testing.T) {
+	params, err := buildParams("fallback", &model.LLMRequest{Contents: []*genai.Content{
+		userContent(&genai.Part{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}}),
+	}})
+	if err != nil {
+		t.Fatalf("buildParams() err = %v", err)
+	}
+	body, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("json.Marshal() err = %v", err)
+	}
+	if want := `"detail":"auto"`; !strings.Contains(string(body), want) {
+		t.Errorf("marshaled request is missing %s", want)
+	}
+	if want := `"type":"input_image"`; !strings.Contains(string(body), want) {
+		t.Errorf("marshaled request is missing %s", want)
 	}
 }
 
@@ -976,22 +1410,32 @@ func TestReplayedReasoning(t *testing.T) {
 }
 
 // accountedForFields is the specification shared.UnsupportedPayload
-// implements: the genai.Part fields the request converters know what to do with,
-// and why.
+// implements for THIS endpoint: the genai.Part fields its request converter
+// knows what to do with, and why.
+//
+// Each endpoint opts into shared.PartFieldMedia when it emits media. Both
+// Responses and Chat Completions now do; the shared package separately tests
+// the default rejection when a converter does not opt in. Both endpoints also
+// pass shared.PartFieldCodeExecution, so executable code and its result are
+// accounted for here.
 //
 // The list is deliberately restated here instead of derived from the
 // production code, so a field genai adds later is absent from it by
 // construction and the walk below demands it be reported instead of silently
 // accepted — the failure a denylist would not produce.
 var accountedForFields = map[string]string{
-	"Text":             "sent, or dropped when it is reasoning",
-	"Thought":          "the marker deciding which",
-	"ThoughtSignature": "no request field on either endpoint carries one",
-	"FunctionCall":     "sent as a call",
-	"FunctionResponse": "sent as the call's result",
-	"VideoMetadata":    "qualifies media carried in another field",
-	"MediaResolution":  "qualifies media carried in another field",
-	"PartMetadata":     "caller bookkeeping, never content",
+	"Text":                "sent, or dropped when it is reasoning",
+	"Thought":             "the marker deciding which",
+	"ThoughtSignature":    "no request field on either endpoint carries one",
+	"FunctionCall":        "sent as a call",
+	"FunctionResponse":    "sent as the call's result",
+	"VideoMetadata":       "qualifies media carried in another field",
+	"MediaResolution":     "qualifies media carried in another field",
+	"PartMetadata":        "caller bookkeeping, never content",
+	"InlineData":          "sent as an input_image or input_file carrying the bytes",
+	"FileData":            "sent as an input_image or input_file naming an upload or a location",
+	"ExecutableCode":      "sent as a fenced python block",
+	"CodeExecutionResult": "sent as a fenced code_output block",
 }
 
 func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
@@ -1006,7 +1450,7 @@ func TestUnsupportedPayload_WalksEveryPartField(t *testing.T) {
 			part := &genai.Part{}
 			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
 
-			got := shared.UnsupportedPayload(part)
+			got := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution)
 			if why, accounted := accountedForFields[field.Name]; accounted {
 				if got != "" {
 					t.Errorf("UnsupportedPayload() = %q for a part carrying only %s, want %q: %s",
@@ -1288,6 +1732,103 @@ func TestApplyGenerationConfigRejectsUnsupportedFields(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.field) {
 				t.Errorf("applyGenerationConfig() error = %q, want it to name %q", err, tc.field)
+			}
+		})
+	}
+}
+
+// systemInstructionAcceptedFields are the genai.Part fields a system-instruction
+// part may carry beside its text. Like accountedForFields, the list is restated
+// rather than derived from the code, so a field genai adds later is absent from
+// it and the walk below demands it be refused.
+var systemInstructionAcceptedFields = map[string]string{
+	"Thought":          "a marker no wire field carries; the text is sent, as adk-python does",
+	"ThoughtSignature": "no request field on either endpoint carries one",
+	"PartMetadata":     "caller bookkeeping, never content",
+	"VideoMetadata":    "qualifies media, and the part carries none",
+	"MediaResolution":  "qualifies media, and the part carries none",
+}
+
+// Every genai.Part field riding on a system-instruction text part is either
+// accepted above or refused by name, because instructions carries text only.
+func TestBuildParams_SystemInstructionWalksEveryPartField(t *testing.T) {
+	partType := reflect.TypeOf(genai.Part{})
+	for i := range partType.NumField() {
+		field := partType.Field(i)
+		if field.Name == "Text" {
+			continue
+		}
+		t.Run(field.Name, func(t *testing.T) {
+			if !field.IsExported() {
+				t.Fatalf("genai.Part gained unexported field %s, which this walk cannot set; "+
+					"check by hand whether a system instruction should refuse it", field.Name)
+			}
+			part := &genai.Part{Text: "describe it"}
+			reflect.ValueOf(part).Elem().Field(i).Set(nonZero(t, field.Type))
+			params, err := buildParams("fallback", &model.LLMRequest{
+				Contents: []*genai.Content{userContent(&genai.Part{Text: "hi"})},
+				Config: &genai.GenerateContentConfig{
+					SystemInstruction: &genai.Content{Parts: []*genai.Part{part}},
+				},
+			})
+			if why, accepted := systemInstructionAcceptedFields[field.Name]; accepted {
+				if err != nil {
+					t.Fatalf("buildParams() err = %v for a text part carrying %s, want nil: %s", err, field.Name, why)
+				}
+				if got, want := params.Instructions, param.NewOpt("describe it"); got != want {
+					t.Errorf("Instructions = %q for a text part carrying %s, want %q: %s", got.Value, field.Name, want.Value, why)
+				}
+				return
+			}
+			// HasSuffix rather than Contains: one field name can prefix another.
+			want := "unsupported system instruction part: " + field.Name
+			if err == nil || !strings.HasSuffix(err.Error(), want) {
+				t.Errorf("buildParams() err = %v for a text part carrying %s, want it to end with %q", err, field.Name, want)
+			}
+		})
+	}
+}
+
+// A set field outside the supported lists is refused by name, whatever genai
+// adds. Dropping a name from a list stands in for a field genai adds later. It
+// swaps package variables, so it must not run in parallel with other tests.
+func TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists(t *testing.T) {
+	savedTop, savedHTTP, savedThinking := supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields
+	t.Cleanup(func() {
+		supportedConfigFields, shared.SupportedHTTPOptionFields, shared.SupportedThinkingConfigFields = savedTop, savedHTTP, savedThinking
+	})
+	supportedConfigFields = slices.DeleteFunc(slices.Clone(savedTop), func(name string) bool { return name == "Temperature" })
+	shared.SupportedHTTPOptionFields = nil
+	shared.SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	tests := []struct {
+		field string
+		cfg   *genai.GenerateContentConfig
+	}{
+		{"Temperature", &genai.GenerateContentConfig{Temperature: genai.Ptr(float32(0.5))}},
+		{"HTTPOptions.Timeout", &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: genai.Ptr(time.Second)}}},
+		{"ThinkingConfig.ThinkingLevel", &genai.GenerateContentConfig{
+			ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.field, func(t *testing.T) {
+			err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, tc.cfg)
+			if want := shared.ErrUnsupportedConfigField.Error() + ": " + tc.field; !errors.Is(err, shared.ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("applyGenerationConfig() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+// AutomaticContinuation has no effect on these APIs, which never pause a
+// generation with CONTINUATION, so a config shared with a Gemini model that
+// sets it must be accepted.
+func TestApplyGenerationConfigAcceptsAutomaticContinuation(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		t.Run(fmt.Sprint(on), func(t *testing.T) {
+			if err := applyGenerationConfig(&oairesponses.ResponseNewParams{}, &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)}); err != nil {
+				t.Errorf("applyGenerationConfig() error = %v, want nil", err)
 			}
 		})
 	}
@@ -1585,6 +2126,8 @@ func TestApplyGenerationConfigAcceptsBoundaryValues(t *testing.T) {
 		{"unset CandidateCount", &genai.GenerateContentConfig{}},
 		// Zero and one both mean the single candidate Responses returns.
 		{"single CandidateCount", &genai.GenerateContentConfig{CandidateCount: 1}},
+		// An empty list asks for no stop sequences, so there is nothing to refuse.
+		{"empty StopSequences", &genai.GenerateContentConfig{StopSequences: []string{}}},
 		{"Logprobs alongside ResponseLogprobs", &genai.GenerateContentConfig{
 			ResponseLogprobs: true,
 			Logprobs:         genai.Ptr(int32(5)),
@@ -1829,89 +2372,6 @@ func TestApplyGenerationConfigKeepsNamedErrorPrecedence(t *testing.T) {
 	}
 }
 
-// Guards against the bug returning as genai grows fields: every exported field
-// must be translated, covered by a named error, or in shared.UnsupportedConfigFields.
-// When this fails, add the new field to whichever of the three it belongs in —
-// not to this test alone, which would only re-hide the drop.
-func TestGenerateContentConfigFieldsAreAccountedFor(t *testing.T) {
-	// Fields applyGenerationConfig, convertTools or convertToolChoice translate.
-	translated := map[string]bool{
-		"SystemInstruction":  true,
-		"Temperature":        true,
-		"TopP":               true,
-		"MaxOutputTokens":    true,
-		"ResponseLogprobs":   true,
-		"Logprobs":           true,
-		"ResponseSchema":     true,
-		"ResponseJsonSchema": true,
-		"ThinkingConfig":     true,
-		"ServiceTier":        true,
-		"HTTPOptions":        true,
-		"Tools":              true,
-		"ToolConfig":         true,
-	}
-	// Fields rejected with their own error, predating shared.ErrUnsupportedConfigField.
-	namedError := map[string]bool{
-		"TopK":             true,
-		"StopSequences":    true,
-		"CandidateCount":   true,
-		"FrequencyPenalty": true,
-		"PresencePenalty":  true,
-		"Labels":           true,
-		"SafetySettings":   true,
-		"ResponseMIMEType": true,
-	}
-	// Fields that have no effect on these APIs, so accepting them drops
-	// nothing: AutomaticContinuation resumes a generation paused with
-	// CONTINUATION, which the OpenAI APIs never do.
-	noEffect := map[string]bool{
-		"AutomaticContinuation": true,
-	}
-	rejected := make(map[string]bool, len(shared.UnsupportedConfigFields))
-	for _, field := range shared.UnsupportedConfigFields {
-		rejected[field.Name] = true
-	}
-
-	cfgType := reflect.TypeOf(genai.GenerateContentConfig{})
-	for i := range cfgType.NumField() {
-		name := cfgType.Field(i).Name
-		if cfgType.Field(i).PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		if !translated[name] && !namedError[name] && !noEffect[name] && !rejected[name] {
-			t.Errorf("genai.GenerateContentConfig.%s is neither translated nor rejected: it would be silently ignored", name)
-		}
-	}
-
-	// Reverse drift: a field renamed upstream leaves a stale entry guarding nothing.
-	for name := range rejected {
-		if _, ok := cfgType.FieldByName(name); !ok {
-			t.Errorf("shared.UnsupportedConfigFields lists %q, which genai.GenerateContentConfig no longer has", name)
-		}
-	}
-}
-
-// ThinkingConfig is the one nested type this package claims to read in full, so
-// a field added to it must be translated rather than dropped like the parts of
-// Tools and the schema types that doc.go still excludes from the guarantee.
-func TestThinkingConfigFieldsAreAccountedFor(t *testing.T) {
-	read := map[string]bool{
-		"IncludeThoughts": true,
-		"ThinkingBudget":  true,
-		"ThinkingLevel":   true,
-	}
-	cfgType := reflect.TypeOf(genai.ThinkingConfig{})
-	for i := range cfgType.NumField() {
-		field := cfgType.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		if !read[field.Name] {
-			t.Errorf("genai.ThinkingConfig.%s is not read by applyThinkingConfig: it would be silently ignored", field.Name)
-		}
-	}
-}
-
 func TestNormalizeRole(t *testing.T) {
 	tests := []struct {
 		role    genai.Role
@@ -1961,6 +2421,27 @@ func TestNewJSONSchemaFormat(t *testing.T) {
 				Type:   constant.JSONSchema("json_schema"),
 				Schema: map[string]any{
 					"title":                "CustomTitle",
+					"type":                 "object",
+					"properties":           map[string]any{},
+					"additionalProperties": false,
+					"required":             []string{},
+				},
+			},
+		},
+		{
+			// OpenAI accepts only ^[a-zA-Z0-9_-]{1,64}$ in the name while genai puts
+			// no constraint on Title, so an illegal title falls back to the
+			// default name and the body keeps the title the caller wrote.
+			name: "response schema title that is not a legal format name",
+			cfg: &genai.GenerateContentConfig{
+				ResponseSchema: &genai.Schema{Title: "Weather Report", Type: genai.TypeObject},
+			},
+			want: &oairesponses.ResponseFormatTextJSONSchemaConfigParam{
+				Name:   shared.DefaultResponseFormatName,
+				Strict: param.NewOpt(true),
+				Type:   constant.JSONSchema("json_schema"),
+				Schema: map[string]any{
+					"title":                "Weather Report",
 					"type":                 "object",
 					"properties":           map[string]any{},
 					"additionalProperties": false,
@@ -2560,48 +3041,6 @@ func TestHTTPOptionsTimeoutReachesTheRequest(t *testing.T) {
 	}
 }
 
-// shared.IgnoredHTTPOptionFields is part of the contract, so it has to name a real
-// field, and every field has to be accounted for in exactly one of the three
-// categories the package documents.
-func TestHTTPOptionFieldsAreAccountedFor(t *testing.T) {
-	honored := map[string]bool{"Timeout": true}
-	ignored := make(map[string]bool, len(shared.IgnoredHTTPOptionFields))
-	for _, name := range shared.IgnoredHTTPOptionFields {
-		ignored[name] = true
-	}
-	rejected := make(map[string]bool, len(shared.UnsupportedHTTPOptionFields))
-	for _, field := range shared.UnsupportedHTTPOptionFields {
-		rejected[field.Name] = true
-	}
-
-	optType := reflect.TypeOf(genai.HTTPOptions{})
-	for i := range optType.NumField() {
-		field := optType.Field(i)
-		if field.PkgPath != "" {
-			continue // unexported, not settable by callers
-		}
-		n := 0
-		for _, in := range []bool{honored[field.Name], ignored[field.Name], rejected[field.Name]} {
-			if in {
-				n++
-			}
-		}
-		if n != 1 {
-			t.Errorf("genai.HTTPOptions.%s is in %d of {honored, ignored, rejected}, want exactly 1", field.Name, n)
-		}
-	}
-	for name := range ignored {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("shared.IgnoredHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
-	}
-	for name := range rejected {
-		if _, ok := optType.FieldByName(name); !ok {
-			t.Errorf("shared.UnsupportedHTTPOptionFields lists %q, which genai.HTTPOptions no longer has", name)
-		}
-	}
-}
-
 // redact describes a header value without reproducing it. These assertions run
 // against stub credentials, but a maintainer debugging a live problem may well
 // have swapped a real key in, and a failing test should not put it in the log.
@@ -2666,12 +3105,9 @@ func assertReRangeable(t *testing.T, stream bool) {
 	}
 }
 
-// geminiShapedHTTPOptions carries one live value per shared.UnsupportedHTTPOptionFields
-// entry, shared so the pairing test below derives from the cases that actually
-// run rather than from a second list agreeing with neither.
-//
-// Live values matter because a predicate is a closure: a reflection test over
-// the names stays green however that closure is edited.
+// geminiShapedHTTPOptions carries realistic values for HTTPOptions fields both
+// endpoints refuse. A field genai adds later is covered by
+// TestApplyGenerationConfigRefusesFieldsOutsideTheSupportedLists instead.
 var geminiShapedHTTPOptions = []struct {
 	field string
 	opts  *genai.HTTPOptions
@@ -2702,31 +3138,9 @@ func TestApplyGenerationConfigRejectsGeminiShapedHTTPOptions(t *testing.T) {
 	}
 }
 
-// Pairs the table with the cases above, reading both rather than restating
-// either, so a predicate added without a case fails here instead of shipping
-// untested. The sibling table is guarded the same way.
-func TestEveryUnsupportedHTTPOptionFieldIsDriven(t *testing.T) {
-	driven := make(map[string]bool, len(geminiShapedHTTPOptions))
-	for _, tc := range geminiShapedHTTPOptions {
-		driven[tc.field] = true
-	}
-	for _, field := range shared.UnsupportedHTTPOptionFields {
-		if !driven[field.Name] {
-			t.Errorf("shared.UnsupportedHTTPOptionFields has %q with no case in "+
-				"geminiShapedHTTPOptions, so its predicate never runs", field.Name)
-		}
-	}
-	if len(driven) != len(shared.UnsupportedHTTPOptionFields) {
-		t.Errorf("%d cases for %d predicates", len(driven), len(shared.UnsupportedHTTPOptionFields))
-	}
-}
-
-// Closes the accounting test's blind side: that one compares names against
-// three lists, so writing a new field into translated greens it while the field
-// is still dropped.
-//
-// Here every field the lists call translated has to reach the params, with the
-// ones needing a whole subsystem to be meaningful left to their own tests.
+// A name in shared.SupportedConfigFields is accepted, so a field listed there but
+// not translated would be dropped. Here every translated field has to reach the
+// params, with the ones needing a whole subsystem left to their own tests.
 func TestTranslatedFieldsAreNotRejected(t *testing.T) {
 	tests := []struct {
 		field string

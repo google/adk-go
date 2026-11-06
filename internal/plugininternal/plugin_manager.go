@@ -73,6 +73,15 @@ func (pm *PluginManager) registerPlugin(plugin *plugin.Plugin) error {
 	return nil
 }
 
+// HasPlugins reports whether the PluginManager has any registered plugins.
+// It is safe to call on a nil PluginManager.
+func (pm *PluginManager) HasPlugins() bool {
+	if pm == nil {
+		return false
+	}
+	return len(pm.plugins) > 0
+}
+
 // RunOnUserMessageCallback runs the OnUserMessageCallback for all plugins.
 func (pm *PluginManager) RunOnUserMessageCallback(cctx agent.InvocationContext, userMessage *genai.Content) (*genai.Content, error) {
 	for _, plugin := range pm.plugins {
@@ -314,4 +323,31 @@ func closePlugin(ctx context.Context, p *plugin.Plugin, timeout time.Duration) e
 func ToContext(ctx context.Context, cfg *PluginManager) context.Context {
 	// TODO(kdroste): move to invocationContext?
 	return context.WithValue(ctx, plugincontext.PluginManagerCtxKey, cfg)
+}
+
+// FromContext returns the PluginManager stored in ctx, or nil if there is none.
+func FromContext(ctx context.Context) *PluginManager {
+	m, _ := ctx.Value(plugincontext.PluginManagerCtxKey).(*PluginManager)
+	return m
+}
+
+type inheritCtxKey struct{}
+
+// WithInheritedPlugins marks ctx so that the next runner started with it keeps
+// the plugin manager already in ctx when that runner has no plugins of its own.
+// Only agenttool sets this mark, for the sub-runner it starts. Any other runner
+// without plugins replaces the manager in ctx with its own empty one.
+func WithInheritedPlugins(ctx context.Context) context.Context {
+	return context.WithValue(ctx, inheritCtxKey{}, FromContext(ctx))
+}
+
+// TakeInheritedPlugins returns the plugin manager marked by
+// WithInheritedPlugins, or nil, and a ctx with the mark cleared, so that the
+// mark applies to one runner only and not to runners started further down.
+func TakeInheritedPlugins(ctx context.Context) (context.Context, *PluginManager) {
+	pm, ok := ctx.Value(inheritCtxKey{}).(*PluginManager)
+	if !ok {
+		return ctx, nil
+	}
+	return context.WithValue(ctx, inheritCtxKey{}, (*PluginManager)(nil)), pm
 }
