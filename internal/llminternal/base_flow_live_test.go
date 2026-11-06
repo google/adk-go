@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,8 @@ func (m *fakeLiveModel) GenerateContent(ctx context.Context, req *model.LLMReque
 func (m *fakeLiveModel) Client() *genai.Client { return m.client }
 
 const serverContentPong = `{"serverContent":{"modelTurn":{"parts":[{"text":"pong"}],"role":"model"},"turnComplete":true}}`
+
+const serverContentThanks = `{"serverContent":{"modelTurn":{"parts":[{"text":"thanks"}],"role":"model"},"turnComplete":true}}`
 
 // startFakeLiveServer runs a Gemini Live wire-protocol fake: it upgrades the
 // websocket, consumes the client's setup frame, replies {"setupComplete":{}},
@@ -765,7 +768,7 @@ func TestRunLiveToolResponseSharesSenderGoroutine(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	var userIdx, respIdx int = -1, -1
+	userIdx, respIdx := -1, -1
 	for i, p := range payloads {
 		if userIdx == -1 && strings.Contains(p, `"text":"ping"`) {
 			userIdx = i
@@ -835,5 +838,178 @@ func TestRunLiveMarksLongRunningCalls(t *testing.T) {
 			t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
 		}
 		return
+	}
+}
+
+// A write failure on the function-response path must end the session the way
+// it does on main: no caller blocked in Send. On the failing branch the
+// sender goroutine returned after reporting the write error, nobody read
+// inputCh anymore, and Send parked forever waiting on it.
+func TestSendAfterToolWriteFailure(t *testing.T) {
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"t1","name":"bad_tool","args":{}}]}}`
+
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(toolCall))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		Tools: []tool.Tool{&mockFunctionTool{name: "bad_tool", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
+			return map[string]any{"v": math.NaN()}, nil // json.Marshal rejects NaN
+		}}},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for { // pull up to the function-response event
+		ev, err, ok := next()
+		if !ok || err != nil {
+			t.Fatalf("ended early: ok=%v err=%v", ok, err)
+		}
+		if ev != nil && ev.LLMResponse.Content != nil && len(utils.FunctionCalls(ev.LLMResponse.Content)) == 0 {
+			if slices.ContainsFunc(ev.LLMResponse.Content.Parts, func(p *genai.Part) bool { return p.FunctionResponse != nil }) {
+				break
+			}
+		}
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	done := make(chan error, 1)
+	go func() { done <- sess.Send(agent.LiveRequest{Content: genai.NewContentFromText("hi", "user")}) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Error("Send blocked after the function-response write failed")
+		_ = sess.Close()
+	}
+}
+
+// Pins the pendingSend hold-and-clear logic in the live event loop: after
+// the server acknowledges one functionResponse, it pushes a model frame;
+// the consumer must receive that frame, and no further functionResponse may
+// reach the wire (a stuck pendingSend would resend the same response in a
+// tight loop and the model frame would never surface).
+func TestRunLiveToolResponseClearsPendingSend(t *testing.T) {
+	const toolCall = `{"toolCall":{"functionCalls":[{"id":"t1","name":"counted_tool","args":{}}]}}`
+
+	var mu sync.Mutex
+	var functionResponses int32
+
+	client, connCount := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(toolCall)); err != nil {
+			t.Errorf("writing toolCall failed: %v", err)
+			return
+		}
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if strings.Contains(string(data), "functionResponse") {
+				mu.Lock()
+				functionResponses++
+				mu.Unlock()
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(serverContentThanks)); err != nil {
+					return
+				}
+			}
+		}
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		Tools: []tool.Tool{
+			&mockFunctionTool{name: "counted_tool", runFunc: func(agent.Context, map[string]any) (map[string]any, error) {
+				return map[string]any{"ok": true}, nil
+			}},
+		},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for { // pull up to the function-response event
+		ev, err, ok := next()
+		if !ok || err != nil {
+			t.Fatalf("ended early: ok=%v err=%v", ok, err)
+		}
+		if ev != nil && ev.LLMResponse.Content != nil {
+			for _, part := range ev.LLMResponse.Content.Parts {
+				if part.FunctionResponse != nil {
+					goto gotResponse
+				}
+			}
+		}
+	}
+gotResponse:
+	for { // next() must now surface the model frame, not another response
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the model frame")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || ev.LLMResponse.Content == nil {
+			continue
+		}
+		var text string
+		for _, part := range ev.LLMResponse.Content.Parts {
+			if part.Text != "" {
+				text = part.Text
+			}
+		}
+		if text == "thanks" {
+			break
+		}
+	}
+
+	// Give a hypothetical stuck sender a window to show its behaviour; in the
+	// fixed flow none can appear.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := functionResponses
+		mu.Unlock()
+		if got > 1 {
+			cancel()
+			t.Fatalf("functionResponse reached the wire %d times, want exactly 1", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	for {
+		if _, _, ok := next(); !ok {
+			break
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := functionResponses; got != 1 {
+		t.Fatalf("functionResponse reached the wire %d times, want exactly 1", got)
+	}
+	if got := connCount.Load(); got != 1 {
+		t.Errorf("connection count = %d, want 1 (scenario needs no reconnect)", got)
 	}
 }

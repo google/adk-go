@@ -209,6 +209,27 @@ type liveSessionImpl struct {
 	audioMgr    *AudioCacheManager
 	mu          sync.Mutex
 	activeTools map[string][]activeTask
+	// finalErr buffers one terminal error for recvIter to deliver after
+	// done is closed: the iterator cannot rely on outputCh (unbuffered)
+	// once Close has been called, because the consumer may be parked in Send.
+	finalMu  sync.Mutex
+	finalErr error
+}
+
+func (s *liveSessionImpl) setFinalError(err error) {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	if s.finalErr == nil {
+		s.finalErr = err
+	}
+}
+
+func (s *liveSessionImpl) takeFinalError() error {
+	s.finalMu.Lock()
+	defer s.finalMu.Unlock()
+	err := s.finalErr
+	s.finalErr = nil
+	return err
 }
 
 func (s *liveSessionImpl) RegisterStreamingTool(toolName, callID string, cancel context.CancelFunc) {
@@ -281,12 +302,23 @@ func (s *liveSessionImpl) Send(req agent.LiveRequest) error {
 func (s *liveSessionImpl) recvIter() iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		for {
+			if err := s.takeFinalError(); err != nil {
+				// Deliver the buffered terminal error; no more events follow.
+				_ = yield(nil, err)
+				return
+			}
 			select {
 			case res := <-s.outputCh:
 				if !yield(res.event, res.err) {
 					return
 				}
 			case <-s.done:
+				// done closing and finalErr being set are not ordered with
+				// the iterator's first check, so drain the terminal error
+				// here too instead of dropping it.
+				if err := s.takeFinalError(); err != nil {
+					_ = yield(nil, err)
+				}
 				return
 			}
 		}
@@ -774,8 +806,14 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 						reconnect = true
 						break // Break the select
 					}
-					sess.pushError(ce.err)
+					// pushError would park here until the consumer pulls from
+					// outputCh, but the consumer may already be blocked in Send,
+					// which only Close can release. Buffer the terminal error so
+					// the iterator can deliver it, then close the session to end
+					// waits in Send and recvIter.
+					sess.setFinalError(ce.err)
 					cleanup()
+					sess.Close()
 					return
 				case <-sess.done:
 					cleanup()
