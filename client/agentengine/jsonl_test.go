@@ -149,24 +149,35 @@ func TestDecodeJSONLNullContent(t *testing.T) {
 }
 
 func TestDecodeJSONLErrorFields(t *testing.T) {
-	// Both runtimes report a failed model call as an ordinary event, not as an
-	// error line.
+	// Both runtimes report a failure as an ordinary event, not as an error
+	// line, and either field can arrive without the other.
 	for _, tc := range []struct {
-		name string
-		line string
+		name, line            string
+		wantCode, wantMessage string
+		wantText              string
 	}{
-		{"snake_case", `{"author":"root","error_code":"SAFETY","error_message":"blocked"}`},
+		{name: "snake_case", line: `{"author":"root","error_code":"SAFETY","error_message":"blocked"}`, wantCode: "SAFETY", wantMessage: "blocked"},
 		// The adk-go server's encoder falls back to the event's camelCase JSON
 		// tags when it meets a kind it has no case for, such as a uint.
-		{"camelCase fallback", `{"author":"root","content":{"role":"model"},"customMetadata":{"attempt":1},"errorCode":"SAFETY","errorMessage":"blocked"}`},
+		{name: "camelCase fallback", line: `{"author":"root","content":{"role":"model"},"customMetadata":{"attempt":1},"errorCode":"SAFETY","errorMessage":"blocked"}`, wantCode: "SAFETY", wantMessage: "blocked"},
+		// A safety stop whose model gave no finish message.
+		{name: "code only", line: `{"author":"root","content":{"role":"model"},"error_code":"SAFETY"}`, wantCode: "SAFETY"},
+		// A failed A2A task as the adk-go server writes it: the text the remote
+		// agent produced, a message and no code.
+		{name: "message only", line: `{"actions":{"artifact_delta":{},"state_delta":{}},"author":"researcher","avg_logprobs":0,"content":{"parts":[{"media_processing":"","text":"Found two of the three"}],"role":"model"},"error_message":"agent run failed: tool backend unavailable","finish_reason":"","id":"","invocation_id":"","timestamp":-62135596800,"turn_complete":true}`, wantMessage: "agent run failed: tool backend unavailable", wantText: "Found two of the three"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := collect(t, decodeJSONL(chunksOf(tc.line+"\n")))
 			if err != nil || len(got) != 1 {
 				t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
 			}
-			if got[0].ErrorCode != "SAFETY" || got[0].ErrorMessage != "blocked" {
-				t.Errorf("ErrorCode, ErrorMessage = %q, %q; want SAFETY, blocked", got[0].ErrorCode, got[0].ErrorMessage)
+			if got[0].ErrorCode != tc.wantCode || got[0].ErrorMessage != tc.wantMessage {
+				t.Errorf("ErrorCode, ErrorMessage = %q, %q; want %q, %q", got[0].ErrorCode, got[0].ErrorMessage, tc.wantCode, tc.wantMessage)
+			}
+			if tc.wantText != "" {
+				if diff := cmp.Diff([]string{tc.wantText}, texts(got)); diff != "" {
+					t.Errorf("content text mismatch (-want +got):\n%s", diff)
+				}
 			}
 		})
 	}

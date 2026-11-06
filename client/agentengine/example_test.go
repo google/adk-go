@@ -57,10 +57,10 @@ func ExampleClient_StreamQuery() {
 				fmt.Print(p.Text)
 			}
 		}
-		// ErrorCode marks a model call that did not end normally, so the text
-		// above may be cut short. ErrorMessage can be empty.
-		if ev.ErrorCode != "" {
-			log.Printf("reply ended early: %s %s", ev.ErrorCode, ev.ErrorMessage)
+		// Either field marks a failure and the other can be empty, so the text
+		// above may be cut short.
+		if ev.ErrorCode != "" || ev.ErrorMessage != "" {
+			log.Printf("reply ended early (code %q, message %q)", ev.ErrorCode, ev.ErrorMessage)
 			return
 		}
 	}

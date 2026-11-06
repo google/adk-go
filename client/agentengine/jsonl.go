@@ -44,11 +44,12 @@ type Event struct {
 	// by one aggregated non-partial event carrying the full content, so
 	// consumers that want each reply once skip partial events.
 	Partial bool
-	// ErrorCode and ErrorMessage describe a model call that did not end
-	// normally, such as a safety block or a malformed function call.
-	// ErrorMessage can be empty, so test ErrorCode. Such an event is a regular
-	// line, not a remote error, and can carry Content, such as the text the
-	// model produced before it stopped.
+	// ErrorCode and ErrorMessage report a failure behind this event, such as a
+	// model call stopped by a safety block or a remote agent whose task
+	// failed. Either can be set without the other, so treat the event as
+	// failed when either is non-empty. Such an event is a regular line, not a
+	// remote error, and can carry Content, such as the text produced before
+	// the failure.
 	ErrorCode    string
 	ErrorMessage string
 	// Raw is the whole decoded line, for fields this type does not model.
