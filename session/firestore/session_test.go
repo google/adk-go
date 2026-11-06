@@ -169,13 +169,13 @@ func TestSerializationAndParsingHelpers(t *testing.T) {
 			{"unexpected type", 123, nil, true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				got, err := decodeSessionState(tc.in)
+				got, err := decodeSessionState(tc.in, false)
 				if (err != nil) != tc.wantErr {
-					t.Fatalf("decodeSessionState(%v) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+					t.Fatalf("decodeSessionState(%v, false) error = %v, wantErr %v", tc.in, err, tc.wantErr)
 				}
 				if !tc.wantErr {
 					if diff := cmp.Diff(tc.want, got); diff != "" {
-						t.Errorf("decodeSessionState(%v) mismatch (-want +got):\n%s", tc.in, diff)
+						t.Errorf("decodeSessionState(%v, false) mismatch (-want +got):\n%s", tc.in, diff)
 					}
 				}
 			})

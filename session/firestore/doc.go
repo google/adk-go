@@ -73,11 +73,14 @@
 //
 // The service stores "event_data" as a native map, the format adk-python
 // releases through 2.13.0 write and read. Firestore rejects some maps: one
-// that holds an array directly inside another array, such as a tool response
-// {"rows": [["a", 1]]}, one with an empty or reserved (__.*__) key, one nested
-// more than 20 levels deep, or one over the size limit once each number
-// counts 8 bytes. The service stores such an event as a JSON string instead,
-// the format adk-python's main branch writes for every event. On
+// with an empty key or a reserved one such as "__type__", one nested more
+// than 20 levels deep, one with more than about 20,000 values, each of which
+// Firestore indexes, or one over the size limit once each number counts 8
+// bytes. The Firestore emulator and some databases also reject an array
+// directly inside another array, such as a tool response
+// {"rows": [["a", 1]]}. The service stores an event in any of these shapes
+// as a JSON string instead, the format adk-python's main branch writes for
+// every event. On
 // read, the service accepts both formats, camelCase field names, and bytes
 // that adk-python wrote in URL-safe base64, such as thought signatures and
 // inline data.
@@ -88,7 +91,9 @@
 //   - ADK Go loads sessions written by any adk-python release or by its main
 //     branch. Event fields that [session.Event] does not define, such as
 //     adk-python's actions.route, agent_state, end_of_agent and
-//     rewind_before_invocation_id, are not read.
+//     rewind_before_invocation_id, are not read. A session whose state holds
+//     NaN or Infinity, which adk-python writes as JSON that [encoding/json]
+//     does not parse, fails to load.
 //   - adk-python releases through 2.13.0 read sessions written by ADK Go,
 //     except a session holding an event stored as a string: adk-python reads
 //     a session's events in one pass, so that one event makes the whole
@@ -164,20 +169,35 @@
 //
 // # Required Indexes
 //
-// This package does not create Firestore indexes automatically. Single-session
-// operations ([session.Service.Create], [session.Service.Get],
+// This package does not create Firestore indexes. Single-session operations
+// ([session.Service.Create], [session.Service.Get],
 // [session.Service.AppendEvent], [session.Service.Delete]) and per-user
 // [session.Service.List] calls work with Firestore's automatic single-field
 // indexes. Listing sessions across all users of an application (calling
-// [session.Service.List] with an empty UserID) requires a collection-group
-// index on the sessions collection for the "appName" field:
+// [session.Service.List] with an empty UserID) runs a collection-group query,
+// which needs a collection-group index on the "appName" field of the sessions
+// collection group. Without it Firestore fails the query with
+// FailedPrecondition, and the error carries a console link that creates the
+// index.
 //
-//	gcloud firestore indexes fields update appName \
-//	  --collection-group=sessions \
-//	  --index=order=ASCENDING,query-scope=COLLECTION \
-//	  --index=order=DESCENDING,query-scope=COLLECTION \
-//	  --index=order=ASCENDING,query-scope=COLLECTION_GROUP
+// A field's index configuration replaces the automatic one, and per-user
+// List calls rely on the collection-scope index, so keep the collection-scope
+// entries when adding the collection-group one. As a field override in
+// firestore.indexes.json:
 //
-// A field's index configuration replaces the automatic one, so the command
-// lists the collection-scope indexes too; per-user List calls query with them.
+//	{
+//	  "fieldOverrides": [{
+//	    "collectionGroup": "sessions",
+//	    "fieldPath": "appName",
+//	    "indexes": [
+//	      {"order": "ASCENDING", "queryScope": "COLLECTION"},
+//	      {"order": "DESCENDING", "queryScope": "COLLECTION"},
+//	      {"arrayConfig": "CONTAINS", "queryScope": "COLLECTION"},
+//	      {"order": "ASCENDING", "queryScope": "COLLECTION_GROUP"}
+//	    ]
+//	  }]
+//	}
+//
+// The gcloud CLI cannot create this index: "gcloud firestore indexes fields
+// update" only writes collection-scope entries.
 package firestore

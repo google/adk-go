@@ -507,7 +507,7 @@ func (s *firestoreService) Get(ctx context.Context, req *session.GetRequest) (*s
 		loadedEvents = loadedEvents[len(loadedEvents)-req.NumRecentEvents:]
 	}
 
-	sessionState, err := decodeSessionState(data["state"])
+	sessionState, err := decodeSessionState(data["state"], false)
 	if err != nil {
 		return nil, fmt.Errorf("firestore: decoding state for session %q: %w", req.SessionID, err)
 	}
@@ -625,7 +625,7 @@ func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (
 		appName, _ := sd["appName"].(string)
 		uid, _ := sd["userId"].(string)
 
-		sState, err := decodeSessionState(sd["state"])
+		sState, err := decodeSessionState(sd["state"], false)
 		if err != nil {
 			return nil, fmt.Errorf("firestore: decoding state for session %q: %w", sid, err)
 		}
@@ -696,7 +696,8 @@ func (s *firestoreService) Delete(ctx context.Context, req *session.DeleteReques
 	}
 
 	eventsRef := sessionRef.Collection(s.eventsCollection)
-	it := eventsRef.Documents(ctx)
+	// Select with no fields returns document names only.
+	it := eventsRef.Select().Documents(ctx)
 	defer it.Stop()
 
 	bw := s.client.BulkWriter(ctx)
@@ -819,7 +820,10 @@ func (s *firestoreService) AppendEvent(ctx context.Context, curSession session.S
 			// transaction, matching session/database rather than
 			// adk-python's in-memory snapshot (firestore_session_service.py:675-681)
 			// so uncommitted in-memory State().Set mutations do not leak to storage.
-			currentSessionState, stateErr := decodeSessionState(sessionDoc["state"])
+			// Numbers stay as written so the rewrite keeps the keys this event
+			// does not touch exact, such as an integer above 2^53 that
+			// adk-python stored.
+			currentSessionState, stateErr := decodeSessionState(sessionDoc["state"], true)
 			if stateErr != nil {
 				return fmt.Errorf("decoding stored state for session %q: %w", sess.ID(), stateErr)
 			}
@@ -957,8 +961,8 @@ func encodeFirestoreState(stored, delta map[string]any) (map[string]any, error) 
 	encoded := encodeFirestoreMap(merged)
 	// A document Firestore would reject for another reason is left for it to
 	// report, as adk-python does.
-	if size, ok := firestoreValueSize(encoded, 1, 0, false); ok && size > maxFirestorePayloadBytes {
-		return nil, fmt.Errorf("state document (%d bytes) exceeds Firestore %d-byte payload limit", size, maxFirestorePayloadBytes)
+	if m := measureFirestoreValue(encoded); m.ok && m.size > maxFirestorePayloadBytes {
+		return nil, fmt.Errorf("state document (%d bytes) exceeds Firestore %d-byte payload limit", m.size, maxFirestorePayloadBytes)
 	}
 	return encoded, nil
 }
@@ -1107,7 +1111,11 @@ func marshalSessionState(state map[string]any) (string, error) {
 	return string(b), nil
 }
 
-func decodeSessionState(raw any) (map[string]any, error) {
+// decodeSessionState decodes a session document's state field, which is a
+// JSON object string or, from older adk-python, a map. With exactNumbers a
+// number decodes as a json.Number, which marshals back as it was written,
+// and otherwise as a float64.
+func decodeSessionState(raw any, exactNumbers bool) (map[string]any, error) {
 	if raw == nil {
 		return make(map[string]any), nil
 	}
@@ -1116,8 +1124,12 @@ func decodeSessionState(raw any) (map[string]any, error) {
 		if v == "" {
 			return make(map[string]any), nil
 		}
+		dec := json.NewDecoder(strings.NewReader(v))
+		if exactNumbers {
+			dec.UseNumber()
+		}
 		var out map[string]any
-		if err := json.Unmarshal([]byte(v), &out); err != nil {
+		if err := dec.Decode(&out); err != nil {
 			return nil, err
 		}
 		if out == nil {
@@ -1135,8 +1147,8 @@ func decodeSessionState(raw any) (map[string]any, error) {
 // epoch-second timestamps, the shape adk-python's Event dumps. It returns a
 // native map, as adk-python releases through 2.13.0 store and read
 // (event.model_dump(exclude_none=True, mode="json")), unless Firestore would
-// reject the map, most often for an array directly inside another array (see
-// firestoreValueSize);
+// reject the map, or might, as for an array directly inside another array
+// (see firestoreMeasure);
 // that event is returned as the JSON string adk-python's main branch stores
 // for every event (event.model_dump_json(exclude_none=True),
 // firestore_session_service.py:701) and reads alongside maps (line 418).
@@ -1169,7 +1181,7 @@ func encodeEventData(event *session.Event) (any, error) {
 			return nil, fmt.Errorf("firestore: encoding compaction of event %q: %w", event.ID, err)
 		}
 	}
-	if size, ok := firestoreValueSize(out, 1, 0, false); ok && size <= maxFirestorePayloadBytes {
+	if m := measureFirestoreValue(out); m.ok && m.size <= maxFirestorePayloadBytes && m.values <= maxFirestoreIndexedValues {
 		return out, nil
 	}
 	b, err = json.Marshal(out)
@@ -1193,55 +1205,76 @@ const (
 	// is below Firestore's 1,500-byte limit, so a path near the limit is
 	// treated as too long rather than risked.
 	maxFirestoreFieldPathBytes = 1024
+	// maxFirestoreIndexedValues bounds the scalar values of one map.
+	// Firestore indexes every value twice by default and rejects a document
+	// with more than 40,000 index entries; this leaves room for the
+	// document's other fields.
+	maxFirestoreIndexedValues = 18000
 )
 
-// firestoreValueSize returns the bytes v takes as a Firestore field value by
-// Firestore's storage-size rules (a string is its UTF-8 length plus one, a
-// number 8 bytes, a boolean or null 1 byte, a map or array the sum of its
-// entries, a map key its length plus one), and whether Firestore stores v at
-// all. Firestore rejects an array directly inside an array, a map key that
-// is empty or matches __.*__, and values nested or named beyond its limits.
-// depth is the nesting level of v, pathBytes the length of the field names
-// leading to it, and inList whether v is an array element.
-func firestoreValueSize(v any, depth, pathBytes int, inList bool) (size int, ok bool) {
+// firestoreMeasure is what measureFirestoreValue learns about a value.
+type firestoreMeasure struct {
+	// ok is false when Firestore does not store the value as a field: it
+	// holds an array directly inside an array, a map key that is empty or
+	// reserved (__ at both ends of a longer name), or it nests or names
+	// fields beyond Firestore's limits. Some databases accept an array
+	// inside an array, but the Firestore emulator and others do not.
+	ok bool
+	// size is the value's storage size by Firestore's rules: a string is
+	// its UTF-8 length plus one, a number 8 bytes, a boolean or null 1 byte,
+	// a map or array the sum of its entries, a map key its length plus one.
+	size int
+	// values counts the scalar values, each of which Firestore indexes.
+	values int
+}
+
+// measureFirestoreValue measures v as the value of a document field.
+func measureFirestoreValue(v any) firestoreMeasure {
+	m := firestoreMeasure{ok: true}
+	m.add(v, 1, 0, false)
+	return m
+}
+
+// add measures v, which sits depth levels deep, under field names totalling
+// pathBytes, and directly inside an array when inList is set.
+func (m *firestoreMeasure) add(v any, depth, pathBytes int, inList bool) {
 	switch x := v.(type) {
 	case map[string]any:
 		if depth > maxFirestoreValueDepth {
-			return 0, false
+			m.ok = false
+			return
 		}
 		for k, e := range x {
 			keyPath := pathBytes + len(k) + 1
-			if k == "" || keyPath > maxFirestoreFieldPathBytes || (strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__")) {
-				return 0, false
+			reserved := len(k) > 4 && strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__")
+			if k == "" || reserved || keyPath > maxFirestoreFieldPathBytes {
+				m.ok = false
+				return
 			}
-			n, ok := firestoreValueSize(e, depth+1, keyPath, false)
-			if !ok {
-				return 0, false
-			}
-			size += len(k) + 1 + n
+			m.size += len(k) + 1
+			m.add(e, depth+1, keyPath, false)
 		}
-		return size, true
 	case []any:
 		if inList || depth > maxFirestoreValueDepth {
-			return 0, false
+			m.ok = false
+			return
 		}
 		for _, e := range x {
-			n, ok := firestoreValueSize(e, depth+1, pathBytes, true)
-			if !ok {
-				return 0, false
-			}
-			size += n
+			m.add(e, depth+1, pathBytes, true)
 		}
-		return size, true
 	case string:
-		return len(x) + 1, true
+		m.size += len(x) + 1
+		m.values++
 	case []byte:
-		return len(x), true
+		m.size += len(x)
+		m.values++
 	case nil, bool:
-		return 1, true
+		m.size++
+		m.values++
 	default:
 		// Numbers and timestamps.
-		return 8, true
+		m.size += 8
+		m.values++
 	}
 }
 

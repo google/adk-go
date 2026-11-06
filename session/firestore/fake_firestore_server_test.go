@@ -566,10 +566,36 @@ func (f *fakeFirestoreServer) validateWrite(w *pb.Write) error {
 
 // validateFields reports the error Firestore returns for a document it does
 // not store: an array directly inside an array, a field name that is empty or
-// reserved (__.*__), or a value nested more than 20 levels deep. These limits
-// were checked against the Firestore emulator.
+// reserved (__ at both ends of a longer name), a value nested more than 20
+// levels deep, or more scalar values than its index entry limit allows. The
+// limits were measured on a Firestore database, except for the array inside
+// an array, which the Firestore emulator rejects and some databases accept.
 func validateFields(fields map[string]*pb.Value) error {
-	return validateMapFields(fields, 1)
+	if err := validateMapFields(fields, 1); err != nil {
+		return err
+	}
+	// Firestore indexes each scalar value twice and allows 40,000 entries.
+	if n := countScalarValues(&pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: fields}}}); n > 20000 {
+		return status.Errorf(codes.InvalidArgument, "too many index entries for entity")
+	}
+	return nil
+}
+
+func countScalarValues(val *pb.Value) int {
+	n := 0
+	switch v := val.GetValueType().(type) {
+	case *pb.Value_ArrayValue:
+		for _, item := range v.ArrayValue.GetValues() {
+			n += countScalarValues(item)
+		}
+	case *pb.Value_MapValue:
+		for _, item := range v.MapValue.GetFields() {
+			n += countScalarValues(item)
+		}
+	default:
+		n = 1
+	}
+	return n
 }
 
 func validateMapFields(fields map[string]*pb.Value, depth int) error {

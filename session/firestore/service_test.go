@@ -1523,7 +1523,7 @@ func TestFirestoreService_AppendEvent_EncodesPythonCompatibleEventData(t *testin
 	// extra='forbid' EventCompaction accepts. This payload was checked with
 	// Event.model_validate in google-adk 2.11.0 and 2.13.0.
 	if _, ok := doc.GetFields()["event_data"].GetValueType().(*pb.Value_MapValue); !ok {
-		t.Fatalf("event_data = %v, want a map", doc.GetFields()["event_data"])
+		t.Fatalf("event_data value type = %T, want a map", doc.GetFields()["event_data"].GetValueType())
 	}
 	artifactDelta := doc.GetFields()["event_data"].GetMapValue().GetFields()["actions"].GetMapValue().GetFields()["artifact_delta"]
 	if _, ok := artifactDelta.GetMapValue().GetFields()["file_name.txt"].GetValueType().(*pb.Value_IntegerValue); !ok {
@@ -1825,7 +1825,7 @@ func TestFirestoreService_NestedArraysAndEscapedDicts(t *testing.T) {
 		t.Fatal("event document not found")
 	}
 	if _, ok := evDoc.GetFields()["event_data"].GetValueType().(*pb.Value_StringValue); !ok {
-		t.Errorf("event_data with nested arrays = %v, want a JSON string", evDoc.GetFields()["event_data"])
+		t.Errorf("event_data with nested arrays value type = %T, want a JSON string", evDoc.GetFields()["event_data"].GetValueType())
 	}
 
 	// 3. Read back via Get and List to ensure exact round-trip.
@@ -1912,10 +1912,10 @@ func TestEventData_KeepsUserKeysVerbatim(t *testing.T) {
 	}
 	const userMaps = 11
 	if got := strings.Count(string(rawJSON), `"camelKey":"c"`); got != userMaps {
-		t.Errorf("event_data keeps camelKey verbatim in %d places, want %d:\n%s", got, userMaps, rawJSON)
+		t.Errorf("event_data keeps camelKey verbatim in %d places, want %d", got, userMaps)
 	}
 	if got := strings.Count(string(rawJSON), `"snake_key":"s"`); got != userMaps {
-		t.Errorf("event_data keeps snake_key verbatim in %d places, want %d:\n%s", got, userMaps, rawJSON)
+		t.Errorf("event_data keeps snake_key verbatim in %d places, want %d", got, userMaps)
 	}
 
 	got, err := decodeEventData(raw)
@@ -2217,42 +2217,73 @@ func nestMaps(n int, leaf any) any {
 	return v
 }
 
-func TestFirestoreValueSize(t *testing.T) {
+func nestArrays(n int, leaf any) any {
+	// Alternates arrays and maps, since an array may not hold an array.
+	v := leaf
+	for i := range n {
+		if i%2 == 0 {
+			v = []any{v}
+		} else {
+			v = map[string]any{"k": v}
+		}
+	}
+	return v
+}
+
+func TestMeasureFirestoreValue(t *testing.T) {
+	// The limits were measured on a Firestore database: a field nests at most
+	// 20 maps and arrays, and "__", "___" and "____" are valid field names.
 	tests := []struct {
-		name     string
-		value    any
-		wantSize int
-		wantOK   bool
+		name       string
+		value      any
+		wantSize   int
+		wantValues int
+		wantOK     bool
 	}{
-		{name: "string", value: map[string]any{"a": "xy"}, wantSize: 2 + 3, wantOK: true},
-		{name: "numbers", value: map[string]any{"i": int64(1), "f": 1.5}, wantSize: 2 + 8 + 2 + 8, wantOK: true},
-		{name: "bool_and_null", value: map[string]any{"b": true, "z": nil}, wantSize: 2 + 1 + 2 + 1, wantOK: true},
-		{name: "array", value: map[string]any{"l": []any{int64(1), "a"}}, wantSize: 2 + 8 + 2, wantOK: true},
-		{name: "array_in_map_in_array", value: map[string]any{"l": []any{map[string]any{"m": []any{"a"}}}}, wantSize: 2 + 2 + 2, wantOK: true},
+		{name: "string", value: map[string]any{"a": "xy"}, wantSize: 2 + 3, wantValues: 1, wantOK: true},
+		{name: "numbers", value: map[string]any{"i": int64(1), "f": 1.5}, wantSize: 2 + 8 + 2 + 8, wantValues: 2, wantOK: true},
+		{name: "bool_and_null", value: map[string]any{"b": true, "z": nil}, wantSize: 2 + 1 + 2 + 1, wantValues: 2, wantOK: true},
+		{name: "array", value: map[string]any{"l": []any{int64(1), "a"}}, wantSize: 2 + 8 + 2, wantValues: 2, wantOK: true},
+		{name: "array_in_map_in_array", value: map[string]any{"l": []any{map[string]any{"m": []any{"a"}}}}, wantSize: 2 + 2 + 2, wantValues: 1, wantOK: true},
 		{name: "array_in_array", value: map[string]any{"l": []any{[]any{"a"}}}},
 		{name: "empty_key", value: map[string]any{"": 1}},
 		{name: "reserved_key", value: map[string]any{"a": map[string]any{"__type__": "x"}}},
-		{name: "long_field_path", value: map[string]any{strings.Repeat("k", 600): map[string]any{strings.Repeat("k", 600): 1}}},
-		{name: "depth_20", value: nestMaps(20, "x"), wantSize: 20*2 + 2, wantOK: true},
-		{name: "depth_21", value: nestMaps(21, "x")},
+		{name: "key_with_reserved_prefix_only", value: map[string]any{"__type": "x"}, wantSize: 7 + 2, wantValues: 1, wantOK: true},
+		{name: "key_with_reserved_suffix_only", value: map[string]any{"type__": "x"}, wantSize: 7 + 2, wantValues: 1, wantOK: true},
+		{name: "key_of_four_underscores", value: map[string]any{"____": "x"}, wantSize: 5 + 2, wantValues: 1, wantOK: true},
+		{name: "field_path_at_limit", value: map[string]any{strings.Repeat("k", 500): map[string]any{strings.Repeat("k", 522): "x"}}, wantSize: 501 + 523 + 2, wantValues: 1, wantOK: true},
+		{name: "field_path_over_limit", value: map[string]any{strings.Repeat("k", 500): map[string]any{strings.Repeat("k", 523): "x"}}},
+		{name: "field_path_over_limit_across_three_levels", value: map[string]any{strings.Repeat("k", 400): map[string]any{strings.Repeat("k", 400): map[string]any{strings.Repeat("k", 400): "x"}}}},
+		{name: "maps_20_deep", value: nestMaps(20, "x"), wantSize: 20*2 + 2, wantValues: 1, wantOK: true},
+		{name: "maps_21_deep", value: nestMaps(21, "x")},
+		{name: "arrays_and_maps_20_deep", value: map[string]any{"k": nestArrays(19, "x")}, wantSize: 2 + 9*2 + 2, wantValues: 1, wantOK: true},
+		{name: "arrays_and_maps_21_deep", value: map[string]any{"k": nestArrays(20, "x")}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			size, ok := firestoreValueSize(tc.value, 1, 0, false)
-			if ok != tc.wantOK || (ok && size != tc.wantSize) {
-				t.Errorf("firestoreValueSize() = (%d, %v), want (%d, %v)", size, ok, tc.wantSize, tc.wantOK)
+			got := measureFirestoreValue(tc.value)
+			if got.ok != tc.wantOK || (got.ok && (got.size != tc.wantSize || got.values != tc.wantValues)) {
+				t.Errorf("measureFirestoreValue() = %+v, want {ok:%v size:%d values:%d}", got, tc.wantOK, tc.wantSize, tc.wantValues)
 			}
 		})
 	}
 }
 
 func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *testing.T) {
-	// Firestore rejects each of these tool responses inside a map, which the
-	// fake enforces except for size, so the event must be stored as a string.
+	// Firestore rejects each of the wantString tool responses inside a map,
+	// which the fake enforces except for size, so the event must be stored as
+	// a string.
 	ints := make([]any, 150000) // about 300 KB of JSON, 1.2 MB as Firestore numbers.
 	for i := range ints {
 		ints[i] = float64(1)
 	}
+	// Firestore rejects a document with more than 40,000 index entries, two
+	// for each value: measured, 19,000 values are stored and 21,000 are not.
+	manyValues := make([]any, 21000)
+	for i := range manyValues {
+		manyValues[i] = "v"
+	}
+	someValues := manyValues[:17000]
 	tests := []struct {
 		name       string
 		response   map[string]any
@@ -2263,8 +2294,13 @@ func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *tes
 		{name: "nested_array", response: map[string]any{"rows": []any{[]any{"a"}}}, wantString: true},
 		{name: "reserved_key", response: map[string]any{"__type__": "x"}, wantString: true},
 		{name: "empty_key", response: map[string]any{"": "x"}, wantString: true},
-		{name: "too_deep", response: map[string]any{"deep": nestMaps(20, "x")}, wantString: true},
+		// The response map is the sixth level under event_data, so 14 more
+		// maps reach Firestore's limit of 20 and 15 pass it.
+		{name: "deepest_map", response: map[string]any{"deep": nestMaps(14, "x")}},
+		{name: "too_deep", response: map[string]any{"deep": nestMaps(15, "x")}, wantString: true},
 		{name: "too_large_as_numbers", response: map[string]any{"ints": ints}, wantString: true},
+		{name: "too_many_indexed_values", response: map[string]any{"cells": manyValues}, wantString: true},
+		{name: "many_indexed_values_under_limit", response: map[string]any{"cells": someValues}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2429,5 +2465,89 @@ func TestValidateIdentityComponent_ReservedPattern(t *testing.T) {
 		if err := validateIdentityComponent("session_id", value); err == nil {
 			t.Errorf("validateIdentityComponent(%q) = nil, want error", value)
 		}
+	}
+}
+
+func TestFirestoreService_AppendEvent_KeepsUntouchedSessionStateExact(t *testing.T) {
+	// adk-python stores session state as exact JSON. Rewriting it on an append
+	// must not round an integer above 2^53 that the event does not touch.
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	srv.putDoc("adk-session/app/users/user/sessions/s", map[string]*pb.Value{
+		"id":       {ValueType: &pb.Value_StringValue{StringValue: "s"}},
+		"appName":  {ValueType: &pb.Value_StringValue{StringValue: "app"}},
+		"userId":   {ValueType: &pb.Value_StringValue{StringValue: "user"}},
+		"state":    {ValueType: &pb.Value_StringValue{StringValue: `{"big":1152921504606846977,"ratio":0.1}`}},
+		"revision": {ValueType: &pb.Value_IntegerValue{IntegerValue: 1}},
+	})
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, got.Session, &session.Event{
+		ID:      "e",
+		Author:  "agent",
+		Actions: session.EventActions{StateDelta: map[string]any{"added": 2}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	doc, ok := srv.getDoc("adk-session/app/users/user/sessions/s")
+	if !ok {
+		t.Fatal("session document not found")
+	}
+	const want = `{"added":2,"big":1152921504606846977,"ratio":0.1}`
+	if state := doc.GetFields()["state"].GetStringValue(); state != want {
+		t.Errorf("stored state = %s, want %s", state, want)
+	}
+}
+
+func TestFirestoreService_SharedStateNumbersReadAsFloat64(t *testing.T) {
+	// App and user state hold Firestore integers, nested ones included, that
+	// every read path must return as float64.
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	nested := func() map[string]*pb.Value {
+		return map[string]*pb.Value{
+			"n": {ValueType: &pb.Value_IntegerValue{IntegerValue: 7}},
+			"m": {ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: map[string]*pb.Value{
+				"l": {ValueType: &pb.Value_ArrayValue{ArrayValue: &pb.ArrayValue{Values: []*pb.Value{
+					{ValueType: &pb.Value_IntegerValue{IntegerValue: 8}},
+				}}}},
+			}}}},
+		}
+	}
+	srv.putDoc("app_states/app", nested())
+	srv.putDoc("user_states/app/users/user", nested())
+	want := map[string]any{
+		"app:n": float64(7), "app:m": map[string]any{"l": []any{float64(8)}},
+		"user:n": float64(7), "user:m": map[string]any{"l": []any{float64(8)}},
+	}
+	check := func(name string, s session.Session) {
+		t.Helper()
+		got := map[string]any{}
+		for k, v := range s.State().All() {
+			got[k] = v
+		}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("%s state mismatch (-want +got):\n%s", name, diff)
+		}
+	}
+
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	check("Create", created.Session)
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	check("Get", got.Session)
+	for _, userID := range []string{"user", ""} {
+		list, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: userID})
+		if err != nil || len(list.Sessions) != 1 {
+			t.Fatalf("List(UserID=%q) = (%d sessions, %v), want 1 session", userID, len(list.Sessions), err)
+		}
+		check(fmt.Sprintf("List(UserID=%q)", userID), list.Sessions[0])
 	}
 }
