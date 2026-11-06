@@ -41,6 +41,12 @@ type streamingResponseAggregator struct {
 	sequence             []*genai.Part
 	currentTextBuffer    string
 	currentTextIsThought bool
+	// currentTextSignature is the first thought signature streamed on a chunk
+	// of currentTextBuffer, for the part the buffer is flushed into. Unlike
+	// adk-python, the same signature is also still carried forward to the next
+	// function call that has none (currentThoughtSignature), which the turn
+	// history needs on Vertex AI.
+	currentTextSignature []byte
 	finishReason         genai.FinishReason
 
 	currentFunctionName             string
@@ -59,7 +65,7 @@ func NewStreamingResponseAggregator() *streamingResponseAggregator {
 func (s *streamingResponseAggregator) ProcessResponse(ctx context.Context, genResp *genai.GenerateContentResponse) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp := converters.Genai2LLMResponse(genResp)
-		if len(genResp.Candidates) > 0 {
+		if len(genResp.Candidates) > 0 && genResp.Candidates[0] != nil {
 			candidate := genResp.Candidates[0]
 			resp.TurnComplete = candidate.FinishReason != ""
 		}
@@ -113,6 +119,9 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 				s.currentTextIsThought = part.Thought
 			}
 			s.currentTextBuffer += part.Text
+			if len(part.ThoughtSignature) > 0 && s.currentTextSignature == nil {
+				s.currentTextSignature = part.ThoughtSignature
+			}
 		} else if part.FunctionCall != nil {
 			// Process function call (handles both streaming Args and non-streaming Args
 			s.processFunctionCallPart(part)
@@ -409,12 +418,14 @@ func (s *streamingResponseAggregator) flushTextBufferToSequence() {
 	// Check if buffer has content (strings.Builder.Len() is efficient)
 	if s.currentTextBuffer != "" {
 		s.sequence = append(s.sequence, &genai.Part{
-			Text:    s.currentTextBuffer,
-			Thought: s.currentTextIsThought,
+			Text:             s.currentTextBuffer,
+			Thought:          s.currentTextIsThought,
+			ThoughtSignature: s.currentTextSignature,
 		})
 		// Reset the buffer and the state
 		s.currentTextBuffer = ""
 		s.currentTextIsThought = false
+		s.currentTextSignature = nil
 	}
 }
 
@@ -466,6 +477,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
 			FinishReason:      s.finishReason,
+			ModelVersion:      s.response.ModelVersion,
 		}
 	}
 	return nil

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/httprr"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/model"
@@ -168,10 +170,10 @@ func TestNewParallelAgent(t *testing.T) {
 				slices.SortFunc(tt.wantEvents, eventCompareFunc)
 				slices.SortFunc(gotEvents, eventCompareFunc)
 
-				// IDs are assigned at append and are fresh UUIDs, so they
-				// cannot be expressed in a fixture. This test is about which
-				// events came out and who authored them.
-				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "ID")); diff != "" {
+				// IDs and timestamps are filled in when the events are run and
+				// appended, so they cannot be expressed in a fixture. This test
+				// is about which events came out and who authored them.
+				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp")); diff != "" {
 					t.Errorf("events mismatch (-want +got):\n%s", diff)
 				}
 			}
@@ -1073,5 +1075,134 @@ func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestParallelAgent_PropagatesIsolationScope verifies that every sub-agent runs
+// with the parent's isolation scope. A workflow node that wraps a parallel
+// agent stamps the node's scope on every event the branches emit, and the LLM
+// history filter keeps only events whose scope matches exactly. A branch that
+// ran unscoped would therefore drop its own earlier turns from its prompt.
+func TestParallelAgent_PropagatesIsolationScope(t *testing.T) {
+	const scope = "scope-1"
+
+	var (
+		mu        sync.Mutex
+		gotScopes = map[string]string{}
+		gotBranch = map[string]string{}
+	)
+	record := func(name string) agent.Agent {
+		return must(agent.New(agent.Config{
+			Name: name,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					mu.Lock()
+					gotScopes[name] = ctx.IsolationScope()
+					gotBranch[name] = ctx.Branch()
+					mu.Unlock()
+				}
+			},
+		}))
+	}
+
+	parallel := must(parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{
+			Name:      "parallel",
+			SubAgents: []agent.Agent{record("a"), record("b")},
+		},
+	}))
+
+	created, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{
+		AppName: "app", UserID: "user", SessionID: "session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+		Session:        created.Session,
+		Agent:          parallel,
+		IsolationScope: scope,
+		InvocationID:   "inv-1",
+	})
+
+	for _, err := range parallel.Run(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wantScopes := map[string]string{"a": scope, "b": scope}
+	if diff := cmp.Diff(wantScopes, gotScopes); diff != "" {
+		t.Errorf("sub-agent isolation scopes mismatch (-want +got):\n%s", diff)
+	}
+	wantBranch := map[string]string{"a": "parallel.a", "b": "parallel.b"}
+	if diff := cmp.Diff(wantBranch, gotBranch); diff != "" {
+		t.Errorf("sub-agent branches mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestParallelAgent_ScopedBranchSeesItsOwnHistory checks the user-visible
+// effect: an LLM branch of a scoped parallel agent must see its own earlier,
+// scoped turn in the prompt it sends to the model.
+func TestParallelAgent_ScopedBranchSeesItsOwnHistory(t *testing.T) {
+	const scope = "scope-1"
+	ctx := t.Context()
+
+	mock := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	branchAgent := must(llmagent.New(llmagent.Config{Name: "a", Model: mock}))
+	parallel := must(parallelagent.New(parallelagent.Config{
+		AgentConfig: agent.Config{Name: "parallel", SubAgents: []agent.Agent{branchAgent}},
+	}))
+
+	service := session.InMemoryService()
+	created, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An earlier turn of this branch, stamped with the node's scope the way
+	// workflow's agent node stamps every event a wrapped agent emits.
+	if err := service.AppendEvent(ctx, created.Session, &session.Event{
+		ID:             "earlier",
+		InvocationID:   "inv-1",
+		Author:         "a",
+		Branch:         "parallel.a",
+		IsolationScope: scope,
+		LLMResponse: model.LLMResponse{
+			Content: genai.NewContentFromText("earlier scoped answer", genai.RoleModel),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invCtx := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Session:        got.Session,
+		Agent:          parallel,
+		IsolationScope: scope,
+		InvocationID:   "inv-1",
+		RunConfig:      &agent.RunConfig{},
+	})
+	for _, err := range parallel.Run(invCtx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if len(mock.Requests) != 1 {
+		t.Fatalf("model got %d requests, want 1", len(mock.Requests))
+	}
+	var texts []string
+	for _, c := range mock.Requests[0].Contents {
+		for _, p := range c.Parts {
+			texts = append(texts, p.Text)
+		}
+	}
+	if !slices.Contains(texts, "earlier scoped answer") {
+		t.Errorf("branch prompt is missing its own scoped history; prompt texts: %q", texts)
 	}
 }
