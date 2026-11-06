@@ -129,6 +129,60 @@ func TestInjectSessionState(t *testing.T) {
 			state:    map[string]any{"user_name": "Foo"},
 			want:     "Say Foo",
 		},
+		// A text artifact can come back as inline data rather than Text:
+		// gcsartifact stores a text Part as a text/plain object and loads it
+		// back as bytes. adk-python injects the decoded text
+		// (_instructions_utils.py, _artifact_to_text).
+		{
+			name:     "text artifact loaded as inline data",
+			template: "The artifact content is: {artifact.notes.txt}",
+			artifacts: map[string]*genai.Part{
+				"notes.txt": genai.NewPartFromBytes([]byte("hello from GCS"), "text/plain"),
+			},
+			want: "The artifact content is: hello from GCS",
+		},
+		{
+			name:     "text artifact with a charset parameter",
+			template: "The artifact content is: {artifact.notes}",
+			artifacts: map[string]*genai.Part{
+				"notes": genai.NewPartFromBytes([]byte("café"), "Text/Markdown; charset=utf-8"),
+			},
+			want: "The artifact content is: café",
+		},
+		{
+			name:     "json artifact with a charset parameter",
+			template: "Config: {artifact.config}",
+			artifacts: map[string]*genai.Part{
+				"config": genai.NewPartFromBytes([]byte(`{"k":"v"}`), "application/JSON; charset=utf-8"),
+			},
+			want: `Config: {"k":"v"}`,
+		},
+		{
+			name:     "text file uploaded as octet-stream",
+			template: "Rows: {artifact.rows.csv}",
+			artifacts: map[string]*genai.Part{
+				"rows.csv": genai.NewPartFromBytes([]byte("a,b\n1,2"), "application/octet-stream"),
+			},
+			want: "Rows: a,b\n1,2",
+		},
+		{
+			name:     "binary artifact still renders empty",
+			template: "Image: {artifact.photo.png}",
+			artifacts: map[string]*genai.Part{
+				"photo.png": genai.NewPartFromBytes([]byte{0x89, 'P', 'N', 'G'}, "image/png"),
+			},
+			want: "Image: ",
+		},
+		// A binary artifact with a text file name is not decoded: Gemini
+		// accepts its MIME type inline. TestArtifactText covers each rule.
+		{
+			name:     "pdf named like a text file is not decoded",
+			template: "Doc: {artifact.notes.txt}",
+			artifacts: map[string]*genai.Part{
+				"notes.txt": genai.NewPartFromBytes([]byte("%PDF-1.7\n%\xe2\xe3\xcf\xd3"), "application/pdf"),
+			},
+			want: "Doc: ",
+		},
 		// Corresponds to: test_inject_session_state_with_missing_artifact_raises_key_error
 		{
 			name:     "missing required artifact",
@@ -295,6 +349,46 @@ And another optional artifact:
 					// Use %q to clearly show differences in strings, especially with whitespace.
 					t.Errorf("got %q, want %q", got, tc.want)
 				}
+			}
+		})
+	}
+}
+
+// TestArtifactText pins each rule artifactText applies to inline data, in
+// adk-python's order: MIME types Gemini accepts inline are never decoded,
+// then text MIME types and text file extensions are.
+func TestArtifactText(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name, fileName, mimeType, data, want string
+	}{
+		// Gemini accepts these inline, so they are not decoded, whatever the name.
+		{name: "pdf", fileName: "notes.txt", mimeType: "application/pdf", data: "%PDF-1.7\n%\xe2\xe3\xcf\xd3", want: ""},
+		{name: "image", fileName: "photo.xml", mimeType: "image/png", data: "\x89PNG", want: ""},
+		{name: "audio", fileName: "memo.csv", mimeType: "audio/wav", data: "RIFF\x24\x00\x00\x00WAVE", want: ""},
+		{name: "video", fileName: "clip.json", mimeType: "video/mp4", data: "\x00\x00\x00\x18ftyp", want: ""},
+		// Gemini rejects SVG and XML images inline, so adk-python decodes them.
+		{name: "svg image", fileName: "logo", mimeType: "image/svg", data: "<svg/>", want: "<svg/>"},
+		{name: "svg+xml image", fileName: "logo", mimeType: "image/svg+xml", data: "<svg/>", want: "<svg/>"},
+		{name: "xml image", fileName: "logo", mimeType: "image/xml", data: "<svg/>", want: "<svg/>"},
+		{name: "csv", fileName: "rows", mimeType: "application/csv", data: "a,b", want: "a,b"},
+		{name: "svg+xml application", fileName: "logo", mimeType: "application/svg+xml", data: "<svg/>", want: "<svg/>"},
+		{name: "xml application", fileName: "feed", mimeType: "application/xml", data: "<feed/>", want: "<feed/>"},
+		{name: "space before the parameters", fileName: "config", mimeType: "application/json ; charset=utf-8", data: `{"k":"v"}`, want: `{"k":"v"}`},
+		{name: "txt extension", fileName: "readme.txt", mimeType: "application/octet-stream", data: "read me", want: "read me"},
+		{name: "upper-case json extension", fileName: "config.JSON", mimeType: "application/octet-stream", data: `{"k":"v"}`, want: `{"k":"v"}`},
+		{name: "xml extension", fileName: "layout.xml", mimeType: "application/octet-stream", data: "<a/>", want: "<a/>"},
+		{name: "other binary", fileName: "blob.bin", mimeType: "application/octet-stream", data: "\x00\x01", want: ""},
+		// One U+FFFD per run of invalid bytes. Python's errors='replace' gives
+		// "caf\uFFFD \uFFFD\uFFFD" here.
+		{name: "invalid UTF-8", fileName: "notes", mimeType: "text/plain", data: "caf\xe9 \xe2\xe3", want: "caf\uFFFD \uFFFD"},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := artifactText(tc.fileName, genai.NewPartFromBytes([]byte(tc.data), tc.mimeType))
+			if got != tc.want {
+				t.Errorf("artifactText(%q, %q) = %q, want %q", tc.fileName, tc.mimeType, got, tc.want)
 			}
 		})
 	}
