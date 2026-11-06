@@ -227,20 +227,21 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var entry *artifactEntry
+	var ok bool
 	if version > 0 {
-		entry, ok := s.get(appName, userID, sessionID, fileName, version)
-		if !ok {
-			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		return &LoadResponse{Part: clonePart(entry.part)}, nil
+		entry, ok = s.get(appName, userID, sessionID, fileName, version)
+	} else {
+		// pick the latest version
+		_, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
-	// pick the latest version
-	_, entry, ok := s.find(appName, userID, sessionID, fileName)
+	s.mu.RUnlock()
+
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
+	// Copy after unlocking. A stored entry never changes after Save, and inline
+	// data can be large.
 	return &LoadResponse{Part: clonePart(entry.part)}, nil
 }
 

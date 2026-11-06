@@ -20,15 +20,19 @@ import (
 	"google.golang.org/genai"
 )
 
-// maxCloneDepth bounds deepCopyValue. A part is a tree in practice, but
-// PartMetadata and tool payloads are caller data and could be cyclic. Past the
-// bound the value is returned as it stands.
+// maxCloneDepth bounds the recursion in deepCopyValue. Each step through a
+// pointer, interface, map, slice, array or struct costs one unit, so a nested
+// map[string]any costs two per level and the copy reaches about 30 levels into
+// PartMetadata. A value below the bound is not copied and stays shared. The
+// bound keeps a self-referencing value from recursing forever. It does not
+// limit the work for a cycle that branches, such as m["a"], m["b"] = m, m,
+// which JSON-shaped data never contains.
 const maxCloneDepth = 64
 
 // clonePart returns a deep copy of p. No pointer, slice or map reachable from
-// the copy is reachable from p, at any depth, so neither the saver nor a loader
-// can change a stored version by editing the part it holds. Nil stays nil and
-// an empty slice or map stays empty and non-nil.
+// the copy within maxCloneDepth is reachable from p, so neither the saver nor a
+// loader can change a stored version by editing the part it holds. Nil stays
+// nil and an empty slice or map stays empty and non-nil.
 //
 // The copy walks the type with reflection instead of listing fields, so a
 // member that genai adds to Part, or to any type reachable from it, is copied
@@ -79,6 +83,11 @@ func deepCopyValue(v reflect.Value, depth int) reflect.Value {
 		}
 		out := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
 		reflect.Copy(out, v)
+		// reflect.Copy is the whole copy for elements that hold no reference,
+		// such as the bytes of InlineData.
+		if !mayAlias(v.Type().Elem()) {
+			return out
+		}
 		for i := range v.Len() {
 			out.Index(i).Set(deepCopyValue(v.Index(i), depth+1))
 		}

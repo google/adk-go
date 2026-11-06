@@ -60,6 +60,62 @@ func TestClonePartKeepsNilAndEmptyDistinct(t *testing.T) {
 	}
 }
 
+// TestClonePartStopsAtDepthBound pins where the copy stops: PartMetadata sits
+// two steps below the part and each nested map[string]any costs two more, so
+// the first maxCloneDepth/2 levels are copied and the rest stay shared.
+func TestClonePartStopsAtDepthBound(t *testing.T) {
+	const levels = maxCloneDepth
+	maps := make([]map[string]any, levels)
+	for i := range maps {
+		maps[i] = map[string]any{"level": i}
+		if i > 0 {
+			maps[i-1]["next"] = maps[i]
+		}
+	}
+	got := clonePart(&genai.Part{Text: "x", PartMetadata: maps[0]})
+
+	copied := 0
+	m := got.PartMetadata
+	for i := range maps {
+		if reflect.ValueOf(m).UnsafePointer() == reflect.ValueOf(maps[i]).UnsafePointer() {
+			break
+		}
+		copied++
+		next, _ := m["next"].(map[string]any)
+		m = next
+	}
+	if want := maxCloneDepth / 2; copied != want {
+		t.Errorf("clonePart() copied %d levels of nested PartMetadata, want %d", copied, want)
+	}
+}
+
+// TestClonePartSelfReferencingMetadata checks that the depth bound ends the
+// copy of a map that contains itself.
+func TestClonePartSelfReferencingMetadata(t *testing.T) {
+	m := map[string]any{}
+	m["self"] = m
+	got := clonePart(&genai.Part{Text: "x", PartMetadata: m})
+
+	if reflect.ValueOf(got.PartMetadata).UnsafePointer() == reflect.ValueOf(m).UnsafePointer() {
+		t.Error("clonePart() shares the top-level PartMetadata map")
+	}
+	inner, ok := got.PartMetadata["self"].(map[string]any)
+	if !ok {
+		t.Fatalf("clonePart() PartMetadata[\"self\"] = %T, want map[string]any", got.PartMetadata["self"])
+	}
+	if reflect.ValueOf(inner).UnsafePointer() == reflect.ValueOf(m).UnsafePointer() {
+		t.Error("clonePart() shares the first nested PartMetadata map")
+	}
+}
+
+func BenchmarkClonePartInlineData(b *testing.B) {
+	p := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: make([]byte, 10<<20)}}
+	b.SetBytes(int64(len(p.InlineData.Data)))
+	for b.Loop() {
+		clonePart(p)
+	}
+}
+
 // fillValue sets every exported field below v to a non-zero value, with fresh
 // memory for each pointer, slice, map and interface. Types already on the stack
 // are left nil so a recursive type terminates.
