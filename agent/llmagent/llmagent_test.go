@@ -1208,6 +1208,42 @@ func TestAgentTransfer(t *testing.T) {
 		})
 	})
 
+	t.Run("unknown_agent_is_a_tool_error", func(t *testing.T) {
+		// root_agent -- sub_agent_1. The model names an agent outside the
+		// declared enum; it gets the error back and answers instead.
+		model := testModel(
+			transferCall("nobody"),
+			text("response1"))
+
+		subAgent1, err := llmagent.New(llmagent.Config{
+			Name:  "sub_agent_1",
+			Model: model,
+		})
+		if err != nil {
+			t.Fatalf("failed to create subAgent1: %v", err)
+		}
+
+		rootAgent, err := llmagent.New(llmagent.Config{
+			Name:      "root_agent",
+			Model:     model,
+			SubAgents: []agent.Agent{subAgent1},
+		})
+		if err != nil {
+			t.Fatalf("failed to create rootAgent: %v", err)
+		}
+
+		errorResponse := genai.NewContentFromFunctionResponse("transfer_to_agent", map[string]any{
+			"error": `agent "nobody" is not a valid transfer target; available agents: sub_agent_1`,
+		}, "user")
+		check(t, rootAgent, [][]content{
+			0: {
+				{"root_agent", transferCall("nobody").Parts},
+				{"root_agent", errorResponse.Parts},
+				{"root_agent", text("response1").Parts},
+			},
+		})
+	})
+
 	// TODO: cover cases similar to adk-python's
 	// tests/unittests/flows/llm_flows/test_agent_transfer.py
 	//   - test_auto_to_sequential
