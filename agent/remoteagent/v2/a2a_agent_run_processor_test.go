@@ -15,6 +15,8 @@
 package remoteagent
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -65,6 +67,17 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			e.Content = genai.NewContentFromParts(parts, genai.RoleModel)
 		}
 		return e
+	}
+	newThoughtUpdate := func(text string) *a2a.TaskArtifactUpdateEvent {
+		p := a2a.NewTextPart(text)
+		p.SetMeta(adka2a.ToA2AMetaKey("thought"), true)
+		return a2a.NewArtifactUpdateEvent(task, "a1", p)
+	}
+	newPartialThoughtEvent := func(text string) *session.Event {
+		return &session.Event{LLMResponse: model.LLMResponse{
+			Partial: true,
+			Content: &genai.Content{Parts: []*genai.Part{{Thought: true, Text: text}}, Role: genai.RoleModel},
+		}}
 	}
 	withADKPartial := func(event *a2a.TaskArtifactUpdateEvent, partial bool) *a2a.TaskArtifactUpdateEvent {
 		event.Metadata = map[string]any{adka2a.ToA2AMetaKey("partial"): partial}
@@ -288,11 +301,59 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 				newCompletedEvent(),
 			},
 		},
+		{
+			name: "thought and text each streamed in several chunks",
+			events: []a2a.Event{
+				newThoughtUpdate("think"),
+				newThoughtUpdate("ing"),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("Hel")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("lo")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialThoughtEvent("think"),
+				newPartialThoughtEvent("ing"),
+				newPartialEvent("Hel"),
+				newPartialEvent("lo"),
+				newEvent(
+					&genai.Part{Thought: true, Text: "thinking"},
+					&genai.Part{Text: "Hello"},
+				),
+				newCompletedEvent(),
+			},
+		},
+		{
+			name: "text streamed in several chunks around a file part",
+			events: []a2a.Event{
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("Hel")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("lo")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewFileURLPart("gs://bucket/chart.png", "image/png")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("wor")),
+				a2a.NewArtifactUpdateEvent(task, "a1", a2a.NewTextPart("ld")),
+				newFinalStatusUpdate(task, a2a.TaskStateCompleted),
+			},
+			wantEvents: []*session.Event{
+				newPartialEvent("Hel"),
+				newPartialEvent("lo"),
+				{LLMResponse: model.LLMResponse{
+					Partial: true,
+					Content: genai.NewContentFromParts([]*genai.Part{{FileData: &genai.FileData{FileURI: "gs://bucket/chart.png", MIMEType: "image/png"}}}, genai.RoleModel),
+				}},
+				newPartialEvent("wor"),
+				newPartialEvent("ld"),
+				newEvent(
+					&genai.Part{Text: "Hello"},
+					&genai.Part{FileData: &genai.FileData{FileURI: "gs://bucket/chart.png", MIMEType: "image/png"}},
+					&genai.Part{Text: "world"},
+				),
+				newCompletedEvent(),
+			},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			agnt := utils.Must(agent.New(agent.Config{}))
+			agnt := utils.Must(agent.New(agent.Config{Name: "test"}))
 			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 				Agent: agnt,
 			})
@@ -322,6 +383,53 @@ func TestA2AAgentRunProcessor_aggregatePartial(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.wantEvents, gotEvents, opts...); diff != "" {
 				t.Errorf("mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// streamedTextEvents returns n partial events of one text part each, the shape
+// a remote agent's streamed reply arrives in.
+func streamedTextEvents(n int) []*session.Event {
+	events := make([]*session.Event, n)
+	for i := range events {
+		events[i] = &session.Event{LLMResponse: model.LLMResponse{
+			Partial: true,
+			Content: genai.NewContentFromText(strings.Repeat("x", 200), genai.RoleModel),
+		}}
+	}
+	return events
+}
+
+func TestA2AAgentRunProcessor_updateAggregationDoesNotRecopyText(t *testing.T) {
+	const chunks = 1000
+	events := streamedTextEvents(chunks)
+	allocs := testing.AllocsPerRun(10, func() {
+		p := newRunProcessor(A2AConfig{}, nil)
+		agg := &artifactAggregation{}
+		for _, ev := range events {
+			p.updateAggregation("a1", agg, ev)
+		}
+	})
+	// Appending through a builder grows its buffer a logarithmic number of
+	// times. Recopying the text on every chunk allocates at least once per
+	// chunk.
+	if allocs >= chunks/10 {
+		t.Errorf("aggregating %d chunks made %.0f allocations, want fewer than %d", chunks, allocs, chunks/10)
+	}
+}
+
+func BenchmarkA2AAgentRunProcessor_updateAggregation(b *testing.B) {
+	for _, chunks := range []int{15, 90, 500} {
+		events := streamedTextEvents(chunks)
+		b.Run(fmt.Sprintf("chunks=%d", chunks), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				p := newRunProcessor(A2AConfig{}, nil)
+				agg := &artifactAggregation{}
+				for _, ev := range events {
+					p.updateAggregation("a1", agg, ev)
+				}
 			}
 		})
 	}
