@@ -18,10 +18,10 @@
   parts:
     - text: '{"translation":"Hola"} '
   node_info:
-    path: coordinator/translator@call_200903
+    path: coordinator/translator@1
     message_as_output: true
     output_for:
-        - coordinator/translator@call_200903
+        - coordinator/translator@1
 - author: coordinator
   role: user
   parts:
@@ -59,10 +59,10 @@
   parts:
     - text: '{"translation":"bonjour"} '
   node_info:
-    path: coordinator/translator@call_143049
+    path: coordinator/translator@1
     message_as_output: true
     output_for:
-        - coordinator/translator@call_143049
+        - coordinator/translator@1
 - author: coordinator
   role: user
   parts:

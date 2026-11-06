@@ -33,13 +33,11 @@ func TestSingleTurnSubAgent_TranscriptStaysOutOfCoordinatorContext(t *testing.T)
 		name       string
 		callID     string
 		wantBranch string
-		// A branch keyed by the counter cannot be told apart from a workflow
-		// node's branch, so its events stay visible, as in adk-python.
-		skipContents bool
 	}{
 		{name: "branch keyed by call id", callID: "fc1", wantBranch: "translator@fc1"},
-		// A numeric id would collide with the run counter, so it is not used.
-		{name: "numeric call id falls back to counter", callID: "7", wantBranch: "translator@1", skipContents: true},
+		// RunNode rejects these as run ids, but the branch can still carry them.
+		{name: "numeric call id", callID: "7", wantBranch: "translator@7"},
+		{name: "call id with slash", callID: "a/b", wantBranch: "translator@a/b"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -92,9 +90,6 @@ func TestSingleTurnSubAgent_TranscriptStaysOutOfCoordinatorContext(t *testing.T)
 				t.Errorf("translator event branches mismatch (-want +got):\n%s", diff)
 			}
 
-			if tc.skipContents {
-				return
-			}
 			if len(coordModel.Requests) != 3 {
 				t.Fatalf("coordinator requests = %d, want 3", len(coordModel.Requests))
 			}
@@ -114,5 +109,43 @@ func TestSingleTurnSubAgent_TranscriptStaysOutOfCoordinatorContext(t *testing.T)
 				t.Errorf("turn2 coordinator contents mismatch (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// Call ids come from the model, so one can repeat within an invocation. Each
+// call must still run the sub-agent with its own args.
+func TestSingleTurnSubAgent_ReusedCallIDRunsTwice(t *testing.T) {
+	inner := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromText("hola", genai.RoleModel),
+		genai.NewContentFromText("bonjour", genai.RoleModel),
+	}}
+	translator, err := llmagent.New(llmagent.Config{
+		Name: "translator", Description: "Translates.", Model: inner, Mode: llmagent.ModeSingleTurn,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(req string) *genai.Content {
+		return &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: "call_0", Name: "translator", Args: map[string]any{"request": req},
+		}}}}
+	}
+	coordModel := &testutil.MockModel{Responses: []*genai.Content{
+		call("hello to Spanish"),
+		call("hello to French"),
+		genai.NewContentFromText("done", genai.RoleModel),
+	}}
+	coordinator, err := llmagent.New(llmagent.Config{
+		Name: "coordinator", Model: coordModel, Mode: llmagent.ModeChat, SubAgents: []agent.Agent{translator},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := testutil.NewTestAgentRunner(t, coordinator)
+	if _, err := testutil.CollectEvents(r.Run(t, "s1", "turn1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(inner.Requests) != 2 {
+		t.Errorf("translator model called %d times, want 2", len(inner.Requests))
 	}
 }

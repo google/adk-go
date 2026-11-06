@@ -47,11 +47,13 @@ func functionCallIDs(events []*session.Event) map[string]struct{} {
 //
 // Every segment below agentBranch is checked, so events nested further
 // down a tool's sub-branch are skipped too. A segment naming agentName is
-// the agent's own branch, and a segment keyed by a run counter rather than
-// a function call id is a workflow node's branch; neither is skipped.
+// the agent's own branch and is not skipped. A segment keyed by a run counter
+// is a workflow node's branch and is not skipped either, unless a function
+// call in the session has an id equal to that counter, since only the suffix
+// is looked up in callIDs.
 //
 // Mirrors _is_tool_sub_branch_event in adk-python's
-// flows/llm_flows/context/_contents.py.
+// flows/llm_flows/context/_contents.py, which has the same counter caveat.
 func isToolSubBranchEvent(agentBranch string, ev *session.Event, agentName string, callIDs map[string]struct{}) bool {
 	if ev.Branch == "" {
 		return false
