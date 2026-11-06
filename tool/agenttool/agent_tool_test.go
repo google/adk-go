@@ -527,12 +527,21 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 }
 
 func TestAgentTool_Run_SkipSummarization(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type:       "OBJECT",
+		Properties: map[string]*genai.Schema{"city": {Type: "STRING"}},
+		Required:   []string{"city"},
+	}
 	tests := []struct {
 		name              string
 		skipSummarization bool
+		inputSchema       *genai.Schema
+		args              map[string]any
 	}{
-		{name: "skip_summarization_true", skipSummarization: true},
-		{name: "skip_summarization_false", skipSummarization: false},
+		{name: "skip_summarization_true", skipSummarization: true, args: map[string]any{"request": "magic"}},
+		{name: "skip_summarization_false", skipSummarization: false, args: map[string]any{"request": "magic"}},
+		{name: "input_schema_skip_summarization_true", skipSummarization: true, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "input_schema_skip_summarization_false", skipSummarization: false, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
 	}
 
 	for _, tt := range tests {
@@ -542,7 +551,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 					genai.NewContentFromText("test response", genai.RoleModel),
 				},
 			}
-			ag := createAgentWithModel(t, nil, nil, testLLM)
+			ag := createAgentWithModel(t, tt.inputSchema, nil, testLLM)
 			toolCtx := createToolContext(t, ag)
 
 			agentTool := agenttool.New(ag, &agenttool.Config{SkipSummarization: tt.skipSummarization})
@@ -551,7 +560,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+			_, err := toolImpl.Run(toolCtx, tt.args)
 			if err != nil {
 				t.Fatalf("Run() failed unexpectedly: %v", err)
 			}
