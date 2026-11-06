@@ -67,7 +67,7 @@ func (c *DebugAPIController) EventSpanHandler(rw http.ResponseWriter, req *http.
 	// Return only generate content and execute tool spans.
 	wantedOperations := []string{"execute_tool", "generate_content"}
 	for _, span := range spans {
-		opName := span.Attributes[key]
+		opName, _ := span.Attributes[key].(string)
 		if slices.Contains(wantedOperations, opName) {
 			response := convertEventSpan(span)
 			// Return the first span that matches the wanted operations - single event should contain only a single generate content or execute tool span.
