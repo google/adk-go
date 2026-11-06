@@ -139,9 +139,13 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 		// Checked first, so a field this package cannot send is named even when
 		// text or a call on the same part would otherwise carry it out unnoticed.
 		// Media is excluded from the report because it is emitted below.
-		if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
+		if field := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution); field != "" {
 			return nil, fmt.Errorf("openai: unsupported content part: %s", field)
 		}
+		// Code execution has no wire field here. It goes out as the same
+		// fenced text the Responses path sends, so a Gemini turn replayed
+		// into this conversation is not dropped.
+		codeText := shared.CodeExecutionText(part)
 		// Classified before any of the part is emitted, so media that cannot be
 		// labeled fails the request instead of leaving with the text beside it.
 		media, err := shared.ClassifyMedia(part)
@@ -161,6 +165,10 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 			texts = append(texts, part.Text)
 			pieces = append(pieces, contentPiece{text: part.Text})
 		}
+		if codeText != "" {
+			texts = append(texts, codeText)
+			pieces = append(pieces, contentPiece{text: codeText})
+		}
 		for i := range media {
 			pieces = append(pieces, contentPiece{media: &media[i]})
 			hasMedia = true
@@ -178,7 +186,7 @@ func convertContent(content *genai.Content, tracker *shared.CallTracker) ([]open
 				return nil, err
 			}
 			messages = append(messages, *msg)
-		case !sendText && len(media) == 0 && !shared.ReplayedReasoning(part):
+		case !sendText && codeText == "" && len(media) == 0 && !shared.ReplayedReasoning(part):
 			return nil, errors.New("openai: unsupported content part: carries nothing to send")
 		}
 	}
@@ -265,6 +273,11 @@ const imageInputDetail = "auto"
 // picks the wire field and the source picks how that field names the bytes.
 // Errors name the kind and the source and never the URI, which can be a
 // presigned URL.
+//
+// adk-python's Chat Completions converter uses image_url for the inline blobs
+// it emits, regardless of MIME type, and drops FileData with non-HTTP URIs.
+// This converter uses the declared media kind and rejects unsupported sources
+// so files are not mislabeled as images or silently lost.
 func newMediaPart(m shared.Media) (openai.ChatCompletionContentPartUnionParam, error) {
 	switch m.Kind {
 	case shared.MediaKindImage:

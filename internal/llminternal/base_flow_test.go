@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -33,6 +34,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/tool/toolauth"
 )
 
@@ -109,9 +111,24 @@ type testCase struct {
 	afterToolCallbacks   []AfterToolCallback
 	onToolErrorCallbacks []OnToolErrorCallback
 	want                 map[string]any
+	// check runs after the result has been compared, for a row that asserts on
+	// more than the result.
+	check func(t *testing.T)
 }
 
 func TestCallTool(t *testing.T) {
+	panicTool, err := functiontool.New(functiontool.Config{Name: "panicTool"}, func(agent.Context, struct{}) (struct{}, error) {
+		panic("boom")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Callbacks run before the flow replaces the panic error with the generic
+	// message, so each one records the error it was handed for its own row's
+	// check to assert on. Each panic row gets its own map, so that a row only
+	// ever reads what its own callbacks recorded.
+	panicCallbackErrs := map[string]error{}
+	wrappedPanicCallbackErrs := map[string]error{}
 	testCases := []testCase{
 		{
 			name: "tool runs successfully",
@@ -134,6 +151,41 @@ func TestCallTool(t *testing.T) {
 			},
 			args: map[string]any{"key": "value"},
 			want: map[string]any{"error": "tool error"},
+		},
+		{
+			name: "tool panic is hidden from the model but not from callbacks",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					panicCallbackErrs["OnToolError"] = err
+					return nil, nil
+				},
+			},
+			afterToolCallbacks: []AfterToolCallback{
+				func(ctx agent.Context, tool tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					panicCallbackErrs["AfterTool"] = err
+					return nil, nil
+				},
+			},
+			want:  map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			check: checkPanicCallbackErrs(panicCallbackErrs, "OnToolError", "AfterTool"),
+		},
+		{
+			// An error on its way out of a tool is wrapped more than once:
+			// agenttool wraps what the sub-agent run returned, and a callback
+			// that handles the error and returns its own is free to wrap it.
+			name: "wrapped tool panic is hidden from the model",
+			tool: panicTool.(toolinternal.FunctionTool),
+			args: map[string]any{},
+			onToolErrorCallbacks: []OnToolErrorCallback{
+				func(ctx agent.Context, tool tool.Tool, args map[string]any, err error) (map[string]any, error) {
+					wrappedPanicCallbackErrs["OnToolError"] = err
+					return nil, fmt.Errorf("lookup failed: %w", err)
+				},
+			},
+			want:  map[string]any{"error": "Invoking `panicTool()` failed with an internal error."},
+			check: checkPanicCallbackErrs(wrappedPanicCallbackErrs, "OnToolError"),
 		},
 		{
 			name: "before callback returns result",
@@ -432,7 +484,35 @@ func TestCallTool(t *testing.T) {
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("callTool() mismatch (-want +got):\n%s", diff)
 			}
+			if tc.check != nil {
+				tc.check(t)
+			}
 		})
+	}
+}
+
+// checkPanicCallbackErrs asserts that a callback of each of the given kinds
+// recorded itself in errs, and was handed the panic value and the stack, which
+// callbacks need to diagnose a panic the model only sees as a generic message.
+func checkPanicCallbackErrs(errs map[string]error, kinds ...string) func(t *testing.T) {
+	return func(t *testing.T) {
+		t.Helper()
+		for _, kind := range kinds {
+			err, ok := errs[kind]
+			if !ok {
+				t.Errorf("%s callback was not called for the panic", kind)
+				continue
+			}
+			if err == nil {
+				t.Errorf("%s callback got a nil error for the panic", kind)
+				continue
+			}
+			for _, want := range []string{"boom", "stack:", "runtime/debug.Stack"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s callback error is missing %q", kind, want)
+				}
+			}
+		}
 	}
 }
 
