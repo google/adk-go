@@ -22556,3 +22556,312 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
 	}
 }
+
+// liveInvocation is the InvocationContext of an agent activation that has not
+// marked it as ended.
+type liveInvocation struct{ agent.InvocationContext }
+
+func (*liveInvocation) Ended() bool { return false }
+
+func TestRetireDrainedDescendants_CarriesCauseAndDropsLateContexts(t *testing.T) {
+	t.Run("carries drained descendant failure cause up to nearest open ancestor", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-drained-cause"
+		cID := identity{invocationID: invID, agentName: "c", path: "c", branch: "c"}
+		pID := identity{invocationID: invID, agentName: "p", path: "c/p", branch: "c"}
+		dID := identity{invocationID: invID, agentName: "d", path: "c/p/d", branch: "c.d"}
+
+		tm.pushAgentSpan(ctx, cID)
+		tm.pushAgentSpan(ctx, pID)
+		dCtx, cancelD := context.WithCancelCause(ctx)
+		branchErr := errors.New("drained branch failure")
+		tm.pushAgentSpan(dCtx, dID)
+		cancelD(branchErr)
+
+		inv := tm.invocation(ctx, cID)
+		inv.mu.Lock()
+		cRec := inv.agentStack[1]
+		pRec := inv.agentStack[2]
+		dRec := inv.agentStack[3]
+		cRec.propagatesChildError = false
+		pRec.propagatesChildError = true
+		dRec.runDone = true
+		inv.mu.Unlock()
+
+		// p retires while d is still unresponded, leaving d open on agentStack
+		// with its own parallel-branch contextFailureCause.
+		tm.popAgentSpan(ctx, pID)
+
+		inv.mu.Lock()
+		if got := len(inv.agentStack); got != 3 || inv.agentStack[2] != dRec {
+			inv.mu.Unlock()
+			t.Fatalf("agentStack after p retired = %d spans, want d retained as drained descendant", got)
+		}
+		if cause := cRec.openFailureCause(); cause != nil {
+			inv.mu.Unlock()
+			t.Fatalf("c.openFailureCause() before d retired = %v, want nil", cause)
+		}
+		dRec.hasResponse = true
+		inv.retireDrainedDescendantsLocked(func(p *spanRecord, _ map[string]bool) bool {
+			return p == cRec
+		})
+		gotCause := cRec.openFailureCause()
+		stillOpen := slices.Contains(inv.agentStack, dRec)
+		inv.mu.Unlock()
+
+		if stillOpen {
+			t.Fatal("d remained on agentStack after retireDrainedDescendantsLocked")
+		}
+		if !errors.Is(gotCause, branchErr) {
+			t.Fatalf("c.openFailureCause() after retireDrainedDescendantsLocked = %v, want %v", gotCause, branchErr)
+		}
+	})
+
+	t.Run("drops ended, activation, canceled and parent contexts on late trace", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-drained-drop"
+		lateReviewEnded(tm, invID)
+
+		cID := identity{invocationID: invID, agentName: "c", path: "c", branch: "c"}
+		pID := identity{invocationID: invID, agentName: "p", path: "c/p", branch: "c"}
+		dID := identity{invocationID: invID, agentName: "d", path: "c/p/d", branch: "c.d"}
+
+		tm.pushAgentSpan(ctx, cID)
+		pLiveCtx, cancelP := context.WithCancelCause(ctx)
+		defer cancelP(nil)
+		pLive := &liveInvocation{}
+		pIC := deltaContext{
+			Context: pLiveCtx,
+			derive:  func() agent.InvocationContext { return pLive },
+		}
+		tm.pushAgentSpan(pIC, pID)
+
+		dLiveCtx, cancelD := context.WithCancelCause(ctx)
+		branchErr := errors.New("late drained branch failure")
+		dLive := &liveInvocation{}
+		dIC := deltaContext{
+			Context: dLiveCtx,
+			derive:  func() agent.InvocationContext { return dLive },
+		}
+		tm.pushAgentSpan(dIC, dID)
+		cancelD(branchErr)
+
+		cRec := lateReviewAgent(t, tm, invID, "c")
+		pRec := lateReviewAgent(t, tm, invID, "p")
+		dRec := lateReviewAgent(t, tm, invID, "d")
+
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		cRec.propagatesChildError = false
+		pRec.propagatesChildError = true
+		dRec.runDone = true
+		if dRec.ended == nil || dRec.activation == nil {
+			endedNil, actNil := dRec.ended == nil, dRec.activation == nil
+			late.mu.Unlock()
+			t.Fatalf("precondition failed: d.ended==nil:%t d.activation==nil:%t, want both false", endedNil, actNil)
+		}
+		late.mu.Unlock()
+
+		// p retires while d has not yet responded, leaving d drained on the
+		// late agentStack under c.
+		tm.popAgentSpan(pIC, pID)
+
+		// d's buffered response arrives, then c settles the drained subtree.
+		tm.completeResponse(dIC, dID, "d", dID.branch, nil)
+		tm.completeResponse(ctx, cID, "c", cID.branch, nil)
+
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"c"}) {
+			t.Fatalf("late agentStack after c completed response = %v, want [c]", got)
+		}
+		checkLateRecordDropped(t, late, dRec)
+	})
+
+	t.Run("owner recovery response clears drained descendant cause carried through retired parallel parent (i > 0)", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-drained-recovery-open-owner"
+		cID := identity{invocationID: invID, agentName: "c", path: "c", branch: "c"}
+		pID := identity{invocationID: invID, agentName: "p", path: "c/p", branch: "c"}
+		dID := identity{invocationID: invID, agentName: "d", path: "c/p/d", branch: "c.d"}
+
+		tm.pushAgentSpan(ctx, cID)
+		tm.pushAgentSpan(ctx, pID)
+		dCtx, cancelD := context.WithCancelCause(ctx)
+		branchErr := errors.New("drained branch boom")
+		tm.pushAgentSpan(dCtx, dID)
+		cancelD(branchErr)
+
+		inv := tm.invocation(ctx, cID)
+		inv.mu.Lock()
+		cRec := inv.agentStack[1]
+		pRec := inv.agentStack[2]
+		dRec := inv.agentStack[3]
+		cRec.propagatesChildError = false
+		pRec.propagatesChildError = true
+		dRec.runDone = true
+		inv.mu.Unlock()
+
+		// p retires while d is unresponded, leaving d drained under open c.
+		tm.popAgentSpan(ctx, pID)
+
+		// d's buffered response arrives, then recovering owner c emits its final response.
+		tm.completeResponse(ctx, dID, "d", dID.branch, nil)
+		tm.completeResponse(ctx, cID, "c", cID.branch, nil)
+
+		inv.mu.Lock()
+		stillOpen := slices.Contains(inv.agentStack, dRec)
+		gotCause := cRec.openFailureCause()
+		gotRetired := slices.Clone(cRec.retiredCauses)
+		inv.mu.Unlock()
+
+		if stillOpen {
+			t.Fatal("d remained on agentStack after owner c recovery response")
+		}
+		if gotCause != nil || len(gotRetired) != 0 {
+			t.Fatalf("c failure state after recovery response = (cause=%v, retired=%+v), want nil/empty", gotCause, gotRetired)
+		}
+
+		tm.popAgentSpan(ctx, cID)
+		unclosed, invErr := tm.popUnclosedAgentSpans(ctx, cID)
+		if invErr != nil || len(unclosed) != 0 {
+			t.Fatalf("popUnclosedAgentSpans() = (len=%d, err=%v), want (0, nil)", len(unclosed), invErr)
+		}
+	})
+
+	t.Run("retired custom agent recovery response clears drained descendant cause attributed across retired ancestor (i <= 0)", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-drained-recovery-retired-author"
+		rootID := identity{invocationID: invID, agentName: "root", path: "root", branch: ""}
+		cID := identity{invocationID: invID, agentName: "c", path: "root/c", branch: ""}
+		pID := identity{invocationID: invID, agentName: "p", path: "root/c/p", branch: ""}
+		dID := identity{invocationID: invID, agentName: "d", path: "root/c/p/d", branch: "d"}
+
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, cID)
+		tm.pushAgentSpan(ctx, pID)
+		dCtx, cancelD := context.WithCancelCause(ctx)
+		branchErr := errors.New("drained branch under retired custom agent")
+		tm.pushAgentSpan(dCtx, dID)
+		cancelD(branchErr)
+
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		cRec := inv.agentStack[2]
+		pRec := inv.agentStack[3]
+		dRec := inv.agentStack[4]
+		rootRec.propagatesChildError = false
+		cRec.propagatesChildError = false
+		pRec.propagatesChildError = true
+		dRec.runDone = true
+		inv.mu.Unlock()
+
+		// Retire p and c while d has not yet responded, leaving d drained under open root.
+		tm.popAgentSpan(ctx, pID)
+		tm.popAgentSpan(ctx, cID)
+
+		// d's buffered response arrives, then c's AfterAgentCallback recovery event arrives (i <= 0).
+		tm.completeResponse(ctx, dID, "d", dID.branch, nil)
+		tm.completeResponse(ctx, cID, "c", cID.branch, nil)
+
+		inv.mu.Lock()
+		stillOpen := slices.Contains(inv.agentStack, dRec)
+		gotCause := rootRec.openFailureCause()
+		gotRetired := slices.Clone(rootRec.retiredCauses)
+		inv.mu.Unlock()
+
+		if stillOpen {
+			t.Fatal("d remained on agentStack after retired c recovery response")
+		}
+		if gotCause != nil || len(gotRetired) != 0 {
+			t.Fatalf("root failure state after c recovery = (cause=%v, retired=%+v), want nil/empty", gotCause, gotRetired)
+		}
+
+		tm.completeResponse(ctx, rootID, "root", rootID.branch, nil)
+		tm.popAgentSpan(ctx, rootID)
+		unclosed, invErr := tm.popUnclosedAgentSpans(ctx, rootID)
+		if invErr != nil || len(unclosed) != 0 {
+			t.Fatalf("popUnclosedAgentSpans() = (len=%d, err=%v), want (0, nil)", len(unclosed), invErr)
+		}
+	})
+}
+
+func TestLatePopSpanEarlyReturn_RetiresSettledActivation(t *testing.T) {
+	t.Run("popLLMSpan recovered model response early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popllm-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		late.mu.Unlock()
+
+		tm.pushLLMSpan(aIC, aID)
+		// OnModelErrorCallback records the model error and pops the LLM span
+		// with responded=false, storing it in completedModels while keeping a
+		// open on the late stack due to the unrecovered model error.
+		tm.recordError(aIC, aID, llmKey(aID), errors.New("transient model failure"))
+		tm.popLLMSpan(aIC, aID, false)
+		if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a"}) {
+			t.Fatalf("late agentStack while awaiting recovered model response = %v, want [a]", got)
+		}
+
+		// Subsequent AfterModelCallback for the recovered call clears the error
+		// and takes the early return in popLLMSpan (rec == nil &&
+		// completedModels[key] != nil), retiring a once nothing holds it open.
+		tm.clearError(aIC, aID, llmKey(aID))
+		tm.popLLMSpan(aIC, aID, true)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after recovered popLLMSpan = %v, want empty", got)
+		}
+		if late.openAgents.Load() {
+			t.Error("late.openAgents = true after recovered popLLMSpan, want false")
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+
+	t.Run("popAgentSpan unknown agent early return retires settled late activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-late-popagent-early"
+		lateReviewEnded(tm, invID)
+
+		aID := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+		unknownID := identity{invocationID: invID, agentName: "ghost", path: "ghost", branch: "ghost"}
+		aLive := &liveInvocation{}
+		aIC := deltaContext{
+			Context: ctx,
+			derive:  func() agent.InvocationContext { return aLive },
+		}
+		tm.pushAgentSpan(aIC, aID)
+		aRec := lateReviewAgent(t, tm, invID, "a")
+		late := lateReviewTrace(t, tm, invID)
+		late.mu.Lock()
+		aRec.runDone = true
+		aRec.contextEnded = true
+		aRec.hasResponse = true
+		late.mu.Unlock()
+
+		tm.popAgentSpan(ctx, unknownID)
+
+		if got := lateReviewStack(t, tm, invID); len(got) != 0 {
+			t.Fatalf("late agentStack after unknown popAgentSpan = %v, want empty", got)
+		}
+		checkLateRecordDropped(t, late, aRec)
+	})
+}

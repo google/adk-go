@@ -1821,40 +1821,47 @@ func (tm *traceManager) endInvocation(ctx context.Context, id identity) rowSpan 
 	}
 	var inv *invocationTrace
 	if id.invocationID != "" {
-		tm.mu.Lock()
-		inv = tm.invocations[id.invocationID]
-		if inv == nil {
-			inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
-			if ev, ok := tm.evicted[id.invocationID]; ok {
-				inv.restoreEvicted(ev)
-			} else if completed := tm.completed[id.invocationID]; completed != nil {
-				inv.restoreEvicted(completed.identity)
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			inv = tm.invocations[id.invocationID]
+			if inv == nil {
+				inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
+				if ev, ok := tm.evicted[id.invocationID]; ok {
+					inv.restoreEvicted(ev)
+				} else if completed := tm.completed[id.invocationID]; completed != nil {
+					inv.restoreEvicted(completed.identity)
+				}
 			}
-		}
-		tm.mu.Unlock()
+		}()
 	}
 	if inv == nil {
 		inv = newInvocationTraceWithSpan(sc, tm.traceIDFor(id.invocationID), now)
 	}
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
-	inv.mu.Lock()
-	inv.noteRootAgentLocked(id, rootIn, false)
-	var latency map[string]any
-	if inv.started && !inv.evicted {
-		latency = latencyOf(inv.agentStack[0], now)
-	}
-	row := inv.rowSpan(inv.agentStack[0], latency, ambient)
-	row.timestamp = now
-	inv.mu.Unlock()
+	var row rowSpan
+	func() {
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		inv.noteRootAgentLocked(id, rootIn, false)
+		var latency map[string]any
+		if inv.started && !inv.evicted {
+			latency = latencyOf(inv.agentStack[0], now)
+		}
+		row = inv.rowSpan(inv.agentStack[0], latency, ambient)
+		row.timestamp = now
+	}()
 	if id.invocationID != "" {
-		tm.mu.Lock()
-		// Publish the final identity, including any trace adopted by rowSpan,
-		// before removing active state. Late Live callbacks may start and end
-		// an operation, so their state is shared separately from the finished run.
-		tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
-		delete(tm.evicted, id.invocationID)
-		delete(tm.invocations, id.invocationID)
-		tm.mu.Unlock()
+		func() {
+			tm.mu.Lock()
+			defer tm.mu.Unlock()
+			// Publish the final identity, including any trace adopted by rowSpan,
+			// before removing active state. Late Live callbacks may start and end
+			// an operation, so their state is shared separately from the finished run.
+			tm.rememberCompletedLocked(id.invocationID, id.agentName, inv)
+			delete(tm.evicted, id.invocationID)
+			delete(tm.invocations, id.invocationID)
+		}()
 	}
 	return row
 }
@@ -1887,6 +1894,7 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 	ended := endedFunc(ctx)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
@@ -1908,7 +1916,6 @@ func (tm *traceManager) popDelegatingAgentSpan(ctx context.Context, id identity)
 			// the delegating activation's run returned, so its
 			// InvocationContext is not read (see popTaskAgentSpan).
 			inv.retireAgentLocked(i, false, since)
-			inv.retireLateSettledLocked()
 			span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
 			span.timestamp = now
 			return span, true
@@ -2221,6 +2228,7 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	if i < 0 {
@@ -2238,7 +2246,6 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	}
 	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	inv.retireAgentLocked(i, true, rec.seq)
-	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -2489,6 +2496,7 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	i := inv.finishedTaskLocked(id, calls)
 	if i < 0 {
@@ -2519,7 +2527,6 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 		}
 	}
 	inv.retireAgentLocked(i, false, noFrame)
-	inv.retireLateSettledLocked()
 	span = inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span, true
@@ -3132,6 +3139,13 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		if author == "" || author == userAuthor {
 			return
 		}
+		// Settle drained descendants before clearing retired causes so any
+		// failure carried from a drained child through this recovered custom
+		// agent is also cleared by its AfterAgentCallback recovery response.
+		inv.retireDrainedDescendantsLocked(func(p *spanRecord, openSet map[string]bool) bool {
+			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
+				p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
+		})
 		// ADK runs an agent's own AfterAgentCallback after this plugin's
 		// retired the agent's activation, so recovery content that a custom
 		// agent returns arrives once the activation is gone: scan all open
@@ -3141,10 +3155,6 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		for _, rec := range inv.agentStack {
 			rec.clearRetiredCauseFor(author, branch, id.path)
 		}
-		inv.retireDrainedDescendantsLocked(func(p *spanRecord, openSet map[string]bool) bool {
-			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
-				p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
-		})
 		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
 		if author == id.agentName {
 			return
@@ -3199,6 +3209,15 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		inv.retireDrainedDescendantsLocked(func(p *spanRecord, _ map[string]bool) bool {
 			return p == owner
 		})
+		// Re-index owner after slices.DeleteFunc compaction and clear any
+		// drained descendant cause just carried onto owner's settled subtree.
+		if i = slices.Index(inv.agentStack, owner); i > 0 {
+			for _, rec := range inv.agentStack[i:] {
+				if under[rec.spanID] {
+					rec.retiredCauses = nil
+				}
+			}
+		}
 	}
 	// Removing the matched tool calls may leave no launcher open for an
 	// activation whose run was already known to be over (see
@@ -3213,7 +3232,9 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 // on agentStack only because their buffered session events arrived after their
 // enclosing workflow or parallel parent had already retired, once a custom
 // ancestor matching matchAnc emits a final response that settles the drained
-// subtree.
+// subtree. Each removed span's openFailureCause moves up to its nearest open
+// ancestor on agentStack (retiredCauses), and late traces drop callback
+// contexts that nothing reaches anymore (see dropRetiredLateContextsLocked).
 func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *spanRecord, openSet map[string]bool) bool) {
 	openSet := make(map[string]bool, len(inv.agentStack))
 	for _, r := range inv.agentStack[1:] {
@@ -3234,12 +3255,14 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 			maps.Copy(failed, inv.lineageLocked(j))
 		}
 	}
+	var retired []*spanRecord
 	inv.agentStack = slices.DeleteFunc(inv.agentStack, func(d *spanRecord) bool {
 		if d.kind != spanKindAgent || failed[d.spanID] || d.parent == nil || d.parent.kind != spanKindAgent || openSet[d.parent.spanID] {
 			return false
 		}
 		for p := d.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
 			if p != d.parent && matchAnc(p, openSet) {
+				retired = append(retired, d)
 				return true
 			}
 			if openSet[p.spanID] {
@@ -3248,6 +3271,33 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 		}
 		return false
 	})
+	for _, d := range retired {
+		ownCtxCause := d.contextFailureCause()
+		inheritedCause := d.firstRetiredCause()
+		if cause := cmp.Or(ownCtxCause, inheritedCause); cause != nil {
+			carrier := d
+			swallowable := !d.propagatesChildError && ownCtxCause == nil && inheritedCause != nil
+			for anc := d.parent; anc != nil; anc = anc.parent {
+				if slices.Contains(inv.agentStack, anc) {
+					anc.retiredCauses = append(anc.retiredCauses, retiredCause{
+						err:               cause,
+						name:              carrier.name,
+						branch:            carrier.branch,
+						path:              carrier.path,
+						swallowableBySelf: swallowable,
+					})
+					break
+				}
+				if anc.kind == spanKindAgent && !anc.propagatesChildError && anc.contextFailureCause() == nil {
+					carrier = anc
+					swallowable = true
+				}
+			}
+		}
+	}
+	if inv.isLate && len(retired) > 0 {
+		inv.dropRetiredLateContextsLocked(retired...)
+	}
 	inv.syncOpenAgentsLocked()
 }
 
@@ -4696,6 +4746,10 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 		return tm.popLLMSpan(ctx, id, responded)
 	}
 	defer inv.mu.Unlock()
+	// The ended call, including a recovered call completed from completedModels,
+	// no longer keeps its agent or the agents above it from retiring in the
+	// late state (see retireLateSettledLocked).
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	key := callKey(ctx, llmKey(id))
 	rec := inv.llmSpans[key]
@@ -4741,10 +4795,6 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 			rec.firstToken = now
 		}
 	}
-	// The ended call no longer keeps its agent, or the agents that its agent
-	// runs under, from retiring in the late state (see
-	// retireLateSettledLocked).
-	inv.retireLateSettledLocked()
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -4811,6 +4861,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 		return tm.popToolSpan(ctx, id, key, fromError)
 	}
 	defer inv.mu.Unlock()
+	defer inv.retireLateSettledLocked()
 	inv.noteRootAgentLocked(id, rootIn, true)
 	key = callKey(ctx, key)
 	open := inv.toolSpans[key]
@@ -4834,7 +4885,6 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	purged = inv.endToolRunsLocked(ctx, id, inv.lastSessionEventPartial, now, ambient, since)
 	// The ended tool call may have run open activations under other spans.
 	inv.settleFinishedLocked()
-	inv.retireLateSettledLocked()
 	if open != nil {
 		open.dropContexts()
 		if fromError {

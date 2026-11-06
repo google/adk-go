@@ -1964,27 +1964,48 @@ func TestLLMRequestContent_Redaction(t *testing.T) {
 }
 
 // TestGCSOffloading_CloseReportsTheCloseErrors checks that Close returns what
-// went wrong while it closed the clients of the plugin. Nothing fails the first
-// time; closing the plugin again finds its BigQuery write client closed, which
-// fails.
+// went wrong while it closed the clients of the plugin, and preserves that
+// close result on subsequent idempotent Close calls.
 func TestGCSOffloading_CloseReportsTheCloseErrors(t *testing.T) {
 	fs := newFakeStorage(t)
 	opts, _ := storageClientOptions(fs)
-	p, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
-		c.GCSBucketName = "test-bucket"
-		c.ClientOptions = opts
-	})
+	ctx := context.Background()
+	conn, err := grpc.NewClient("passthrough:///unused", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient() error: %v", err)
+	}
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test_table"
+	cfg.DisableCreateViews = true
+	cfg.GCSBucketName = "test-bucket"
+	cfg.ClientOptions = opts
 
-	if err := p.Close(); err != nil {
-		t.Fatalf("Close() error: %v", err)
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error: %v", err)
+	}
+	// Pre-closing writeClient causes p.Close() to encounter an error when
+	// closing the underlying BigQuery write client.
+	if err := writeClient.Close(); err != nil {
+		t.Fatalf("writeClient.Close() error: %v", err)
 	}
 
-	err := p.Close()
+	err = p.Close()
 	if err == nil {
-		t.Fatal("closing the plugin again succeeded, want the error of closing the write client again")
+		t.Fatal("p.Close() succeeded, want error from closing pre-closed write client")
 	}
 	if want := "failed to close BigQuery write client"; !strings.Contains(err.Error(), want) {
-		t.Errorf("closing the plugin again returned %q, want an error that contains %q", err, want)
+		t.Errorf("p.Close() returned %q, want an error that contains %q", err, want)
+	}
+	if secondErr := p.Close(); secondErr != err {
+		t.Errorf("second p.Close() returned %v, want cached first error %v", secondErr, err)
 	}
 }
 
