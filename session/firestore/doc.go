@@ -74,16 +74,21 @@
 // The service stores "event_data" as a native map, the format adk-python
 // releases through 2.13.0 write and read. Firestore rejects some maps: one
 // with an empty key or a reserved one such as "__type__", one nested more
-// than 20 levels deep, one with more than about 20,000 values, each of which
-// Firestore indexes, or one over the size limit once each number counts 8
-// bytes. The Firestore emulator and some databases also reject an array
+// than 20 levels deep, one over the size limit once each number counts 8
+// bytes, or one with more than about 20,000 indexed values. Firestore
+// indexes every value of a map and every element of an array, but not the
+// fields of a map inside an array, so a large state delta can pass that
+// limit and a tool response, which sits in the content's parts array,
+// cannot. The Firestore emulator and some databases also reject an array
 // directly inside another array, such as a tool response
 // {"rows": [["a", 1]]}. The service stores an event in any of these shapes
 // as a JSON string instead, the format adk-python's main branch writes for
-// every event. On
-// read, the service accepts both formats, camelCase field names, and bytes
-// that adk-python wrote in URL-safe base64, such as thought signatures and
-// inline data.
+// every event, with some margin below the limits. Firestore has further
+// limits the service does not predict, such as the size of one index entry,
+// so [session.Service.AppendEvent] also appends the event as a string when
+// Firestore rejects it as a map. On read, the service accepts both formats,
+// camelCase field names, and bytes that adk-python wrote in URL-safe base64,
+// such as thought signatures and inline data.
 //
 // In practice, for an application that moves between adk-python and ADK Go
 // on one database:
@@ -111,11 +116,11 @@
 // The service writes both exactly under an extra "adk_go_compaction" key that
 // adk-python ignores, and reads them back from it.
 //
-// Firestore rejects an array directly inside another array. In the app and
-// user state documents, each such inner array is stored as
-// {"_adk_list": [...]} and a one-key map in an array whose key is "_adk_list"
-// or "_adk_dict" as {"_adk_dict": {...}}, as adk-python's main branch does,
-// and both are unwrapped on read. adk-python releases through 2.13.0 neither
+// The Firestore emulator and some databases reject an array directly inside
+// another array. In the app and user state documents, each such inner array
+// is stored as {"_adk_list": [...]} and a one-key map in an array whose key
+// is "_adk_list" or "_adk_dict" as {"_adk_dict": {...}}, as adk-python's main
+// branch does, and both are unwrapped on read. adk-python releases through 2.13.0 neither
 // write nor unwrap these, and cannot store such state themselves, so they
 // return app or user state that ADK Go wrote with a nested array in its
 // wrapped form.

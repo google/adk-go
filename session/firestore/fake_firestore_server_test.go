@@ -55,6 +55,9 @@ type fakeFirestoreServer struct {
 	failNextQuery   error
 	failBatchWrites error
 	onBeforeCommit  func(txID string)
+	// lastQueryProjection holds the field paths the last query selected,
+	// and is nil when it selected whole documents.
+	lastQueryProjection []string
 }
 
 func newFakeFirestoreServer() *fakeFirestoreServer {
@@ -410,6 +413,23 @@ func (f *fakeFirestoreServer) RunQuery(req *pb.RunQueryRequest, stream pb.Firest
 		}
 	}
 
+	f.lastQueryProjection = nil
+	if sel := sq.GetSelect(); sel != nil {
+		f.lastQueryProjection = []string{}
+		for _, field := range sel.GetFields() {
+			f.lastQueryProjection = append(f.lastQueryProjection, field.GetFieldPath())
+		}
+		for i, doc := range matched {
+			projected := &pb.Document{Name: doc.GetName(), CreateTime: doc.GetCreateTime(), UpdateTime: doc.GetUpdateTime(), Fields: map[string]*pb.Value{}}
+			for _, path := range f.lastQueryProjection {
+				if val, ok := doc.GetFields()[path]; ok {
+					projected.Fields[path] = val
+				}
+			}
+			matched[i] = projected
+		}
+	}
+
 	now := timestamppb.Now()
 	for _, doc := range matched {
 		if err := stream.Send(&pb.RunQueryResponse{
@@ -567,35 +587,42 @@ func (f *fakeFirestoreServer) validateWrite(w *pb.Write) error {
 // validateFields reports the error Firestore returns for a document it does
 // not store: an array directly inside an array, a field name that is empty or
 // reserved (__ at both ends of a longer name), a value nested more than 20
-// levels deep, or more scalar values than its index entry limit allows. The
-// limits were measured on a Firestore database, except for the array inside
-// an array, which the Firestore emulator rejects and some databases accept.
+// levels deep, more indexed values than its index entry limit allows, or an
+// array of empty maps too long for one index entry. The limits were measured
+// on a Firestore database, except for the array inside an array, which the
+// Firestore emulator rejects and some databases accept.
 func validateFields(fields map[string]*pb.Value) error {
 	if err := validateMapFields(fields, 1); err != nil {
 		return err
 	}
-	// Firestore indexes each scalar value twice and allows 40,000 entries.
-	if n := countScalarValues(&pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: fields}}}); n > 20000 {
+	// Firestore writes two index entries for each indexed value and allows
+	// 40,000.
+	n := 0
+	for _, val := range fields {
+		n += countIndexedValues(val)
+	}
+	if n > 20000 {
 		return status.Errorf(codes.InvalidArgument, "too many index entries for entity")
 	}
 	return nil
 }
 
-func countScalarValues(val *pb.Value) int {
-	n := 0
+// countIndexedValues counts what Firestore indexes in val: val itself, every
+// value of a map at any depth, and each element of an array, but not the
+// fields of a map inside an array.
+func countIndexedValues(val *pb.Value) int {
 	switch v := val.GetValueType().(type) {
 	case *pb.Value_ArrayValue:
-		for _, item := range v.ArrayValue.GetValues() {
-			n += countScalarValues(item)
-		}
+		return 1 + len(v.ArrayValue.GetValues())
 	case *pb.Value_MapValue:
+		n := 1
 		for _, item := range v.MapValue.GetFields() {
-			n += countScalarValues(item)
+			n += countIndexedValues(item)
 		}
+		return n
 	default:
-		n = 1
+		return 1
 	}
-	return n
 }
 
 func validateMapFields(fields map[string]*pb.Value, depth int) error {
@@ -621,6 +648,17 @@ func validateValue(val *pb.Value, depth int, inArray bool) error {
 		}
 		if depth > 20 {
 			return status.Errorf(codes.InvalidArgument, "value is nested too deeply")
+		}
+		// Measured: an array of 4,000 empty maps is stored and one of 5,000
+		// is not, while 19,000 maps with a field are.
+		emptyMaps := 0
+		for _, item := range v.ArrayValue.GetValues() {
+			if m, ok := item.GetValueType().(*pb.Value_MapValue); ok && len(m.MapValue.GetFields()) == 0 {
+				emptyMaps++
+			}
+		}
+		if emptyMaps > 4000 {
+			return status.Errorf(codes.InvalidArgument, "Index entry is too large.")
 		}
 		for _, item := range v.ArrayValue.GetValues() {
 			if err := validateValue(item, depth+1, true); err != nil {

@@ -793,104 +793,120 @@ func (s *firestoreService) AppendEvent(ctx context.Context, curSession session.S
 		expectedRev := sess.currentRevision()
 
 		var newRevision int64
-		err = s.runTransaction(ctx, func(_ context.Context, tx *fs.Transaction) error {
-			sessionSnap, txErr := tx.Get(sessionRef)
-			if txErr != nil {
-				if status.Code(txErr) == codes.NotFound {
-					return fmt.Errorf("%w: %q: %w", session.ErrNotFound, sess.ID(), txErr)
+		appendTx := func(eventData any) error {
+			return s.runTransaction(ctx, func(_ context.Context, tx *fs.Transaction) error {
+				sessionSnap, txErr := tx.Get(sessionRef)
+				if txErr != nil {
+					if status.Code(txErr) == codes.NotFound {
+						return fmt.Errorf("%w: %q: %w", session.ErrNotFound, sess.ID(), txErr)
+					}
+					return fmt.Errorf("reading session %q: %w", sess.ID(), txErr)
 				}
-				return fmt.Errorf("reading session %q: %w", sess.ID(), txErr)
-			}
-			if !sessionSnap.Exists() {
-				return fmt.Errorf("%w: %q", session.ErrNotFound, sess.ID())
-			}
+				if !sessionSnap.Exists() {
+					return fmt.Errorf("%w: %q", session.ErrNotFound, sess.ID())
+				}
 
-			sessionDoc := sessionSnap.Data()
-			if statusStr, _ := sessionDoc["status"].(string); statusStr == sessionStatusDeleting {
-				return fmt.Errorf("%w: session %q is being deleted", session.ErrNotFound, sess.ID())
-			}
+				sessionDoc := sessionSnap.Data()
+				if statusStr, _ := sessionDoc["status"].(string); statusStr == sessionStatusDeleting {
+					return fmt.Errorf("%w: session %q is being deleted", session.ErrNotFound, sess.ID())
+				}
 
-			currentRevision := parseRevision(sessionDoc["revision"])
-			if currentRevision != expectedRev {
-				return fmt.Errorf("%w: session %q expected revision %d, stored revision is %d",
-					ErrStaleSession, sess.ID(), expectedRev, currentRevision)
-			}
+				currentRevision := parseRevision(sessionDoc["revision"])
+				if currentRevision != expectedRev {
+					return fmt.Errorf("%w: session %q expected revision %d, stored revision is %d",
+						ErrStaleSession, sess.ID(), expectedRev, currentRevision)
+				}
 
-			// Merge session-scoped deltas onto the stored session state inside the
-			// transaction, matching session/database rather than
-			// adk-python's in-memory snapshot (firestore_session_service.py:675-681)
-			// so uncommitted in-memory State().Set mutations do not leak to storage.
-			// Numbers stay as written so the rewrite keeps the keys this event
-			// does not touch exact, such as an integer above 2^53 that
-			// adk-python stored.
-			currentSessionState, stateErr := decodeSessionState(sessionDoc["state"], true)
-			if stateErr != nil {
-				return fmt.Errorf("decoding stored state for session %q: %w", sess.ID(), stateErr)
-			}
-			maps.Copy(currentSessionState, sessionUpdates)
-			sessionStateJSON, stateErr := marshalSessionState(currentSessionState)
-			if stateErr != nil {
-				return fmt.Errorf("marshaling session state: %w", stateErr)
-			}
+				// Merge session-scoped deltas onto the stored session state inside the
+				// transaction, matching session/database rather than
+				// adk-python's in-memory snapshot (firestore_session_service.py:675-681)
+				// so uncommitted in-memory State().Set mutations do not leak to storage.
+				// Numbers stay as written so the rewrite keeps the keys this event
+				// does not touch exact, such as an integer above 2^53 that
+				// adk-python stored.
+				currentSessionState, stateErr := decodeSessionState(sessionDoc["state"], true)
+				if stateErr != nil {
+					return fmt.Errorf("decoding stored state for session %q: %w", sess.ID(), stateErr)
+				}
+				maps.Copy(currentSessionState, sessionUpdates)
+				sessionStateJSON, stateErr := marshalSessionState(currentSessionState)
+				if stateErr != nil {
+					return fmt.Errorf("marshaling session state: %w", stateErr)
+				}
 
-			var appSnap, userSnap *fs.DocumentSnapshot
-			if len(appUpdates) > 0 {
-				appSnap, txErr = tx.Get(appRef)
-				if txErr != nil && status.Code(txErr) != codes.NotFound {
-					return fmt.Errorf("reading app state: %w", txErr)
+				var appSnap, userSnap *fs.DocumentSnapshot
+				if len(appUpdates) > 0 {
+					appSnap, txErr = tx.Get(appRef)
+					if txErr != nil && status.Code(txErr) != codes.NotFound {
+						return fmt.Errorf("reading app state: %w", txErr)
+					}
+				}
+				if len(userUpdates) > 0 {
+					userSnap, txErr = tx.Get(userRef)
+					if txErr != nil && status.Code(txErr) != codes.NotFound {
+						return fmt.Errorf("reading user state: %w", txErr)
+					}
+				}
+
+				if len(appUpdates) > 0 {
+					currentApp := snapshotMapOrEmpty(appSnap)
+					encodedApp, encErr := encodeFirestoreState(currentApp, appUpdates)
+					if encErr != nil {
+						return fmt.Errorf("encoding app state: %w", encErr)
+					}
+					if err := tx.Set(appRef, encodedApp); err != nil {
+						return fmt.Errorf("writing app state: %w", err)
+					}
+				}
+				if len(userUpdates) > 0 {
+					currentUser := snapshotMapOrEmpty(userSnap)
+					encodedUser, encErr := encodeFirestoreState(currentUser, userUpdates)
+					if encErr != nil {
+						return fmt.Errorf("encoding user state: %w", encErr)
+					}
+					if err := tx.Set(userRef, encodedUser); err != nil {
+						return fmt.Errorf("writing user state: %w", err)
+					}
+				}
+
+				newRevision = currentRevision + 1
+				eventTimeUTC := event.Timestamp.UTC()
+				if err := tx.Update(sessionRef, []fs.Update{
+					{Path: "state", Value: sessionStateJSON},
+					{Path: "updateTime", Value: eventTimeUTC},
+					{Path: "revision", Value: newRevision},
+				}); err != nil {
+					return fmt.Errorf("updating session %q: %w", sess.ID(), err)
+				}
+
+				if err := tx.Create(eventRef, map[string]any{
+					"event_data":   eventData,
+					"timestamp":    eventTimeUTC,
+					"invocationId": event.InvocationID,
+					"appName":      sess.AppName(),
+					"userId":       sess.UserID(),
+					"revision":     newRevision,
+				}); err != nil {
+					return fmt.Errorf("writing event %q: %w", event.ID, err)
+				}
+
+				return nil
+			})
+		}
+		err := appendTx(eventData)
+		// measureFirestoreValue does not model every Firestore limit: an
+		// index entry's size depends on the document's name, and databases
+		// differ on some shapes. A commit applies nothing when it fails, so
+		// an event Firestore rejects as a map is appended as a string. When
+		// the string is too large or would not read back, Firestore's error
+		// stands.
+		if m, isMap := eventData.(map[string]any); isMap && status.Code(err) == codes.InvalidArgument {
+			if asString, strErr := eventDataString(event.ID, m); strErr == nil {
+				if _, strErr = decodeEventData(asString); strErr == nil {
+					err = appendTx(asString)
 				}
 			}
-			if len(userUpdates) > 0 {
-				userSnap, txErr = tx.Get(userRef)
-				if txErr != nil && status.Code(txErr) != codes.NotFound {
-					return fmt.Errorf("reading user state: %w", txErr)
-				}
-			}
-
-			if len(appUpdates) > 0 {
-				currentApp := snapshotMapOrEmpty(appSnap)
-				encodedApp, encErr := encodeFirestoreState(currentApp, appUpdates)
-				if encErr != nil {
-					return fmt.Errorf("encoding app state: %w", encErr)
-				}
-				if err := tx.Set(appRef, encodedApp); err != nil {
-					return fmt.Errorf("writing app state: %w", err)
-				}
-			}
-			if len(userUpdates) > 0 {
-				currentUser := snapshotMapOrEmpty(userSnap)
-				encodedUser, encErr := encodeFirestoreState(currentUser, userUpdates)
-				if encErr != nil {
-					return fmt.Errorf("encoding user state: %w", encErr)
-				}
-				if err := tx.Set(userRef, encodedUser); err != nil {
-					return fmt.Errorf("writing user state: %w", err)
-				}
-			}
-
-			newRevision = currentRevision + 1
-			eventTimeUTC := event.Timestamp.UTC()
-			if err := tx.Update(sessionRef, []fs.Update{
-				{Path: "state", Value: sessionStateJSON},
-				{Path: "updateTime", Value: eventTimeUTC},
-				{Path: "revision", Value: newRevision},
-			}); err != nil {
-				return fmt.Errorf("updating session %q: %w", sess.ID(), err)
-			}
-
-			if err := tx.Create(eventRef, map[string]any{
-				"event_data":   eventData,
-				"timestamp":    eventTimeUTC,
-				"invocationId": event.InvocationID,
-				"appName":      sess.AppName(),
-				"userId":       sess.UserID(),
-				"revision":     newRevision,
-			}); err != nil {
-				return fmt.Errorf("writing event %q: %w", event.ID, err)
-			}
-
-			return nil
-		})
+		}
 		if err != nil {
 			return fmt.Errorf("firestore: append event: %w", err)
 		}
@@ -961,7 +977,7 @@ func encodeFirestoreState(stored, delta map[string]any) (map[string]any, error) 
 	encoded := encodeFirestoreMap(merged)
 	// A document Firestore would reject for another reason is left for it to
 	// report, as adk-python does.
-	if m := measureFirestoreValue(encoded); m.ok && m.size > maxFirestorePayloadBytes {
+	if m := measureFirestoreDocument(encoded); m.ok && m.size > maxFirestorePayloadBytes {
 		return nil, fmt.Errorf("state document (%d bytes) exceeds Firestore %d-byte payload limit", m.size, maxFirestorePayloadBytes)
 	}
 	return encoded, nil
@@ -1113,8 +1129,9 @@ func marshalSessionState(state map[string]any) (string, error) {
 
 // decodeSessionState decodes a session document's state field, which is a
 // JSON object string or, from older adk-python, a map. With exactNumbers a
-// number decodes as a json.Number, which marshals back as it was written,
-// and otherwise as a float64.
+// number keeps the form that marshals back as it was written, a json.Number
+// from a string and an int64 or float64 from a map, and otherwise it is a
+// float64.
 func decodeSessionState(raw any, exactNumbers bool) (map[string]any, error) {
 	if raw == nil {
 		return make(map[string]any), nil
@@ -1137,7 +1154,10 @@ func decodeSessionState(raw any, exactNumbers bool) (map[string]any, error) {
 		}
 		return out, nil
 	case map[string]any:
-		return maps.Clone(v), nil
+		if exactNumbers {
+			return maps.Clone(v), nil
+		}
+		return integersAsFloat64(maps.Clone(v)), nil
 	default:
 		return nil, fmt.Errorf("unexpected session state type %T", raw)
 	}
@@ -1184,14 +1204,20 @@ func encodeEventData(event *session.Event) (any, error) {
 	if m := measureFirestoreValue(out); m.ok && m.size <= maxFirestorePayloadBytes && m.values <= maxFirestoreIndexedValues {
 		return out, nil
 	}
-	b, err = json.Marshal(out)
+	return eventDataString(event.ID, out)
+}
+
+// eventDataString returns the event_data map of the event with the given ID
+// as the JSON string adk-python's main branch stores.
+func eventDataString(eventID string, eventData map[string]any) (any, error) {
+	b, err := json.Marshal(eventData)
 	if err != nil {
-		return nil, fmt.Errorf("firestore: marshaling event %q: %w", event.ID, err)
+		return nil, fmt.Errorf("firestore: marshaling event %q: %w", eventID, err)
 	}
 	if len(b) > maxFirestorePayloadBytes {
 		return nil, fmt.Errorf(
 			"firestore: event %q serialized size (%d bytes) exceeds the %d-byte Firestore payload limit; store large binary payloads in artifact.Service and reference them via genai.FileData URIs",
-			event.ID, len(b), maxFirestorePayloadBytes,
+			eventID, len(b), maxFirestorePayloadBytes,
 		)
 	}
 	return string(b), nil
@@ -1205,9 +1231,9 @@ const (
 	// is below Firestore's 1,500-byte limit, so a path near the limit is
 	// treated as too long rather than risked.
 	maxFirestoreFieldPathBytes = 1024
-	// maxFirestoreIndexedValues bounds the scalar values of one map.
-	// Firestore indexes every value twice by default and rejects a document
-	// with more than 40,000 index entries; this leaves room for the
+	// maxFirestoreIndexedValues bounds the values of one field that
+	// Firestore indexes. It writes two index entries for each by default and
+	// rejects a document with more than 40,000; this leaves room for the
 	// document's other fields.
 	maxFirestoreIndexedValues = 18000
 )
@@ -1224,8 +1250,17 @@ type firestoreMeasure struct {
 	// its UTF-8 length plus one, a number 8 bytes, a boolean or null 1 byte,
 	// a map or array the sum of its entries, a map key its length plus one.
 	size int
-	// values counts the scalar values, each of which Firestore indexes.
+	// values bounds what Firestore indexes: the value itself, every value
+	// of a map at any depth, and each element of an array. Firestore counts
+	// equal elements of an array once and does not index the fields of a map
+	// inside an array, so nothing under an event's content parts counts.
+	// Measured on a real database: 19,000 distinct strings in a map or an
+	// array are accepted and 21,000 rejected, as are 9,900 and 10,100
+	// one-key maps or one-element arrays in a map; an array of 19,000
+	// distinct three-key maps is accepted.
 	values int
+	// arrays is how many arrays enclose the value being measured.
+	arrays int
 }
 
 // measureFirestoreValue measures v as the value of a document field.
@@ -1235,9 +1270,19 @@ func measureFirestoreValue(v any) firestoreMeasure {
 	return m
 }
 
+// measureFirestoreDocument measures fields as the fields of a document.
+func measureFirestoreDocument(fields map[string]any) firestoreMeasure {
+	m := firestoreMeasure{ok: true}
+	m.add(fields, 0, 0, false)
+	return m
+}
+
 // add measures v, which sits depth levels deep, under field names totalling
 // pathBytes, and directly inside an array when inList is set.
 func (m *firestoreMeasure) add(v any, depth, pathBytes int, inList bool) {
+	if m.arrays == 0 {
+		m.values++
+	}
 	switch x := v.(type) {
 	case map[string]any:
 		if depth > maxFirestoreValueDepth {
@@ -1259,22 +1304,23 @@ func (m *firestoreMeasure) add(v any, depth, pathBytes int, inList bool) {
 			m.ok = false
 			return
 		}
+		if m.arrays == 0 {
+			m.values += len(x)
+		}
+		m.arrays++
 		for _, e := range x {
 			m.add(e, depth+1, pathBytes, true)
 		}
+		m.arrays--
 	case string:
 		m.size += len(x) + 1
-		m.values++
 	case []byte:
 		m.size += len(x)
-		m.values++
 	case nil, bool:
 		m.size++
-		m.values++
 	default:
 		// Numbers and timestamps.
 		m.size += 8
-		m.values++
 	}
 }
 

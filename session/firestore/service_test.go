@@ -766,6 +766,14 @@ func TestFirestoreService_Delete_BatchingOver500Events(t *testing.T) {
 		t.Fatalf("Delete() error = %v", err)
 	}
 
+	// Delete needs only the event names.
+	srv.mu.Lock()
+	projection := srv.lastQueryProjection
+	srv.mu.Unlock()
+	if diff := cmp.Diff([]string{"__name__"}, projection); diff != "" {
+		t.Errorf("event query projection mismatch (-want +got):\n%s", diff)
+	}
+
 	// 505 event deletes in batches of 500 = 2 batch commits + 1 session delete commit = 3 non-tx commits.
 	srv.mu.Lock()
 	batchCommits := srv.batchCommits
@@ -2233,6 +2241,8 @@ func nestArrays(n int, leaf any) any {
 func TestMeasureFirestoreValue(t *testing.T) {
 	// The limits were measured on a Firestore database: a field nests at most
 	// 20 maps and arrays, and "__", "___" and "____" are valid field names.
+	// wantValues counts the value itself, every value of a map and each
+	// element of an array.
 	tests := []struct {
 		name       string
 		value      any
@@ -2240,23 +2250,28 @@ func TestMeasureFirestoreValue(t *testing.T) {
 		wantValues int
 		wantOK     bool
 	}{
-		{name: "string", value: map[string]any{"a": "xy"}, wantSize: 2 + 3, wantValues: 1, wantOK: true},
-		{name: "numbers", value: map[string]any{"i": int64(1), "f": 1.5}, wantSize: 2 + 8 + 2 + 8, wantValues: 2, wantOK: true},
-		{name: "bool_and_null", value: map[string]any{"b": true, "z": nil}, wantSize: 2 + 1 + 2 + 1, wantValues: 2, wantOK: true},
-		{name: "array", value: map[string]any{"l": []any{int64(1), "a"}}, wantSize: 2 + 8 + 2, wantValues: 2, wantOK: true},
-		{name: "array_in_map_in_array", value: map[string]any{"l": []any{map[string]any{"m": []any{"a"}}}}, wantSize: 2 + 2 + 2, wantValues: 1, wantOK: true},
+		{name: "string", value: map[string]any{"a": "xy"}, wantSize: 2 + 3, wantValues: 2, wantOK: true},
+		{name: "numbers", value: map[string]any{"i": int64(1), "f": 1.5}, wantSize: 2 + 8 + 2 + 8, wantValues: 3, wantOK: true},
+		{name: "bool_and_null", value: map[string]any{"b": true, "z": nil}, wantSize: 2 + 1 + 2 + 1, wantValues: 3, wantOK: true},
+		{name: "array", value: map[string]any{"l": []any{int64(1), "a"}}, wantSize: 2 + 8 + 2, wantValues: 4, wantOK: true},
+		{name: "array_in_map_in_array", value: map[string]any{"l": []any{map[string]any{"m": []any{"a"}}}}, wantSize: 2 + 2 + 2, wantValues: 3, wantOK: true},
 		{name: "array_in_array", value: map[string]any{"l": []any{[]any{"a"}}}},
 		{name: "empty_key", value: map[string]any{"": 1}},
 		{name: "reserved_key", value: map[string]any{"a": map[string]any{"__type__": "x"}}},
-		{name: "key_with_reserved_prefix_only", value: map[string]any{"__type": "x"}, wantSize: 7 + 2, wantValues: 1, wantOK: true},
-		{name: "key_with_reserved_suffix_only", value: map[string]any{"type__": "x"}, wantSize: 7 + 2, wantValues: 1, wantOK: true},
-		{name: "key_of_four_underscores", value: map[string]any{"____": "x"}, wantSize: 5 + 2, wantValues: 1, wantOK: true},
-		{name: "field_path_at_limit", value: map[string]any{strings.Repeat("k", 500): map[string]any{strings.Repeat("k", 522): "x"}}, wantSize: 501 + 523 + 2, wantValues: 1, wantOK: true},
+		{name: "key_with_reserved_prefix_only", value: map[string]any{"__type": "x"}, wantSize: 7 + 2, wantValues: 2, wantOK: true},
+		{name: "key_with_reserved_suffix_only", value: map[string]any{"type__": "x"}, wantSize: 7 + 2, wantValues: 2, wantOK: true},
+		{name: "key_of_four_underscores", value: map[string]any{"____": "x"}, wantSize: 5 + 2, wantValues: 2, wantOK: true},
+		{name: "key_of_five_underscores", value: map[string]any{"_____": "x"}},
+		{name: "empty_map_and_array", value: map[string]any{"m": map[string]any{}, "l": []any{}}, wantSize: 2 + 2, wantValues: 3, wantOK: true},
+		{name: "maps_in_map", value: map[string]any{"m": map[string]any{"a": "x", "b": map[string]any{"c": "x"}}}, wantSize: 2 + 2 + 2 + 2 + 2 + 2, wantValues: 5, wantOK: true},
+		// Firestore does not index the fields of a map inside an array.
+		{name: "maps_in_array", value: map[string]any{"rows": []any{map[string]any{"a": "x", "b": "y"}, map[string]any{"l": []any{"x", "y"}}}}, wantSize: 5 + 4 + 4 + 2 + 4, wantValues: 4, wantOK: true},
+		{name: "field_path_at_limit", value: map[string]any{strings.Repeat("k", 500): map[string]any{strings.Repeat("k", 522): "x"}}, wantSize: 501 + 523 + 2, wantValues: 3, wantOK: true},
 		{name: "field_path_over_limit", value: map[string]any{strings.Repeat("k", 500): map[string]any{strings.Repeat("k", 523): "x"}}},
 		{name: "field_path_over_limit_across_three_levels", value: map[string]any{strings.Repeat("k", 400): map[string]any{strings.Repeat("k", 400): map[string]any{strings.Repeat("k", 400): "x"}}}},
-		{name: "maps_20_deep", value: nestMaps(20, "x"), wantSize: 20*2 + 2, wantValues: 1, wantOK: true},
+		{name: "maps_20_deep", value: nestMaps(20, "x"), wantSize: 20*2 + 2, wantValues: 21, wantOK: true},
 		{name: "maps_21_deep", value: nestMaps(21, "x")},
-		{name: "arrays_and_maps_20_deep", value: map[string]any{"k": nestArrays(19, "x")}, wantSize: 2 + 9*2 + 2, wantValues: 1, wantOK: true},
+		{name: "arrays_and_maps_20_deep", value: map[string]any{"k": nestArrays(19, "x")}, wantSize: 2 + 9*2 + 2, wantValues: 3, wantOK: true},
 		{name: "arrays_and_maps_21_deep", value: map[string]any{"k": nestArrays(20, "x")}},
 	}
 	for _, tc := range tests {
@@ -2278,15 +2293,35 @@ func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *tes
 		ints[i] = float64(1)
 	}
 	// Firestore rejects a document with more than 40,000 index entries, two
-	// for each value: measured, 19,000 values are stored and 21,000 are not.
+	// for each indexed value: measured, 19,000 distinct values are stored and
+	// 21,000 are not. It indexes a map and each of its values, so 10,100
+	// one-key maps pass the limit too. It does not index the fields of a map
+	// inside an array, so neither 15,000 rows of three fields nor anything in
+	// a tool response, which sits in the parts array, count.
 	manyValues := make([]any, 21000)
 	for i := range manyValues {
-		manyValues[i] = "v"
+		manyValues[i] = fmt.Sprintf("v%d", i)
 	}
 	someValues := manyValues[:17000]
+	oneKeyMaps := make(map[string]any, 10100)
+	for i := range 10100 {
+		oneKeyMaps[fmt.Sprintf("r%d", i)] = map[string]any{"a": "v"}
+	}
+	rows := make([]any, 15000)
+	for i := range rows {
+		rows[i] = map[string]any{"id": float64(i), "name": "x", "ok": true}
+	}
+	// Firestore rejects this one for the size of an index entry, which the
+	// service does not predict: the commit fails and the event is appended
+	// again as a string.
+	emptyMaps := make([]any, 4500)
+	for i := range emptyMaps {
+		emptyMaps[i] = map[string]any{}
+	}
 	tests := []struct {
 		name       string
 		response   map[string]any
+		delta      map[string]any
 		wantString bool
 	}{
 		{name: "plain", response: map[string]any{"rows": []any{"a", float64(1)}}},
@@ -2299,8 +2334,12 @@ func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *tes
 		{name: "deepest_map", response: map[string]any{"deep": nestMaps(14, "x")}},
 		{name: "too_deep", response: map[string]any{"deep": nestMaps(15, "x")}, wantString: true},
 		{name: "too_large_as_numbers", response: map[string]any{"ints": ints}, wantString: true},
-		{name: "too_many_indexed_values", response: map[string]any{"cells": manyValues}, wantString: true},
-		{name: "many_indexed_values_under_limit", response: map[string]any{"cells": someValues}},
+		{name: "too_many_indexed_values", delta: map[string]any{"cells": manyValues}, wantString: true},
+		{name: "many_indexed_values_under_limit", delta: map[string]any{"cells": someValues}},
+		{name: "too_many_indexed_maps", delta: map[string]any{"byID": oneKeyMaps}, wantString: true},
+		{name: "many_rows_in_an_array", delta: map[string]any{"rows": rows}},
+		{name: "values_in_a_tool_response_are_not_indexed", response: map[string]any{"cells": manyValues, "byID": oneKeyMaps}},
+		{name: "rejected_by_firestore_as_a_map", response: map[string]any{"rows": emptyMaps}, wantString: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2313,7 +2352,7 @@ func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *tes
 			ev := &session.Event{ID: "e", Author: "agent", LLMResponse: model.LLMResponse{Content: &genai.Content{
 				Role:  "model",
 				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "t", Response: tc.response}}},
-			}}}
+			}}, Actions: session.EventActions{StateDelta: tc.delta}}
 			if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
 				t.Fatalf("AppendEvent() error = %v", err)
 			}
@@ -2330,6 +2369,194 @@ func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *tes
 			}
 			if diff := cmp.Diff(tc.response, got.Session.Events().At(0).Content.Parts[0].FunctionResponse.Response); diff != "" {
 				t.Errorf("response round-trip mismatch (-want +got):\n%s", diff)
+			}
+			gotDelta := got.Session.Events().At(0).Actions.StateDelta
+			if diff := cmp.Diff(tc.delta, gotDelta); diff != "" && len(tc.delta)+len(gotDelta) > 0 {
+				t.Errorf("state delta round-trip mismatch (-want +got):\n%s", diff)
+			}
+			if rev := got.Session.(*localSession).currentRevision(); rev != 1 {
+				t.Errorf("revision after one append = %d, want 1", rev)
+			}
+		})
+	}
+}
+
+func TestEncodeEventData_IndexedValueLimit(t *testing.T) {
+	// The event is stored as a map up to 18,000 indexed values, which leaves
+	// 2,000 below Firestore's limit for the rest of the document, and as a
+	// string past it.
+	event := func(cells int) *session.Event {
+		values := make([]any, cells)
+		for i := range values {
+			values[i] = "v"
+		}
+		return &session.Event{ID: "e", Author: "agent", Actions: session.EventActions{StateDelta: map[string]any{"cells": values}}}
+	}
+	empty, err := encodeEventData(event(0))
+	if err != nil {
+		t.Fatalf("encodeEventData() error = %v", err)
+	}
+	atLimit := 18000 - measureFirestoreValue(empty).values
+	for _, tc := range []struct {
+		cells      int
+		wantString bool
+	}{
+		{cells: atLimit},
+		{cells: atLimit + 1, wantString: true},
+	} {
+		got, err := encodeEventData(event(tc.cells))
+		if err != nil {
+			t.Fatalf("encodeEventData(%d cells) error = %v", tc.cells, err)
+		}
+		if _, isString := got.(string); isString != tc.wantString {
+			t.Errorf("encodeEventData(%d cells) returned a string = %v, want %v", tc.cells, isString, tc.wantString)
+		}
+	}
+}
+
+func TestFirestoreService_AppendEvent_RetriesAsStringOnlyOnInvalidArgument(t *testing.T) {
+	// A map Firestore rejects is appended once more as a string. Any other
+	// failure, a rejection of an event that is already a string, and a
+	// rejection the string does not cure are returned with nothing stored.
+	manyValues := make([]*pb.Value, 21000)
+	for i := range manyValues {
+		manyValues[i] = &pb.Value{ValueType: &pb.Value_StringValue{StringValue: fmt.Sprintf("v%d", i)}}
+	}
+	invalid := status.Error(codes.InvalidArgument, "Index entry is too large.")
+	tests := []struct {
+		name        string
+		failWrite   error
+		response    map[string]any
+		text        string
+		oversizeApp bool
+		wantCode    codes.Code
+		wantCommits int
+		wantString  bool
+	}{
+		{name: "invalid_argument_once", failWrite: invalid, wantCode: codes.OK, wantCommits: 2, wantString: true},
+		{name: "other_error", failWrite: status.Error(codes.PermissionDenied, "denied"), wantCode: codes.PermissionDenied, wantCommits: 1},
+		// A nested array makes the event a string from the start.
+		{name: "event_already_a_string", failWrite: invalid, response: map[string]any{"rows": []any{[]any{"a"}}}, wantCode: codes.InvalidArgument, wantCommits: 1},
+		// Each "<" is 6 bytes of JSON, so the string is over the payload
+		// limit although the map is under it.
+		{name: "string_too_large", failWrite: invalid, text: strings.Repeat("<", 200000), wantCode: codes.InvalidArgument, wantCommits: 1},
+		// The stored app state already holds more values than the fake
+		// accepts, so it rejects the rewritten document on both attempts.
+		{name: "invalid_argument_twice", oversizeApp: true, wantCode: codes.InvalidArgument, wantCommits: 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc, srv := newTestService(t, Config{})
+			created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			ev := &session.Event{ID: "e", Author: "agent", LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model"}}}
+			if tc.response != nil {
+				ev.Content.Parts = append(ev.Content.Parts, &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "t", Response: tc.response}})
+			}
+			if tc.text != "" {
+				ev.Content.Parts = append(ev.Content.Parts, &genai.Part{Text: tc.text})
+			}
+			if tc.oversizeApp {
+				srv.putDoc("app_states/app", map[string]*pb.Value{
+					"cells": {ValueType: &pb.Value_ArrayValue{ArrayValue: &pb.ArrayValue{Values: manyValues}}},
+				})
+				ev.Actions.StateDelta = map[string]any{"app:k": "v"}
+			}
+			commits := 0
+			srv.mu.Lock()
+			srv.failNextWrite = tc.failWrite
+			srv.onBeforeCommit = func(string) { commits++ }
+			srv.mu.Unlock()
+
+			err = svc.AppendEvent(ctx, created.Session, ev)
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("AppendEvent() error code = %v, want %v", status.Code(err), tc.wantCode)
+			}
+			if commits != tc.wantCommits {
+				t.Errorf("commits = %d, want %d", commits, tc.wantCommits)
+			}
+			doc, stored := srv.getDoc("adk-session/app/users/user/sessions/s/events/e")
+			if stored != (tc.wantCode == codes.OK) {
+				t.Fatalf("event stored = %v, want %v", stored, tc.wantCode == codes.OK)
+			}
+			if stored {
+				if _, isString := doc.GetFields()["event_data"].GetValueType().(*pb.Value_StringValue); isString != tc.wantString {
+					t.Errorf("event_data stored as string = %v, want %v", isString, tc.wantString)
+				}
+			}
+			wantRevision := int64(0)
+			if tc.wantCode == codes.OK {
+				wantRevision = 1
+			}
+			if rev := created.Session.(*localSession).currentRevision(); rev != wantRevision {
+				t.Errorf("session handle revision = %d, want %d", rev, wantRevision)
+			}
+		})
+	}
+}
+
+func TestFirestoreService_SessionStateNumbersReadAsFloat64(t *testing.T) {
+	// Session state is a JSON string or, from older adk-python, a map holding
+	// Firestore integers. Get and List return its numbers as float64 either
+	// way, and an append keeps an integer above 2^53 exact.
+	mapState := &pb.Value{ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: map[string]*pb.Value{
+		"n":   {ValueType: &pb.Value_IntegerValue{IntegerValue: 5}},
+		"big": {ValueType: &pb.Value_IntegerValue{IntegerValue: 1152921504606846977}},
+		"m": {ValueType: &pb.Value_MapValue{MapValue: &pb.MapValue{Fields: map[string]*pb.Value{
+			"l": {ValueType: &pb.Value_ArrayValue{ArrayValue: &pb.ArrayValue{Values: []*pb.Value{
+				{ValueType: &pb.Value_IntegerValue{IntegerValue: 6}},
+			}}}},
+		}}}},
+	}}}}
+	want := map[string]any{"n": float64(5), "big": float64(1152921504606846977), "m": map[string]any{"l": []any{float64(6)}}}
+	for _, tc := range []struct {
+		name  string
+		state *pb.Value
+	}{
+		{name: "string", state: &pb.Value{ValueType: &pb.Value_StringValue{StringValue: `{"n":5,"big":1152921504606846977,"m":{"l":[6]}}`}}},
+		{name: "map", state: mapState},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc, srv := newTestService(t, Config{})
+			srv.putDoc("adk-session/app/users/user/sessions/s", map[string]*pb.Value{
+				"id":       {ValueType: &pb.Value_StringValue{StringValue: "s"}},
+				"appName":  {ValueType: &pb.Value_StringValue{StringValue: "app"}},
+				"userId":   {ValueType: &pb.Value_StringValue{StringValue: "user"}},
+				"state":    tc.state,
+				"revision": {ValueType: &pb.Value_IntegerValue{IntegerValue: 1}},
+			})
+			check := func(name string, s session.Session) {
+				t.Helper()
+				got := map[string]any{}
+				for k, v := range s.State().All() {
+					got[k] = v
+				}
+				if diff := cmp.Diff(want, got); diff != "" {
+					t.Errorf("%s state mismatch (-want +got):\n%s", name, diff)
+				}
+			}
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			check("Get", got.Session)
+			list, err := svc.List(ctx, &session.ListRequest{AppName: "app", UserID: "user"})
+			if err != nil || len(list.Sessions) != 1 {
+				t.Fatalf("List() = (%d sessions, %v), want 1 session", len(list.Sessions), err)
+			}
+			check("List", list.Sessions[0])
+
+			if err := svc.AppendEvent(ctx, got.Session, &session.Event{ID: "e", Author: "agent"}); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+			doc, _ := srv.getDoc("adk-session/app/users/user/sessions/s")
+			const wantStored = `{"big":1152921504606846977,"m":{"l":[6]},"n":5}`
+			if stored := doc.GetFields()["state"].GetStringValue(); stored != wantStored {
+				t.Errorf("stored state after append = %s, want %s", stored, wantStored)
 			}
 		})
 	}
@@ -2549,5 +2776,16 @@ func TestFirestoreService_SharedStateNumbersReadAsFloat64(t *testing.T) {
 			t.Fatalf("List(UserID=%q) = (%d sessions, %v), want 1 session", userID, len(list.Sessions), err)
 		}
 		check(fmt.Sprintf("List(UserID=%q)", userID), list.Sessions[0])
+	}
+}
+
+func TestEncodeFirestoreState_SizeLimitAtFullDepth(t *testing.T) {
+	// A state document's fields nest 20 deep like any other, so a value at
+	// that depth still counts toward the payload limit.
+	for _, depth := range []int{1, 20} {
+		value := nestMaps(depth, strings.Repeat("x", maxFirestorePayloadBytes))
+		if _, err := encodeFirestoreState(nil, map[string]any{"k": value}); err == nil || !strings.Contains(err.Error(), "payload limit") {
+			t.Errorf("encodeFirestoreState(value nested %d maps deep) error = %v, want a payload limit error", depth, err)
+		}
 	}
 }
