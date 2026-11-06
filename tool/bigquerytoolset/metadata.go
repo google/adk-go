@@ -65,7 +65,7 @@ func (b *bigQuery) getDatasetInfo(ctx agent.Context, args getDatasetInfoArgs) (a
 	if err != nil {
 		return nil, err
 	}
-	return b.resource(ctx, "get_dataset_info", path)
+	return b.resource(ctx, "get_dataset_info", path, nil)
 }
 
 type listTableIDsArgs struct {
@@ -114,7 +114,28 @@ func (b *bigQuery) getTableInfo(ctx agent.Context, args getTableInfoArgs) (any, 
 	if err != nil {
 		return nil, err
 	}
-	return b.resource(ctx, "get_table_info", path+"/tables/"+table)
+	return b.resource(ctx, "get_table_info", path+"/tables/"+table, nil)
+}
+
+type getJobInfoArgs struct {
+	ProjectID string `json:"project_id"`
+	JobID     string `json:"job_id"`
+}
+
+func (b *bigQuery) getJobInfo(ctx agent.Context, args getJobInfoArgs) (any, error) {
+	project, err := pathSegment("project_id", b.project(args.ProjectID))
+	if err != nil {
+		return nil, err
+	}
+	job, err := pathSegment("job_id", args.JobID)
+	if err != nil {
+		return nil, err
+	}
+	var query url.Values
+	if b.location != "" {
+		query = url.Values{"location": {b.location}}
+	}
+	return b.resource(ctx, "get_job_info", "projects/"+project+"/jobs/"+job, query)
 }
 
 func datasetPath(projectID, datasetID string) (string, error) {
@@ -130,9 +151,9 @@ func datasetPath(projectID, datasetID string) (string, error) {
 }
 
 // resource fetches one REST resource as a JSON object.
-func (b *bigQuery) resource(ctx agent.Context, toolName, path string) (map[string]any, error) {
+func (b *bigQuery) resource(ctx agent.Context, toolName, path string, query url.Values) (map[string]any, error) {
 	var out map[string]any
-	if err := b.client.get(ctx, toolName, path, nil, &out); err != nil {
+	if err := b.client.get(ctx, toolName, path, query, &out); err != nil {
 		return nil, err
 	}
 	return out, nil

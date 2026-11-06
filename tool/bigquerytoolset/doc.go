@@ -14,7 +14,7 @@
 
 // Package bigquerytoolset provides a [tool.Toolset] whose tools let an agent
 // explore BigQuery: list the datasets in a project and the tables in a
-// dataset, and read the metadata of a dataset or a table.
+// dataset, and read the metadata of a dataset, a table or a job.
 //
 // The tools have the same names, arguments and results as adk-python's
 // BigQueryToolset, so prompts and skills written for it work unchanged. When
