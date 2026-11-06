@@ -15,6 +15,7 @@
 package workflowinternal_test
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -212,18 +213,31 @@ func TestFinishTaskTool_DeclarationResultMatchesValidation(t *testing.T) {
 			name:         "string",
 			outputSchema: &genai.Schema{Type: genai.TypeString},
 		},
+		{
+			name: "nullable string enum with description",
+			outputSchema: &genai.Schema{
+				Type:        genai.TypeString,
+				Description: "The verdict.",
+				Enum:        []string{"yes", "no"},
+				Nullable:    genai.Ptr(true),
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			wantUserNullable := tc.outputSchema.Nullable
+			// Snapshot by value: the tool's copy of the schema starts out sharing
+			// pointers with the original, so a saved pointer would change with it.
+			wantUserSchema := schemaJSON(t, tc.outputSchema)
+			wantDeclared := *tc.outputSchema
+			wantDeclared.Nullable = nil
 			ft := newFinishTaskTool(t, tc.outputSchema)
 
 			declared := ft.Declaration().Parameters.Properties[ft.WrapperKey()]
 			if declared == nil {
 				t.Fatalf("Declaration() has no %q property", ft.WrapperKey())
 			}
-			if declared.Nullable != nil && *declared.Nullable {
-				t.Errorf("declared %q schema is nullable, want non-nullable", ft.WrapperKey())
+			if diff := cmp.Diff(&wantDeclared, declared); diff != "" {
+				t.Errorf("declared %q schema mismatch (-want +got):\n%s", ft.WrapperKey(), diff)
 			}
 
 			got, err := ft.Run(nil, map[string]any{ft.WrapperKey(): nil})
@@ -234,11 +248,20 @@ func TestFinishTaskTool_DeclarationResultMatchesValidation(t *testing.T) {
 				t.Errorf("Run() with null %q = %v, want a validation error", ft.WrapperKey(), got)
 			}
 
-			if diff := cmp.Diff(wantUserNullable, tc.outputSchema.Nullable); diff != "" {
-				t.Errorf("agent OutputSchema.Nullable changed (-want +got):\n%s", diff)
+			if diff := cmp.Diff(wantUserSchema, schemaJSON(t, tc.outputSchema)); diff != "" {
+				t.Errorf("agent OutputSchema changed (-want +got):\n%s", diff)
 			}
 		})
 	}
+}
+
+func schemaJSON(t *testing.T, schema *genai.Schema) string {
+	t.Helper()
+	data, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("json.Marshal(schema) error: %v", err)
+	}
+	return string(data)
 }
 
 func TestFinishTaskTool_WrapperKey(t *testing.T) {
