@@ -266,6 +266,28 @@ func TestBuildParams_MediaRefused(t *testing.T) {
 			wantMsg: "media in a developer message is not supported: image/png",
 		},
 		{
+			// The system instruction becomes a text-only system message, so
+			// the image would be dropped while its text goes out.
+			name: "text and inline data on one system instruction part",
+			req: &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config: &genai.GenerateContentConfig{SystemInstruction: &genai.Content{Parts: []*genai.Part{
+					{Text: "describe it", InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1}}},
+				}}},
+			},
+			wantMsg: "system instruction part: InlineData",
+		},
+		{
+			name: "text and file data on one system instruction part",
+			req: &model.LLMRequest{
+				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
+				Config: &genai.GenerateContentConfig{SystemInstruction: &genai.Content{Parts: []*genai.Part{
+					{Text: "describe it", FileData: &genai.FileData{MIMEType: "application/pdf", FileURI: secretURL}},
+				}}},
+			},
+			wantMsg: "system instruction part: FileData",
+		},
+		{
 			name: "media beside a function response",
 			req: &model.LLMRequest{Contents: []*genai.Content{
 				{Role: "model", Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "c1", Name: "f"}}}},
