@@ -738,6 +738,48 @@ func TestRunner_AutoCreateSession_GetError(t *testing.T) {
 	}
 }
 
+// TestRunner_AutoCreateSession_EmptySessionID checks that an empty session ID
+// still creates a session with a generated ID. Get rejects the empty ID with a
+// validation error rather than session.ErrNotFound.
+func TestRunner_AutoCreateSession_EmptySessionID(t *testing.T) {
+	t.Parallel()
+
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	}))
+	svc := session.InMemoryService()
+	r, err := New(Config{
+		AppName:           "testApp",
+		Agent:             testAgent,
+		SessionService:    svc,
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	msg := &genai.Content{Parts: []*genai.Part{{Text: "hello"}}}
+	for _, err := range r.Run(t.Context(), "testUser", "", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Runner.Run() with an empty session ID error = %v", err)
+		}
+	}
+
+	resp, err := svc.List(t.Context(), &session.ListRequest{AppName: "testApp", UserID: "testUser"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(resp.Sessions) != 1 {
+		t.Fatalf("List() returned %d sessions, want 1", len(resp.Sessions))
+	}
+	if resp.Sessions[0].ID() == "" {
+		t.Error("created session has an empty ID, want a generated one")
+	}
+}
+
 func TestRunner_NilEventYieldedTerminatesRun(t *testing.T) {
 	nilAgent, err := agent.New(agent.Config{
 		Name: "nil_flood",
