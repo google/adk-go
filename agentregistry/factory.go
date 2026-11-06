@@ -169,18 +169,7 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 const cardTypeA2AAgentCard = "A2A_AGENT_CARD"
 
 // defaultA2AProtocolVersion is used when the registry does not report one.
-const defaultA2AProtocolVersion = "0.3"
-
-// majorMinor returns version without its patch number: A2A clients send the
-// interface's version in the A2A-Version header, which servers match against
-// the Major.Minor version they serve, while the registry may report "0.3.0".
-func majorMinor(version string) string {
-	if major, rest, ok := strings.Cut(version, "."); ok {
-		minor, _, _ := strings.Cut(rest, ".")
-		return major + "." + minor
-	}
-	return version
-}
+const defaultA2AProtocolVersion = "0.3.0"
 
 // RemoteAgent resolves a registered A2A agent into an [agent.Agent] usable as a
 // sub-agent. name is the full agent resource name.
@@ -316,7 +305,10 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name stri
 	if transport == "" {
 		transport = a2a.TransportProtocolHTTPJSON
 	}
-	protocolVersion := majorMinor(cmp.Or(version, defaultA2AProtocolVersion))
+	protocolVersion := version
+	if protocolVersion == "" {
+		protocolVersion = defaultA2AProtocolVersion
+	}
 
 	card = &a2a.AgentCard{
 		Name:        agentName,

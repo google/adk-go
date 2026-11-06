@@ -71,7 +71,7 @@ func TestRemoteAgent_E2E(t *testing.T) {
 		},
 		{
 			// Registry wire binding HTTP_JSON maps to a2a HTTP+JSON; the missing
-			// protocolVersion falls back to 0.3, for which the factory registers
+			// protocolVersion falls back to 0.3.0, for which the factory registers
 			// a compat transport.
 			name:    "discrete protocols over HTTP+JSON",
 			binding: a2a.TransportProtocolHTTPJSON,
@@ -88,7 +88,7 @@ func TestRemoteAgent_E2E(t *testing.T) {
 			},
 		},
 		{
-			// The registry reports 0.3.0, which a 0.3 server accepts only as 0.3.
+			// The registry reports 0.3.0, which a 0.3 server accepts.
 			name:    "discrete protocols over JSONRPC 0.3.0",
 			binding: a2a.TransportProtocolJSONRPC,
 			v0:      true,
