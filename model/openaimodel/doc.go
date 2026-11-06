@@ -61,6 +61,11 @@
 // is not configurable, so tool call arguments are best effort rather than
 // guaranteed to match the declared parameter schema.
 //
+// A successful fallback from a response.completed conversion failure records
+// "openai.terminal_response_conversion_failed" on the active OpenTelemetry span
+// for unsupported output items, unsupported message content, or invalid
+// function-call arguments. The event contains only an "error.type" category.
+//
 // On the Responses API, model reasoning is reported to the caller as thought
 // parts; Chat Completions responses are read for text, refusals and tool calls
 // only. Reasoning is not sent back on a later turn to either API: the
