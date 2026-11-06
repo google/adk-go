@@ -25,7 +25,7 @@ import (
 	"sync"
 	"testing"
 
-	"cloud.google.com/go/firestore"
+	fs "cloud.google.com/go/firestore"
 	pb "cloud.google.com/go/firestore/apiv1/firestorepb"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -64,7 +64,7 @@ func newFakeFirestoreServer() *fakeFirestoreServer {
 	}
 }
 
-func newTestFirestoreClient(t *testing.T) (*firestore.Client, *fakeFirestoreServer) {
+func newTestFirestoreClient(t *testing.T) (*fs.Client, *fakeFirestoreServer) {
 	t.Helper()
 
 	srv := newFakeFirestoreServer()
@@ -95,7 +95,7 @@ func newTestFirestoreClient(t *testing.T) (*firestore.Client, *fakeFirestoreServ
 		_ = conn.Close()
 	})
 
-	client, err := firestore.NewClient(
+	client, err := fs.NewClient(
 		t.Context(),
 		"test-project",
 		option.WithGRPCConn(conn),
@@ -250,29 +250,18 @@ func (f *fakeFirestoreServer) Commit(_ context.Context, req *pb.CommitRequest) (
 		f.batchCommits++
 	}
 
+	// A commit is atomic: check every write before applying any, so a
+	// rejected write leaves the earlier writes of the same commit unapplied.
+	for _, w := range req.GetWrites() {
+		if err := f.validateWrite(w); err != nil {
+			return nil, err
+		}
+	}
+
 	now := timestamppb.Now()
 	results := make([]*pb.WriteResult, 0, len(req.GetWrites()))
 
 	for _, w := range req.GetWrites() {
-		if pre := w.GetCurrentDocument(); pre != nil {
-			switch cond := pre.GetConditionType().(type) {
-			case *pb.Precondition_Exists:
-				var docName string
-				if u := w.GetUpdate(); u != nil {
-					docName = u.GetName()
-				} else if d := w.GetDelete(); d != "" {
-					docName = d
-				}
-				_, exists := f.docs[docName]
-				if cond.Exists && !exists {
-					return nil, status.Errorf(codes.NotFound, "document %s does not exist", docName)
-				}
-				if !cond.Exists && exists {
-					return nil, status.Errorf(codes.AlreadyExists, "document %s already exists", docName)
-				}
-			}
-		}
-
 		switch op := w.GetOperation().(type) {
 		case *pb.Write_Update:
 			incoming := proto.Clone(op.Update).(*pb.Document)
@@ -534,4 +523,67 @@ func compareValues(a, b *pb.Value) int {
 		}
 	}
 	return 0
+}
+
+// validateWrite reports the error Firestore returns for w against the current
+// documents. The caller holds f.mu.
+func (f *fakeFirestoreServer) validateWrite(w *pb.Write) error {
+	if pre := w.GetCurrentDocument(); pre != nil {
+		if cond, ok := pre.GetConditionType().(*pb.Precondition_Exists); ok {
+			var docName string
+			if u := w.GetUpdate(); u != nil {
+				docName = u.GetName()
+			} else if d := w.GetDelete(); d != "" {
+				docName = d
+			}
+			_, exists := f.docs[docName]
+			if cond.Exists && !exists {
+				return status.Errorf(codes.NotFound, "document %s does not exist", docName)
+			}
+			if !cond.Exists && exists {
+				return status.Errorf(codes.AlreadyExists, "document %s already exists", docName)
+			}
+		}
+	}
+	if u := w.GetUpdate(); u != nil {
+		return validateNoNestedArrays(u.GetFields())
+	}
+	return nil
+}
+
+func validateNoNestedArrays(fields map[string]*pb.Value) error {
+	for _, val := range fields {
+		if err := validateValueNoNestedArrays(val, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateValueNoNestedArrays(val *pb.Value, inArray bool) error {
+	if val == nil {
+		return nil
+	}
+	switch v := val.GetValueType().(type) {
+	case *pb.Value_ArrayValue:
+		if inArray {
+			return status.Errorf(codes.InvalidArgument, "nested arrays are not supported in Firestore")
+		}
+		if v.ArrayValue != nil {
+			for _, item := range v.ArrayValue.GetValues() {
+				if err := validateValueNoNestedArrays(item, true); err != nil {
+					return err
+				}
+			}
+		}
+	case *pb.Value_MapValue:
+		if v.MapValue != nil {
+			for _, item := range v.MapValue.GetFields() {
+				if err := validateValueNoNestedArrays(item, false); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }

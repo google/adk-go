@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
 func newTestService(t *testing.T, cfg Config) (*firestoreService, *fakeFirestoreServer) {
@@ -400,6 +401,9 @@ func TestFirestoreService_DeletingStatusHidesSessionAndRecoversOnRetry(t *testin
 	if err == nil {
 		t.Fatal("AppendEvent on DELETING session = nil error, want error")
 	}
+	if !errors.Is(err, session.ErrNotFound) {
+		t.Errorf("AppendEvent on DELETING session error = %v, want wrapping session.ErrNotFound", err)
+	}
 	if !strings.Contains(err.Error(), "being deleted") {
 		t.Errorf("AppendEvent on DELETING session error = %q, want mention of 'being deleted'", err.Error())
 	}
@@ -650,9 +654,11 @@ func TestFirestoreService_CrossRuntimePythonSessionAndEventRead(t *testing.T) {
 		"userId":     {ValueType: &pb.Value_StringValue{StringValue: "user"}},
 	})
 
-	// Event 2: cross-runtime adk-python Event.model_dump(mode="json", by_alias=True)
-	// payload (reused from session/vertexai/raw_event_crossruntime_test.go),
-	// verifying that requestedAuthConfigs, functionCall, groundingMetadata,
+	// Event 2: a camelCase Event.model_dump(mode="json", by_alias=True) payload,
+	// the Vertex AI shape (reused from session/vertexai/raw_event_crossruntime_test.go)
+	// rather than what adk-python's Firestore service writes, which
+	// TestFirestoreService_Get_ReadsAdkPythonEventData covers. It verifies that
+	// camelCase input still decodes: requestedAuthConfigs, functionCall, groundingMetadata,
 	// float-formatted integer tokens in artifactDelta and usageMetadata,
 	// nodeInfo, output, and float epoch timestamp decode cleanly.
 	const pythonDumpedEventJSON = `{
@@ -1044,6 +1050,48 @@ func TestFirestoreService_Get_NumRecentEventsReturnsMostRecentTail(t *testing.T)
 	if diff := cmp.Diff(wantCombinedIDs, gotCombinedIDs); diff != "" {
 		t.Errorf("Get(After+NumRecentEvents) event IDs mismatch (-want +got):\n%s", diff)
 	}
+
+	// When events share equal timestamps and have non-monotonic document IDs,
+	// NumRecentEvents must return the most recent events by insertion order
+	// (revision), not by Firestore __name__ lexicographical ordering.
+	equalTimeSess, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "equal-ts-tail-sess",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	equalTS := base.Add(10 * time.Minute)
+	equalIDs := []string{"z-first", "a-second", "y-third", "b-fourth"}
+	for _, id := range equalIDs {
+		ev := &session.Event{
+			ID:           id,
+			Author:       "user",
+			InvocationID: "inv1",
+			Timestamp:    equalTS,
+		}
+		if err := svc.AppendEvent(ctx, equalTimeSess.Session, ev); err != nil {
+			t.Fatalf("AppendEvent(%s) error = %v", id, err)
+		}
+	}
+	gotEqualTail, err := svc.Get(ctx, &session.GetRequest{
+		AppName:         "app",
+		UserID:          "user",
+		SessionID:       "equal-ts-tail-sess",
+		NumRecentEvents: 2,
+	})
+	if err != nil {
+		t.Fatalf("Get(NumRecentEvents=2) error = %v", err)
+	}
+	var gotEqualTailIDs []string
+	for ev := range gotEqualTail.Session.Events().All() {
+		gotEqualTailIDs = append(gotEqualTailIDs, ev.ID)
+	}
+	wantEqualTailIDs := []string{"y-third", "b-fourth"}
+	if diff := cmp.Diff(wantEqualTailIDs, gotEqualTailIDs); diff != "" {
+		t.Errorf("Get(NumRecentEvents=2 on equal timestamps) mismatch (-want +got):\n%s", diff)
+	}
 }
 
 func TestFirestoreService_AppendEvent_ZeroTimestampIsPopulatedAndQueryable(t *testing.T) {
@@ -1257,5 +1305,805 @@ func TestFirestoreService_TransactionMaxAttemptsExhaustion(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("AppendEvent() with TransactionMaxAttempts=1 and persistent conflict = nil, want error")
+	}
+}
+
+func TestFirestoreService_ListAllUsersFiltersCrossRootSessions(t *testing.T) {
+	ctx := t.Context()
+	client, srv := newTestFirestoreClient(t)
+
+	svc1, err := NewSessionService(client, Config{RootCollection: "root-one"})
+	if err != nil {
+		t.Fatalf("NewSessionService(root-one) failed: %v", err)
+	}
+	svc2, err := NewSessionService(client, Config{RootCollection: "root-two"})
+	if err != nil {
+		t.Fatalf("NewSessionService(root-two) failed: %v", err)
+	}
+
+	// Create session under root-one.
+	s1, err := svc1.Create(ctx, &session.CreateRequest{
+		AppName:   "shared-app",
+		UserID:    "user-1",
+		SessionID: "sess-1",
+	})
+	if err != nil {
+		t.Fatalf("svc1.Create() error = %v", err)
+	}
+	// Create session under root-two with the same AppName.
+	s2, err := svc2.Create(ctx, &session.CreateRequest{
+		AppName:   "shared-app",
+		UserID:    "user-2",
+		SessionID: "sess-2",
+	})
+	if err != nil {
+		t.Fatalf("svc2.Create() error = %v", err)
+	}
+
+	// Also simulate an arbitrary sessions collection document not under root-one.
+	srv.putDoc("other-root/shared-app/users/user-3/sessions/sess-3", map[string]*pb.Value{
+		"id":      {ValueType: &pb.Value_StringValue{StringValue: "sess-3"}},
+		"appName": {ValueType: &pb.Value_StringValue{StringValue: "shared-app"}},
+		"userId":  {ValueType: &pb.Value_StringValue{StringValue: "user-3"}},
+	})
+	// A collection named like root-one but nested under another document.
+	srv.putDoc("tenant/t1/root-one/shared-app/users/user-4/sessions/sess-4", map[string]*pb.Value{
+		"id":      {ValueType: &pb.Value_StringValue{StringValue: "sess-4"}},
+		"appName": {ValueType: &pb.Value_StringValue{StringValue: "shared-app"}},
+		"userId":  {ValueType: &pb.Value_StringValue{StringValue: "user-4"}},
+	})
+	// An appName field that disagrees with the app in the document path.
+	srv.putDoc("root-one/other-app/users/user-5/sessions/sess-5", map[string]*pb.Value{
+		"id":      {ValueType: &pb.Value_StringValue{StringValue: "sess-5"}},
+		"appName": {ValueType: &pb.Value_StringValue{StringValue: "shared-app"}},
+		"userId":  {ValueType: &pb.Value_StringValue{StringValue: "user-5"}},
+	})
+	// A sessions collection under a document that is not in "users".
+	srv.putDoc("root-one/shared-app/admins/user-6/sessions/sess-6", map[string]*pb.Value{
+		"id":      {ValueType: &pb.Value_StringValue{StringValue: "sess-6"}},
+		"appName": {ValueType: &pb.Value_StringValue{StringValue: "shared-app"}},
+		"userId":  {ValueType: &pb.Value_StringValue{StringValue: "user-6"}},
+	})
+
+	// Listing all users under svc1 must only return sess-1.
+	listResp1, err := svc1.List(ctx, &session.ListRequest{AppName: "shared-app"})
+	if err != nil {
+		t.Fatalf("svc1.List() error = %v", err)
+	}
+	if len(listResp1.Sessions) != 1 || listResp1.Sessions[0].ID() != s1.Session.ID() {
+		t.Errorf("svc1.List() returned %d sessions (IDs: %v), want exactly [sess-1]",
+			len(listResp1.Sessions), sessionIDs(listResp1.Sessions))
+	}
+
+	// Listing all users under svc2 must only return sess-2.
+	listResp2, err := svc2.List(ctx, &session.ListRequest{AppName: "shared-app"})
+	if err != nil {
+		t.Fatalf("svc2.List() error = %v", err)
+	}
+	if len(listResp2.Sessions) != 1 || listResp2.Sessions[0].ID() != s2.Session.ID() {
+		t.Errorf("svc2.List() returned %d sessions (IDs: %v), want exactly [sess-2]",
+			len(listResp2.Sessions), sessionIDs(listResp2.Sessions))
+	}
+}
+
+func sessionIDs(sessions []session.Session) []string {
+	ids := make([]string, len(sessions))
+	for i, s := range sessions {
+		ids[i] = s.ID()
+	}
+	return ids
+}
+
+func TestFirestoreService_AppendEvent_DuplicateEventIDRejected(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "dup-id-sess",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	ev1 := &session.Event{
+		ID:           "duplicate-id",
+		Author:       "user",
+		InvocationID: "inv1",
+	}
+	if err := svc.AppendEvent(ctx, created.Session, ev1); err != nil {
+		t.Fatalf("AppendEvent(ev1) error = %v", err)
+	}
+
+	// Appending an event with the exact same ID must fail with an AlreadyExists
+	// error rather than silently overwriting the stored event.
+	ev2 := &session.Event{
+		ID:           "duplicate-id",
+		Author:       "user",
+		InvocationID: "inv2",
+	}
+	err = svc.AppendEvent(ctx, created.Session, ev2)
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("AppendEvent(duplicate event ID) error = %v, want AlreadyExists status", err)
+	}
+
+	// The failed append must leave the stored event and revision untouched.
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "dup-id-sess"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 1 {
+		t.Fatalf("Events().Len() = %d, want 1", n)
+	}
+	if inv := got.Session.Events().At(0).InvocationID; inv != "inv1" {
+		t.Errorf("stored event InvocationID = %q, want inv1 (overwritten by the duplicate)", inv)
+	}
+	doc, ok := srv.getDoc("adk-session/app/users/user/sessions/dup-id-sess")
+	if !ok {
+		t.Fatal("session document not found")
+	}
+	if rev := doc.GetFields()["revision"].GetIntegerValue(); rev != 1 {
+		t.Errorf("session revision = %d, want 1 after the rejected append", rev)
+	}
+}
+
+func TestFirestoreService_AppendEvent_EncodesPythonCompatibleEventData(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "compat-sess",
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	eventTS := time.Date(2026, 11, 5, 12, 34, 56, 789000, time.UTC)
+	compactionStart := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	ev := &session.Event{
+		ID:           "compat-ev",
+		Author:       "user",
+		InvocationID: "inv-compat",
+		Timestamp:    eventTS,
+		Branch:       "branch-main",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"user_key_camelCase": "val1",
+				"user_key_snake":     "val2",
+			},
+			ArtifactDelta: map[string]int64{
+				"file_name.txt": 1,
+			},
+			TransferToAgent: "helper-agent",
+			Compaction: &session.EventCompaction{
+				StartTimestamp:   compactionStart,
+				EndTimestamp:     compactionStart.Add(5 * time.Second),
+				CompactedContent: genai.NewContentFromText("summary", "model"),
+				ExcludedEvents:   []session.EventRef{{InvocationID: "inv-1", Timestamp: compactionStart}},
+			},
+		},
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{
+						FunctionCall: &genai.FunctionCall{
+							ID:   "call-1",
+							Name: "my_tool",
+							Args: map[string]any{
+								"camelCaseParam": "argVal",
+							},
+						},
+					},
+				},
+			},
+			OutputTranscription: &genai.Transcription{Text: "transcription text"},
+		},
+	}
+
+	if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	// Inspect the raw document in fake Firestore.
+	doc, ok := srv.getDoc("adk-session/app/users/user/sessions/compat-sess/events/compat-ev")
+	if !ok {
+		t.Fatal("event document not found in fake Firestore")
+	}
+
+	// With no nested array, event_data must be the native map released
+	// adk-python stores with event.model_dump(exclude_none=True, mode="json"):
+	// snake_case schema keys, user keys verbatim, integers as integers, float
+	// epoch seconds, and a compaction holding only the fields Python's
+	// extra='forbid' EventCompaction accepts. This payload was checked with
+	// Event.model_validate in google-adk 2.11.0 and 2.13.0.
+	if _, ok := doc.GetFields()["event_data"].GetValueType().(*pb.Value_MapValue); !ok {
+		t.Fatalf("event_data = %v, want a map", doc.GetFields()["event_data"])
+	}
+	artifactDelta := doc.GetFields()["event_data"].GetMapValue().GetFields()["actions"].GetMapValue().GetFields()["artifact_delta"]
+	if _, ok := artifactDelta.GetMapValue().GetFields()["file_name.txt"].GetValueType().(*pb.Value_IntegerValue); !ok {
+		t.Errorf("artifact_delta = %v, want an integer version", artifactDelta)
+	}
+	snap, err := svc.client.Doc("adk-session/app/users/user/sessions/compat-sess/events/compat-ev").Get(ctx)
+	if err != nil {
+		t.Fatalf("reading event document: %v", err)
+	}
+	rawEvent, err := json.Marshal(snap.Data()["event_data"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantEventData = `{
+	  "actions": {
+	    "artifact_delta": {"file_name.txt": 1},
+	    "compaction": {
+	      "compacted_content": {"parts": [{"text": "summary"}], "role": "model"},
+	      "end_timestamp": 1772600772.123456,
+	      "start_timestamp": 1772600767.123456
+	    },
+	    "state_delta": {"user_key_camelCase": "val1", "user_key_snake": "val2"},
+	    "transfer_to_agent": "helper-agent"
+	  },
+	  "adk_go_compaction": {
+	    "end_timestamp": "2026-03-04T05:06:12.123456789Z",
+	    "excluded_events": [{"invocation_id": "inv-1", "timestamp": "2026-03-04T05:06:07.123456789Z"}],
+	    "start_timestamp": "2026-03-04T05:06:07.123456789Z"
+	  },
+	  "author": "user",
+	  "branch": "branch-main",
+	  "content": {
+	    "parts": [{"function_call": {"args": {"camelCaseParam": "argVal"}, "id": "call-1", "name": "my_tool"}}],
+	    "role": "user"
+	  },
+	  "id": "compat-ev",
+	  "invocation_id": "inv-compat",
+	  "output_transcription": {"text": "transcription text"},
+	  "timestamp": 1793882096.000789
+	}`
+	var got, want map[string]any
+	if err := json.Unmarshal([]byte(rawEvent), &got); err != nil {
+		t.Fatalf("event_data is not JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(wantEventData), &want); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("event_data mismatch (-want +got):\n%s", diff)
+	}
+
+	// Get must decode back into Go session.Event perfectly.
+	gotResp, err := svc.Get(ctx, &session.GetRequest{
+		AppName:   "app",
+		UserID:    "user",
+		SessionID: "compat-sess",
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if gotResp.Session.Events().Len() != 1 {
+		t.Fatalf("Events().Len() = %d, want 1", gotResp.Session.Events().Len())
+	}
+	decodedEv := gotResp.Session.Events().At(0)
+	if decodedEv.InvocationID != "inv-compat" {
+		t.Errorf("decoded InvocationID = %q, want %q", decodedEv.InvocationID, "inv-compat")
+	}
+	if decodedEv.Actions.TransferToAgent != "helper-agent" {
+		t.Errorf("decoded TransferToAgent = %q, want %q", decodedEv.Actions.TransferToAgent, "helper-agent")
+	}
+	if decodedEv.Actions.StateDelta["user_key_camelCase"] != "val1" {
+		t.Errorf("decoded StateDelta[user_key_camelCase] = %v, want val1", decodedEv.Actions.StateDelta["user_key_camelCase"])
+	}
+	if decodedEv.Actions.ArtifactDelta["file_name.txt"] != 1 {
+		t.Errorf("decoded ArtifactDelta[file_name.txt] = %v, want 1", decodedEv.Actions.ArtifactDelta["file_name.txt"])
+	}
+	if decodedEv.OutputTranscription == nil || decodedEv.OutputTranscription.Text != "transcription text" {
+		t.Errorf("decoded OutputTranscription = %+v, want 'transcription text'", decodedEv.OutputTranscription)
+	}
+	if diff := cmp.Diff(ev.Actions.Compaction, decodedEv.Actions.Compaction); diff != "" {
+		t.Errorf("decoded Compaction mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestFirestoreService_Get_ReadsAdkPythonEventData(t *testing.T) {
+	// Both payloads were produced by google-adk 2.11.0 from one Event.
+	// adk-python's main branch stores event.model_dump_json(exclude_none=True)
+	// (firestore_session_service.py:701); releases up to 2.11.0 stored
+	// event.model_dump(exclude_none=True, mode="json") as a native map. In the
+	// map case the function response is swapped for one without a nested
+	// array, which Firestore rejects, and with a wrapper-like key that
+	// adk-python reads verbatim.
+	const pythonJSON = `{"content":{"parts":[{"function_call":{"id":"call-1","args":{"camelArg":1},"name":"t"},"thought_signature":"-_-_","part_metadata":{"snake_key":2}},{"function_response":{"id":"call-1","name":"t","response":{"rows":[["a",1]]}}},{"inline_data":{"data":"-_-_AQ==","mime_type":"image/png"}}],"role":"model"},"custom_metadata":{"myKey":"v"},"invocation_id":"py-inv-3","author":"agent","actions":{"state_delta":{"camelKey":"v","user:count":2},"artifact_delta":{"f.txt":1},"transfer_to_agent":"helper","requested_auth_configs":{},"requested_tool_confirmations":{},"compaction":{"start_timestamp":1733040000.5,"end_timestamp":1733040001.75,"compacted_content":{"parts":[{"text":"summary"}],"role":"model"}}},"node_info":{"path":""},"long_running_tool_ids":["lr-1"],"branch":"b","id":"py-evt-3","timestamp":1733040002.25}`
+	const pythonMapJSON = `{"actions": {"artifact_delta": {"f.txt": 1}, "compaction": {"compacted_content": {"parts": [{"text": "summary"}], "role": "model"}, "end_timestamp": 1733040001.75, "start_timestamp": 1733040000.5}, "requested_auth_configs": {}, "requested_tool_confirmations": {}, "state_delta": {"camelKey": "v", "user:count": 2}, "transfer_to_agent": "helper"}, "author": "agent", "branch": "b", "content": {"parts": [{"function_call": {"args": {"camelArg": 1}, "id": "call-1", "name": "t"}, "part_metadata": {"snake_key": 2}, "thought_signature": "-_-_"}, {"function_response": {"id": "call-1", "name": "t", "response": {"rows": [{"_adk_list": ["a"]}]}}}, {"inline_data": {"data": "-_-_AQ==", "mime_type": "image/png"}}], "role": "model"}, "custom_metadata": {"myKey": "v"}, "id": "py-evt-3", "invocation_id": "py-inv-3", "long_running_tool_ids": ["lr-1"], "node_info": {"path": ""}, "timestamp": 1733040002.25}`
+	var pythonMap map[string]any
+	if err := json.Unmarshal([]byte(pythonMapJSON), &pythonMap); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name         string
+		eventData    any
+		wantResponse map[string]any
+	}{
+		{name: "json_string", eventData: pythonJSON, wantResponse: map[string]any{"rows": []any{[]any{"a", float64(1)}}}},
+		{name: "native_map", eventData: pythonMap, wantResponse: map[string]any{"rows": []any{map[string]any{"_adk_list": []any{"a"}}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			client, _ := newTestFirestoreClient(t)
+			svc, err := NewSessionService(client, Config{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "py-sess"}); err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			evTS := time.UnixMilli(1733040002250).UTC()
+			if _, err := client.Doc("adk-session/app/users/user/sessions/py-sess/events/py-evt-3").Set(ctx, map[string]any{
+				"event_data": tc.eventData,
+				"timestamp":  evTS,
+				"appName":    "app",
+				"userId":     "user",
+			}); err != nil {
+				t.Fatalf("writing Python event: %v", err)
+			}
+
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "py-sess"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if n := got.Session.Events().Len(); n != 1 {
+				t.Fatalf("Events().Len() = %d, want 1", n)
+			}
+			ev := got.Session.Events().At(0)
+			if ev.ID != "py-evt-3" || ev.InvocationID != "py-inv-3" || ev.Branch != "b" || !ev.Timestamp.Equal(evTS) {
+				t.Errorf("event = (%q, %q, %q, %v), want (py-evt-3, py-inv-3, b, %v)", ev.ID, ev.InvocationID, ev.Branch, ev.Timestamp, evTS)
+			}
+			if diff := cmp.Diff([]string{"lr-1"}, ev.LongRunningToolIDs); diff != "" {
+				t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(map[string]any{"camelKey": "v", "user:count": float64(2)}, ev.Actions.StateDelta); diff != "" {
+				t.Errorf("StateDelta mismatch (-want +got):\n%s", diff)
+			}
+			if ev.Actions.ArtifactDelta["f.txt"] != 1 || ev.Actions.TransferToAgent != "helper" {
+				t.Errorf("actions = (%v, %q), want (f.txt:1, helper)", ev.Actions.ArtifactDelta, ev.Actions.TransferToAgent)
+			}
+			c := ev.Actions.Compaction
+			if c == nil {
+				t.Fatal("Actions.Compaction = nil, want the Python compaction")
+			}
+			if !c.StartTimestamp.Equal(time.UnixMilli(1733040000500)) || !c.EndTimestamp.Equal(time.UnixMilli(1733040001750)) {
+				t.Errorf("compaction range = [%v, %v], want [1733040000.5, 1733040001.75]", c.StartTimestamp, c.EndTimestamp)
+			}
+			parts := ev.Content.Parts
+			if len(parts) != 3 {
+				t.Fatalf("len(Content.Parts) = %d, want 3", len(parts))
+			}
+			if fc := parts[0].FunctionCall; fc == nil || fc.Name != "t" || fc.Args["camelArg"] != float64(1) {
+				t.Errorf("FunctionCall = %+v, want t(camelArg=1)", fc)
+			}
+			if fr := parts[1].FunctionResponse; fr == nil || !cmp.Equal(tc.wantResponse, fr.Response) {
+				t.Errorf("FunctionResponse = %+v, want response %v", fr, tc.wantResponse)
+			}
+			// pydantic writes bytes as URL-safe base64 ("-_-_"), which Go's
+			// []byte decoding rejects unless it is normalized.
+			if got := string(parts[0].ThoughtSignature); got != "\xfb\xff\xbf" {
+				t.Errorf("ThoughtSignature = %q, want %q", got, "\xfb\xff\xbf")
+			}
+			if diff := cmp.Diff(map[string]any{"snake_key": float64(2)}, parts[0].PartMetadata); diff != "" {
+				t.Errorf("PartMetadata mismatch (-want +got):\n%s", diff)
+			}
+			if blob := parts[2].InlineData; blob == nil || blob.MIMEType != "image/png" || string(blob.Data) != "\xfb\xff\xbf\x01" {
+				t.Errorf("InlineData = %+v, want image/png [fb ff bf 01]", blob)
+			}
+			if ev.CustomMetadata["myKey"] != "v" {
+				t.Errorf("CustomMetadata = %v, want myKey:v", ev.CustomMetadata)
+			}
+		})
+	}
+}
+
+func TestFirestoreMapWrappers_MatchAdkPython(t *testing.T) {
+	// Each encoded value is what adk-python's _encode_firestore_map
+	// (firestore_session_service.py:84-122) produces for the same input.
+	tests := []struct {
+		name, value, encoded string
+	}{
+		{"matrix", `[["a","b"],["c",1]]`, `[{"_adk_list":["a","b"]},{"_adk_list":["c",1]}]`},
+		{"list_in_dict_in_list", `[{"k":[[1]]}]`, `[{"k":[{"_adk_list":[1]}]}]`},
+		{"deep", `[[[1]]]`, `[{"_adk_list":[{"_adk_list":[1]}]}]`},
+		{"reserved_list_key_outside_list", `{"_adk_list":[1,2]}`, `{"_adk_list":[1,2]}`},
+		{"reserved_list_key_in_list", `[{"_adk_list":[1,2]}]`, `[{"_adk_dict":{"_adk_list":[1,2]}}]`},
+		{"reserved_dict_key_in_list", `[{"_adk_dict":{"a":1}}]`, `[{"_adk_dict":{"_adk_dict":{"a":1}}}]`},
+		{"two_reserved_keys_in_list", `[{"_adk_list":1,"_adk_dict":2}]`, `[{"_adk_list":1,"_adk_dict":2}]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var value, wantEncoded any
+			if err := json.Unmarshal([]byte(tc.value), &value); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.encoded), &wantEncoded); err != nil {
+				t.Fatal(err)
+			}
+			encoded := encodeFirestoreMap(map[string]any{"v": value})
+			if diff := cmp.Diff(wantEncoded, encoded["v"]); diff != "" {
+				t.Errorf("encodeFirestoreMap mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(map[string]any{"v": value}, decodeFirestoreMap(map[string]any{"v": wantEncoded})); diff != "" {
+				t.Errorf("decodeFirestoreMap mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFirestoreService_NestedArraysAndEscapedDicts(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+
+	// 1. App state and User state with nested 2D arrays (e.g. matrix: [["a", "b"], ["c", "d"]]).
+	matrix := []any{
+		[]any{"a", "b"},
+		[]any{"c", "d"},
+	}
+	// A map that contains only reserved wrapper keys "_adk_list" or "_adk_dict".
+	trickyDict := map[string]any{
+		"_adk_list": "not_actually_a_list",
+	}
+
+	created, err := svc.Create(ctx, &session.CreateRequest{
+		AppName: "nest-app",
+		UserID:  "nest-user",
+		State: map[string]any{
+			"app:matrix":     matrix,
+			"user:matrix":    matrix,
+			"user:escaped":   trickyDict,
+			"session_matrix": matrix,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Verify app_states doc in fake Firestore used _adk_list wrapper so no raw nested array was written.
+	appDoc, ok := srv.getDoc("app_states/nest-app")
+	if !ok {
+		t.Fatal("app_states doc not found")
+	}
+	matrixVal := appDoc.GetFields()["matrix"]
+	if matrixVal == nil || matrixVal.GetArrayValue() == nil {
+		t.Fatalf("matrix field is not an ArrayValue: %v", matrixVal)
+	}
+	firstElem := matrixVal.GetArrayValue().GetValues()[0]
+	// First element must be a MapValue with "_adk_list" key.
+	if firstElem.GetMapValue() == nil || firstElem.GetMapValue().GetFields()["_adk_list"] == nil {
+		t.Errorf("first element of matrix was not encoded with _adk_list: %v", firstElem)
+	}
+
+	// 2. Append event with nested arrays in function_response and state_delta.
+	ev := &session.Event{
+		ID:           "nest-ev",
+		Author:       "agent",
+		InvocationID: "inv1",
+		Actions: session.EventActions{
+			StateDelta: map[string]any{
+				"app:nested_delta": matrix,
+				"user:nested_del":  matrix,
+				"delta_matrix":     matrix,
+			},
+		},
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{
+						FunctionResponse: &genai.FunctionResponse{
+							ID:   "call-1",
+							Name: "matrix_tool",
+							Response: map[string]any{
+								"rows": matrix,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+		t.Fatalf("AppendEvent() with nested arrays error = %v", err)
+	}
+	// Firestore rejects these arrays in a map, so this event is stored as the
+	// JSON string adk-python's main branch writes for every event.
+	evDoc, ok := srv.getDoc("adk-session/nest-app/users/nest-user/sessions/" + created.Session.ID() + "/events/nest-ev")
+	if !ok {
+		t.Fatal("event document not found")
+	}
+	if _, ok := evDoc.GetFields()["event_data"].GetValueType().(*pb.Value_StringValue); !ok {
+		t.Errorf("event_data with nested arrays = %v, want a JSON string", evDoc.GetFields()["event_data"])
+	}
+
+	// 3. Read back via Get and List to ensure exact round-trip.
+	gotResp, err := svc.Get(ctx, &session.GetRequest{
+		AppName:   "nest-app",
+		UserID:    "nest-user",
+		SessionID: created.Session.ID(),
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	val, err := gotResp.Session.State().Get("app:matrix")
+	if err != nil {
+		t.Fatalf("State().Get(app:matrix) error = %v", err)
+	}
+	if diff := cmp.Diff(matrix, val); diff != "" {
+		t.Errorf("app:matrix round-trip mismatch (-want +got):\n%s", diff)
+	}
+
+	val, err = gotResp.Session.State().Get("user:escaped")
+	if err != nil {
+		t.Fatalf("State().Get(user:escaped) error = %v", err)
+	}
+	if diff := cmp.Diff(trickyDict, val); diff != "" {
+		t.Errorf("user:escaped round-trip mismatch (-want +got):\n%s", diff)
+	}
+
+	if gotResp.Session.Events().Len() != 1 {
+		t.Fatalf("Events().Len() = %d, want 1", gotResp.Session.Events().Len())
+	}
+	decodedFR := gotResp.Session.Events().At(0).Content.Parts[0].FunctionResponse
+	if diff := cmp.Diff(matrix, decodedFR.Response["rows"]); diff != "" {
+		t.Errorf("function_response rows mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEventData_KeepsUserKeysVerbatim(t *testing.T) {
+	// Keys inside user data must survive both the snake_case encoding and the
+	// round trip back to Go. A snake_case user key would come back camelCase,
+	// and a camelCase one would be stored snake_case, if either were treated
+	// as schema.
+	user := func() map[string]any { return map[string]any{"snake_key": "s", "camelKey": "c"} }
+	ev := &session.Event{
+		ID:        "keys-ev",
+		Author:    "agent",
+		Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 6000, time.UTC),
+		Output:    user(),
+		RequestedInput: &session.RequestInput{
+			InterruptID: "int-1",
+			Payload:     user(),
+		},
+		Actions: session.EventActions{
+			StateDelta: user(),
+			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
+				"call_1": {Hint: "h", Payload: user()},
+			},
+		},
+		LLMResponse: model.LLMResponse{
+			CustomMetadata: user(),
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "f", Args: user()}, PartMetadata: user()},
+				{FunctionResponse: &genai.FunctionResponse{ID: "call_1", Name: "f", Response: user()}},
+				{ToolCall: &genai.ToolCall{ID: "tc_1", Args: user()}},
+				{ToolResponse: &genai.ToolResponse{ID: "tc_1", Response: user()}},
+			}},
+		},
+	}
+
+	raw, err := encodeEventData(ev)
+	if err != nil {
+		t.Fatalf("encodeEventData() error = %v", err)
+	}
+	rawJSON, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const userMaps = 10
+	if got := strings.Count(string(rawJSON), `"camelKey":"c"`); got != userMaps {
+		t.Errorf("event_data keeps camelKey verbatim in %d places, want %d:\n%s", got, userMaps, rawJSON)
+	}
+	if got := strings.Count(string(rawJSON), `"snake_key":"s"`); got != userMaps {
+		t.Errorf("event_data keeps snake_key verbatim in %d places, want %d:\n%s", got, userMaps, rawJSON)
+	}
+
+	got, err := decodeEventData(raw)
+	if err != nil {
+		t.Fatalf("decodeEventData() error = %v", err)
+	}
+	if diff := cmp.Diff(ev, got); diff != "" {
+		t.Errorf("event round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDecodeEventData_KeepsResponseSchemaKeywords(t *testing.T) {
+	// JSON Schema keywords are camelCase and must not be rewritten when a
+	// snake_case adk-python event is decoded.
+	const raw = `{"id":"e","author":"a","timestamp":1.5,"requested_input":{"interrupt_id":"i","response_schema":{"type":"object","additionalProperties":false,"properties":{"snake_field":{"type":"string"}}}}}`
+	ev, err := decodeEventData(raw)
+	if err != nil {
+		t.Fatalf("decodeEventData() error = %v", err)
+	}
+	s := ev.RequestedInput.ResponseSchema
+	if s == nil || s.AdditionalProperties == nil {
+		t.Fatalf("ResponseSchema = %+v, want additionalProperties kept", s)
+	}
+	if _, ok := s.Properties["snake_field"]; !ok {
+		t.Errorf("ResponseSchema.Properties = %v, want snake_field kept", s.Properties)
+	}
+}
+
+func TestFirestoreService_AppendEvent_KeepsStoredStateTypes(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	stamp := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	// App state as adk-python writes it, with native Firestore types.
+	srv.putDoc("app_states/app", map[string]*pb.Value{
+		"count": {ValueType: &pb.Value_IntegerValue{IntegerValue: 2}},
+		"when":  {ValueType: &pb.Value_TimestampValue{TimestampValue: timestamppb.New(stamp)}},
+		"blob":  {ValueType: &pb.Value_BytesValue{BytesValue: []byte{1, 2}}},
+	})
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, created.Session, &session.Event{
+		ID:      "e1",
+		Author:  "agent",
+		Actions: session.EventActions{StateDelta: map[string]any{"app:goCount": 3, "app:ratio": 0.5}},
+	}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	doc, ok := srv.getDoc("app_states/app")
+	if !ok {
+		t.Fatal("app state document not found")
+	}
+	f := doc.GetFields()
+	if _, ok := f["count"].GetValueType().(*pb.Value_IntegerValue); !ok {
+		t.Errorf("count = %v, want an integer value kept", f["count"])
+	}
+	if got := f["when"].GetTimestampValue(); got == nil || !got.AsTime().Equal(stamp) {
+		t.Errorf("when = %v, want timestamp %v kept", f["when"], stamp)
+	}
+	if got := f["blob"].GetBytesValue(); string(got) != "\x01\x02" {
+		t.Errorf("blob = %v, want bytes kept", f["blob"])
+	}
+	if got, ok := f["goCount"].GetValueType().(*pb.Value_IntegerValue); !ok || got.IntegerValue != 3 {
+		t.Errorf("goCount = %v, want integer 3", f["goCount"])
+	}
+	if got := f["ratio"].GetDoubleValue(); got != 0.5 {
+		t.Errorf("ratio = %v, want double 0.5", f["ratio"])
+	}
+}
+
+func TestFirestoreService_RejectsOversizedSharedState(t *testing.T) {
+	ctx := t.Context()
+	svc, _ := newTestService(t, Config{})
+	// Sized from Firestore's 1 MiB document limit, not from the package's cap.
+	big := strings.Repeat("x", 1<<20)
+	for _, key := range []string{"app:big", "user:big"} {
+		_, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{key: big}})
+		if err == nil || !strings.Contains(err.Error(), "serialized state") {
+			t.Errorf("Create(%s of 1 MiB) error = %v, want state payload limit error", key, err)
+		}
+	}
+
+	// Each event fits, but together they push the shared document past 1 MiB.
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	half := strings.Repeat("x", 600<<10)
+	for _, prefix := range []string{"app:", "user:"} {
+		if err := svc.AppendEvent(ctx, created.Session, &session.Event{
+			ID: prefix + "1", Author: "agent",
+			Actions: session.EventActions{StateDelta: map[string]any{prefix + "a": half}},
+		}); err != nil {
+			t.Fatalf("AppendEvent(%sa of 600 KiB) error = %v", prefix, err)
+		}
+		err := svc.AppendEvent(ctx, created.Session, &session.Event{
+			ID: prefix + "2", Author: "agent",
+			Actions: session.EventActions{StateDelta: map[string]any{prefix + "b": half}},
+		})
+		if err == nil || !strings.Contains(err.Error(), "serialized state") {
+			t.Errorf("AppendEvent(%sb past 1 MiB) error = %v, want state payload limit error", prefix, err)
+		}
+	}
+}
+
+func TestDecodeEventData_NormalizesURLSafeBase64(t *testing.T) {
+	// pydantic writes every genai bytes field as URL-safe base64; "-_-_" is
+	// 0xfb 0xff 0xbf, which the standard alphabet spells "+/+/".
+	const raw = `{"id":"e","author":"a","timestamp":1.5,
+	  "content":{"parts":[
+	    {"text":"t","thought_signature":"-_-_"},
+	    {"inline_data":{"mime_type":"image/png","data":"-_-_"}},
+	    {"function_response":{"name":"f","response":{},"parts":[{"inline_data":{"mime_type":"image/png","data":"-_-_"}}]}}]},
+	  "actions":{"compaction":{"start_timestamp":1,"end_timestamp":2,
+	    "compacted_content":{"parts":[{"text":"s","thought_signature":"-_-_"}]}}},
+	  "grounding_metadata":{"search_entry_point":{"rendered_content":"<b>","sdk_blob":"-_-_"}}}`
+	ev, err := decodeEventData(raw)
+	if err != nil {
+		t.Fatalf("decodeEventData() error = %v", err)
+	}
+	const want = "\xfb\xff\xbf"
+	parts := ev.Content.Parts
+	got := map[string]string{
+		"thought_signature":         string(parts[0].ThoughtSignature),
+		"inline_data":               string(parts[1].InlineData.Data),
+		"function_response_part":    string(parts[2].FunctionResponse.Parts[0].InlineData.Data),
+		"compacted_content_thought": string(ev.Actions.Compaction.CompactedContent.Parts[0].ThoughtSignature),
+		"search_entry_point_blob":   string(ev.GroundingMetadata.SearchEntryPoint.SDKBlob),
+	}
+	for field, v := range got {
+		if v != want {
+			t.Errorf("%s = %q, want %q", field, v, want)
+		}
+	}
+}
+
+func TestFirestoreService_Get_OrdersTiedTimestampsByRevision(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	// One timestamp, revisions mixed with an adk-python event that has none.
+	// Comparing revisions only when both are set orders these in a cycle.
+	for _, e := range []struct {
+		id       string
+		revision int64
+	}{{"z-rev1", 1}, {"m-norev", 0}, {"a-rev2", 2}} {
+		fields := map[string]*pb.Value{
+			"event_data": {ValueType: &pb.Value_StringValue{StringValue: fmt.Sprintf(`{"id":%q,"author":"a","timestamp":%v}`, e.id, float64(ts.Unix()))}},
+			"timestamp":  {ValueType: &pb.Value_TimestampValue{TimestampValue: timestamppb.New(ts)}},
+		}
+		if e.revision > 0 {
+			fields["revision"] = &pb.Value{ValueType: &pb.Value_IntegerValue{IntegerValue: e.revision}}
+		}
+		srv.putDoc("adk-session/app/users/user/sessions/s/events/"+e.id, fields)
+	}
+
+	for _, n := range []int{0, 2} {
+		got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s", NumRecentEvents: n})
+		if err != nil {
+			t.Fatalf("Get(NumRecentEvents=%d) error = %v", n, err)
+		}
+		var ids []string
+		for ev := range got.Session.Events().All() {
+			ids = append(ids, ev.ID)
+		}
+		want := []string{"m-norev", "z-rev1", "a-rev2"}
+		if n > 0 {
+			want = want[len(want)-n:]
+		}
+		if diff := cmp.Diff(want, ids); diff != "" {
+			t.Errorf("Get(NumRecentEvents=%d) event IDs mismatch (-want +got):\n%s", n, diff)
+		}
+	}
+}
+
+func TestFirestoreService_Get_AfterIsTruncatedToMicroseconds(t *testing.T) {
+	ctx := t.Context()
+	svc, _ := newTestService(t, Config{})
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	if err := svc.AppendEvent(ctx, created.Session, &session.Event{ID: "e1", Author: "a", Timestamp: ts}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+	// The stored timestamp has microsecond resolution, so a cursor carrying
+	// the event's own sub-microsecond remainder must still include it.
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s", After: ts.Add(789 * time.Nanosecond)})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if n := got.Session.Events().Len(); n != 1 {
+		t.Errorf("Get(After=ts+789ns) returned %d events, want 1", n)
 	}
 }

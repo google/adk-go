@@ -19,8 +19,9 @@
 //
 // The service stores session documents, event documents, and shared state
 // documents using the same collection hierarchy and field layout as
-// adk-python's FirestoreSessionService, allowing sessions written by one ADK
-// runtime to be read and resumed by another:
+// adk-python's FirestoreSessionService, so a session written by one ADK
+// runtime can be read and resumed by the other, within the limits described
+// under Cross-Runtime Compatibility:
 //
 //	{rootCollection}/{appName}/users/{userID}/sessions/{sessionID}
 //	{rootCollection}/{appName}/users/{userID}/sessions/{sessionID}/events/{eventID}
@@ -39,8 +40,11 @@
 // mutations via [session.State.Set] outside [session.EventActions.StateDelta]
 // affect only the in-memory handle and are not persisted. Because session state
 // and event payloads are marshaled through [encoding/json] into map[string]any,
-// numeric values round-trip as float64 (preserving exact integer precision up
-// to 2^53).
+// their numeric values round-trip as float64 (preserving exact integer
+// precision up to 2^53). App and user state are stored as native Firestore
+// values: integers read back as int64, and values already in the document,
+// such as timestamps or bytes written by adk-python, keep their types when Go
+// updates other keys.
 //
 // Session timestamps ("createTime" and "updateTime") and event timestamps are
 // truncated to microsecond precision to match Cloud Firestore's storage
@@ -53,6 +57,50 @@
 // [session.Service.List] calls, whereas adk-python uses Firestore's
 // SERVER_TIMESTAMP sentinel. Both timestamp representations are accepted on
 // read.
+//
+// # Cross-Runtime Compatibility
+//
+// An event's "event_data" field holds the event with snake_case field names
+// and timestamps as float epoch seconds, the shape adk-python dumps. Keys
+// inside user data, such as state deltas, function and tool call arguments and
+// responses, and part metadata, are kept as written.
+//
+// The service stores "event_data" as a native map, the format adk-python
+// releases through 2.13.0 write and read. An event that holds an array
+// directly inside another array, such as a tool response {"rows": [["a", 1]]},
+// cannot be stored in a map, so the service stores that event as a JSON
+// string, the format adk-python's main branch writes for every event. On
+// read, the service accepts both formats, camelCase field names, and bytes
+// that adk-python wrote in URL-safe base64, such as thought signatures and
+// inline data.
+//
+// In practice, for an application that moves between adk-python and ADK Go
+// on one database:
+//
+//   - ADK Go reads sessions written by any adk-python release or by its main
+//     branch.
+//   - adk-python releases through 2.13.0 read sessions written by ADK Go,
+//     except a session holding an event stored as a string: adk-python reads
+//     a session's events in one pass, so that one event makes the whole
+//     session fail to load. Those releases cannot store such an event
+//     themselves, so only sessions created or continued by ADK Go have them.
+//     A release of adk-python that reads strings loads these sessions too.
+//   - adk-python loads events without the fields only ADK Go defines, such as
+//     [session.EventCompaction.ExcludedEvents]. Its EventActions and
+//     EventCompaction reject fields they do not define, though, so a field
+//     ADK Go adds to either later makes events carrying it unreadable by
+//     adk-python versions that lack it.
+//
+// adk-python stores a compaction's range as float seconds, which keep only
+// microseconds, and has no field for [session.EventCompaction.ExcludedEvents].
+// The service writes both exactly under an extra "adk_go_compaction" key that
+// adk-python ignores, and reads them back from it.
+//
+// Firestore rejects an array directly inside another array. In the app and
+// user state documents, each such inner array is stored as
+// {"_adk_list": [...]} and a one-key map in an array whose key is "_adk_list"
+// or "_adk_dict" as {"_adk_dict": {...}}, as adk-python does, and both are
+// unwrapped on read.
 //
 // # Concurrency and Consistency
 //
@@ -88,9 +136,10 @@
 //
 // [session.Service.Get] orders events by "timestamp" ascending on the server
 // and tie-breaks equal timestamps in memory by the event's session revision and
-// document ID. When [session.GetRequest.NumRecentEvents] is positive,
-// Firestore's LimitToLast window selects the tail by (timestamp, document ID)
-// before the client-side revision tie-break is applied.
+// document ID before applying [session.GetRequest.NumRecentEvents], so the tail
+// window reflects insertion order even when multiple events share a timestamp.
+// A positive NumRecentEvents therefore still reads every event matching
+// [session.GetRequest.After].
 //
 // # Document Size Limit
 //
