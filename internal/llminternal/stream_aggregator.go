@@ -477,6 +477,7 @@ func (s *streamingResponseAggregator) Close() *model.LLMResponse {
 			ErrorCode:         errorCode,
 			ErrorMessage:      errorMessage,
 			FinishReason:      s.finishReason,
+			ModelVersion:      s.response.ModelVersion,
 		}
 	}
 	return nil
