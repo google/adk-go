@@ -624,14 +624,18 @@ func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
 func TestParallelWorker_FailureBeforeCancelIsReturned(t *testing.T) {
 	// Item 1 fails and cancels item 2. The caller cancels only after that,
 	// while item 2 is still running, so the failure has to win over
-	// ctx.Err().
+	// ctx.Err(). Item 1 fails only once item 2 has started, because the
+	// dispatch loop skips any item it has not reached by then.
 	errBoom := errors.New("boom")
+	item2Started := make(chan struct{})
 	sawFailFast := make(chan struct{})
 	release := make(chan struct{})
 	wrapped := NewFunctionNode("fails_then_cancels", func(ctx agent.Context, input int) (int, error) {
 		if input == 1 {
+			<-item2Started
 			return 0, errBoom
 		}
+		close(item2Started)
 		<-ctx.Done()
 		close(sawFailFast)
 		<-release
@@ -657,7 +661,11 @@ func TestParallelWorker_FailureBeforeCancelIsReturned(t *testing.T) {
 		close(done)
 	}()
 
-	<-sawFailFast
+	select {
+	case <-sawFailFast:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for item 1's failure to cancel item 2")
+	}
 	cancel()
 	close(release)
 
