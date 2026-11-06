@@ -5882,6 +5882,418 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 			name: "Cookie multiline joined single quote newline after quote",
 			in:   "curl -H \"Cookie: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
 		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Escaped-quote multiline joined single quote closing at colon-preceded quote at EOL",
+			in:   "curl -H \\\"X-Api-Key: \\\"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Same-line possessive before quoted Authorization header",
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `'`,
+		},
+		{
+			name: "Same-line possessive before quoted Cookie header",
+			in:   `curl -H "X-Api-Key: "Bob's Cookie: 'theme=dark; sid=` + secret + `'`,
+		},
+		{
+			name: "Same-line digit-stem possessive before quoted Authorization header",
+			in:   `curl -H "X-Api-Key: "v2's Authorization: 'Bearer ` + secret + `'`,
+		},
+		{
+			name: "Same-line possessive in prose prefix preserves next-line PUBLIC_KEEP",
+			in:   "I ran curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer " + secret + "' and it failed\nPUBLIC_KEEP",
+		},
+		{
+			name: "Same-line possessive before Authorization header with trailing contraction fails closed",
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `' didn't work`,
+		},
+		{
+			name: "JSON-wrapped same-line possessive before quoted Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped same-line possessive before balanced-quote Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped escaped newline possessive before quoted Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Same-line double-quote inch mark before quoted Cookie header",
+			in:   `curl -H 'X-Api-Key: 'size12" Cookie: "theme=dark; sid=` + secret + `" PUBLIC_KEEP`,
+		},
+		{
+			name: "Multiline possessive before LF Cookie header",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'",
+		},
+		{
+			name: "Multiline possessive before CRLF Cookie header",
+			in:   "curl -H \"X-Api-Key: \"Bob's\r\nCookie: 'theme=dark; sid=" + secret + "'",
+		},
+		{
+			name: "Multiline curl-v transcript possessive before Set-Cookie header",
+			in:   "> curl -H \"X-Api-Key: \"Bob's demo key\n< HTTP/1.1 200 OK PUBLIC_KEEP\n< Set-Cookie: 'theme=dark; session=" + secret + "'",
+		},
+		{
+			name: "Multiline double-quote inch mark before Cookie header",
+			in:   "curl -H 'X-Api-Key: 'size12\"\nCookie: \"theme=dark; sid=" + secret + "\"",
+		},
+		{
+			name: "Multiline possessive before Cookie header preserves third-line possessive note",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'\nNote: Alice's PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline possessive before unredacted X-Note preserves PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nX-Note: 'PUBLIC_KEEP'",
+		},
+		{
+			name: "Multiline joined single quote with contraction on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization single quote with contraction and trailing command",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo don't PUBLIC_KEEP",
+		},
+		{
+			name: "CRLF multiline joined Cookie single quote with possessive on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' Bob's\r\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined single quote with closing-line contraction before second auth header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's PUBLIC_KEEP; Authorization: 'Bearer " + secret + "'",
+		},
+		{
+			name: "Multiline joined single quote with closing-line contraction adjacent to second auth header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's Authorization: 'Bearer " + secret + "'",
+		},
+		{
+			name: "Bare digit stem without contraction suffix does not skip credential",
+			in:   `curl -H "X-Api-Key: "abc123' ` + secret,
+		},
+		{
+			name: "Multiline joined single quote closing at unclosed Cookie header fails closed",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail; echo TAIL_CMD",
+		},
+		{
+			name: "JSON double-escaped newline before quoted second header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's\\nAuthorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Multiline joined single quote with plural possessive on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' the users' keys PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization single quote with plural possessive and trailing command",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo users' PUBLIC_KEEP",
+		},
+		{
+			name: "CRLF multiline joined Cookie single quote with plural possessive on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' James'\r\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined single quote with leading secret token and plural possessive on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail' users' PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline possessive before key-value line with trailing plural possessive",
+			in:   "curl -H \"X-Api-Key: \"Bob's\ntoken: tail' " + secret + " users'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Cookie header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested X-Api-Key header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: 'part1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Proxy-Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nProxy-Authorization: 'Basic\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested X-Auth-Token header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Auth-Token: 'part1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested empty quoted Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: '\nBearer " + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Double-quoted nested Authorization header closing joined quote across newline",
+			in:   "curl -H 'X-Api-Key: 'pre\" " + secret + "\nAuthorization: \"Bearer\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Non-joined inner single quote before multiline Authorization header",
+			in:   "curl -H \"X-Api-Key: 'pre " + secret + "\nAuthorization: 'Bearer\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined single quote before double-quoted nested X-Api-Key header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: \"part1\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined plural possessive before double-quoted nested X-Api-Key header",
+			in:   "curl -H \"X-Api-Key: \"users' " + secret + "\nX-Api-Key: \"part1\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined quote before Cookie header with unpaired trailing double quote",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "JSON-wrapped unclosed joined quote before Cookie header",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'tail'; echo \"unpaired","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped nested Cookie header preserving sibling note",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'theme=dark; sid=` + secret + `_SECOND'","note":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped nested Authorization header spanning newline",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nAuthorization: 'Bearer\n` + secret + `_SECOND'","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Multiline nested Authorization header with space on line 2 unclosed to EOF",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer " + secret + "_TOK1\n" + secret + "_SECOND",
+		},
+		{
+			name: "Multiline nested Authorization header with unpaired double quote on line 3",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer " + secret + "_TOK1\n" + secret + "_SECOND'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline nested Cookie header with semicolon on line 2 unclosed to EOF",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=" + secret + "_TOK1; x=2\n" + secret + "_SECOND",
+		},
+		{
+			name: "Plural possessive before parenthesized secret",
+			in:   "curl -H \"X-Api-Key: \"users' (" + secret + "); echo tail",
+		},
+		{
+			name: "Plural possessive before dash-prefixed secret variants",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "\"; " + secret + "_TWO; --tok-" + secret + "_THREE",
+		},
+		{
+			name: "Final-line nested Cookie with semicolon before opaque fragment",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; " + secret + "_OPAQUE",
+		},
+		{
+			name: "Final-line nested Authorization with pipe before token part 2",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'tok1|" + secret + "_PART2",
+		},
+		{
+			name: "Plural possessive before CLI non-header flags and custom header flags",
+			in:   "curl -H \"X-Api-Key: \"users' -a \"" + secret + "\"; -p " + secret + "_TWO; --token " + secret + "_THREE; --header=X-Custom:" + secret + "_FOUR; -H=X-Custom:" + secret + "_FIVE",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag keeping ok field",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' --token \"` + secret + `\"","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Plural possessive before unmatched closing paren secret",
+			in:   "curl -H \"X-Api-Key: \"users')" + secret + "; echo tail",
+		},
+		{
+			name: "Plural possessive before non-header flags and custom header preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before -a secret preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -a " + secret + " -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before custom non-auth header preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -H \"X-Custom: " + secret + "\" -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before semicolon curl auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag before curl auth header keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H \"Authorization: Bearer ` + secret + `_TWO\"","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Quoted open paren earlier on line before plural possessive close paren",
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users') ` + secret + `; echo tail`,
+		},
+		{
+			name: "Open paren inside header value before plural possessive close paren",
+			in:   "curl -H \"X-Api-Key: \"pre(mid users') " + secret + "; echo tail",
+		},
+		{
+			name: "Unclosed subshell paren followed by bare secret argument",
+			in:   "(curl -H \"X-Api-Key: \"users') " + secret + "; echo tail",
+		},
+		{
+			name: "Final-line nested Cookie before semicolon true and trailing secrets",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; true; " + secret + "_TWO; echo " + secret + "_THREE; env " + secret + "_FOUR; sudo " + secret + "_FIVE; curl -u user:" + secret + "_SIX https://example.com",
+		},
+		{
+			name: "Final-line JSON wrapped Cookie before semicolon true preserving ok field",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'sid=1; true; ` + secret + `_TWO","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Final-line raw-newline JSON wrapped Cookie before semicolon true",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + "\nCookie: 'sid=1; true; " + secret + `_TWO","ok":"TAIL"}`,
+		},
+		{
+			name: "Plural possessive before non-header flag and single-quoted auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H 'Authorization: Bearer " + secret + "_TWO'",
+		},
+		{
+			name: "Plural possessive before semicolon curl and single-quoted auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H 'Authorization: Bearer " + secret + "_TWO'",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag before single-quoted auth header keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H 'Authorization: Bearer ` + secret + `_TWO'","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Cross-subshell plural possessive before trailing unclosed paren secret",
+			in:   `(curl -H "X-Api-Key: "users') && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "Cross-subshell contraction before plural possessive close paren secret",
+			in:   `(echo it's) && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "JSON wrapped cross-subshell contraction before plural possessive close paren secret keeping ok",
+			in:   `{"cmd":"(echo it's) && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Quoted open paren earlier on line before semicolon secret",
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "Plural possessive before brace secret",
+			in:   `curl -H "X-Api-Key: "users'} ` + secret,
+		},
+		{
+			name: "Escaped quote before comma secret",
+			in:   `curl -H "X-Api-Key: "tok", ` + secret,
+		},
+		{
+			name: "Apostrophe before comma secret",
+			in:   `curl -H "X-Api-Key: "tok', ` + secret,
+		},
+		{
+			name: "JSON wrapped inner escaped quote before comma secret keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"tok\", ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Unclosed inline open paren before semicolon keeps tail",
+			in:   `curl -H "X-Api-Key: "pre(tok` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Dollar command substitution subshell preserves trailing command",
+			in:   `$(curl -H "X-Api-Key: "users') && echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cross-field escaped JSON open subshell with unclosed single quote does not leak next field",
+			in:   `{"a":"(echo 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Cross-field escaped JSON contraction plus open single quote resets on closing quote",
+			in:   `{"a":"(curl -H \"X-Api-Key: \"it's 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Trailing apostrophe rejects non-auth Accept header before trailing auth header",
+			in:   `curl -H "X-Api-Key: "users' -H "Accept: ` + secret + `" -H 'Authorization: Bearer ` + secret + `_TWO'`,
+		},
+		{
+			name: "Trailing apostrophe rejects URL query parameter",
+			in:   `curl -H "X-Api-Key: "users' https://api.example.com/v1?x=` + secret,
+		},
+		{
+			name: "Trailing apostrophe rejects env assignment wrapper before curl auth header",
+			in:   `curl -H "X-Api-Key: "users'; env FOO=` + secret + ` curl -H 'Authorization: Bearer ` + secret + `_TWO'`,
+		},
+		{
+			name: "Multiline trailing apostrophe rejects cookie prose with unclosed quote",
+			in:   "curl -H \"X-Api-Key: \"users'\ntok' The cookie: Monster 'unclosed " + secret,
+		},
+		{
+			name: "Multiline trailing apostrophe rejects second-line trailing apostrophe before secret",
+			in:   "curl -H \"X-Api-Key: \"users'\nusers' " + secret,
+		},
+		{
+			name: "Escaped JSON trailing apostrophe preserves quoted clean URL",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' \"https://PUBLIC_KEEP.example.com/v1\"","ok":"OK_KEEP"}`,
+		},
 	}
 	for _, tt := range inputs {
 		t.Run(tt.name, func(t *testing.T) {

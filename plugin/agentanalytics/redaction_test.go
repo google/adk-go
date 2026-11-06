@@ -2800,6 +2800,72 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 			},
 			scrubEveryPath, raceScaled(4000),
 		},
+		{
+			"repeated unclosed Bearer word-apostrophe quotes on one line", func(n int) string {
+				return "p='" + strings.Repeat("Bearer 'words' ", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"nested joined apostrophe and colon quote lines", func(n int) string {
+				return strings.Repeat("curl -H \"X-Api-Key: \"pre' ok\nAuthorization: 'Bearer ok'; echo x\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"unclosed joined apostrophe with unpaired trailing double quote", func(n int) string {
+				return strings.Repeat("curl -H \"X-Api-Key: \"pre' ok\nCookie: 'tail'; echo \"unpaired\nPUBLIC_KEEP\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"plural possessive tails with CLI flags on one line", func(n int) string {
+				return "curl -H \"X-Api-Key: \"users' -a " + strings.Repeat("users' -a ", n) + "-H 'X-Api-Key: SYNTH_SECRET'"
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"multiline nested headers with newline continuation", func(n int) string {
+				return strings.Repeat("curl -H \"X-Api-Key: \"pre' s1\nAuthorization: 'Bearer tok1\ns2'; echo PUBLIC_KEEP\n", n)
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"plural possessive tails with same-line multi-header double-quoted target", func(n int) string {
+				return "curl -H \"X-Api-Key: \"users' -a " + strings.Repeat("users' -a; curl -H \"X-Api-Key: \"users' -a ", n) + "-H \"Authorization: Bearer SYNTH_SECRET\""
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"many leading open parens before subshell closing apostrophe", func(n int) string {
+				return strings.Repeat("(", n) + "curl -H \"X-Api-Key: \"users') && echo PUBLIC_KEEP"
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"multi JSON fields on one line with subshell and plural possessive", func(n int) string {
+				return `{"pre":"(x)` + strings.Repeat(`","k":"curl -H \"X-Api-Key: \"users') && echo y`, n) + `"}`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(1500),
+		},
+		{
+			"many unclosed inline parens before semicolon", func(n int) string {
+				return `curl -H "X-Api-Key: "pre` + strings.Repeat("(", n) + `tok; echo PUBLIC_KEEP`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"many unclosed inline parens before single close paren", func(n int) string {
+				return `curl -H "X-Api-Key: "pre` + strings.Repeat("(", n) + `x); echo PUBLIC_KEEP`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"many single-line JSON fields with apostrophe subshell tail", func(n int) string {
+				return `{"pre":"(x)` + strings.Repeat(`","k":"curl -H \"X-Api-Key: \"users') && echo y"`, n) + `"}`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -6974,6 +7040,188 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 			in:   "curl -H \"Cookie: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
 			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
 		},
+		// Multiline joined single quotes with subsequent quoted fragments or separate commands on closing line.
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+			want: "curl -H \"Authorization: [REDACTED]\"; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+			want: "curl -H \"Cookie: [REDACTED]\"; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		// Multiline joined single quotes with colon preceding closing quote at end of line.
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+			want: "curl -H \"Authorization: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+			want: "curl -H \"Cookie: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+			want: "curl -H \"Authorization: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+			want: "curl -H \"Cookie: [REDACTED]\"\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+			want: `curl -H "Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		// Escaped-quote multiline closure ending at colon-preceded quote at EOL.
+		{
+			in:   "curl -H \\\"X-Api-Key: \\\"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+			want: "curl -H \\\"X-Api-Key: [REDACTED]\\\"\necho PUBLIC_KEEP",
+		},
+		// Same-line possessives and inch marks do not swallow a following quoted auth header.
+		{
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]" Authorization: [REDACTED]`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "Bob's Cookie: 'theme=dark; sid=` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]" Cookie: [REDACTED]`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "v2's Authorization: 'Bearer ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]" Authorization: [REDACTED]`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "SECRET1's Authorization: 'Bearer ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]" Authorization: [REDACTED]`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "v2' Authorization: 'Bearer ` + secret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]" Authorization: [REDACTED]`,
+		},
+		{
+			in:   `I ran curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `' and it failed`,
+			want: `I ran curl -H "X-Api-Key: [REDACTED]" Authorization: [REDACTED]`,
+		},
+		{
+			in:   "I ran curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer " + secret + "' and it failed\nPUBLIC_KEEP",
+			want: "I ran curl -H \"X-Api-Key: [REDACTED]\" Authorization: [REDACTED]\nPUBLIC_KEEP",
+		},
+		{
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `' didn't work`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "Bob's key Authorization: 'Bearer ` + secret + `' PUBLIC_KEEP`,
+			want: `curl -H "X-Api-Key: [REDACTED]" PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's Authorization:'Bearer " + secret + "'\nPUBLIC_KEEP",
+			want: "curl -H \"X-Api-Key: [REDACTED]\" Authorization: [REDACTED]\nPUBLIC_KEEP",
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'\""}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]\""}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\""}`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]\"", "note": "PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"","note":"PUBLIC_KEEP"}`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]\" Authorization: [REDACTED]", "note": "PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\" Authorization: [REDACTED]","note":"PUBLIC_KEEP"}`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer ` + secret + `'\""}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]\""}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"\nAuthorization: [REDACTED]"}`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]\"", "note": "PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"\nAuthorization: [REDACTED]","note":"PUBLIC_KEEP"}`,
+		},
+		{
+			in:   `curl -H 'X-Api-Key: 'size12" Cookie: "theme=dark; sid=` + secret + `" PUBLIC_KEEP`,
+			want: `curl -H 'X-Api-Key: [REDACTED]' PUBLIC_KEEP`,
+		},
+		// Multiline possessives and inch marks check quote-chain balance across subsequent headers and notes.
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nCookie: [REDACTED]",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\r\nCookie: 'theme=dark; sid=" + secret + "'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\r\nCookie: [REDACTED]",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer " + secret + "'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nAuthorization: [REDACTED]",
+		},
+		{
+			in:   "> curl -H \"X-Api-Key: \"Bob's demo key\n< HTTP/1.1 200 OK\n< Set-Cookie: 'theme=dark; session=" + secret + "'",
+			want: "> curl -H \"X-Api-Key: [REDACTED]\" demo key\n< HTTP/1.1 200 OK\n< Set-Cookie: [REDACTED]",
+		},
+		{
+			in:   "curl -H 'X-Api-Key: 'size12\"\nCookie: \"theme=dark; sid=" + secret + "\"",
+			want: "curl -H 'X-Api-Key: [REDACTED]'\nCookie: [REDACTED]",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'\nNote: Alice's PUBLIC_KEEP",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nNote: Alice's PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\nX-Note: 'PUBLIC_KEEP'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nX-Note: 'PUBLIC_KEEP'",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre1' " + secret + "\ntail'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
 		// Embedded mid-word header names where bare scan must not split credential without word boundary.
 		{
 			in:   `curl -H "X-Api-Key: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
@@ -7002,6 +7250,94 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 		{
 			in:   `curl -H "Set-Cookie: "preAuthorization:` + secret + `; echo PUBLIC_KEEP`,
 			want: `curl -H "Set-Cookie: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		// Closing lines containing prose contractions, bare digit stems, valid-shell continuations, and double-escaped JSON newlines.
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's",
+			want: `curl -H "X-Api-Key: [REDACTED]" it's`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo don't PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo don't PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' Bob's\r\necho PUBLIC_KEEP",
+			want: "curl -H \"Cookie: [REDACTED]\" Bob's\r\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's Authorization: 'Bearer " + secret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]" it's Authorization: [REDACTED]`,
+		},
+		{
+			in:   "msg=\"X-Api-Key: \"pre' " + secret + "\ntail' it's",
+			want: `msg="X-Api-Key: [REDACTED]" it's`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail' it's",
+			want: `curl -H "X-Api-Key: [REDACTED]" it's`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "abc123' ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"v2' " + secret + "\nCookie: 'theme=dark; sid=" + secret + "'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nCookie: [REDACTED]",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's PUBLIC_KEEP; Authorization: 'Bearer " + secret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]" it's PUBLIC_KEEP; Authorization: [REDACTED]`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's\\nAuthorization: 'Bearer ` + secret + `'"}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\""}`,
+		},
+		{
+			in:      `{"cmd": "curl -H \"X-Api-Key: \"Bob's\\nAuthorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+			want:    `{"cmd": "curl -H \"X-Api-Key: [REDACTED]", "note": "PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"","note":"PUBLIC_KEEP"}`,
+		},
+		// Closing lines containing trailing plural possessives (such as users', James', parents') and negative guards.
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' users'",
+			want: `curl -H "X-Api-Key: [REDACTED]" users'`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' the users' keys",
+			want: `curl -H "X-Api-Key: [REDACTED]" the users' keys`,
+		},
+		{
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo users' PUBLIC_KEEP",
+			want: `curl -H "Authorization: [REDACTED]"; echo users' PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' James'\r\necho PUBLIC_KEEP",
+			want: "curl -H \"Cookie: [REDACTED]\" James'\r\necho PUBLIC_KEEP",
+		},
+		{
+			in:   "msg=\"X-Api-Key: \"pre' " + secret + "\ntail' parents'.",
+			want: `msg="X-Api-Key: [REDACTED]" parents'.`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail' users'",
+			want: `curl -H "X-Api-Key: [REDACTED]" users'`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' users' PUBLIC_KEEP; Authorization: 'Bearer " + secret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]" users' PUBLIC_KEEP; Authorization: [REDACTED]`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\ntoken: tail' " + secret + " users'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\ntoken:[REDACTED]",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"Bob's\npassword: tail' " + secret + " James'",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\npassword:[REDACTED]",
 		},
 	} {
 		checkNoLeak(t, tt.in, secret)
@@ -7091,6 +7427,33 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 			in:           "{\n  \"unclosed\": \"x\n  \"h\": \"Authorization: Bearer " + secret + "\",\"b\": \"PUBLIC_KEEP\"\n}",
 			malformedErr: true,
 		},
+		// Same-line possessives, JSON-escaped line breaks, inch marks, and multiline follow-on headers across all redaction paths.
+		{in: `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `'`},
+		{in: `curl -H "X-Api-Key: "Bob's Cookie: 'theme=dark; sid=` + secret + `'`},
+		{in: `curl -H "X-Api-Key: "v2's Authorization: 'Bearer ` + secret + `'`},
+		{in: `curl -H "X-Api-Key: "SECRET1's Authorization: 'Bearer ` + secret + `'`},
+		{in: "I ran curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer " + secret + "' and it failed\nPUBLIC_KEEP"},
+		{in: `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `' didn't work`},
+		{in: `curl -H 'X-Api-Key: 'size12" Cookie: "theme=dark; sid=` + secret + `" PUBLIC_KEEP`},
+		{
+			in:        `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+			wantValid: true,
+		},
+		{
+			in:        `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+			wantValid: true,
+		},
+		{
+			in:        `{"cmd": "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+			wantValid: true,
+		},
+		{in: "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'"},
+		{in: "curl -H \"X-Api-Key: \"Bob's\r\nCookie: 'theme=dark; sid=" + secret + "'"},
+		{in: "> curl -H \"X-Api-Key: \"Bob's demo key\n< HTTP/1.1 200 OK PUBLIC_KEEP\n< Set-Cookie: 'theme=dark; session=" + secret + "'"},
+		{in: "curl -H 'X-Api-Key: 'size12\"\nCookie: \"theme=dark; sid=" + secret + "\""},
+		{in: "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'\nNote: Alice's PUBLIC_KEEP"},
+		{in: "curl -H \"X-Api-Key: \"Bob's\nX-Note: 'PUBLIC_KEEP'"},
+		{in: "curl -H \\\"X-Api-Key: \\\"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP"},
 	} {
 		checkNoLeak(t, tt.in, secret)
 		if got, fresh := redactAuthHeaders(tt.in), redactAuthHeadersFreshScanner(tt.in); got != fresh {
@@ -7122,6 +7485,573 @@ func TestJoinedHeaderQuotesRedacted(t *testing.T) {
 		if strings.Contains(string(col), secret) {
 			t.Errorf("SmartTruncate(%q) = %q, which still holds the secret", tt.in, col)
 		}
+	}
+	for _, tc := range []struct {
+		in, want string
+	}{
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'\\''x'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail'\\''x'; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+		},
+	} {
+		checkNoLeak(t, tc.in, secret)
+		if got := scrubTextPatterns(tc.in); got != tc.want {
+			t.Errorf("scrubTextPatterns(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if got := redactAuthHeaders(tc.in); got != tc.want {
+			t.Errorf("redactAuthHeaders(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if got, fresh := redactAuthHeaders(tc.in), redactAuthHeadersFreshScanner(tc.in); got != fresh {
+			t.Errorf("redactAuthHeaders(%q) = %q != fresh %q", tc.in, got, fresh)
+		}
+	}
+	const secondSecret = "SYNTH_REVIEW_SECOND_CREDENTIAL"
+	for _, tc := range []struct {
+		in      string
+		want    string
+		wantErr string
+		forbid  string
+		keepPub bool
+	}{
+		// Nested auth or sensitive headers closing a joined or inner multiline quote and spanning a newline.
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:     "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer tok1\n" + secondSecret,
+			want:   `curl -H "X-Api-Key: [REDACTED]"`,
+			forbid: "tok1",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer tok1\n" + secondSecret + "'; echo \"unpaired\nPUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\"; echo \"unpaired\nPUBLIC_KEEP",
+			forbid:  "tok1",
+			keepPub: true,
+		},
+		{
+			in:     "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; x=2\n" + secondSecret,
+			want:   `curl -H "X-Api-Key: [REDACTED]"`,
+			forbid: "x=2",
+		},
+		{
+			in:     "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; x=" + secondSecret,
+			want:   `curl -H "X-Api-Key: [REDACTED]"`,
+			forbid: "sid=1",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'theme=dark; secret=" + secondSecret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' (" + secret + "); echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users'(" + secret + ")",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "\"; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' --tok-" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -a " + secret + "\"; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' --custom=" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		// Final-line nested Cookie / Authorization tails with semicolons or pipes and trailing-apostrophe non-header flags / stray parens.
+		{
+			in:     "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; OPAQUE_KEY_FRAG_2222",
+			want:   `curl -H "X-Api-Key: [REDACTED]"`,
+			forbid: "OPAQUE_KEY_FRAG_2222",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; " + secondSecret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; true; " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; echo " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; env " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; sudo " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; curl -u user:" + secondSecret + " https://example.com",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in: `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + "\nCookie: 'sid=1; true; " + secondSecret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'sid=1; true; ` + secondSecret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:     "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'tok1|tok_part2_alpha_9911",
+			want:   `curl -H "X-Api-Key: [REDACTED]"`,
+			forbid: "tok_part2_alpha_9911",
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer tok1; " + secondSecret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -a \"" + secret + "\"; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -p " + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' --token " + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' --token \"` + secret + `\"","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' --header=X-Custom:" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -H=X-Custom:" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users')" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' )" + secret + "; echo PUBLIC_KEEP",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      "(curl -H \"X-Api-Key: \"users') && echo PUBLIC_KEEP",
+			want:    `(curl -H "X-Api-Key: [REDACTED]") && echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:   "(curl -H \"X-Api-Key: \"users')" + secret + "; echo PUBLIC_KEEP",
+			want: `(curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"users' -H \"X-Api-Key: " + secret + "\" \"PUBLIC_KEEP\"",
+			keepPub: true,
+		},
+		{
+			in:      `wget --header="X-Api-Key: "users' --header="X-Api-Key: ` + secret + `" "PUBLIC_KEEP"`,
+			keepPub: true,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H \"Authorization: Bearer " + secondSecret + "\"",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -a " + secret + " -H \"Authorization: Bearer " + secondSecret + "\"",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -H \"X-Custom: " + secret + "\" -H \"Authorization: Bearer " + secondSecret + "\"",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H \"Authorization: Bearer " + secondSecret + "\"",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -a \"" + secret + "\"; curl -H \"Authorization: Bearer " + secondSecret + "\"",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H \"Authorization: Bearer ` + secondSecret + `\"","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -H \"Authorization: Bearer ` + secret + `\"","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users') ` + secret + `; echo PUBLIC_KEEP`,
+			want: `echo "(note)" && curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in: "curl -H \"X-Api-Key: \"pre(mid users') " + secret + "; echo PUBLIC_KEEP",
+		},
+		{
+			in:   "(curl -H \"X-Api-Key: \"users') " + secret + "; echo PUBLIC_KEEP",
+			want: `(curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H 'Authorization: Bearer " + secondSecret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -a " + secret + " -H 'Authorization: Bearer " + secondSecret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H 'Authorization: Bearer " + secondSecret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' -H \"X-Custom: " + secret + "\" -H 'Authorization: Bearer " + secondSecret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users' " + secret + " -H 'Authorization: Bearer " + secondSecret + "'",
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H 'Authorization: Bearer ` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -H \"X-Custom: ` + secret + `\" -H 'Authorization: Bearer ` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -H \"Accept: text/html;q=0.9\" -H 'Authorization: Bearer ` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users') && curl -H 'Authorization: Bearer ` + secret + `'`,
+			want: `echo "(note)" && curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `(curl -H "X-Api-Key: "users') && curl -H "X-Api-Key: "users'); ` + secret,
+			want: `(curl -H "X-Api-Key: [REDACTED]") && curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `(echo it's) && curl -H "X-Api-Key: "users'); ` + secret,
+			want: `(echo it's) && curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"(echo it's) && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users'); ` + secret,
+			want: `echo "(note)" && curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users', ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users'} ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users'] ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "tok', ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "tok", ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "tok"} ` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"tok\", ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"(curl -H \"X-Api-Key: \"users'), ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"(curl -H \"X-Api-Key: \"users')] ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `curl -H "X-Api-Key: "pre(tok; echo PUBLIC_KEEP`,
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      `curl -H "X-Api-Key: "pre(` + secret + `; echo PUBLIC_KEEP`,
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      `$(curl -H "X-Api-Key: "users') && echo PUBLIC_KEEP`,
+			want:    `$(curl -H "X-Api-Key: [REDACTED]") && echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      `echo $(curl -H "X-Api-Key: "users') && echo PUBLIC_KEEP`,
+			want:    `echo $(curl -H "X-Api-Key: [REDACTED]") && echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"(curl -H \"X-Api-Key: \"users') && echo x","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: 'part1\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nProxy-Authorization: 'Basic\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Auth-Token: 'part1\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: '\nBearer " + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\r\nAuthorization: 'Bearer\r\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    `curl -H "X-Api-Key: [REDACTED]"; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H 'X-Api-Key: 'pre\" " + secret + "\nAuthorization: \"Bearer\n" + secondSecret + "\"; echo PUBLIC_KEEP",
+			want:    `curl -H 'X-Api-Key: [REDACTED]'; echo PUBLIC_KEEP`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + "\nAuthorization: 'Bearer\n" + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			wantErr: `[UNPARSEABLE_JSON_BLOB]`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nAuthorization: 'Bearer\n` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			want:    `{"cmd":"curl -H \"X-Api-Key: [REDACTED]","ok":"PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: 'pre " + secret + "\nAuthorization: 'Bearer\n" + secondSecret + "'; echo PUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\nAuthorization: [REDACTED]; echo PUBLIC_KEEP",
+			keepPub: true,
+		},
+		// Unclosed joined apostrophe/quote fragments followed by credential text before a mismatched or unpaired line.
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: \"part1\n" + secondSecret + "\"; echo PUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\"\nX-Api-Key: [REDACTED]; echo PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"users' " + secret + "\nX-Api-Key: \"part1\n" + secondSecret + "\"; echo PUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\"\nX-Api-Key: [REDACTED]; echo PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail'; echo \"unpaired\nPUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			in:      "curl -H \"X-Api-Key: \"users' " + secret + "\nCookie: 'tail'; echo \"unpaired\nPUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'tail'; echo \"unpaired PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"\nCookie: 'tail'; echo \"unpaired PUBLIC_KEEP"}`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'theme=dark; sid=` + secondSecret + `'","note":"PUBLIC_KEEP"}`,
+			want:    `{"cmd":"curl -H \"X-Api-Key: [REDACTED]","note":"PUBLIC_KEEP"}`,
+			wantErr: `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\"\nCookie: [REDACTED]","note":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      "Authorization: 'Bearer " + secret + "'; echo PUBLIC_KEEP",
+			want:    "Authorization: [REDACTED]; echo PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			in:   "Cookie: 'theme=dark; sid=" + secret + "'; " + secondSecret,
+			want: "Cookie: [REDACTED]",
+		},
+		{
+			in:      `{"a":"(echo 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"a":"(curl -H \"X-Api-Key: \"it's 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' -H "Accept: ` + secret + `"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' -H "Accept: ` + secret + `" -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' -d x=` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' -d x=` + secret + ` -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' --data=x=` + secret + ` -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' -b my_val=` + secret + ` -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users'; env FOO=` + secret + ` curl -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:     `curl -H "X-Api-Key: "users'; env FOO="bar\" curl -H 'Authorization: Bearer ` + secondSecret + `'`,
+			forbid: `bar`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' https://api.example.com/v1?x=` + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   `curl -H "X-Api-Key: "users' https://api.example.com/v1?x=` + secret + ` -H 'Authorization: Bearer ` + secondSecret + `'`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -d x=` + secret + ` -H 'Authorization: Bearer ` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' -H \"Accept: ` + secret + `\" -H 'Authorization: Bearer ` + secondSecret + `'","ok":"PUBLIC_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:      `{"cmd":"curl -H \"X-Api-Key: \"users' \"https://PUBLIC_KEEP.example.com/v1\"","ok":"OK_KEEP"}`,
+			want:    `{"cmd":"curl -H \"X-Api-Key: [REDACTED]\" \"https://PUBLIC_KEEP.example.com/v1\"","ok":"OK_KEEP"}`,
+			keepPub: true,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users'\ntok' The cookie: Monster 'unclosed " + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users'\nusers' " + secret,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
+		{
+			in:   "curl -H \"X-Api-Key: \"users'\nusers' " + secret + "\nAuthorization: Bearer " + secondSecret,
+			want: "curl -H \"X-Api-Key: [REDACTED]\"\nAuthorization: [REDACTED]",
+		},
+	} {
+		checkNoLeak(t, tc.in, secret)
+		checkNoLeak(t, tc.in, secondSecret)
+		authGot, fresh := redactAuthHeaders(tc.in), redactAuthHeadersFreshScanner(tc.in)
+		if authGot != fresh || strings.Contains(authGot, secret) || strings.Contains(authGot, secondSecret) || (tc.forbid != "" && strings.Contains(authGot, tc.forbid)) {
+			t.Errorf("redactAuthHeaders(%q) = %q (fresh %q), leaked or diverged", tc.in, authGot, fresh)
+		}
+		if redactAuthHeaders(authGot) != authGot {
+			t.Errorf("redactAuthHeaders not idempotent on %q: pass1=%q, pass2=%q", tc.in, authGot, redactAuthHeaders(authGot))
+		}
+		scrubGot := scrubTextPatterns(tc.in)
+		if scrubTextPatterns(scrubGot) != scrubGot || (tc.forbid != "" && strings.Contains(scrubGot, tc.forbid)) {
+			t.Errorf("scrubTextPatterns(%q) = %q, pass2 = %q, leaked forbid=%q or not idempotent", tc.in, scrubGot, scrubTextPatterns(scrubGot), tc.forbid)
+		}
+		sanGot, _ := sanitizeRawText(tc.in)
+		if san2, _ := sanitizeRawText(sanGot); san2 != sanGot || (tc.forbid != "" && strings.Contains(sanGot, tc.forbid)) {
+			t.Errorf("sanitizeRawText(%q) = %q, pass2 = %q, leaked forbid=%q or not idempotent", tc.in, sanGot, san2, tc.forbid)
+		}
+		errGot := redactErrorMessage(tc.in)
+		if redactErrorMessage(errGot) != errGot || (tc.forbid != "" && strings.Contains(errGot, tc.forbid)) {
+			t.Errorf("redactErrorMessage(%q) = %q, pass2 = %q, leaked forbid=%q or not idempotent", tc.in, errGot, redactErrorMessage(errGot), tc.forbid)
+		}
+		if tc.want != "" {
+			checkRedactionPaths(t, tc.in, tc.want)
+			if authGot != tc.want {
+				t.Errorf("redactAuthHeaders(%q) = %q, want %q", tc.in, authGot, tc.want)
+			}
+		}
+		if tc.wantErr != "" {
+			if errGot != tc.wantErr {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, errGot, tc.wantErr)
+			}
+		} else if tc.want != "" {
+			if errGot != tc.want {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, errGot, tc.want)
+			}
+		}
+		if tc.keepPub {
+			if !strings.Contains(scrubGot, "PUBLIC_KEEP") || !strings.Contains(scrubTextPatterns(scrubGot), "PUBLIC_KEEP") {
+				t.Errorf("scrubTextPatterns(%q) = %q, lost PUBLIC_KEEP", tc.in, scrubGot)
+			}
+			if !strings.Contains(sanGot, "PUBLIC_KEEP") {
+				t.Errorf("sanitizeRawText(%q) = %q, lost PUBLIC_KEEP", tc.in, sanGot)
+			}
+			if !strings.Contains(errGot, "PUBLIC_KEEP") {
+				t.Errorf("redactErrorMessage(%q) = %q, lost PUBLIC_KEEP", tc.in, errGot)
+			}
+		}
+		if raw, _, err := SmartTruncate(tc.in, 1<<20); err != nil || strings.Contains(string(raw), secret) || strings.Contains(string(raw), secondSecret) || (tc.forbid != "" && strings.Contains(string(raw), tc.forbid)) || (tc.keepPub && !strings.Contains(string(raw), "PUBLIC_KEEP")) {
+			t.Errorf("SmartTruncate(%q, 1<<20) = (%q, %v), leaked or lost PUBLIC_KEEP", tc.in, raw, err)
+		}
+		if col, _, err := SmartTruncate(map[string]any{"err": tc.in}, 1000); err != nil || strings.Contains(string(col), secret) || strings.Contains(string(col), secondSecret) || (tc.keepPub && !strings.Contains(string(col), "PUBLIC_KEEP")) {
+			t.Errorf("SmartTruncate(map, %q) = (%q, %v), leaked or lost PUBLIC_KEEP", tc.in, col, err)
+		}
+	}
+	rawJSONFinal := `{"X-Api-Key: "pre' ` + secret + "\nnote Cookie: 'sid=1; " + secondSecret + `","ok":"PUBLIC_KEEP"}`
+	if got, fresh := redactAuthHeaders(rawJSONFinal), redactAuthHeadersFreshScanner(rawJSONFinal); got != fresh || strings.Contains(got, secret) || strings.Contains(got, secondSecret) || !strings.Contains(got, `"ok":"PUBLIC_KEEP"`) {
+		t.Errorf("redactAuthHeaders(rawJSONFinal) = %q (fresh %q), leaked or lost ok field", got, fresh)
+	}
+	if scrub := scrubTextPatterns(rawJSONFinal); strings.Contains(scrub, secret) || strings.Contains(scrub, secondSecret) || !strings.Contains(scrub, `"ok":"PUBLIC_KEEP"`) {
+		t.Errorf("scrubTextPatterns(rawJSONFinal) = %q, leaked or lost ok field", scrub)
 	}
 }
 
@@ -7510,6 +8440,28 @@ func TestJoinedHeaderQuotesApostropheFamilies(t *testing.T) {
 		{
 			name: "curl_r30j_long_space_padded_header_over_64_bytes",
 			in:   `curl -H 'X-Api-Key: 'prefix's; SYNTH_R30J_S4 -H 'X-Api-Key` + strings.Repeat(" ", 70) + `: SYNTH_R30J_O4'`,
+		},
+		{
+			name:     "curl_multi_header_plural_possessive_short_flag_H_keep",
+			in:       `curl -H "X-Api-Key: "users' -a -H 'X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name:     "curl_multi_header_plural_possessive_long_header_eq_keep",
+			in:       `wget --header="X-Api-Key: "users' --header='X-Api-Key: ` + secret + `' 'PUBLIC_KEEP'`,
+			wantKeep: "PUBLIC_KEEP",
+		},
+		{
+			name: "curl_multi_header_reject_custom_header_before_single_quoted",
+			in:   `curl -H "X-Api-Key: "users' -H "X-Custom: ` + secret + `" -H 'Authorization: Bearer ` + otherSecret + `'`,
+		},
+		{
+			name: "curl_multi_header_reject_userinfo_url_before_single_quoted",
+			in:   `curl -H "X-Api-Key: "users' https://admin:` + secret + `@api.example.com/v1 -H 'X-Api-Key: ` + otherSecret + `'`,
+		},
+		{
+			name: "curl_multi_header_reject_env_secret_var_before_curl",
+			in:   `curl -H "X-Api-Key: "user's; env API_KEY=` + secret + ` curl -H 'X-Api-Key: ` + otherSecret + `'`,
 		},
 	}
 

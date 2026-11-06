@@ -2188,9 +2188,10 @@ func hasUnquotedShellComment(s string) bool {
 	return false
 }
 
-func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int) bool {
-	if h.balLineEnd != lineEnd || h.balMemo == nil {
+func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int, inJSON bool) bool {
+	if h.balLineEnd != lineEnd || h.balInJSON != inJSON || h.balMemo == nil {
 		h.balLineEnd = lineEnd
+		h.balInJSON = inJSON
 		h.balMemo = make(map[int]bool)
 	}
 	var visited []int
@@ -2210,6 +2211,54 @@ func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int) bool {
 		c := s[p]
 		switch c {
 		case '\\':
+			if inJSON {
+				bs := 0
+				for p+bs < lineEnd && s[p+bs] == '\\' {
+					bs++
+				}
+				if p+bs < lineEnd && s[p+bs] == '"' && bs%4 == 1 {
+					j := p + bs + 1
+					closed := false
+					for j < lineEnd {
+						if s[j] == '\\' {
+							bs2 := 0
+							for j+bs2 < lineEnd && s[j+bs2] == '\\' {
+								bs2++
+							}
+							if j+bs2 < lineEnd && s[j+bs2] == '"' {
+								if bs2%4 == 1 {
+									p = j + bs2 + 1
+									closed = true
+									break
+								}
+								j += bs2 + 1
+								continue
+							}
+							j += bs2
+							if bs2%2 == 1 && j < lineEnd {
+								j++
+							}
+							continue
+						}
+						if s[j] == '"' {
+							p = j + 1
+							closed = true
+							break
+						}
+						j++
+					}
+					if !closed {
+						return stamp(false)
+					}
+					continue
+				}
+				if bs%2 == 1 && p+bs < lineEnd {
+					p += bs + 1
+				} else {
+					p += bs
+				}
+				continue
+			}
 			p += 2
 		case '\'':
 			end := strings.IndexByte(s[p+1:lineEnd], '\'')
@@ -2245,9 +2294,22 @@ func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int) bool {
 	return stamp(true)
 }
 
-func isHeaderFlagGap(gap string) bool {
+// isHeaderFlagGap reports whether gap between an apostrophe token and a
+// subsequent single-quoted auth header contains only validated shell command
+// separators, curl/wget flags/URLs/redirects, safe non-secret headers or
+// key=value data args, and terminates with -H/--header.
+func (h *headerQuoteScanner) isHeaderFlagGap(k int, gap string, lineEnd int, escJSON, trailingApostrophe bool) bool {
 	if len(gap) == 0 {
 		return false
+	}
+	if gap[0] == ')' {
+		if h == nil || !h.hasOpenSubshellBefore(k, escJSON) {
+			return false
+		}
+		gap = gap[1:]
+		if len(gap) == 0 {
+			return false
+		}
 	}
 	if gap[0] != ' ' && gap[0] != '\t' && strings.IndexByte(";&|<>()", gap[0]) < 0 {
 		return false
@@ -2282,18 +2344,60 @@ func isHeaderFlagGap(gap string) bool {
 		c := trimmed[i]
 		if inDouble {
 			if c == '\\' {
+				if escJSON {
+					bs := 0
+					for i+bs < len(trimmed) && trimmed[i+bs] == '\\' {
+						bs++
+					}
+					if i+bs < len(trimmed) && trimmed[i+bs] == '"' {
+						if bs%4 == 1 {
+							inDouble = false
+						}
+						i += bs
+						continue
+					}
+					if bs%2 == 1 && i+bs < len(trimmed) {
+						i += bs
+						continue
+					}
+					i += bs - 1
+					continue
+				}
 				i++
 				continue
 			}
 			if c == '"' {
+				if escJSON {
+					return false
+				}
 				inDouble = false
 			}
 			continue
 		}
 		switch c {
 		case '\\':
+			if escJSON {
+				bs := 0
+				for i+bs < len(trimmed) && trimmed[i+bs] == '\\' {
+					bs++
+				}
+				if i+bs < len(trimmed) && trimmed[i+bs] == '"' && bs%4 == 1 {
+					inDouble = true
+					i += bs
+					continue
+				}
+				if bs%2 == 1 && i+bs < len(trimmed) {
+					i += bs
+					continue
+				}
+				i += bs - 1
+				continue
+			}
 			i++
 		case '"':
+			if escJSON {
+				return false
+			}
 			inDouble = true
 		case ';':
 			segs = append(segs, trimmed[segStart:i])
@@ -2335,66 +2439,413 @@ func isHeaderFlagGap(gap string) bool {
 	if inDouble {
 		return false
 	}
-	if len(segs) == 0 {
-		fields := strings.Fields(trimmed)
-		if len(fields) == 0 {
-			return false
-		}
-		lastTok := strings.TrimLeft(fields[len(fields)-1], "(")
-		return lastTok == "-H" || lastTok == "--header"
-	}
 	segs = append(segs, trimmed[segStart:])
 	if strings.TrimSpace(segs[len(segs)-1]) == "" {
 		return false
 	}
-	startsAfterUnquotedSep := strings.TrimSpace(segs[0]) == ""
-	var lastSegFields []string
+	startsAfterUnquotedSep := len(segs) > 1 && strings.TrimSpace(segs[0]) == ""
+	lastNonEmpty := -1
 	for idx, seg := range segs {
-		segFields := strings.Fields(seg)
-		if len(segFields) == 0 {
-			continue
+		if strings.TrimSpace(seg) != "" {
+			lastNonEmpty = idx
 		}
-		if idx > 0 || startsAfterUnquotedSep {
-			pos := 0
-			for pos < len(segFields) {
-				tok := strings.TrimLeft(segFields[pos], "(")
-				switch tok {
-				case "env":
-					pos++
-					for pos < len(segFields) {
-						next := strings.TrimLeft(segFields[pos], "(")
-						if strings.HasPrefix(next, "-") || (strings.IndexByte(next, '=') > 0 && next[0] != '-') {
-							pos++
-							continue
-						}
-						break
-					}
-				case "sudo", "command", "nohup", "time", "xargs", "nice":
-					pos++
-					for pos < len(segFields) && strings.HasPrefix(strings.TrimLeft(segFields[pos], "("), "-") {
-						pos++
-					}
-				default:
-					goto checkedWrapper
-				}
-			}
-		checkedWrapper:
-			if pos >= len(segFields) {
-				return false
-			}
-			cmd := strings.TrimLeft(segFields[pos], "(")
-			if cmd != "curl" && cmd != "wget" && cmd != "-H" && cmd != "--header" &&
-				!strings.HasSuffix(cmd, "/curl") && !strings.HasSuffix(cmd, "/wget") {
-				return false
-			}
-		}
-		lastSegFields = segFields
 	}
-	if len(lastSegFields) == 0 {
+	if lastNonEmpty < 0 {
 		return false
 	}
-	lastTok := strings.TrimLeft(lastSegFields[len(lastSegFields)-1], "(")
-	return lastTok == "-H" || lastTok == "--header"
+	for idx, seg := range segs {
+		segTokens, ok := splitHeaderGapTokens(seg, escJSON)
+		if !ok {
+			return false
+		}
+		if len(segTokens) == 0 {
+			continue
+		}
+		allowCmd := idx > 0 || startsAfterUnquotedSep
+		isFinal := idx == lastNonEmpty
+		if !isValidHeaderFlagGapTokens(segTokens, allowCmd, isFinal, escJSON, trailingApostrophe) {
+			return false
+		}
+	}
+	return true
+}
+
+// splitHeaderGapTokens splits a single gap command segment on horizontal
+// whitespace while keeping double-quoted (or JSON-escaped \"...\") arguments as
+// single tokens.
+func splitHeaderGapTokens(seg string, escJSON bool) ([]string, bool) {
+	var toks []string
+	i := 0
+	for i < len(seg) {
+		for i < len(seg) && (seg[i] == ' ' || seg[i] == '\t') {
+			i++
+		}
+		if i >= len(seg) {
+			break
+		}
+		tokStart := i
+		inDouble := false
+		for i < len(seg) {
+			c := seg[i]
+			if inDouble {
+				if c == '\\' {
+					if escJSON {
+						bs := 0
+						for i+bs < len(seg) && seg[i+bs] == '\\' {
+							bs++
+						}
+						if i+bs < len(seg) && seg[i+bs] == '"' {
+							if bs%4 == 1 {
+								inDouble = false
+							}
+							i += bs + 1
+							continue
+						}
+						if bs%2 == 1 && i+bs < len(seg) {
+							i += bs + 1
+							continue
+						}
+						i += bs
+						continue
+					}
+					i += 2
+					continue
+				}
+				if c == '"' {
+					if escJSON {
+						return nil, false
+					}
+					inDouble = false
+				}
+				i++
+				continue
+			}
+			if c == ' ' || c == '\t' {
+				break
+			}
+			if c == '\\' {
+				if escJSON {
+					bs := 0
+					for i+bs < len(seg) && seg[i+bs] == '\\' {
+						bs++
+					}
+					if i+bs < len(seg) && seg[i+bs] == '"' && bs%4 == 1 {
+						inDouble = true
+						i += bs + 1
+						continue
+					}
+					if bs%2 == 1 && i+bs < len(seg) {
+						i += bs + 1
+						continue
+					}
+					i += bs
+					continue
+				}
+				i += 2
+				continue
+			}
+			if c == '"' {
+				if escJSON {
+					return nil, false
+				}
+				inDouble = true
+			}
+			i++
+		}
+		if inDouble {
+			return nil, false
+		}
+		toks = append(toks, seg[tokStart:i])
+	}
+	return toks, true
+}
+
+func unquoteGapTok(tok string, escJSON bool) (string, bool) {
+	if escJSON && len(tok) >= 4 && strings.HasPrefix(tok, `\"`) && strings.HasSuffix(tok, `\"`) {
+		return tok[2 : len(tok)-2], true
+	}
+	if !escJSON && len(tok) >= 2 && tok[0] == '"' && tok[len(tok)-1] == '"' {
+		return tok[1 : len(tok)-1], true
+	}
+	return tok, false
+}
+
+func isSafeGapShellRedirect(tok string) bool {
+	switch tok {
+	case "2>&1", "1>&2", "&>/dev/null", ">/dev/null", "2>/dev/null", "1>/dev/null":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeGapHTTPMethod(m string) bool {
+	switch strings.ToUpper(m) {
+	case "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeGapKVList(arg string) bool {
+	if len(arg) == 0 {
+		return false
+	}
+	for _, part := range strings.Split(arg, "&") {
+		eq := strings.IndexByte(part, '=')
+		if eq <= 0 {
+			return false
+		}
+		k := part[:eq]
+		if strings.ContainsAny(k, " \t") || isSensitiveKey(k) {
+			return false
+		}
+	}
+	return true
+}
+
+func isSafeGapURL(u string) bool {
+	scheme := strings.Index(u, "://")
+	if scheme <= 0 {
+		return false
+	}
+	p := strings.ToLower(u[:scheme])
+	if p != "http" && p != "https" {
+		return false
+	}
+	rest := u[scheme+3:]
+	if len(rest) == 0 {
+		return false
+	}
+	authEnd := strings.IndexAny(rest, "/?#")
+	auth := rest
+	if authEnd >= 0 {
+		auth = rest[:authEnd]
+	}
+	if strings.Contains(auth, "@") {
+		return false
+	}
+	if q := strings.IndexByte(rest, '?'); q >= 0 {
+		query := rest[q+1:]
+		if frag := strings.IndexByte(query, '#'); frag >= 0 {
+			query = query[:frag]
+		}
+		if query != "" {
+			for _, part := range strings.Split(query, "&") {
+				if eq := strings.IndexByte(part, '='); eq > 0 {
+					if isSensitiveKey(part[:eq]) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+func isSafeNonSecretGapHeaderName(name string) bool {
+	switch name {
+	case "accept", "accept-encoding", "accept-language", "content-type",
+		"content-length", "user-agent", "cache-control", "pragma",
+		"host", "origin", "referer", "connection":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSafeGapHeaderArg(hdr string) bool {
+	colon := strings.IndexByte(hdr, ':')
+	if colon <= 0 {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(hdr[:colon]))
+	if name == "" || isSensitiveKey(name) {
+		return false
+	}
+	val := strings.TrimSpace(hdr[colon+1:])
+	if isSafeNonSecretGapHeaderName(name) {
+		for _, param := range strings.Split(val, ";") {
+			param = strings.TrimSpace(param)
+			if eq := strings.IndexByte(param, '='); eq > 0 {
+				if isSensitiveKey(strings.TrimSpace(param[:eq])) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return !strings.ContainsAny(val, " \t") && isSafeGapKVList(val)
+}
+
+func isSafeGapBoolFlag(tok string) bool {
+	if tok == "-qO-" {
+		return true
+	}
+	if strings.HasPrefix(tok, "--") {
+		if len(tok) <= 2 {
+			return false
+		}
+		rest := tok[2:]
+		if rest[0] < 'a' || rest[0] > 'z' {
+			return false
+		}
+		for i := 1; i < len(rest); i++ {
+			c := rest[i]
+			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
+				return false
+			}
+		}
+		return true
+	}
+	if len(tok) < 2 || len(tok) > 4 || tok[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(tok); i++ {
+		c := tok[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidHeaderFlagGapTokens reports whether segTokens holds only recognized
+// shell wrappers/curl/wget command invocations, safe URLs/redirects/flags, and
+// non-secret args, ending with -H/--header when isFinalSeg is true.
+func isValidHeaderFlagGapTokens(segTokens []string, allowCmdPrefix, isFinalSeg, escJSON, trailingApostrophe bool) bool {
+	pos := 0
+	if allowCmdPrefix {
+		for pos < len(segTokens) {
+			tok := strings.TrimLeft(segTokens[pos], "(")
+			switch tok {
+			case "env":
+				if trailingApostrophe {
+					return false
+				}
+				pos++
+				for pos < len(segTokens) {
+					next := strings.TrimLeft(segTokens[pos], "(")
+					if strings.HasPrefix(next, "-") {
+						pos++
+						continue
+					}
+					if eq := strings.IndexByte(next, '='); eq > 0 && next[0] != '-' && !isSensitiveKey(next[:eq]) {
+						pos++
+						continue
+					}
+					break
+				}
+			case "sudo", "command", "nohup", "time", "xargs", "nice":
+				pos++
+				for pos < len(segTokens) && strings.HasPrefix(strings.TrimLeft(segTokens[pos], "("), "-") {
+					pos++
+				}
+			default:
+				goto checkedWrapper
+			}
+		}
+	checkedWrapper:
+		if pos >= len(segTokens) {
+			return false
+		}
+		cmd := strings.TrimLeft(segTokens[pos], "(")
+		switch {
+		case cmd == "curl" || cmd == "wget" || strings.HasSuffix(cmd, "/curl") || strings.HasSuffix(cmd, "/wget"):
+			pos++
+		case cmd == "-H" || cmd == "--header":
+			// Only permitted as the trailing flag or an explicit safe intermediate -H.
+		default:
+			return false
+		}
+	}
+	limit := len(segTokens)
+	if isFinalSeg {
+		if pos >= len(segTokens) {
+			return false
+		}
+		lastTok := segTokens[len(segTokens)-1]
+		if allowCmdPrefix && pos == len(segTokens)-1 {
+			lastTok = strings.TrimLeft(lastTok, "(")
+		}
+		if lastTok != "-H" && lastTok != "--header" {
+			return false
+		}
+		limit = len(segTokens) - 1
+	}
+	for pos < limit {
+		tok := segTokens[pos]
+		if isSafeGapShellRedirect(tok) {
+			pos++
+			continue
+		}
+		if unq, _ := unquoteGapTok(tok, escJSON); (!trailingApostrophe || !strings.ContainsAny(unq, "?#@=")) && isSafeGapURL(unq) {
+			pos++
+			continue
+		}
+		if tok == "-X" || tok == "--request" {
+			if pos+1 >= limit {
+				return false
+			}
+			method, _ := unquoteGapTok(segTokens[pos+1], escJSON)
+			if !isSafeGapHTTPMethod(method) {
+				return false
+			}
+			pos += 2
+			continue
+		}
+		if strings.HasPrefix(tok, "-X=") && isSafeGapHTTPMethod(tok[3:]) {
+			pos++
+			continue
+		}
+		if strings.HasPrefix(tok, "--request=") && isSafeGapHTTPMethod(tok[len("--request="):]) {
+			pos++
+			continue
+		}
+		if tok == "-d" || tok == "--data" || tok == "--data-raw" || tok == "--data-binary" || tok == "-F" || tok == "--form" || tok == "-b" {
+			if trailingApostrophe || pos+1 >= limit {
+				return false
+			}
+			arg, _ := unquoteGapTok(segTokens[pos+1], escJSON)
+			if !isSafeGapKVList(arg) {
+				return false
+			}
+			pos += 2
+			continue
+		}
+		if eq := strings.IndexByte(tok, '='); eq > 0 {
+			flagPart, valPart := tok[:eq], tok[eq+1:]
+			if flagPart == "--data" || flagPart == "--data-raw" || flagPart == "--data-binary" || flagPart == "--form" {
+				if trailingApostrophe {
+					return false
+				}
+				arg, _ := unquoteGapTok(valPart, escJSON)
+				if !isSafeGapKVList(arg) {
+					return false
+				}
+				pos++
+				continue
+			}
+		}
+		if tok == "-H" || tok == "--header" {
+			if trailingApostrophe || pos+1 >= limit {
+				return false
+			}
+			hdr, quoted := unquoteGapTok(segTokens[pos+1], escJSON)
+			if !quoted || !isSafeGapHeaderArg(hdr) {
+				return false
+			}
+			pos += 2
+			continue
+		}
+		if isSafeGapBoolFlag(tok) {
+			pos++
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func isBenignCommandGap(gap string) bool {
@@ -2409,14 +2860,521 @@ func isBenignCommandGap(gap string) bool {
 	return cmd == "echo" || cmd == "printf"
 }
 
+// isWordApostropheAt reports whether s[k] is a word apostrophe (a contraction
+// or possessive marker, mid-word apostrophe, or trailing possessive after a
+// letter). Digit stems without a contraction suffix return false so bare tokens
+// such as abc123' remain quoted until handled by header-opener checks.
+func isWordApostropheAt(s string, k int) bool {
+	if k <= 0 || k >= len(s) || s[k] != '\'' {
+		return false
+	}
+	before, _ := utf8.DecodeLastRuneInString(s[:k])
+	if !unicode.IsLetter(before) && !unicode.IsDigit(before) {
+		return false
+	}
+	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+	if unicode.IsDigit(before) {
+		return startsContractionBefore(s, k, 1, isWord)
+	}
+	if startsContractionBefore(s, k, 1, isWord) || isMidWordApostrophe(s, k) {
+		return true
+	}
+	if before != 's' && before != 'S' {
+		return false
+	}
+	if _, w := utf8.DecodeLastRuneInString(s[:k]); w <= 0 || k-w <= 0 {
+		return false
+	} else if prev2, _ := utf8.DecodeLastRuneInString(s[:k-w]); !unicode.IsLetter(prev2) {
+		return false
+	}
+	if k+1 == len(s) || strings.IndexByte(",;.!?)]}", s[k+1]) >= 0 {
+		return true
+	}
+	after, _ := utf8.DecodeRuneInString(s[k+1:])
+	return isDelimSpace(after)
+}
+
+// hasOpenSubshellBefore reports whether an unquoted command-position '('
+// opened on the same line strictly before headerStart remains unclosed at
+// headerStart. Scanning resumes incrementally across monotonic calls on the
+// same line regardless of per-header outerEnd bounds to stay O(N).
+func (h *headerQuoteScanner) hasOpenSubshellBefore(headerStart int, escJSON bool) bool {
+	if h == nil || headerStart <= 0 {
+		return false
+	}
+	s := h.s
+	realLineEnd := func(ls int) int {
+		if nl := strings.IndexAny(s[ls:], "\r\n"); nl >= 0 {
+			return ls + nl
+		}
+		return len(s)
+	}
+	if !h.subShellReady || h.subEscJSON != escJSON || headerStart < h.subPos {
+		ls := 0
+		if nl := strings.LastIndexAny(s[:headerStart], "\r\n"); nl >= 0 {
+			ls = nl + 1
+		}
+		h.subShellReady = true
+		h.subLineStart = ls
+		h.subRealLineEnd = realLineEnd(ls)
+		h.subEscJSON = escJSON
+		h.subPos = ls
+		h.subDepth = 0
+		h.subInSingle = false
+		h.subInDouble = false
+		h.subCmdPos = true
+	} else if headerStart > h.subRealLineEnd {
+		ls := h.subPos
+		if nl := strings.LastIndexAny(s[h.subPos:headerStart], "\r\n"); nl >= 0 {
+			ls = h.subPos + nl + 1
+		}
+		h.subLineStart = ls
+		h.subRealLineEnd = realLineEnd(ls)
+		h.subPos = ls
+		h.subDepth = 0
+		h.subInSingle = false
+		h.subInDouble = false
+		h.subCmdPos = true
+	}
+	for h.subPos < headerStart {
+		p := h.subPos
+		c := s[p]
+		if escJSON {
+			if c == '"' {
+				h.subDepth = 0
+				h.subInSingle = false
+				h.subInDouble = false
+				h.subCmdPos = true
+				h.subPos++
+				continue
+			}
+			if c == '\\' {
+				bs := 0
+				for p+bs < headerStart && s[p+bs] == '\\' {
+					bs++
+				}
+				if p+bs < headerStart && s[p+bs] == '"' {
+					if bs%2 == 0 {
+						h.subDepth = 0
+						h.subInSingle = false
+						h.subInDouble = false
+						h.subCmdPos = true
+						h.subPos = p + bs + 1
+						continue
+					}
+					if h.subInSingle {
+						h.subPos = p + bs + 1
+						continue
+					}
+					h.subInDouble = !h.subInDouble
+					h.subCmdPos = false
+					h.subPos = p + bs + 1
+					continue
+				}
+				if h.subInSingle {
+					h.subPos = p + bs
+					continue
+				}
+				if bs%2 == 1 && p+bs < headerStart && s[p+bs] == '\'' {
+					if !h.subInDouble {
+						h.subInSingle = true
+					}
+					h.subCmdPos = false
+					h.subPos = p + bs + 1
+					continue
+				}
+				h.subCmdPos = false
+				h.subPos = p + bs
+				continue
+			}
+			if h.subInSingle {
+				if c == '\'' {
+					h.subInSingle = false
+				}
+				h.subPos++
+				continue
+			}
+		} else {
+			if h.subInSingle {
+				if c == '\'' {
+					h.subInSingle = false
+				}
+				h.subPos++
+				continue
+			}
+			if h.subInDouble {
+				if c == '\\' && p+1 < headerStart {
+					h.subPos += 2
+					continue
+				}
+				if c == '"' {
+					h.subInDouble = false
+				}
+				h.subPos++
+				continue
+			}
+			if c == '\\' {
+				h.subCmdPos = false
+				if p+1 < headerStart {
+					h.subPos += 2
+				} else {
+					h.subPos++
+				}
+				continue
+			}
+			if c == '"' {
+				h.subInDouble = true
+				h.subCmdPos = false
+				h.subPos++
+				continue
+			}
+		}
+		if h.subInDouble {
+			h.subPos++
+			continue
+		}
+		switch c {
+		case '\'':
+			if !isWordApostropheAt(s, p) {
+				h.subInSingle = true
+			}
+			h.subCmdPos = false
+		case '(':
+			if h.subCmdPos {
+				h.subDepth++
+			}
+		case ')':
+			if h.subDepth > 0 {
+				h.subDepth--
+			}
+			h.subCmdPos = false
+		case ';', '|', '&':
+			h.subCmdPos = true
+		case ' ', '\t':
+		case '$':
+			if p+1 < len(s) && s[p+1] == '(' {
+				h.subCmdPos = true
+			} else {
+				h.subCmdPos = false
+			}
+		default:
+			h.subCmdPos = false
+		}
+		h.subPos++
+	}
+	return h.subDepth > 0
+}
+
+// parenClosesCleanlyAt reports whether h.s[parenPos] == ')' closes a genuine
+// unquoted subshell opened before headerStart on the same line and is followed
+// after optional horizontal whitespace by end-of-line, a shell delimiter, or
+// a JSON terminator when unescaped in JSON.
+func (h *headerQuoteScanner) parenClosesCleanlyAt(headerStart, parenPos, lineEnd int, inJSON, jsonEscaped bool) bool {
+	escJSON := inJSON || jsonEscaped
+	if !h.hasOpenSubshellBefore(headerStart, escJSON) {
+		return false
+	}
+	p := skipHorizDelimSpace(h.s, parenPos+1)
+	if p >= lineEnd {
+		return true
+	}
+	switch h.s[p] {
+	case ';', '|', ')', '#':
+		return true
+	case '&':
+		return p+1 < lineEnd && h.s[p+1] == '&'
+	case '"':
+		return escJSON
+	case ',', '}', ']':
+		return inJSON && !jsonEscaped
+	default:
+		return false
+	}
+}
+
+// apostropheTailStopsOnLine reports whether the remainder of the header line
+// after an unclosed word apostrophe at h.s[k] terminates on a safe boundary
+// (end of line, shell terminator, comment, closed subshell, balanced
+// -H/--header flag opening a recognized auth header, auth header, or URL)
+// rather than running into bare token text that may carry a credential.
+func (h *headerQuoteScanner) apostropheTailStopsOnLine(headerStart, k, lineEnd int, inJSON, jsonEscaped bool) bool {
+	s := h.s
+	escJSON := inJSON || jsonEscaped
+	afterEnd := k + 1
+	for afterEnd < lineEnd {
+		r, w := utf8.DecodeRuneInString(s[afterEnd:lineEnd])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			break
+		}
+		afterEnd += w
+	}
+	if afterEnd < lineEnd {
+		c := s[afterEnd]
+		if c == ')' {
+			return h.parenClosesCleanlyAt(headerStart, afterEnd, lineEnd, inJSON, jsonEscaped)
+		}
+		if strings.IndexByte(";&|<>", c) >= 0 || (inJSON && (c == ',' || c == '}' || c == ']')) {
+			return true
+		}
+	}
+	if afterEnd < lineEnd {
+		r, _ := utf8.DecodeRuneInString(s[afterEnd:lineEnd])
+		if !isDelimSpace(r) {
+			return false
+		}
+	}
+	rest := s[afterEnd:lineEnd]
+	for len(rest) > 0 {
+		r, w := utf8.DecodeRuneInString(rest)
+		if !isDelimSpace(r) {
+			break
+		}
+		rest = rest[w:]
+	}
+	if len(rest) == 0 {
+		return true
+	}
+	restPos := lineEnd - len(rest)
+	if rest[0] == ')' {
+		return h.parenClosesCleanlyAt(headerStart, restPos, lineEnd, inJSON, jsonEscaped)
+	}
+	if strings.IndexByte(";|&<>#", rest[0]) >= 0 || (inJSON && (rest[0] == ',' || rest[0] == '}' || rest[0] == ']')) {
+		return true
+	}
+	if rest[0] == '-' {
+		if h == nil {
+			return false
+		}
+		var hdrStart int
+		switch {
+		case strings.HasPrefix(rest, "-H="):
+			hdrStart = len("-H=")
+		case strings.HasPrefix(rest, "--header="):
+			hdrStart = len("--header=")
+		case strings.HasPrefix(rest, "-H"):
+			hdrStart = skipHorizDelimSpace(rest, len("-H"))
+			if hdrStart == len("-H") {
+				return false
+			}
+		case strings.HasPrefix(rest, "--header"):
+			hdrStart = skipHorizDelimSpace(rest, len("--header"))
+			if hdrStart == len("--header") {
+				return false
+			}
+		default:
+			return false
+		}
+		gapEnd := restPos + hdrStart
+		authOff := hdrStart
+		if escJSON && strings.HasPrefix(rest[authOff:], `\"`) {
+			authOff += 2
+		} else if authOff < len(rest) && rest[authOff] == '"' {
+			authOff++
+		}
+		if authOff >= len(rest) || !startsAuthHeaderPrefix(rest[authOff:]) {
+			return false
+		}
+		return h.isShellBalancedFrom(gapEnd, lineEnd, escJSON)
+	}
+	if authHeaderKeys.mayStartAt(rest, 0) {
+		if loc := authHeaderPrefixAtRe.FindStringSubmatchIndex(rest); loc != nil {
+			return !isCookieHeaderKey(rest[loc[2]:loc[3]]) || !cookieValueIsProse(rest, loc[1])
+		}
+	}
+	if strings.HasPrefix(rest, "http://") || strings.HasPrefix(rest, "https://") ||
+		strings.HasPrefix(rest, `"http://`) || strings.HasPrefix(rest, `"https://`) ||
+		(escJSON && (strings.HasPrefix(rest, `\"http://`) || strings.HasPrefix(rest, `\"https://`))) {
+		tokLen := 0
+		for tokLen < len(rest) {
+			r, w := utf8.DecodeRuneInString(rest[tokLen:])
+			if isDelimSpace(r) {
+				break
+			}
+			tokLen += w
+		}
+		urlTok := rest[:tokLen]
+		if rest[0] == 'h' || rest[0] == 'H' {
+			cutChars := `";|&<>`
+			if inJSON {
+				cutChars = `";|&<>,}]`
+			}
+			if cut := strings.IndexAny(urlTok, cutChars); cut > 0 {
+				urlTok = urlTok[:cut]
+				tokLen = cut
+			}
+		}
+		unq, _ := unquoteGapTok(urlTok, escJSON)
+		if strings.ContainsAny(unq, "?#@=") || !isSafeGapURL(unq) {
+			return false
+		}
+		return h.isShellBalancedFrom(restPos+tokLen, lineEnd, escJSON)
+	}
+	return len(rest) >= 3 && rest[0] >= '0' && rest[0] <= '9' && (rest[1] == '>' || rest[1] == '<')
+}
+
+// isTrailingDigitApostropheAt reports whether s[k] is a single quote directly
+// after a digit at the end of a token before horizontal space or punctuation.
+func isTrailingDigitApostropheAt(s string, k int) bool {
+	if k <= 0 || k >= len(s) || s[k] != '\'' {
+		return false
+	}
+	before, _ := utf8.DecodeLastRuneInString(s[:k])
+	if !unicode.IsDigit(before) {
+		return false
+	}
+	if k+1 == len(s) || strings.IndexByte(",;.!?)]}", s[k+1]) >= 0 {
+		return true
+	}
+	after, _ := utf8.DecodeRuneInString(s[k+1:])
+	return isDelimSpace(after)
+}
+
+// isAuthHeaderOpenerGap reports whether gap sits between a preceding token and
+// an immediately following auth header opener (optionally preceded by shell
+// separators and a -H/--header flag).
+func isAuthHeaderOpenerGap(gap string) bool {
+	if len(gap) == 0 {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(gap)
+	if !isDelimSpace(r) && strings.IndexByte(";&|<>()", gap[0]) < 0 {
+		return false
+	}
+	rem := gap[skipHorizDelimSpace(gap, 0):]
+	for len(rem) > 0 && strings.IndexByte(";&|()", rem[0]) >= 0 {
+		rem = rem[1:]
+		rem = rem[skipHorizDelimSpace(rem, 0):]
+	}
+	for _, flag := range []string{"--header", "-H"} {
+		if strings.HasPrefix(rem, flag) && len(rem) > len(flag) {
+			after := rem[len(flag):]
+			if n := skipHorizDelimSpace(after, 0); n > 0 {
+				rem = after[n:]
+				break
+			} else if after[0] == '=' {
+				rem = after[1:]
+				break
+			}
+		}
+	}
+	if !authHeaderKeys.mayStartAt(rem, 0) {
+		return false
+	}
+	loc := authHeaderPrefixAtRe.FindStringIndex(rem)
+	return loc != nil && loc[0] == 0 && loc[1] == len(rem)
+}
+
+// isJSONEscapedSpaceBefore reports whether s[:pos] ends with a backslash-escaped
+// whitespace sequence (\n, \r, or \t, single- or double-escaped in JSON text).
+func isJSONEscapedSpaceBefore(s string, pos int) bool {
+	if pos < 2 {
+		return false
+	}
+	switch s[pos-1] {
+	case 'n', 'r', 't':
+	default:
+		return false
+	}
+	bs := 0
+	for p := pos - 2; p >= 0 && s[p] == '\\'; p-- {
+		bs++
+	}
+	return bs >= 1
+}
+
+// spanEndsWithAuthHeaderPrefix reports whether s[spanStart:spanEnd] terminates
+// with a recognized auth header name and colon delimiter on a clean boundary.
+func spanEndsWithAuthHeaderPrefix(s string, spanStart, spanEnd int) bool {
+	if spanStart < 0 || spanEnd > len(s) || spanStart >= spanEnd {
+		return false
+	}
+	span := s[spanStart:spanEnd]
+	j := len(span) - 1
+	for j >= 0 && (span[j] == ' ' || span[j] == '\t') {
+		j--
+	}
+	if j < 0 || span[j] != ':' {
+		return false
+	}
+	nameStart := j - 1
+	for nameStart >= 0 && (span[nameStart] == ' ' || span[nameStart] == '\t') {
+		nameStart--
+	}
+	for nameStart >= 0 {
+		c := span[nameStart]
+		if c != '-' && c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			break
+		}
+		if isJSONEscapedSpaceBefore(s, spanStart+nameStart+1) {
+			break
+		}
+		nameStart--
+	}
+	idx := nameStart + 1
+	if idx >= len(span) || !authHeaderKeys.mayStartAt(span, idx) {
+		return false
+	}
+	loc := authHeaderPrefixAtRe.FindStringIndex(span[idx:])
+	if loc == nil || loc[0] != 0 || idx+loc[1] != len(span) {
+		return false
+	}
+	return wordBoundaryAt(s, spanStart+idx) || isJSONEscapedSpaceBefore(s, spanStart+idx)
+}
+
+// spanEndsWithNestedHeaderPrefix reports whether s[spanStart:spanEnd] ends
+// with a recognized auth header prefix or a sensitive key-colon prefix on a
+// clean boundary.
+func spanEndsWithNestedHeaderPrefix(s string, spanStart, spanEnd int) bool {
+	if spanEndsWithAuthHeaderPrefix(s, spanStart, spanEnd) {
+		return true
+	}
+	if spanStart < 0 || spanEnd > len(s) || spanStart >= spanEnd {
+		return false
+	}
+	span := s[spanStart:spanEnd]
+	j := len(span) - 1
+	for j >= 0 && (span[j] == ' ' || span[j] == '\t') {
+		j--
+	}
+	if j < 0 || span[j] != ':' {
+		return false
+	}
+	nameEnd := j - 1
+	for nameEnd >= 0 && (span[nameEnd] == ' ' || span[nameEnd] == '\t') {
+		nameEnd--
+	}
+	if nameEnd < 0 {
+		return false
+	}
+	nameStart := nameEnd
+	for nameStart >= 0 {
+		c := span[nameStart]
+		if c != '-' && c != '_' && (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			break
+		}
+		if isJSONEscapedSpaceBefore(s, spanStart+nameStart+1) {
+			break
+		}
+		nameStart--
+	}
+	idx := nameStart + 1
+	if idx > nameEnd {
+		return false
+	}
+	if !wordBoundaryAt(s, spanStart+idx) && !isJSONEscapedSpaceBefore(s, spanStart+idx) {
+		return false
+	}
+	return isSensitiveKey(span[idx : nameEnd+1])
+}
+
 func startsAuthHeaderPrefix(sub string) bool {
 	return authHeaderKeys.mayStartAt(sub, 0) && authHeaderPrefixAtRe.FindStringIndex(sub) != nil
 }
 
-func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd int) bool {
+func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd int, inJSON bool) bool {
 	s := h.s
-	isWordOrEq := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '=' }
-	if !startsContractionBefore(s, k, 1, isWordOrEq) && !isTrailingApostrophe(s, k) {
+	wordApostrophe := isWordApostropheAt(s, k)
+	if !wordApostrophe && !isTrailingDigitApostropheAt(s, k) {
 		return false
 	}
 	tokEnd := k + 1
@@ -2434,13 +3392,17 @@ func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd in
 	if hasUnquotedShellComment(gap) {
 		return false
 	}
-	if closePos < 2 || (s[closePos-2] != ' ' && s[closePos-2] != '\t' && strings.IndexByte("=;&|(", s[closePos-2]) < 0 && !opensPrefixedString(s, closePos-1)) {
+	if closePos < 2 || (s[closePos-2] != ' ' && s[closePos-2] != '\t' && strings.IndexByte("=:;&|(", s[closePos-2]) < 0 && !opensPrefixedString(s, closePos-1)) {
 		return false
 	}
 	if startsAuthHeaderPrefix(s[closePos:lineEnd]) {
-		return isHeaderFlagGap(gap)
+		return wordApostrophe && h.isHeaderFlagGap(k, gap, lineEnd, inJSON, isTrailingApostrophe(s, k))
 	}
-	if !isBenignCommandGap(gap) {
+	authGap := isAuthHeaderOpenerGap(gap)
+	if !wordApostrophe && !authGap {
+		return false
+	}
+	if !authGap && !isBenignCommandGap(gap) {
 		return false
 	}
 	if closePos < lineEnd && s[closePos] == '#' {
@@ -2451,6 +3413,12 @@ func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd in
 		return false
 	}
 	inner := s[closePos : nextClose-1]
+	if authGap {
+		if hasUnquotedShellComment(inner) {
+			return false
+		}
+		return h.isShellBalancedFrom(tokEnd, lineEnd, inJSON)
+	}
 	if len(inner) == 0 || hasUnquotedShellComment(inner) || strings.ContainsAny(inner, "\"\\") {
 		return false
 	}
@@ -2464,7 +3432,7 @@ func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd in
 			return false
 		}
 	}
-	return h.isShellBalancedFrom(tokEnd, lineEnd)
+	return h.isShellBalancedFrom(tokEnd, lineEnd, inJSON)
 }
 
 // unescapeBackslashControls decodes the standard backslash escapes in s. A
@@ -3159,7 +4127,7 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 				}
 			} else if outer == "" && inner != "" {
 				if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
-					k, unclosed := quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON())
+					k, unclosed := quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
 					if unclosed == "" && k < end && (s[k] == ' ' || s[k] == '\t' || s[k] == ';' || s[k] == '&' || s[k] == '|') {
 						cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
 						if cutEnd == k {
@@ -3170,7 +4138,7 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 				}
 			} else if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
 				var unclosed string
-				k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON())
+				k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
 				if unclosed == "" {
 					cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
 					if cutEnd == k {
@@ -3179,6 +4147,22 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 					end = cutEnd
 				} else {
 					end = k
+				}
+			}
+		} else if !isCookieHeaderKey(s[loc[2]:loc[3]]) {
+			rest := strings.TrimLeft(s[loc[1]:end], " \t")
+			if strings.HasPrefix(rest, redactedValue) {
+				after := strings.TrimLeft(strings.TrimPrefix(rest, redactedValue), " \t")
+				if after != "" && (after[0] == ';' || after[0] == '|' || strings.HasPrefix(after, "&&")) {
+					lead := len(s[loc[1]:end]) - len(rest)
+					end = loc[1] + lead + len(redactedValue)
+				}
+			} else if k0 := loc[1] + len(s[loc[1]:end]) - len(rest); k0 < end {
+				if m := quotedValueAt(quotes.shellScanner(), s, k0); m != "" && k0+len(m) < end {
+					after := strings.TrimLeft(s[k0+len(m):end], " \t")
+					if after != "" && (after[0] == ';' || after[0] == '|' || strings.HasPrefix(after, "&&")) {
+						end = k0 + len(m)
+					}
 				}
 			}
 		}
@@ -4581,6 +5565,7 @@ type headerQuoteScanner struct {
 	curLine    lineQuoteState
 	hasCurLine bool
 	balLineEnd int
+	balInJSON  bool
 	balMemo    map[int]bool
 	// closes caches where the quotes that stay open into a header from a line
 	// before it close, by kind of quote (see quoteCloses).
@@ -4588,6 +5573,12 @@ type headerQuoteScanner struct {
 	// proseCloses caches where the quotes that are open before a Cookie
 	// header's value close, by kind of quote (see closeAt).
 	proseCloses [4]quoteCloseMemo
+	// joinedCloses caches where multiline joined header quotes close on later
+	// lines without mixing joined-quote lookahead into proseCloses.
+	joinedCloses [4]quoteCloseMemo
+	// chainCloses caches whether a joined-quote close position is followed by
+	// balanced shell quoting through the remainder of its multiline chain.
+	chainCloses map[int]bool
 	// shell answers inShellAssignment for the quotes of s. It belongs to
 	// this scan alone, so that its cursors are never evicted by another
 	// scrub and nothing keeps s once the scan is done.
@@ -4598,10 +5589,19 @@ type headerQuoteScanner struct {
 	// suffix.
 	joinedFrom, joinedLineEnd, joinedEnd int
 	joinedEntryOuter, joinedUnclosed     string
-	joinedInJSON                         bool
+	joinedInJSON, joinedEscJSON          bool
 	curOuterJSON                         bool
 	jsonOuterFrom, jsonOuterLineEnd      int
 	jsonOuterEnd                         int
+	plainPrefixReady                     bool
+	plainPrefixBits                      []uint64
+	proseCloseMemo                       map[int]bool
+	closeTailStops                       map[int]bool
+	subShellReady                        bool
+	subLineStart, subRealLineEnd         int
+	subEscJSON                           bool
+	subPos, subDepth                     int
+	subInSingle, subInDouble, subCmdPos  bool
 }
 
 // newHeaderQuoteScanner returns a headerQuoteScanner for s.
@@ -4666,7 +5666,7 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEndAt(k, lineEnd int, entryOu
 	if outerEnd < 0 {
 		return 0, "", false
 	}
-	endPos, unclosed := h.joinedHeaderArgEnd(k, outerEnd, entryOuter, false)
+	endPos, unclosed := h.joinedHeaderArgEnd(k, outerEnd, entryOuter, false, true)
 	if unclosed == "" && endPos < outerEnd {
 		return endPos, entryInner, true
 	}
@@ -4725,23 +5725,145 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int) (int, 
 // header argument after its apparent closing quote, and returns the end offset
 // of the joined argument along with any quote that remained unclosed at
 // lineEnd.
-func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter string, inJSON bool) (int, string) {
+func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter string, inJSON, jsonEscaped bool) (int, string) {
 	if h == nil || k >= lineEnd {
 		return k, ""
 	}
 	s := h.s
-	if h.joinedLineEnd == lineEnd && h.joinedEntryOuter == entryOuter && h.joinedInJSON == inJSON && k >= h.joinedFrom && k <= h.joinedEnd {
+	if h.joinedLineEnd == lineEnd && h.joinedEntryOuter == entryOuter && h.joinedInJSON == inJSON && h.joinedEscJSON == jsonEscaped && k >= h.joinedFrom && k <= h.joinedEnd {
 		return h.joinedEnd, h.joinedUnclosed
 	}
+	escJSON := inJSON || jsonEscaped
 	start := k
+	if start > 0 && s[start-1] == '\'' && (isWordApostropheAt(s, start-1) || isTrailingDigitApostropheAt(s, start-1)) {
+		if parenPos := skipHorizDelimSpace(s, k); parenPos < lineEnd && s[parenPos] == ')' {
+			if !h.parenClosesCleanlyAt(start, parenPos, lineEnd, inJSON, jsonEscaped) {
+				return lineEnd, ""
+			}
+		}
+	}
 	if (s[k] == '.' || s[k] == '!' || s[k] == '?') && (k+1 >= lineEnd || func() bool { r, _ := utf8.DecodeRuneInString(s[k+1:]); return isDelimSpace(r) }()) {
 		return k, ""
+	}
+	parenDepth := 0
+	unclosedParenNoCloseUntil := -1
+	var matchedParenSet map[int]bool
+	matchedParenUntil := -1
+	hasBalancedCloseParen := func(openPos int) bool {
+		if openPos < unclosedParenNoCloseUntil {
+			return false
+		}
+		if openPos < matchedParenUntil {
+			return matchedParenSet[openPos]
+		}
+		depth := 1
+		closesSeen := 0
+		segEnd := lineEnd
+		for p := openPos + 1; p < lineEnd; {
+			if q := openingQuote(s, p); q != "" {
+				if q == "'" && isWordApostropheAt(s, p) {
+					p++
+					continue
+				}
+				var qOuter, qInner string
+				if len(q) == 1 {
+					qOuter = q
+				} else {
+					qInner = q
+				}
+				closePos := quoteCloseScan(s[:lineEnd], p+len(q), qOuter, qInner)
+				if closePos < 0 {
+					segEnd = p
+					break
+				}
+				p = closePos
+				continue
+			}
+			c := s[p]
+			if c == '\\' {
+				if p+1 < lineEnd {
+					p += 2
+				} else {
+					p++
+				}
+				continue
+			}
+			if strings.IndexByte(";&|<>", c) >= 0 || (inJSON && !jsonEscaped && (c == ',' || c == '}' || c == ']')) {
+				segEnd = p
+				break
+			}
+			switch c {
+			case '(':
+				depth++
+			case ')':
+				closesSeen++
+				depth--
+				if depth == 0 {
+					return true
+				}
+			}
+			p++
+		}
+		if closesSeen == 0 {
+			unclosedParenNoCloseUntil = segEnd
+			return false
+		}
+		matched := make(map[int]bool, closesSeen)
+		var stack []int
+		for p := openPos; p < segEnd; {
+			if q := openingQuote(s, p); q != "" {
+				if q == "'" && isWordApostropheAt(s, p) {
+					p++
+					continue
+				}
+				var qOuter, qInner string
+				if len(q) == 1 {
+					qOuter = q
+				} else {
+					qInner = q
+				}
+				closePos := quoteCloseScan(s[:segEnd], p+len(q), qOuter, qInner)
+				if closePos < 0 {
+					break
+				}
+				p = closePos
+				continue
+			}
+			c := s[p]
+			if c == '\\' {
+				if p+1 < segEnd {
+					p += 2
+				} else {
+					p++
+				}
+				continue
+			}
+			switch {
+			case c == '(':
+				stack = append(stack, p)
+			case c == ')' && len(stack) > 0:
+				top := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				matched[top] = true
+			}
+			p++
+		}
+		matchedParenSet = matched
+		matchedParenUntil = segEnd
+		return matched[openPos]
 	}
 	for k < lineEnd {
 		if wordBoundaryAt(s, k) && startsAuthHeaderPrefix(s[k:lineEnd]) {
 			break
 		}
+		if s[k] == '\\' && k+2 < lineEnd && s[k+1] == '\'' && s[k+2] == '\'' && entryOuter != "" && !escJSON {
+			k += 2
+			continue
+		}
 		if q := openingQuote(s, k); q != "" {
+			if inJSON && q == `"` && k+1 < lineEnd && (s[k+1] == ',' || s[k+1] == '}' || s[k+1] == ']') {
+				break
+			}
 			var qOuter, qInner string
 			if len(q) == 1 {
 				qOuter = q
@@ -4750,19 +5872,51 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			}
 			closePos := quoteCloseScan(s[:lineEnd], k+len(q), qOuter, qInner)
 			if closePos < 0 {
-				if q == "'" && (isMidWordApostrophe(s, k) || isTrailingApostrophe(s, k)) && !h.singleQuoteClosesAfterLine(lineEnd) {
+				if q == "'" && isWordApostropheAt(s, k) && !h.singleQuoteClosesAfterLine(lineEnd) &&
+					(!isTrailingApostrophe(s, k) || (h.apostropheTailStopsOnLine(start, k, lineEnd, inJSON, jsonEscaped) && (inJSON || jsonEscaped || !h.hasUnclosedQuoteOnNextLine(lineEnd)))) {
 					k++
 					continue
 				}
-				if after := k + len(q); after < lineEnd && (s[after] == '}' || s[after] == ']' || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
-					break
+				if inJSON && !jsonEscaped {
+					if after := k + len(q); after < lineEnd && (s[after] == '}' || s[after] == ']' || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
+						break
+					}
 				}
-				h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON = start, lineEnd, lineEnd, entryOuter, q, inJSON
+				h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON, h.joinedEscJSON = start, lineEnd, lineEnd, entryOuter, q, inJSON, jsonEscaped
 				return lineEnd, q
 			}
-			if q == "'" && h.isCandidateHeaderApostrophe(k, closePos, lineEnd) {
+			if q == "'" && h.isCandidateHeaderApostrophe(k, closePos, lineEnd, escJSON) {
 				k++
 				continue
+			}
+			if q == "'" && (isWordApostropheAt(s, k) || isTrailingDigitApostropheAt(s, k)) {
+				if startsAuthHeaderPrefix(s[closePos:lineEnd]) {
+					return lineEnd, ""
+				}
+				if isTrailingApostrophe(s, k) {
+					if parenPos := skipHorizDelimSpace(s, k+1); parenPos < closePos-1 && s[parenPos] == ')' {
+						if h.parenClosesCleanlyAt(start, parenPos, lineEnd, inJSON, jsonEscaped) {
+							k++
+							continue
+						}
+						return lineEnd, ""
+					}
+				}
+			}
+			if spanEndsWithAuthHeaderPrefix(s, k+len(q), closePos-len(q)) {
+				nextClose := quoteCloseScan(s[:lineEnd], closePos, qOuter, qInner)
+				if nextClose >= 0 {
+					if h.isShellBalancedFrom(nextClose, lineEnd, escJSON) {
+						k = nextClose
+						continue
+					}
+					return lineEnd, ""
+				} else if lineEnd < len(s) && (s[lineEnd] == '\n' || s[lineEnd] == '\r') && h.joinedQuoteCloses(lineEnd, qOuter, qInner) {
+					h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON, h.joinedEscJSON = start, lineEnd, lineEnd, entryOuter, q, inJSON, jsonEscaped
+					return lineEnd, q
+				} else {
+					return lineEnd, ""
+				}
 			}
 			if startsAuthHeaderPrefix(s[closePos:lineEnd]) {
 				k = closePos
@@ -4779,24 +5933,39 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			}
 			continue
 		}
-		if inJSON && (s[k] == '}' || s[k] == ']') {
+		if inJSON && !jsonEscaped && (s[k] == '}' || s[k] == ']') {
 			break
 		}
-		if k == start && inJSON && (s[k] == ',' || s[k] == ':') {
+		if k == start && inJSON && !jsonEscaped && (s[k] == ',' || s[k] == ':') {
 			break
 		}
-		if s[k] == ',' {
+		if inJSON && !jsonEscaped && s[k] == ',' {
 			if k+1 >= lineEnd || s[k+1] == ' ' || s[k+1] == '\t' {
 				break
 			}
 		}
+		if s[k] == '(' {
+			if parenDepth > 0 || hasBalancedCloseParen(k) {
+				parenDepth++
+			}
+			k++
+			continue
+		}
+		if s[k] == ')' {
+			if parenDepth > 0 {
+				parenDepth--
+				k++
+				continue
+			}
+			break
+		}
 		r, w := utf8.DecodeRuneInString(s[k:])
-		if isDelimSpace(r) || strings.IndexByte(";&|<>()", s[k]) >= 0 {
+		if parenDepth == 0 && (isDelimSpace(r) || strings.IndexByte(";&|<>", s[k]) >= 0) {
 			break
 		}
 		k += w
 	}
-	h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON = start, lineEnd, k, entryOuter, "", inJSON
+	h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON, h.joinedEscJSON = start, lineEnd, k, entryOuter, "", inJSON, jsonEscaped
 	return k, ""
 }
 
@@ -5155,20 +6324,274 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 	return false
 }
 
+// joinedQuoteCloseAt returns quoteCloseScan(h.s, from, outer, inner) cached
+// in joinedCloses so multiline joined-quote lookahead scales linearly without
+// mutating proseCloses.
+func (h *headerQuoteScanner) joinedQuoteCloseAt(from int, outer, inner string) int {
+	m := closeSlot(&h.joinedCloses, outer, inner)
+	if m == nil {
+		return quoteCloseScan(h.s, from, outer, inner)
+	}
+	if !m.ok || from < m.from || (m.closePos >= 0 && from >= m.closePos) {
+		*m = quoteCloseMemo{ok: true, from: from, closePos: quoteCloseScan(h.s, from, outer, inner), lastHdrLine: -1}
+	}
+	return m.closePos
+}
+
+// chainMode selects how chainClosesFrom handles unquoted apostrophes on a
+// closing line when checking whether the remainder of a quote chain is
+// shell-balanced.
+type chainMode int
+
+const (
+	chainStrict chainMode = iota
+	chainSkipContractions
+	chainSkipPossessives
+)
+
+// isProsePluralPossessive reports whether line[k] is a trailing plural
+// possessive apostrophe after a prose word of at least three letters ending in
+// 's' or 'S' (such as "users'" or "James'") that starts after whitespace or an
+// opening/clause delimiter inside line.
+func isProsePluralPossessive(line string, k int) bool {
+	if k < 3 || (line[k-1] != 's' && line[k-1] != 'S') || !isTrailingApostrophe(line, k) {
+		return false
+	}
+	start, letters := k, 0
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(line[:start])
+		if !unicode.IsLetter(r) {
+			break
+		}
+		start -= size
+		letters++
+	}
+	if start == 0 || letters < 3 {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(line[:start])
+	return isDelimSpace(r) || strings.ContainsRune("([{,;", r)
+}
+
+// closesProseLineWord reports whether h.s[pos] is a trailing apostrophe closing
+// a letter-only word on a line whose preceding text contains only plain
+// alphanumeric tokens and horizontal whitespace (no key-value delimiters or
+// quotes). Precomputed line prefixes and memoization keep repeated checks
+// linear across the scan.
+func (h *headerQuoteScanner) closesProseLineWord(pos int) bool {
+	if h == nil || pos <= 0 || pos >= len(h.s) {
+		return false
+	}
+	if v, ok := h.proseCloseMemo[pos]; ok {
+		return v
+	}
+	stamp := func(v bool) bool {
+		if h.proseCloseMemo == nil {
+			h.proseCloseMemo = make(map[int]bool)
+		}
+		h.proseCloseMemo[pos] = v
+		return v
+	}
+	s := h.s
+	if !isTrailingApostrophe(s, pos) {
+		return stamp(false)
+	}
+	start := pos
+	for start > 0 {
+		r, size := utf8.DecodeLastRuneInString(s[:start])
+		if !unicode.IsLetter(r) {
+			break
+		}
+		start -= size
+	}
+	if start > 0 && s[start-1] != '\n' && s[start-1] != '\r' && s[start-1] != ' ' && s[start-1] != '\t' {
+		return stamp(false)
+	}
+	if !h.plainPrefixReady {
+		h.plainPrefixBits = make([]uint64, (len(s)+64)/64)
+		h.plainPrefixBits[0] |= 1
+		lineOK := true
+		for i := 0; i < len(s); {
+			r, w := utf8.DecodeRuneInString(s[i:])
+			end := i + w
+			if r == '\r' || r == '\n' {
+				lineOK = true
+			} else if lineOK && !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '-' && r != ' ' && r != '\t' {
+				lineOK = false
+			}
+			if lineOK {
+				h.plainPrefixBits[end>>6] |= 1 << (end & 63)
+			}
+			i = end
+		}
+		h.plainPrefixReady = true
+	}
+	return stamp((h.plainPrefixBits[start>>6]>>(start&63))&1 != 0)
+}
+
+// chainClosesFrom reports whether a joined-quote close at closePos has
+// balanced shell quoting through the remainder of its chain under mode.
+func (h *headerQuoteScanner) chainClosesFrom(closePos int, escaped bool, mode chainMode) bool {
+	if h == nil {
+		return false
+	}
+	key := closePos<<4 | int(mode)<<2
+	if escaped {
+		key |= 1
+	}
+	if h.curOuterJSON {
+		key |= 2
+	}
+	if v, ok := h.chainCloses[key]; ok {
+		return v
+	}
+	stamp := func(res bool) bool {
+		if h.chainCloses == nil {
+			h.chainCloses = make(map[int]bool)
+		}
+		h.chainCloses[key] = res
+		return res
+	}
+	s := h.s
+	lineLim := len(s)
+	if nl := strings.IndexAny(s[closePos:], "\r\n"); nl >= 0 {
+		lineLim = closePos + nl
+	}
+	for k := closePos; k < lineLim; {
+		c := s[k]
+		if c == '#' && (k == 0 || s[k-1] == ' ' || s[k-1] == '\t' || strings.IndexByte(";&|()\r\n", s[k-1]) >= 0) {
+			return stamp(true)
+		}
+		if wordBoundaryAt(s, k) && authHeaderKeys.mayStartAt(s[k:lineLim], 0) {
+			if loc := authHeaderPrefixAtRe.FindStringSubmatchIndex(s[k:lineLim]); loc != nil {
+				if !isCookieHeaderKey(s[k+loc[2]:k+loc[3]]) || !cookieValueIsProse(s, k+loc[1]) {
+					return stamp(true)
+				}
+			}
+		}
+		if !escaped && c == '\\' {
+			if k+1 < lineLim {
+				k += 2
+			} else {
+				k++
+			}
+			continue
+		}
+		if q := openingQuote(s[:lineLim], k); q != "" {
+			if h.curOuterJSON && !escaped && q == `"` && k+1 < lineLim && (s[k+1] == ',' || s[k+1] == '}' || s[k+1] == ']') {
+				return stamp(true)
+			}
+			if mode != chainStrict && q == "'" {
+				line, pos := s[closePos:lineLim], k-closePos
+				if isProseContraction(line, pos) || mode == chainSkipPossessives && isProsePluralPossessive(line, pos) {
+					k += len(q)
+					continue
+				}
+			}
+			var qOuter, qInner string
+			var qEsc bool
+			if len(q) == 1 {
+				qOuter = q
+			} else {
+				qInner = q
+				qEsc = true
+			}
+			cPos := quoteCloseScan(s[:lineLim], k+len(q), qOuter, qInner)
+			if cPos >= 0 {
+				k = cPos
+				continue
+			}
+			nextClose := quoteCloseScan(s, lineLim, qOuter, qInner)
+			if nextClose < 0 {
+				return stamp(false)
+			}
+			nextMode := mode
+			if nextClose > lineLim && nextMode == chainSkipPossessives {
+				nextMode = chainSkipContractions
+			}
+			return stamp(h.chainClosesFrom(nextClose, qEsc, nextMode))
+		}
+		k++
+	}
+	return stamp(true)
+}
+
+// joinedQuoteCloses reports whether outer and inner close at or after from and
+// leave balanced shell quoting under strict lexical mode, prose-contraction
+// mode, or (when the closing quote terminates a plain prose word on its line)
+// plural-possessive mode.
+// hasUnclosedQuoteOnNextLine reports whether the first non-empty line after
+// lineEnd does not open a new header and contains a single quote.
+func (h *headerQuoteScanner) hasUnclosedQuoteOnNextLine(lineEnd int) bool {
+	if h == nil || lineEnd >= len(h.s) || (h.s[lineEnd] != '\n' && h.s[lineEnd] != '\r') {
+		return false
+	}
+	s := h.s
+	next := lineEnd + 1
+	if s[lineEnd] == '\r' && next < len(s) && s[next] == '\n' {
+		next++
+	}
+	nextEnd := len(s)
+	if nl := strings.IndexAny(s[next:], "\r\n"); nl >= 0 {
+		nextEnd = next + nl
+	}
+	for next == nextEnd && nextEnd < len(s) {
+		next = nextEnd + 1
+		if s[nextEnd] == '\r' && next < len(s) && s[next] == '\n' {
+			next++
+		}
+		nextEnd = len(s)
+		if nl := strings.IndexAny(s[next:], "\r\n"); nl >= 0 {
+			nextEnd = next + nl
+		}
+	}
+	if next >= nextEnd || startsHeaderLine(s, next) {
+		return false
+	}
+	closePos := h.joinedQuoteCloseAt(lineEnd, "'", "")
+	return closePos > next && closePos <= nextEnd
+}
+
+func (h *headerQuoteScanner) joinedQuoteCloses(from int, outer, inner string) bool {
+	if h == nil || from >= len(h.s) {
+		return false
+	}
+	closePos := h.joinedQuoteCloseAt(from, outer, inner)
+	if closePos < 0 {
+		return false
+	}
+	if outer == "'" && inner == "" && closePos > 0 && isWordApostropheAt(h.s, closePos-1) && isTrailingApostrophe(h.s, closePos-1) {
+		stops, ok := h.closeTailStops[closePos]
+		if !ok {
+			closeLineStart := strings.LastIndexAny(h.s[:closePos-1], "\r\n") + 1
+			closeLineEnd := len(h.s)
+			if nl := strings.IndexAny(h.s[closePos:], "\r\n"); nl >= 0 {
+				closeLineEnd = closePos + nl
+			}
+			stops = h.apostropheTailStopsOnLine(closeLineStart, closePos-1, closeLineEnd, false, false)
+			if h.closeTailStops == nil {
+				h.closeTailStops = make(map[int]bool)
+			}
+			h.closeTailStops[closePos] = stops
+		}
+		if !stops {
+			return false
+		}
+	}
+	esc := inner != ""
+	if h.chainClosesFrom(closePos, esc, chainStrict) || h.chainClosesFrom(closePos, esc, chainSkipContractions) {
+		return true
+	}
+	return closePos > 0 && h.closesProseLineWord(closePos-1) && h.chainClosesFrom(closePos, esc, chainSkipPossessives)
+}
+
 // singleQuoteClosesAfterLine reports whether a single quote that stays open at
-// lineEnd closes on a subsequent line without closeLineRejects rejecting the
-// closing line.
+// lineEnd closes on a subsequent line and leaves a balanced shell quote chain.
 func (h *headerQuoteScanner) singleQuoteClosesAfterLine(lineEnd int) bool {
-	if h == nil || lineEnd >= len(h.s) {
+	if h == nil || lineEnd >= len(h.s) || (h.s[lineEnd] != '\n' && h.s[lineEnd] != '\r') {
 		return false
 	}
-	if !h.quoteCloses(lineEnd, "'", "") {
-		return false
-	}
-	if m := closeSlot(&h.closes, "'", ""); m != nil {
-		return !m.rejects
-	}
-	return true
+	return h.joinedQuoteCloses(lineEnd, "'", "")
 }
 
 // closeSlot returns the entry of memos that caches the close of the quotes
@@ -5447,6 +6870,16 @@ func isFoldedHeaderLine(s string, next, indentLen int) bool {
 func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bool, indentLen int, quotes *headerQuoteScanner) (int, string) {
 	sh := quotes.shellScanner()
 	var closesChecked, closes bool
+	if outer == "" && inner == "" && !headerBeforeIsCookie(s, from) {
+		rest := strings.TrimLeft(s[from:end], " \t")
+		if strings.HasPrefix(rest, redactedValue) {
+			after := strings.TrimLeft(strings.TrimPrefix(rest, redactedValue), " \t")
+			if after != "" && (after[0] == ';' || after[0] == '|' || strings.HasPrefix(after, "&&")) {
+				lead := len(s[from:end]) - len(rest)
+				return from + lead + len(redactedValue), ""
+			}
+		}
+	}
 	if !canFold && strings.TrimSpace(s[from:end]) == redactedValue {
 		if outer == "" && inner == "" || quotes == nil || !quotes.placeholderQuoteCloses(end, outer, inner) {
 			return end, ""
@@ -5456,11 +6889,13 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 	}
 	nestedEnd := 0
 	lineEnd := end
+	curLineStart := from
 	entryOuter, entryInner := outer, inner
 	joinedMultiline := false
 	for k := from; ; {
 		if k < end {
 			if outer != "" || inner != "" {
+				prevOuter, prevInner := outer, inner
 				mLen, vEnd := nestedQuotedValueEnd(s, from, k, end, outer, inner)
 				c := s[k]
 				switch {
@@ -5468,9 +6903,21 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					nestedEnd = vEnd
 					k += mLen
 					end = vEnd
+					if k < end && outer != "" && inner == "" && strings.TrimSpace(s[from:k-mLen]) == "" && quoteCloseScan(s, k, outer, "") < 0 {
+						if endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, "", quotes.inJSON(), false); unclosed == "" && endPos < end {
+							return endPos, ""
+						}
+					}
 				case outer == "'":
 					if c == '\'' {
-						outer = ""
+						if !joinedMultiline || closes {
+							outer = ""
+						} else if k > curLineStart {
+							prevRune, _ := utf8.DecodeLastRuneInString(s[curLineStart:k])
+							if (unicode.IsLetter(prevRune) || unicode.IsDigit(prevRune)) && quotes != nil && quotes.apostropheTailStopsOnLine(curLineStart, k, end, quotes.inJSON(), false) {
+								outer = ""
+							}
+						}
 					}
 					k++
 				case c == '\\':
@@ -5518,8 +6965,39 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				}
 				if outer == "" && inner == "" {
 					nestedEnd = 0
+					if joinedMultiline && (entryOuter != "" || entryInner != "") {
+						if qLen := len(prevOuter) + len(prevInner); qLen > 0 && k-qLen > from && spanEndsWithNestedHeaderPrefix(s, from, k-qLen) {
+							if nextClose := quoteCloseScan(s[:end], k, prevOuter, prevInner); nextClose >= 0 {
+								if quotes == nil || quotes.isShellBalancedFrom(nextClose, end, quotes.inJSON()) {
+									k = nextClose
+								} else {
+									k = end
+								}
+							} else if (quotes != nil && quotes.joinedQuoteCloses(end, prevOuter, prevInner)) || k == end || end < len(s) {
+								outer, inner = prevOuter, prevInner
+								joinedMultiline = true
+								closesChecked = false
+								k = end
+								continue
+							} else {
+								if quotes != nil && quotes.inJSON() {
+									for p := k; p < end; p++ {
+										c := s[p]
+										if c == '\\' {
+											p++
+											continue
+										}
+										if c == '"' || c == '}' || c == ']' {
+											return p, entryInner + entryOuter
+										}
+									}
+								}
+								return end, entryInner + entryOuter
+							}
+						}
+					}
 					if entryOuter != "" && (k <= lineEnd || joinedMultiline) {
-						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, quotes.inJSON())
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, quotes.inJSON(), false)
 						if unclosed == "" || endPos == len(s) {
 							return endPos, entryInner + entryOuter
 						}
@@ -5534,8 +7012,8 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 						continue
 					}
 					if entryOuter == "" && entryInner != "" && (k <= lineEnd || joinedMultiline) {
-						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, false)
-						if unclosed == "" && endPos < end && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == ';' || s[endPos] == '&' || s[endPos] == '|') {
+						endPos, unclosed := quotes.joinedHeaderArgEnd(k, end, entryOuter, false, false)
+						if unclosed == "" && ((endPos < end && (s[endPos] == ' ' || s[endPos] == '\t' || s[endPos] == ';' || s[endPos] == '&' || s[endPos] == '|')) || (joinedMultiline && endPos == end)) {
 							return endPos, entryInner
 						}
 						if unclosed != "" && endPos < len(s) {
@@ -5596,6 +7074,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				}
 				return end, ""
 			}
+			origK := k
 			k += len(m)
 			if k > end {
 				end = len(s)
@@ -5603,14 +7082,26 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					end = k + nl
 				}
 			}
+			if k < end && strings.TrimSpace(s[from:origK]) == "" && !headerBeforeIsCookie(s, from) {
+				rest := k
+				for rest < end && (s[rest] == ' ' || s[rest] == '\t') {
+					rest++
+				}
+				if rest < end && (s[rest] == ';' || s[rest] == '|' || (rest+1 < end && s[rest] == '&' && s[rest+1] == '&')) {
+					return k, ""
+				}
+			}
 			continue
 		}
 		if (outer != "" || inner != "") && end < len(s) {
 			if !closesChecked {
 				closesChecked = true
-				if quotes != nil {
+				switch {
+				case joinedMultiline:
+					closes = quotes != nil && quotes.joinedQuoteCloses(end, outer, inner)
+				case quotes != nil:
 					closes = quotes.quoteCloses(end, outer, inner)
-				} else {
+				default:
 					closes = outerQuoteCloses(sh, s, end, outer, inner)
 				}
 			}
@@ -5642,6 +7133,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 				k = next
 			}
 			if k < end {
+				curLineStart = k
 				continue
 			}
 			break
@@ -5657,15 +7149,20 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					end = next + nl
 				}
 				k = next
+				curLineStart = k
 				continue
 			}
 		}
 		break
 	}
-	if (outer != "" || inner != "") && nestedEnd > 0 {
-		return nestedEnd, ""
+	closedQ := ""
+	if joinedMultiline {
+		closedQ = entryInner + entryOuter
 	}
-	return end, ""
+	if (outer != "" || inner != "") && nestedEnd > 0 {
+		return nestedEnd, closedQ
+	}
+	return end, closedQ
 }
 
 // nestedQuotedValueEnd checks whether s[k:], at the start of a token in the
@@ -5694,6 +7191,9 @@ func nestedQuotedValueEnd(s string, from, k, end int, outer, inner string) (int,
 	if m == "" || k+len(m) <= end {
 		return 0, 0
 	}
+	if spanEndsWithNestedHeaderPrefix(s, from, k+len(m)-len(q)) {
+		return 0, 0
+	}
 	body := m[len(q) : len(m)-len(q)]
 	if inner != "" && strings.Contains(body, inner) {
 		return 0, 0
@@ -5716,6 +7216,31 @@ func nestedQuotedValueEnd(s string, from, k, end int, outer, inner string) (int,
 		}
 	}
 	return len(m), vEnd
+}
+
+// headerBeforeIsCookie reports whether the header name directly preceding
+// the separator before s[from:] is Cookie, Set-Cookie, or Cookie2.
+func headerBeforeIsCookie(s string, from int) bool {
+	p := from
+	for p > 0 && (s[p-1] == ' ' || s[p-1] == '\t') {
+		p--
+	}
+	if p == 0 || s[p-1] != ':' {
+		return false
+	}
+	p--
+	for p > 0 && (s[p-1] == ' ' || s[p-1] == '\t') {
+		p--
+	}
+	end := p
+	for p > 0 {
+		c := s[p-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			break
+		}
+		p--
+	}
+	return isCookieHeaderKey(s[p:end])
 }
 
 // crossesHeaderLine reports whether a line that starts in s[from:to], after a
