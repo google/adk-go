@@ -1473,6 +1473,16 @@ func TestAuthRedirectPolicy(t *testing.T) {
 			wantTargetHit: true,
 		},
 		{
+			// net/http hands the hook a request with Host unset. A hook
+			// that pins it to the URL's host changes nothing on the wire.
+			name: "same origin with a caller CheckRedirect copying Host from the URL",
+			checkRedirect: func(req *http.Request, _ []*http.Request) error {
+				req.Host = req.URL.Host
+				return nil
+			},
+			wantTargetHit: true,
+		},
+		{
 			name: "caller CheckRedirect still applies",
 			checkRedirect: func(*http.Request, []*http.Request) error {
 				return errors.New("caller refused")
@@ -1620,81 +1630,112 @@ func TestAuthRedirectPolicy(t *testing.T) {
 // delays, and then fails the whole session, while an answer that is not
 // text/event-stream only means the server offers no stream. A refused
 // redirect there must read as the latter, and the other host must still see
-// nothing.
+// nothing. A 3xx the server labels text/event-stream gets past that check in
+// the SDK and fails the session on its status, at once rather than after the
+// retries.
 func TestAuthRedirectStandaloneStream(t *testing.T) {
 	const token = "user-tok"
-	var mu sync.Mutex
-	var otherAuth []string
-	var gets int
-	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		otherAuth = append(otherAuth, r.Method+" "+r.Header.Get("Authorization"))
-		mu.Unlock()
-		w.Header().Set("Content-Type", "text/html")
-		if _, err := io.WriteString(w, "<html>docs</html>"); err != nil {
-			t.Error(err)
-		}
-	}))
-	defer other.Close()
-	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
-	mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping", Description: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
-		return &mcp.CallToolResult{}, nil, nil
-	})
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
-	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			mu.Lock()
-			gets++
-			mu.Unlock()
-			http.Redirect(w, r, other.URL+"/docs", http.StatusFound)
-			return
-		}
-		mcpHandler.ServeHTTP(w, r)
-	}))
-	defer endpoint.Close()
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		wantErr     string
+		wantTools   int
+	}{
+		{name: "3xx not labeled as a stream", wantTools: 1},
+		{name: "3xx labeled text/event-stream", contentType: "text/event-stream", wantErr: "Found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var otherAuth []string
+			var gets int
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				otherAuth = append(otherAuth, r.Method+" "+r.Header.Get("Authorization"))
+				mu.Unlock()
+				w.Header().Set("Content-Type", "text/html")
+				if _, err := io.WriteString(w, "<html>docs</html>"); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer other.Close()
+			mcpServer := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+			mcp.AddTool(mcpServer, &mcp.Tool{Name: "ping", Description: "ping"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+				return &mcp.CallToolResult{}, nil, nil
+			})
+			mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, nil)
+			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					mu.Lock()
+					gets++
+					mu.Unlock()
+					if tc.contentType != "" {
+						// http.Redirect keeps a Content-Type set before it.
+						w.Header().Set("Content-Type", tc.contentType)
+					}
+					http.Redirect(w, r, other.URL+"/docs", http.StatusFound)
+					return
+				}
+				mcpHandler.ServeHTTP(w, r)
+			}))
+			defer endpoint.Close()
 
-	ts, err := mcptoolset.New(mcptoolset.Config{
-		Endpoint: strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp",
-		Auth:     auth.StaticToken(token),
-	})
-	if err != nil {
-		t.Fatalf("mcptoolset.New() error = %v", err)
-	}
-	defer func() {
-		if err := ts.(io.Closer).Close(); err != nil {
-			t.Errorf("Close() error = %v", err)
-		}
-	}()
-	start := time.Now()
-	tools, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
-	if err != nil || len(tools) != 1 {
-		t.Errorf("Tools() = %d tools, %v, want 1 tool and no error", len(tools), err)
-	}
-	// The SDK's retry delays add up to well over this.
-	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("Tools() took %v, want it not to wait out the stream's retries", took)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if gets == 0 {
-		t.Fatal("the SDK opened no standalone stream, so this test exercised nothing")
-	}
-	if len(otherAuth) != 0 {
-		t.Errorf("redirect target received %q, want no request", otherAuth)
+			ts, err := mcptoolset.New(mcptoolset.Config{
+				Endpoint: strings.Replace(endpoint.URL, "127.0.0.1", "localhost", 1) + "/mcp",
+				Auth:     auth.StaticToken(token),
+			})
+			if err != nil {
+				t.Fatalf("mcptoolset.New() error = %v", err)
+			}
+			defer func() {
+				if err := ts.(io.Closer).Close(); err != nil {
+					t.Errorf("Close() error = %v", err)
+				}
+			}()
+			start := time.Now()
+			tools, err := ts.Tools(icontext.NewReadonlyContext(icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})))
+			if tc.wantErr == "" && (err != nil || len(tools) != tc.wantTools) {
+				t.Errorf("Tools() = %d tools, %v, want %d tools and no error", len(tools), err, tc.wantTools)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("Tools() error = %v, want it to contain %q", err, tc.wantErr)
+			}
+			// The SDK's retry delays add up to well over this.
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("Tools() took %v, want it not to wait out the stream's retries", took)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if gets == 0 {
+				t.Fatal("the SDK opened no standalone stream, so this test exercised nothing")
+			}
+			if len(otherAuth) != 0 {
+				t.Errorf("redirect target received %q, want no request", otherAuth)
+			}
+		})
 	}
 }
 
-// TestAuthRedirectHookRewritesHost covers a caller CheckRedirect that leaves
-// the URL alone and edits the request's Host instead. Through an HTTP forward
-// proxy that is the request target, so the policy has to hold it too.
-func TestAuthRedirectHookRewritesHost(t *testing.T) {
+// TestAuthRedirectHookRewritesTarget covers a caller CheckRedirect that
+// leaves the URL's host alone and points the request elsewhere another way:
+// through the Host header, an opaque URL or a path without a leading slash.
+// Through an HTTP forward proxy each of those decides the request target.
+func TestAuthRedirectHookRewritesTarget(t *testing.T) {
 	const token = "user-tok"
 	for _, tc := range []struct {
-		name string
-		hook func(*http.Request, []*http.Request) error
+		name     string
+		location string // what the endpoint's /mcp answers with
+		hook     func(*http.Request, []*http.Request) error
 	}{
-		{"sets req.Host", func(req *http.Request, _ []*http.Request) error { req.Host = "evil.test"; return nil }},
-		{"sets req.URL.Opaque", func(req *http.Request, _ []*http.Request) error { req.URL.Opaque = "//evil.test/mcp/"; return nil }},
+		{"sets req.Host", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.Host = "evil.test"; return nil }},
+		{"sets req.URL.Opaque", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Opaque = "//evil.test/mcp/"; return nil }},
+		{"sets a path without a leading slash", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Path = ".evil.test/mcp/"; return nil }},
+		{"sets a path that makes the host userinfo", "/mcp/", func(req *http.Request, _ []*http.Request) error { req.URL.Path = "@evil.test/mcp/"; return nil }},
+		// A prefix-trimming hook meets a same-origin Location shaped so that
+		// the trimmed path starts with a dot.
+		{"trims a prefix off the path", "/api.evil.test/mcp/", func(req *http.Request, _ []*http.Request) error {
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api")
+			return nil
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			type seen struct{ target, host, authz string }
@@ -1705,7 +1746,7 @@ func TestAuthRedirectHookRewritesHost(t *testing.T) {
 				got = append(got, seen{r.RequestURI, r.Host, r.Header.Get("Authorization")})
 				mu.Unlock()
 				if r.Host == "endpoint.test" && r.URL.Path == "/mcp" {
-					http.Redirect(w, r, "/mcp/", http.StatusTemporaryRedirect)
+					http.Redirect(w, r, tc.location, http.StatusTemporaryRedirect)
 					return
 				}
 				http.Error(w, "not the endpoint", http.StatusTeapot)

@@ -27,6 +27,7 @@ import (
 // GET chain the SDK uses for its server-to-client stream.
 func TestAuthCheckRedirectChains(t *testing.T) {
 	allowAll := func(*http.Request, []*http.Request) error { return nil }
+	retarget := func(req *http.Request, _ []*http.Request) error { req.URL.Host = "other"; return nil }
 	tests := []struct {
 		name    string
 		method  string
@@ -44,6 +45,11 @@ func TestAuthCheckRedirectChains(t *testing.T) {
 		{name: "cross host on a POST chain", method: http.MethodPost, via: []string{"https://h/a"}, to: "https://other/a", wantErr: "refusing redirect"},
 		{name: "cross host on a GET chain", method: http.MethodGet, via: []string{"https://h/a"}, to: "https://other/a", wantErr: "use last response"},
 		{name: "cross host on a GET chain, with a permissive hook", method: http.MethodGet, via: []string{"https://h/a"}, to: "https://other/a", next: allowAll, wantErr: "use last response"},
+		// A hook that retargets the request is refused after it ran, and on
+		// a GET chain that refusal is the unfollowed 3xx as well.
+		{name: "hook retargets a POST chain", method: http.MethodPost, via: []string{"https://h/a"}, to: "https://h/b", next: retarget, wantErr: "refusing redirect"},
+		{name: "hook retargets a GET chain", method: http.MethodGet, via: []string{"https://h/a"}, to: "https://h/b", next: retarget, wantErr: "use last response"},
+		{name: "hook sets the Host header on a GET chain", method: http.MethodGet, via: []string{"https://h/a"}, to: "https://h/b", next: func(req *http.Request, _ []*http.Request) error { req.Host = "other"; return nil }, wantErr: "use last response"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
