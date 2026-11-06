@@ -263,7 +263,9 @@ information on using pull requests.
     title, and in the commit subject too on a single-commit PR, where that is
     what lands instead. Release tooling reads the landed subject to pick the
     next version and build the release notes, and silently skips anything with
-    no recognized type.
+    no recognized type. The `Require conventional subject` check flags a title
+    or subject that release tooling would skip. It accepts the types listed in
+    `.github/release-please-config.json`, plus `revert`.
 -   If the change alters behavior for anyone already on the current release, say
     so in the description: what differs, and who is affected. This includes bug
     fixes, since a fix that alters an observable result is still a behavior

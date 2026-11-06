@@ -61,32 +61,46 @@ func beforeModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *mo
 			if tool.FunctionDeclarations == nil {
 				continue
 			}
-			for _, decl := range tool.FunctionDeclarations {
+			for i, decl := range tool.FunctionDeclarations {
 				_, exists := req.Tools[decl.Name]
 				if !exists {
 					continue
 				}
 
-				shouldAddArgs := cfg.Predicate(decl.Name)
-
-				if shouldAddArgs {
-					if decl.Parameters == nil {
-						decl.Parameters = &genai.Schema{Type: "OBJECT", Properties: map[string]*genai.Schema{}}
-					}
-					if decl.Parameters.Properties == nil {
-						decl.Parameters.Properties = map[string]*genai.Schema{}
-					}
-
-					maps.Copy(decl.Parameters.Properties, cfg.Args)
-
-					if cfg.OverrideDescription != nil {
-						decl.Description = cfg.OverrideDescription(decl.Description)
-					}
+				if cfg.Predicate(decl.Name) {
+					tool.FunctionDeclarations[i] = modifiedDeclaration(cfg, decl)
 				}
 			}
 		}
 		return nil, nil
 	}
+}
+
+// modifiedDeclaration returns a copy of decl with the configured arguments
+// and description applied, and leaves decl alone. The task and single_turn
+// tools an LLM agent installs for its sub-agents hand out the same declaration
+// on every call, so editing it in place would wrap the description again on
+// every request and race between concurrent ones. An agent tool built on an
+// agent with an InputSchema rebuilds its declaration on each call but uses that
+// schema as its parameters, so an in-place edit would add the arguments to the
+// agent's own InputSchema.
+func modifiedDeclaration(cfg FunctionCallModifierConfig, decl *genai.FunctionDeclaration) *genai.FunctionDeclaration {
+	modified := *decl
+	params := genai.Schema{Type: "OBJECT"}
+	if decl.Parameters != nil {
+		params = *decl.Parameters
+	}
+	params.Properties = maps.Clone(params.Properties)
+	if params.Properties == nil {
+		params.Properties = make(map[string]*genai.Schema, len(cfg.Args))
+	}
+	maps.Copy(params.Properties, cfg.Args)
+	modified.Parameters = &params
+
+	if cfg.OverrideDescription != nil {
+		modified.Description = cfg.OverrideDescription(decl.Description)
+	}
+	return &modified
 }
 
 func afterModelCallback(cfg FunctionCallModifierConfig) func(agent.Context, *model.LLMResponse, error) (*model.LLMResponse, error) {

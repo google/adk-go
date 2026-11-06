@@ -168,10 +168,10 @@ func TestNewParallelAgent(t *testing.T) {
 				slices.SortFunc(tt.wantEvents, eventCompareFunc)
 				slices.SortFunc(gotEvents, eventCompareFunc)
 
-				// IDs are assigned at append and are fresh UUIDs, so they
-				// cannot be expressed in a fixture. This test is about which
-				// events came out and who authored them.
-				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "ID")); diff != "" {
+				// IDs and timestamps are filled in when the events are run and
+				// appended, so they cannot be expressed in a fixture. This test
+				// is about which events came out and who authored them.
+				if diff := cmp.Diff(tt.wantEvents, gotEvents, cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp")); diff != "" {
 					t.Errorf("events mismatch (-want +got):\n%s", diff)
 				}
 			}
