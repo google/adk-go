@@ -215,7 +215,8 @@ type GCSContentOffloader interface {
 // logging, redaction of sensitive keys and credentials, run-end flushing,
 // additive schema upgrades, and per-event view creation are enabled by default;
 // DisableSessionMetadata, DisableSensitiveKeyRedaction, DisableFlushOnRunEnd,
-// DisableSchemaUpgrade, and DisableCreateViews opt out of each. Created and
+// DisableSchemaUpgrade, and DisableCreateViews opt out of each, while
+// CreateEvalViews opts in to creating the pre-built evaluation views. Created and
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
@@ -467,6 +468,34 @@ type Config struct {
 	// that start many instances may set DisableCreateViews and call SyncViews
 	// once at deploy time.
 	DisableCreateViews bool
+	// CreateEvalViews creates or replaces the two pre-built agent evaluation
+	// BigQuery views (see [Config.EvalViewDefinitions]), named
+	// "<ViewPrefix>_eval_session" and "<ViewPrefix>_eval_turn" (for example
+	// v_eval_session and v_eval_turn), in the dataset of the events table.
+	// When true (the default is false) and the plugin has a BigQuery client,
+	// the views are created in the background once the table is ready, after
+	// the per-event views when DisableCreateViews is false or on their own
+	// when DisableCreateViews is true; [BigQueryAgentAnalyticsPlugin.SyncEvalViews]
+	// creates or replaces the two evaluation views synchronously and returns
+	// the error even when CreateEvalViews is false, and
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] also includes them when
+	// CreateEvalViews is true.
+	//
+	// Both views reconstruct Vertex AI GenAI Evaluation AgentData trajectories
+	// (trace) and per-turn / per-session guardrail metrics from the content
+	// column and require USER_MESSAGE_RECEIVED, AGENT_STARTING, LLM_REQUEST,
+	// TOOL_STARTING, TOOL_COMPLETED, TOOL_PAUSED, AGENT_TRANSFER,
+	// HITL_CREDENTIAL_REQUEST, HITL_CONFIRMATION_REQUEST, HITL_INPUT_REQUEST,
+	// HITL_CREDENTIAL_REQUEST_COMPLETED, HITL_CONFIRMATION_REQUEST_COMPLETED,
+	// HITL_INPUT_REQUEST_COMPLETED, AGENT_RESPONSE, and INVOCATION_COMPLETED
+	// events. Enabling CreateEvalViews when "content" is in
+	// PayloadColumnDenylist or when EventDenylist / EventAllowlist filters out
+	// any of these required events is a configuration error.
+	//
+	// Because the evaluation views aggregate per session or turn, filtering on
+	// session_start_timestamp or turn_start_timestamp does not prune the
+	// events table's timestamp partitions.
+	CreateEvalViews bool
 	// ViewPrefix is the name prefix of the created views. Empty means "v".
 	// It may contain only letters, digits, '_' and '-'. Give each events
 	// table that shares a dataset its own prefix.

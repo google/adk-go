@@ -252,16 +252,20 @@ type pluginState struct {
 	enabled bool
 	// defs and defsErr are the views of the plugin's Config, or why it has
 	// none, from [Config.ViewDefinitions].
-	defs           []ViewDefinition
-	defsErr        error
-	runner         viewRunner
-	viewGate       chan struct{}
-	viewsMu        sync.Mutex
-	lifeCtx        context.Context
-	lifeCancel     context.CancelFunc
-	viewsCancel    context.CancelFunc
-	asyncViewsDone chan struct{}
-	closed         bool
+	defs            []ViewDefinition
+	defsErr         error
+	evalDefs        []ViewDefinition
+	evalDefsErr     error
+	evalConfigErr   error
+	createEvalViews bool
+	runner          viewRunner
+	viewGate        chan struct{}
+	viewsMu         sync.Mutex
+	lifeCtx         context.Context
+	lifeCancel      context.CancelFunc
+	viewsCancel     context.CancelFunc
+	asyncViewsDone  chan struct{}
+	closed          bool
 }
 
 // BigQueryAgentAnalyticsPlugin wraps an ADK [baseplugin.Plugin] and exposes
@@ -466,14 +470,20 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	defs, defsErr := config.ViewDefinitions()
+	evalDefs, evalDefsErr := config.EvalViewDefinitions()
+	evalConfigErr := validateEvalViewConfig(config, deniedColumns, false)
 	state := &pluginState{
-		counters:   processor.counters,
-		enabled:    true,
-		defs:       defs,
-		defsErr:    defsErr,
-		viewGate:   make(chan struct{}, 1),
-		lifeCtx:    lifeCtx,
-		lifeCancel: lifeCancel,
+		counters:        processor.counters,
+		enabled:         true,
+		defs:            defs,
+		defsErr:         defsErr,
+		evalDefs:        evalDefs,
+		evalDefsErr:     evalDefsErr,
+		evalConfigErr:   evalConfigErr,
+		createEvalViews: config.CreateEvalViews,
+		viewGate:        make(chan struct{}, 1),
+		lifeCtx:         lifeCtx,
+		lifeCancel:      lifeCancel,
 	}
 	state.viewGate <- struct{}{}
 	if bqClient != nil {
@@ -534,15 +544,27 @@ func newBigQueryAgentAnalyticsPlugin(
 
 	registerPlugin(adkPlugin, state)
 
-	if config.createViews() && state.runner != nil {
+	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
 		logf := config.viewLogf()
-		if defsErr != nil {
+		var startupDefs []ViewDefinition
+		var startupErr error
+		if config.createViews() {
+			startupDefs = append(startupDefs, defs...)
+			startupErr = defsErr
+		}
+		if config.CreateEvalViews {
+			startupDefs = append(startupDefs, evalDefs...)
+			if startupErr == nil {
+				startupErr = cmp.Or(evalConfigErr, evalDefsErr)
+			}
+		}
+		if startupErr != nil {
 			if logf != nil {
-				logf("agentanalytics: skipping view creation: %v", defsErr)
+				logf("agentanalytics: skipping view creation: %v", startupErr)
 			}
 		} else {
 			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+			state.startAsyncViewCreation(ctx, startupDefs, logf, bqClient)
 		}
 	}
 	return adkPlugin, nil
@@ -581,6 +603,11 @@ func validateConfig(c Config) (map[string]struct{}, error) {
 	}
 	if c.ViewPrefix != "" && !isValidIdentifier(c.ViewPrefix) {
 		return nil, fmt.Errorf("invalid config: invalid ViewPrefix %q", c.ViewPrefix)
+	}
+	if c.CreateEvalViews {
+		if err := validateEvalViewConfig(c, denied, true); err != nil {
+			return nil, err
+		}
 	}
 	return denied, nil
 }
