@@ -15,6 +15,8 @@
 package internal_test
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,13 +74,14 @@ func TestBackportConflictCommentMatchesBothBotSpellings(t *testing.T) {
 // #8 has no branch yet and must still be backported.
 //
 // gh is a stub that answers only the calls the script is expected to make, so
-// the test needs no network and no credentials, and any other call fails the
-// run.
+// the test needs no network and no credentials. Any other call fails the test,
+// including one the script only warns about.
 func TestBackportSkipsLeftoverBranch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("scripts/backport.sh needs bash and a POSIX gh stub")
 	}
-	if _, err := exec.LookPath("git"); err != nil {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
 		t.Skipf("git is not installed: %v", err)
 	}
 	if err := exec.Command("bash", "-c", "((BASH_VERSINFO[0]*100 + BASH_VERSINFO[1] >= 404))").Run(); err != nil {
@@ -103,7 +106,16 @@ func TestBackportSkipsLeftoverBranch(t *testing.T) {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	// git reads ignore and attributes files from $XDG_CONFIG_HOME/git or
+	// ~/.config/git even when no config file names them, so HOME and
+	// XDG_CONFIG_HOME point at the temporary directory, which has neither.
+	env = append(env,
+		"HOME="+tmp,
+		"XDG_CONFIG_HOME="+tmp,
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_ATTR_NOSYSTEM=1",
+	)
 
 	git := func(t *testing.T, dir string, args ...string) string {
 		t.Helper()
@@ -159,32 +171,61 @@ case "$*" in
 *changedFiles*) echo 1 ;;
 "pr create "*) echo https://github.com/google/adk-go/pull/100 ;;
 "pr edit 100 "*) ;;
-*) echo "gh stub: unexpected call: $*" >&2; exit 1 ;;
+*) echo "gh stub: unexpected call: $*" | tee -a "$STUB_UNEXPECTED" >&2; exit 1 ;;
 esac
 `, 0o755)
 
-	run := func(t *testing.T, args ...string) string {
+	// A git that fails ls-remote and passes everything else to the real one.
+	brokenLsRemote := filepath.Join(tmp, "broken-ls-remote")
+	if err := os.Mkdir(brokenLsRemote, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(brokenLsRemote, "git"), `#!/bin/sh
+if [ "$1" = ls-remote ]; then
+  echo "git stub: ls-remote failed" >&2
+  exit 128
+fi
+exec "$REAL_GIT" "$@"
+`, 0o755)
+
+	// run runs the script with dirs ahead of PATH.
+	run := func(t *testing.T, dirs string, args ...string) (string, error) {
 		t.Helper()
+		unexpected := filepath.Join(t.TempDir(), "unexpected")
 		cmd := exec.CommandContext(t.Context(), "bash", append([]string{script}, args...)...)
 		cmd.Dir = work
 		cmd.Env = append(env,
-			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			"PATH="+dirs+string(os.PathListSeparator)+os.Getenv("PATH"),
 			"TMPDIR="+tmp,
 			"ADK_REMOTE=origin",
+			"REAL_GIT="+realGit,
 			"STUB_PR7="+pr7,
 			"STUB_PR8="+pr8,
+			"STUB_UNEXPECTED="+unexpected,
 		)
 		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("backport.sh %v failed the run: %v\n%s", args, err, out)
+		// The script only warns on some gh failures, such as the label call, so
+		// an unexpected call can leave the run green.
+		if calls, readErr := os.ReadFile(unexpected); readErr == nil {
+			t.Errorf("backport.sh %v made gh calls the stub does not expect:\n%s\noutput:\n%s", args, calls, out)
+		} else if !errors.Is(readErr, fs.ErrNotExist) {
+			t.Fatal(readErr)
 		}
-		return string(out)
+		return string(out), err
 	}
 
 	t.Run("pr", func(t *testing.T) {
-		out := run(t, "--pr")
-		if want := "backported 1, conflicted 0, empty 0, stale 1, failed 0"; !strings.Contains(out, want) {
-			t.Errorf("backport.sh --pr output does not contain %q:\n%s", want, out)
+		out, err := run(t, bin, "--pr")
+		if err != nil {
+			t.Fatalf("backport.sh --pr failed the run: %v\n%s", err, out)
+		}
+		for _, want := range []string{
+			"backported 1, conflicted 0, empty 0, stale 1, failed 0",
+			"backport branch already pushed with no pull request open when this run started: #7\n",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("backport.sh --pr output does not contain %q:\n%s", want, out)
+			}
 		}
 		if got := git(t, tmp, "ls-remote", remote, "refs/heads/backport/v1/pr-7"); !strings.HasPrefix(got, leftover) {
 			t.Errorf("backport/v1/pr-7 = %q, want it left at %s", got, leftover)
@@ -196,9 +237,28 @@ esac
 
 	// A local replay pushes nothing, so the leftover branch is no reason to skip.
 	t.Run("local", func(t *testing.T) {
-		out := run(t)
+		out, err := run(t, bin)
+		if err != nil {
+			t.Fatalf("backport.sh failed the run: %v\n%s", err, out)
+		}
 		if want := "backported 2, conflicted 0, empty 0, stale 0, failed 0"; !strings.Contains(out, want) {
 			t.Errorf("backport.sh output does not contain %q:\n%s", want, out)
+		}
+	})
+
+	// A branch check that got no answer must fail the run, not pass as stale.
+	t.Run("ls-remote fails", func(t *testing.T) {
+		out, err := run(t, brokenLsRemote+string(os.PathListSeparator)+bin, "--pr")
+		if err == nil {
+			t.Errorf("backport.sh --pr succeeded with ls-remote failing:\n%s", out)
+		}
+		for _, want := range []string{
+			"could not check whether backport/v1/pr-7 already exists",
+			"backported 0, conflicted 0, empty 0, stale 0, failed 2",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("backport.sh --pr output does not contain %q:\n%s", want, out)
+			}
 		}
 	})
 }

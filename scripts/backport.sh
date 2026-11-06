@@ -157,8 +157,8 @@ already_backported() {
 }
 
 # True when a backport pull request for this PR is open. A pushed branch with no
-# open pull request is not in flight; backport_one skips it with a warning, and
-# deleting the branch re-queues the PR.
+# open pull request leaves the PR queued; a --pr run skips it with a warning,
+# and deleting the branch lets the next --pr run replay it.
 in_flight() {
   local pr="$1" open_prs
   # An open pull request, not merely a branch. Branch-existence conflated "a
@@ -284,10 +284,14 @@ backport_one() {
   subject="$(git log -1 --format=%s "${sha}")"
   info "PR #${pr}: ${subject}"
 
-  # in_flight found no open pull request, so a branch here was left by a backport
-  # closed unmerged or by a run that died before `gh pr create`. A fresh replay
-  # cannot be pushed over it, and only a human can say whether the backport is
-  # still wanted. A local replay pushes nothing, so it does not care.
+  # in_flight found no open pull request when the queue was built. So a branch
+  # here was left by a backport closed unmerged, by a run that died before
+  # `gh pr create`, or by someone finishing a conflicted backport by hand who
+  # has not opened its pull request yet. A fresh replay cannot be pushed over
+  # it, and only a human can tell these apart, so the warning gives the action
+  # for each and nothing is deleted. A pull request opened after the queue was
+  # built is reported here too, though it is open; the next run sees it and
+  # leaves the PR alone. A local replay pushes nothing, so it does not care.
   if [[ "${open_pr}" == true ]]; then
     local existing
     if ! existing="$(git ls-remote --heads "${remote}" "refs/heads/${branch}")"; then
@@ -295,8 +299,9 @@ backport_one() {
       return 3
     fi
     if [[ -n "${existing}" ]]; then
-      warn "  ${branch} already exists with no open pull request; skipping.
-  To have #${pr} replayed, delete it:
+      warn "  ${branch} already exists with no pull request open when this run
+  started; skipping. If it holds a backport finished by hand, open its pull
+  request. To have #${pr} replayed instead, delete it:
     git push ${remote} --delete ${branch}"
       return 4
     fi
@@ -423,8 +428,8 @@ backport_one() {
   # Checked, and checked before the emptiness test. errexit is inert in this
   # function (the call site is `|| status=$?`), so a failed `git show` would
   # otherwise leave an empty file, be read as "nothing to backport", and be
-  # tallied as a benign skip on a green run. Of the four return codes 2 is the
-  # one that quietly absorbs tooling failure, so it has to be earned.
+  # tallied as a benign skip on a green run. Of the return codes, 2 is the one
+  # that quietly absorbs tooling failure, so it has to be earned.
   local -a pipe_status=("${PIPESTATUS[@]}")
   local stage
   for stage in "${pipe_status[@]}"; do
@@ -673,9 +678,10 @@ clone cannot be used, check out with fetch-depth: 0"
   [[ ${#conflicted[@]} -eq 0 ]] ||
     warn "needs a manual backport: ${conflicted[*]/#/#}"
   [[ ${#stale[@]} -eq 0 ]] ||
-    warn "backport branch already pushed with no open pull request: ${stale[*]/#/#}
-  Drop '${BACKPORT_LABEL}' from the original if the backport is not wanted, or
-  delete its ${BRANCH_PREFIX}<n> branch to have it replayed."
+    warn "backport branch already pushed with no pull request open when this run started: ${stale[*]/#/#}
+  Open its pull request if the branch holds a backport finished by hand, drop
+  '${BACKPORT_LABEL}' from the original if the backport is not wanted, or delete
+  its ${BRANCH_PREFIX}<n> branch to have it replayed."
 
   # A conflict or a leftover branch is a real outcome rather than a broken run:
   # the PRs that applied have their pull requests, and the warnings above say
