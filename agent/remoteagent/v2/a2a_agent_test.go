@@ -1284,6 +1284,74 @@ func TestRemoteAgent_ErrorOnServerError(t *testing.T) {
 	}
 }
 
+func TestRemoteAgent_AfterRequestCallbackGetsNilEventOnDefaultConverterError(t *testing.T) {
+	testCases := []struct {
+		name          string
+		events        []a2a.Event
+		executorErr   error
+		partConverter adka2a.A2APartConverter
+	}{
+		{
+			name:        "transport error",
+			executorErr: fmt.Errorf("mock executor error"),
+		},
+		{
+			name:   "conversion error",
+			events: []a2a.Event{a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("hello"))},
+			partConverter: func(ctx context.Context, a2aEvent a2a.Event, part *a2a.Part) (*genai.Part, error) {
+				return nil, fmt.Errorf("unsupported part")
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			executor := &mockA2AExecutor{
+				executeFn: func(ctx context.Context, execCtx *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+					return func(yield func(a2a.Event, error) bool) {
+						for _, event := range tc.events {
+							if !yield(event, nil) {
+								return
+							}
+						}
+						if tc.executorErr != nil {
+							yield(nil, tc.executorErr)
+						}
+					}
+				},
+			}
+			server := startA2AServer(executor)
+			card := &a2a.AgentCard{SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(server.URL, a2a.TransportProtocolJSONRPC)}, Capabilities: a2a.AgentCapabilities{Streaming: true}}
+
+			var calls int
+			remoteAgent := utils.Must(NewA2A(A2AConfig{
+				Name:             "a2a",
+				AgentCard:        card,
+				A2APartConverter: tc.partConverter,
+				AfterRequestCallbacks: []AfterA2ARequestCallback{
+					func(ctx agent.Context, req *a2a.SendMessageRequest, resp *session.Event, err error) (*session.Event, error) {
+						calls++
+						if err == nil {
+							t.Error("callback err = nil, want non-nil")
+						}
+						if resp != nil {
+							t.Errorf("callback event = %+v, want nil", resp)
+						}
+						return nil, nil
+					},
+				},
+			}))
+
+			ictx := newInvocationContext(t, []*session.Event{newUserHello()})
+			if _, err := runAndCollect(ictx, remoteAgent); err == nil {
+				t.Fatal("agent.Run() error = nil, want non-nil")
+			}
+			if calls != 1 {
+				t.Errorf("callback calls = %d, want 1", calls)
+			}
+		})
+	}
+}
+
 func TestRemoteAgent_ErrorIfAgentCardResolutionFails(t *testing.T) {
 	remoteAgent, err := NewA2A(A2AConfig{
 		Name: "a2a",
@@ -1323,8 +1391,9 @@ func TestRemoteAgent_ErrorIfMessageCreationFails(t *testing.T) {
 		},
 	}))
 
-	// Only a scoped dispatch seeding its input from UserContent propagates a
-	// part conversion error from newMessage.
+	// A scoped dispatch seeding its input from UserContent propagates a part
+	// conversion error from newMessage, as the resume path does. The path that
+	// builds the message from session history logs and skips the part instead.
 	ictx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
 		Agent:          remoteAgent,
 		Session:        prepareSession(t, t.Context(), nil),
