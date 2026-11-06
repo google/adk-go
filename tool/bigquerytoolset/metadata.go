@@ -68,6 +68,55 @@ func (b *bigQuery) getDatasetInfo(ctx agent.Context, args getDatasetInfoArgs) (a
 	return b.resource(ctx, "get_dataset_info", path)
 }
 
+type listTableIDsArgs struct {
+	ProjectID string `json:"project_id"`
+	DatasetID string `json:"dataset_id"`
+}
+
+func (b *bigQuery) listTableIDs(ctx agent.Context, args listTableIDsArgs) (any, error) {
+	path, err := datasetPath(b.project(args.ProjectID), b.dataset(args.DatasetID))
+	if err != nil {
+		return nil, err
+	}
+	type page struct {
+		Tables []struct {
+			TableReference struct {
+				TableID string `json:"tableId"`
+			} `json:"tableReference"`
+		} `json:"tables"`
+		NextPageToken string `json:"nextPageToken"`
+	}
+	ids := []string{}
+	err = pages(b, ctx, "list_table_ids", path+"/tables", func(p *page) string {
+		for _, t := range p.Tables {
+			ids = append(ids, t.TableReference.TableID)
+		}
+		return p.NextPageToken
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+type getTableInfoArgs struct {
+	ProjectID string `json:"project_id"`
+	DatasetID string `json:"dataset_id"`
+	TableID   string `json:"table_id"`
+}
+
+func (b *bigQuery) getTableInfo(ctx agent.Context, args getTableInfoArgs) (any, error) {
+	path, err := datasetPath(b.project(args.ProjectID), b.dataset(args.DatasetID))
+	if err != nil {
+		return nil, err
+	}
+	table, err := pathSegment("table_id", args.TableID)
+	if err != nil {
+		return nil, err
+	}
+	return b.resource(ctx, "get_table_info", path+"/tables/"+table)
+}
+
 func datasetPath(projectID, datasetID string) (string, error) {
 	project, err := pathSegment("project_id", projectID)
 	if err != nil {

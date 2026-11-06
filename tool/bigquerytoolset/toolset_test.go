@@ -210,7 +210,7 @@ func TestToolset_ToolNames(t *testing.T) {
 	for _, tl := range tools {
 		got = append(got, tl.Name())
 	}
-	want := []string{"get_dataset_info", "list_dataset_ids"}
+	want := []string{"get_dataset_info", "get_table_info", "list_dataset_ids", "list_table_ids"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}
@@ -241,6 +241,8 @@ func TestToolset_Declarations(t *testing.T) {
 	want := map[string][]string{
 		"list_dataset_ids": {"project_id"},
 		"get_dataset_info": {"project_id", "dataset_id"},
+		"list_table_ids":   {"project_id", "dataset_id"},
+		"get_table_info":   {"project_id", "dataset_id", "table_id"},
 	}
 	for name, wantRequired := range want {
 		t.Run(name, func(t *testing.T) {
@@ -274,6 +276,8 @@ func TestToolset_Declarations(t *testing.T) {
 var descriptionFirstLine = map[string]string{
 	"list_dataset_ids": "List BigQuery dataset ids in a Google Cloud project.",
 	"get_dataset_info": "Get metadata information about a BigQuery dataset.",
+	"list_table_ids":   "List table ids in a BigQuery dataset.",
+	"get_table_info":   "Get metadata information about a BigQuery table.",
 }
 
 func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
@@ -295,6 +299,12 @@ func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
 		if got := schema.Properties[prop].Type; got != "string" {
 			t.Errorf("property %q type = %q, want string", prop, got)
 		}
+	}
+
+	// An id without a default stays required.
+	schema = declarationSchema(t, toolByName(t, ts, "get_table_info").Declaration())
+	if diff := cmp.Diff([]string{"table_id"}, schema.Required); diff != "" {
+		t.Errorf("get_table_info required mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -529,6 +539,38 @@ func TestListDatasetIDs_EmptyProject(t *testing.T) {
 	}
 }
 
+func TestListTableIDs(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/datasets/d/tables":                {body: `{"tables":[{"tableReference":{"projectId":"p","datasetId":"d","tableId":"t1"}}],"nextPageToken":"next"}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables?pageToken=next": {body: `{"tables":[{"tableReference":{"projectId":"p","datasetId":"d","tableId":"t2"}}]}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+
+	got := run(t, toolByName(t, ts, "list_table_ids"), map[string]any{"project_id": "p", "dataset_id": "d"})
+
+	want := map[string]any{"result": []any{"t1", "t2"}}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGetTableInfo_ReturnsRESTResource checks that the tool returns the table
+// as the BigQuery REST API represents it, like adk-python's _properties,
+// including fields this package does not model.
+func TestGetTableInfo_ReturnsRESTResource(t *testing.T) {
+	tableBody := `{"kind":"bigquery#table","id":"p:d.t","schema":{"fields":[{"name":"year","type":"INTEGER","mode":"NULLABLE"}]},"numRows":"1000","type":"TABLE"}`
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/datasets/d/tables/t": {body: tableBody},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+
+	got := run(t, toolByName(t, ts, "get_table_info"), map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "t"})
+
+	if diff := cmp.Diff(decodeJSON(t, tableBody), roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestGetDatasetInfo_ReturnsRESTResource checks that the tool returns the
 // dataset as the BigQuery REST API represents it, like adk-python's to_api_repr,
 // including fields this package does not model.
@@ -552,8 +594,10 @@ func TestGetDatasetInfo_ReturnsRESTResource(t *testing.T) {
 func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 	notFound := fakeResponse{status: http.StatusNotFound, body: `{"error":{"code":404,"message":"Not found: Dataset p:missing","errors":[{"reason":"notFound","message":"Not found: Dataset p:missing"}]}}`}
 	f := newFakeBigQuery(t, map[string]fakeResponse{
-		"GET /bigquery/v2/projects/p/datasets/missing": notFound,
-		"GET /bigquery/v2/projects/missing/datasets":   notFound,
+		"GET /bigquery/v2/projects/p/datasets/missing":          notFound,
+		"GET /bigquery/v2/projects/p/datasets/missing/tables":   notFound,
+		"GET /bigquery/v2/projects/p/datasets/missing/tables/t": notFound,
+		"GET /bigquery/v2/projects/missing/datasets":            notFound,
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
@@ -563,6 +607,8 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 	}{
 		{tool: "list_dataset_ids", args: map[string]any{"project_id": "missing"}},
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "missing"}},
+		{tool: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "missing"}},
+		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "missing", "table_id": "t"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -909,6 +955,9 @@ func TestTools_InvalidIDsAreRejected(t *testing.T) {
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "."}},
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "..", "dataset_id": "d"}},
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": ""}},
+		{tool: "list_table_ids", args: map[string]any{"project_id": "..", "dataset_id": "d"}},
+		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "..", "table_id": "t"}},
+		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": ".."}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
