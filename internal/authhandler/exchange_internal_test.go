@@ -426,10 +426,14 @@ func TestExchangeCodeSendsTheTokenRequest(t *testing.T) {
 	}
 }
 
-func TestExchangeCodeWithoutExpiresInLeavesTheExpiryUnset(t *testing.T) {
+// An expiry the credential already carried does not outlive a token response
+// without expires_in.
+func TestExchangeCodeWithoutExpiresInClearsTheExpiry(t *testing.T) {
 	_, tokenURL := newTokenEndpoint(t, http.StatusOK, `{"access_token":"at-1","token_type":"Bearer"}`)
 	scheme := codeFlow(tokenURL)
-	got, err := exchangeCode(t.Context(), &scheme, answeredCredential())
+	cred := answeredCredential()
+	cred.OAuth2.ExpiresIn, cred.OAuth2.ExpiresAt = 3600, 1700000000
+	got, err := exchangeCode(t.Context(), &scheme, cred)
 	if err != nil {
 		t.Fatalf("exchangeCode() error = %v", err)
 	}

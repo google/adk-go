@@ -48,7 +48,7 @@ func parseAuthResponse(resp map[string]any) (*toolauth.Credential, error) {
 
 // pinAuthResponse returns requested, the config ADK sent, with answer as its
 // exchanged credential. OAuth2 fields the answer leaves empty are filled from
-// the request, which is how the PKCE verifier the client never saw comes back.
+// the request, so a PKCE verifier the client did not echo back comes back.
 // The result shares requested's other fields; nothing here writes to them.
 func pinAuthResponse(requested *toolauth.Config, answer *toolauth.Credential) *toolauth.Config {
 	out := *requested
@@ -63,13 +63,16 @@ func pinAuthResponse(requested *toolauth.Config, answer *toolauth.Credential) *t
 
 // mergeOAuth2 returns a copy of source when target is nil, as adk-python does,
 // and otherwise a copy of target with six fields filled from source where
-// empty. State is not one of them: it is the client's proof of the answer.
+// empty. The state always comes from source, so the redirect URL is checked
+// against the state ADK issued rather than one the client names. adk-python's
+// agent path keeps the answer's state, so there the check proves nothing.
 func mergeOAuth2(target, source *toolauth.OAuth2Auth) *toolauth.OAuth2Auth {
 	if target == nil {
 		o := *source
 		return &o
 	}
 	o := *target
+	o.State = source.State
 	o.ClientID = cmp.Or(o.ClientID, source.ClientID)
 	o.ClientSecret = cmp.Or(o.ClientSecret, source.ClientSecret)
 	o.RedirectURI = cmp.Or(o.RedirectURI, source.RedirectURI)

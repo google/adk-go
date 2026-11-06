@@ -237,7 +237,7 @@ func TestPinAuthResponse(t *testing.T) {
 			},
 		},
 		{
-			name:      "a blank state stays blank",
+			name:      "the request's state fills in a blank one",
 			requested: storedRequest(),
 			answer: &toolauth.Credential{
 				AuthType: toolauth.CredentialTypeOAuth2,
@@ -251,7 +251,32 @@ func TestPinAuthResponse(t *testing.T) {
 				AuthType: toolauth.CredentialTypeOAuth2,
 				OAuth2: &toolauth.OAuth2Auth{
 					ClientID:            "app-123",
+					State:               "Xy7",
 					AuthResponseURI:     "https://adk.example/cb?code=4/0Ab",
+					RedirectURI:         "https://adk.example/cb",
+					CodeVerifier:        "v-secret",
+					CodeChallengeMethod: "S256",
+				},
+			},
+		},
+		{
+			name:      "the request's state replaces the answer's",
+			requested: storedRequest(),
+			answer: &toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2: &toolauth.OAuth2Auth{
+					ClientID:        "app-123",
+					State:           "attacker",
+					AuthResponseURI: "https://adk.example/cb?state=attacker&code=4/0Ab",
+					RedirectURI:     "https://adk.example/cb",
+				},
+			},
+			want: &toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2: &toolauth.OAuth2Auth{
+					ClientID:            "app-123",
+					State:               "Xy7",
+					AuthResponseURI:     "https://adk.example/cb?state=attacker&code=4/0Ab",
 					RedirectURI:         "https://adk.example/cb",
 					CodeVerifier:        "v-secret",
 					CodeChallengeMethod: "S256",

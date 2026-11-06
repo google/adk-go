@@ -32,7 +32,8 @@ import (
 const tokenRequestTimeout = 10 * time.Second
 
 // authCode returns the authorization code to redeem: the one in the redirect
-// URL the client sent back, or AuthCode when the URL carries none.
+// URL the client sent back, or AuthCode when the URL carries none. A bare
+// AuthCode comes with no redirect state, so nothing ties it to the request.
 func authCode(o *toolauth.OAuth2Auth) (string, error) {
 	code, err := codeFromRedirect(o.AuthResponseURI, o.State)
 	if err != nil {

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/adk/v2/session"
@@ -136,7 +137,7 @@ func credentialFromValue(scheme *toolauth.Scheme, v any) (*toolauth.Credential, 
 		if v == "" {
 			return nil, nil
 		}
-		return tokenCredential(scheme, v), nil
+		return tokenCredential(scheme, v)
 	}
 	return nil, nil
 }
@@ -154,18 +155,22 @@ func decodeCredential(m map[string]any) (*toolauth.Credential, error) {
 }
 
 // tokenCredential wraps a bare token in the credential scheme expects, as
-// adk-python's _build_credential_from_string does.
-func tokenCredential(scheme *toolauth.Scheme, token string) *toolauth.Credential {
+// adk-python's _credential_from_string does. HTTP basic needs a username and
+// password, so a token for it is an error.
+func tokenCredential(scheme *toolauth.Scheme, token string) (*toolauth.Credential, error) {
 	switch scheme.Type {
 	case toolauth.SchemeTypeAPIKey:
-		return &toolauth.Credential{AuthType: toolauth.CredentialTypeAPIKey, APIKey: token}
+		return &toolauth.Credential{AuthType: toolauth.CredentialTypeAPIKey, APIKey: token}, nil
 	case toolauth.SchemeTypeHTTP:
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return nil, errors.New("authhandler: HTTP basic auth needs a username and password, not a token")
+		}
 		return &toolauth.Credential{AuthType: toolauth.CredentialTypeHTTP, HTTP: &toolauth.HTTPAuth{
 			Scheme:      cmp.Or(scheme.Scheme, "bearer"),
 			Credentials: toolauth.HTTPCredentials{Token: token},
-		}}
+		}}, nil
 	}
-	return &toolauth.Credential{AuthType: toolauth.CredentialTypeOAuth2, OAuth2: &toolauth.OAuth2Auth{AccessToken: token}}
+	return &toolauth.Credential{AuthType: toolauth.CredentialTypeOAuth2, OAuth2: &toolauth.OAuth2Auth{AccessToken: token}}, nil
 }
 
 // GetAuthResponse returns the credential the user's answer produced for cfg,

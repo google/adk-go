@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Package authhandler runs the server side of the end-user OAuth2 consent
-// flow: it builds the sign-in request ADK sends to the client and, in later
-// files, stores and exchanges the client's answer.
+// flow: it builds the sign-in request ADK sends to the client, stores the
+// client's answer, and exchanges its code for tokens.
 package authhandler
 
 import (
@@ -71,7 +71,9 @@ func GenerateAuthURI(cfg *toolauth.Config) (*toolauth.Credential, error) {
 		opts = append(opts, oauth2.SetAuthURLParam("nonce", o.Nonce))
 	}
 	if method != "" {
-		o.CodeVerifier = cmp.Or(o.CodeVerifier, randomToken(verifierBytes))
+		if o.CodeVerifier == "" {
+			o.CodeVerifier = randomToken(verifierBytes)
+		}
 		o.CodeChallengeMethod = method
 		opts = append(opts, oauth2.S256ChallengeOption(o.CodeVerifier))
 	}

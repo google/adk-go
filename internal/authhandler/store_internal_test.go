@@ -184,6 +184,31 @@ func (failingState) Get(string) (any, error)     { return nil, errors.New("stora
 func (failingState) Set(string, any) error       { return nil }
 func (failingState) All() iter.Seq2[string, any] { return func(func(string, any) bool) {} }
 
+// adk-python refuses a bare token for HTTP basic, which needs a username and
+// password.
+func TestReadStoredCredentialRefusesATokenForBasic(t *testing.T) {
+	const planted = "PLANTED-TOKEN"
+	tests := []struct {
+		name   string
+		scheme string
+	}{
+		{"lowercase scheme name", "basic"},
+		{"capitalized scheme name", "Basic"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := toolauth.Scheme{Type: toolauth.SchemeTypeHTTP, Scheme: tt.scheme}
+			_, got, err := readStoredCredential(stateWith(t, map[string]any{"k": planted}), &scheme, "k")
+			if err == nil {
+				t.Fatalf("readStoredCredential() = %v, nil; want an error", got)
+			}
+			if strings.Contains(err.Error(), planted) {
+				t.Errorf("error quotes the stored value: %v", err)
+			}
+		})
+	}
+}
+
 func TestReadStoredCredentialErrors(t *testing.T) {
 	const planted = "PLANTED-SECRET"
 	tests := []struct {
@@ -362,6 +387,22 @@ func TestGetAuthResponseNoExchangeNeeded(t *testing.T) {
 			}(),
 		},
 		{
+			// adk-python's _is_exchangeable needs a client ID to redeem a code.
+			name: "a code for a tool with no client ID comes back unredeemed",
+			cfg: func(tokenURL string) *toolauth.Config {
+				cfg := toolConfig(tokenURL)
+				cfg.RawAuthCredential.OAuth2.ClientID = ""
+				return cfg
+			},
+			stored: storedCode(),
+			want: func() *toolauth.Credential {
+				c := storedCode()
+				c.OAuth2.ClientID = ""
+				c.OAuth2.ClientSecret = "s3cret"
+				return &c
+			}(),
+		},
+		{
 			name: "an OAuth2 credential stored for an HTTP tool comes back as stored",
 			cfg: func(string) *toolauth.Config {
 				return &toolauth.Config{
@@ -467,6 +508,47 @@ func TestGenerateStoreAndGetAuthResponseWithExplicitKey(t *testing.T) {
 	}
 	if got == nil || got.OAuth2 == nil || got.OAuth2.AccessToken != "at-1" {
 		t.Errorf("GetAuthResponse() = %v, want access token at-1", got)
+	}
+}
+
+// The redirect URL is checked against the state ADK issued, whatever state the
+// answer names.
+func TestGenerateStoreAndGetAuthResponseRefusesAnotherState(t *testing.T) {
+	tests := []struct {
+		name   string
+		oauth2 map[string]any
+	}{
+		{"answer names the redirect's state", map[string]any{
+			"state":           "attacker",
+			"authResponseUri": "https://adk.example/cb?state=attacker&code=evil",
+		}},
+		{"answer names no state", map[string]any{
+			"authResponseUri": "https://adk.example/cb?state=attacker&code=evil",
+		}},
+		{"redirect carries no state", map[string]any{
+			"authResponseUri": "https://adk.example/cb?code=evil",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub, tokenURL := newTokenEndpoint(t, http.StatusOK, tokenResponse)
+			cfg := toolConfig(tokenURL)
+			req, err := GenerateAuthRequest(cfg)
+			if err != nil {
+				t.Fatalf("GenerateAuthRequest() error = %v", err)
+			}
+			state := stateWith(t, nil)
+			resp := map[string]any{"authType": "oauth2", "oauth2": tt.oauth2}
+			if _, err := StoreAuthResponse(state, req, resp); err != nil {
+				t.Fatalf("StoreAuthResponse() error = %v", err)
+			}
+			if got, err := GetAuthResponse(t.Context(), state, cfg); err == nil {
+				t.Errorf("GetAuthResponse() = %v, nil; want a state mismatch error", got)
+			}
+			if calls, _ := stub.seen(); calls != 0 {
+				t.Errorf("token endpoint got %d requests, want 0", calls)
+			}
+		})
 	}
 }
 
