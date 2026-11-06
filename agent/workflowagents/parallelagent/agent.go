@@ -17,8 +17,10 @@ package parallelagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"slices"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
@@ -45,12 +47,16 @@ type Config struct {
 // - Generating multiple responses for review by a subsequent evaluation agent.
 //
 // If a direct sub-agent yields an event with Actions.Escalate, the agent yields
-// that event, cancels the remaining branches and ends. If a sub-agent has
-// already yielded an error by then, that error is returned instead of the
-// event. That includes an error yielded by an agent nested at any depth below
-// this one in the same invocation, even if the agents in between have not
-// returned it yet. Escalations from deeper agents are passed through and do
-// not stop this agent.
+// that event, cancels the remaining branches and ends. If an error that would
+// reach this agent has already been yielded by then, that error is returned
+// instead of the event. That covers an error a direct sub-agent yields, and an
+// error from inside a nested ParallelAgent reached through ParallelAgents,
+// SequentialAgents and LoopAgents only, even while the agents in between are
+// still cleaning up. Other agents, such as a workflow agent or a custom agent,
+// can catch or retry an error, so an error from inside one counts only once
+// that agent has yielded it. An error from a branch that a nested ParallelAgent
+// canceled after its own escalation never counts. Escalations from deeper
+// agents are passed through and do not stop this agent.
 func New(cfg Config) (agent.Agent, error) {
 	if cfg.AgentConfig.Run != nil {
 		return nil, fmt.Errorf("ParallelAgent doesn't allow custom Run implementations")
@@ -87,7 +93,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		doneChan              = make(chan bool)
 		resultsChan           = make(chan result)
 		// The first error a sub-agent yielded, recorded as soon as it is
-		// yielded, before that sub-agent's Run unwinds.
+		// yielded, before that sub-agent's Run unwinds. The escalation path
+		// seals it with errSealed, so errors from the branches it cancels are
+		// neither recorded nor reported.
 		firstErr atomic.Pointer[error]
 	)
 
@@ -105,15 +113,20 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			}
 			onErr := func(err error) {
 				err = wrap(err)
-				firstErr.CompareAndSwap(nil, &err)
-				// An enclosing ParallelAgent only gets this error from us once
-				// our errgroup returns, so record it there now as well.
-				reportErr(ctx, err)
+				// Once recorded, this agent returns the error: in place of an
+				// escalation, or from errGroup.Wait otherwise. An enclosing
+				// ParallelAgent would get it only after that Wait, so report
+				// it there now as well.
+				if firstErr.CompareAndSwap(nil, &err) {
+					reportErr(ctx, err)
+				}
 			}
-			// Agents nested below subAgent, such as an inner ParallelAgent,
-			// report their errors here as soon as they are yielded.
+			// A ParallelAgent nested below subAgent reports its error here as
+			// soon as it is recorded, if the agents in between pass errors
+			// straight up.
 			reporterCtx := context.WithValue(errGroupCtx, errReporterKey{}, errReporter{
 				invocationID: ctx.InvocationID(),
+				root:         subAgent,
 				report:       onErr,
 			})
 			// Keep the parent's isolation scope: a workflow node stamps it on
@@ -169,9 +182,10 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 			if res.event != nil && res.event.Actions.Escalate && subAgentNames[res.event.Author] {
 				// An error a sub-agent yielded before this point must still reach
 				// the caller, even if that sub-agent is still unwinding or the
-				// caller has canceled since.
-				if err := firstErr.Load(); err != nil {
-					yield(nil, *err)
+				// caller has canceled since. Sealing the record keeps errors from
+				// the branches canceled below out of it.
+				if !firstErr.CompareAndSwap(nil, &errSealed) {
+					yield(nil, *firstErr.Load())
 					return
 				}
 				yield(res.event, nil)
@@ -235,14 +249,41 @@ type errReporterKey struct{}
 // through an agent tool) does not report into it.
 type errReporter struct {
 	invocationID string
-	report       func(error)
+	// root is the enclosing ParallelAgent's direct sub-agent this reporter
+	// was made for.
+	root   agent.Agent
+	report func(error)
 }
 
-// reportErr records err in the closest enclosing ParallelAgent of ctx, if any.
+// errSealed marks the error record of a ParallelAgent that has ended on an
+// escalation.
+var errSealed = errors.New("parallel agent ended on an escalation")
+
+// reportErr records err in the closest enclosing ParallelAgent of ctx, if the
+// agents between the two hand an error straight up.
 func reportErr(ctx agent.InvocationContext, err error) {
-	if r, ok := ctx.Value(errReporterKey{}).(errReporter); ok && r.invocationID == ctx.InvocationID() {
+	if r, ok := ctx.Value(errReporterKey{}).(errReporter); ok && r.invocationID == ctx.InvocationID() && passesErrorsUp(r.root, ctx.Agent()) {
 		r.report(err)
 	}
+}
+
+// passesErrorsUp reports whether target is root, or is reached from root only
+// through SequentialAgents and LoopAgents. Those yield a sub-agent's error to
+// their caller as soon as it is yielded. Any other agent may catch or retry it,
+// so its error counts only once it yields it.
+func passesErrorsUp(root, target agent.Agent) bool {
+	if root == target {
+		return true
+	}
+	internalAgent, ok := root.(agentinternal.Agent)
+	if !ok {
+		return false
+	}
+	switch agentinternal.Reveal(internalAgent).AgentType {
+	case agentinternal.TypeSequentialAgent, agentinternal.TypeLoopAgent:
+		return slices.ContainsFunc(root.SubAgents(), func(sub agent.Agent) bool { return passesErrorsUp(sub, target) })
+	}
+	return false
 }
 
 type result struct {

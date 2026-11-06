@@ -797,8 +797,7 @@ func TestParallelAgent_ErrorDuringSiblingTeardownSurvivesEscalate(t *testing.T) 
 			return func(yield func(*session.Event, error) bool) {
 				yield(nil, boom)
 				close(failed)
-				// Teardown that lasts until the run cancels it, like a remote
-				// agent's cleanup call.
+				// Teardown that lasts until the run cancels it.
 				<-ctx.Done()
 			}
 		},
@@ -1018,8 +1017,7 @@ func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
 	}{
 		{"no cleanup", func(agent.InvocationContext) {}},
 		{"50ms cleanup", func(agent.InvocationContext) { time.Sleep(50 * time.Millisecond) }},
-		// Cleanup that lasts until the run cancels it, like a remote agent's
-		// cleanup call.
+		// Cleanup that lasts until the run cancels it.
 		{"cleanup until canceled", func(ctx agent.InvocationContext) { <-ctx.Done() }},
 	}
 	for _, nesting := range nestings {
@@ -1075,6 +1073,152 @@ func TestParallelAgent_NestedErrorSurvivesEscalate(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An inner ParallelAgent that ends on its own escalation cancels its other
+// branches. The error a canceled branch yields then never leaves the inner
+// agent, so it must not replace a later escalation of the outer one.
+func TestParallelAgent_CanceledNestedBranchErrorKeepsEscalate(t *testing.T) {
+	parallel := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	sequential := func(name string, subAgents ...agent.Agent) agent.Agent {
+		return must(sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}}))
+	}
+	escalate := func(text string) *session.Event {
+		return &session.Event{
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText(text, genai.RoleModel)},
+			Actions:     session.EventActions{Escalate: true},
+		}
+	}
+	for _, nesting := range []struct {
+		name string
+		wrap func(inner agent.Agent) agent.Agent
+	}{
+		{"inner parallel", func(inner agent.Agent) agent.Agent { return inner }},
+		{"sequential then parallel", func(inner agent.Agent) agent.Agent { return sequential("seq", inner) }},
+	} {
+		t.Run(nesting.name, func(t *testing.T) {
+			started := make(chan struct{})
+			waitingFailed := make(chan struct{})
+			waiting := must(agent.New(agent.Config{
+				Name: "waiting",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						defer close(waitingFailed)
+						close(started)
+						<-ctx.Done()
+						// As a model call cut off by cancellation does.
+						yield(nil, ctx.Err())
+					}
+				},
+			}))
+			innerEsc := must(agent.New(agent.Config{
+				Name: "inner_esc",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						<-started
+						yield(escalate("inner done"), nil)
+					}
+				},
+			}))
+			outerEsc := must(agent.New(agent.Config{
+				Name: "outer_esc",
+				Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						<-waitingFailed
+						yield(escalate("outer done"), nil)
+					}
+				},
+			}))
+			outer := parallel("outer", nesting.wrap(parallel("inner", innerEsc, waiting)), outerEsc)
+			r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			sawOuterEsc := false
+			for ev, err := range r.Run(ctx, "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Errorf("run yielded error %v, want the outer_esc escalation", err)
+				}
+				if ev != nil && ev.Author == "outer_esc" && ev.Actions.Escalate {
+					sawOuterEsc = true
+				}
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("run ended only at the test deadline")
+			}
+			if !sawOuterEsc {
+				t.Errorf("outer_esc escalation was not yielded")
+			}
+		})
+	}
+}
+
+// An agent between two ParallelAgents that catches the inner one's error and
+// carries on keeps that error from the outer one, so it must not replace an
+// escalation of the outer one.
+func TestParallelAgent_CaughtNestedErrorKeepsEscalate(t *testing.T) {
+	boom := errors.New("boom")
+	failing := must(agent.New(agent.Config{
+		Name: "failing",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) { yield(nil, boom) }
+		},
+	}))
+	inner := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: []agent.Agent{failing}}}))
+	recovered := make(chan struct{})
+	catcher := must(agent.New(agent.Config{
+		Name:      "catcher",
+		SubAgents: []agent.Agent{inner},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				defer close(recovered)
+				for ev, err := range inner.Run(ctx) {
+					if err != nil {
+						yield(&session.Event{LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("fallback", genai.RoleModel)}}, nil)
+						return
+					}
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	}))
+	escalator := must(agent.New(agent.Config{
+		Name: "escalator",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				<-recovered
+				yield(&session.Event{
+					LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("escalating", genai.RoleModel)},
+					Actions:     session.EventActions{Escalate: true},
+				}, nil)
+			}
+		},
+	}))
+	outer := must(parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "outer", SubAgents: []agent.Agent{catcher, escalator}}}))
+	r, err := runner.New(runner.Config{AppName: "test_app", Agent: outer, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sawEsc := false
+	for ev, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Errorf("run yielded error %v, want the escalation", err)
+		}
+		if ev != nil && ev.Author == "escalator" && ev.Actions.Escalate {
+			sawEsc = true
+		}
+	}
+	if !sawEsc {
+		t.Errorf("escalation was not yielded")
 	}
 }
 
