@@ -76,7 +76,19 @@ func (t *SingleTurnTool) Run(toolCtx agent.Context, args any) (map[string]any, e
 		return nil, fmt.Errorf("failed to create agent node: %w", err)
 	}
 
-	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, workflow.WithUseSubBranch())
+	// Put the sub-agent's events on "<agent>@<function_call_id>", so the calling
+	// agent's contents builder can tell them apart from a workflow node's branch.
+	// Only the branch carries the id: the run id stays on the scheduler's counter,
+	// so a call id the model reuses still runs the sub-agent, as in adk-python.
+	opts := []workflow.RunNodeOption{workflow.WithUseSubBranch()}
+	if id := toolCtx.FunctionCallID(); id != "" {
+		branch := t.agent.Name() + "@" + id
+		if base := toolCtx.Branch(); base != "" {
+			branch = base + "." + branch
+		}
+		opts = []workflow.RunNodeOption{workflow.WithOverrideBranch(branch)}
+	}
+	result, err := workflow.RunNode[any](toolCtx, node, nodeInput, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to run agent node: %w", err)
 	}
