@@ -249,7 +249,7 @@ func TestTaskAgent_RejectedFinishTaskDoesNotWriteOutputKey(t *testing.T) {
 // under one does not go through runTask and nothing writes the finish_task
 // output. OutputKey stays unset, and the text turn after finish_task does not
 // fill it either. adk-python behaves the same way. This pins the limit of the
-// OutputKey behaviour for task agents run through Run.
+// OutputKey behavior for task agents run through Run.
 func TestSequentialParentTaskChildLeavesOutputKeyUnset(t *testing.T) {
 	t.Parallel()
 	taskLLM := &scriptedLLM{turns: []*model.LLMResponse{
