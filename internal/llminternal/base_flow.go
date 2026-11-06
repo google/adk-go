@@ -47,6 +47,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -405,6 +406,23 @@ func isResumable(err error) bool {
 		strings.Contains(errStr, "GoAway")
 }
 
+// hasRealtimeInput reports whether v should be passed to SendRealtime. A nil
+// pointer of one of the types LiveRequest.RealtimeInput documents carries no
+// input, as a None field in adk-python does.
+func hasRealtimeInput(v any) bool {
+	switch v := v.(type) {
+	case nil:
+		return false
+	case *genai.Blob:
+		return v != nil
+	case *genai.ActivityStart:
+		return v != nil
+	case *genai.ActivityEnd:
+		return v != nil
+	}
+	return true
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -630,7 +648,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 								return
 							}
 						}
-						if req.RealtimeInput != nil {
+						if hasRealtimeInput(req.RealtimeInput) {
 							if blob, ok := req.RealtimeInput.(*genai.Blob); ok {
 								sess.audioMgr.CacheInput(ctx, blob.Data, blob.MIMEType)
 							}
@@ -1068,7 +1086,7 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 
 			if callbackResp != nil {
 				resp := &responseWithEventID{
-					LLMResponse: callbackResp,
+					LLMResponse: inheritModelFields(resp.LLMResponse, callbackResp),
 					eventID:     resp.eventID,
 				}
 				if !yield(resp, nil) {
@@ -1088,6 +1106,46 @@ func (f *Flow) callLLM(ctx agent.InvocationContext, req *model.LLMRequest, state
 			}
 		}
 	}
+}
+
+// inheritModelFields carries fields that describe the model call, rather than
+// the response content, from a response onto the after-model callback's
+// replacement for it.
+//
+// A callback that rebuilds the response, for example to scrub its text, is
+// still answering the same model call. If the replacement drops Partial, every
+// streamed delta looks final: SSE clients render each delta as a complete
+// turn and the runner persists each one as a separate session event. If it
+// drops TurnComplete, clients never see the turn end. If it drops
+// UsageMetadata, the call disappears from token accounting.
+//
+// Partial and TurnComplete are plain bools, so an unset value cannot be told
+// apart from an explicit false; a delta is never final while the stream
+// continues, so a partial original keeps its replacement partial, and a
+// response that ended the turn keeps its replacement ending it. UsageMetadata
+// set on the replacement is respected. The replacement is copied rather than
+// modified, and returned as is when nothing needs filling.
+func inheritModelFields(original, replacement *model.LLMResponse) *model.LLMResponse {
+	if original == nil {
+		return replacement
+	}
+	inheritPartial := original.Partial && !replacement.Partial
+	inheritTurnComplete := original.TurnComplete && !replacement.TurnComplete
+	inheritUsage := original.UsageMetadata != nil && replacement.UsageMetadata == nil
+	if !inheritPartial && !inheritTurnComplete && !inheritUsage {
+		return replacement
+	}
+	merged := *replacement
+	if inheritPartial {
+		merged.Partial = true
+	}
+	if inheritTurnComplete {
+		merged.TurnComplete = true
+	}
+	if inheritUsage {
+		merged.UsageMetadata = original.UsageMetadata
+	}
+	return &merged
 }
 
 type responseWithEventID struct {
@@ -1436,7 +1494,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": err.Error()}
+								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
+								result = map[string]any{"error": errText}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1593,7 +1652,8 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
+		return map[string]any{"error": errText}
 	}
 	return response
 }
@@ -1707,6 +1767,12 @@ func mergeEventActions(base, other *session.EventActions) *session.EventActions 
 			base.RequestedToolConfirmations = make(map[string]toolconfirmation.ToolConfirmation)
 		}
 		maps.Copy(base.RequestedToolConfirmations, other.RequestedToolConfirmations)
+	}
+	if other.RequestedAuthConfigs != nil {
+		if base.RequestedAuthConfigs == nil {
+			base.RequestedAuthConfigs = make(map[string]toolauth.Config)
+		}
+		maps.Copy(base.RequestedAuthConfigs, other.RequestedAuthConfigs)
 	}
 	return base
 }
