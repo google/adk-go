@@ -407,3 +407,98 @@ func TestPrepareDockerfile_EntryPointReachesRUNLine(t *testing.T) {
 		t.Errorf("RUN line = %q, want it to end with %q", runLine, want)
 	}
 }
+
+func TestSecretFlagIsRegistered(t *testing.T) {
+	f := agentEngineCmd.PersistentFlags().Lookup("secret")
+	if f == nil {
+		t.Fatal("agentengine command has no --secret flag for mapping Secret Manager secrets to env variables")
+	}
+	if got := f.Value.Type(); got != "stringArray" && got != "stringSlice" {
+		t.Errorf("--secret flag type = %q, want a repeatable string flag", got)
+	}
+}
+
+func TestParseSecrets(t *testing.T) {
+	got, err := parseSecrets([]string{"A=my-secret:latest", "B=s_2:3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "A" || got[0].SecretRef.Secret != "my-secret" || got[0].SecretRef.Version != "latest" ||
+		got[1].SecretRef.Secret != "s_2" || got[1].SecretRef.Version != "3" {
+		t.Errorf("unexpected result %v", got)
+	}
+	alias, err := parseSecrets([]string{"DB_PW=db_pw-2:prod-alias"})
+	if err != nil {
+		t.Fatalf("version alias rejected: %v", err)
+	}
+	if len(alias) != 1 || alias[0].SecretRef.Secret != "db_pw-2" || alias[0].SecretRef.Version != "prod-alias" {
+		t.Errorf("unexpected alias result %v", alias)
+	}
+	for _, bad := range []string{"A", "A=b", "=b:c", "A=:1", "A=b:", "A=s:1,B=t:2", "A=s:1\r", "A=s:1:2", "A=projects/p/secrets/s:3"} {
+		if _, err := parseSecrets([]string{bad}); err == nil {
+			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
+		}
+	}
+}
+
+func TestParseSecrets_RejectsInvalidNameAndDuplicates(t *testing.T) {
+	for _, bad := range [][]string{{"1A=s:1"}, {"GOOGLE_CLOUD_REGION=s:1"}, {"NUM_WORKERS=s:1"}, {"GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=s:1"}, {"OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=s:1"}, {"A-B=s:1"}, {"A=s:1", "A=t:2"}} {
+		if _, err := parseSecrets(bad); err == nil {
+			t.Errorf("parseSecrets(%q) succeeded, want error", bad)
+		}
+	}
+}
+
+func TestComputeFlags_RejectsInvalidSecret(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	parent := flags.build.tempDir
+	flags.agentEngine.secrets = []string{"bad"}
+	if err := flags.computeFlags(); err == nil {
+		t.Fatal("computeFlags() = nil, want an error for an invalid --secret")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("rejected --secret left %d entries in the temp dir parent", len(entries))
+	}
+}
+
+func TestComputeFlags_RejectsSecretWithAgentEngineID(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	parent := flags.build.tempDir
+	flags.agentEngine.agentEngineID = "123"
+	flags.agentEngine.secrets = []string{"API_KEY=my-secret:latest"}
+	if err := flags.computeFlags(); err == nil {
+		t.Fatal("computeFlags() = nil, want an error for --secret with --agent_engine_id")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("rejected --secret left %d entries in the temp dir parent", len(entries))
+	}
+}
+
+func TestComputeFlags_AgentEngineIDWithoutSecret(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	flags.agentEngine.agentEngineID = "123"
+	if err := flags.computeFlags(); err != nil {
+		t.Fatalf("computeFlags() = %v, want nil for --agent_engine_id without --secret", err)
+	}
+}
+
+func TestCreateRequest_SecretEnv(t *testing.T) {
+	resetFlags(t, "cmd/app/main.go")
+	flags.agentEngine.secrets = []string{"API_KEY=my-secret:latest"}
+	if err := flags.computeFlags(); err != nil {
+		t.Fatal(err)
+	}
+	req := flags.createRequest("parent", nil, nil)
+	got := req.ReasoningEngine.Spec.DeploymentSpec.SecretEnv
+	if len(got) != 1 || got[0].Name != "API_KEY" || got[0].SecretRef.Secret != "my-secret" || got[0].SecretRef.Version != "latest" {
+		t.Errorf("SecretEnv = %v, want API_KEY=my-secret:latest", got)
+	}
+}
