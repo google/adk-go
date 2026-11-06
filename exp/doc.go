@@ -21,6 +21,9 @@
 //
 // The subpackages are:
 //
+//   - [google.golang.org/adk/v2/exp/acpagent]: an agent backed by a coding
+//     agent harness speaking the Agent Client Protocol, such as opencode or
+//     Gemini CLI
 //   - [google.golang.org/adk/v2/exp/appinfo]: the app-info endpoint, which
 //     describes an app's agents, instructions and tools, and the web
 //     sublauncher that serves it

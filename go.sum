@@ -34,8 +34,8 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapp
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.57.0/go.mod h1:YqwkQPrWSC7+byyc1VlKbWLBF5JsW5IoL6xUkemYSXk=
 github.com/a2aproject/a2a-go v0.3.15 h1:h5YpCiPq3jxQ5rIns7oDjPag3ivP8u817AzdA4F+NiI=
 github.com/a2aproject/a2a-go v0.3.15/go.mod h1:I7Cm+a1oL+UT6zMoP+roaRE5vdfUa1iQGVN8aSOuZ0I=
-github.com/a2aproject/a2a-go/v2 v2.6.0 h1:QflB0gHxOP0o5quvA/h9EbYgfOsmRsSmFkeBYtKdwwk=
-github.com/a2aproject/a2a-go/v2 v2.6.0/go.mod h1:rvFIb0sBJl2qmJRYU2fQxI6hhIQksmGGMEhT/uRwWww=
+github.com/a2aproject/a2a-go/v2 v2.7.1-0.20261106110653-b5ea75313df9 h1:953XycSjw+khk2jTyZrFbFmziqB+hPDCLomDvTiUg90=
+github.com/a2aproject/a2a-go/v2 v2.7.1-0.20261106110653-b5ea75313df9/go.mod h1:UrxIRm1qmHm1kDoEk5PXRHc+4WGw0OEnZFuavMOH+24=
 github.com/anthropics/anthropic-sdk-go v1.81.0 h1:3WAxA6xMSSHKExnFN3t/qIwJUC8l6zQFTmwVGl3QWy0=
 github.com/anthropics/anthropic-sdk-go v1.81.0/go.mod h1:GThfYqPJoaQ/6pmibCI98Cr4y5su2FXMUHn3NrSSnIc=
 github.com/awalterschulze/gographviz v2.0.3+incompatible h1:9sVEXJBJLwGX7EQVhLm2elIKCm7P2YHFC8v6096G09E=

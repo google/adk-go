@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"google.golang.org/genai"
 
@@ -38,13 +39,14 @@ import (
 // and RemoteAgent resolves that record, connects over A2A, and exchanges a
 // message. It exercises both agentCard shapes — an embedded A2A_AGENT_CARD and
 // discrete protocols — and both transports (JSONRPC, HTTP+JSON), which also
-// covers the HTTP_JSON->HTTP+JSON binding mapping and the 0.3.0 compat transport.
+// covers the HTTP_JSON->HTTP+JSON binding mapping and the 0.3 compat transports.
 func TestRemoteAgent_E2E(t *testing.T) {
 	const reply = "hello from the remote agent"
 
 	tests := []struct {
 		name    string
 		binding a2a.TransportProtocol // selects the A2A server transport
+		v0      bool                  // serves A2A 0.3 instead of the current version
 		record  func(serverURL string) Agent
 	}{
 		{
@@ -73,6 +75,7 @@ func TestRemoteAgent_E2E(t *testing.T) {
 			// a compat transport.
 			name:    "discrete protocols over HTTP+JSON",
 			binding: a2a.TransportProtocolHTTPJSON,
+			v0:      true,
 			record: func(serverURL string) Agent {
 				return Agent{
 					DisplayName: "Echo",
@@ -84,10 +87,27 @@ func TestRemoteAgent_E2E(t *testing.T) {
 				}
 			},
 		},
+		{
+			// The registry reports 0.3.0, which a 0.3 server accepts.
+			name:    "discrete protocols over JSONRPC 0.3.0",
+			binding: a2a.TransportProtocolJSONRPC,
+			v0:      true,
+			record: func(serverURL string) Agent {
+				return Agent{
+					DisplayName: "Echo",
+					Description: "echoes a canned reply",
+					Protocols: []Protocol{{
+						Type:            protocolTypeA2AAgent,
+						ProtocolVersion: "0.3.0",
+						Interfaces:      []Interface{{URL: serverURL, ProtocolBinding: "JSONRPC"}},
+					}},
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			a2aURL := startCannedA2AServer(t, tc.binding, reply)
+			a2aURL := startCannedA2AServer(t, tc.binding, tc.v0, reply)
 
 			regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if err := json.NewEncoder(w).Encode(tc.record(a2aURL)); err != nil {
@@ -109,9 +129,10 @@ func TestRemoteAgent_E2E(t *testing.T) {
 }
 
 // startCannedA2AServer runs an in-process A2A server, backed by an offline agent
-// that always replies with reply, over the given transport. It returns the
-// server URL and registers cleanup.
-func startCannedA2AServer(t *testing.T, binding a2a.TransportProtocol, reply string) string {
+// that always replies with reply, over the given transport of A2A 0.3 if v0 is
+// set or of the current version otherwise. It returns the server URL and
+// registers cleanup.
+func startCannedA2AServer(t *testing.T, binding a2a.TransportProtocol, v0 bool, reply string) string {
 	t.Helper()
 
 	canned, err := agent.New(agent.Config{
@@ -137,10 +158,14 @@ func startCannedA2AServer(t *testing.T, binding a2a.TransportProtocol, reply str
 	}))
 
 	var h http.Handler
-	switch binding {
-	case a2a.TransportProtocolJSONRPC:
+	switch {
+	case binding == a2a.TransportProtocolJSONRPC && v0:
+		h = a2av0.NewJSONRPCHandler(handler)
+	case binding == a2a.TransportProtocolHTTPJSON && v0:
+		h = a2av0.NewRESTHandler(handler)
+	case binding == a2a.TransportProtocolJSONRPC:
 		h = a2asrv.NewJSONRPCHandler(handler)
-	case a2a.TransportProtocolHTTPJSON:
+	case binding == a2a.TransportProtocolHTTPJSON:
 		h = a2asrv.NewRESTHandler(handler)
 	default:
 		t.Fatalf("unsupported binding %q", binding)

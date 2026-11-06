@@ -26,6 +26,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
@@ -212,7 +213,8 @@ type transportKey struct {
 // advertises. Agent Registry commonly reports an older A2A protocol version
 // (e.g. 0.3.0) than the SDK's current one, and the a2a-go factory matches
 // transports by (protocol, version); without a matching compat transport,
-// client creation fails with "no compatible transports found".
+// client creation fails with "no compatible transports found". A 0.x version
+// gets the a2acompat/a2av0 transport, which speaks that version's wire format.
 func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.Factory {
 	opts := []a2aclient.FactoryOption{
 		a2aclient.WithJSONRPCTransport(httpClient),
@@ -224,11 +226,16 @@ func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.F
 		if iface == nil || iface.ProtocolVersion == "" || iface.ProtocolVersion == a2a.Version {
 			continue
 		}
+		v0 := strings.HasPrefix(string(iface.ProtocolVersion), "0.")
 		var factory a2aclient.TransportFactory
-		switch iface.ProtocolBinding {
-		case a2a.TransportProtocolJSONRPC:
+		switch {
+		case iface.ProtocolBinding == a2a.TransportProtocolJSONRPC && v0:
+			factory = a2av0.NewJSONRPCTransportFactory(a2av0.JSONRPCTransportConfig{Client: httpClient})
+		case iface.ProtocolBinding == a2a.TransportProtocolHTTPJSON && v0:
+			factory = a2av0.NewRESTTransportFactory(a2av0.RESTTransportConfig{Client: httpClient})
+		case iface.ProtocolBinding == a2a.TransportProtocolJSONRPC:
 			factory = jsonrpcTransportFactory(httpClient)
-		case a2a.TransportProtocolHTTPJSON:
+		case iface.ProtocolBinding == a2a.TransportProtocolHTTPJSON:
 			factory = restTransportFactory(httpClient)
 		default:
 			continue

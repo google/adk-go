@@ -231,7 +231,7 @@ func TestA2AInputRequired(t *testing.T) {
 			}
 
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg2a, task2a.Status.Message, msg3, task2a.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg2a, task2a.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
@@ -549,7 +549,7 @@ func TestA2AMultiHopInputRequired(t *testing.T) {
 				}),
 			}
 			gotHistory := task3.History
-			wantHistory := []*a2a.Message{msg1, msg2, task1.Status.Message, msg3, task2.Status.Message}
+			wantHistory := []*a2a.Message{msg1, task1.Status.Message, msg2, task2.Status.Message, msg3}
 			if diff := cmp.Diff(wantHistory, gotHistory, opts...); diff != "" {
 				t.Fatalf("unexpected history (+got,-want) diff:\n%s", diff)
 			}
