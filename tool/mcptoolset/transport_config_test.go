@@ -385,16 +385,26 @@ func TestCommandTransportReconnectKeepsSettings(t *testing.T) {
 func TestCommandTransportSpecIsIndependent(t *testing.T) {
 	cmd := exec.Command("server", "--flag")
 	cmd.Env = []string{"A=1"}
+	extra, err := os.CreateTemp(t.TempDir(), "extra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = extra.Close() }()
+	cmd.ExtraFiles = []*os.File{extra}
 	ct := newCommandTransport(&mcp.CommandTransport{Command: cmd})
 
 	cmd.Args[1] = "--changed"
 	cmd.Env[0] = "A=changed"
+	cmd.ExtraFiles[0] = nil
 
 	if got, want := ct.spec.Args, []string{"server", "--flag"}; !slices.Equal(got, want) {
 		t.Errorf("spec.Args = %v, want %v", got, want)
 	}
 	if got, want := ct.spec.Env, []string{"A=1"}; !slices.Equal(got, want) {
 		t.Errorf("spec.Env = %v, want %v", got, want)
+	}
+	if got, want := ct.spec.ExtraFiles, []*os.File{extra}; !slices.Equal(got, want) {
+		t.Errorf("spec.ExtraFiles = %v, want %v", got, want)
 	}
 }
 
