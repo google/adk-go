@@ -17,13 +17,48 @@ package authhandler
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolauth"
 )
+
+type exchangeLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var (
+	exchangeLocksMu sync.Mutex
+	exchangeLocks   = map[[sha256.Size]byte]*exchangeLock{}
+)
+
+func lockExchange(key string, o *toolauth.OAuth2Auth) func() {
+	k := sha256.Sum256([]byte(key + "\x00" + o.AuthResponseURI + "\x00" + o.AuthCode))
+	exchangeLocksMu.Lock()
+	l := exchangeLocks[k]
+	if l == nil {
+		l = &exchangeLock{}
+		exchangeLocks[k] = l
+	}
+	l.refs++
+	exchangeLocksMu.Unlock()
+
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		exchangeLocksMu.Lock()
+		l.refs--
+		if l.refs == 0 {
+			delete(exchangeLocks, k)
+		}
+		exchangeLocksMu.Unlock()
+	}
+}
 
 // StoreAuthResponse stores the credential in resp, the client's answer to the
 // request ADK sent, under "temp:" plus that request's key, and returns the key.
@@ -135,19 +170,23 @@ func tokenCredential(scheme *toolauth.Scheme, token string) *toolauth.Credential
 
 // GetAuthResponse returns the credential the user's answer produced for cfg,
 // the tool's own config, or nil when no answer is stored. A code is exchanged
-// for tokens, which go back to state without the client secret.
+// for tokens, which go back to state without the client secret. Concurrent
+// exchanges of the same stored code are serialized so tool calls sharing a
+// credential key redeem it once.
 func GetAuthResponse(ctx context.Context, state session.State, cfg *toolauth.Config) (*toolauth.Credential, error) {
 	key, err := cfg.Key()
 	if err != nil {
 		return nil, fmt.Errorf("authhandler: credential key: %w", err)
 	}
-	stateKey, cred, err := readStoredCredential(state, &cfg.AuthScheme, key)
-	if err != nil || cred == nil {
-		return nil, err
-	}
-	cred = withConfiguredClient(cred, cfg.RawAuthCredential)
+	_, cred, err := readConfiguredCredential(state, cfg, key)
 	if !needsExchange(&cfg.AuthScheme, cred) {
-		return cred, nil
+		return cred, err
+	}
+	unlock := lockExchange(key, cred.OAuth2)
+	defer unlock()
+	stateKey, cred, err := readConfiguredCredential(state, cfg, key)
+	if !needsExchange(&cfg.AuthScheme, cred) {
+		return cred, err
 	}
 	exchanged, err := exchangeCode(ctx, &cfg.AuthScheme, cred)
 	if err != nil {
@@ -157,6 +196,14 @@ func GetAuthResponse(ctx context.Context, state session.State, cfg *toolauth.Con
 		return nil, fmt.Errorf("authhandler: store exchanged credential: %w", err)
 	}
 	return exchanged, nil
+}
+
+func readConfiguredCredential(state session.State, cfg *toolauth.Config, key string) (string, *toolauth.Credential, error) {
+	stateKey, cred, err := readStoredCredential(state, &cfg.AuthScheme, key)
+	if err != nil || cred == nil {
+		return "", nil, err
+	}
+	return stateKey, withConfiguredClient(cred, cfg.RawAuthCredential), nil
 }
 
 // withConfiguredClient puts the tool's own client ID, secret and auth method
@@ -178,7 +225,7 @@ func withConfiguredClient(cred, raw *toolauth.Credential) *toolauth.Credential {
 // needsExchange reports whether cred still holds a code that ADK redeems, as
 // adk-python's _is_exchangeable decides with allow_public.
 func needsExchange(scheme *toolauth.Scheme, cred *toolauth.Credential) bool {
-	if scheme.Type != toolauth.SchemeTypeOAuth2 && scheme.Type != toolauth.SchemeTypeOpenIDConnect {
+	if cred == nil || (scheme.Type != toolauth.SchemeTypeOAuth2 && scheme.Type != toolauth.SchemeTypeOpenIDConnect) {
 		return false
 	}
 	o := cred.OAuth2

@@ -18,8 +18,11 @@ import (
 	"errors"
 	"iter"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -358,6 +361,18 @@ func TestGetAuthResponseNoExchangeNeeded(t *testing.T) {
 				return &c
 			}(),
 		},
+		{
+			name: "an OAuth2 credential stored for an HTTP tool comes back as stored",
+			cfg: func(string) *toolauth.Config {
+				return &toolauth.Config{
+					AuthScheme:        httpScheme,
+					RawAuthCredential: &toolauth.Credential{AuthType: toolauth.CredentialTypeHTTP, HTTP: &toolauth.HTTPAuth{Scheme: "bearer"}},
+					CredentialKey:     "k",
+				}
+			},
+			stored: signedIn,
+			want:   &signedIn,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -421,6 +436,198 @@ func TestGetAuthResponseUsesTheConfiguredAuthMethod(t *testing.T) {
 			if inBody != tt.wantSecretInBody || inHeader == tt.wantSecretInBody {
 				t.Errorf("secret in body = %t, in Basic header = %t; want in body = %t, in header = %t",
 					inBody, inHeader, tt.wantSecretInBody, !tt.wantSecretInBody)
+			}
+		})
+	}
+}
+
+func TestGenerateStoreAndGetAuthResponseWithExplicitKey(t *testing.T) {
+	_, tokenURL := newTokenEndpoint(t, http.StatusOK, tokenResponse)
+	cfg := toolConfig(tokenURL)
+	cfg.CredentialKey = "my_tool_tokens"
+
+	req, err := GenerateAuthRequest(cfg)
+	if err != nil {
+		t.Fatalf("GenerateAuthRequest() error = %v", err)
+	}
+	state := stateWith(t, nil)
+	resp := map[string]any{
+		"authType": "oauth2",
+		"oauth2": map[string]any{
+			"state":           req.ExchangedAuthCredential.OAuth2.State,
+			"authResponseUri": "https://adk.example/cb?state=" + req.ExchangedAuthCredential.OAuth2.State + "&code=4/0Ab",
+		},
+	}
+	if _, err := StoreAuthResponse(state, req, resp); err != nil {
+		t.Fatalf("StoreAuthResponse() error = %v", err)
+	}
+	got, err := GetAuthResponse(t.Context(), state, cfg)
+	if err != nil {
+		t.Fatalf("GetAuthResponse() error = %v", err)
+	}
+	if got == nil || got.OAuth2 == nil || got.OAuth2.AccessToken != "at-1" {
+		t.Errorf("GetAuthResponse() = %v, want access token at-1", got)
+	}
+}
+
+// oneTimeCodeEndpoint is a token endpoint that redeems each code once, as
+// RFC 6749 section 4.1.2 requires: a second use of a code gets invalid_grant.
+type oneTimeCodeEndpoint struct {
+	mu       sync.Mutex
+	used     map[string]bool
+	requests int
+}
+
+func newOneTimeCodeEndpoint(t *testing.T) (*oneTimeCodeEndpoint, string) {
+	t.Helper()
+	e := &oneTimeCodeEndpoint{used: map[string]bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm() error = %v", err)
+		}
+		code := r.PostForm.Get("code")
+		e.mu.Lock()
+		e.requests++
+		spent := e.used[code]
+		e.used[code] = true
+		e.mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		if spent {
+			w.WriteHeader(http.StatusBadRequest)
+			if _, err := w.Write([]byte(`{"error":"invalid_grant"}`)); err != nil {
+				t.Errorf("Write() error = %v", err)
+			}
+			return
+		}
+		if _, err := w.Write([]byte(tokenResponse)); err != nil {
+			t.Errorf("Write() error = %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return e, srv.URL + "/token"
+}
+
+func (e *oneTimeCodeEndpoint) requestCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.requests
+}
+
+func TestGetAuthResponseConcurrentCallsShareOneCode(t *testing.T) {
+	endpoint, tokenURL := newOneTimeCodeEndpoint(t)
+	state := stateWith(t, map[string]any{"temp:k": storedCode()})
+	cfg := toolConfig(tokenURL)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	got := make([]*toolauth.Credential, 2)
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got[i], errs[i] = GetAuthResponse(t.Context(), state, cfg)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if n := endpoint.requestCount(); n != 1 {
+		t.Errorf("token endpoint got %d requests for one code, want 1", n)
+	}
+	want := exchangedCredential("s3cret")
+	for i := range 2 {
+		if errs[i] != nil {
+			t.Errorf("call %d error = %v, want nil", i, errs[i])
+			continue
+		}
+		if diff := cmp.Diff(&want, got[i], ignoreExpiresAt); diff != "" {
+			t.Errorf("call %d credential mismatch (-want +got):\n%s", i, diff)
+		}
+	}
+	exchangeLocksMu.Lock()
+	left := len(exchangeLocks)
+	exchangeLocksMu.Unlock()
+	if left != 0 {
+		t.Errorf("len(exchangeLocks) = %d after calls finished, want 0", left)
+	}
+}
+
+func TestGetAuthResponseDoesNotBlockOtherSessions(t *testing.T) {
+	tests := []struct {
+		name      string
+		storedB   toolauth.Credential
+		wantToken string
+	}{
+		{
+			name: "session with a stored token",
+			storedB: toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2:   &toolauth.OAuth2Auth{ClientID: "app-123", AccessToken: "at-0"},
+			},
+			wantToken: "at-0",
+		},
+		{
+			name: "session with a different code",
+			storedB: func() toolauth.Credential {
+				c := storedCode()
+				c.OAuth2.AuthResponseURI = "https://adk.example/cb?state=Xy7&code=other-code"
+				return c
+			}(),
+			wantToken: "at-1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hit := make(chan struct{}, 1)
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("ParseForm() error = %v", err)
+				}
+				if r.PostForm.Get("code") == "4/0Ab" {
+					hit <- struct{}{}
+					<-release
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if _, err := w.Write([]byte(tokenResponse)); err != nil {
+					t.Errorf("Write() error = %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			cfg := toolConfig(srv.URL + "/token")
+
+			stateA := stateWith(t, map[string]any{"temp:k": storedCode()})
+			aDone := make(chan error, 1)
+			go func() {
+				_, err := GetAuthResponse(t.Context(), stateA, cfg)
+				aDone <- err
+			}()
+			<-hit
+
+			stateB := stateWith(t, map[string]any{"temp:k": tt.storedB})
+			bDone := make(chan struct{})
+			var gotB *toolauth.Credential
+			var errB error
+			go func() {
+				defer close(bDone)
+				gotB, errB = GetAuthResponse(t.Context(), stateB, cfg)
+			}()
+
+			select {
+			case <-bDone:
+			case <-time.After(200 * time.Millisecond):
+				t.Errorf("unrelated session blocked behind in-flight code exchange")
+			}
+			close(release)
+			<-bDone
+			if err := <-aDone; err != nil {
+				t.Fatalf("session A GetAuthResponse() error = %v", err)
+			}
+			if errB != nil || gotB == nil || gotB.OAuth2 == nil || gotB.OAuth2.AccessToken != tt.wantToken {
+				t.Errorf("session B GetAuthResponse() = %v, %v; want access token %q", gotB, errB, tt.wantToken)
 			}
 		})
 	}

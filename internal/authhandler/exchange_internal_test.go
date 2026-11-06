@@ -15,6 +15,7 @@
 package authhandler
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -153,6 +154,18 @@ func TestTokenConfig(t *testing.T) {
 			name:   "code flow, client with a secret, header",
 			scheme: codeFlow("https://idp.example/token"),
 			o:      withSecret,
+			want: &oauth2.Config{
+				ClientID: "app-123", ClientSecret: "s3cret", RedirectURL: "https://adk.example/cb",
+				Endpoint: oauth2.Endpoint{TokenURL: "https://idp.example/token", AuthStyle: oauth2.AuthStyleInHeader},
+			},
+		},
+		{
+			name:   "client_secret_basic puts the secret in the header",
+			scheme: codeFlow("https://idp.example/token"),
+			o: toolauth.OAuth2Auth{
+				ClientID: "app-123", ClientSecret: "s3cret", RedirectURI: "https://adk.example/cb",
+				TokenEndpointAuthMethod: "client_secret_basic",
+			},
 			want: &oauth2.Config{
 				ClientID: "app-123", ClientSecret: "s3cret", RedirectURL: "https://adk.example/cb",
 				Endpoint: oauth2.Endpoint{TokenURL: "https://idp.example/token", AuthStyle: oauth2.AuthStyleInHeader},
@@ -525,5 +538,31 @@ func TestExchangeCodeLeavesInputUnchanged(t *testing.T) {
 	}
 	if diff := cmp.Diff(answeredCredential(), cred); diff != "" {
 		t.Errorf("input credential was modified (-want +got):\n%s", diff)
+	}
+}
+
+type deadlineRecorder struct {
+	deadline time.Time
+	ok       bool
+}
+
+func (d *deadlineRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
+	d.deadline, d.ok = r.Context().Deadline()
+	return http.DefaultTransport.RoundTrip(r)
+}
+
+func TestExchangeCodeBoundsTheTokenRequest(t *testing.T) {
+	_, tokenURL := newTokenEndpoint(t, http.StatusOK, tokenResponse)
+	rec := &deadlineRecorder{}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, &http.Client{Transport: rec})
+	scheme := codeFlow(tokenURL)
+	before := time.Now()
+	if _, err := exchangeCode(ctx, &scheme, answeredCredential()); err != nil {
+		t.Fatalf("exchangeCode() error = %v", err)
+	}
+	after := time.Now()
+	if !rec.ok || rec.deadline.Before(before.Add(tokenRequestTimeout)) || rec.deadline.After(after.Add(tokenRequestTimeout)) {
+		t.Errorf("token request deadline = %v (set = %t), want between %v and %v",
+			rec.deadline, rec.ok, before.Add(tokenRequestTimeout), after.Add(tokenRequestTimeout))
 	}
 }

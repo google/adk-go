@@ -73,6 +73,9 @@ func TestGenerateAuthRequestKeepsKeyAndDropsSecrets(t *testing.T) {
 	}{
 		{"api key", apiKeyConfig()},
 		{"oauth2 that needs an authorization URI", authCodeConfig(nil)},
+		{"oauth2 with an explicit credential key", authCodeConfig(func(c *toolauth.Config) {
+			c.CredentialKey = "my_tool_tokens"
+		})},
 		{"oauth2 whose raw credential has an authorization URI", authCodeConfig(rawHasAuthURI)},
 		{"oauth2 whose exchanged credential has an authorization URI", authCodeConfig(exchangedHasAuthURI)},
 	}

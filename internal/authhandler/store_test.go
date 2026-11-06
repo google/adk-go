@@ -115,6 +115,23 @@ func TestStoreAuthResponse(t *testing.T) {
 			wantKey: "adk_api",
 			want:    toolauth.Credential{AuthType: toolauth.CredentialTypeAPIKey, APIKey: "user-key"},
 		},
+		{
+			name: "oauth2 answer to a request without configured oauth2 keeps its client ID",
+			requested: &toolauth.Config{
+				AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Api-Key"},
+				RawAuthCredential: &toolauth.Credential{AuthType: toolauth.CredentialTypeAPIKey},
+				CredentialKey:     "adk_api",
+			},
+			resp: map[string]any{
+				"authType": "oauth2",
+				"oauth2":   map[string]any{"clientId": "other-app", "clientSecret": "client-sent", "authCode": "4/0Ab"},
+			},
+			wantKey: "adk_api",
+			want: toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2:   &toolauth.OAuth2Auth{ClientID: "other-app", AuthCode: "4/0Ab"},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
