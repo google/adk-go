@@ -62,8 +62,9 @@ func (t *Providers) Shutdown(ctx context.Context) error {
 	}
 	if t.MeterProvider != nil {
 		// The tracer and logger providers return nil on a repeated Shutdown;
-		// the meter provider reports it as ErrReaderShutdown.
-		if mpErr := t.MeterProvider.Shutdown(ctx); mpErr != nil && !errors.Is(mpErr, sdkmetric.ErrReaderShutdown) {
+		// the meter provider returns the bare ErrReaderShutdown. Not errors.Is:
+		// on the first Shutdown a reader's own error can come joined with it.
+		if mpErr := t.MeterProvider.Shutdown(ctx); mpErr != nil && mpErr != sdkmetric.ErrReaderShutdown {
 			err = errors.Join(err, mpErr)
 		}
 	}

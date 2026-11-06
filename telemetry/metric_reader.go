@@ -23,7 +23,7 @@ import (
 )
 
 // newPeriodicReader returns a reader over a [sdkmetric.PeriodicReader] which
-// deosn't export on Shutdown, and which exports nothing while no instrument has recorded.
+// doesn't export on Shutdown, and which exports nothing while no instrument has recorded.
 func newPeriodicReader(exporter sdkmetric.Exporter, opts ...sdkmetric.PeriodicReaderOption) sdkmetric.Reader {
 	guarded := &guardedExporter{Exporter: exporter}
 	return &noFinalExportReader{

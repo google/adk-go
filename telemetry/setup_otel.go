@@ -82,7 +82,11 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 	}
 	cfg.spanProcessors = append(cfg.spanProcessors, exp.spanProcessors...)
 	cfg.logProcessors = append(cfg.logProcessors, exp.logProcessors...)
-	cfg.metricReaders = append(cfg.metricReaders, exp.metricReaders...)
+	// A periodic reader runs from construction, so readers are built only
+	// once nothing else can fail; one built earlier would outlive the error.
+	for _, m := range exp.metricExporters {
+		cfg.metricReaders = append(cfg.metricReaders, newPeriodicReader(m.exporter, m.opts...))
+	}
 	return cfg, nil
 }
 
@@ -145,15 +149,19 @@ func resolveProject(configuredProject string, creds *google.Credentials, require
 }
 
 // resolveResource creates a new resource with attributes specified in the following order (later attributes override earlier ones):
-//  1. A `service.instance.id` unique to this process.
-//  2. [resource.Default()] populates the resource labels from environment variables like OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
-//  3. GCP related attributes when otelToCloud is enabled or gcpResourceProject is set - `gcp.project_id` attribute needed by Cloud Trace and other attributes provided by [gcp.NewDetector()].
+//  1. With export to Google Cloud, a `service.instance.id` unique to this process.
+//  2. The default resource, populated from environment variables like OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES.
+//  3. The GCP project ID that Cloud Trace needs, from the configured resource project.
 //  4. GCP detector adds runtime attributes if ADK runs on one of supported platforms (e.g. GCE, GKE, CloudRun).
 //  5. Resource from config, if present.
 func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, error) {
-	r, err := resource.Merge(resource.NewSchemaless(semconv.ServiceInstanceID(serviceInstanceID())), resource.Default())
-	if err != nil {
-		return nil, fmt.Errorf("failed to merge default resource: %w", err)
+	r := resource.Default()
+	if cfg.oTelToCloud {
+		var err error
+		r, err = resource.Merge(resource.NewSchemaless(semconv.ServiceInstanceID(serviceInstanceID())), r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge default resource: %w", err)
+		}
 	}
 
 	opts := []resource.Option{
@@ -192,15 +200,22 @@ func serviceInstanceID() string {
 }
 
 type exporters struct {
-	spanProcessors []sdktrace.SpanProcessor
-	logProcessors  []sdklog.Processor
-	metricReaders  []sdkmetric.Reader
+	spanProcessors  []sdktrace.SpanProcessor
+	logProcessors   []sdklog.Processor
+	metricExporters []metricExporter
+}
+
+// metricExporter is a metric exporter and the options of the periodic reader
+// that will drive it.
+type metricExporter struct {
+	exporter sdkmetric.Exporter
+	opts     []sdkmetric.PeriodicReaderOption
 }
 
 func (e *exporters) add(other exporters) {
 	e.spanProcessors = append(e.spanProcessors, other.spanProcessors...)
 	e.logProcessors = append(e.logProcessors, other.logProcessors...)
-	e.metricReaders = append(e.metricReaders, other.metricReaders...)
+	e.metricExporters = append(e.metricExporters, other.metricExporters...)
 }
 
 // ownProviders says which providers [New] builds itself, as opposed to taking
@@ -249,7 +264,7 @@ func otlpExporters(ctx context.Context, own ownProviders) (exporters, error) {
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create OTLP HTTP metric exporter: %w", err)
 		}
-		exp.metricReaders = append(exp.metricReaders, newPeriodicReader(exporter))
+		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter})
 	}
 	if own.logger && endpointSet("LOGS") {
 		exporter, err := otlploghttp.New(ctx)
@@ -284,7 +299,7 @@ func gcpExporters(ctx context.Context, cfg *config, own ownProviders) (exporters
 		if err != nil {
 			return exporters{}, fmt.Errorf("failed to create GCP metric exporter: %w", err)
 		}
-		exp.metricReaders = append(exp.metricReaders, newPeriodicReader(exporter, sdkmetric.WithInterval(gcpMetricExportInterval)))
+		exp.metricExporters = append(exp.metricExporters, metricExporter{exporter: exporter, opts: []sdkmetric.PeriodicReaderOption{sdkmetric.WithInterval(gcpMetricExportInterval)}})
 	}
 	// TODO log exporter
 	return exp, nil
