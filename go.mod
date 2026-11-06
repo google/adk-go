@@ -54,7 +54,7 @@ require (
 )
 
 require (
-	github.com/a2aproject/a2a-go/v2 v2.6.0
+	github.com/a2aproject/a2a-go/v2 v2.7.1-0.20261106095057-ec61e7c5ac0f
 	github.com/anthropics/anthropic-sdk-go v1.81.0
 )
 

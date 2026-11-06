@@ -253,8 +253,8 @@ func TestAgentCard_Synthesized(t *testing.T) {
 	if iface.ProtocolBinding != a2a.TransportProtocolJSONRPC {
 		t.Errorf("interface binding = %q, want JSONRPC", iface.ProtocolBinding)
 	}
-	if iface.ProtocolVersion != a2a.ProtocolVersion("0.3.0") {
-		t.Errorf("interface protocol version = %q, want 0.3.0", iface.ProtocolVersion)
+	if iface.ProtocolVersion != a2a.ProtocolVersion("0.3") {
+		t.Errorf("interface protocol version = %q, want 0.3", iface.ProtocolVersion)
 	}
 	if len(card.Skills) != 1 || card.Skills[0].ID != "s1" || card.Skills[0].Name != "Skill One" {
 		t.Errorf("skills = %+v, want one mapped skill s1", card.Skills)
@@ -344,8 +344,8 @@ func TestA2AClientFactory_CompatProtocolVersion(t *testing.T) {
 		binding a2a.TransportProtocol
 		version a2a.ProtocolVersion
 	}{
-		{name: "http+json old version", binding: a2a.TransportProtocolHTTPJSON, version: "0.3.0"},
-		{name: "jsonrpc old version", binding: a2a.TransportProtocolJSONRPC, version: "0.3.0"},
+		{name: "http+json old version", binding: a2a.TransportProtocolHTTPJSON, version: "0.3"},
+		{name: "jsonrpc old version", binding: a2a.TransportProtocolJSONRPC, version: "0.3"},
 		{name: "http+json current version", binding: a2a.TransportProtocolHTTPJSON, version: a2a.Version},
 	}
 	for _, tc := range tests {

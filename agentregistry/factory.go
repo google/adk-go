@@ -26,6 +26,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"google.golang.org/adk/v2/agent"
@@ -168,7 +169,18 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 const cardTypeA2AAgentCard = "A2A_AGENT_CARD"
 
 // defaultA2AProtocolVersion is used when the registry does not report one.
-const defaultA2AProtocolVersion = "0.3.0"
+const defaultA2AProtocolVersion = "0.3"
+
+// majorMinor returns version without its patch number: A2A clients send the
+// interface's version in the A2A-Version header, which servers match against
+// the Major.Minor version they serve, while the registry may report "0.3.0".
+func majorMinor(version string) string {
+	if major, rest, ok := strings.Cut(version, "."); ok {
+		minor, _, _ := strings.Cut(rest, ".")
+		return major + "." + minor
+	}
+	return version
+}
 
 // RemoteAgent resolves a registered A2A agent into an [agent.Agent] usable as a
 // sub-agent. name is the full agent resource name.
@@ -212,7 +224,8 @@ type transportKey struct {
 // advertises. Agent Registry commonly reports an older A2A protocol version
 // (e.g. 0.3.0) than the SDK's current one, and the a2a-go factory matches
 // transports by (protocol, version); without a matching compat transport,
-// client creation fails with "no compatible transports found".
+// client creation fails with "no compatible transports found". A 0.x version
+// gets the a2acompat/a2av0 transport, which speaks that version's wire format.
 func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.Factory {
 	opts := []a2aclient.FactoryOption{
 		a2aclient.WithJSONRPCTransport(httpClient),
@@ -224,11 +237,16 @@ func a2aClientFactory(card *a2a.AgentCard, httpClient *http.Client) *a2aclient.F
 		if iface == nil || iface.ProtocolVersion == "" || iface.ProtocolVersion == a2a.Version {
 			continue
 		}
+		v0 := strings.HasPrefix(string(iface.ProtocolVersion), "0.")
 		var factory a2aclient.TransportFactory
-		switch iface.ProtocolBinding {
-		case a2a.TransportProtocolJSONRPC:
+		switch {
+		case iface.ProtocolBinding == a2a.TransportProtocolJSONRPC && v0:
+			factory = a2av0.NewJSONRPCTransportFactory(a2av0.JSONRPCTransportConfig{Client: httpClient})
+		case iface.ProtocolBinding == a2a.TransportProtocolHTTPJSON && v0:
+			factory = a2av0.NewRESTTransportFactory(a2av0.RESTTransportConfig{Client: httpClient})
+		case iface.ProtocolBinding == a2a.TransportProtocolJSONRPC:
 			factory = jsonrpcTransportFactory(httpClient)
-		case a2a.TransportProtocolHTTPJSON:
+		case iface.ProtocolBinding == a2a.TransportProtocolHTTPJSON:
 			factory = restTransportFactory(httpClient)
 		default:
 			continue
@@ -298,10 +316,7 @@ func agentCard(info *Agent, resourceName string) (card *a2a.AgentCard, name stri
 	if transport == "" {
 		transport = a2a.TransportProtocolHTTPJSON
 	}
-	protocolVersion := version
-	if protocolVersion == "" {
-		protocolVersion = defaultA2AProtocolVersion
-	}
+	protocolVersion := majorMinor(cmp.Or(version, defaultA2AProtocolVersion))
 
 	card = &a2a.AgentCard{
 		Name:        agentName,
