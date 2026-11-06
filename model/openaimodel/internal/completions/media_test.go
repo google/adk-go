@@ -79,6 +79,14 @@ func TestBuildParams_MediaOnTheWire(t *testing.T) {
 			want:  `[{"text":"look","type":"text"},` + image + `]`,
 		},
 		{
+			name: "executable code before an inline image keeps its order",
+			parts: []*genai.Part{
+				{ExecutableCode: &genai.ExecutableCode{Code: "print(1)"}},
+				{InlineData: &genai.Blob{MIMEType: "image/png", Data: png}},
+			},
+			want: "[{\"text\":\"Code:```python\\nprint(1)\\n```\",\"type\":\"text\"}," + image + "]",
+		},
+		{
 			name:  "image by url",
 			parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "image/jpeg", FileURI: "https://example.com/a.jpg"}}},
 			want:  `[{"image_url":{"detail":"auto","url":"https://example.com/a.jpg"},"type":"image_url"}]`,
