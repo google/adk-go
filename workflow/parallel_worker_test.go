@@ -621,6 +621,59 @@ func TestParallelWorker_CancelDuringDispatch(t *testing.T) {
 	}
 }
 
+func TestParallelWorker_CancelAfterDispatch(t *testing.T) {
+	// Every item is running when the caller cancels, and each one then
+	// returns no output and no error. No item is skipped at dispatch and no
+	// worker reports a failure.
+	started := make(chan struct{}, 3)
+	wrapped := NewFunctionNode("no_output_on_cancel", func(ctx agent.Context, input int) (any, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, nil
+	}, defaultNodeConfig)
+
+	pw, err := NewParallelWorker("parallel", wrapped, 0, defaultNodeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	exCtx := agent.NewContext(&MockInvocationContext{Context: ctx})
+
+	done := make(chan struct{})
+	var gotErr error
+	var gotOutput any
+	go func() {
+		for ev, err := range pw.Run(exCtx, []any{1, 2, 3}) {
+			if err != nil {
+				gotErr = err
+			}
+			if out, ok := extractOutput(ev); ok {
+				gotOutput = out
+			}
+		}
+		close(done)
+	}()
+
+	for range 3 {
+		<-started
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation after dispatch to complete")
+	}
+
+	if !errors.Is(gotErr, context.Canceled) {
+		t.Errorf("Run() error = %v, want %v", gotErr, context.Canceled)
+	}
+	if gotOutput != nil {
+		t.Errorf("Run() yielded output %v, want none", gotOutput)
+	}
+}
+
 func TestParallelWorker_FailureBeforeCancelIsReturned(t *testing.T) {
 	// Item 1 fails and cancels item 2. The caller cancels only after that,
 	// while item 2 is still running, so the failure has to win over
