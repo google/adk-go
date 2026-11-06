@@ -254,7 +254,7 @@ type Config struct {
 	//     connect.
 	//   - The copy can't carry an exec.CommandContext context, so a server
 	//     built with CommandContext is started again after that context is
-	//     cancelled, and the new process ignores it. In the same way, a
+	//     canceled, and the new process ignores it. In the same way, a
 	//     server stopped by killing cmd.Process comes back on the next tool
 	//     call.
 	//   - A CommandTransport inside a wrapper such as *mcp.LoggingTransport

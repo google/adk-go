@@ -288,7 +288,7 @@ func TestCommandTransportReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stderr.Close()
+	defer func() { _ = stderr.Close() }()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestCommandTransportHelper$")
 	cmd.Env = append(os.Environ(), "MCPTOOLSET_TEST_HELPER=1")
