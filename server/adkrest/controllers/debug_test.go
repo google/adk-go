@@ -422,6 +422,95 @@ func TestEventSpanHandlerEmptyLogsSerializeAsJSONArray(t *testing.T) {
 	}
 }
 
+func TestDebugHandlersPreserveAttributeTypes(t *testing.T) {
+	const sessionID, eventID = "typed-session", "typed-event"
+	tt := setupTestTelemetry(t)
+	_, span := tt.tracer.Start(t.Context(), "generate_content test-model", trace.WithAttributes(
+		attribute.String("gcp.vertex.agent.event_id", eventID),
+		semconv.GenAIConversationID(sessionID),
+		semconv.GenAIOperationNameGenerateContent,
+		semconv.GenAIUsageInputTokens(773),
+		semconv.GenAIUsageOutputTokens(75),
+		semconv.GenAIResponseFinishReasons("tool_call"),
+		attribute.Float64("gen_ai.request.temperature", 0.5),
+		attribute.Bool("test.enabled", true),
+		attribute.Int64Slice("test.counts", []int64{1, 2}),
+		attribute.Float64Slice("test.weights", []float64{0.25, 0.5}),
+		attribute.BoolSlice("test.flags", []bool{true, false}),
+		attribute.StringSlice("test.empty", []string{}),
+		attribute.String("test.json_string", `["keep as text"]`),
+		attribute.KeyValue{Key: "test.nested", Value: attribute.MapValue(
+			attribute.KeyValue{Key: "values", Value: attribute.SliceValue(
+				attribute.Int64Value(3), attribute.BoolValue(false),
+			)},
+		)},
+		attribute.Float64("test.nan", math.NaN()),
+		attribute.Float64Slice("test.infinity", []float64{1, math.Inf(1)}),
+		attribute.KeyValue{Key: "test.nested_invalid", Value: attribute.MapValue(
+			attribute.Float64("value", math.Inf(-1)),
+		)},
+	))
+	span.End()
+	controller := controllers.NewDebugAPIController(nil, nil, tt.dt)
+	want := map[string]any{
+		"gcp.vertex.agent.event_id":      eventID,
+		"gen_ai.conversation.id":         sessionID,
+		"gen_ai.operation.name":          "generate_content",
+		"gen_ai.usage.input_tokens":      float64(773),
+		"gen_ai.usage.output_tokens":     float64(75),
+		"gen_ai.response.finish_reasons": []any{"tool_call"},
+		"gen_ai.request.temperature":     0.5,
+		"test.enabled":                   true,
+		"test.counts":                    []any{float64(1), float64(2)},
+		"test.weights":                   []any{0.25, 0.5},
+		"test.flags":                     []any{true, false},
+		"test.empty":                     []any{},
+		"test.json_string":               `["keep as text"]`,
+		"test.nested":                    map[string]any{"values": []any{float64(3), false}},
+	}
+	for _, tc := range []struct {
+		name    string
+		vars    map[string]string
+		handler http.HandlerFunc
+	}{
+		{"session", map[string]string{"session_id": sessionID}, controller.SessionSpansHandler},
+		{"event", map[string]string{"event_id": eventID}, controller.EventSpanHandler},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			tc.handler(rr, mux.SetURLVars(httptest.NewRequest(http.MethodGet, "/", nil), tc.vars))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+			}
+			var attrs map[string]any
+			if tc.name == "session" {
+				var spans []struct {
+					Attributes map[string]any `json:"attributes"`
+				}
+				if err := json.Unmarshal(rr.Body.Bytes(), &spans); err != nil {
+					t.Fatal("session response is not valid JSON")
+				}
+				if len(spans) != 1 {
+					t.Fatalf("got %d spans, want 1", len(spans))
+				}
+				attrs = spans[0].Attributes
+			} else if err := json.Unmarshal(rr.Body.Bytes(), &attrs); err != nil {
+				t.Fatal("event response is not valid JSON")
+			}
+			for key, expected := range want {
+				if !cmp.Equal(expected, attrs[key]) {
+					t.Errorf("attribute %s has incorrect value or type: got %T, want %T", key, attrs[key], expected)
+				}
+			}
+			for _, key := range []string{"test.nan", "test.infinity", "test.nested_invalid"} {
+				if _, exists := attrs[key]; exists {
+					t.Errorf("attribute %s cannot be represented in JSON and should be omitted", key)
+				}
+			}
+		})
+	}
+}
+
 // emitElidedMessageLogs records a span carrying the two log records the server
 // emits with OpenTelemetry content capture off, which is the default: both bodies
 // hold the elided placeholder instead of the message.

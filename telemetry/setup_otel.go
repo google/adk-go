@@ -137,10 +137,15 @@ func resolveProject(configuredProject string, creds *google.Credentials, require
 func resolveResource(ctx context.Context, cfg *config) (*resource.Resource, error) {
 	r := resource.Default()
 
-	opts := []resource.Option{
-		resource.WithAttributes(
+	var opts []resource.Option
+	// Only a known project is recorded, as in adk-python
+	// (telemetry/_gcp_resource.py, _get_common_resource). An empty one would
+	// still be merged over resource.Default() and blank a gcp.project_id set
+	// in OTEL_RESOURCE_ATTRIBUTES.
+	if cfg.gcpResourceProject != "" {
+		opts = append(opts, resource.WithAttributes(
 			attribute.Key("gcp.project_id").String(cfg.gcpResourceProject),
-		),
+		))
 	}
 	if cfg.oTelToCloud {
 		// Add GCP specific detectors.
