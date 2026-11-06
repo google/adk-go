@@ -43,17 +43,18 @@ import (
 type fakeFirestoreServer struct {
 	pb.UnimplementedFirestoreServer
 
-	mu             sync.Mutex
-	docs           map[string]*pb.Document
-	docVersions    map[string]int64
-	txReads        map[string]map[string]int64
-	nextTxID       int
-	batchCommits   int
-	txAborts       int
-	failNextWrite  error
-	failNextRead   error
-	failNextQuery  error
-	onBeforeCommit func(txID string)
+	mu              sync.Mutex
+	docs            map[string]*pb.Document
+	docVersions     map[string]int64
+	txReads         map[string]map[string]int64
+	nextTxID        int
+	batchCommits    int
+	txAborts        int
+	failNextWrite   error
+	failNextRead    error
+	failNextQuery   error
+	failBatchWrites error
+	onBeforeCommit  func(txID string)
 }
 
 func newFakeFirestoreServer() *fakeFirestoreServer {
@@ -342,6 +343,18 @@ func (f *fakeFirestoreServer) Commit(_ context.Context, req *pb.CommitRequest) (
 }
 
 func (f *fakeFirestoreServer) BatchWrite(ctx context.Context, req *pb.BatchWriteRequest) (*pb.BatchWriteResponse, error) {
+	f.mu.Lock()
+	failErr := f.failBatchWrites
+	f.mu.Unlock()
+	if failErr != nil {
+		// BatchWrite reports each write's outcome in the response.
+		resp := &pb.BatchWriteResponse{}
+		for range req.GetWrites() {
+			resp.WriteResults = append(resp.WriteResults, &pb.WriteResult{})
+			resp.Status = append(resp.Status, status.Convert(failErr).Proto())
+		}
+		return resp, nil
+	}
 	commitResp, err := f.Commit(ctx, &pb.CommitRequest{
 		Database: req.GetDatabase(),
 		Writes:   req.GetWrites(),
@@ -546,44 +559,53 @@ func (f *fakeFirestoreServer) validateWrite(w *pb.Write) error {
 		}
 	}
 	if u := w.GetUpdate(); u != nil {
-		return validateNoNestedArrays(u.GetFields())
+		return validateFields(u.GetFields())
 	}
 	return nil
 }
 
-func validateNoNestedArrays(fields map[string]*pb.Value) error {
-	for _, val := range fields {
-		if err := validateValueNoNestedArrays(val, false); err != nil {
+// validateFields reports the error Firestore returns for a document it does
+// not store: an array directly inside an array, a field name that is empty or
+// reserved (__.*__), or a value nested more than 20 levels deep. These limits
+// were checked against the Firestore emulator.
+func validateFields(fields map[string]*pb.Value) error {
+	return validateMapFields(fields, 1)
+}
+
+func validateMapFields(fields map[string]*pb.Value, depth int) error {
+	for name, val := range fields {
+		if name == "" {
+			return status.Errorf(codes.InvalidArgument, "document contains an empty field name")
+		}
+		if len(name) > 4 && strings.HasPrefix(name, "__") && strings.HasSuffix(name, "__") {
+			return status.Errorf(codes.InvalidArgument, "field name %q is reserved", name)
+		}
+		if err := validateValue(val, depth, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateValueNoNestedArrays(val *pb.Value, inArray bool) error {
-	if val == nil {
-		return nil
-	}
+func validateValue(val *pb.Value, depth int, inArray bool) error {
 	switch v := val.GetValueType().(type) {
 	case *pb.Value_ArrayValue:
 		if inArray {
 			return status.Errorf(codes.InvalidArgument, "nested arrays are not supported in Firestore")
 		}
-		if v.ArrayValue != nil {
-			for _, item := range v.ArrayValue.GetValues() {
-				if err := validateValueNoNestedArrays(item, true); err != nil {
-					return err
-				}
+		if depth > 20 {
+			return status.Errorf(codes.InvalidArgument, "value is nested too deeply")
+		}
+		for _, item := range v.ArrayValue.GetValues() {
+			if err := validateValue(item, depth+1, true); err != nil {
+				return err
 			}
 		}
 	case *pb.Value_MapValue:
-		if v.MapValue != nil {
-			for _, item := range v.MapValue.GetFields() {
-				if err := validateValueNoNestedArrays(item, false); err != nil {
-					return err
-				}
-			}
+		if depth > 20 {
+			return status.Errorf(codes.InvalidArgument, "value is nested too deeply")
 		}
+		return validateMapFields(v.MapValue.GetFields(), depth+1)
 	}
 	return nil
 }

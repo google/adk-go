@@ -37,6 +37,7 @@ import (
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -53,6 +54,7 @@ func newTestService(t *testing.T, cfg Config) (*firestoreService, *fakeFirestore
 func TestFirestoreService_ConformanceSuite(t *testing.T) {
 	opts := sessiontestsuite.SuiteOptions{
 		SupportsUserProvidedSessionID: true,
+		ChecksRequestedAuthConfigs:    true,
 	}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		svc, _ := newTestService(t, Config{})
@@ -1609,7 +1611,7 @@ func TestFirestoreService_AppendEvent_EncodesPythonCompatibleEventData(t *testin
 func TestFirestoreService_Get_ReadsAdkPythonEventData(t *testing.T) {
 	// Both payloads were produced by google-adk 2.11.0 from one Event.
 	// adk-python's main branch stores event.model_dump_json(exclude_none=True)
-	// (firestore_session_service.py:701); releases up to 2.11.0 stored
+	// (firestore_session_service.py:701); releases through 2.13.0 store
 	// event.model_dump(exclude_none=True, mode="json") as a native map. In the
 	// map case the function response is swapped for one without a nested
 	// array, which Firestore rejects, and with a wrapper-like key that
@@ -1718,6 +1720,7 @@ func TestFirestoreMapWrappers_MatchAdkPython(t *testing.T) {
 		{"reserved_list_key_in_list", `[{"_adk_list":[1,2]}]`, `[{"_adk_dict":{"_adk_list":[1,2]}}]`},
 		{"reserved_dict_key_in_list", `[{"_adk_dict":{"a":1}}]`, `[{"_adk_dict":{"_adk_dict":{"a":1}}}]`},
 		{"two_reserved_keys_in_list", `[{"_adk_list":1,"_adk_dict":2}]`, `[{"_adk_list":1,"_adk_dict":2}]`},
+		{"list_key_beside_another_key_in_list", `[{"_adk_list":[1],"other":2}]`, `[{"_adk_list":[1],"other":2}]`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1880,6 +1883,13 @@ func TestEventData_KeepsUserKeysVerbatim(t *testing.T) {
 			RequestedToolConfirmations: map[string]toolconfirmation.ToolConfirmation{
 				"call_1": {Hint: "h", Payload: user()},
 			},
+			Compaction: &session.EventCompaction{
+				StartTimestamp: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC),
+				EndTimestamp:   time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC),
+				CompactedContent: &genai.Content{Role: "model", Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "f", Args: user()}},
+				}},
+			},
 		},
 		LLMResponse: model.LLMResponse{
 			CustomMetadata: user(),
@@ -1900,7 +1910,7 @@ func TestEventData_KeepsUserKeysVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const userMaps = 10
+	const userMaps = 11
 	if got := strings.Count(string(rawJSON), `"camelKey":"c"`); got != userMaps {
 		t.Errorf("event_data keeps camelKey verbatim in %d places, want %d:\n%s", got, userMaps, rawJSON)
 	}
@@ -1943,6 +1953,8 @@ func TestFirestoreService_AppendEvent_KeepsStoredStateTypes(t *testing.T) {
 		"count": {ValueType: &pb.Value_IntegerValue{IntegerValue: 2}},
 		"when":  {ValueType: &pb.Value_TimestampValue{TimestampValue: timestamppb.New(stamp)}},
 		"blob":  {ValueType: &pb.Value_BytesValue{BytesValue: []byte{1, 2}}},
+		// encoding/json cannot marshal NaN, which must not block later writes.
+		"nan": {ValueType: &pb.Value_DoubleValue{DoubleValue: math.NaN()}},
 	})
 	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
 	if err != nil {
@@ -1951,7 +1963,7 @@ func TestFirestoreService_AppendEvent_KeepsStoredStateTypes(t *testing.T) {
 	if err := svc.AppendEvent(ctx, created.Session, &session.Event{
 		ID:      "e1",
 		Author:  "agent",
-		Actions: session.EventActions{StateDelta: map[string]any{"app:goCount": 3, "app:ratio": 0.5}},
+		Actions: session.EventActions{StateDelta: map[string]any{"app:goCount": 3, "app:ratio": 0.5, "app:whole": 2.0}},
 	}); err != nil {
 		t.Fatalf("AppendEvent() error = %v", err)
 	}
@@ -1976,6 +1988,19 @@ func TestFirestoreService_AppendEvent_KeepsStoredStateTypes(t *testing.T) {
 	if got := f["ratio"].GetDoubleValue(); got != 0.5 {
 		t.Errorf("ratio = %v, want double 0.5", f["ratio"])
 	}
+
+	// Every number reads back as a float64, as session-scoped state does,
+	// whichever runtime stored it and whether or not it is whole.
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	for key, want := range map[string]float64{"app:count": 2, "app:goCount": 3, "app:ratio": 0.5, "app:whole": 2} {
+		v, err := got.Session.State().Get(key)
+		if f, ok := v.(float64); err != nil || !ok || f != want {
+			t.Errorf("State().Get(%q) = (%#v, %v), want float64(%v)", key, v, err, want)
+		}
+	}
 }
 
 func TestFirestoreService_RejectsOversizedSharedState(t *testing.T) {
@@ -1985,7 +2010,7 @@ func TestFirestoreService_RejectsOversizedSharedState(t *testing.T) {
 	big := strings.Repeat("x", 1<<20)
 	for _, key := range []string{"app:big", "user:big"} {
 		_, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{key: big}})
-		if err == nil || !strings.Contains(err.Error(), "serialized state") {
+		if err == nil || !strings.Contains(err.Error(), "payload limit") {
 			t.Errorf("Create(%s of 1 MiB) error = %v, want state payload limit error", key, err)
 		}
 	}
@@ -2007,7 +2032,7 @@ func TestFirestoreService_RejectsOversizedSharedState(t *testing.T) {
 			ID: prefix + "2", Author: "agent",
 			Actions: session.EventActions{StateDelta: map[string]any{prefix + "b": half}},
 		})
-		if err == nil || !strings.Contains(err.Error(), "serialized state") {
+		if err == nil || !strings.Contains(err.Error(), "payload limit") {
 			t.Errorf("AppendEvent(%sb past 1 MiB) error = %v, want state payload limit error", prefix, err)
 		}
 	}
@@ -2105,5 +2130,304 @@ func TestFirestoreService_Get_AfterIsTruncatedToMicroseconds(t *testing.T) {
 	}
 	if n := got.Session.Events().Len(); n != 1 {
 		t.Errorf("Get(After=ts+789ns) returned %d events, want 1", n)
+	}
+}
+
+func TestDecodeEventData_ReadsAdkPythonRequestedAuthConfigs(t *testing.T) {
+	// Produced by google-adk 2.13.0 with event.model_dump_json(exclude_none=True).
+	// adk-python dumps an AuthConfig with its own snake_case field names and
+	// "type_" for the scheme type, which toolauth.Config decodes, so the
+	// configs must reach it with their keys untouched.
+	const raw = `{"id":"py-auth","author":"agent","invocation_id":"inv","timestamp":1733040002.25,"actions":{"requested_auth_configs":{"call-1":{"auth_scheme":{"type_":"oauth2","flows":{"authorizationCode":{"scopes":{"read":"Read"},"authorizationUrl":"https://example.com/authorize","tokenUrl":"https://example.com/token"}}},"raw_auth_credential":{"auth_type":"oauth2","oauth2":{"client_id":"cid","token_endpoint_auth_method":"client_secret_basic"}},"credential_key":"my_tool_tokens"}}}}`
+	ev, err := decodeEventData(raw)
+	if err != nil {
+		t.Fatalf("decodeEventData() error = %v", err)
+	}
+	got, ok := ev.Actions.RequestedAuthConfigs["call-1"]
+	if !ok {
+		t.Fatalf("RequestedAuthConfigs = %v, want call-1", ev.Actions.RequestedAuthConfigs)
+	}
+	if got.CredentialKey != "my_tool_tokens" || got.AuthScheme.Type != toolauth.SchemeTypeOAuth2 {
+		t.Errorf("config = (%q, %q), want (my_tool_tokens, oauth2)", got.CredentialKey, got.AuthScheme.Type)
+	}
+	if f := got.AuthScheme.Flows; f == nil || f.AuthorizationCode == nil || f.AuthorizationCode.TokenURL != "https://example.com/token" {
+		t.Errorf("AuthScheme.Flows = %+v, want the authorization code flow", f)
+	}
+	if c := got.RawAuthCredential; c == nil || c.OAuth2 == nil || c.OAuth2.ClientID != "cid" || c.OAuth2.TokenEndpointAuthMethod != "client_secret_basic" {
+		t.Errorf("RawAuthCredential = %+v, want OAuth2 client cid", c)
+	}
+}
+
+func TestEncodeEventData_KeepsRequestedAuthConfigsVerbatim(t *testing.T) {
+	// adk-python's AuthConfig reads its camelCase aliases, and the OpenAPI
+	// scheme models accept no other spelling of fields such as
+	// authorizationUrl, so the configs must not be rewritten to snake_case.
+	// This payload was checked with Event.model_validate_json in google-adk
+	// 2.13.0.
+	ev := &session.Event{
+		ID:        "go-auth",
+		Author:    "agent",
+		Timestamp: time.Unix(1733040002, 0),
+		Actions: session.EventActions{RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {
+			AuthScheme: toolauth.Scheme{
+				Type: toolauth.SchemeTypeOAuth2,
+				Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+					AuthorizationURL: "https://example.com/authorize",
+					TokenURL:         "https://example.com/token",
+					Scopes:           map[string]string{"read": "Read"},
+				}},
+			},
+			RawAuthCredential: &toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", TokenEndpointAuthMethod: "client_secret_basic"},
+			},
+			CredentialKey: "my_tool_tokens",
+		}}},
+	}
+	raw, err := encodeEventData(ev)
+	if err != nil {
+		t.Fatalf("encodeEventData() error = %v", err)
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		t.Fatalf("event_data type = %T, want a map", raw)
+	}
+	gotJSON, err := json.Marshal(m["actions"].(map[string]any)["requested_auth_configs"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	const wantJSON = `{"call-1":{"authScheme":{"flows":{"authorizationCode":{"authorizationUrl":"https://example.com/authorize","scopes":{"read":"Read"},"tokenUrl":"https://example.com/token"}},"type":"oauth2"},"credentialKey":"my_tool_tokens","rawAuthCredential":{"authType":"oauth2","oauth2":{"clientId":"cid","tokenEndpointAuthMethod":"client_secret_basic"}}}}`
+	var got, want any
+	if err := json.Unmarshal(gotJSON, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(wantJSON), &want); err != nil {
+		t.Fatal(err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("requested_auth_configs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func nestMaps(n int, leaf any) any {
+	v := leaf
+	for range n {
+		v = map[string]any{"k": v}
+	}
+	return v
+}
+
+func TestFirestoreValueSize(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    any
+		wantSize int
+		wantOK   bool
+	}{
+		{name: "string", value: map[string]any{"a": "xy"}, wantSize: 2 + 3, wantOK: true},
+		{name: "numbers", value: map[string]any{"i": int64(1), "f": 1.5}, wantSize: 2 + 8 + 2 + 8, wantOK: true},
+		{name: "bool_and_null", value: map[string]any{"b": true, "z": nil}, wantSize: 2 + 1 + 2 + 1, wantOK: true},
+		{name: "array", value: map[string]any{"l": []any{int64(1), "a"}}, wantSize: 2 + 8 + 2, wantOK: true},
+		{name: "array_in_map_in_array", value: map[string]any{"l": []any{map[string]any{"m": []any{"a"}}}}, wantSize: 2 + 2 + 2, wantOK: true},
+		{name: "array_in_array", value: map[string]any{"l": []any{[]any{"a"}}}},
+		{name: "empty_key", value: map[string]any{"": 1}},
+		{name: "reserved_key", value: map[string]any{"a": map[string]any{"__type__": "x"}}},
+		{name: "long_field_path", value: map[string]any{strings.Repeat("k", 600): map[string]any{strings.Repeat("k", 600): 1}}},
+		{name: "depth_20", value: nestMaps(20, "x"), wantSize: 20*2 + 2, wantOK: true},
+		{name: "depth_21", value: nestMaps(21, "x")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			size, ok := firestoreValueSize(tc.value, 1, 0, false)
+			if ok != tc.wantOK || (ok && size != tc.wantSize) {
+				t.Errorf("firestoreValueSize() = (%d, %v), want (%d, %v)", size, ok, tc.wantSize, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestFirestoreService_AppendEvent_StoresStringWhenFirestoreRejectsMap(t *testing.T) {
+	// Firestore rejects each of these tool responses inside a map, which the
+	// fake enforces except for size, so the event must be stored as a string.
+	ints := make([]any, 150000) // about 300 KB of JSON, 1.2 MB as Firestore numbers.
+	for i := range ints {
+		ints[i] = float64(1)
+	}
+	tests := []struct {
+		name       string
+		response   map[string]any
+		wantString bool
+	}{
+		{name: "plain", response: map[string]any{"rows": []any{"a", float64(1)}}},
+		{name: "nested_maps", response: map[string]any{"deep": nestMaps(5, "x")}},
+		{name: "nested_array", response: map[string]any{"rows": []any{[]any{"a"}}}, wantString: true},
+		{name: "reserved_key", response: map[string]any{"__type__": "x"}, wantString: true},
+		{name: "empty_key", response: map[string]any{"": "x"}, wantString: true},
+		{name: "too_deep", response: map[string]any{"deep": nestMaps(20, "x")}, wantString: true},
+		{name: "too_large_as_numbers", response: map[string]any{"ints": ints}, wantString: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			svc, srv := newTestService(t, Config{})
+			created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			ev := &session.Event{ID: "e", Author: "agent", LLMResponse: model.LLMResponse{Content: &genai.Content{
+				Role:  "model",
+				Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: "t", Response: tc.response}}},
+			}}}
+			if err := svc.AppendEvent(ctx, created.Session, ev); err != nil {
+				t.Fatalf("AppendEvent() error = %v", err)
+			}
+			doc, ok := srv.getDoc("adk-session/app/users/user/sessions/s/events/e")
+			if !ok {
+				t.Fatal("event document not found")
+			}
+			if _, isString := doc.GetFields()["event_data"].GetValueType().(*pb.Value_StringValue); isString != tc.wantString {
+				t.Errorf("event_data stored as string = %v, want %v", isString, tc.wantString)
+			}
+			got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if diff := cmp.Diff(tc.response, got.Session.Events().At(0).Content.Parts[0].FunctionResponse.Response); diff != "" {
+				t.Errorf("response round-trip mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestFirestoreService_List_OrdersByUpdateTimeUserAndID(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	t1 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for _, s := range []struct {
+		user, id string
+		updated  time.Time
+	}{
+		{"u2", "s1", t1},
+		{"u1", "s0", t1.Add(time.Second)},
+		{"u1", "s2", t1},
+		{"u1", "s1", t1},
+	} {
+		srv.putDoc("adk-session/app/users/"+s.user+"/sessions/"+s.id, map[string]*pb.Value{
+			"id":         {ValueType: &pb.Value_StringValue{StringValue: s.id}},
+			"appName":    {ValueType: &pb.Value_StringValue{StringValue: "app"}},
+			"userId":     {ValueType: &pb.Value_StringValue{StringValue: s.user}},
+			"updateTime": {ValueType: &pb.Value_TimestampValue{TimestampValue: timestamppb.New(s.updated)}},
+		})
+	}
+	resp, err := svc.List(ctx, &session.ListRequest{AppName: "app"})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	var got []string
+	for _, s := range resp.Sessions {
+		got = append(got, s.UserID()+"/"+s.ID())
+	}
+	if diff := cmp.Diff([]string{"u1/s1", "u1/s2", "u2/s1", "u1/s0"}, got); diff != "" {
+		t.Errorf("List() order mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestFirestoreService_Get_OrdersByEventTimestamp(t *testing.T) {
+	// Released adk-python stamps the document's timestamp field with the
+	// server's write time, which can order events differently from their own
+	// timestamps.
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, e := range []struct {
+		id               string
+		written, eventTS int64
+	}{{"a", 1733040010, 1733040200}, {"b", 1733040020, 1733040100}} {
+		srv.putDoc("adk-session/app/users/user/sessions/s/events/"+e.id, map[string]*pb.Value{
+			"event_data": {ValueType: &pb.Value_StringValue{StringValue: fmt.Sprintf(`{"id":%q,"author":"a","timestamp":%d}`, e.id, e.eventTS)}},
+			"timestamp":  {ValueType: &pb.Value_TimestampValue{TimestampValue: timestamppb.New(time.Unix(e.written, 0))}},
+		})
+	}
+	got, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	var ids []string
+	for ev := range got.Session.Events().All() {
+		ids = append(ids, ev.ID)
+	}
+	if diff := cmp.Diff([]string{"b", "a"}, ids); diff != "" {
+		t.Errorf("event order mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestFirestoreService_Delete_MarksDeletingAndReportsEventDeleteFailure(t *testing.T) {
+	ctx := t.Context()
+	svc, srv := newTestService(t, Config{})
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := svc.AppendEvent(ctx, created.Session, &session.Event{ID: "e1", Author: "a"}); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	srv.mu.Lock()
+	srv.failBatchWrites = status.Error(codes.PermissionDenied, "delete denied")
+	srv.mu.Unlock()
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "s"}); err == nil {
+		t.Fatal("Delete() = nil error while event deletes fail, want error")
+	}
+	// The interrupted delete must leave the session marked, so it stays hidden
+	// and a retry can finish.
+	doc, ok := srv.getDoc("adk-session/app/users/user/sessions/s")
+	if !ok {
+		t.Fatal("session document removed although its events could not be deleted")
+	}
+	if got := doc.GetFields()["status"].GetStringValue(); got != "DELETING" {
+		t.Errorf("session status = %q after an interrupted Delete, want DELETING", got)
+	}
+
+	srv.mu.Lock()
+	srv.failBatchWrites = nil
+	srv.mu.Unlock()
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "s"}); err != nil {
+		t.Fatalf("Delete() retry error = %v", err)
+	}
+	if _, ok := srv.getDoc("adk-session/app/users/user/sessions/s/events/e1"); ok {
+		t.Error("event document still present after Delete")
+	}
+}
+
+func TestDecodeEventData_ReadsCompactionFloatSecondsAsMicroseconds(t *testing.T) {
+	// adk-python stores a compaction's range as float seconds.
+	const raw = `{"id":"e","author":"a","timestamp":1741064767.123456,"actions":{"compaction":{"start_timestamp":1741064767.123456,"end_timestamp":1741064768.000001,"compacted_content":{"parts":[{"text":"s"}]}}}}`
+	ev, err := decodeEventData(raw)
+	if err != nil {
+		t.Fatalf("decodeEventData() error = %v", err)
+	}
+	c := ev.Actions.Compaction
+	if want := time.UnixMicro(1741064767123456); !c.StartTimestamp.Equal(want) {
+		t.Errorf("StartTimestamp = %v, want %v", c.StartTimestamp.UTC(), want.UTC())
+	}
+	if want := time.UnixMicro(1741064768000001); !c.EndTimestamp.Equal(want) {
+		t.Errorf("EndTimestamp = %v, want %v", c.EndTimestamp.UTC(), want.UTC())
+	}
+}
+
+func TestValidateIdentityComponent_ReservedPattern(t *testing.T) {
+	// Matches adk-python (firestore_session_service.py:254): only names of at
+	// least four bytes that start and end with "__" are reserved.
+	for _, value := range []string{"__", "___", "__abc", "abc__", "a__b"} {
+		if err := validateIdentityComponent("session_id", value); err != nil {
+			t.Errorf("validateIdentityComponent(%q) error = %v, want nil", value, err)
+		}
+	}
+	for _, value := range []string{"____", "__x__"} {
+		if err := validateIdentityComponent("session_id", value); err == nil {
+			t.Errorf("validateIdentityComponent(%q) = nil, want error", value)
+		}
 	}
 }

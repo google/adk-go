@@ -41,10 +41,12 @@
 // affect only the in-memory handle and are not persisted. Because session state
 // and event payloads are marshaled through [encoding/json] into map[string]any,
 // their numeric values round-trip as float64 (preserving exact integer
-// precision up to 2^53). App and user state are stored as native Firestore
-// values: integers read back as int64, and values already in the document,
-// such as timestamps or bytes written by adk-python, keep their types when Go
-// updates other keys.
+// precision up to 2^53). App and user state are stored as Firestore values.
+// The values ADK Go writes also go through [encoding/json] first, so whole
+// numbers are stored as integers, other numbers as doubles, and a time.Time
+// or []byte as a string. Values already in the document, such as timestamps
+// or bytes written natively by adk-python, keep their types when ADK Go
+// updates other keys. Numbers in app and user state read back as float64 too.
 //
 // Session timestamps ("createTime" and "updateTime") and event timestamps are
 // truncated to microsecond precision to match Cloud Firestore's storage
@@ -63,13 +65,19 @@
 // An event's "event_data" field holds the event with snake_case field names
 // and timestamps as float epoch seconds, the shape adk-python dumps. Keys
 // inside user data, such as state deltas, function and tool call arguments and
-// responses, and part metadata, are kept as written.
+// responses, part metadata, and requested auth configs, are kept as written.
+// [session.Service.AppendEvent] refuses an event that would not decode from
+// what it stores, such as one whose requested auth config does not decode as a
+// [google.golang.org/adk/v2/tool/toolauth.Config], rather than store an event
+// that makes the session fail to load.
 //
 // The service stores "event_data" as a native map, the format adk-python
-// releases through 2.13.0 write and read. An event that holds an array
-// directly inside another array, such as a tool response {"rows": [["a", 1]]},
-// cannot be stored in a map, so the service stores that event as a JSON
-// string, the format adk-python's main branch writes for every event. On
+// releases through 2.13.0 write and read. Firestore rejects some maps: one
+// that holds an array directly inside another array, such as a tool response
+// {"rows": [["a", 1]]}, one with an empty or reserved (__.*__) key, one nested
+// more than 20 levels deep, or one over the size limit once each number
+// counts 8 bytes. The service stores such an event as a JSON string instead,
+// the format adk-python's main branch writes for every event. On
 // read, the service accepts both formats, camelCase field names, and bytes
 // that adk-python wrote in URL-safe base64, such as thought signatures and
 // inline data.
@@ -77,8 +85,10 @@
 // In practice, for an application that moves between adk-python and ADK Go
 // on one database:
 //
-//   - ADK Go reads sessions written by any adk-python release or by its main
-//     branch.
+//   - ADK Go loads sessions written by any adk-python release or by its main
+//     branch. Event fields that [session.Event] does not define, such as
+//     adk-python's actions.route, agent_state, end_of_agent and
+//     rewind_before_invocation_id, are not read.
 //   - adk-python releases through 2.13.0 read sessions written by ADK Go,
 //     except a session holding an event stored as a string: adk-python reads
 //     a session's events in one pass, so that one event makes the whole
@@ -99,16 +109,18 @@
 // Firestore rejects an array directly inside another array. In the app and
 // user state documents, each such inner array is stored as
 // {"_adk_list": [...]} and a one-key map in an array whose key is "_adk_list"
-// or "_adk_dict" as {"_adk_dict": {...}}, as adk-python does, and both are
-// unwrapped on read.
+// or "_adk_dict" as {"_adk_dict": {...}}, as adk-python's main branch does,
+// and both are unwrapped on read. adk-python releases through 2.13.0 neither
+// write nor unwrap these, and cannot store such state themselves, so they
+// return app or user state that ADK Go wrote with a nested array in its
+// wrapped form.
 //
 // # Concurrency and Consistency
 //
 // Firestore reads and queries are strongly consistent, and writes execute in
-// serializable optimistic transactions. Unlike SQL backends that block on
-// pessimistic row locks (SELECT ... FOR UPDATE), Firestore aborts and retries
-// contending transactions up to [Config.TransactionMaxAttempts] (defaulting to
-// the Firestore client default of 5 attempts) before returning an error.
+// serializable transactions. A transaction that loses to a concurrent write
+// is retried, up to [Config.TransactionMaxAttempts] (defaulting to the
+// Firestore client default of 5 attempts), before the error is returned.
 //
 // Each session document maintains a monotonic integer revision counter
 // incremented on every [session.Service.AppendEvent] call. If the stored
@@ -120,8 +132,7 @@
 //
 // Because all users of an application share a single "{appStateCollection}/{appName}"
 // document, high-frequency writes to "app:" state keys across many concurrent
-// sessions contend on that document (Firestore sustains roughly one write per
-// second to a single document before transaction retries increase). Use "user:"
+// sessions contend on that document and their transactions retry. Use "user:"
 // or session-scoped keys for frequently mutated state.
 //
 // [session.Service.Delete] marks the session document with status "DELETING" in
@@ -163,5 +174,10 @@
 //
 //	gcloud firestore indexes fields update appName \
 //	  --collection-group=sessions \
+//	  --index=order=ASCENDING,query-scope=COLLECTION \
+//	  --index=order=DESCENDING,query-scope=COLLECTION \
 //	  --index=order=ASCENDING,query-scope=COLLECTION_GROUP
+//
+// A field's index configuration replaces the automatic one, so the command
+// lists the collection-scope indexes too; per-user List calls query with them.
 package firestore

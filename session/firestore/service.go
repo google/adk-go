@@ -261,7 +261,9 @@ func validateIdentityComponent(name, value string) error {
 	if value == "." || value == ".." {
 		return fmt.Errorf("firestore: %s must not be '.' or '..', got %q", name, value)
 	}
-	if strings.HasPrefix(value, "__") && strings.HasSuffix(value, "__") {
+	// "__" and "___" are not reserved, as in adk-python
+	// (firestore_session_service.py:254).
+	if len(value) >= 4 && strings.HasPrefix(value, "__") && strings.HasSuffix(value, "__") {
 		return fmt.Errorf("firestore: %s must not match the Firestore-reserved __.*__ pattern, got %q", name, value)
 	}
 	return nil
@@ -296,7 +298,7 @@ func (s *firestoreService) Create(ctx context.Context, req *session.CreateReques
 	// Stamp createTime and updateTime from platform.Now(ctx).UTC() truncated to
 	// microsecond precision (Cloud Firestore's native timestamp resolution)
 	// rather than firestore.ServerTimestamp (adk-python
-	// firestore_session_service.py:255-256) so the returned
+	// firestore_session_service.py:273) so the returned
 	// Session.LastUpdateTime() matches what Get and List read back, consistent
 	// with session.InMemoryService and session/database.
 	now := platform.Now(ctx).UTC().Truncate(time.Microsecond)
@@ -334,7 +336,7 @@ func (s *firestoreService) Create(ctx context.Context, req *session.CreateReques
 
 		// Documents are written whole without firestore.MergeAll: a merge write
 		// deep-merges nested maps and would keep keys that the new value dropped
-		// (matching adk-python firestore_session_service.py:279-288).
+		// (matching adk-python firestore_session_service.py:324-332).
 		if len(appDelta) > 0 {
 			encodedApp, encErr := encodeFirestoreState(currentApp, appDelta)
 			if encErr != nil {
@@ -343,7 +345,6 @@ func (s *firestoreService) Create(ctx context.Context, req *session.CreateReques
 			if err := tx.Set(appRef, encodedApp); err != nil {
 				return fmt.Errorf("writing app state: %w", err)
 			}
-			maps.Copy(currentApp, appDelta)
 		}
 		if len(userDelta) > 0 {
 			encodedUser, encErr := encodeFirestoreState(currentUser, userDelta)
@@ -353,7 +354,6 @@ func (s *firestoreService) Create(ctx context.Context, req *session.CreateReques
 			if err := tx.Set(userRef, encodedUser); err != nil {
 				return fmt.Errorf("writing user state: %w", err)
 			}
-			maps.Copy(currentUser, userDelta)
 		}
 
 		if err := tx.Set(sessionRef, sessionData); err != nil {
@@ -365,6 +365,8 @@ func (s *firestoreService) Create(ctx context.Context, req *session.CreateReques
 		return nil, fmt.Errorf("firestore: create session: %w", err)
 	}
 
+	maps.Copy(integersAsFloat64(currentApp), appDelta)
+	maps.Copy(integersAsFloat64(currentUser), userDelta)
 	mergedState := mergeStates(currentApp, currentUser, sessionState)
 	return &session.CreateResponse{
 		Session: &localSession{
@@ -509,8 +511,8 @@ func (s *firestoreService) Get(ctx context.Context, req *session.GetRequest) (*s
 	if err != nil {
 		return nil, fmt.Errorf("firestore: decoding state for session %q: %w", req.SessionID, err)
 	}
-	appState := snapshotMapOrEmpty(appDoc)
-	userState := snapshotMapOrEmpty(userDoc)
+	appState := integersAsFloat64(snapshotMapOrEmpty(appDoc))
+	userState := integersAsFloat64(snapshotMapOrEmpty(userDoc))
 	mergedState := mergeStates(appState, userState, sessionState)
 
 	return &session.GetResponse{
@@ -531,7 +533,7 @@ func (s *firestoreService) Get(ctx context.Context, req *session.GetRequest) (*s
 //
 // In Go's [session.ListRequest], an empty UserID represents listing sessions
 // across all users of the application (the equivalent of user_id=None in
-// adk-python's list_sessions, firestore_session_service.py:410-414), executed
+// adk-python's list_sessions, firestore_session_service.py:449-463), executed
 // via a collection-group query on the sessions collection filtered by appName.
 func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (*session.ListResponse, error) {
 	if req == nil {
@@ -576,7 +578,7 @@ func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (
 	if err != nil && status.Code(err) != codes.NotFound {
 		return nil, fmt.Errorf("firestore: fetching app state for %q: %w", req.AppName, err)
 	}
-	appState := snapshotMapOrEmpty(appSnap)
+	appState := integersAsFloat64(snapshotMapOrEmpty(appSnap))
 
 	userStatesMap := make(map[string]map[string]any)
 	if req.UserID != "" {
@@ -585,7 +587,7 @@ func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (
 			return nil, fmt.Errorf("firestore: fetching user state for %q: %w", req.UserID, err)
 		}
 		if userSnap != nil && userSnap.Exists() {
-			userStatesMap[req.UserID] = snapshotMapOrEmpty(userSnap)
+			userStatesMap[req.UserID] = integersAsFloat64(snapshotMapOrEmpty(userSnap))
 		}
 	} else {
 		uniqueUsers := make(map[string]struct{})
@@ -611,7 +613,7 @@ func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (
 			}
 			for _, uSnap := range userSnaps {
 				if uSnap != nil && uSnap.Exists() {
-					userStatesMap[uSnap.Ref.ID] = snapshotMapOrEmpty(uSnap)
+					userStatesMap[uSnap.Ref.ID] = integersAsFloat64(snapshotMapOrEmpty(uSnap))
 				}
 			}
 		}
@@ -642,7 +644,7 @@ func (s *firestoreService) List(ctx context.Context, req *session.ListRequest) (
 	}
 
 	// Sort by (LastUpdateTime, UserID, ID), matching adk-python
-	// firestore_session_service.py:477.
+	// firestore_session_service.py:531.
 	slices.SortFunc(sessions, func(a, b session.Session) int {
 		if c := a.LastUpdateTime().Compare(b.LastUpdateTime()); c != 0 {
 			return c
@@ -672,8 +674,8 @@ func (s *firestoreService) Delete(ctx context.Context, req *session.DeleteReques
 
 	// Mark the session as DELETING in a transaction first so concurrent
 	// AppendEvent calls observe the status and abort cleanly (matching
-	// adk-python firestore_session_service.py:503-515). Unlike adk-python,
-	// which logs and swallows errors here, ADK Go returns non-NotFound errors
+	// adk-python firestore_session_service.py:557-563). Unlike adk-python,
+	// which swallows errors here (lines 565-569), ADK Go returns non-NotFound errors
 	// to the caller instead of proceeding with an unmarked session.
 	if err := s.runTransaction(ctx, func(_ context.Context, tx *fs.Transaction) error {
 		snap, txErr := tx.Get(sessionRef)
@@ -762,7 +764,7 @@ func (s *firestoreService) AppendEvent(ctx context.Context, curSession session.S
 	// with a zero Timestamp; assign platform.Now(ctx).UTC() so they do not sort
 	// to year 0001 or rewind the session's LastUpdateTime. Truncate to
 	// microsecond precision to match Cloud Firestore's Timestamp resolution and
-	// session/database (session/database/service.go:385).
+	// session/database, which truncates the same way.
 	if event.Timestamp.IsZero() {
 		event.Timestamp = platform.Now(ctx).UTC()
 	}
@@ -772,6 +774,13 @@ func (s *firestoreService) AppendEvent(ctx context.Context, curSession session.S
 	eventData, err := encodeEventData(trimmedEvent)
 	if err != nil {
 		return err
+	}
+	// Refuse an event that would not read back, such as one whose requested
+	// auth config encodes but does not decode, as the in-memory, database and
+	// Vertex AI services do. Stored, it would make every Get of the session
+	// fail.
+	if _, err := decodeEventData(eventData); err != nil {
+		return fmt.Errorf("firestore: event %q would not read back from storage: %w", event.ID, err)
 	}
 
 	appUpdates, userUpdates, sessionUpdates := extractStateDeltas(event.Actions.StateDelta)
@@ -807,8 +816,8 @@ func (s *firestoreService) AppendEvent(ctx context.Context, curSession session.S
 			}
 
 			// Merge session-scoped deltas onto the stored session state inside the
-			// transaction, matching session/database (service.go:489-491) rather than
-			// adk-python's in-memory snapshot (firestore_session_service.py:567-576)
+			// transaction, matching session/database rather than
+			// adk-python's in-memory snapshot (firestore_session_service.py:675-681)
 			// so uncommitted in-memory State().Set mutations do not leak to storage.
 			currentSessionState, stateErr := decodeSessionState(sessionDoc["state"])
 			if stateErr != nil {
@@ -945,13 +954,41 @@ func encodeFirestoreState(stored, delta map[string]any) (map[string]any, error) 
 	for k, v := range normalized {
 		merged[k] = jsonNumbersToGo(v)
 	}
-	if b, err = json.Marshal(merged); err != nil {
-		return nil, err
+	encoded := encodeFirestoreMap(merged)
+	// A document Firestore would reject for another reason is left for it to
+	// report, as adk-python does.
+	if size, ok := firestoreValueSize(encoded, 1, 0, false); ok && size > maxFirestorePayloadBytes {
+		return nil, fmt.Errorf("state document (%d bytes) exceeds Firestore %d-byte payload limit", size, maxFirestorePayloadBytes)
 	}
-	if len(b) > maxFirestorePayloadBytes {
-		return nil, fmt.Errorf("serialized state (%d bytes) exceeds Firestore %d-byte payload limit", len(b), maxFirestorePayloadBytes)
+	return encoded, nil
+}
+
+// integersAsFloat64 replaces each int64 in the decoded state map m with a
+// float64, in place, and returns m. Firestore keeps integers and doubles
+// apart, but session-scoped state and the other session services return every
+// number as a float64, so a caller reads an app or user state number the same
+// way whichever runtime wrote it and whether or not it is whole.
+func integersAsFloat64(m map[string]any) map[string]any {
+	for k, v := range m {
+		m[k] = integerAsFloat64(v)
 	}
-	return encodeFirestoreMap(merged), nil
+	return m
+}
+
+func integerAsFloat64(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return float64(x)
+	case map[string]any:
+		return integersAsFloat64(x)
+	case []any:
+		for i, e := range x {
+			x[i] = integerAsFloat64(e)
+		}
+		return x
+	default:
+		return v
+	}
 }
 
 // jsonNumbersToGo replaces each json.Number in v with an int64 when it is an
@@ -1097,8 +1134,9 @@ func decodeSessionState(raw any) (map[string]any, error) {
 // encodeEventData serializes event with snake_case schema keys and float
 // epoch-second timestamps, the shape adk-python's Event dumps. It returns a
 // native map, as adk-python releases through 2.13.0 store and read
-// (event.model_dump(exclude_none=True, mode="json")), unless the event holds
-// an array directly inside another array, which Firestore rejects in a map;
+// (event.model_dump(exclude_none=True, mode="json")), unless Firestore would
+// reject the map, most often for an array directly inside another array (see
+// firestoreValueSize);
 // that event is returned as the JSON string adk-python's main branch stores
 // for every event (event.model_dump_json(exclude_none=True),
 // firestore_session_service.py:701) and reads alongside maps (line 418).
@@ -1131,6 +1169,9 @@ func encodeEventData(event *session.Event) (any, error) {
 			return nil, fmt.Errorf("firestore: encoding compaction of event %q: %w", event.ID, err)
 		}
 	}
+	if size, ok := firestoreValueSize(out, 1, 0, false); ok && size <= maxFirestorePayloadBytes {
+		return out, nil
+	}
 	b, err = json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("firestore: marshaling event %q: %w", event.ID, err)
@@ -1141,33 +1182,67 @@ func encodeEventData(event *session.Event) (any, error) {
 			event.ID, len(b), maxFirestorePayloadBytes,
 		)
 	}
-	if hasNestedArray(out, false) {
-		return string(b), nil
-	}
-	return out, nil
+	return string(b), nil
 }
 
-// hasNestedArray reports whether v holds an array directly inside another
-// array, which Firestore does not store.
-func hasNestedArray(v any, inList bool) bool {
+const (
+	// maxFirestoreValueDepth is how many maps and arrays Firestore lets a
+	// field nest, the field's own value included.
+	maxFirestoreValueDepth = 20
+	// maxFirestoreFieldPathBytes bounds the field names along one path. It
+	// is below Firestore's 1,500-byte limit, so a path near the limit is
+	// treated as too long rather than risked.
+	maxFirestoreFieldPathBytes = 1024
+)
+
+// firestoreValueSize returns the bytes v takes as a Firestore field value by
+// Firestore's storage-size rules (a string is its UTF-8 length plus one, a
+// number 8 bytes, a boolean or null 1 byte, a map or array the sum of its
+// entries, a map key its length plus one), and whether Firestore stores v at
+// all. Firestore rejects an array directly inside an array, a map key that
+// is empty or matches __.*__, and values nested or named beyond its limits.
+// depth is the nesting level of v, pathBytes the length of the field names
+// leading to it, and inList whether v is an array element.
+func firestoreValueSize(v any, depth, pathBytes int, inList bool) (size int, ok bool) {
 	switch x := v.(type) {
-	case []any:
-		if inList {
-			return true
-		}
-		for _, item := range x {
-			if hasNestedArray(item, true) {
-				return true
-			}
-		}
 	case map[string]any:
-		for _, item := range x {
-			if hasNestedArray(item, false) {
-				return true
-			}
+		if depth > maxFirestoreValueDepth {
+			return 0, false
 		}
+		for k, e := range x {
+			keyPath := pathBytes + len(k) + 1
+			if k == "" || keyPath > maxFirestoreFieldPathBytes || (strings.HasPrefix(k, "__") && strings.HasSuffix(k, "__")) {
+				return 0, false
+			}
+			n, ok := firestoreValueSize(e, depth+1, keyPath, false)
+			if !ok {
+				return 0, false
+			}
+			size += len(k) + 1 + n
+		}
+		return size, true
+	case []any:
+		if inList || depth > maxFirestoreValueDepth {
+			return 0, false
+		}
+		for _, e := range x {
+			n, ok := firestoreValueSize(e, depth+1, pathBytes, true)
+			if !ok {
+				return 0, false
+			}
+			size += n
+		}
+		return size, true
+	case string:
+		return len(x) + 1, true
+	case []byte:
+		return len(x), true
+	case nil, bool:
+		return 1, true
+	default:
+		// Numbers and timestamps.
+		return 8, true
 	}
-	return false
 }
 
 // encodeCompactionForPython rewrites the snake_case compaction in eventMap so
@@ -1253,7 +1328,6 @@ func decodeEventData(raw any) (*session.Event, error) {
 func restoreGoCompaction(eventMap map[string]any) {
 	key := snakeToCamel(goCompactionKey)
 	exact, ok := eventMap[key].(map[string]any)
-	delete(eventMap, key)
 	if !ok {
 		return
 	}
