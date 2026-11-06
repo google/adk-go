@@ -26,19 +26,24 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/exp/acpagent"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 // fakeHarness is an ACP agent served over pipes. A prompt "use <kind>" asks
 // permission for a tool of that kind and replies with the chosen option, and
 // "ask <kind>" does the same after streaming some text first; "wait"
 // reports progress and never finishes, recording the session/cancel it gets;
-// any other prompt is echoed back in two chunks, prefixed with the session ID.
+// "tool <name> <json args>" calls the tool of the session's MCP server and
+// replies with its result; any other prompt is echoed back in two chunks,
+// prefixed with the session ID.
 type fakeHarness struct {
 	t   *testing.T
 	enc *json.Encoder
@@ -46,11 +51,19 @@ type fakeHarness struct {
 
 	canceled chan string
 
-	mu       sync.Mutex
-	sessions int
-	prompts  []string
-	pending  map[int]chan json.RawMessage
-	nextID   int
+	mu         sync.Mutex
+	sessions   int
+	prompts    []string
+	pending    map[int]chan json.RawMessage
+	nextID     int
+	mcpServers map[string][]mcpServer // session ID -> MCP servers
+}
+
+type mcpServer struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Headers []any  `json:"headers"`
 }
 
 type rpcMessage struct {
@@ -62,7 +75,7 @@ type rpcMessage struct {
 }
 
 func startFake(t *testing.T) (*fakeHarness, func(context.Context) (io.ReadWriteCloser, error)) {
-	f := &fakeHarness{t: t, pending: map[int]chan json.RawMessage{}, canceled: make(chan string, 1)}
+	f := &fakeHarness{t: t, pending: map[int]chan json.RawMessage{}, canceled: make(chan string, 1), mcpServers: map[string][]mcpServer{}}
 	return f, func(context.Context) (io.ReadWriteCloser, error) {
 		clientR, harnessW := io.Pipe()
 		harnessR, clientW := io.Pipe()
@@ -102,9 +115,16 @@ func (f *fakeHarness) serve() {
 		case "initialize":
 			f.send(rpcMessage{ID: m.ID, Result: map[string]any{"protocolVersion": 1, "agentCapabilities": map[string]any{}}})
 		case "session/new":
+			var p struct {
+				MCPServers []mcpServer `json:"mcpServers"`
+			}
+			if err := json.Unmarshal(m.Params, &p); err != nil {
+				f.t.Errorf("fake harness: bad session/new: %v", err)
+			}
 			f.mu.Lock()
 			f.sessions++
 			id := fmt.Sprintf("sess-%d", f.sessions)
+			f.mcpServers[id] = p.MCPServers
 			f.mu.Unlock()
 			f.send(rpcMessage{ID: m.ID, Result: map[string]any{"sessionId": id}})
 		case "session/prompt":
@@ -149,6 +169,9 @@ func (f *fakeHarness) prompt(id int, params json.RawMessage) {
 	reply := []string{req.SessionID + " echo: ", text}
 	if kind, ok := strings.CutPrefix(text, "use "); ok {
 		reply = []string{"permission: " + f.askPermission(req.SessionID, kind)}
+	}
+	if call, ok := strings.CutPrefix(text, "tool "); ok {
+		reply = []string{f.callTool(req.SessionID, call)}
 	}
 	if kind, ok := strings.CutPrefix(text, "ask "); ok {
 		f.chunk(req.SessionID, "checking. ")
@@ -200,6 +223,42 @@ func (f *fakeHarness) askPermission(sessionID, kind string) string {
 	return resp.Outcome.Outcome
 }
 
+// callTool calls a tool of the session's MCP server: call is the tool name,
+// a space and its JSON arguments.
+func (f *fakeHarness) callTool(sessionID, call string) string {
+	name, args, _ := strings.Cut(call, " ")
+	f.mu.Lock()
+	servers := f.mcpServers[sessionID]
+	f.mu.Unlock()
+	if len(servers) != 1 || servers[0].Type != "http" {
+		return fmt.Sprintf("unexpected MCP servers: %+v", servers)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := mcp.NewClient(&mcp.Implementation{Name: "fake-harness"}, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: servers[0].URL}, nil)
+	if err != nil {
+		return "connect error: " + err.Error()
+	}
+	defer func() { _ = cs.Close() }()
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: json.RawMessage(args)})
+	if err != nil {
+		return "call error: " + err.Error()
+	}
+	var sb strings.Builder
+	if res.IsError {
+		sb.WriteString("tool error: ")
+	} else {
+		sb.WriteString("result: ")
+	}
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String()
+}
+
 func (f *fakeHarness) recordedPrompts() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -230,6 +289,12 @@ func (p pipeRWC) Close() error {
 
 func newRunner(t *testing.T, cfg acpagent.Config) *runner.Runner {
 	t.Helper()
+	r, _ := newRunnerWithSessions(t, cfg)
+	return r
+}
+
+func newRunnerWithSessions(t *testing.T, cfg acpagent.Config) (*runner.Runner, session.Service) {
+	t.Helper()
 	cfg.Name = "coder"
 	ag, closer, err := acpagent.New(t.Context(), cfg)
 	if err != nil {
@@ -240,16 +305,17 @@ func newRunner(t *testing.T, cfg acpagent.Config) *runner.Runner {
 			t.Errorf("Close() error = %v", err)
 		}
 	})
+	sessions := session.InMemoryService()
 	r, err := runner.New(runner.Config{
 		AppName:           "app",
 		Agent:             ag,
-		SessionService:    session.InMemoryService(),
+		SessionService:    sessions,
 		AutoCreateSession: true,
 	})
 	if err != nil {
 		t.Fatalf("runner.New() error = %v", err)
 	}
-	return r
+	return r, sessions
 }
 
 // reply runs one turn and returns the final text of the agent.
@@ -372,6 +438,123 @@ func TestAgent_AnswerInLaterInvocation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// noteTool saves its text in the session state under "note", and fails for
+// an empty text.
+func noteTool(t *testing.T) tool.Tool {
+	t.Helper()
+	type args struct {
+		Text string `json:"text"`
+	}
+	type result struct {
+		Saved string `json:"saved"`
+	}
+	nt, err := functiontool.New(functiontool.Config{Name: "save_note", Description: "Saves a note."},
+		func(ctx agent.Context, a args) (result, error) {
+			if a.Text == "" {
+				return result{}, errors.New("empty note")
+			}
+			if err := ctx.State().Set("note", a.Text); err != nil {
+				return result{}, err
+			}
+			return result{Saved: a.Text}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New() error = %v", err)
+	}
+	return nt
+}
+
+func TestAgent_Tools(t *testing.T) {
+	for _, mode := range []agent.StreamingMode{agent.StreamingModeSSE, agent.StreamingModeNone} {
+		t.Run(string(mode), func(t *testing.T) {
+			_, start := startFake(t)
+			r, sessions := newRunnerWithSessions(t, acpagent.Config{Start: start, Tools: []tool.Tool{noteTool(t)}})
+
+			got := []string{
+				reply(t, r, "s1", `tool save_note {"text":"first"}`, mode),
+				// A later invocation of the session runs the tool too.
+				reply(t, r, "s1", `tool save_note {"text":"second"}`, mode),
+				reply(t, r, "s1", `tool save_note {"text":""}`, mode),
+				// The harness keeps its session, so tools don't start a new one.
+				reply(t, r, "s1", "hello", mode),
+			}
+			want := []string{
+				`result: {"saved":"first"}`,
+				`result: {"saved":"second"}`,
+				"tool error: empty note",
+				"sess-1 echo: hello",
+			}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Errorf("replies mismatch (-want +got):\n%s", diff)
+			}
+
+			resp, err := sessions.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: "s1"})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if got, err := resp.Session.State().Get("note"); err != nil || got != "second" {
+				t.Errorf("state note = %v, %v, want %q", got, err, "second")
+			}
+			var calls, responses []string
+			for ev := range resp.Session.Events().All() {
+				if ev.Author != "coder" || ev.Content == nil {
+					continue
+				}
+				for _, p := range ev.Content.Parts {
+					if p.FunctionCall != nil {
+						calls = append(calls, fmt.Sprint(p.FunctionCall.Args["text"]))
+					}
+					if p.FunctionResponse != nil {
+						responses = append(responses, fmt.Sprint(p.FunctionResponse.Response))
+					}
+				}
+			}
+			if diff := cmp.Diff([]string{"first", "second", ""}, calls); diff != "" {
+				t.Errorf("function calls mismatch (-want +got):\n%s", diff)
+			}
+			wantResponses := []string{"map[saved:first]", "map[saved:second]", "map[error:empty note]"}
+			if diff := cmp.Diff(wantResponses, responses); diff != "" {
+				t.Errorf("function responses mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestAgent_ToolsAbandonedRunKeepsSession(t *testing.T) {
+	_, start := startFake(t)
+	r := newRunner(t, acpagent.Config{Start: start, Tools: []tool.Tool{noteTool(t)}})
+	msg := genai.NewContentFromText(`tool save_note {"text":"x"}`, genai.RoleUser)
+	// Stop at the tool's response, so that it is the agent's last event.
+	for ev, err := range r.Run(t.Context(), "user", "s1", msg, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil {
+			break
+		}
+	}
+	if got, want := reply(t, r, "s1", "hello", agent.StreamingModeSSE), "sess-1 echo: hello"; got != want {
+		t.Errorf("reply after the abandoned run = %q, want %q", got, want)
+	}
+}
+
+func TestAgent_ToolsPerSession(t *testing.T) {
+	fake, start := startFake(t)
+	r := newRunner(t, acpagent.Config{Start: start, Tools: []tool.Tool{noteTool(t)}})
+	reply(t, r, "s1", "hello", agent.StreamingModeSSE)
+	reply(t, r, "s2", "hello", agent.StreamingModeSSE)
+
+	fake.mu.Lock()
+	s1, s2 := fake.mcpServers["sess-1"], fake.mcpServers["sess-2"]
+	fake.mu.Unlock()
+	if len(s1) != 1 || len(s2) != 1 {
+		t.Fatalf("MCP servers = %v and %v, want one per session", s1, s2)
+	}
+	if s1[0].URL == s2[0].URL {
+		t.Errorf("sessions share the MCP endpoint %s", s1[0].URL)
 	}
 }
 
