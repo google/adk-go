@@ -18,7 +18,9 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -208,6 +210,50 @@ func TestDecodeJSONLDurations(t *testing.T) {
 				t.Errorf("AudioTranscription = %+v, want EndOffset 2s, StartOffset 0", tr)
 			}
 		})
+	}
+}
+
+func TestDecodeJSONLDurationPrecision(t *testing.T) {
+	// Every integer literal within int64 converts exactly. Any other number,
+	// including an integer written with a fraction or an exponent, fails the
+	// line rather than decoding as something else.
+	cases := []struct {
+		name    string
+		offset  string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "2^53+1", offset: "9007199254740993", want: 1<<53 + 1},
+		{name: "MaxInt64", offset: "9223372036854775807", want: math.MaxInt64},
+		{name: "MinInt64", offset: "-9223372036854775808", want: math.MinInt64},
+		{name: "beyond int64", offset: "9223372036854775808", wantErr: true},
+		{name: "fraction", offset: "1.5", wantErr: true},
+		{name: "fraction a float64 rounds to an integer", offset: "2.0000000000000001", wantErr: true},
+		{name: "exponent", offset: "1e9", wantErr: true},
+	}
+	for _, path := range leafPaths(reflect.TypeOf(genai.Content{}), isDuration, nil, map[reflect.Type]bool{}) {
+		for _, tc := range cases {
+			t.Run(strings.Join(path, ".")+"/"+tc.name, func(t *testing.T) {
+				content, err := json.Marshal(nest(path, json.RawMessage(tc.offset)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				line := `{"author":"root","content":` + string(content) + `}` + "\n"
+				got, err := collect(t, decodeJSONL(chunksOf(line)))
+				if tc.wantErr {
+					if err == nil {
+						t.Fatalf("decodeJSONL() = %d events, nil; want a decoding error", len(got))
+					}
+					return
+				}
+				if err != nil || len(got) != 1 {
+					t.Fatalf("decodeJSONL() = %d events, %v; want 1, nil", len(got), err)
+				}
+				if d := valueAt(t, reflect.ValueOf(got[0].Content), path).Interface(); d != tc.want {
+					t.Errorf("duration = %v, want %v", d, tc.want)
+				}
+			})
+		}
 	}
 }
 
@@ -406,8 +452,7 @@ func TestDecodeJSONLURLSafeBase64(t *testing.T) {
 			if diff := cmp.Diff([]*genai.Part{tc.want}, got[0].Content.Parts); diff != "" {
 				t.Errorf("Parts mismatch (-want +got):\n%s", diff)
 			}
-			// Raw shares the user-data maps with the decoded content and
-			// must still hold the line as written.
+			// Raw must still hold the line as written.
 			var want map[string]any
 			if err := json.Unmarshal([]byte(line), &want); err != nil {
 				t.Fatal(err)
@@ -529,6 +574,31 @@ func isBytes(t reflect.Type) bool {
 }
 
 func isDuration(t reflect.Type) bool { return t == reflect.TypeFor[time.Duration]() }
+
+// valueAt follows a path built by leafPaths through a decoded value, taking
+// the first element of each slice.
+func valueAt(t *testing.T, v reflect.Value, path []string) reflect.Value {
+	t.Helper()
+	for _, key := range path {
+		for v.Kind() == reflect.Pointer {
+			v = v.Elem()
+		}
+		if key == "[]" {
+			v = v.Index(0)
+			continue
+		}
+		fields := reflect.VisibleFields(v.Type())
+		i := slices.IndexFunc(fields, func(f reflect.StructField) bool {
+			tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			return tag == key
+		})
+		if i < 0 {
+			t.Fatalf("no field tagged %q in %v", key, v.Type())
+		}
+		v = v.FieldByIndex(fields[i].Index)
+	}
+	return v
+}
 
 // nest builds the JSON value that places leaf at path.
 func nest(path []string, leaf any) any {

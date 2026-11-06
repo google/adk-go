@@ -117,7 +117,11 @@ func decodeLine(line []byte) (*Event, error) {
 	ev.Partial, _ = raw["partial"].(bool)
 	ev.ErrorCode = stringField(raw, "error_code", "errorCode")
 	ev.ErrorMessage = stringField(raw, "error_message", "errorMessage")
-	if c, ok := raw["content"]; ok && c != nil {
+	if raw["content"] != nil {
+		c, err := exactContent(line)
+		if err != nil {
+			return nil, fmt.Errorf("agentengine: decoding content: %w", err)
+		}
 		// genai's JSON tags are camelCase, but servers emit snake_case keys,
 		// so normalize before decoding.
 		c = camelizeKeys(c)
@@ -134,6 +138,21 @@ func decodeLine(line []byte) (*Event, error) {
 		ev.Content = &content
 	}
 	return ev, nil
+}
+
+// exactContent decodes the line's content object a second time, with numbers
+// kept as json.Number so that integer nanoseconds convert to a duration
+// exactly. Raw keeps the float64 numbers encoding/json gives by default.
+func exactContent(line []byte) (any, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(line, &fields); err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(fields["content"]))
+	dec.UseNumber()
+	var c any
+	err := dec.Decode(&c)
+	return c, err
 }
 
 // stringField returns the first of keys whose value is a string. The adk-go
@@ -207,8 +226,9 @@ func snakeToCamel(s string) string {
 // at any depth (a function response carries its own media parts). Pydantic
 // emits bytes as URL-safe base64, while encoding/json decodes []byte only
 // from standard base64, so a Python agent's value would otherwise fail the
-// whole line. User-data maps are skipped: they are shared with Event.Raw.
-// content must be a value returned by camelizeKeys, which the caller owns.
+// whole line. User-data maps are skipped: they must reach the caller as
+// written. content must be a value returned by camelizeKeys, which the caller
+// owns.
 func stdBase64Fields(v any) {
 	switch v := v.(type) {
 	case map[string]any:
@@ -251,12 +271,15 @@ func stdBase64(s string) string {
 
 var durationType = reflect.TypeFor[time.Duration]()
 
-// stringDurations rewrites in place every number under v that genai decodes
-// into a time.Duration, as a string such as "1.5s". The adk-go server writes a
-// time.Duration as integer nanoseconds, while genai decodes these fields only
-// from strings, so the whole line would otherwise fail. t is the Go type v
-// decodes into. Map-typed fields hold user data and are left alone. v must be
-// a value returned by camelizeKeys, which the caller owns.
+// stringDurations rewrites in place each number under v that genai decodes
+// into a time.Duration and that is written as an integer within int64, as a
+// string such as "1.5s". The adk-go server writes a time.Duration as integer
+// nanoseconds, while genai decodes these fields only from strings, so the
+// whole line would otherwise fail. v holds numbers as json.Number, so the
+// conversion is exact. Any other number, such as a fraction or an exponent,
+// is left for genai to reject. t is the Go type v decodes into. Map-typed
+// fields hold user data and are left alone. v must be a value returned by
+// camelizeKeys, which the caller owns.
 func stringDurations(v any, t reflect.Type) {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
@@ -279,8 +302,10 @@ func stringDurations(v any, t reflect.Type) {
 			if !ok {
 				continue
 			}
-			if n, isNum := val.(float64); isNum && f.Type == durationType {
-				v[name] = time.Duration(n).String()
+			if n, isNum := val.(json.Number); isNum && f.Type == durationType {
+				if d, err := n.Int64(); err == nil {
+					v[name] = time.Duration(d).String()
+				}
 				continue
 			}
 			stringDurations(val, f.Type)
