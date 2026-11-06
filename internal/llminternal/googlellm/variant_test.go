@@ -108,6 +108,7 @@ func TestIsGemini3xLive(t *testing.T) {
 		{"gemini-3.8-live", true},
 		{"models/gemini-3.8-live", true},
 		{"projects/p/locations/l/models/gemini-3.1-flash-live-preview", true},
+		{"gemini-3.5-flash-live-preview", true},
 		{"models/gemini-3.5-live-translate-preview", false},
 		{"gemini-3.5-live-translate", false},
 		{"gemini-3.1-pro-preview", false},

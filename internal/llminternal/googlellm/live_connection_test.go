@@ -91,6 +91,8 @@ func TestLiveConnectionRoutesInputByModel(t *testing.T) {
 		{"live translate audio", gemini, "gemini-3.5-live-translate-preview", audio, `{"realtimeInput":{"audio":{"data":"AQ==","mimeType":"audio/pcm;rate=16000"}}}`},
 		{"live translate text", gemini, "gemini-3.5-live-translate-preview", text, `{"clientContent":{"turns":[{"parts":[{"text":"hi"}],"role":"user"}],"turnComplete":true}}`},
 		{"2.5 audio", gemini, "gemini-2.5-flash-native-audio-latest", audio, `{"realtimeInput":{"mediaChunks":[{"data":"AQ==","mimeType":"audio/pcm;rate=16000"}]}}`},
+		{"2.5 image", gemini, "gemini-2.5-flash-native-audio-latest", image, `{"realtimeInput":{"mediaChunks":[{"data":"Ag==","mimeType":"image/jpeg"}]}}`},
+		{"2.5 text", gemini, "gemini-2.5-flash-native-audio-latest", text, `{"clientContent":{"turns":[{"parts":[{"text":"hi"}],"role":"user"}],"turnComplete":true}}`},
 		{"3.x two text parts", gemini, "gemini-3.8-live", twoTexts, `{"clientContent":{"turns":[{"parts":[{"text":"a"},{"text":"b"}],"role":"user"}],"turnComplete":true}}`},
 		{"3.x inline image part", gemini, "gemini-3.8-live", inlineImage, `{"clientContent":{"turns":[{"parts":[{"inlineData":{"data":"Ag==","mimeType":"image/jpeg"}}],"role":"user"}],"turnComplete":true}}`},
 		{"3.1 audio", gemini, "gemini-3.1-flash-live-preview", audio, `{"realtimeInput":{"audio":{"data":"AQ==","mimeType":"audio/pcm;rate=16000"}}}`},
