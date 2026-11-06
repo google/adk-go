@@ -583,6 +583,11 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			opt(&options)
 		}
 
+		// The inbound message is always a user turn, whatever Role the caller
+		// set. Normalize it once here so that findAgentToRun, the invocation
+		// context and the stored event all see the same message.
+		msg = asUserContent(msg)
+
 		storedSession, err := r.getOrCreateSession(ctx, userID, sessionID)
 		if err != nil {
 			yield(nil, err)
@@ -661,7 +666,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
 			MaxLLMCalls:   runconfig.ResolveMaxLLMCalls(cfg.MaxLLMCalls),
 		})
-		ctx = plugininternal.ToContext(ctx, r.pluginManager)
+		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 		// Compaction has to happen however iteration ends. Breaking out of the
@@ -954,7 +959,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
 		Live:          &cfg,
 	})
-	ctx = plugininternal.ToContext(ctx, r.pluginManager)
+	ctx = r.withPluginManager(ctx)
 	// Deliberately no compactionctx here: context compaction does not apply to
 	// live runs. A live session streams over a persistent connection instead of
 	// re-sending assembled history each turn, so replacing older events with a
@@ -1175,7 +1180,10 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 			return ctx, nil, fmt.Errorf("error running on run user message callback : %w", err)
 		}
 		if modifiedMsg != nil {
-			msg = modifiedMsg
+			// A plugin can return a message with any Role. Normalize it before
+			// it becomes the invocation context's UserContent: WithDelta copies
+			// the value it points to, so a later reassignment would not reach it.
+			msg = asUserContent(modifiedMsg)
 
 			ctx = ctx.WithDelta(&agent.CommonContextDelta{
 				InvocationContextDelta: &agent.InvocationContextDelta{
@@ -1221,6 +1229,21 @@ func (r *Runner) appendMessageToSession(ctx agent.Context, storedSession session
 		return ctx, nil, fmt.Errorf("failed to append event to sessionService: %w", err)
 	}
 	return ctx, event, nil
+}
+
+// asUserContent returns a copy of msg with Role set to [genai.RoleUser] and its
+// own Parts slice, so the caller's struct is never modified. The inbound
+// message of a run is a user turn: an empty Role would be skipped when the
+// model request is built, and a "model" Role would present the caller's text
+// as the model's own earlier turn. A nil msg is returned as is.
+func asUserContent(msg *genai.Content) *genai.Content {
+	if msg == nil {
+		return nil
+	}
+	out := *msg
+	out.Role = genai.RoleUser
+	out.Parts = slices.Clone(msg.Parts)
+	return &out
 }
 
 // findActiveTaskIsolationScope returns the most recent isolation_scope that has
@@ -1344,4 +1367,18 @@ func hasInlineData(event *session.Event) bool {
 		}
 	}
 	return false
+}
+
+// withPluginManager puts this runner's plugin manager in ctx, which is where
+// tools and callbacks look it up. The one exception is a runner without plugins
+// that agenttool starts for a sub-agent: it keeps the plugin manager of the run
+// that called the tool, so that run's plugins also see the sub-agent. Any other
+// runner uses only its own plugins. Run-level callbacks always stay with
+// r.pluginManager.
+func (r *Runner) withPluginManager(ctx context.Context) context.Context {
+	ctx, inherited := plugininternal.TakeInheritedPlugins(ctx)
+	if !r.pluginManager.HasPlugins() && inherited.HasPlugins() {
+		return plugininternal.ToContext(ctx, inherited)
+	}
+	return plugininternal.ToContext(ctx, r.pluginManager)
 }
