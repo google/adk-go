@@ -661,6 +661,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			return
 		}
 
+		ctx = withExecutionID(ctx)
 		ctx = parentmap.ToContext(ctx, r.parents)
 		ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 			StreamingMode: runconfig.StreamingMode(cfg.StreamingMode),
@@ -942,6 +943,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		return nil, nil, fmt.Errorf("agent %s does not support Live Run", agentToRun.Name())
 	}
 
+	ctx = withExecutionID(ctx)
 	ctx = parentmap.ToContext(ctx, r.parents)
 	ctx = runconfig.ToContext(ctx, &runconfig.RunConfig{
 		StreamingMode: runconfig.StreamingModeBidi, // Live is always bidirectional streaming
