@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"sync"
@@ -177,6 +178,51 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 			t.Errorf("unexpected result: %v", respPart.Response["result"])
 		}
 	})
+}
+
+func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler functiontool.StreamingFunc[struct{}]
+		want    string
+	}{
+		{
+			name: "panic is hidden from the model",
+			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
+				return func(func(string, error) bool) { panic("boom") }
+			},
+			want: "Invoking `test_stream()` failed with an internal error.",
+		},
+		{
+			name: "returned error reaches the model",
+			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) { yield("", errors.New("order not found")) }
+			},
+			want: "order not found",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			streamTool, err := functiontool.NewStreaming(functiontool.Config{Name: "test_stream"}, tc.handler)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp := &model.LLMResponse{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "test_stream", Args: map[string]any{}},
+			}}}}
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				InvocationID: "inv_1",
+				Agent:        &mockAgent{name: "agent_1"},
+			})
+
+			mergedEvent, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, resp, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response["error"]; got != tc.want {
+				t.Errorf("FunctionResponse error = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 func TestHandleFunctionCalls_LiveControlPlane(t *testing.T) {
