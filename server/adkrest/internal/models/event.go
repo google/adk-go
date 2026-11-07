@@ -239,6 +239,11 @@ func (e Event) MarshalJSON() ([]byte, error) {
 		}
 
 		for i, part := range e.Content.Parts {
+			// A nil part (e.g. a null in a stored request body) has nothing to
+			// wrap; keep the slot so part counts round-trip.
+			if part == nil {
+				continue
+			}
 			// Wrap the original part
 			proxyPart := &ProxyPart{Part: part}
 
