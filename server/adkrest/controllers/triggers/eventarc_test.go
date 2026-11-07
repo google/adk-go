@@ -16,12 +16,14 @@ package triggers_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 
@@ -235,5 +237,52 @@ func TestEventarcBinaryModeRejectsOversizedBody(t *testing.T) {
 
 	if got, want := rr.Code, http.StatusBadRequest; got != want {
 		t.Fatalf("oversized binary-mode body: status %d, want %d (body: %s)", got, want, rr.Body.String())
+	}
+}
+
+// TestEventarcTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited mirrors the
+// Pub/Sub guard for the same edge: MaxConcurrentRuns<=0 must mean "no limit"
+// (nil semaphore), not a zero-capacity channel that would block every request
+// forever.
+func TestEventarcTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
+	runCount := 0
+	testAgent := createMockAgent(t, nil, &runCount, nil)
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = 0
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewEventarcController(sessionService, agent.NewSingleLoader(testAgent), nil, nil, runner.PluginConfig{}, cfg)
+
+	payload := `{"message": {"data": "` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}}`
+	ce := map[string]any{
+		"specversion": "1.0",
+		"type":        "google.cloud.pubsub.topic.v1.messagePublished",
+		"source":      "//pubsub.googleapis.com/projects/test-project/topics/test-topic",
+		"id":          "1234-5678",
+		"data":        json.RawMessage(payload),
+	}
+	body, err := json.Marshal(ce)
+	if err != nil {
+		t.Fatalf("marshal cloud event: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "/apps/test-agent/triggers/eventarc", bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/cloudevents+json")
+	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		ctrl.EventarcTriggerHandler(rr, req)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler blocked with MaxConcurrentRuns=0; must be treated as no limit")
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", rr.Code, rr.Body.String())
 	}
 }
