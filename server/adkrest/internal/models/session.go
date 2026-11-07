@@ -34,8 +34,12 @@ type Session struct {
 }
 
 type CreateSessionRequest struct {
-	State  map[string]any `json:"state"`
-	Events []Event        `json:"events"`
+	// SessionID lets a client choose the new session's ID. It is used when the
+	// request path does not carry a {session_id} variable; the deprecated
+	// path-parameter route wins when both are present.
+	SessionID string         `json:"sessionId,omitempty"`
+	State     map[string]any `json:"state"`
+	Events    []Event        `json:"events"`
 }
 
 // UpdateSessionRequest is the body of a PATCH session request.
