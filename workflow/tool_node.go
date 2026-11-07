@@ -20,10 +20,10 @@ import (
 	"iter"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -159,7 +159,7 @@ func (n *ToolNode) ValidateOutput(out any) (any, error) {
 func (n *ToolNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		eventActions := &session.EventActions{StateDelta: make(map[string]any), ArtifactDelta: make(map[string]int64)}
-		toolCtx := agent.NewToolContext(ctx, uuid.NewString(), eventActions, nil)
+		toolCtx := agent.NewToolContext(ctx, platform.NewUUID(ctx), eventActions, nil)
 
 		toolOutput, err := n.runTool(toolCtx, input)
 		if err != nil {
