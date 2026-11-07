@@ -46,6 +46,19 @@ import (
 // fails the tool call.
 type MetadataProvider func(ctx agent.Context) (map[string]any, error)
 
+// OnToolResultFunc observes the raw result of an MCP tool call before it is
+// flattened into the ADK tool response. The params carry the arguments and
+// `_meta` sent to the server, and the result carries every field the flattened
+// response drops, including the server's `_meta` in result.Meta.
+//
+// It is called for successful calls and for results the server marks as errors,
+// after the call returns and before the response is flattened or the error is
+// built. It is not called when the call fails before producing a result, such
+// as on a transport error or cancellation. It may be called concurrently.
+//
+// The hook must not modify or retain params or result.
+type OnToolResultFunc func(ctx agent.Context, params *mcp.CallToolParams, result *mcp.CallToolResult)
+
 // New returns MCP ToolSet.
 // MCP ToolSet connects to a MCP Server, retrieves MCP Tools into ADK Tools and
 // passes them to the LLM.
@@ -102,6 +115,7 @@ func New(cfg Config) (tool.Toolset, error) {
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
 		metadataProvider:            cfg.MetadataProvider,
+		onToolResult:                cfg.OnToolResult,
 	}, nil
 }
 
@@ -344,6 +358,12 @@ type Config struct {
 	// MetadataProvider, when set, is called before each tool call is sent to
 	// build the request's `_meta` entries.
 	MetadataProvider MetadataProvider
+
+	// OnToolResult, when set, is called with the raw result of each tool call
+	// before it is flattened into the tool response. It exposes fields the
+	// flattened response drops, including the server's `_meta` in result.Meta.
+	// See OnToolResultFunc.
+	OnToolResult OnToolResultFunc
 }
 
 // sessionClient is the MCP connection a set uses: one shared session, or one
@@ -360,6 +380,7 @@ type set struct {
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
 	metadataProvider            MetadataProvider
+	onToolResult                OnToolResultFunc
 }
 
 func (s *set) Close() error {
@@ -389,7 +410,7 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 	var adkTools []tool.Tool
 	for _, mcpTool := range mcpTools {
-		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider)
+		t, err := convertTool(mcpTool, s.mcpClient, s.requireConfirmation, s.requireConfirmationProvider, s.metadataProvider, s.onToolResult)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert MCP tool %q to adk tool: %w", mcpTool.Name, err)
 		}
