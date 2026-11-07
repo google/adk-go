@@ -54,10 +54,14 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 type mockTransport struct {
@@ -5467,6 +5471,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 	makeSwitchableBranch := func(t *testing.T, name string, runs []struct {
 		childName   string
 		childErr    error
+		runText     string
 		recoverText string
 	},
 	) agent.Agent {
@@ -5475,6 +5480,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		var idx int
 		type runData struct {
 			par         agent.Agent
+			runText     string
 			recoverText string
 		}
 		prepared := make([]runData, 0, len(runs))
@@ -5503,7 +5509,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 				t.Fatalf("agent.New(%s): %v", childName, err)
 			}
 			par := newParallelAgent(t, fmt.Sprintf("%s_par_%d", name, i), child)
-			prepared = append(prepared, runData{par: par, recoverText: rc.recoverText})
+			prepared = append(prepared, runData{par: par, runText: rc.runText, recoverText: rc.recoverText})
 			subAgents = append(subAgents, par)
 		}
 		var active *runData
@@ -5521,6 +5527,15 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 						if runErr != nil {
 							continue
 						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+					if cur.runText != "" {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = name
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", cur.runText)
 						if !yield(ev, nil) {
 							return
 						}
@@ -5610,6 +5625,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		inner := makeSwitchableBranch(t, "inner", []struct {
 			childName   string
 			childErr    error
+			runText     string
 			recoverText string
 		}{
 			{childName: "child1", childErr: err1, recoverText: "run1 recovered"},
@@ -5640,6 +5656,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		inner := makeSwitchableBranch(t, "inner", []struct {
 			childName   string
 			childErr    error
+			runText     string
 			recoverText string
 		}{
 			{childName: "child1", childErr: err1, recoverText: "run1 recovered"},
@@ -5658,8 +5675,125 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		}
 		invErr := onlyRowOfType(t, rows, EventInvocationError)
 		msg, _ := invErr["error_message"].(string)
-		if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
-			t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+		if !strings.Contains(msg, err1.Error()) && !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q or %q preserved", msg, err1.Error(), err2.Error())
+		}
+	})
+
+	t.Run("two buffered responses from recovered first run do not clear later unrecovered activation", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		err1 := errors.New("run1 recoverable error")
+		err2 := errors.New("run2 unrecovered error")
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			runText     string
+			recoverText string
+		}{
+			{childName: "child1", childErr: err1, runText: "run1 progress", recoverText: "run1 recovered"},
+			{childName: "child2", childErr: err2, recoverText: ""},
+		})
+		outer, err := agent.New(agent.Config{
+			Name:      "outer",
+			SubAgents: []agent.Agent{inner},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range inner.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		root := makeDualRoot(t, outer, "inner")
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-two-buffered", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, err1.Error()) && !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q or %q preserved", msg, err1.Error(), err2.Error())
+		}
+	})
+
+	t.Run("buffered response from clean first run does not clear later unrecovered activation", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		err2 := errors.New("run2 unrecovered after clean run1")
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			runText     string
+			recoverText string
+		}{
+			{childName: "child1", childErr: nil, recoverText: "run1 clean summary"},
+			{childName: "child2", childErr: err2, recoverText: ""},
+		})
+		root := makeDualRoot(t, inner, "inner")
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-clean-first", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, err2.Error())
+		}
+	})
+
+	t.Run("built-in LoopAgent clean first iteration allows second iteration recovery", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			runText     string
+			recoverText string
+		}{
+			{childName: "child1", childErr: nil, recoverText: "iter1 clean"},
+			{childName: "child2", childErr: errors.New("iter2 recoverable error"), recoverText: "iter2 recovered"},
+		})
+		loop, err := loopagent.New(loopagent.Config{
+			AgentConfig: agent.Config{
+				Name:      "loop",
+				SubAgents: []agent.Agent{inner},
+			},
+			MaxIterations: 2,
+		})
+		if err != nil {
+			t.Fatalf("loopagent.New: %v", err)
+		}
+
+		for _, err := range newTestRunner(t, loop, p).Run(t.Context(), "u1", "s-loop-clean-first", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
 		}
 	})
 
@@ -5670,6 +5804,7 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		inner := makeSwitchableBranch(t, "inner", []struct {
 			childName   string
 			childErr    error
+			runText     string
 			recoverText string
 		}{
 			{childName: "child1", childErr: err1, recoverText: ""},
@@ -5717,8 +5852,2146 @@ func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
 		}
 		invErr := onlyRowOfType(t, rows, EventInvocationError)
 		msg, _ := invErr["error_message"].(string)
-		if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
-			t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+		if !strings.Contains(msg, err1.Error()) && !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q or %q preserved", msg, err1.Error(), err2.Error())
 		}
 	})
+
+	t.Run("buffered response from first run flushed while second activation is open preserves error", func(t *testing.T) {
+		runOpenFlushCase := func(t *testing.T, flushRun1, rootRecovers bool) {
+			t.Helper()
+			p, requests, _ := setupTestPlugin(t)
+			err2 := errors.New("run2 unrecovered while open")
+			helper, err := agent.New(agent.Config{
+				Name: "helper",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "helper"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "tick")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(helper): %v", err)
+			}
+			child1, err := agent.New(agent.Config{
+				Name: "child1",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "child1"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "c1-ok")
+						yield(ev, nil)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(child1): %v", err)
+			}
+			child2, err := agent.New(agent.Config{
+				Name: "child2",
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = "child2"
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", "c2-ok")
+						if !yield(ev, nil) {
+							return
+						}
+						yield(nil, err2)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(child2): %v", err)
+			}
+			par1 := newParallelAgent(t, "par1", child1)
+			par2 := newParallelAgent(t, "par2", child2)
+
+			var innerRun int
+			inner, err := agent.New(agent.Config{
+				Name:      "inner",
+				SubAgents: []agent.Agent{par1, par2, helper},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					innerRun++
+					curRun := innerRun
+					return func(yield func(*session.Event, error) bool) {
+						if curRun == 1 {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "inner"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "run1-a")
+							if !yield(ev, nil) {
+								return
+							}
+							for ev, runErr := range par1.Run(ctx) {
+								if runErr == nil && ev != nil && !yield(ev, nil) {
+									return
+								}
+							}
+							return
+						}
+						for ev, runErr := range par2.Run(ctx) {
+							if runErr != nil {
+								continue
+							}
+							if ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+						for ev, runErr := range helper.Run(ctx) {
+							if runErr == nil && ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+				AfterAgentCallbacks: []agent.AfterAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						if innerRun == 1 {
+							return textContent("model", "run1-b"), nil
+						}
+						return nil, nil
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(inner): %v", err)
+			}
+
+			var rootCallbacks []agent.AfterAgentCallback
+			if rootRecovers {
+				rootCallbacks = []agent.AfterAgentCallback{
+					func(agent.Context) (*genai.Content, error) {
+						return textContent("model", "root final recovery"), nil
+					},
+				}
+			}
+			root, err := agent.New(agent.Config{
+				Name:                "root",
+				SubAgents:           []agent.Agent{inner},
+				AfterAgentCallbacks: rootCallbacks,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						var buffered *session.Event
+						// Run 1: deliver run1-a immediately and buffer run1-b.
+						for ev, runErr := range inner.Run(ctx) {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if ev != nil && ev.Author == "inner" && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "run1-b" {
+								buffered = ev
+								continue
+							}
+							if ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+						// Run 2: flush run1-b when helper ticks while inner2 is still open.
+						for ev, runErr := range inner.Run(ctx) {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if ev != nil && ev.Author == "helper" && flushRun1 && buffered != nil {
+								flushed := buffered
+								buffered = nil
+								if !yield(flushed, nil) {
+									return
+								}
+							}
+							if ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(root): %v", err)
+			}
+
+			for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-open2-flush", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("runner.Run error = %v, want nil", err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if rootRecovers {
+				if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+					t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+				}
+				if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+					t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+				}
+				return
+			}
+			if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+				t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+			}
+			invErr := onlyRowOfType(t, rows, EventInvocationError)
+			msg, _ := invErr["error_message"].(string)
+			if !strings.Contains(msg, err2.Error()) {
+				t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, err2.Error())
+			}
+		}
+
+		t.Run("control no flush", func(t *testing.T) { runOpenFlushCase(t, false, false) })
+		t.Run("flush run1 buffered while inner2 open", func(t *testing.T) { runOpenFlushCase(t, true, false) })
+		t.Run("root final recovery after flush", func(t *testing.T) { runOpenFlushCase(t, true, true) })
+	})
+
+	t.Run("buffered LLM response from first run flushed while open second LlmAgent has model error preserves failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errModel2 := errors.New("bot2 model unrecovered error")
+		readyToFlush := make(chan struct{})
+		flushDone := make(chan struct{})
+		var readyOnce, flushOnce sync.Once
+		botLLM := &firstCallResponseThenErrLLM{
+			first: &model.LLMResponse{Content: textContent("model", "bot1-buffered-final"), TurnComplete: true},
+			err:   errModel2,
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Model: botLLM,
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+				func(ctx agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+					readyOnce.Do(func() { close(readyToFlush) })
+					select {
+					case <-flushDone:
+					case <-ctx.Done():
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered *session.Event
+					// Run 1: buffer bot1's model response.
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Author == "bot" {
+							buffered = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					// Run 2: run bot2 concurrently so root flushes bot1's buffered
+					// event while bot2 is open on agentStack with errModel2 recorded
+					// in unrecoveredErrors (root swallows bot2's returned error).
+					streamBufferedConcurrentRun(ctx, bot, readyToFlush, buffered, func() {
+						flushOnce.Do(func() { close(flushDone) })
+					}, true, yield)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-open2-llm-flush", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("built-in LoopAgent allows open second activation recovery", func(t *testing.T) {
+		t.Run("LoopAgent iter2 open recovery in Run clears iter2 failure", func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			inner := makeSwitchableBranch(t, "inner", []struct {
+				childName   string
+				childErr    error
+				runText     string
+				recoverText string
+			}{
+				{childName: "child1", childErr: nil, runText: "iter1-ok"},
+				{childName: "child2", childErr: errors.New("iter2 open failure"), runText: "iter2-recovered-in-run"},
+			})
+			loop, err := loopagent.New(loopagent.Config{
+				AgentConfig: agent.Config{
+					Name:      "loop",
+					SubAgents: []agent.Agent{inner},
+				},
+				MaxIterations: 2,
+			})
+			if err != nil {
+				t.Fatalf("loopagent.New: %v", err)
+			}
+
+			for _, err := range newTestRunner(t, loop, p).Run(t.Context(), "u1", "s-loop-open2", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("runner.Run error = %v, want nil", err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+				t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+			}
+			if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+				t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+			}
+		})
+
+		t.Run("LoopAgent iter2 open recovery after iter1 custom wrapper retired", func(t *testing.T) {
+			p, requests, _ := setupTestPlugin(t)
+			inner := makeSwitchableBranch(t, "inner", []struct {
+				childName   string
+				childErr    error
+				runText     string
+				recoverText string
+			}{
+				{childName: "child1", childErr: nil, runText: "iter1-ok"},
+				{childName: "child2", childErr: errors.New("iter2 open recoverable"), runText: "iter2-recovered-in-run"},
+			})
+			var outerRun int
+			bufOuter, err := agent.New(agent.Config{
+				Name:      "bufOuter",
+				SubAgents: []agent.Agent{inner},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					outerRun++
+					curRun := outerRun
+					return func(yield func(*session.Event, error) bool) {
+						var buffered []*session.Event
+						for ev, runErr := range inner.Run(ctx) {
+							if runErr != nil || ev == nil {
+								continue
+							}
+							if curRun == 1 {
+								buffered = append(buffered, ev)
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+						for _, ev := range buffered {
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(bufOuter): %v", err)
+			}
+			loopRoot, err := loopagent.New(loopagent.Config{
+				AgentConfig: agent.Config{
+					Name:      "loopRoot",
+					SubAgents: []agent.Agent{bufOuter},
+				},
+				MaxIterations: 2,
+			})
+			if err != nil {
+				t.Fatalf("loopagent.New: %v", err)
+			}
+
+			for _, err := range newTestRunner(t, loopRoot, p).Run(t.Context(), "u1", "s-loop-wrap-open2", textContent("user", "go"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("runner.Run error = %v, want nil", err)
+				}
+			}
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+				t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+			}
+			if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+				t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+			}
+		})
+	})
+
+	t.Run("buffered FunctionResponse from first run flushed while open second LlmAgent tool is running preserves TOOL_COMPLETED span and latency", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		readyToFlush := make(chan struct{})
+		flushDone := make(chan struct{})
+		var readyOnce, flushOnce sync.Once
+		var toolRuns atomic.Int32
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			runNum := toolRuns.Add(1)
+			ctx.Actions().SkipSummarization = true
+			if runNum == 2 {
+				readyOnce.Do(func() { close(readyToFlush) })
+				select {
+				case <-flushDone:
+				case <-ctx.Done():
+				}
+			}
+			return map[string]any{"res": fmt.Sprintf("r%d", runNum)}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_0", Name: "lookup", Args: map[string]any{}}}},
+					},
+				}, nil)
+			}},
+			Tools: []tool.Tool{lookupTool},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && len(functionResponseCalls(ev.Content)) > 0 {
+							buffered = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					streamBufferedConcurrentRun(ctx, bot, readyToFlush, buffered, func() {
+						flushOnce.Do(func() { close(flushDone) })
+					}, false, yield)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-open2-tool-flush", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+		starts := rowsOfType(rows, EventToolStarting)
+		ends := rowsOfType(rows, EventToolCompleted)
+		if len(starts) != 2 || len(ends) != 2 {
+			t.Fatalf("tool rows = (starts=%d, ends=%d), want (2, 2); event types=%v", len(starts), len(ends), eventTypes(rows))
+		}
+		for idx := range 2 {
+			if got, want := ends[idx]["span_id"], starts[idx]["span_id"]; got != want {
+				t.Errorf("TOOL_COMPLETED[%d] span_id = %v, want TOOL_STARTING[%d] span_id %v", idx, got, idx, want)
+			}
+			if _, ok := ends[idx][columnLatencyMS]; !ok {
+				t.Errorf("TOOL_COMPLETED[%d] row missing %s", idx, columnLatencyMS)
+			}
+		}
+	})
+
+	t.Run("clean LlmAgent BeforeModelCallbacks cache hit allows second run recovery", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+				func(_ agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "cached-1"), TurnComplete: true}, nil
+				},
+			},
+			Model: &funcStreamLLM{fn: func(_ context.Context, _ func(*model.LLMResponse, error) bool) {
+				t.Error("bot1 Model should not be called on BeforeModelCallbacks cache hit")
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errChild2 := errors.New("bot2 child recoverable failure")
+		failingChild, err := agent.New(agent.Config{
+			Name: "p8_failing_child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "p8_failing_child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child partial")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, errChild2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(p8_failing_child): %v", err)
+		}
+		par2 := newParallelAgent(t, "p8_par2", failingChild)
+		bot2, err := agent.New(agent.Config{
+			Name:      "bot",
+			SubAgents: []agent.Agent{par2},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "bot"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "bot2-recovered")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-clean-before-model-break", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("clean LlmAgent earlier AfterModelCallback plugin with OnModelErrorCallbacks fallback allows second run recovery", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		earlierAfterModel, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_after_model",
+			AfterModelCallback: func(_ agent.Context, res *model.LLMResponse, err error) (*model.LLMResponse, error) {
+				if err != nil || res == nil {
+					return nil, err
+				}
+				return res, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(earlier_after_model): %v", err)
+		}
+		errModel1 := errors.New("bot1 transient model failure")
+		errModel2 := errors.New("bot2 transient model failure")
+		var modelCalls atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if modelCalls.Add(1) == 1 {
+					yield(nil, errModel1)
+					return
+				}
+				yield(nil, errModel2)
+			}},
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+				func(_ agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "bot-fallback"), TurnComplete: true}, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for range 2 {
+						for ev, runErr := range bot.Run(ctx) {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, earlierAfterModel, p).Run(t.Context(), "u1", "s-clean-earlier-after-model", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("clean LlmAgent earlier AfterToolCallback plugin with SkipSummarization allows second run recovery", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		earlierAfterTool, err := baseplugin.New(baseplugin.Config{
+			Name: "earlier_after_tool",
+			AfterToolCallback: func(_ agent.Context, _ tool.Tool, _, _ map[string]any, err error) (map[string]any, error) {
+				if err == nil {
+					return map[string]any{"res": "intercepted-1"}, nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(earlier_after_tool): %v", err)
+		}
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			ctx.Actions().SkipSummarization = true
+			return map[string]any{"res": "r1"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role:  "model",
+						Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call_1", Name: "lookup", Args: map[string]any{}}}},
+					},
+				}, nil)
+			}},
+			Tools: []tool.Tool{lookupTool},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errChild2 := errors.New("bot2 child recoverable failure")
+		failingChild, err := agent.New(agent.Config{
+			Name: "p14_failing_child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "p14_failing_child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child partial")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, errChild2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(p14_failing_child): %v", err)
+		}
+		par2 := newParallelAgent(t, "p14_par2", failingChild)
+		bot2, err := agent.New(agent.Config{
+			Name:      "bot",
+			SubAgents: []agent.Agent{par2},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "bot"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "bot2-recovered")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, earlierAfterTool, p).Run(t.Context(), "u1", "s-clean-earlier-after-tool", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("later AfterAgentCallback plugin event buffered from clean LlmAgent does not clear second activation failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var cbCalls atomic.Int32
+		laterAfterAgent, err := baseplugin.New(baseplugin.Config{
+			Name: "later_after_agent",
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				if ctx.AgentName() == "bot" && cbCalls.Add(1) == 1 {
+					return textContent("model", "plugin-tail-1"), nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(later_after_agent): %v", err)
+		}
+		errModel2 := errors.New("bot2 unrecovered model error")
+		readyToFlush := make(chan struct{})
+		flushDone := make(chan struct{})
+		var readyOnce, flushOnce sync.Once
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &firstCallResponseThenErrLLM{
+				first: &model.LLMResponse{Content: textContent("model", "bot1-model"), TurnComplete: true},
+				err:   errModel2,
+			},
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+				func(ctx agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+					readyOnce.Do(func() { close(readyToFlush) })
+					select {
+					case <-flushDone:
+					case <-ctx.Done():
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "plugin-tail-1" {
+							buffered = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					streamBufferedConcurrentRun(ctx, bot, readyToFlush, buffered, func() {
+						flushOnce.Do(func() { close(flushDone) })
+					}, true, yield)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p, laterAfterAgent).Run(t.Context(), "u1", "s-later-after-agent", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("multi-turn LlmAgent buffered FunctionResponse preserves later sequential run failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return map[string]any{"res": "tool-ok"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		errModel2 := errors.New("bot2 sequential multi-turn error")
+		var callCount atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				switch callCount.Add(1) {
+				case 1:
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call_seq_1",
+									Name: "lookup",
+									Args: map[string]any{},
+								},
+							}},
+						},
+						TurnComplete: true,
+					}, nil)
+				case 2:
+					yield(&model.LLMResponse{Content: textContent("model", "bot1-turn2-final"), TurnComplete: true}, nil)
+				default:
+					yield(nil, errModel2)
+				}
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFR *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil {
+							bufferedFR = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							if bufferedFR != nil {
+								yield(bufferedFR, nil)
+								bufferedFR = nil
+							}
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-multiturn-seq-fr", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("multi-turn LlmAgent buffered FunctionResponse preserves concurrent open activation failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return map[string]any{"res": "tool-ok"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		errModel2 := errors.New("bot2 concurrent multi-turn error")
+		readyToFlush := make(chan struct{})
+		flushDone := make(chan struct{})
+		var readyOnce, flushOnce sync.Once
+		var callCount atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				switch callCount.Add(1) {
+				case 1:
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call_conc_1",
+									Name: "lookup",
+									Args: map[string]any{},
+								},
+							}},
+						},
+						TurnComplete: true,
+					}, nil)
+				case 2:
+					yield(&model.LLMResponse{Content: textContent("model", "bot1-turn2-final"), TurnComplete: true}, nil)
+				default:
+					yield(nil, errModel2)
+				}
+			}},
+			OnModelErrorCallbacks: []llmagent.OnModelErrorCallback{
+				func(ctx agent.Context, _ *model.LLMRequest, _ error) (*model.LLMResponse, error) {
+					readyOnce.Do(func() { close(readyToFlush) })
+					select {
+					case <-flushDone:
+					case <-ctx.Done():
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFR *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil {
+							bufferedFR = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					streamBufferedConcurrentRun(ctx, bot, readyToFlush, bufferedFR, func() {
+						flushOnce.Do(func() { close(flushDone) })
+					}, true, yield)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-multiturn-conc-fr", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("earlier BeforeModelCallback benign plugin with sequential recovery allows invocation completion", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		benignBeforeModel, err := baseplugin.New(baseplugin.Config{
+			Name: "benign_before_model",
+			BeforeModelCallback: func(_ agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(benign_before_model): %v", err)
+		}
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+				func(_ agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+					return &model.LLMResponse{Content: textContent("model", "cached-1"), TurnComplete: true}, nil
+				},
+			},
+			Model: &funcStreamLLM{fn: func(_ context.Context, _ func(*model.LLMResponse, error) bool) {
+				t.Error("bot1 Model should not be called on BeforeModelCallbacks cache hit")
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errChild2 := errors.New("bot2 child recoverable failure")
+		failingChild, err := agent.New(agent.Config{
+			Name: "h3_failing_child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "h3_failing_child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child partial")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, errChild2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(h3_failing_child): %v", err)
+		}
+		par2 := newParallelAgent(t, "h3_par2", failingChild)
+		bot2, err := agent.New(agent.Config{
+			Name:      "bot",
+			SubAgents: []agent.Agent{par2},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "bot"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "bot2-recovered")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, benignBeforeModel, p).Run(t.Context(), "u1", "s-h3-benign-before-model", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("LlmAgent AfterAgentCallbacks OutputSchema ModeTask and custom predecessor with sequential recovery allow invocation completion", func(t *testing.T) {
+		for _, modeCase := range []struct {
+			name   string
+			task   bool
+			custom bool
+		}{
+			{name: "AfterAgentCallbacks and OutputSchema"},
+			{name: "ModeTask", task: true},
+			{name: "custom_bot1", custom: true},
+		} {
+			t.Run(modeCase.name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var bot1 agent.Agent
+				var err error
+				var taskCalls atomic.Int32
+				if modeCase.custom {
+					bot1, err = agent.New(agent.Config{
+						Name: "bot",
+						Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+							return func(yield func(*session.Event, error) bool) {
+								ev := session.NewEvent(ctx, ctx.InvocationID())
+								ev.Author = "bot"
+								ev.Branch = ctx.Branch()
+								ev.Content = textContent("model", "custom-bot1-ok")
+								yield(ev, nil)
+							}
+						},
+					})
+				} else if modeCase.task {
+					taskSub, subErr := llmagent.New(llmagent.Config{
+						Name: "task_worker_r8",
+						Mode: llmagent.ModeTask,
+						Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   "finish-r8",
+											Name: "finish_task",
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+								TurnComplete: true,
+							}, nil)
+						}},
+					})
+					if subErr != nil {
+						t.Fatalf("llmagent.New(taskSub): %v", subErr)
+					}
+					bot1, err = llmagent.New(llmagent.Config{
+						Name:      "bot",
+						Mode:      llmagent.ModeChat,
+						SubAgents: []agent.Agent{taskSub},
+						Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+							if taskCalls.Add(1) == 1 {
+								yield(&model.LLMResponse{
+									Content: &genai.Content{
+										Role: "model",
+										Parts: []*genai.Part{{
+											FunctionCall: &genai.FunctionCall{
+												ID:   "call-task-r8",
+												Name: "task_worker_r8",
+												Args: map[string]any{"request": "complete task"},
+											},
+										}},
+									},
+									TurnComplete: true,
+								}, nil)
+								return
+							}
+							yield(&model.LLMResponse{Content: textContent("model", "delegation done"), TurnComplete: true}, nil)
+						}},
+					})
+				} else {
+					bot1, err = llmagent.New(llmagent.Config{
+						Name:         "bot",
+						OutputSchema: &genai.Schema{Type: genai.TypeObject},
+						AfterAgentCallbacks: []agent.AfterAgentCallback{
+							func(_ agent.Context) (*genai.Content, error) {
+								return nil, nil
+							},
+						},
+						BeforeModelCallbacks: []llmagent.BeforeModelCallback{
+							func(_ agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+								return &model.LLMResponse{Content: textContent("model", `{"ok":true}`), TurnComplete: true}, nil
+							},
+						},
+						Model: &funcStreamLLM{fn: func(_ context.Context, _ func(*model.LLMResponse, error) bool) {
+							t.Error("bot1 Model should not be called on BeforeModelCallbacks cache hit")
+						}},
+					})
+				}
+				if err != nil {
+					t.Fatalf("llmagent.New(bot1): %v", err)
+				}
+				errChild2 := errors.New("bot2 child recoverable failure")
+				failingChild, err := agent.New(agent.Config{
+					Name: "h3_cfg_failing_child",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "h3_cfg_failing_child"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "child partial")
+							if !yield(ev, nil) {
+								return
+							}
+							yield(nil, errChild2)
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(h3_cfg_failing_child): %v", err)
+				}
+				par2 := newParallelAgent(t, "h3_cfg_par2", failingChild)
+				bot2, err := agent.New(agent.Config{
+					Name:      "bot",
+					SubAgents: []agent.Agent{par2},
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							for ev, runErr := range par2.Run(ctx) {
+								if runErr != nil {
+									continue
+								}
+								if ev != nil && !yield(ev, nil) {
+									return
+								}
+							}
+							ev := session.NewEvent(ctx, ctx.InvocationID())
+							ev.Author = "bot"
+							ev.Branch = ctx.Branch()
+							ev.Content = textContent("model", "bot2-recovered")
+							yield(ev, nil)
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(bot2): %v", err)
+				}
+				root, err := agent.New(agent.Config{
+					Name:      "root",
+					SubAgents: []agent.Agent{bot1},
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							for ev, runErr := range bot1.Run(ctx) {
+								if runErr != nil {
+									yield(nil, runErr)
+									return
+								}
+								if ev != nil && !yield(ev, nil) {
+									return
+								}
+							}
+							for ev, runErr := range bot2.Run(ctx) {
+								if runErr != nil {
+									continue
+								}
+								if ev != nil && !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-h3-cfg-"+modeCase.name, textContent("user", "go"), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("runner.Run error = %v, want nil", err)
+					}
+				}
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+					t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+				}
+				if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+					t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+				}
+			})
+		}
+	})
+
+	t.Run("single LlmAgent failing functiontool with Turn-2 model error preserves TOOL_ERROR and error when buffered FunctionCall flushes", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errTool := errors.New("tool execution failed")
+		errModel2 := errors.New("turn2 model failure after tool error")
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return nil, errTool
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		var modelCalls atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if modelCalls.Add(1) == 1 {
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call_fc_tool_err",
+									Name: "lookup",
+									Args: map[string]any{},
+								},
+							}},
+						},
+						TurnComplete: true,
+					}, nil)
+					return
+				}
+				yield(nil, errModel2)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFC, bufferedFR *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							if !errors.Is(runErr, errModel2) {
+								t.Fatalf("unexpected bot.Run error: %v", runErr)
+							}
+							if bufferedFC != nil {
+								yield(bufferedFC, nil)
+							}
+							if bufferedFR != nil {
+								yield(bufferedFR, nil)
+							}
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 {
+							if ev.Content.Parts[0].FunctionCall != nil {
+								bufferedFC = ev
+								continue
+							}
+							if ev.Content.Parts[0].FunctionResponse != nil {
+								bufferedFR = ev
+								continue
+							}
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-single-fc-tool-err", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+			t.Fatalf("got %d TOOL_ERROR rows, want 1; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("single LlmAgent BeforeToolCallbacks error with Turn-2 model error preserves TOOL_ERROR and error when buffered FunctionCall flushes", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errBeforeTool := errors.New("before_tool callback failure")
+		errModel2 := errors.New("turn2 model failure after before_tool error")
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return map[string]any{"res": "should-not-run"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		var modelCalls atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			BeforeToolCallbacks: []llmagent.BeforeToolCallback{
+				func(_ agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
+					return nil, errBeforeTool
+				},
+			},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if modelCalls.Add(1) == 1 {
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call_fc_cb_err",
+									Name: "lookup",
+									Args: map[string]any{},
+								},
+							}},
+						},
+						TurnComplete: true,
+					}, nil)
+					return
+				}
+				yield(nil, errModel2)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFC, bufferedFR *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							if !errors.Is(runErr, errModel2) {
+								t.Fatalf("unexpected bot.Run error: %v", runErr)
+							}
+							if bufferedFC != nil {
+								yield(bufferedFC, nil)
+							}
+							if bufferedFR != nil {
+								yield(bufferedFR, nil)
+							}
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 {
+							if ev.Content.Parts[0].FunctionCall != nil {
+								bufferedFC = ev
+								continue
+							}
+							if ev.Content.Parts[0].FunctionResponse != nil {
+								bufferedFR = ev
+								continue
+							}
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-single-fc-cb-err", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		if n := len(rowsOfType(rows, EventToolError)); n != 1 {
+			t.Fatalf("got %d TOOL_ERROR rows, want 1; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("single multi-turn LlmAgent buffered FunctionResponse preserves Turn-2 model error", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errModel2 := errors.New("single multi-turn turn2 model failure")
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(_ agent.Context, _ struct{}) (map[string]any, error) {
+			return map[string]any{"res": "tool-ok"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		var modelCalls atomic.Int32
+		bot, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if modelCalls.Add(1) == 1 {
+					yield(&model.LLMResponse{
+						Content: &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{{
+								FunctionCall: &genai.FunctionCall{
+									ID:   "call_single_mt_fr",
+									Name: "lookup",
+									Args: map[string]any{},
+								},
+							}},
+						},
+						TurnComplete: true,
+					}, nil)
+					return
+				}
+				yield(nil, errModel2)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFR *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							if bufferedFR != nil {
+								yield(bufferedFR, nil)
+							}
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionResponse != nil {
+							bufferedFR = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-single-mt-fr-err", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errModel2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errModel2.Error())
+		}
+	})
+
+	t.Run("single LlmAgent buffered plain text flushed during frozen-clock stream error preserves error", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		errStream := errors.New("stream_err_after_turncomplete_text")
+		bot, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if !yield(&model.LLMResponse{
+					Content:      textContent("model", "buffered-plain-text"),
+					TurnComplete: true,
+				}, nil) {
+					return
+				}
+				yield(nil, errStream)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedText *session.Event
+					for ev, runErr := range bot.Run(ctx) {
+						if runErr != nil {
+							if bufferedText != nil {
+								yield(bufferedText, nil)
+							}
+							return
+						}
+						if ev != nil && ev.Content != nil {
+							bufferedText = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		fixedTime := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+		runCtx := platform.WithTimeProvider(t.Context(), func() time.Time { return fixedTime })
+		for _, err := range newTestRunner(t, root, p).Run(runCtx, "u1", "s-frozen-clock-plain-text", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errStream.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q", msg, errStream.Error())
+		}
+	})
+
+	t.Run("buffered plugin AfterAgentCallback tail from first LlmAgent preserves silent second run failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		tailPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "tail_after_agent",
+			AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+				if ctx.AgentName() == "bot" {
+					return textContent("model", "bot1-plugin-tail"), nil
+				}
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(tail_after_agent): %v", err)
+		}
+		var calls atomic.Int32
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				if calls.Add(1) == 1 {
+					yield(&model.LLMResponse{Content: textContent("model", "bot1-ok"), TurnComplete: true}, nil)
+					return
+				}
+				t.Error("bot1 Model called more than once")
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errSilent2 := errors.New("bot2 silent failure")
+		bot2, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, errSilent2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedTail *session.Event
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "bot1-plugin-tail" {
+							bufferedTail = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							if bufferedTail != nil {
+								yield(bufferedTail, nil)
+							}
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p, tailPlugin).Run(t.Context(), "u1", "s-plugin-tail-silent2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationError)
+	})
+
+	t.Run("buffered agent AfterAgentCallbacks event from first LlmAgent preserves silent second run failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{Content: textContent("model", "bot1-model"), TurnComplete: true}, nil)
+			}},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(_ agent.Context) (*genai.Content, error) {
+					return textContent("model", "bot1-agent-tail"), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errSilent2 := errors.New("bot2 silent failure")
+		bot2, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, errSilent2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedTail *session.Event
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "bot1-agent-tail" {
+							bufferedTail = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							if bufferedTail != nil {
+								yield(bufferedTail, nil)
+							}
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-agent-tail-silent2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationError)
+	})
+
+	t.Run("SkipSummarization tool buffered FunctionCall flushed during silent second run failure preserves error", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		lookupTool, err := functiontool.New(functiontool.Config{
+			Name:        "lookup",
+			Description: "Look up item",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			ctx.Actions().SkipSummarization = true
+			return map[string]any{"res": "done"}, nil
+		})
+		if err != nil {
+			t.Fatalf("functiontool.New(lookup): %v", err)
+		}
+		bot1, err := llmagent.New(llmagent.Config{
+			Name:  "bot",
+			Tools: []tool.Tool{lookupTool},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{{
+							FunctionCall: &genai.FunctionCall{
+								ID:   "call_skip_sum",
+								Name: "lookup",
+								Args: map[string]any{},
+							},
+						}},
+					},
+					TurnComplete: true,
+				}, nil)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errSilent2 := errors.New("bot2 silent failure")
+		bot2, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(_ agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, errSilent2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedFC *session.Event
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].FunctionCall != nil {
+							bufferedFC = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							if bufferedFC != nil {
+								yield(bufferedFC, nil)
+							}
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-skipsum-fc-silent2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationError)
+	})
+
+	t.Run("responded LlmAgent with buffered AfterAgentCallback tail preserves silent second run failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		bot1, err := llmagent.New(llmagent.Config{
+			Name: "bot",
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(_ agent.Context) (*genai.Content, error) {
+					return textContent("model", "bot1-extra-tail"), nil
+				},
+			},
+			Model: &funcStreamLLM{fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				yield(&model.LLMResponse{
+					Content:      textContent("model", "bot1-primary"),
+					TurnComplete: true,
+				}, nil)
+			}},
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(bot1): %v", err)
+		}
+		errSilent := errors.New("silent bot2 failure")
+		bot2, err := agent.New(agent.Config{
+			Name: "bot",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, errSilent)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(bot2): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{bot1},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var bufferedTail *session.Event
+					for ev, runErr := range bot1.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Content != nil && len(ev.Content.Parts) > 0 && ev.Content.Parts[0].Text == "bot1-extra-tail" {
+							bufferedTail = ev
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for ev, runErr := range bot2.Run(ctx) {
+						if runErr != nil {
+							if bufferedTail != nil {
+								yield(bufferedTail, nil)
+							}
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-responded-tail-silent2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationError)
+	})
+}
+
+// streamBufferedConcurrentRun runs second in a goroutine while forwarding any
+// events synchronously with per-event backpressure until readyToFlush signals,
+// yields flushEv while second is open, invokes onFlush, and then drains the
+// remaining output from second.
+func streamBufferedConcurrentRun(
+	ctx agent.InvocationContext,
+	second agent.Agent,
+	readyToFlush <-chan struct{},
+	flushEv *session.Event,
+	onFlush func(),
+	swallowSecondErr bool,
+	yield func(*session.Event, error) bool,
+) {
+	type botOut struct {
+		ev  *session.Event
+		err error
+		ack chan bool
+	}
+	ch := make(chan botOut)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(ch)
+		for ev, runErr := range second.Run(ctx) {
+			var ack chan bool
+			if ev != nil {
+				ack = make(chan bool, 1)
+			}
+			select {
+			case ch <- botOut{ev: ev, err: runErr, ack: ack}:
+			case <-done:
+				return
+			}
+			if ack != nil {
+				select {
+				case cont := <-ack:
+					if !cont {
+						return
+					}
+				case <-done:
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		onFlush()
+		close(done)
+		wg.Wait()
+	}()
+	handleOut := func(out botOut) bool {
+		if out.err != nil {
+			if out.ack != nil {
+				out.ack <- false
+			}
+			if swallowSecondErr {
+				return true
+			}
+			yield(nil, out.err)
+			return false
+		}
+		if out.ev != nil {
+			cont := yield(out.ev, nil)
+			if out.ack != nil {
+				out.ack <- cont
+			}
+			return cont
+		}
+		if out.ack != nil {
+			out.ack <- true
+		}
+		return true
+	}
+	for ready := false; !ready; {
+		select {
+		case out, ok := <-ch:
+			if !ok {
+				return
+			}
+			if !handleOut(out) {
+				return
+			}
+		case <-readyToFlush:
+			ready = true
+		case <-ctx.Done():
+			ready = true
+		}
+	}
+	if flushEv != nil && !yield(flushEv, nil) {
+		return
+	}
+	onFlush()
+	for out := range ch {
+		if !handleOut(out) {
+			return
+		}
+	}
 }

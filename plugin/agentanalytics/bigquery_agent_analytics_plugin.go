@@ -955,7 +955,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, ev.ID != "")
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
