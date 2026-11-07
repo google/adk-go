@@ -85,6 +85,20 @@ type Config struct {
 	//
 	// optional
 	Compaction *compaction.Config
+
+	// ContextCache enables explicit context caching for the model requests of
+	// every LLM agent this runner drives, so the system instruction, tools and
+	// stable conversation prefix are not resent in full on every turn. Nil, the
+	// default, disables it. It does not apply to [Runner.RunLive].
+	//
+	// When an invocation ends, the runner deletes the caches its model calls
+	// created or stopped using, except those its stored events still name.
+	//
+	// See [model.ContextCacheConfig] for when a cache is created and reused,
+	// and which models and session services support it.
+	//
+	// optional
+	ContextCache *model.ContextCacheConfig
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -146,6 +160,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, err
 	}
 
+	if err := cfg.ContextCache.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid ContextCache: %w", err)
+	}
+	// A copy that shares nothing with the caller's config, its HTTP options
+	// included, so a later change to it neither reaches running invocations
+	// nor races with them.
+	contextCache := llminternal.CloneContextCacheConfig(cfg.ContextCache)
+
 	return &Runner{
 		appName:           cfg.AppName,
 		rootAgent:         cfg.Agent,
@@ -156,6 +178,7 @@ func New(cfg Config) (*Runner, error) {
 		pluginManager:     pluginManager,
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
+		contextCache:      contextCache,
 	}, nil
 }
 
@@ -246,6 +269,10 @@ type Runner struct {
 	// validated copy of Config.Compaction with the summarizer
 	// resolved.
 	compactionConfig *compaction.Config
+
+	// contextCache is nil when context caching is disabled. Otherwise it is
+	// a validated copy of Config.ContextCache.
+	contextCache *model.ContextCacheConfig
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -514,6 +541,32 @@ func (r *Runner) compactionRuntime() *compactionctx.Runtime {
 	return compactionctx.New(r.compactionConfig, r.sessionService)
 }
 
+// withContextCache returns ctx carrying this runner's context cache config and
+// a ledger of its own for the invocation. Both are set even when caching is
+// off, so an invocation never sees the config or ledger of a run it is nested
+// in, such as an agent tool's caller.
+func (r *Runner) withContextCache(ctx context.Context) context.Context {
+	ctx = llminternal.WithContextCacheConfig(ctx, r.contextCache)
+	var ledger *llminternal.ContextCacheLedger
+	if r.contextCache != nil {
+		ledger = llminternal.NewContextCacheLedger()
+	}
+	return llminternal.WithContextCacheLedger(ctx, ledger)
+}
+
+// settleContextCaches deletes the context caches the invocation's model calls
+// created or stopped using that no event stored in sess names. It runs once
+// the invocation has ended, however it ended, so that the events it judges
+// are the ones the session actually holds. A canceled invocation still
+// settles, or its caches would stay on the provider until their TTL runs out.
+func (r *Runner) settleContextCaches(ctx context.Context, sess session.Session) {
+	ledger := llminternal.ContextCacheLedgerFromContext(ctx)
+	if ledger == nil || sess == nil {
+		return
+	}
+	ledger.Settle(context.WithoutCancel(ctx), sess.Events())
+}
+
 // reloadSession re-fetches a session so compaction works against current state
 // rather than the snapshot the invocation began with.
 func (r *Runner) reloadSession(ctx context.Context, s session.Session) (session.Session, error) {
@@ -674,6 +727,8 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		})
 		ctx = r.withPluginManager(ctx)
 		ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
+		ctx = r.withContextCache(ctx)
+		defer r.settleContextCaches(ctx, storedSession)
 
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
