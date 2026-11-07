@@ -51,8 +51,12 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 			return
 		}
 
-		// Add the set_model_response tool to handle structured output
-		setResponseTool := &setModelResponseTool{schema: state.OutputSchema}
+		schema, err := CloneSchema(state.OutputSchema)
+		if err != nil {
+			yield(nil, fmt.Errorf("clone output schema: %w", err))
+			return
+		}
+		setResponseTool := &setModelResponseTool{schema: schema}
 		if err := toolutils.PackTool(req, setResponseTool); err != nil {
 			yield(nil, fmt.Errorf("failed to pack set_model_response tool: %w", err))
 			return

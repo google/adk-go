@@ -54,10 +54,9 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 		taskAgentName: taskAgent.Name(),
 	}
 
-	if llmAgentState.OutputSchema != nil {
-		newTool.userSchema = llmAgentState.OutputSchema
-	} else {
-		newTool.userSchema = &genai.Schema{
+	userSchema := llmAgentState.OutputSchema
+	if userSchema == nil {
+		userSchema = &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
 				defaultWrapperKey: {
@@ -70,14 +69,14 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 	}
 
 	// Function declaration parameters must be an OBJECT schema.
-	if isObjectSchema(newTool.userSchema) {
-		newTool.wrappedSchema = newTool.userSchema
+	if isObjectSchema(userSchema) {
+		newTool.wrappedSchema = userSchema
 	} else {
 		newTool.wrapperKey = defaultWrapperKey
 		newTool.wrappedSchema = &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
-				newTool.wrapperKey: newTool.userSchema,
+				newTool.wrapperKey: userSchema,
 			},
 			Required: []string{newTool.wrapperKey},
 		}
@@ -94,12 +93,8 @@ func NewFinishTaskTool(taskAgent agent.Agent) (tool.Tool, error) {
 type FinishTaskTool struct {
 	taskAgentName string
 	description   string
-	// userSchema it's either LLMAgent.OutputSchema or the default schema if not set by the user.
-	userSchema *genai.Schema
-	// if userSchema is not an object, we wrap it into object using wrapperKey
-	// As function call parameters must be an OBJECT schema, so non-object output schemas are
-	// wrapped inside `{type: OBJECT, properties: {result: <schema>}, required:
-	// [result]}` and the model-provided value is unwrapped before validation.
+	// Function parameters must be an object, so non-object outputs are wrapped
+	// in a property named wrapperKey.
 	wrappedSchema *genai.Schema
 	wrapperKey    string
 }
@@ -138,6 +133,15 @@ func (t *FinishTaskTool) Declaration() *genai.FunctionDeclaration {
 }
 
 func (t *FinishTaskTool) ProcessRequest(ctx agent.Context, req *model.LLMRequest) error {
+	schema, err := llminternal.CloneSchema(t.wrappedSchema)
+	if err != nil {
+		return fmt.Errorf("clone finish_task schema: %w", err)
+	}
+	// The tool is shared across requests; keep callback mutations and validation
+	// on the same request's copy.
+	requestTool := *t
+	requestTool.wrappedSchema = schema
+
 	instructions := `
 Do NOT call 'finish_task' prematurely. Use your available tools to
 fully complete every aspect of the delegated task first. If the
@@ -148,7 +152,7 @@ no accompanying text output.
 
 	utils.AppendInstructions(req, instructions)
 
-	return toolutils.PackTool(req, t)
+	return toolutils.PackTool(req, &requestTool)
 }
 
 func (t *FinishTaskTool) Run(ctx agent.Context, args any) (map[string]any, error) {
@@ -176,10 +180,6 @@ func (t *FinishTaskTool) Run(ctx agent.Context, args any) (map[string]any, error
 }
 
 func (t *FinishTaskTool) validateArgs(args map[string]any) error {
-	if t.wrapperKey == "" {
-		return utils.ValidateMapOnSchema(args, t.userSchema, false)
-	}
-
 	return utils.ValidateMapOnSchema(
 		args,
 		t.wrappedSchema,

@@ -15,6 +15,8 @@
 package workflowinternal_test
 
 import (
+	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -95,6 +97,81 @@ func TestNewFinishTaskTool(t *testing.T) {
 					"output data", got, want)
 			}
 		})
+	}
+}
+
+func TestFinishTaskTool_RequestSchemaIsolation(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		schema   *genai.Schema
+		property string
+	}{
+		{
+			name: "object", property: "answer",
+			schema: &genai.Schema{
+				Type:       genai.TypeObject,
+				Properties: map[string]*genai.Schema{"answer": {Type: genai.TypeString}},
+			},
+		},
+		{name: "wrapped array", property: "result", schema: &genai.Schema{Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeString}}},
+		{name: "default", property: "result"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ft := newFinishTaskTool(t, tt.schema)
+			want, err := json.Marshal(ft.Declaration().Parameters)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := []*model.LLMRequest{{}, {}}
+			for _, req := range requests {
+				if err := ft.ProcessRequest(nil, req); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed := requests[1].Config.Tools[0].FunctionDeclarations[0].Parameters
+			changed.Properties[tt.property].Description = "changed"
+			changed.Properties[tt.property] = &genai.Schema{Type: genai.TypeNumber}
+			later := &model.LLMRequest{}
+			if err := ft.ProcessRequest(nil, later); err != nil {
+				t.Fatal(err)
+			}
+			for name, schema := range map[string]*genai.Schema{
+				"shared tool":   ft.Declaration().Parameters,
+				"other request": requests[0].Config.Tools[0].FunctionDeclarations[0].Parameters,
+				"later request": later.Config.Tools[0].FunctionDeclarations[0].Parameters,
+			} {
+				got, err := json.Marshal(schema)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != string(want) {
+					t.Errorf("request mutation changed %s schema", name)
+				}
+			}
+			requestTool := requests[1].Tools[workflowinternal.FinishTaskToolName].(*workflowinternal.FinishTaskTool)
+			result, err := requestTool.Run(nil, map[string]any{tt.property: 42.0})
+			if err != nil || result["result"] != workflowinternal.FinishTaskSuccessResult {
+				t.Fatal("request tool did not validate against its request schema")
+			}
+		})
+	}
+}
+
+type failingSchemaValue struct{ err error }
+
+func (v failingSchemaValue) MarshalJSON() ([]byte, error) { return nil, v.err }
+
+func TestFinishTaskTool_RequestSchemaCloneError(t *testing.T) {
+	wantErr := errors.New("cannot encode test schema")
+	ft := newFinishTaskTool(t, &genai.Schema{
+		Type: genai.TypeObject, Default: failingSchemaValue{err: wantErr},
+	})
+	req := &model.LLMRequest{}
+	if err := ft.ProcessRequest(nil, req); !errors.Is(err, wantErr) {
+		t.Fatal("ProcessRequest did not preserve the clone error")
+	}
+	if req.Config != nil || len(req.Tools) != 0 {
+		t.Error("ProcessRequest modified the request after clone failure")
 	}
 }
 
