@@ -526,11 +526,14 @@ func TestEventsSharingATimestampComeBackInAStableOrder(t *testing.T) {
 	}
 	sess := created.Session
 
-	// Six events on one instant, appended in a known order.
+	// Six events on one instant, appended in a known order. The ids ascend
+	// because the query breaks ties on id: random ids land in exact reverse
+	// insertion order once in 720 runs and fail the check below.
 	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	var want []string
 	for i := range 6 {
 		ev := session.NewEvent(ctx, "inv1")
+		ev.ID = fmt.Sprintf("event-%d", i)
 		ev.Author = "author"
 		ev.Timestamp = ts
 		ev.LLMResponse.Content = genai.NewContentFromText(fmt.Sprintf("event %d", i), genai.RoleUser)
