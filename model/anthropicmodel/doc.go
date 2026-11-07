@@ -249,6 +249,13 @@
 // `LLMResponse.CustomMetadata[StopReasonMetadataKey]`. `LLMResponse.ErrorCode`
 // is never set on a content-bearing response because of its stop reason alone.
 //
+// A refusal usually arrives with no content parts. When Claude reports why it
+// refused, the policy category (such as `cyber`) is stored in
+// `LLMResponse.CustomMetadata[RefusalCategoryMetadataKey]` and the explanation
+// in `LLMResponse.CustomMetadata[RefusalExplanationMetadataKey]`, each only when
+// present. A refusal sets neither `LLMResponse.ErrorCode` nor
+// `LLMResponse.ErrorMessage`.
+//
 // # Errors and Retries
 //
 // API failures return an [*APIError] that unwraps to a sentinel error for use
@@ -316,4 +323,9 @@
 //     reported in `CustomMetadata[CacheCreationInputTokensMetadataKey]` because
 //     Go's `genai.GenerateContentResponseUsageMetadata` struct does not allow
 //     arbitrary dynamic attributes.
+//   - Refusal details: when Claude refuses, the policy category and the
+//     explanation it reports in `stop_details` are preserved in
+//     `CustomMetadata[RefusalCategoryMetadataKey]` and
+//     `CustomMetadata[RefusalExplanationMetadataKey]`. `adk-python` does not
+//     read `stop_details`.
 package anthropicmodel
