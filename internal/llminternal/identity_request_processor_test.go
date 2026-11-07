@@ -80,6 +80,43 @@ func TestIdentityRequestProcessor(t *testing.T) {
 			wantNoSI: true,
 		},
 		{
+			// A leaf that can transfer nowhere never names itself, so the
+			// identity paragraph only makes otherwise identical workers differ.
+			name: "NoOpWhenLeafAndAllTransfersDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "worker"})),
+				s: &State{
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			wantNoSI: true,
+		},
+		{
+			// A sub-agent still needs to be able to address this agent by name.
+			name: "InjectsWhenSubAgentsPresent",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:      "parent",
+					SubAgents: []agent.Agent{utils.Must(agent.New(agent.Config{Name: "child"}))},
+				})),
+				s: &State{
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			wantContains: []string{`Your internal name is "parent".`},
+		},
+		{
+			// One enabled transfer direction is enough to keep the identity.
+			name: "InjectsWhenTransferToParentAllowed",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "peer_worker"})),
+				s:     &State{DisallowTransferToPeers: true},
+			},
+			wantContains: []string{`Your internal name is "peer_worker".`},
+		},
+		{
 			name: "EmptyDescription",
 			agent: &mockLLMAgent{
 				Agent: utils.Must(agent.New(agent.Config{
