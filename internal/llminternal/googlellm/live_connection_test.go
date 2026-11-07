@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/gorilla/websocket"
@@ -151,5 +152,177 @@ func TestLiveConnectionRejectsOtherMIMETypesOn3xLive(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("first frame after the rejected blob mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestLiveConnectionSendHistoryFiltersInternalParts checks that SendHistory
+// strips the parts the live API must not be primed with - internal _adk_live
+// artifact references (written by the audio cache manager) and cached audio
+// blobs - while leaving text and ordinary file references untouched.
+func TestLiveConnectionSendHistoryFiltersInternalParts(t *testing.T) {
+	testCases := []struct {
+		name string
+		// history is what the contents processor hands SendHistory.
+		history []*genai.Content
+		// want is the turns the live API should be primed with.
+		want []*genai.Content
+		// wantTurnComplete mirrors whether want ends in a user turn.
+		wantTurnComplete bool
+	}{
+		{
+			name: "DropsInternalArtifactRefsAndKeepsRest",
+			history: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "what is in this file?"},
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/report.pdf#1", MIMEType: "application/pdf"}},
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio_1.pcm#1", MIMEType: "audio/pcm"}},
+					},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "a quarterly report"},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "what is in this file?"},
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/report.pdf#1", MIMEType: "application/pdf"}},
+					},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "a quarterly report"},
+					},
+				},
+			},
+			wantTurnComplete: false,
+		},
+		{
+			name: "DropsContentLeftEmptyByFiltering",
+			history: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio_1.pcm#1", MIMEType: "audio/pcm"}},
+					},
+				},
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{Text: "hello"},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
+		{
+			// turnComplete has to follow the last surviving turn, not the last
+			// turn of the history as it arrived: here the history ends in a
+			// model turn that is filtered away, leaving a user turn.
+			name: "TurnCompleteFollowsLastSurvivingTurn",
+			history: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+				{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/adk_live_audio_storage_output_audio_1.pcm#0", MIMEType: "audio/pcm"}},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role:  "user",
+					Parts: []*genai.Part{{Text: "hello"}},
+				},
+			},
+			wantTurnComplete: true,
+		},
+		{
+			name: "DropsInlineAudioButKeepsNonLiveArtifactAudio",
+			history: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{InlineData: &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0x01, 0x02}}},
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/uploaded.wav#1", MIMEType: "audio/wav"}},
+						{Text: "transcribe this"},
+					},
+				},
+			},
+			want: []*genai.Content{
+				{
+					Role: "user",
+					Parts: []*genai.Part{
+						{FileData: &genai.FileData{FileURI: "artifact://app/user/session/uploaded.wav#1", MIMEType: "audio/wav"}},
+						{Text: "transcribe this"},
+					},
+				},
+			},
+			wantTurnComplete: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+			if err := conn.SendHistory(t.Context(), tc.history); err != nil {
+				t.Fatalf("SendHistory failed: %v", err)
+			}
+			msg := &genai.LiveClientMessage{}
+			if err := json.Unmarshal(testutil.AwaitValue(t, frames, "history frame"), msg); err != nil {
+				t.Fatalf("decoding the history frame failed: %v", err)
+			}
+			if msg.ClientContent == nil {
+				t.Fatalf("SendHistory sent %+v, want a clientContent message", msg)
+			}
+			if diff := cmp.Diff(tc.want, msg.ClientContent.Turns); diff != "" {
+				t.Errorf("SendHistory sent unexpected turns (-want +got):\n%s", diff)
+			}
+			if got := msg.ClientContent.TurnComplete; got != tc.wantTurnComplete {
+				t.Errorf("SendHistory sent turnComplete=%t, want %t", got, tc.wantTurnComplete)
+			}
+		})
+	}
+}
+
+// TestLiveConnectionSendHistoryAllFiltered checks that a history made up
+// entirely of internal parts sends nothing at all, rather than an empty turn.
+func TestLiveConnectionSendHistoryAllFiltered(t *testing.T) {
+	conn, frames := connectFakeLive(t, genai.BackendGeminiAPI, "gemini-2.0-flash-live-001")
+	history := []*genai.Content{
+		nil,
+		{
+			Role: "user",
+			Parts: []*genai.Part{
+				nil,
+				{FileData: &genai.FileData{FileURI: "artifact://app/user/session/_adk_live/audio_1.pcm#1", MIMEType: "audio/pcm"}},
+				{InlineData: &genai.Blob{MIMEType: "audio/pcm", Data: []byte{0x01}}},
+			},
+		},
+	}
+	if err := conn.SendHistory(t.Context(), history); err != nil {
+		t.Fatalf("SendHistory failed: %v", err)
+	}
+	select {
+	case raw, ok := <-frames:
+		if ok {
+			t.Errorf("SendHistory sent %s, want no frame", raw)
+		}
+	case <-time.After(500 * time.Millisecond):
 	}
 }

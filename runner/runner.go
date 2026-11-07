@@ -29,6 +29,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/artifact"
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
@@ -62,7 +63,11 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	// optional
+	// optional. When true, Run and RunLive create the session if it does not
+	// exist. The session is created when the session ID is empty, so the
+	// service generates one, or when the session service's Get reports
+	// [session.ErrNotFound]. Any other Get error is returned as is, so a
+	// transient storage failure never replaces an existing session.
 	AutoCreateSession bool
 
 	// Compaction enables context compaction for the sessions this
@@ -536,7 +541,9 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 	if err == nil {
 		return getResp.Session, nil
 	}
-	if !r.autoCreateSession {
+	// Services reject an empty ID in Get with a validation error, not
+	// ErrNotFound. Create generates an ID for it.
+	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
 		return nil, err
 	}
 	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
@@ -715,11 +722,28 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
+		// A function response goes back to the agent that made the call, on
+		// the branch it ran on (adk-python find_agent_to_run and
+		// restore_branch_from_history). Re-running the root would run agents
+		// that never saw the call, and they fail on the unmatched response.
+		// A call made inside a graph workflow is the exception: the root runs,
+		// as on any other turn. The workflow resumes the interrupted node only
+		// for an adk_request_input response; any other response restarts the
+		// graph. Agents ahead of or beside the workflow run again, and an LLM
+		// agent among them fails on the unmatched response.
+		agentToRun, branch := r.rootAgent, ""
+		if ev := handleUserFunctionCallResponse(storedSession.Events(), msg); ev != nil {
+			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
+				agentToRun, branch = sub, ev.Branch
+			}
+		}
+
 		ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 			Artifacts:    artifacts,
 			Memory:       memoryImpl,
 			Session:      storedSession,
-			Agent:        r.rootAgent,
+			Branch:       branch,
+			Agent:        agentToRun,
 			UserContent:  msg,
 			RunConfig:    &cfg,
 			InvocationID: resolveInvocationID(storedSession, msg),
@@ -744,7 +768,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 		}
 
-		for event, err := range r.rootAgent.Run(ctx) {
+		for event, err := range agentToRun.Run(ctx) {
 			if err != nil {
 				// The model-call budget is spent for the whole invocation, so
 				// nothing that runs after this can reach a model. Ending here
@@ -758,7 +782,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			}
 
 			if event == nil {
-				err := fmt.Errorf("adk: agent %q yielded a nil event", r.rootAgent.Name())
+				err := fmt.Errorf("adk: agent %q yielded a nil event", agentToRun.Name())
 				log.Printf("%v", err) //nolint:forbidigo // pre-slog call site
 				yield(nil, err)
 				return
@@ -1320,6 +1344,17 @@ func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *
 		}
 	}
 	return nil
+}
+
+// isInGraphWorkflow reports whether a or one of its ancestors is a graph
+// workflow agent built by workflowagent.New.
+func (r *Runner) isInGraphWorkflow(a agent.Agent) bool {
+	for cur := a; cur != nil; cur = r.parents[cur.Name()] {
+		if ia, ok := cur.(agentinternal.Agent); ok && agentinternal.Reveal(ia).AgentType == agentinternal.TypeWorkflowAgent {
+			return true
+		}
+	}
+	return false
 }
 
 // checks if the agent and its parent chain allow transfer up the tree.

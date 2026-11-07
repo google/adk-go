@@ -166,6 +166,9 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	// Read the caller-provided clock outside the service lock. A provider may
 	// call back into the service, so invoking it while locked could deadlock.
 	createTime := platform.Now(ctx)
+	// Copy before taking the lock. The copy only reads the caller's part, and
+	// inline data can be large.
+	part := clonePart(req.Part)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,7 +178,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 		nextVersion = internalVer + 1
 	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, &artifactEntry{
-		part:           req.Part,
+		part:           part,
 		createTime:     createTime,
 		customMetadata: customMetadata,
 	})
@@ -224,21 +227,22 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	}
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
+	var entry *artifactEntry
+	var ok bool
 	if version > 0 {
-		entry, ok := s.get(appName, userID, sessionID, fileName, version)
-		if !ok {
-			return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
-		}
-		return &LoadResponse{Part: entry.part}, nil
+		entry, ok = s.get(appName, userID, sessionID, fileName, version)
+	} else {
+		// pick the latest version
+		_, entry, ok = s.find(appName, userID, sessionID, fileName)
 	}
-	// pick the latest version
-	_, entry, ok := s.find(appName, userID, sessionID, fileName)
+	s.mu.RUnlock()
+
 	if !ok {
 		return nil, fmt.Errorf("artifact not found: %w", fs.ErrNotExist)
 	}
-	return &LoadResponse{Part: entry.part}, nil
+	// Copy after unlocking. A stored entry never changes after Save, and inline
+	// data can be large.
+	return &LoadResponse{Part: clonePart(entry.part)}, nil
 }
 
 // List implements [artifact.Service]
