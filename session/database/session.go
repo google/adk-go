@@ -73,6 +73,14 @@ func (s *localSession) LastUpdateTime() time.Time {
 	return s.updatedAt
 }
 
+// setUpdatedAt sets the last update time under the session lock.
+func (s *localSession) setUpdatedAt(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.updatedAt = t
+}
+
 func (s *localSession) appendEvent(event *session.Event) error {
 	if event.Partial {
 		return nil
