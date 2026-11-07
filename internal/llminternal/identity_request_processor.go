@@ -35,6 +35,13 @@ func identityRequestProcessor(ctx agent.InvocationContext, req *model.LLMRequest
 		if ModeFor(ctx, ctx.Agent().Name(), llmAgent.internal()) == ModeSingleTurn {
 			return
 		}
+		// A leaf agent that can transfer neither to its parent nor to peers has
+		// no use for the framework identity: it will never name itself in a
+		// transfer. Omitting it keeps otherwise identical workers byte-for-byte
+		// identical regardless of their internal names.
+		if !shouldUseAutoFlow(ctx.Agent()) {
+			return
+		}
 
 		parts := []string{fmt.Sprintf("You are an agent. Your internal name is %q.", ctx.Agent().Name())}
 		if description := ctx.Agent().Description(); description != "" {
