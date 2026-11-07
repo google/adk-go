@@ -79,18 +79,28 @@ func NewAgentNodeWithSchemas(a agent.Agent, inputSchema, outputSchema *jsonschem
 // NewAgentNodeTyped creates a new node wrapping an agent using generics to
 // automatically infer input and output schemas from the provided types.
 //
-// The output schema is passed to the model when it is an object with
-// properties and the wrapped agent is an LLM agent that sets no response schema
-// of its own (OutputSchema, or ResponseSchema or ResponseJsonSchema in
+// The output schema is passed to the model when it is a closed object with
+// properties (a struct, not a pointer to one; a hand-written schema must set
+// additionalProperties to false on every object) and the wrapped agent is an
+// LLM agent that sets no response format of its own (OutputSchema, or
+// ResponseSchema, ResponseJsonSchema or ResponseMIMEType in
 // GenerateContentConfig), runs single_turn (the default at a node; chat and
 // task agents talk to the user between replies), and cannot transfer to other
-// agents. It goes out as the request's response schema or, on Gemini models
-// that cannot combine tools with one, as a set_model_response tool the model is
-// told to call. Value constraints such as bounds and patterns are not sent, and
-// nothing is sent for a schema the model API cannot express, such as one with
-// an any or map field or a non-string enum. Either way the node validates the
-// reply against the full output schema, and the agent's OutputKey, if set,
-// still receives the reply text rather than a parsed value.
+// agents.
+//
+// It goes out as the request's response schema or, on Gemini models that
+// cannot combine tools with one, as a set_model_response tool the model is
+// told to call. That tool is a function declaration, so, as with a declared
+// OutputSchema, an agent with a Gemini built-in tool such as Google Search
+// fails on models that cannot mix built-in tools with function declarations
+// (on Gemini 1.x, before the model is called); declare an untyped node for it.
+//
+// Value constraints such as bounds and patterns are not sent, a pointer or
+// slice field is sent as not nullable, and nothing is sent for a schema the
+// model API cannot express, such as one with an any or map field or a
+// non-string enum. Either way the node validates the reply against the full
+// output schema, and the agent's OutputKey, if set, still receives the reply
+// text rather than a parsed value.
 func NewAgentNodeTyped[Input, Output any](a agent.Agent, cfg NodeConfig) (*AgentNode, error) {
 	return newAgentNodeWithSchemasTyped[Input, Output](a, nil, nil, cfg)
 }
@@ -144,17 +154,11 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			state := llminternal.Reveal(llmA)
 			mode := llminternal.ResolveMode(state.Mode, llminternal.ModeSingleTurn)
 			bound = llminternal.WithBoundMode(ctx, n.agent.Name(), state, mode)
-			// Offer the node's output shape to the model. Only a single_turn
-			// run answers once and is done; a chat or task agent talks to the
-			// user between replies, so forcing every turn into the shape would
-			// break it. Whether a request uses the shape is decided per
-			// request, against the agent's own setup. A nil schema is still
-			// bound, so this placement clears one an outer placement bound.
-			var schema *genai.Schema
-			if mode == llminternal.ModeSingleTurn {
-				schema = n.modelOutputSchema
-			}
-			bound = llminternal.WithBoundOutputSchema(bound, n.agent.Name(), state, schema)
+			// Offer the node's output shape to the model. Each request decides
+			// whether to use it, against the mode bound for it and the agent's
+			// own setup. A nil schema is still bound, so this placement clears
+			// one an outer placement bound.
+			bound = llminternal.WithBoundOutputSchema(bound, n.agent.Name(), state, n.modelOutputSchema)
 		}
 
 		// Use existing agent context instead of implementing a new one.

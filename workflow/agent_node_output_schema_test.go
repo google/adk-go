@@ -26,8 +26,11 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/internal/agent/runconfig"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/adk/v2/workflow"
@@ -184,9 +187,11 @@ func TestAgentNode_TypedObjectOutputSetsResponseSchema(t *testing.T) {
 // schema goes out as set_model_response and the node returns its arguments.
 func TestAgentNode_TypedObjectOutputWithToolsUsesSetModelResponse(t *testing.T) {
 	llm := &requestRecorder{
-		name:     "gemini-2.5-flash",
-		backend:  genai.BackendGeminiAPI,
-		setReply: map[string]any{"city": "Paris", "temp": float64(20)}, // JSON numbers decode as float64
+		name:    "gemini-2.5-flash",
+		backend: genai.BackendGeminiAPI,
+		// Differs from the default text reply, so the output can only come from
+		// the set_model_response call. JSON numbers decode as float64.
+		setReply: map[string]any{"city": "Paris", "temp": float64(31)},
 	}
 	a, err := llmagent.New(llmagent.Config{Name: "weather", Model: llm, Tools: []tool.Tool{lookupTool(t)}})
 	if err != nil {
@@ -214,9 +219,13 @@ func TestAgentNode_TypedObjectOutputWithToolsUsesSetModelResponse(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ValidateOutput(%v): %v", out, err)
 	}
-	want := map[string]any{"city": "Paris", "temp": float64(20)}
+	want := map[string]any{"city": "Paris", "temp": float64(31)}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("node output mismatch (-want +got):\n%s", diff)
+	}
+	// The set_model_response result ends the turn: no second model call.
+	if len(llm.reqs) != 1 {
+		t.Errorf("model was called %d times, want 1", len(llm.reqs))
 	}
 }
 
@@ -274,6 +283,9 @@ func TestAgentNode_OneAgentTwoTypedNodes(t *testing.T) {
 	runNode(t, cityNode, a)
 	runNode(t, weatherNode, a)
 
+	if len(llm.reqs) != 3 {
+		t.Fatalf("got %d model requests, want 3", len(llm.reqs))
+	}
 	for i, want := range []*genai.Schema{weatherSchema, citySchema, weatherSchema} {
 		if diff := cmp.Diff(want, llm.reqs[i].Config.ResponseSchema); diff != "" {
 			t.Errorf("run %d ResponseSchema mismatch (-want +got):\n%s", i, diff)
@@ -334,13 +346,20 @@ type withMapField struct {
 
 type empty struct{}
 
-// Outputs that are not an object with properties, or that genai.Schema cannot
-// describe, must construct and send exactly the request an untyped node
-// sends, with and without tools.
+// Outputs that are not a closed, non-null object with properties, or that
+// genai.Schema cannot describe, must construct and send exactly the request
+// an untyped node sends, with and without tools.
 func TestAgentNode_OutputSchemaLeavesRequestUnchanged(t *testing.T) {
 	intEnum := &jsonschema.Schema{
+		Type:                 "object",
+		Properties:           map[string]*jsonschema.Schema{"level": {Type: "integer", Enum: []any{1, 2, 3}}},
+		AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
+	}
+	// No additionalProperties: the node accepts extra keys, which
+	// set_model_response would reject.
+	openObject := &jsonschema.Schema{
 		Type:       "object",
-		Properties: map[string]*jsonschema.Schema{"level": {Type: "integer", Enum: []any{1, 2, 3}}},
+		Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}},
 	}
 	newNodes := map[string]func(agent.Agent) (*workflow.AgentNode, error){
 		"string": func(a agent.Agent) (*workflow.AgentNode, error) {
@@ -366,6 +385,12 @@ func TestAgentNode_OutputSchemaLeavesRequestUnchanged(t *testing.T) {
 		},
 		"explicit schema with an integer enum": func(a agent.Agent) (*workflow.AgentNode, error) {
 			return workflow.NewAgentNodeWithSchemas(a, nil, intEnum, workflow.NodeConfig{})
+		},
+		"explicit open object schema": func(a agent.Agent) (*workflow.AgentNode, error) {
+			return workflow.NewAgentNodeWithSchemas(a, nil, openObject, workflow.NodeConfig{})
+		},
+		"pointer to struct": func(a agent.Agent) (*workflow.AgentNode, error) {
+			return workflow.NewAgentNodeTyped[string, *weatherOut](a, workflow.NodeConfig{})
 		},
 	}
 	models := map[string]struct {
@@ -432,6 +457,13 @@ func TestAgentNode_AgentSetupKeepsItsRequest(t *testing.T) {
 				ResponseJsonSchema: map[string]any{"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}}},
 			}},
 			newLLM: func() *requestRecorder { return &requestRecorder{name: "recorder", reply: `{"answer":"sunny"}`} },
+		},
+		{
+			name: "GenerateContentConfig.ResponseMIMEType",
+			cfg: llmagent.Config{GenerateContentConfig: &genai.GenerateContentConfig{
+				ResponseMIMEType: "text/plain",
+			}},
+			newLLM: func() *requestRecorder { return &requestRecorder{name: "recorder", reply: "sunny"} },
 		},
 		{
 			name: "sub-agent on a gemini api model",
@@ -506,15 +538,25 @@ func (statelessLLM) GenerateContent(context.Context, *model.LLMRequest, bool) it
 }
 
 // Concurrent runs of one node, as under a fan-out, each get their own schema,
-// so a callback that writes to it does not race with the other run. Run with
-// -race.
+// so a callback that writes to it does not race with the other run (also
+// checked under -race).
 func TestAgentNode_ConcurrentRunsDoNotShareSchema(t *testing.T) {
+	var (
+		mu   sync.Mutex
+		seen []*genai.Schema
+	)
 	a, err := llmagent.New(llmagent.Config{
 		Name:  "weather",
 		Model: statelessLLM{},
 		BeforeModelCallbacks: []llmagent.BeforeModelCallback{
 			func(_ agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-				req.Config.ResponseSchema.Description = "set by callback"
+				schema := req.Config.ResponseSchema
+				mu.Lock()
+				seen = append(seen, schema)
+				mu.Unlock()
+				if schema != nil {
+					schema.Description = "set by callback" // races under -race if shared
+				}
 				return nil, nil
 			},
 		},
@@ -540,4 +582,108 @@ func TestAgentNode_ConcurrentRunsDoNotShareSchema(t *testing.T) {
 		})
 	}
 	wg.Wait()
+
+	if len(seen) != 2 || seen[0] == nil || seen[1] == nil {
+		t.Fatalf("callback saw schemas %v, want two non-nil", seen)
+	}
+	if seen[0] == seen[1] {
+		t.Error("both runs were handed the same *genai.Schema")
+	}
+}
+
+// An agent that declares single_turn itself is treated like one that runs
+// single_turn by default at a node.
+func TestAgentNode_ExplicitSingleTurnAgentGetsOutputSchema(t *testing.T) {
+	llm := &requestRecorder{name: "recorder"}
+	a, err := llmagent.New(llmagent.Config{Name: "weather", Model: llm, Mode: llmagent.ModeSingleTurn})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNodeTyped[string, weatherOut](a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNodeTyped: %v", err)
+	}
+
+	runNode(t, node, a)
+
+	if diff := cmp.Diff(weatherSchema, firstRequest(t, llm).Config.ResponseSchema); diff != "" {
+		t.Errorf("ResponseSchema mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// An untyped placement of an agent, running inside a typed placement of the
+// same agent, clears the outer schema rather than inheriting it.
+func TestAgentNode_InnerUntypedPlacementClearsOuterSchema(t *testing.T) {
+	llm := &requestRecorder{name: "recorder"}
+	a, err := llmagent.New(llmagent.Config{Name: "weather", Model: llm})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	inner, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNode: %v", err)
+	}
+	state := llminternal.Reveal(a.(llminternal.Agent))
+	outer := llminternal.WithBoundOutputSchema(
+		llminternal.WithBoundMode(t.Context(), a.Name(), state, llminternal.ModeSingleTurn),
+		a.Name(), state, weatherSchema)
+
+	for _, err := range inner.Run(nodeContextFrom(t, outer, a), "weather in Paris?") {
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	}
+
+	if got := firstRequest(t, llm).Config.ResponseSchema; got != nil {
+		t.Errorf("ResponseSchema = %v under an untyped inner placement, want nil", got)
+	}
+}
+
+// nodeContextFrom is newRunnableNodeContext built on base, so a test can
+// start a node inside bindings an outer placement made.
+func nodeContextFrom(t *testing.T, base context.Context, a agent.Agent) agent.Context {
+	t.Helper()
+	resp, err := session.InMemoryService().Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	ctx := runconfig.ToContext(base, &runconfig.RunConfig{StreamingMode: runconfig.StreamingModeNone})
+	return agent.NewContext(icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
+		Agent:        a,
+		Session:      resp.Session,
+		InvocationID: "inv-test",
+	}))
+}
+
+// A hand-written object schema that allows extra keys is not sent: the model's
+// answer with an extra key reaches the node as it does on an untyped node,
+// rather than set_model_response rejecting it and the error becoming the
+// output.
+func TestAgentNode_OpenObjectSchemaKeepsModelAnswer(t *testing.T) {
+	answer := map[string]any{"city": "Paris", "country": "FR"}
+	llm := &requestRecorder{
+		name:     "gemini-2.5-flash",
+		backend:  genai.BackendGeminiAPI,
+		reply:    `{"city":"Paris","country":"FR"}`,
+		setReply: answer, // used only if set_model_response is offered
+	}
+	a, err := llmagent.New(llmagent.Config{Name: "weather", Model: llm, Tools: []tool.Tool{lookupTool(t)}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	open := &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}}}
+	node, err := workflow.NewAgentNodeWithSchemas(a, nil, open, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNodeWithSchemas: %v", err)
+	}
+
+	out := runNode(t, node, a)
+
+	got, err := node.ValidateOutput(out)
+	if err != nil {
+		t.Fatalf("ValidateOutput(%v): %v", out, err)
+	}
+	if diff := cmp.Diff(answer, got); diff != "" {
+		t.Errorf("node output mismatch (-want +got):\n%s", diff)
+	}
 }

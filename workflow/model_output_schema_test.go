@@ -40,15 +40,19 @@ type schemaShapes struct {
 	Opaque json.RawMessage
 }
 
+// closed returns the schema jsonschema-go writes for additionalProperties on a
+// Go struct: it matches nothing, so no extra keys are allowed. Each use needs
+// its own value, because a resolved schema must be a tree.
+func closed() *jsonschema.Schema { return &jsonschema.Schema{Not: &jsonschema.Schema{}} }
+
+// object returns a closed object schema with the given properties.
+func object(props map[string]*jsonschema.Schema) *jsonschema.Schema {
+	return &jsonschema.Schema{Type: "object", Properties: props, AdditionalProperties: closed()}
+}
+
 func TestModelOutputSchema(t *testing.T) {
 	inner := &genai.Schema{
 		Type:       genai.TypeObject,
-		Properties: map[string]*genai.Schema{"n": {Type: genai.TypeInteger}},
-		Required:   []string{"n"},
-	}
-	nullableInner := &genai.Schema{
-		Type:       genai.TypeObject,
-		Nullable:   genai.Ptr(true),
 		Properties: map[string]*genai.Schema{"n": {Type: genai.TypeInteger}},
 		Required:   []string{"n"},
 	}
@@ -58,6 +62,7 @@ func TestModelOutputSchema(t *testing.T) {
 		want   *genai.Schema
 	}{
 		{
+			// Pointer and slice fields are sent as their non-null type.
 			name: "struct shapes",
 			want: &genai.Schema{
 				Type: genai.TypeObject,
@@ -65,37 +70,51 @@ func TestModelOutputSchema(t *testing.T) {
 					"name":  {Type: genai.TypeString, Description: "the name"},
 					"score": {Type: genai.TypeNumber},
 					"ok":    {Type: genai.TypeBoolean},
-					"note":  {Type: genai.TypeString, Nullable: genai.Ptr(true)},
-					"tags":  {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: &genai.Schema{Type: genai.TypeString}},
+					"note":  {Type: genai.TypeString},
+					"tags":  {Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeString}},
 					"inner": inner,
-					"maybe": nullableInner,
-					"many":  {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: inner},
+					"maybe": inner,
+					"many":  {Type: genai.TypeArray, Items: inner},
 					// uint's minimum: 0 is dropped; ValidateOutput still checks it.
 					"count": {Type: genai.TypeInteger},
 					// json.RawMessage is a byte array with bounds on each item.
-					"Opaque": {Type: genai.TypeArray, Nullable: genai.Ptr(true), Items: &genai.Schema{Type: genai.TypeInteger}},
+					"Opaque": {Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeInteger}},
 				},
 				Required: []string{"name", "ok", "note", "tags", "inner", "maybe", "many", "count", "Opaque"},
 			},
 		},
 		{
-			name: "string enum",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"level": {Type: "string", Enum: []any{"low", "high"}},
+			name: "string enum and titles",
+			schema: &jsonschema.Schema{
+				Type: "object", Title: "Report", AdditionalProperties: closed(),
+				Properties: map[string]*jsonschema.Schema{
+					"level": {Type: "string", Title: "Level", Enum: []any{"low", "high"}},
+				},
+			},
+			want: &genai.Schema{Type: genai.TypeObject, Title: "Report", Properties: map[string]*genai.Schema{
+				"level": {Type: genai.TypeString, Title: "Level", Enum: []string{"low", "high"}},
 			}},
+		},
+		{
+			name: "single-element type lists",
+			schema: &jsonschema.Schema{
+				Types: []string{"object"}, AdditionalProperties: closed(),
+				Properties: map[string]*jsonschema.Schema{"city": {Types: []string{"string"}}},
+			},
 			want: &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{
-				"level": {Type: genai.TypeString, Enum: []string{"low", "high"}},
+				"city": {Type: genai.TypeString},
 			}},
 		},
 		{
 			name: "value constraints and annotations dropped",
 			schema: &jsonschema.Schema{
-				Schema:        "https://json-schema.org/draft/2020-12/schema",
-				ID:            "https://example.com/report",
-				Anchor:        "report",
-				Type:          "object",
-				MinProperties: jsonschema.Ptr(1),
-				MaxProperties: jsonschema.Ptr(5),
+				Schema:               "https://json-schema.org/draft/2020-12/schema",
+				ID:                   "https://example.com/report",
+				Anchor:               "report",
+				Type:                 "object",
+				AdditionalProperties: closed(),
+				MinProperties:        jsonschema.Ptr(1),
+				MaxProperties:        jsonschema.Ptr(5),
 				Properties: map[string]*jsonschema.Schema{
 					"code": {
 						Type: "string", Pattern: "^[A-Z]+$", Format: "email",
@@ -114,6 +133,18 @@ func TestModelOutputSchema(t *testing.T) {
 				"list": {Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeNumber}},
 			}},
 		},
+		// set_model_response rejects keys its schema does not list, so an
+		// object that accepts extra keys cannot be sent.
+		{
+			name:   "open root object",
+			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}}},
+		},
+		{
+			name: "open nested object",
+			schema: object(map[string]*jsonschema.Schema{
+				"place": {Type: "object", Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}}},
+			}),
+		},
 		{
 			name: "properties with a schema for extra keys",
 			schema: &jsonschema.Schema{
@@ -123,52 +154,64 @@ func TestModelOutputSchema(t *testing.T) {
 			},
 		},
 		{
-			name: "integer enum",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"level": {Type: "integer", Enum: []any{1, 2}},
-			}},
+			name: "required name with no property",
+			schema: &jsonschema.Schema{
+				Type: "object", AdditionalProperties: closed(), Required: []string{"city", "country"},
+				Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}},
+			},
 		},
 		{
-			name: "untyped property",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"any": {},
-			}},
+			// A pointer Output: set_model_response always answers with an
+			// object, so a null answer would have no way through.
+			name: "nullable root object",
+			schema: &jsonschema.Schema{
+				Types: []string{"null", "object"}, AdditionalProperties: closed(),
+				Properties: map[string]*jsonschema.Schema{"city": {Type: "string"}},
+			},
 		},
 		{
-			name: "map property",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"m": {Type: "object", AdditionalProperties: &jsonschema.Schema{Type: "integer"}},
-			}},
+			name:   "integer enum",
+			schema: object(map[string]*jsonschema.Schema{"level": {Type: "integer", Enum: []any{1, 2}}}),
 		},
 		{
-			name: "anyOf property",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"v": {AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "integer"}}},
-			}},
+			name:   "non-string value in a string enum",
+			schema: object(map[string]*jsonschema.Schema{"level": {Type: "string", Enum: []any{"low", 2}}}),
 		},
 		{
-			name: "const property",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"v": {Type: "string", Const: jsonschema.Ptr[any]("x")},
-			}},
+			name:   "string enum on an integer",
+			schema: object(map[string]*jsonschema.Schema{"level": {Type: "integer", Enum: []any{"1", "2"}}}),
 		},
 		{
-			name: "two non-null types",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{
-				"v": {Types: []string{"string", "integer"}},
-			}},
+			name:   "untyped property",
+			schema: object(map[string]*jsonschema.Schema{"any": {}}),
+		},
+		{
+			name:   "map property",
+			schema: object(map[string]*jsonschema.Schema{"m": {Type: "object", AdditionalProperties: &jsonschema.Schema{Type: "integer"}}}),
+		},
+		{
+			name:   "anyOf property",
+			schema: object(map[string]*jsonschema.Schema{"v": {Type: "string", AnyOf: []*jsonschema.Schema{{Type: "string"}, {Type: "string", MinLength: jsonschema.Ptr(2)}}}}),
+		},
+		{
+			name:   "const property",
+			schema: object(map[string]*jsonschema.Schema{"v": {Type: "string", Const: jsonschema.Ptr[any]("x")}}),
+		},
+		{
+			name:   "two non-null types",
+			schema: object(map[string]*jsonschema.Schema{"v": {Types: []string{"string", "integer"}}}),
 		},
 		{
 			name:   "array without items",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"v": {Type: "array"}}},
+			schema: object(map[string]*jsonschema.Schema{"v": {Type: "array"}}),
 		},
 		{
 			name:   "nested object without properties",
-			schema: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"v": {Type: "object"}}},
+			schema: object(map[string]*jsonschema.Schema{"v": {Type: "object", AdditionalProperties: closed()}}),
 		},
 		{
 			name:   "root object without properties",
-			schema: &jsonschema.Schema{Type: "object"},
+			schema: &jsonschema.Schema{Type: "object", AdditionalProperties: closed()},
 		},
 		{
 			name:   "root string",
@@ -176,7 +219,7 @@ func TestModelOutputSchema(t *testing.T) {
 		},
 		{
 			name:   "root array of objects",
-			schema: &jsonschema.Schema{Type: "array", Items: &jsonschema.Schema{Type: "object", Properties: map[string]*jsonschema.Schema{"n": {Type: "integer"}}}},
+			schema: &jsonschema.Schema{Type: "array", Items: object(map[string]*jsonschema.Schema{"n": {Type: "integer"}})},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

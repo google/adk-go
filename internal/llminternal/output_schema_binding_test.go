@@ -39,6 +39,7 @@ func TestOutputSchemaFor(t *testing.T) {
 		subAgents []agent.Agent
 		parent    agent.Agent                     // an LLM agent that lists this one as a sub-agent
 		bindTo    func(s *State) (string, *State) // which agent the binding names
+		mode      Mode                            // bound for this agent; ModeSingleTurn when unset
 		want      *genai.Schema
 	}{
 		{
@@ -46,6 +47,18 @@ func TestOutputSchemaFor(t *testing.T) {
 			agentName: "self",
 			state:     &State{},
 			want:      bound,
+		},
+		{
+			name:      "chat mode bound for this agent",
+			agentName: "self",
+			state:     &State{},
+			mode:      ModeChat,
+		},
+		{
+			name:      "task mode bound for this agent",
+			agentName: "self",
+			state:     &State{},
+			mode:      ModeTask,
 		},
 		{
 			name:      "declared OutputSchema wins",
@@ -62,6 +75,11 @@ func TestOutputSchemaFor(t *testing.T) {
 			name:      "GenerateContentConfig.ResponseJsonSchema counts as declared",
 			agentName: "self",
 			state:     &State{GenerateContentConfig: &genai.GenerateContentConfig{ResponseJsonSchema: map[string]any{"type": "object"}}},
+		},
+		{
+			name:      "GenerateContentConfig.ResponseMIMEType counts as declared",
+			agentName: "self",
+			state:     &State{GenerateContentConfig: &genai.GenerateContentConfig{ResponseMIMEType: "text/plain"}},
 		},
 		{
 			name:      "agent that can transfer",
@@ -101,7 +119,11 @@ func TestOutputSchemaFor(t *testing.T) {
 				bindName, bindState = tc.bindTo(tc.state)
 			}
 			a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: tc.agentName, SubAgents: tc.subAgents})), s: tc.state}
-			base := t.Context()
+			mode := tc.mode
+			if mode == ModeUnset {
+				mode = ModeSingleTurn
+			}
+			base := WithBoundMode(t.Context(), tc.agentName, tc.state, mode)
 			if tc.parent != nil {
 				base = parentmap.ToContext(base, parentmap.Map{tc.agentName: tc.parent})
 			}
@@ -126,7 +148,7 @@ func TestOutputSchemaForCopiesBoundSchema(t *testing.T) {
 	state := &State{}
 	a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "self"})), s: state}
 	ctx := icontext.NewInvocationContext(
-		WithBoundOutputSchema(t.Context(), "self", state, bound),
+		WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, bound),
 		icontext.InvocationContextParams{Agent: a},
 	)
 
@@ -147,7 +169,7 @@ func TestWithBoundOutputSchemaNilShadowsOuter(t *testing.T) {
 	bound := &genai.Schema{Type: genai.TypeObject, Properties: map[string]*genai.Schema{"a": {Type: genai.TypeString}}}
 	state := &State{}
 	a := &mockLLMAgent{Agent: utils.Must(agent.New(agent.Config{Name: "self"})), s: state}
-	outer := WithBoundOutputSchema(t.Context(), "self", state, bound)
+	outer := WithBoundOutputSchema(WithBoundMode(t.Context(), "self", state, ModeSingleTurn), "self", state, bound)
 	ctx := icontext.NewInvocationContext(
 		WithBoundOutputSchema(outer, "self", state, nil),
 		icontext.InvocationContextParams{Agent: a},

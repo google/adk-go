@@ -16,6 +16,7 @@ package workflow
 
 import (
 	"reflect"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -25,10 +26,18 @@ import (
 // with, derived from the node's output schema, or nil to leave the model
 // unconstrained as it was before typed nodes passed their schema on.
 //
-// Only an object with at least one property qualifies. A string Output sent
-// as a response schema makes the model answer with a quoted JSON string, and
-// the set_model_response tool needs object parameters, so primitive, slice and
-// map outputs stay unconstrained.
+// Only a closed, non-null object with at least one property qualifies. A
+// string Output sent as a response schema makes the model answer with a
+// quoted JSON string, and the set_model_response tool needs object parameters,
+// so primitive, slice, map and nullable (pointer) outputs stay unconstrained.
+// Every object must also set additionalProperties to false, as a Go struct
+// does: set_model_response rejects keys its schema does not list, so an open
+// object would turn an answer the node accepts into an error.
+//
+// A nullable property (a pointer or slice field) is sent as its non-null type.
+// The Anthropic and OpenAI adapters pass a response schema through as JSON
+// Schema, which has no nullable keyword, and a field the model fills in is
+// still a valid answer.
 //
 // The result is a hint, not the contract: BaseNode.ValidateOutput still checks
 // the reply against the full schema. So a schema that genai.Schema cannot
@@ -43,7 +52,11 @@ func modelOutputSchema(resolved *jsonschema.Resolved) *genai.Schema {
 	if resolved == nil {
 		return nil
 	}
-	s, ok := toGenaiSchema(resolved.Schema())
+	root := resolved.Schema()
+	if root == nil || slices.Contains(root.Types, "null") {
+		return nil
+	}
+	s, ok := toGenaiSchema(root)
 	if !ok || s.Type != genai.TypeObject {
 		return nil
 	}
@@ -61,22 +74,22 @@ var genaiTypes = map[string]genai.Type{
 
 // toGenaiSchema converts the shape of s: types, properties, required fields,
 // array items, string enums, title and description. Value constraints
-// (bounds, lengths, pattern, format) are dropped: ValidateOutput enforces
-// them, and some providers reject them in a response schema (#2036). It
-// reports false for anything else, such as an untyped (true) schema from an
-// `any` field, a map, a composition keyword, a reference or a non-string enum.
+// (bounds, lengths, pattern) are dropped: ValidateOutput enforces them, and
+// some providers reject them in a response schema (#2036). Annotations such as
+// format, default and examples are dropped too; ValidateOutput does not check
+// them either. A "null" in a type list is dropped (see [modelOutputSchema]).
+// It reports false for anything else, such as an untyped (true) schema from an
+// `any` field, a map or other open object, a required name with no property,
+// a composition keyword, a reference, or an enum that is not on a string.
 func toGenaiSchema(s *jsonschema.Schema) (*genai.Schema, bool) {
 	if s == nil || !onlyKnownKeywords(*s) {
 		return nil, false
 	}
-	typ, nullable, ok := schemaType(s)
-	if !ok {
+	typ, ok := schemaType(s)
+	if !ok || (len(s.Enum) > 0 && typ != genai.TypeString) {
 		return nil, false
 	}
 	out := &genai.Schema{Type: typ, Title: s.Title, Description: s.Description}
-	if nullable {
-		out.Nullable = genai.Ptr(true)
-	}
 	for _, v := range s.Enum {
 		str, ok := v.(string)
 		if !ok {
@@ -87,8 +100,13 @@ func toGenaiSchema(s *jsonschema.Schema) (*genai.Schema, bool) {
 
 	switch typ {
 	case genai.TypeObject:
-		if len(s.Properties) == 0 {
+		if len(s.Properties) == 0 || !isFalseSchema(s.AdditionalProperties) {
 			return nil, false
+		}
+		for _, name := range s.Required {
+			if _, ok := s.Properties[name]; !ok {
+				return nil, false
+			}
 		}
 		out.Properties = make(map[string]*genai.Schema, len(s.Properties))
 		for name, prop := range s.Properties {
@@ -118,8 +136,9 @@ func onlyKnownKeywords(s jsonschema.Schema) bool {
 	s.Type, s.Types, s.Enum = "", nil, nil
 	s.Title, s.Description = "", ""
 	s.Properties, s.Required, s.Items = nil, nil, nil
-	// Dropped. A struct's additionalProperties: false only forbids extra
-	// keys, which ValidateOutput still does; any other value describes a map.
+	// Dropped. additionalProperties: false only forbids extra keys, which
+	// ValidateOutput and set_model_response both enforce; toGenaiSchema
+	// requires it on every object. Any other value describes a map.
 	if isFalseSchema(s.AdditionalProperties) {
 		s.AdditionalProperties = nil
 	}
@@ -142,25 +161,23 @@ func isFalseSchema(s *jsonschema.Schema) bool {
 
 // schemaType maps the JSON Schema type of s to a genai type. A type list may
 // pair one type with "null", which jsonschema-go emits for pointers and
-// slices; that becomes Nullable. No type, or more than one non-null type, has
+// slices; the "null" is ignored. No type, or more than one non-null type, has
 // no genai equivalent.
-func schemaType(s *jsonschema.Schema) (genai.Type, bool, bool) {
+func schemaType(s *jsonschema.Schema) (genai.Type, bool) {
 	if s.Type != "" {
 		t, ok := genaiTypes[s.Type]
-		return t, false, ok
+		return t, ok
 	}
 	var name string
-	nullable := false
 	for _, t := range s.Types {
 		if t == "null" {
-			nullable = true
 			continue
 		}
 		if name != "" {
-			return "", false, false
+			return "", false
 		}
 		name = t
 	}
 	t, ok := genaiTypes[name]
-	return t, nullable, ok
+	return t, ok
 }
