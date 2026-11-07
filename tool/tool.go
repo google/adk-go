@@ -25,6 +25,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolerror"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool/toolutils"
 )
@@ -302,7 +303,7 @@ func (t *confirmationStreamingTool) ProcessRequest(ctx agent.Context, req *model
 func (t *confirmationStreamingTool) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
 		if err := confirmCall(ctx, t, args, t.requireConfirmation, t.provider); err != nil {
-			yield("", err)
+			yield("", &toolerror.BeforeHandler{Err: err})
 			return
 		}
 		for chunk, err := range t.streamingRunnableTool.RunStream(ctx, args) {
