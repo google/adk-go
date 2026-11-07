@@ -64,10 +64,17 @@ const (
 	// non-partial response. Streamed chunks with Partial set only feed
 	// latency_ms.time_to_first_token_ms on that final row, and only the
 	// first chunk with generated content does.
-	EventLLMResponse   = "LLM_RESPONSE"
-	EventLLMError      = "LLM_ERROR"
-	EventToolStarting  = "TOOL_STARTING"
+	EventLLMResponse  = "LLM_RESPONSE"
+	EventLLMError     = "LLM_ERROR"
+	EventToolStarting = "TOOL_STARTING"
+	// EventToolCompleted is written when a tool call finishes without an error
+	// (or with a tool confirmation request/rejection), except when the call was
+	// already recorded as TOOL_ERROR by OnToolErrorCallback or answered by
+	// plugin/retryandreflect.
 	EventToolCompleted = "TOOL_COMPLETED"
+	// EventToolError is written when a tool call fails, including when the
+	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
+	// plugin/retryandreflect in either registration order.
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -139,6 +146,11 @@ var knownEventTypes = newSet(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// response payload and logged as TOOL_ERROR regardless of registration order;
+// recoveries by other plugins registered before this plugin are still logged
+// as TOOL_COMPLETED.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -165,6 +177,11 @@ func NewBigQueryAgentAnalyticsPlugin(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// response payload and logged as TOOL_ERROR regardless of registration order;
+// recoveries by other plugins registered before this plugin are still logged
+// as TOOL_COMPLETED.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -345,6 +362,11 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// Tool errors handled by plugin/retryandreflect are recognized from its
+// response payload and logged as TOOL_ERROR regardless of registration order;
+// recoveries by other plugins registered before this plugin are still logged
+// as TOOL_COMPLETED.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -1187,6 +1209,33 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	return nil, nil
 }
 
+const (
+	// reflectAndRetryResponseType matches the unexported response_type marker
+	// emitted by plugin/retryandreflect (and adk-python's ReflectAndRetryToolPlugin)
+	// when it recovers a tool error into retry guidance. Kept here because
+	// plugin/agentanalytics requires google.golang.org/adk/v2 v2.0.0.
+	reflectAndRetryResponseType         = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+	reflectAndRetryFallbackErrorMessage = "Tool raised an error that ReflectAndRetryToolPlugin handled."
+)
+
+// retryAnswerError reports whether result is a recovery payload produced by
+// plugin/retryandreflect, returning the extracted error message and true.
+// Only exact string values on "error_details" and "error_type" are accepted;
+// non-string values are ignored and fall back to
+// reflectAndRetryFallbackErrorMessage.
+func retryAnswerError(result map[string]any) (string, bool) {
+	rt, ok := result["response_type"].(string)
+	if !ok || rt != reflectAndRetryResponseType {
+		return "", false
+	}
+	for _, k := range []string{"error_details", "error_type"} {
+		if s, ok := result[k].(string); ok && s != "" {
+			return s, true
+		}
+	}
+	return reflectAndRetryFallbackErrorMessage, true
+}
+
 // isToolConfirmationOutcome reports whether err is a tool confirmation request
 // or rejection. Both outcomes complete the tool call in adk-python rather than
 // logging TOOL_ERROR.
@@ -1202,6 +1251,12 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	span, purged, closedByError := p.traces.popToolSpan(ctx, id, toolKey(id, callID, name), false)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
+	if closedByError {
+		// onToolError already wrote TOOL_ERROR; even when an agent
+		// OnToolErrorCallback or a later plugin recovered or replaced the error,
+		// suppress TOOL_COMPLETED, noteTaskFinished, and AGENT_RESPONSE.
+		return nil, nil
+	}
 	// A tool that waits for or is rejected by the user's confirmation fails
 	// with tool.ErrConfirmationRequired or tool.ErrConfirmationRejected before
 	// it runs. adk-python returns the confirmation outcome as the tool's
@@ -1209,14 +1264,19 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	// the model as its result.
 	confirmationOutcome := isToolConfirmationOutcome(err)
 	if err != nil && !confirmationOutcome {
-		// OnToolErrorCallback normally owns the TOOL_ERROR row and sets
-		// closedByError; when an earlier plugin short-circuited
-		// OnToolErrorCallback before onToolError ran, emit TOOL_ERROR here so
-		// the failed call still gets its terminal row.
-		if !closedByError {
-			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
-		}
+		// When an earlier plugin short-circuited OnToolErrorCallback before
+		// onToolError ran and passed the error through, emit TOOL_ERROR here.
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
+	}
+	if !confirmationOutcome {
+		if msg, ok := retryAnswerError(result); ok {
+			// plugin/retryandreflect registered before this plugin short-circuits
+			// OnToolErrorCallback and returns a recovery payload with err == nil.
+			// Log it as TOOL_ERROR and suppress TOOL_COMPLETED and AGENT_RESPONSE.
+			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+			return nil, nil
+		}
 	}
 	if confirmationOutcome {
 		result = map[string]any{"error": err.Error()}

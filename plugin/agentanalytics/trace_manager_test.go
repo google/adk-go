@@ -1008,13 +1008,13 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 }
 
-// TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
-// failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
-// in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
-// the tool call's span under the agent span (with latency_ms reported once on
-// TOOL_ERROR), while AGENT_RESPONSE (when in FinalResponseToolNames) is placed
-// on the enclosing agent span.
-func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testing.T) {
+// TestTraceManager_RecoveredToolErrorEmitsOnlyToolError replays a failed tool
+// call that a subsequent OnToolErrorCallback recovers (err == nil in
+// AfterToolCallback). TOOL_STARTING and TOOL_ERROR share the tool call's span
+// under the agent span (with latency_ms reported on TOOL_ERROR), while
+// TOOL_COMPLETED and AGENT_RESPONSE (even when in FinalResponseToolNames) are
+// suppressed.
+func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
 	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
 	toolCtx := withFunctionCall(mCtx, "call-recovered")
 	final := &fakeTool{name: "final_answer"}
@@ -1034,8 +1034,6 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 		EventAgentStarting,
 		EventToolStarting,
 		EventToolError,
-		EventToolCompleted,
-		EventAgentResponse,
 		EventAgentCompleted,
 		EventInvocationCompleted,
 	}
@@ -1047,23 +1045,17 @@ func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testin
 	if toolStart.parent != agentStart.span {
 		t.Errorf("TOOL_STARTING parent_span_id = %q, want agent span %q", toolStart.parent, agentStart.span)
 	}
-	for _, evType := range []string{EventToolError, EventToolCompleted} {
-		row := onlyRowOfType(t, rows, evType)
-		if got := placeOf(row); got != toolStart {
-			t.Errorf("%s is at %+v, want %+v", evType, got, toolStart)
-		}
+	errRow := onlyRowOfType(t, rows, EventToolError)
+	if got := placeOf(errRow); got != toolStart {
+		t.Errorf("TOOL_ERROR is at %+v, want %+v", got, toolStart)
 	}
-	if got := placeOf(onlyRowOfType(t, rows, EventAgentResponse)); got != agentStart {
-		t.Errorf("AGENT_RESPONSE is at %+v, want agent span %+v", got, agentStart)
+	mustLatency(t, errRow)
+	if errRow["status"] != "ERROR" {
+		t.Errorf("TOOL_ERROR status = %v, want ERROR", errRow["status"])
 	}
-	mustLatency(t, onlyRowOfType(t, rows, EventToolError))
-	for _, evType := range []string{EventToolCompleted, EventAgentResponse} {
-		if latency, ok := rowLatency(t, onlyRowOfType(t, rows, evType)); ok {
-			t.Errorf("%s after OnToolErrorCallback has latency_ms %v, want none", evType, latency)
-		}
+	if errRow["error_message"] != "transient error" {
+		t.Errorf("TOOL_ERROR error_message = %v, want %q", errRow["error_message"], "transient error")
 	}
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
-		`{"tool":"final_answer","result":{"answer":"fallback-42"},"tool_origin":"UNKNOWN"}`)
 	if got := placeOf(onlyRowOfType(t, rows, EventAgentCompleted)); got != agentStart {
 		t.Errorf("AGENT_COMPLETED is at %+v, want %+v", got, agentStart)
 	}
