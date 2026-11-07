@@ -79,6 +79,10 @@ func (r *Runner) runNode(
 	// Allocating it inside newNodeInvocationContext instead gave the mid-turn
 	// processor a different instance from the one this function reads, so the
 	// "already compacted" hand-off between the two strategies never arrived.
+	// The execution ID is attached here for the same reason: minted inside
+	// newNodeInvocationContext it reached the callbacks but not the
+	// post-invocation compaction, which the agent path runs under its ID.
+	ctx = withExecutionID(ctx)
 	ctx = compactionctx.ToContext(ctx, r.compactionRuntime())
 
 	invocationFailed := false
