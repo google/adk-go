@@ -171,3 +171,26 @@ func TestConsoleSurvivesACompactionFailure(t *testing.T) {
 }
 
 var errSummarizerUnavailable = errors.New("summarizer unavailable")
+
+// TestConsoleDeliversFinalPromptWithoutNewline pins that a piped prompt whose
+// stdin ends without a newline is still submitted. ReadString returns that data
+// together with io.EOF, and the reader used to report the EOF first and drop it.
+func TestConsoleDeliversFinalPromptWithoutNewline(t *testing.T) {
+	out := runConsole(t, testConfig(t, nil), "hello")
+
+	if !strings.Contains(out, "hello") {
+		t.Errorf("the final prompt without a trailing newline was dropped; output:\n%s", out)
+	}
+}
+
+// TestConsoleDeliversAllLinesWithoutTrailingNewline checks a multi-line pipe
+// whose last line lacks a terminator: every line must reach the agent.
+func TestConsoleDeliversAllLinesWithoutTrailingNewline(t *testing.T) {
+	out := runConsole(t, testConfig(t, nil), "first\nlast")
+
+	for _, want := range []string{"first", "last"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("line %q was dropped; output:\n%s", want, out)
+		}
+	}
+}
