@@ -727,12 +727,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// restore_branch_from_history). Re-running the root would run agents
 		// that never saw the call, and they fail on the unmatched response.
 		// A call made inside a graph workflow is the exception: the root runs,
-		// as on any other turn. The workflow resumes the interrupted node only
-		// for an adk_request_input response; any other response restarts the
-		// graph. Agents ahead of or beside the workflow run again, and an LLM
-		// agent among them fails on the unmatched response.
+		// and sequential, parallel and loop agents on the way narrow to the
+		// sub-agents holding the callers (utils.GraphResumeIndexes), provided
+		// the workflow's node agents are listed in its SubAgents. Sub-agents
+		// after it in a sequence still run, though an LLM agent among them
+		// fails on the unmatched response if the workflow's last node emits no
+		// content. The workflow resumes the interrupted node only for an
+		// adk_request_input response; any other response restarts the graph.
+		// The first response in the message decides the route.
 		agentToRun, branch := r.rootAgent, ""
-		if ev := handleUserFunctionCallResponse(storedSession.Events(), msg); ev != nil {
+		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
 			}
@@ -1287,7 +1291,7 @@ func findActiveTaskIsolationScope(sess session.Session) string {
 // findAgentToRun returns the agent that should handle the next request based on
 // session history.
 func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (agent.Agent, error) {
-	if event := handleUserFunctionCallResponse(session.Events(), msg); event != nil {
+	if event := utils.FunctionCallEvent(session.Events(), msg); event != nil {
 		subAgent := r.rootAgent.FindAgent(event.Author)
 		if subAgent != nil {
 			return subAgent, nil
@@ -1317,33 +1321,6 @@ func (r *Runner) findAgentToRun(session session.Session, msg *genai.Content) (ag
 
 	// Falls back to root agent if no suitable agents are found in the session.
 	return r.rootAgent, nil
-}
-
-// handleUserFunctionCallResponse finds the function call event that matches the function response id
-// delivered by the user in the latest event.
-func handleUserFunctionCallResponse(events session.Events, msg *genai.Content) *session.Event {
-	if events.Len() == 0 {
-		return nil
-	}
-
-	functionResponses := utils.FunctionResponses(msg)
-	if len(functionResponses) == 0 {
-		return nil
-	}
-
-	// This assumes that even if user provides multiple function responses, all the function calls
-	// were made by the same agent. Otherwise it would be impossible to rearrange session events
-	// such that every function response has a corresponding call filtering by author.
-	callID := functionResponses[0].ID
-	for i := events.Len() - 1; i >= 0; i-- {
-		event := events.At(i)
-		for _, part := range utils.FunctionCalls(event.Content) {
-			if part.ID == callID {
-				return event
-			}
-		}
-	}
-	return nil
 }
 
 // isInGraphWorkflow reports whether a or one of its ancestors is a graph
