@@ -17,6 +17,7 @@ package anthropicmodel
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -119,6 +120,7 @@ func buildOutputFormatSchema(cfg *genai.GenerateContentConfig) (map[string]any, 
 		}
 	}
 	normalizeOutputSchemaObjects(schemaMap)
+	sanitizeOutputSchema(schemaMap)
 	if rootType, _ := schemaMap["type"].(string); rootType == "object" {
 		return schemaMap, false, nil
 	}
@@ -183,6 +185,123 @@ func normalizeOutputSchemaObjects(node any) {
 			normalizeOutputSchemaObjects(elem)
 		}
 	}
+}
+
+// supportedOutputSchemaKeys is the set of JSON schema keywords Anthropic's
+// structured output API accepts. "definitions" is kept alongside "$defs"
+// because buildOutputFormatSchema hoists either form for non-object roots;
+// dropping it would leave their $ref values dangling. "additionalItems" is
+// kept because rewriteWrappedSchemaRefs relies on it for tuple schemas.
+var supportedOutputSchemaKeys = map[string]bool{
+	"$ref": true, "$defs": true, "definitions": true,
+	"type": true, "anyOf": true, "oneOf": true, "allOf": true,
+	"description": true, "title": true, "enum": true, "const": true,
+	"properties": true, "additionalProperties": true, "required": true,
+	"items": true, "additionalItems": true, "minItems": true, "format": true, "pattern": true,
+}
+
+var supportedOutputSchemaFormats = map[string]bool{
+	"date-time": true, "time": true, "date": true, "duration": true,
+	"email": true, "hostname": true, "uri": true, "ipv4": true,
+	"ipv6": true, "uuid": true,
+}
+
+// sanitizeOutputSchema rewrites a JSON schema map to the subset Anthropic
+// accepts. Unsupported keywords are moved into the description rather than
+// dropped, matching the Anthropic Go SDK, so the model can still see a value
+// constraint it cannot enforce.
+func sanitizeOutputSchema(schema map[string]any) {
+	extras := make(map[string]any)
+	for key, value := range schema {
+		if supportedOutputSchemaKeys[key] {
+			continue
+		}
+		if value != nil {
+			extras[key] = value
+		}
+		delete(schema, key)
+	}
+
+	if format, ok := schema["format"].(string); ok {
+		if !supportedOutputSchemaFormats[format] {
+			extras["format"] = format
+			delete(schema, "format")
+		}
+	}
+	if minItems, ok := schema["minItems"]; ok {
+		if n, ok := schemaNumber(minItems); ok && n != 0 && n != 1 {
+			extras["minItems"] = minItems
+			delete(schema, "minItems")
+		}
+	}
+
+	for _, key := range []string{"properties", "$defs", "definitions"} {
+		if schemas, ok := schema[key].(map[string]any); ok {
+			for _, subschema := range schemas {
+				sanitizeOutputSchemaValue(subschema)
+			}
+		}
+	}
+	for _, key := range []string{"items", "additionalItems", "additionalProperties", "anyOf", "oneOf", "allOf"} {
+		sanitizeOutputSchemaValue(schema[key])
+	}
+
+	if len(extras) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(extras))
+	for key := range extras {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %s", key, formatSchemaExtra(extras[key])))
+	}
+	extraText := "{" + strings.Join(parts, ", ") + "}"
+	if description, _ := schema["description"].(string); description != "" {
+		schema["description"] = description + "\n\n" + extraText
+	} else {
+		schema["description"] = extraText
+	}
+}
+
+func sanitizeOutputSchemaValue(node any) {
+	switch v := node.(type) {
+	case map[string]any:
+		sanitizeOutputSchema(v)
+	case []any:
+		for _, elem := range v {
+			if _, ok := elem.(map[string]any); ok {
+				sanitizeOutputSchemaValue(elem)
+			}
+		}
+	}
+}
+
+func schemaNumber(value any) (float64, bool) {
+	switch n := value.(type) {
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	}
+	return 0, false
+}
+
+func formatSchemaExtra(value any) string {
+	switch value.(type) {
+	case []any, map[string]any:
+		if data, err := json.Marshal(value); err == nil {
+			return string(data)
+		}
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 func buildOutputConfigParam(effort Effort, cfg *genai.GenerateContentConfig) (anthropic.OutputConfigParam, bool, error) {
