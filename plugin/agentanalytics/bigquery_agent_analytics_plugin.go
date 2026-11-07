@@ -986,6 +986,16 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
+// isTaskCompletedResult reports whether a finish_task response map carries the
+// successful completion sentinel ("result": "Task completed.").
+func isTaskCompletedResult(resp map[string]any) bool {
+	if len(resp) == 0 {
+		return false
+	}
+	res, ok := resp["result"].(string)
+	return ok && res == "Task completed."
+}
+
 // hasTaskCompletedResponse reports whether c carries a successful
 // finish_task function response ("result": "Task completed."), which ends a
 // task-mode LLM agent in ADK without running its AfterAgentCallback.
@@ -998,8 +1008,7 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 			continue
 		}
 		if part.FunctionResponse.Name == finishTaskToolName {
-			result, ok := part.FunctionResponse.Response["result"].(string)
-			return ok && result == "Task completed."
+			return isTaskCompletedResult(part.FunctionResponse.Response)
 		}
 	}
 	return false
@@ -1218,18 +1227,21 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		return nil, nil
 	}
+	if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
+		// The finish_task response event that follows reaches OnEventCallback
+		// without the context of the activation that made the call.
+		p.traces.noteTaskFinished(ctx, id, callID)
+	}
 	if !confirmationOutcome {
 		if msg, ok := classifyToolResultError(result); ok {
-			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+			if !closedByError {
+				p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+			}
 			return nil, nil
 		}
 	}
 	if confirmationOutcome {
 		result = map[string]any{"error": err.Error()}
-	} else if name == finishTaskToolName {
-		// The finish_task response event that follows reaches OnEventCallback
-		// without the context of the activation that made the call.
-		p.traces.noteTaskFinished(ctx, id, callID)
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -2097,6 +2109,7 @@ func (p *analyticsPlugin) attributes(eventID string, id identity, agentName stri
 	metaTrunc := false
 	if md := p.customMetadata.apply(d.customMetadata); md != nil {
 		attrs["custom_metadata"] = md
+		metaTrunc = d.customMetadataTruncated
 	}
 	return attrs, metaTrunc
 }

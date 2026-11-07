@@ -2998,3 +2998,158 @@ func TestSensitiveKeys_StandardRedactionInCompactionAndA2A(t *testing.T) {
 	}
 	checkJSONAt(t, attrs, `"exchange auth_code=[REDACTED] and code_verifier=[REDACTED]"`, "a2a_metadata", "a2a:request", "note")
 }
+
+func TestAgentStateCheckpoint_RetainedCustomMetadataTruncation(t *testing.T) {
+	deepMeta := map[string]any{"leaf": "ok"}
+	for range maxSanitizeDepth + 2 {
+		deepMeta = map[string]any{"nested": deepMeta}
+	}
+
+	tests := []struct {
+		name          string
+		allowlist     []string
+		meta          map[string]any
+		wantStep      int
+		wantTruncated bool
+		wantCustomKey string
+		wantCustomVal string
+		wantSubstr    string
+		omittedKeys   []string
+	}{
+		{
+			name:      "retained allowlisted ordinary key with malformed json marks is_truncated",
+			allowlist: []string{"note"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 1},
+				"note":            "{bad",
+			},
+			wantStep:      1,
+			wantTruncated: true,
+			wantCustomKey: "note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "retained allowlisted ordinary key exceeding max depth marks is_truncated",
+			allowlist: []string{"deep"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 2},
+				"deep":            deepMeta,
+			},
+			wantStep:      2,
+			wantTruncated: true,
+			wantCustomKey: "deep",
+			wantSubstr:    maxDepthPlaceholder,
+		},
+		{
+			name:      "retained allowlisted a2a key marks is_truncated",
+			allowlist: []string{"a2a:note"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 3},
+				"a2a:note":        "{bad",
+			},
+			wantStep:      3,
+			wantTruncated: true,
+			wantCustomKey: "a2a:note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "retained wildcard allowlisted a2a key marks is_truncated",
+			allowlist: []string{"*"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 4},
+				"a2a:note":        "{bad",
+			},
+			wantStep:      4,
+			wantTruncated: true,
+			wantCustomKey: "a2a:note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "discarded unallowlisted ordinary key leaves is_truncated false",
+			allowlist: []string{"ok"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 5},
+				"ok":              "clean",
+				"dropped":         "{bad",
+			},
+			wantStep:      5,
+			wantTruncated: false,
+			wantCustomKey: "ok",
+			wantCustomVal: "clean",
+			omittedKeys:   []string{"dropped"},
+		},
+		{
+			name:      "discarded unallowlisted a2a key with empty allowlist leaves is_truncated false",
+			allowlist: nil,
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 6},
+				"a2a:dropped":     "{bad",
+			},
+			wantStep:      6,
+			wantTruncated: false,
+			omittedKeys:   []string{"a2a:dropped"},
+		},
+		{
+			name:      "discarded unallowlisted a2a key alongside allowlisted clean key leaves is_truncated false",
+			allowlist: []string{"ok"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 7},
+				"ok":              "clean",
+				"a2a:dropped":     "{bad",
+			},
+			wantStep:      7,
+			wantTruncated: false,
+			wantCustomKey: "ok",
+			wantCustomVal: "clean",
+			omittedKeys:   []string{"a2a:dropped"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+				c.CustomMetadataAllowlist = tc.allowlist
+			})
+			var errs callbackErrors
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				Author: "state-agent",
+				LLMResponse: model.LLMResponse{
+					CustomMetadata: tc.meta,
+				},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			cpRow := onlyRowOfType(t, rows, EventAgentStateCheckpoint)
+			content := jsonObjectColumn(t, cpRow, "content")
+			checkJSONAt(t, content, fmt.Sprintf("%d", tc.wantStep), "agent_state", "step")
+			checkJSONAt(t, content, "false", "end_of_agent")
+
+			attrs := jsonObjectColumn(t, cpRow, "attributes")
+			if tc.wantCustomKey != "" {
+				if tc.wantSubstr != "" {
+					val, ok := lookup(attrs, "custom_metadata", tc.wantCustomKey)
+					if !ok {
+						t.Fatalf("attributes.custom_metadata.%s missing: %s", tc.wantCustomKey, cpRow["attributes"])
+					}
+					if rawAttrs, _ := cpRow["attributes"].(string); !strings.Contains(rawAttrs, tc.wantSubstr) {
+						t.Errorf("attributes.custom_metadata.%s (%v) missing %q: %s", tc.wantCustomKey, val, tc.wantSubstr, rawAttrs)
+					}
+				} else {
+					checkJSONAt(t, attrs, fmt.Sprintf("%q", tc.wantCustomVal), "custom_metadata", tc.wantCustomKey)
+				}
+			} else if _, hasCustom := lookup(attrs, "custom_metadata"); hasCustom {
+				t.Errorf("attributes.custom_metadata unexpectedly present: %s", cpRow["attributes"])
+			}
+			for _, omitted := range tc.omittedKeys {
+				if _, ok := lookup(attrs, "custom_metadata", omitted); ok {
+					t.Errorf("attributes.custom_metadata leaked discarded key %q: %s", omitted, cpRow["attributes"])
+				}
+			}
+			if got := cpRow["is_truncated"]; got != tc.wantTruncated {
+				t.Errorf("is_truncated = %v, want %t", got, tc.wantTruncated)
+			}
+		})
+	}
+}

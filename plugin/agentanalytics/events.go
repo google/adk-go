@@ -954,14 +954,16 @@ func (p *analyticsPlugin) emitUserMessageSignalEvents(ctx agent.InvocationContex
 // scrubA2ACustomMetadata filters and redacts custom metadata map.
 // Only keys allowed by allowlist or starting with "a2a:" are retained,
 // and their values are scrubbed using standard key-based redaction (redactJSONValue).
-func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter, redact bool) (map[string]any, bool) {
+// It reports projectedTrunc for keys retained by allowlist (emitted into
+// attributes.custom_metadata) separately from allTrunc across all retained keys.
+func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter, redact bool) (clean map[string]any, projectedTrunc, allTrunc bool) {
 	if len(meta) == 0 {
-		return nil, false
+		return nil, false, false
 	}
 	out := make(map[string]any)
-	var trunc bool
 	for k, v := range meta {
-		if !allowlist.allows(k) && !strings.HasPrefix(k, "a2a:") {
+		allowed := allowlist.allows(k)
+		if !allowed && !strings.HasPrefix(k, "a2a:") {
 			continue
 		}
 		if redact {
@@ -972,15 +974,20 @@ func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter,
 			budget := &nodeBudget{remaining: maxSanitizeNodes}
 			cleanVal, _, lost := redactJSONValue(v, 0, budget)
 			out[k] = cleanVal
-			trunc = trunc || lost
+			if lost {
+				allTrunc = true
+				if allowed {
+					projectedTrunc = true
+				}
+			}
 		} else {
 			out[k] = v
 		}
 	}
 	if len(out) == 0 {
-		return nil, false
+		return nil, false, false
 	}
-	return out, trunc
+	return out, projectedTrunc, allTrunc
 }
 
 // emitSessionEventSignals evaluates all orthogonal session.Event signals without
@@ -1003,13 +1010,13 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 		id.path = ev.NodeInfo.Path
 	}
 	span := p.traces.eventSpan(ctx, id, ev.Author, ev.Branch)
-	cleanCustomMeta, a2aTrunc := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
+	cleanCustomMeta, projectedTrunc, a2aTrunc := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
 	applyEventBase := func(d *eventData) {
 		d.sourceEvent = ev
 		d.author = ev.Author
 		d.customMetadata = cleanCustomMeta
 		d.customMetadataScrubbed = true
-		d.customMetadataTruncated = a2aTrunc
+		d.customMetadataTruncated = projectedTrunc
 	}
 
 	// 1. STATE_DELTA (scrubbing temp: keys, writing delta to attributes.state_delta only).
