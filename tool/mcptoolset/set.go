@@ -16,9 +16,13 @@
 package mcptoolset
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
+	"slices"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -84,8 +88,15 @@ func New(cfg Config) (tool.Toolset, error) {
 	if err != nil {
 		return nil, err
 	}
+	var client sessionClient
+	if cfg.Auth != nil {
+		client = newCredentialSessions(cfg.Client, transport, cfg.Auth)
+	} else {
+		client = newConnectionRefresher(cfg.Client, transport)
+	}
 	return &set{
-		mcpClient:                   newConnectionRefresher(cfg.Client, transport),
+		mcpClient:                   client,
+		toolNamePrefix:              cfg.ToolNamePrefix,
 		toolFilter:                  cfg.ToolFilter,
 		requireConfirmation:         cfg.RequireConfirmation,
 		requireConfirmationProvider: cfg.RequireConfirmationProvider,
@@ -94,9 +105,13 @@ func New(cfg Config) (tool.Toolset, error) {
 }
 
 // buildTransport resolves the MCP transport from cfg. When Transport is nil and
-// Endpoint is set, it builds a streamable HTTP transport to that URL. When
-// Config.Auth is set, it wraps the transport's HTTP client with a per-request
-// auth RoundTripper, which requires a streamable HTTP transport.
+// Endpoint is set, it builds a streamable HTTP transport to that URL. A
+// streamable HTTP or SSE transport is copied, and the copy's HTTP client sends
+// the ADK tracking headers. When Config.Auth is set, the client also applies a
+// per-request auth RoundTripper, which requires a streamable HTTP transport.
+// A *mcp.CommandTransport with a non-nil Command is wrapped so it can connect
+// more than once (see Config.Transport). Other transports are returned as
+// given.
 func buildTransport(cfg Config) (mcp.Transport, error) {
 	transport := cfg.Transport
 	if transport == nil && cfg.Endpoint != "" {
@@ -105,28 +120,110 @@ func buildTransport(cfg Config) (mcp.Transport, error) {
 	if transport == nil {
 		return nil, fmt.Errorf("mcptoolset: set Config.Transport or Config.Endpoint")
 	}
-	if cfg.Auth == nil {
-		return transport, nil
-	}
-	st, ok := transport.(*mcp.StreamableClientTransport)
-	if !ok {
+	if _, ok := transport.(*mcp.StreamableClientTransport); cfg.Auth != nil && !ok {
 		return nil, fmt.Errorf("mcptoolset: Config.Auth requires a streamable HTTP transport; "+
 			"set Config.Endpoint or pass a *mcp.StreamableClientTransport (got %T)", transport)
 	}
-	stCopy := *st
-	stCopy.HTTPClient = authHTTPClient(st.HTTPClient, cfg.Auth)
-	return &stCopy, nil
+	switch t := transport.(type) {
+	case *mcp.StreamableClientTransport:
+		if t == nil {
+			return nil, fmt.Errorf("mcptoolset: Config.Transport is a nil %T", t)
+		}
+		stCopy := *t
+		stCopy.HTTPClient = httpClient(t.HTTPClient, cfg.Auth)
+		return &stCopy, nil
+	case *mcp.SSEClientTransport:
+		if t == nil {
+			return nil, fmt.Errorf("mcptoolset: Config.Transport is a nil %T", t)
+		}
+		sseCopy := *t
+		sseCopy.HTTPClient = httpClient(t.HTTPClient, nil)
+		return &sseCopy, nil
+	case *mcp.CommandTransport:
+		// A nil Command is passed through, so it behaves as before.
+		if t != nil && t.Command != nil {
+			return newCommandTransport(t), nil
+		}
+	}
+	return transport, nil
 }
 
-// authHTTPClient returns a shallow copy of base whose Transport applies provider
-// to every request. base may be nil.
-func authHTTPClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
-	c := &http.Client{}
-	if base != nil {
-		*c = *base
+// commandTransport lets a CommandTransport connect more than once. An
+// *exec.Cmd can be started only once, so the first Connect uses the caller's
+// command as is, and every later Connect runs a copy. Without this, a reconnect
+// fails with "exec: Stdout already set".
+type commandTransport struct {
+	first mcp.CommandTransport // the caller's transport, used for the first Connect
+	// spec copies the caller's command settings before the first Connect, as
+	// the SDK sets Stdin and Stdout on the command it starts.
+	spec exec.Cmd
+
+	mu   sync.Mutex
+	used bool // the caller's command has been handed to a Connect
+}
+
+func newCommandTransport(t *mcp.CommandTransport) *commandTransport {
+	src := t.Command
+	// Only the fields that configure a process are copied. The copy has no
+	// exec.CommandContext context, because os/exec does not expose it. Cancel
+	// is left out too: Start rejects a Cancel without a context, and the
+	// default Cancel of CommandContext would kill the caller's process, not
+	// the copy.
+	return &commandTransport{first: *t, spec: exec.Cmd{
+		Path:        src.Path,
+		Args:        slices.Clone(src.Args),
+		Env:         slices.Clone(src.Env),
+		Dir:         src.Dir,
+		Stdin:       src.Stdin,
+		Stderr:      src.Stderr,
+		ExtraFiles:  slices.Clone(src.ExtraFiles),
+		SysProcAttr: src.SysProcAttr,
+		WaitDelay:   src.WaitDelay,
+		Err:         src.Err,
+	}}
+}
+
+// Connect implements mcp.Transport.
+func (t *commandTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	t.mu.Lock()
+	first := !t.used
+	t.used = true
+	t.mu.Unlock()
+
+	if first {
+		return t.first.Connect(ctx)
 	}
-	c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
-	return c
+	return t.reconnectTransport().Connect(ctx)
+}
+
+// reconnectTransport returns the transport for every Connect after the first.
+// It copies the whole transport, so every setting on it (such as
+// TerminateDuration) carries over, including ones added in later SDK
+// versions. Only Command is replaced, with a fresh copy of spec.
+func (t *commandTransport) reconnectTransport() *mcp.CommandTransport {
+	cmd := t.spec
+	tr := t.first
+	tr.Command = &cmd
+	return &tr
+}
+
+// httpClient returns a shallow copy of base whose Transport adds the ADK
+// tracking headers and, when provider is non-nil, applies provider to every
+// request. A nil base stands for http.DefaultClient, as it does in the SDK,
+// except with a provider (see Config.Auth).
+func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Client {
+	var c http.Client
+	switch {
+	case base != nil:
+		c = *base
+	case provider == nil:
+		c = *http.DefaultClient
+	}
+	c.Transport = &trackingTransport{base: c.Transport}
+	if provider != nil {
+		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+	}
+	return &c
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -134,6 +231,36 @@ type Config struct {
 	// Client is an optional custom MCP client to use. If nil, a default client will be created.
 	Client *mcp.Client
 	// Transport that will be used to connect to MCP server.
+	//
+	// A *mcp.StreamableClientTransport or *mcp.SSEClientTransport is copied
+	// together with its HTTPClient when New is called, so later changes to
+	// either have no effect. A nil HTTPClient stands for http.DefaultClient,
+	// except with Auth (see there). The copied client puts the ADK client
+	// labels ("google-adk/<version> gl-go/<version>") at the front of the
+	// User-Agent and X-Goog-Api-Client headers of every request. The
+	// HTTPClient's own Transport runs after that. A User-Agent it
+	// sets with Header.Set replaces the labels, and one it adds with
+	// Header.Add is not sent, because net/http sends only the first value.
+	//
+	// A *mcp.CommandTransport with a non-nil Command is wrapped when New is
+	// called, so the server can be started again after the connection is
+	// lost (an *exec.Cmd can be started only once). The first connect runs
+	// the caller's command, and every later connect runs a copy of the
+	// command and transport taken at New. Callers can notice this in three
+	// ways:
+	//   - The transport is copied at New, so changing it afterwards (for
+	//     example TerminateDuration) has no effect, even on the first
+	//     connect. Changes to the command after New only reach the first
+	//     connect.
+	//   - The copy can't carry an exec.CommandContext context, so a server
+	//     built with CommandContext is started again after that context is
+	//     canceled, and the new process ignores it. In the same way, a
+	//     server stopped by killing cmd.Process comes back on the next tool
+	//     call.
+	//   - A CommandTransport inside a wrapper such as *mcp.LoggingTransport
+	//     is used as given, so it still can't reconnect.
+	//
+	// Other transport types are used as given.
 	Transport mcp.Transport
 
 	// Endpoint, when set and Transport is nil, builds a streamable HTTP
@@ -147,13 +274,33 @@ type Config struct {
 	// Combining Auth with a non-HTTP transport (e.g. a stdio command) is a
 	// configuration error. See package google.golang.org/adk/v2/auth.
 	//
+	// With Auth set, each distinct credential the provider resolves gets an
+	// MCP session of its own, so a server that binds sessions to the user who
+	// created them serves every user, while a user-independent credential such
+	// as auth.StaticToken keeps one session. A session idle for 10 minutes is
+	// closed, and at most 64 are kept open unless more are in use at once.
+	//
+	// With Auth and a nil HTTPClient, requests use a zero http.Client rather
+	// than a copy of http.DefaultClient, so the credential never reaches
+	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
+	// user's requests are not kept in its Jar. Requests are sent by
+	// http.DefaultTransport.
+	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
 	// would fight over the same request.
 	Auth auth.CredentialProvider
 
+	// ToolNamePrefix, when non-empty, exposes each tool as "<prefix>_<name>".
+	// For example, "docs" changes "search" to "docs_search". MCP calls still
+	// use the original server-side name. An empty prefix leaves names unchanged.
+	// Tool callbacks and confirmation providers receive the exposed name.
+	// When using tool.FilterToolset, predicates also see the exposed name.
+	ToolNamePrefix string
+
 	// Deprecated: use tool.FilterToolset instead.
 	// ToolFilter selects tools for which tool.Predicate returns true.
+	// It runs before ToolNamePrefix is applied, so predicates see original names.
 	// If ToolFilter is nil, then all tools are returned.
 	// tool.StringPredicate can be convenient if there's a known fixed list of tool names.
 	ToolFilter tool.Predicate
@@ -180,8 +327,16 @@ type Config struct {
 	MetadataProvider MetadataProvider
 }
 
+// sessionClient is the MCP connection a set uses: one shared session, or one
+// per credential when Config.Auth is set.
+type sessionClient interface {
+	MCPClient
+	io.Closer
+}
+
 type set struct {
-	mcpClient                   *connectionRefresher
+	mcpClient                   sessionClient
+	toolNamePrefix              string
 	toolFilter                  tool.Predicate
 	requireConfirmation         bool
 	requireConfirmationProvider tool.ConfirmationProvider
@@ -222,6 +377,11 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 
 		if s.toolFilter != nil && !s.toolFilter(ctx, t) {
 			continue
+		}
+
+		if s.toolNamePrefix != "" {
+			t.name = s.toolNamePrefix + "_" + t.originalName
+			t.funcDeclaration.Name = t.name
 		}
 
 		adkTools = append(adkTools, t)

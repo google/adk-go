@@ -17,6 +17,12 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -156,5 +162,124 @@ func TestLazyTokenSourceBoundsHungInit(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Errorf("init called %d times, want 2 (each call retries after a bounded hang)", got)
+	}
+}
+
+// TestLazyTokenSourceInitContextOutlivesInit: the context init receives stays
+// live after init returns, since the token source refreshes on it.
+func TestLazyTokenSourceInitContextOutlivesInit(t *testing.T) {
+	defer func(d time.Duration) { initTimeout = d }(initTimeout)
+	initTimeout = 100 * time.Millisecond
+
+	var initCtx context.Context
+	p := lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
+		initCtx = ctx
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+	})
+	if _, err := p.Credential(t.Context()); err != nil {
+		t.Fatalf("Credential() error = %v", err)
+	}
+
+	select {
+	case <-initCtx.Done():
+		t.Fatalf("init context done after init returned: %v", initCtx.Err())
+	case <-time.After(3 * initTimeout):
+	}
+}
+
+// TestLazyTokenSourceDiscardsSourceBuiltPastTimeout: a source returned after
+// the bound fired is not cached.
+func TestLazyTokenSourceDiscardsSourceBuiltPastTimeout(t *testing.T) {
+	defer func(d time.Duration) { initTimeout = d }(initTimeout)
+	initTimeout = 10 * time.Millisecond
+
+	var calls atomic.Int64
+	p := lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+		}
+		return oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "tok"}), nil
+	})
+
+	if _, err := p.Credential(t.Context()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first Credential() error = %v, want context.DeadlineExceeded", err)
+	}
+	if _, err := p.Credential(t.Context()); err != nil {
+		t.Fatalf("second Credential() error = %v, want a retried init to succeed", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("init called %d times, want 2 (the late source must not be cached)", got)
+	}
+}
+
+// TestLazyTokenSourceKeepsInitErrorTextPastTimeout: a timed-out init keeps
+// init's error text but does not report as context.Canceled.
+func TestLazyTokenSourceKeepsInitErrorTextPastTimeout(t *testing.T) {
+	defer func(d time.Duration) { initTimeout = d }(initTimeout)
+	initTimeout = 100 * time.Millisecond
+
+	p := lazyTokenSource(func(ctx context.Context) (oauth2.TokenSource, error) {
+		<-ctx.Done()
+		return nil, fmt.Errorf("auth: find default credentials: %w", ctx.Err())
+	})
+
+	_, err := p.Credential(t.Context())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Credential() error = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("Credential() error = %v, want a timeout not to report as a cancellation", err)
+	}
+	if !strings.Contains(err.Error(), "find default credentials") {
+		t.Errorf("Credential() error = %v, want it to name what init was doing", err)
+	}
+}
+
+// TestProvidersMintTokensAfterInit: ADC and ServiceAccount mint through an
+// authorized_user source, which requests tokens on its construction context.
+func TestProvidersMintTokensAfterInit(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		// Inside oauth2's expiry margin, so every Apply refreshes.
+		_, _ = fmt.Fprintf(w, `{"access_token":"tok%d","token_type":"Bearer","expires_in":1}`, n)
+	}))
+	defer srv.Close()
+
+	credsFile := filepath.Join(t.TempDir(), "adc.json")
+	creds := fmt.Sprintf(`{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh","token_uri":%q}`, srv.URL)
+	if err := os.WriteFile(credsFile, []byte(creds), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+
+	tests := []struct {
+		name     string
+		provider CredentialProvider
+	}{
+		{"ADC", ADC()},
+		{"ServiceAccountADCFallback", ServiceAccount(ServiceAccountConfig{})},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := hits.Load()
+			cred, err := tc.provider.Credential(t.Context())
+			if err != nil {
+				t.Fatalf("Credential() error = %v", err)
+			}
+			for i := range 2 {
+				h := http.Header{}
+				if err := cred.Apply(h); err != nil {
+					t.Fatalf("Apply() #%d error = %v", i+1, err)
+				}
+				if !strings.HasPrefix(h.Get("Authorization"), "Bearer tok") {
+					t.Errorf("Apply() #%d Authorization = %q, want a minted bearer token", i+1, h.Get("Authorization"))
+				}
+			}
+			if got := hits.Load() - before; got != 2 {
+				t.Errorf("token endpoint hit %d times, want 2 (one mint per Apply)", got)
+			}
+		})
 	}
 }

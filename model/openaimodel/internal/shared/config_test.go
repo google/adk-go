@@ -15,6 +15,7 @@
 package shared
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -39,5 +40,68 @@ func TestRequestTimeoutGuardsNonPositiveItself(t *testing.T) {
 	cfg := &genai.GenerateContentConfig{HTTPOptions: &genai.HTTPOptions{Timeout: &positive}}
 	if got := RequestTimeout(cfg); got != positive {
 		t.Errorf("RequestTimeout(%v) = %v, want it unchanged", positive, got)
+	}
+}
+
+// rejectUnsupportedFields stands in for genai growing a field: Later and Last
+// play fields added after the supported list was written, which must be refused
+// by name, first in declaration order, while zero and unexported ones pass.
+func TestRejectUnsupportedFieldsRefusesFieldsAddedLater(t *testing.T) {
+	type knobs struct {
+		Supported *int
+		Later     *bool
+		Last      []int
+		internal  int
+	}
+	tests := []struct {
+		name string
+		in   any
+		want string // the field the error names, or "" for no error
+	}{
+		{name: "untyped nil", in: nil},
+		{name: "nil pointer", in: (*knobs)(nil)},
+		{name: "nothing set", in: &knobs{}},
+		{name: "supported only", in: &knobs{Supported: new(int)}},
+		{name: "unexported", in: &knobs{internal: 1}},
+		{name: "added later", in: &knobs{Later: new(bool)}, want: "Knobs.Later"},
+		{name: "first of two", in: &knobs{Later: new(bool), Last: []int{1}}, want: "Knobs.Later"},
+		{name: "struct value", in: knobs{Last: []int{1}}, want: "Knobs.Last"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := rejectUnsupportedFields("Knobs.", tc.in, []string{"Supported"})
+			if tc.want == "" {
+				if err != nil {
+					t.Errorf("rejectUnsupportedFields() error = %v, want nil", err)
+				}
+				return
+			}
+			if want := ErrUnsupportedConfigField.Error() + ": " + tc.want; !errors.Is(err, ErrUnsupportedConfigField) || err.Error() != want {
+				t.Errorf("rejectUnsupportedFields() error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
+// The ThinkingConfig walk has nothing to refuse until genai grows that type, so
+// narrowing the supported list stands in for the field it will one day add. It
+// swaps a package variable, so it must not run in parallel with other tests.
+func TestRejectUnsupportedConfigFieldsWalksThinkingConfig(t *testing.T) {
+	saved := SupportedThinkingConfigFields
+	t.Cleanup(func() { SupportedThinkingConfigFields = saved })
+	SupportedThinkingConfigFields = []string{"IncludeThoughts", "ThinkingBudget"}
+
+	cfg := &genai.GenerateContentConfig{ThinkingConfig: &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}}
+	err := RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
+	if want := ErrUnsupportedConfigField.Error() + ": ThinkingConfig.ThinkingLevel"; err == nil || err.Error() != want {
+		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
+	}
+
+	// Every top-level field is reported before any ThinkingConfig field, even
+	// ImageConfig, which genai declares after ThinkingConfig.
+	cfg.ImageConfig = &genai.ImageConfig{}
+	err = RejectUnsupportedConfigFields(cfg, SupportedConfigFields)
+	if want := ErrUnsupportedConfigField.Error() + ": ImageConfig"; err == nil || err.Error() != want {
+		t.Errorf("RejectUnsupportedConfigFields() error = %v, want %q", err, want)
 	}
 }
