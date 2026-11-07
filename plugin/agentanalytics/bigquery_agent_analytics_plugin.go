@@ -424,6 +424,9 @@ func newBigQueryAgentAnalyticsPlugin(
 	}
 
 	// Ensure table exists and optionally upgrade schema (done once per instance).
+	// OnSchemaError hears of a table that cannot be read, created or upgraded;
+	// OnSchemaReady hears of a ready table once the views are ready too (below).
+	tableChecked := false
 	if bqClient != nil {
 		ds := bqClient.Dataset(config.DatasetID)
 		if config.ProjectID != "" {
@@ -432,9 +435,11 @@ func newBigQueryAgentAnalyticsPlugin(
 		}
 		tableRef := ds.Table(config.TableName)
 		if err := ensureTableAndSchema(ctx, bqTableAdapter{table: tableRef}, config, deniedColumns); err != nil {
+			notifySchemaError(config.OnSchemaError, err, config.logf)
 			closeOwnedResources()
 			return nil, err
 		}
+		tableChecked = true
 	}
 
 	// Determine destination stream: default stream unless ExactlyOnceDelivery
@@ -540,10 +545,17 @@ func newBigQueryAgentAnalyticsPlugin(
 			if logf != nil {
 				logf("agentanalytics: skipping view creation: %v", defsErr)
 			}
+			// The views are not ready, so OnSchemaReady is not called, as it
+			// is not in adk-python when a view cannot be created.
 		} else {
-			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, defs, logf, bqClient)
+			// Pass only the non-default Logger hook so the goroutine does not
+			// retain Config. The pass calls OnSchemaReady once every view is
+			// created, and forgets the callback when it ends.
+			state.startAsyncViewCreation(ctx, defs, logf, bqClient, config.OnSchemaReady)
 		}
+	} else if tableChecked {
+		// No view pass runs, so the schema is ready once the table is.
+		notifySchemaReady(config.OnSchemaReady, config.logf)
 	}
 	return adkPlugin, nil
 }
@@ -986,6 +998,13 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
+// isTaskCompletedResult reports whether a finish_task tool result map carries
+// ADK's runtime completion envelope ("result": "Task completed.").
+func isTaskCompletedResult(resp map[string]any) bool {
+	res, ok := resp["result"].(string)
+	return ok && res == "Task completed."
+}
+
 // hasTaskCompletedResponse reports whether c carries a successful
 // finish_task function response ("result": "Task completed."), which ends a
 // task-mode LLM agent in ADK without running its AfterAgentCallback.
@@ -998,8 +1017,7 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 			continue
 		}
 		if part.FunctionResponse.Name == finishTaskToolName {
-			result, ok := part.FunctionResponse.Response["result"].(string)
-			return ok && result == "Task completed."
+			return isTaskCompletedResult(part.FunctionResponse.Response)
 		}
 	}
 	return false
@@ -1219,11 +1237,28 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		return nil, nil
 	}
 	if confirmationOutcome {
+		// The tool has not run. ADK sends the model the confirmation outcome
+		// as the call's result, as adk-python does, so the row carries it,
+		// and the classifier sees it, as it does there.
 		result = map[string]any{"error": err.Error()}
-	} else if name == finishTaskToolName {
-		// The finish_task response event that follows reaches OnEventCallback
-		// without the context of the activation that made the call.
+	}
+	if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
+		// Even when ToolResultClassifier records the call as TOOL_ERROR,
+		// classification does not alter result, so ADK still emits the
+		// finish_task completion event that reaches OnEventCallback without
+		// the calling activation's context. Non-completion envelopes (such as
+		// an earlier plugin rewriting result into an error map) do not end the
+		// task run and are not marked.
 		p.traces.noteTaskFinished(ctx, id, callID)
+	}
+	if !closedByError {
+		// A call whose failure OnToolErrorCallback already recorded has its
+		// TOOL_ERROR row; the classifier is not asked about the result that a
+		// later plugin recovered it into.
+		if msg, ok := p.classifyToolResultError(ctx, t, name, args, result); ok {
+			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
+			return nil, nil
+		}
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -1266,6 +1301,12 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 	return nil, nil
 }
 
+// classifiedToolErrorMessage is the error_message of a result that
+// Config.ToolResultClassifier records as TOOL_ERROR without a message of its
+// own. It matches adk-python, whose classifier is tool_result_classifier, so
+// that rows from either language can be queried together.
+const classifiedToolErrorMessage = "tool_result_classifier classified the tool result as an error."
+
 func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.Tool, spanFn func() rowSpan, name, callID string, args map[string]any, err error) {
 	p.logEvent(ctx, id, EventToolError, spanFn, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -1276,6 +1317,48 @@ func (p *analyticsPlugin) logToolError(ctx context.Context, id identity, t tool.
 		}
 		d.functionCallID = callID
 	})
+}
+
+// classifyToolResultError returns the error_message of the TOOL_ERROR row of a
+// result that a tool returned without an error, and true, or false to record
+// the result as TOOL_COMPLETED. Config.ToolResultClassifier decides: its
+// ToolResultError verdict records the row, with the classifier's ErrorMessage,
+// or classifiedToolErrorMessage when that is empty, as the error_message, and
+// its ToolResultOK verdict completes the call. When the classifier is nil,
+// abstains, panics or returns a decision that is not defined, the call is
+// recorded as TOOL_COMPLETED, as it is without a classifier.
+func (p *analyticsPlugin) classifyToolResultError(ctx agent.Context, t tool.Tool, name string, args, result map[string]any) (string, bool) {
+	if p.config.ToolResultClassifier == nil {
+		return "", false
+	}
+	switch verdict := p.runToolResultClassifier(ctx, t, name, args, result); verdict.Decision {
+	case ToolResultOK:
+		return "", false
+	case ToolResultError:
+		return cmp.Or(verdict.ErrorMessage, classifiedToolErrorMessage), true
+	}
+	return "", false
+}
+
+// runToolResultClassifier calls Config.ToolResultClassifier and returns its
+// verdict, or an abstaining verdict when the classifier panicked or returned
+// a decision that is not defined, so that the call is recorded as
+// TOOL_COMPLETED. The warning names only the tool: the panic value can carry
+// the result.
+func (p *analyticsPlugin) runToolResultClassifier(ctx agent.Context, t tool.Tool, name string, args, result map[string]any) (verdict ToolResultVerdict) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.config.logf("agentanalytics: ToolResultClassifier failed for tool %q: recovered panic of type %T; recording the call as TOOL_COMPLETED", name, r)
+			verdict = ToolResultVerdict{}
+		}
+	}()
+	verdict = p.config.ToolResultClassifier(ctx, t, args, result)
+	switch verdict.Decision {
+	case ToolResultAbstain, ToolResultOK, ToolResultError:
+		return verdict
+	}
+	p.config.logf("agentanalytics: ToolResultClassifier returned an unusable verdict %v for tool %q; recording the call as TOOL_COMPLETED", verdict.Decision, name)
+	return ToolResultVerdict{}
 }
 
 // toolName returns the name of t, or "" if t is nil or its Name method

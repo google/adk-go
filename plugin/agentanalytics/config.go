@@ -17,9 +17,13 @@ package agentanalytics
 import (
 	"context"
 	"log"
+	"strconv"
 	"time"
 
 	"google.golang.org/api/option"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
 )
 
 const (
@@ -95,6 +99,76 @@ type RetryConfig struct {
 // the content is replaced with "[FORMATTER_FAILED]" so that unformatted data is
 // never written.
 type ContentFormatter func(payload any, eventType string) (any, error)
+
+// ToolResultDecision is the verdict of a [ToolResultClassifier] on the result
+// of a tool call.
+type ToolResultDecision int
+
+const (
+	// ToolResultAbstain leaves the result to the plugin, which records a
+	// result that a tool returned without an error as TOOL_COMPLETED. It is
+	// the zero value, so a classifier abstains by returning
+	// ToolResultVerdict{}.
+	ToolResultAbstain ToolResultDecision = iota
+	// ToolResultOK records the call as TOOL_COMPLETED, whatever the result
+	// holds.
+	ToolResultOK
+	// ToolResultError records the call as TOOL_ERROR, the row of a tool call
+	// that returned an error, with [ToolResultVerdict.ErrorMessage] as its
+	// error_message.
+	ToolResultError
+)
+
+// String returns the name of d, or "ToolResultDecision(<n>)" for a value that
+// is not one of the defined decisions.
+func (d ToolResultDecision) String() string {
+	switch d {
+	case ToolResultAbstain:
+		return "ToolResultAbstain"
+	case ToolResultOK:
+		return "ToolResultOK"
+	case ToolResultError:
+		return "ToolResultError"
+	}
+	return "ToolResultDecision(" + strconv.Itoa(int(d)) + ")"
+}
+
+// ToolResultVerdict is what a [ToolResultClassifier] returns. The zero value
+// abstains.
+type ToolResultVerdict struct {
+	// _ prevents unkeyed literals, which adding a field would break.
+	_ struct{}
+	// Decision says how the call is recorded; see [ToolResultDecision].
+	Decision ToolResultDecision
+	// ErrorMessage is written to error_message when Decision is
+	// ToolResultError and ignored otherwise. When it is empty, the fixed
+	// message "tool_result_classifier classified the tool result as an
+	// error." (the message that adk-python writes, so that rows from either
+	// language can be queried together) is written instead. The message is
+	// scrubbed of credentials like every other error_message unless
+	// DisableSensitiveKeyRedaction is set, and truncated to MaxContentLen, but
+	// Config.ContentFormatter and Config.PayloadColumnDenylist do not apply
+	// to it, so copy tool output into it only where storing that output is
+	// acceptable.
+	ErrorMessage string
+}
+
+// ToolResultClassifier decides whether the result of a tool call that returned
+// without an error reports a failure. It is called from the plugin's
+// AfterToolCallback with the context, the tool, the arguments and the result
+// that the callback receives, after the checks that it cannot override: a tool
+// error that OnToolErrorCallback already recorded and an error that reached
+// AfterToolCallback unrecovered are recorded as TOOL_ERROR without it. A tool
+// call that waits for or was rejected by the user's confirmation reaches the
+// classifier with the result that ADK sends the model, a map with the
+// confirmation outcome under "error", as it does in adk-python. The classifier
+// must not modify args or result: the model and the agent use them next. It is
+// called synchronously on the agent's goroutine, so keep it fast, and it may be
+// called concurrently for parallel tool calls. A classifier that panics, or
+// that returns a Decision that is not one of the defined decisions, is skipped
+// for that call: the call is recorded as TOOL_COMPLETED, as it is without a
+// classifier, and the warning logged to Config.Logger names only the tool.
+type ToolResultClassifier func(ctx agent.Context, t tool.Tool, args, result map[string]any) ToolResultVerdict
 
 // DropStats reports cumulative event-drop and formatter-failure counts across
 // the plugin's event processing pipeline.
@@ -209,6 +283,15 @@ type GCSContentOffloader interface {
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
 // [DefaultConfig] when a plugin or batch processor is constructed.
+//
+// ToolResultClassifier, OnSchemaReady and OnSchemaError map to adk-python's
+// tool_result_classifier, on_schema_ready and on_schema_error and reach the
+// same verdicts on the same inputs. adk-python runs its table readiness pass,
+// which creates the views too, lazily on the first event and again on later
+// events after a failure, so its two schema callbacks can be called several
+// times; this plugin reads, creates or upgrades the table once, in the
+// constructor, which fails on a table error, and creates the views in the
+// background, so each callback is called at most once per plugin.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
@@ -332,6 +415,22 @@ type Config struct {
 	// logged as an AGENT_RESPONSE event carrying the tool arguments.
 	FinalResponseToolNames []string
 
+	// ToolResultClassifier, if set, decides whether a tool result that was
+	// returned without an error reports a failure; see
+	// [ToolResultClassifier]. A ToolResultError verdict records the call as
+	// TOOL_ERROR instead of TOOL_COMPLETED, which also leaves out the
+	// AGENT_RESPONSE row of a tool in FinalResponseToolNames (while a
+	// runtime-successful finish_task completion still completes the task span
+	// because classification leaves the agent-facing result unchanged); a
+	// ToolResultOK verdict records TOOL_COMPLETED, whatever the result holds;
+	// and a ToolResultAbstain verdict (the zero value) leaves the result to
+	// the plugin, which records it as TOOL_COMPLETED. When nil, every result
+	// that a tool returned without an error is recorded as TOOL_COMPLETED. The
+	// classifier is called even when EventAllowlist or EventDenylist drops
+	// the TOOL_COMPLETED and TOOL_ERROR rows, since its verdict also decides
+	// the AGENT_RESPONSE row of a tool in FinalResponseToolNames.
+	ToolResultClassifier ToolResultClassifier
+
 	// DisableFlushOnRunEnd stops the synchronous best-effort flush when an
 	// invocation completes. When false (the default), AfterRunCallback flushes
 	// queued events, skipping the flush if a background flush is already
@@ -354,6 +453,37 @@ type Config struct {
 	// missing columns are added, which needs the bigquery.tables.update
 	// permission; a table that already has every column is not updated.
 	DisableSchemaUpgrade bool
+
+	// OnSchemaReady, if set, is called once the plugin's startup pass over the
+	// BigQuery schema has succeeded: the events table was read, created or
+	// upgraded during construction and, unless DisableCreateViews is set, the
+	// startup view creation pass has created every view (see
+	// DisableCreateViews). It is called at most once per plugin: when
+	// DisableCreateViews is set, synchronously from the constructor before it
+	// returns; otherwise from the background view creation goroutine, so keep
+	// it fast and non-blocking, and expect it on another goroutine. It must
+	// not call Close or SyncViews on the plugin, nor wait for anything that
+	// does, since both wait for the callback to return first. It is not
+	// called when a view fails, when the startup view pass is preempted by
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] or ended by closing the plugin,
+	// when the view definitions are invalid, when the plugin is disabled, or
+	// when the plugin was built with [NewBigQueryAgentAnalyticsPluginWithClients]
+	// and bqClient == nil, since no pass runs then; a SyncViews call of its
+	// own never calls it either. A panic in the callback is recovered and
+	// logged (through Config.Logger when called from the constructor, and only
+	// through a non-default Logger when called from the background pass, as
+	// view failures are).
+	OnSchemaReady func()
+
+	// OnSchemaError, if set, is called with the error when the startup pass
+	// fails to read, create or upgrade the events table, right before the
+	// constructor returns that error. It is called at most once per
+	// constructor call, synchronously from the constructor, and never for a
+	// view that fails to be created, which is logged instead and retried by
+	// SyncViews, nor when the plugin is disabled or was built with bqClient ==
+	// nil. A panic in the callback is recovered and logged through
+	// Config.Logger, and the constructor still returns the error.
+	OnSchemaError func(err error)
 
 	// EnableOTelCorrelation also writes the ambient OpenTelemetry trace and
 	// span IDs to attributes.otel.
