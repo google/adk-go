@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
@@ -401,5 +402,24 @@ func TestOmitEmpty(t *testing.T) {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
 
+	}
+}
+
+func TestTimeFractionalSeconds(t *testing.T) {
+	// Verify microsecond resolution is preserved (e.g., matching adkrest UnixMicro / 1e6)
+	tm := time.UnixMicro(1733040000123456) // 1733040000.123456
+	got, err := convertSnake("", "", tm)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+
+	gotFloat, ok := got.(float64)
+	if !ok {
+		t.Fatalf("convertSnake(time.Time) returned %T (%v), want float64", got, got)
+	}
+
+	want := 1733040000.123456
+	if gotFloat != want {
+		t.Errorf("convertSnake(time.Time) = %v, want %v", gotFloat, want)
 	}
 }
