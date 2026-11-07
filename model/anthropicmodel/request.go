@@ -76,7 +76,7 @@ func (m *anthropicModel) buildMessageParams(
 		System:       systemBlocks,
 		Tools:        tools,
 		ToolChoice:   toolChoice,
-		Thinking:     buildThinkingParam(req.Config),
+		Thinking:     buildThinkingParam(req.Config, modelID),
 		OutputConfig: outputConfig,
 	}
 
