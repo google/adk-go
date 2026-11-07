@@ -186,6 +186,9 @@ func TestRetryAndReflect_MaxRetries(t *testing.T) {
 	if !strings.Contains(res["reflection_guidance"].(string), "exceeded") {
 		t.Errorf("expected guidance to mention exceeded, got %v", res["reflection_guidance"])
 	}
+	if !strings.Contains(res["reflection_guidance"].(string), "failed consecutively 2 times") {
+		t.Errorf("expected guidance to mention 'failed consecutively 2 times', got %v", res["reflection_guidance"])
+	}
 }
 
 func TestRetryAndReflect_ErrorIfRetryExceeded(t *testing.T) {
