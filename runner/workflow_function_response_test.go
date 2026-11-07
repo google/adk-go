@@ -22,6 +22,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagent"
+	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/parallelagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/internal/testutil"
@@ -158,9 +159,8 @@ func hasFunctionResponse(contents []*genai.Content, callID string) bool {
 
 // TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow checks that an
 // adk_request_input response to a node of a graph workflow goes through the
-// workflow, when the workflow is the root or the only child, so Workflow.Resume
-// runs the downstream nodes. Running the node agent on its own would ask for
-// input again.
+// workflow, at the root or nested, so Workflow.Resume runs the downstream nodes.
+// Running the node agent on its own would ask for input again.
 func TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -218,6 +218,106 @@ func TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow(t *testing.T) {
 			}
 			if !sawD {
 				t.Error("resume did not reach downstream node d")
+			}
+		})
+	}
+}
+
+// TestRun_FunctionResponseSkipsSiblingsOfGraphWorkflow checks that a composite
+// root does not re-run the sub-agents ahead of or beside a graph workflow when
+// a node of the workflow gets its adk_request_input response. The LLM sibling
+// would fail on a response it never saw the call for. Sub-agents after the
+// workflow in a sequence still run.
+func TestRun_FunctionResponseSkipsSiblingsOfGraphWorkflow(t *testing.T) {
+	tests := []struct {
+		name      string
+		newRoot   func(subAgents ...agent.Agent) (agent.Agent, error)
+		withAfter bool
+	}{
+		{
+			name: "sequential, sibling ahead",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: subAgents}})
+			},
+		},
+		{
+			name: "sequential, sub-agent after the workflow runs",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: subAgents}})
+			},
+			withAfter: true,
+		},
+		{
+			name: "sequential inside sequential",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				inner, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "inner", SubAgents: subAgents}})
+				if err != nil {
+					return nil, err
+				}
+				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{inner}}})
+			},
+		},
+		{
+			name: "parallel",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				return parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: subAgents}})
+			},
+		},
+		{
+			name: "loop",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				return loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: subAgents}, MaxIterations: 1})
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			otherModel := &testutil.MockModel{Responses: []*genai.Content{genai.NewContentFromText("other answer", genai.RoleModel)}}
+			other, err := llmagent.New(llmagent.Config{Name: "other", Model: otherModel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, d := joinResumeAgent(t, "b", "B", true), joinResumeAgent(t, "d", "D", false)
+			bn, dn := joinResumeAgentNode(t, b), joinResumeAgentNode(t, d)
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name: "wf", SubAgents: []agent.Agent{b, d},
+				Edges: []workflow.Edge{{From: workflow.Start, To: bn}, {From: bn, To: dn}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			subAgents := []agent.Agent{other, wf}
+			if tc.withAfter {
+				subAgents = append(subAgents, joinResumeAgent(t, "after", "A", false))
+			}
+			root, err := tc.newRoot(subAgents...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := runner.New(runner.Config{AppName: "repro", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			authors := map[string]bool{}
+			for ev, err := range r.Run(t.Context(), "u", "s", resumeContent("b", workflow.WorkflowInputFunctionCallName, "approved"), agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("resume error: %v", err)
+				}
+				authors[ev.Author] = true
+			}
+			if !authors["d"] {
+				t.Error("resume did not reach downstream node d")
+			}
+			if authors["other"] {
+				t.Error("resume re-ran the sibling other")
+			}
+			if tc.withAfter && !authors["after"] {
+				t.Error("resume did not run the sub-agent after the workflow")
 			}
 		})
 	}

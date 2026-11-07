@@ -25,6 +25,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -79,7 +80,11 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
-	for _, sa := range ctx.Agent().SubAgents() {
+	subAgents := ctx.Agent().SubAgents()
+	if i := utils.GraphResumeIndex(ctx); i >= 0 {
+		subAgents = subAgents[i : i+1]
+	}
+	for _, sa := range subAgents {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
