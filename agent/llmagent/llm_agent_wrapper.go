@@ -710,6 +710,12 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			} else {
 				ev.Output = pendingFCArgs
 			}
+			if key := outputKeyOf(a); key != "" && ev.Output != nil {
+				if ev.Actions.StateDelta == nil {
+					ev.Actions.StateDelta = map[string]any{}
+				}
+				ev.Actions.StateDelta[key] = ev.Output
+			}
 			yield(ev, nil)
 			return
 		}
@@ -717,6 +723,15 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 			return
 		}
 	}
+}
+
+// outputKeyOf returns the OutputKey of an LlmAgent, or "" for any other agent.
+func outputKeyOf(a agent.Agent) string {
+	llmA, ok := a.(llminternal.Agent)
+	if !ok || llmA == nil {
+		return ""
+	}
+	return llminternal.Reveal(llmA).OutputKey
 }
 
 // TODO: The current approach of using wrappedSession to inject the user input
