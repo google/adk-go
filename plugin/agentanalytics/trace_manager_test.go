@@ -23191,4 +23191,202 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("activation/delayed inner1 recovery clears only first activation and keeps inner2", func(t *testing.T) {
+		runScenario := func(t *testing.T, recoverSecond bool) {
+			t.Helper()
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-activation-fifo"
+			rootID := identity{invocationID: invID, agentName: "root", branch: "root"}
+			innerID := identity{invocationID: invID, agentName: "inner", branch: "root"}
+			parID := identity{invocationID: invID, agentName: "par", branch: "root"}
+			dID := identity{invocationID: invID, agentName: "d", branch: "root.d"}
+
+			err1 := errors.New("inner run1 error")
+			err2 := errors.New("inner run2 error")
+
+			tm.pushAgentSpan(ctx, rootID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			rootRec := inv.agentStack[1]
+			rootRec.propagatesChildError = false
+			inv.mu.Unlock()
+
+			runOne := func(err error) {
+				tm.pushAgentSpan(ctx, innerID)
+				tm.pushAgentSpan(ctx, parID)
+				dCtx, cancelD := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(dCtx, dID)
+				cancelD(err)
+
+				inv.mu.Lock()
+				n := len(inv.agentStack)
+				inv.agentStack[n-3].propagatesChildError = false
+				inv.agentStack[n-2].propagatesChildError = true
+				inv.agentStack[n-1].runDone = true
+				inv.mu.Unlock()
+
+				tm.popAgentSpan(dCtx, dID)
+				tm.popAgentSpan(ctx, parID)
+				tm.popAgentSpan(ctx, innerID)
+			}
+
+			runOne(err1)
+			runOne(err2)
+
+			// First delayed recovery event from inner clears only run1's cause.
+			tm.completeResponse(ctx, rootID, "inner", "root", nil)
+
+			inv.mu.Lock()
+			afterFirst := rootRec.openFailureCause()
+			retiredCount := len(rootRec.retiredCauses)
+			inv.mu.Unlock()
+			if errors.Is(afterFirst, err1) || !errors.Is(afterFirst, err2) || retiredCount != 1 {
+				t.Fatalf("after 1st recovery: cause=%v count=%d, want only err2 (%v) and count=1", afterFirst, retiredCount, err2)
+			}
+
+			if recoverSecond {
+				tm.completeResponse(ctx, rootID, "inner", "root", nil)
+				inv.mu.Lock()
+				afterSecond := rootRec.openFailureCause()
+				inv.mu.Unlock()
+				if afterSecond != nil {
+					t.Fatalf("after 2nd recovery: cause=%v, want nil", afterSecond)
+				}
+			}
+		}
+
+		t.Run("second unrecovered stays failed", func(t *testing.T) { runScenario(t, false) })
+		t.Run("second buffered recovery also clears", func(t *testing.T) { runScenario(t, true) })
+	})
+
+	t.Run("activation/delayed drained descendant clears only first activation", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-drained-activation-fifo"
+		rootID := identity{invocationID: invID, agentName: "root", branch: "root"}
+		innerID := identity{invocationID: invID, agentName: "inner", branch: "root"}
+		parID := identity{invocationID: invID, agentName: "par", branch: "root"}
+		dID := identity{invocationID: invID, agentName: "d", branch: "root.d"}
+
+		err1 := errors.New("run1 failure")
+		err2 := errors.New("run2 drained failure")
+
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		rootRec.propagatesChildError = false
+		inv.mu.Unlock()
+
+		// Run 1 retires completely.
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, parID)
+		d1Ctx, cancelD1 := context.WithCancelCause(ctx)
+		tm.pushAgentSpan(d1Ctx, dID)
+		cancelD1(err1)
+		inv.mu.Lock()
+		n := len(inv.agentStack)
+		inv.agentStack[n-3].propagatesChildError = false
+		inv.agentStack[n-2].propagatesChildError = true
+		inv.agentStack[n-1].runDone = true
+		inv.mu.Unlock()
+		tm.popAgentSpan(d1Ctx, dID)
+		tm.popAgentSpan(ctx, parID)
+		tm.popAgentSpan(ctx, innerID)
+
+		// Run 2 leaves d2 on agentStack under retired par and inner (drained descendant).
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, parID)
+		d2Ctx, cancelD2 := context.WithCancelCause(ctx)
+		tm.pushAgentSpan(d2Ctx, dID)
+		cancelD2(err2)
+		inv.mu.Lock()
+		n = len(inv.agentStack)
+		inv.agentStack[n-3].propagatesChildError = false
+		inv.agentStack[n-2].propagatesChildError = true
+		inv.agentStack[n-1].runDone = true
+		inv.mu.Unlock()
+		tm.popAgentSpan(ctx, parID)
+		tm.popAgentSpan(ctx, innerID)
+
+		tm.completeResponse(ctx, rootID, "d", "root.d", nil)
+		tm.completeResponse(ctx, rootID, "inner", "root", nil)
+
+		inv.mu.Lock()
+		gotCause := rootRec.openFailureCause()
+		inv.mu.Unlock()
+		if errors.Is(gotCause, err1) || !errors.Is(gotCause, err2) {
+			t.Fatalf("root openFailureCause = %v, want err2 (%v) and not err1", gotCause, err2)
+		}
+	})
+
+	t.Run("activation/retiredPeerCount trailer clears only earliest retired peer", func(t *testing.T) {
+		ctx := context.Background()
+		tm := newTraceManager()
+		const invID = "inv-retired-peer-cause-fifo"
+		rootID := identity{invocationID: invID, agentName: "root", branch: ""}
+		workerID := identity{invocationID: invID, agentName: "worker", branch: ""}
+		parID := identity{invocationID: invID, agentName: "par", branch: ""}
+		childID := identity{invocationID: invID, agentName: "child", branch: "c"}
+
+		err1 := errors.New("peer1 recoverable")
+		err2 := errors.New("peer2 unrecovered")
+		err3 := errors.New("live peer3 model error")
+
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		rootRec.propagatesChildError = false
+		inv.mu.Unlock()
+
+		// Live peer3 runs concurrently so retiring peer1 and peer2 increments retiredPeerCount.
+		tm.pushAgentSpan(ctx, workerID)
+		inv.mu.Lock()
+		peer3 := inv.agentStack[len(inv.agentStack)-1]
+		peer3.propagatesChildError = false
+		inv.mu.Unlock()
+
+		retireFailingPeer := func(err error) {
+			tm.pushAgentSpan(ctx, workerID)
+			// Mark this peer activation responded (e.g., partial/progress
+			// event before its child ran) so retiring leaves unrespondedRetired
+			// at 0 and the delayed AfterAgentCallback trailer exercises
+			// retiredPeerCount.
+			tm.completeResponse(ctx, workerID, "worker", "", nil)
+			tm.pushAgentSpan(ctx, parID)
+			cCtx, cancelC := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(cCtx, childID)
+			cancelC(err)
+			inv.mu.Lock()
+			n := len(inv.agentStack)
+			inv.agentStack[n-3].propagatesChildError = false
+			inv.agentStack[n-2].propagatesChildError = true
+			inv.agentStack[n-1].runDone = true
+			inv.mu.Unlock()
+			tm.popAgentSpan(cCtx, childID)
+			tm.popAgentSpan(ctx, parID)
+			tm.popAgentSpan(ctx, workerID)
+		}
+
+		retireFailingPeer(err1)
+		retireFailingPeer(err2)
+
+		tm.pushLLMSpan(ctx, workerID)
+		tm.recordError(ctx, workerID, llmKey(workerID), err3)
+		tm.popLLMSpan(ctx, workerID, false)
+
+		// One trailer event arrives while peer3 is still open -> clears only peer1.
+		tm.completeResponse(ctx, rootID, "worker", "", nil)
+
+		inv.mu.Lock()
+		gotCause := rootRec.openFailureCause()
+		retiredCount := len(rootRec.retiredCauses)
+		inv.mu.Unlock()
+		if errors.Is(gotCause, err1) || !errors.Is(gotCause, err2) || retiredCount != 1 {
+			t.Fatalf("after trailer: root cause=%v count=%d, want only err2 (%v) and count=1", gotCause, retiredCount, err2)
+		}
+	})
 }

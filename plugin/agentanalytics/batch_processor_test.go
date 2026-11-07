@@ -8835,3 +8835,243 @@ func TestBatchProcessor_RowErrorsIsolation(t *testing.T) {
 		}
 	})
 }
+
+func TestBatchProcessor_AmbiguousSendRowErrorsDoesNotReplaySurvivors(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		attempt2Resp *storagepb.AppendRowsResponse
+	}{
+		{
+			name: "nil error status with RowErrors after ambiguous send fails without survivor replay",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+		{
+			name: "InvalidArgument status with RowErrors after ambiguous send fails without survivor replay",
+			attempt2Resp: &storagepb.AppendRowsResponse{
+				Response: &storagepb.AppendRowsResponse_Error{
+					Error: &statuspb.Status{
+						Code:    int32(codes.InvalidArgument),
+						Message: "row 0 invalid",
+					},
+				},
+				RowErrors: []*storagepb.RowError{{
+					Index:   0,
+					Message: "row 0 invalid",
+				}},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			var mu sync.Mutex
+			var appendRowCounts []int64
+			srv := &scriptedCommittedStreamServer{
+				onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+					mu.Lock()
+					appendRowCounts = append(appendRowCounts, req.GetArrowRows().GetRows().GetRowCount())
+					mu.Unlock()
+					switch attempt {
+					case 1:
+						return nil, status.Error(codes.Unavailable, "unknown outcome")
+					case 2:
+						return tc.attempt2Resp, nil
+					default:
+						return &storagepb.AppendRowsResponse{}, nil
+					}
+				},
+			}
+
+			lis, err := net.Listen("tcp", "localhost:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			gSrv := grpc.NewServer()
+			storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+			go func() { _ = gSrv.Serve(lis) }()
+			t.Cleanup(gSrv.Stop)
+
+			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+
+			writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+			if err != nil {
+				t.Fatalf("write client: %v", err)
+			}
+			t.Cleanup(func() { _ = writeClient.Close() })
+
+			config := DefaultConfig()
+			config.ProjectID = "test-proj"
+			config.DatasetID = "test-ds"
+			config.TableName = "agent_events"
+			config.ExactlyOnceDelivery = true
+			config.RetryConfig = RetryConfig{
+				MaxRetries:   1,
+				InitialDelay: time.Millisecond,
+				MaxDelay:     5 * time.Millisecond,
+				Multiplier:   1.0,
+			}
+
+			bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+			if err != nil {
+				t.Fatalf("NewBatchProcessor() error = %v", err)
+			}
+			defer bp.Close()
+
+			batchA := []map[string]any{
+				{"event_type": "LLM_REQUEST"},
+				{"event_type": "LLM_RESPONSE"},
+			}
+			if err := bp.writeBatch(ctx, batchA); err == nil {
+				t.Fatal("writeBatch(Batch A) error = nil, want error")
+			}
+
+			wantDropsAfterA := DropStats{AppendFailureDrops: 2, TotalDrops: 2}
+			if diff := cmp.Diff(wantDropsAfterA, bp.DropStats()); diff != "" {
+				t.Errorf("DropStats() after Batch A mismatch (-want +got):\n%s", diff)
+			}
+
+			if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "TOOL_STARTING"}}); err != nil {
+				t.Fatalf("writeBatch(Batch B) error = %v, want nil", err)
+			}
+
+			srv.mu.Lock()
+			defer srv.mu.Unlock()
+			wantStreams := []string{
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+				"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-2",
+			}
+			if diff := cmp.Diff(wantStreams, srv.appendStreamNames); diff != "" {
+				t.Errorf("AppendRows stream names mismatch (-want +got):\n%s", diff)
+			}
+			wantOffsets := []int64{0, 0, 0}
+			if diff := cmp.Diff(wantOffsets, srv.appendOffsets); diff != "" {
+				t.Errorf("AppendRows offsets mismatch (-want +got):\n%s", diff)
+			}
+			mu.Lock()
+			gotCounts := slices.Clone(appendRowCounts)
+			mu.Unlock()
+			if diff := cmp.Diff([]int64{2, 2, 1}, gotCounts); diff != "" {
+				t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	t.Run("non-ambiguous in-band transient failure before RowErrors still isolates survivors without rotation", func(t *testing.T) {
+		ctx := context.Background()
+		var mu sync.Mutex
+		var appendRowCounts []int64
+		srv := &scriptedCommittedStreamServer{
+			onAppend: func(attempt int, req *storagepb.AppendRowsRequest) (*storagepb.AppendRowsResponse, error) {
+				mu.Lock()
+				appendRowCounts = append(appendRowCounts, req.GetArrowRows().GetRows().GetRowCount())
+				mu.Unlock()
+				switch attempt {
+				case 1:
+					return &storagepb.AppendRowsResponse{
+						Response: &storagepb.AppendRowsResponse_Error{
+							Error: &statuspb.Status{
+								Code:    int32(codes.Unavailable),
+								Message: "in-band transient rejection (uncommitted)",
+							},
+						},
+					}, nil
+				case 2:
+					return &storagepb.AppendRowsResponse{
+						RowErrors: []*storagepb.RowError{{
+							Index:   0,
+							Message: "row 0 invalid",
+						}},
+					}, nil
+				default:
+					return &storagepb.AppendRowsResponse{}, nil
+				}
+			},
+		}
+
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("write client: %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		config := DefaultConfig()
+		config.ProjectID = "test-proj"
+		config.DatasetID = "test-ds"
+		config.TableName = "agent_events"
+		config.ExactlyOnceDelivery = true
+		config.RetryConfig = RetryConfig{
+			MaxRetries:   1,
+			InitialDelay: time.Millisecond,
+			MaxDelay:     5 * time.Millisecond,
+			Multiplier:   1.0,
+		}
+
+		bp, err := NewBatchProcessor(ctx, writeClient, "", config)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		defer bp.Close()
+
+		batchA := []map[string]any{
+			{"event_type": "LLM_REQUEST"},
+			{"event_type": "LLM_RESPONSE"},
+		}
+		if err := bp.writeBatch(ctx, batchA); err == nil || !strings.Contains(err.Error(), "1 row(s) rejected by RowErrors") {
+			t.Fatalf("writeBatch(Batch A) error = %v, want 1 row(s) rejected by RowErrors", err)
+		}
+		wantDrops := DropStats{RowErrorDrops: 1, TotalDrops: 1}
+		if diff := cmp.Diff(wantDrops, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+
+		if err := bp.writeBatch(ctx, []map[string]any{{"event_type": "TOOL_STARTING"}}); err != nil {
+			t.Fatalf("writeBatch(Batch B) error = %v, want nil", err)
+		}
+
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		wantStreams := []string{
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+			"projects/test-proj/datasets/test-ds/tables/agent_events/streams/committed-1",
+		}
+		if diff := cmp.Diff(wantStreams, srv.appendStreamNames); diff != "" {
+			t.Errorf("AppendRows stream names mismatch (-want +got):\n%s", diff)
+		}
+		wantOffsets := []int64{0, 0, 0, 1}
+		if diff := cmp.Diff(wantOffsets, srv.appendOffsets); diff != "" {
+			t.Errorf("AppendRows offsets mismatch (-want +got):\n%s", diff)
+		}
+		mu.Lock()
+		gotCounts := slices.Clone(appendRowCounts)
+		mu.Unlock()
+		if diff := cmp.Diff([]int64{2, 2, 1, 1}, gotCounts); diff != "" {
+			t.Errorf("AppendRows row counts mismatch (-want +got):\n%s", diff)
+		}
+	})
+}

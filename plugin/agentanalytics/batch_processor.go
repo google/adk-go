@@ -1743,6 +1743,15 @@ func (s *streamWriter) append(ctx context.Context, recordBatch arrow.RecordBatch
 			continue
 		}
 
+		// Under ExactlyOnceDelivery, if an earlier attempt had an ambiguous send,
+		// returning RowErrors to the caller without error would let
+		// appendChunkRows strip the bad rows and replay the surviving rows onto a
+		// rotated write stream, bypassing offset deduplication for rows that the
+		// ambiguous attempt may already have committed.
+		if s.config.ExactlyOnceDelivery && hadAmbiguousSend && len(recvRes.GetRowErrors()) > 0 {
+			return nil, fmt.Errorf("row errors received after ambiguous send on stream; outcome uncertain; dropped to prevent duplicate delivery")
+		}
+
 		if s.config.ExactlyOnceDelivery && recvRes.GetError() == nil && len(recvRes.GetRowErrors()) == 0 {
 			s.streamOffset.Add(recordBatch.NumRows())
 			hadAmbiguousSend = false

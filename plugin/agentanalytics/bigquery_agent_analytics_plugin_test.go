@@ -1150,7 +1150,8 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
-				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want)), "args")
+				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want),
+			), "args")
 			checkJSONAt(t, jsonObjectColumn(t, row, "attributes"),
 				fmt.Sprintf(`{"temp:token":%q,"theme":"dark"}`, tt.want), "session_metadata", "state")
 
@@ -5458,6 +5459,266 @@ func TestNestedRetiredRecovery_Runner(t *testing.T) {
 					t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
 				}
 			})
+		}
+	})
+}
+
+func TestDelayedRecoveryDoesNotClearLaterActivation_Runner(t *testing.T) {
+	makeSwitchableBranch := func(t *testing.T, name string, runs []struct {
+		childName   string
+		childErr    error
+		recoverText string
+	},
+	) agent.Agent {
+		t.Helper()
+		var mu sync.Mutex
+		var idx int
+		type runData struct {
+			par         agent.Agent
+			recoverText string
+		}
+		prepared := make([]runData, 0, len(runs))
+		subAgents := make([]agent.Agent, 0, len(runs))
+		for i, rc := range runs {
+			childErr := rc.childErr
+			childName := rc.childName
+			child, err := agent.New(agent.Config{
+				Name: childName,
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						ev := session.NewEvent(ctx, ctx.InvocationID())
+						ev.Author = childName
+						ev.Branch = ctx.Branch()
+						ev.Content = textContent("model", childName+" answer")
+						if !yield(ev, nil) {
+							return
+						}
+						if childErr != nil {
+							yield(nil, childErr)
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(%s): %v", childName, err)
+			}
+			par := newParallelAgent(t, fmt.Sprintf("%s_par_%d", name, i), child)
+			prepared = append(prepared, runData{par: par, recoverText: rc.recoverText})
+			subAgents = append(subAgents, par)
+		}
+		var active *runData
+		ag, err := agent.New(agent.Config{
+			Name:      name,
+			SubAgents: subAgents,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				mu.Lock()
+				cur := &prepared[idx]
+				active = cur
+				idx++
+				mu.Unlock()
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range cur.par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					mu.Lock()
+					cur := active
+					mu.Unlock()
+					if cur == nil || cur.recoverText == "" {
+						return nil, nil
+					}
+					return textContent("model", cur.recoverText), nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", name, err)
+		}
+		return ag
+	}
+
+	makeDualRoot := func(t *testing.T, child agent.Agent, delayAuthors ...string) agent.Agent {
+		t.Helper()
+		delaySet := make(map[string]bool, len(delayAuthors))
+		for _, a := range delayAuthors {
+			delaySet[a] = true
+		}
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{child},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered []*session.Event
+					// Run 1
+					for ev, runErr := range child.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && delaySet[ev.Author] {
+							buffered = append(buffered, ev)
+							continue
+						}
+						if ev != nil {
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					// Run 2
+					for ev, runErr := range child.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && delaySet[ev.Author] {
+							buffered = append(buffered, ev)
+							continue
+						}
+						if ev != nil {
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, ev := range buffered {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		return root
+	}
+
+	t.Run("immediate delivery control preserves later unrecovered failure", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		err1 := errors.New("run1 recoverable error")
+		err2 := errors.New("run2 unrecovered error")
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			recoverText string
+		}{
+			{childName: "child1", childErr: err1, recoverText: "run1 recovered"},
+			{childName: "child2", childErr: err2, recoverText: ""},
+		})
+		root := makeDualRoot(t, inner)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-ctrl", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+		}
+	})
+
+	t.Run("delayed recovery from earlier run does not clear later unrecovered activation", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		err1 := errors.New("run1 recoverable error")
+		err2 := errors.New("run2 unrecovered error")
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			recoverText string
+		}{
+			{childName: "child1", childErr: err1, recoverText: "run1 recovered"},
+			{childName: "child2", childErr: err2, recoverText: ""},
+		})
+		root := makeDualRoot(t, inner, "inner")
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-delay-inner", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+		}
+	})
+
+	t.Run("delayed nested wrapper recovery does not clear later unrecovered wrapper+inner run", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		err1 := errors.New("run1 nested recoverable error")
+		err2 := errors.New("run2 nested unrecovered error")
+		inner := makeSwitchableBranch(t, "inner", []struct {
+			childName   string
+			childErr    error
+			recoverText string
+		}{
+			{childName: "child1", childErr: err1, recoverText: ""},
+			{childName: "child2", childErr: err2, recoverText: ""},
+		})
+		var outerRun int
+		outer, err := agent.New(agent.Config{
+			Name:      "outer",
+			SubAgents: []agent.Agent{inner},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				outerRun++
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range inner.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					if outerRun == 1 {
+						return textContent("model", "outer run1 recovered"), nil
+					}
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		root := makeDualRoot(t, outer, "outer")
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-delay-outer", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
 		}
 	})
 }

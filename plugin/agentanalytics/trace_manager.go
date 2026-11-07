@@ -350,68 +350,67 @@ type spanRecord struct {
 }
 
 // retiredSwallower identifies a retired custom ancestor that drained a child
-// failure without its own context failing, so recovery content from its own
-// AfterAgentCallback may clear the cause.
+// failure without its own context failing, so recovery content from that
+// activation's AfterAgentCallback may clear the cause without clearing causes
+// owned by other activations of the same agent.
 type retiredSwallower struct {
+	spanID string
+	seq    uint64
 	name   string
 	branch string
 	path   string
 }
 
+// matches reports whether recovery content authored by (name, branch, path)
+// matches this swallower's identity. An empty path on either side matches any
+// path, as in findAgent.
+func (s retiredSwallower) matches(name, branch, path string) bool {
+	return s.name == name && s.branch == branch && (path == "" || s.path == "" || s.path == path)
+}
+
 // retiredCause is the failure cause of an activation that retired under an
 // open span (see spanRecord.retiredCauses), with the name, branch and node
-// path of the retired activation. swallowableBySelf reports that the retired
-// activation (or an intermediate retired custom ancestor recorded in
-// swallowers) drained an inherited child failure without its own context
-// failing and is not a built-in workflow agent, so recovery content from any
-// of their AfterAgentCallbacks may clear the cause.
+// path of the retired activation. swallowers holds the retired custom
+// swallower activations whose recovery responses may clear this cause.
 type retiredCause struct {
-	err               error
-	name              string
-	branch            string
-	path              string
-	swallowableBySelf bool
-	swallowers        []retiredSwallower
+	err        error
+	name       string
+	branch     string
+	path       string
+	swallowers []retiredSwallower
 }
 
 // addSwallower records rec as a retired custom swallower eligible to clear c on
-// a later recovery response from rec.
+// a later recovery response from that specific activation of rec.
 func (c *retiredCause) addSwallower(rec *spanRecord) {
 	if rec == nil {
 		return
 	}
-	if !c.swallowableBySelf {
-		c.name = rec.name
-		c.branch = rec.branch
-		c.path = rec.path
-		c.swallowableBySelf = true
-		return
+	if rec.spanID != "" {
+		for _, s := range c.swallowers {
+			if s.spanID == rec.spanID {
+				return
+			}
+		}
+	} else {
+		for _, s := range c.swallowers {
+			if s.spanID == "" && s.name == rec.name && s.branch == rec.branch && s.path == rec.path {
+				return
+			}
+		}
 	}
-	if c.name == rec.name && c.branch == rec.branch && c.path == rec.path {
-		return
-	}
-	entry := retiredSwallower{name: rec.name, branch: rec.branch, path: rec.path}
-	if slices.Contains(c.swallowers, entry) {
-		return
-	}
-	c.swallowers = append(slices.Clone(c.swallowers), entry)
+	c.swallowers = append(slices.Clone(c.swallowers), retiredSwallower{
+		spanID: rec.spanID,
+		seq:    rec.seq,
+		name:   rec.name,
+		branch: rec.branch,
+		path:   rec.path,
+	})
 }
 
-// matchesSwallower reports whether recovery content authored by (name, branch,
-// path) may clear c. An empty path on either side matches any path, as in
-// findAgent.
-func (c retiredCause) matchesSwallower(name, branch, path string) bool {
-	if !c.swallowableBySelf {
-		return false
-	}
-	matches := func(sName, sBranch, sPath string) bool {
-		return sName == name && sBranch == branch && (path == "" || sPath == "" || sPath == path)
-	}
-	if matches(c.name, c.branch, c.path) {
-		return true
-	}
+func (c retiredCause) hasSwallowerSpan(spanID string) bool {
 	for _, s := range c.swallowers {
-		if matches(s.name, s.branch, s.path) {
+		if s.spanID == spanID {
 			return true
 		}
 	}
@@ -429,14 +428,57 @@ func (rec *spanRecord) firstRetiredCause() error {
 	return nil
 }
 
-// clearRetiredCauseFor removes the swallowable failure causes that activations
-// of the agent name on branch, and on path, retired under rec with or drained
-// as intermediate custom swallowers. An empty path on either side matches any
-// path, as in findAgent.
-func (rec *spanRecord) clearRetiredCauseFor(name, branch, path string) {
-	rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
-		return c.matchesSwallower(name, branch, path)
-	})
+// clearRetiredCauseForLocked clears the swallowable failure causes linked to
+// the earliest retired swallower activation matching (name, branch, path), so
+// a delayed recovery response from one activation never clears unrecovered
+// failures owned by other activations of the same agent. inv.mu must be held.
+func (inv *invocationTrace) clearRetiredCauseForLocked(name, branch, path string) {
+	var targetSpanID string
+	var targetSeq uint64
+	var hasFallback bool
+	for _, rec := range inv.agentStack {
+		for _, c := range rec.retiredCauses {
+			for _, s := range c.swallowers {
+				if !s.matches(name, branch, path) {
+					continue
+				}
+				if s.spanID == "" {
+					hasFallback = true
+					continue
+				}
+				if targetSpanID == "" || (s.seq != 0 && (targetSeq == 0 || s.seq < targetSeq)) {
+					targetSpanID = s.spanID
+					targetSeq = s.seq
+				}
+			}
+		}
+	}
+	if targetSpanID != "" {
+		for _, rec := range inv.agentStack {
+			rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
+				return c.hasSwallowerSpan(targetSpanID)
+			})
+		}
+		return
+	}
+	if !hasFallback {
+		return
+	}
+	cleared := false
+	for _, rec := range inv.agentStack {
+		rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
+			if cleared {
+				return false
+			}
+			for _, s := range c.swallowers {
+				if s.spanID == "" && s.matches(name, branch, path) {
+					cleared = true
+					return true
+				}
+			}
+			return false
+		})
+	}
 }
 
 // rowSpan places a row in the trace of its invocation. It holds the
@@ -3266,9 +3308,10 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		// spans because a concurrent undeclared sibling started before the
 		// custom agent retired can sit above the ancestor carrying the
 		// swallowable retiredCause (see retireAgentLocked).
-		for _, rec := range inv.agentStack {
-			rec.clearRetiredCauseFor(author, branch, id.path)
-		}
+		// Clear only the earliest matching retired swallower activation's
+		// swallowable causes so delayed recovery from one activation does not
+		// clear unrecovered causes belonging to another activation.
+		inv.clearRetiredCauseForLocked(author, branch, id.path)
 		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
 		if author == id.agentName {
 			return
@@ -3514,9 +3557,7 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []string, was
 		}
 	}
 	if inv.retiredPeerCount[k] > 0 {
-		for _, rec := range inv.agentStack {
-			rec.clearRetiredCauseFor(base.name, base.branch, base.path)
-		}
+		inv.clearRetiredCauseForLocked(base.name, base.branch, base.path)
 		return absorbOntoParent()
 	}
 	for _, j := range peerIdxs {
