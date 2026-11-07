@@ -376,7 +376,10 @@ type BeforeModelCallback func(ctx agent.Context, llmRequest *model.LLMRequest) (
 // AfterModelCallback that is called after receiving a response from the model.
 //
 // If it returns non-nil LLMResponse or error, the actual model response/error
-// is replaced with the returned response/error.
+// is replaced with the returned response/error. A replacement keeps the
+// Partial, TurnComplete and UsageMetadata of the response it replaces unless
+// it sets them itself; since Partial and TurnComplete are bools, setting them
+// to false has no effect.
 type AfterModelCallback func(ctx agent.Context, llmResponse *model.LLMResponse, llmResponseError error) (*model.LLMResponse, error)
 
 // OnModelErrorCallback that is called when receiving an error response from the llm model.
@@ -525,6 +528,16 @@ func (a *llmAgent) maybeSaveOutputToState(event *session.Event) {
 	}
 	if event.Author != a.Name() {
 		// TODO: log "Skipping output save for agent %s: event authored by %s"
+		return
+	}
+	// A task agent delivers its result through finish_task, which runTask writes
+	// to OutputKey. Its text turns (a clarification question, a greeting) are
+	// not the result. runTask runs only when the task agent is entered as a node
+	// (its RunNode method or RunLLMAgentAsNode), whichever agent sits above it.
+	// When it is run through Run (as SequentialAgent, LoopAgent and
+	// ParallelAgent do) or RunLive, nothing writes the finish_task output, so
+	// OutputKey stays unset. Matches adk-python's __maybe_save_output_to_state.
+	if llminternal.Reveal(a).Mode == llminternal.ModeTask {
 		return
 	}
 	if a.OutputKey != "" && event.IsFinalResponse() && event.Content != nil && len(event.Content.Parts) > 0 {

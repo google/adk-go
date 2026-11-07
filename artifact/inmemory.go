@@ -182,6 +182,9 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	// Read the caller-provided clock outside the service lock. A provider may
 	// call back into the service, so invoking it while locked could deadlock.
 	createTime := platform.Now(ctx)
+	// Copy before taking the lock. The copy only reads the caller's part, and
+	// inline data can be large.
+	part := clonePart(req.Part)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,7 +194,7 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 		nextVersion = internalVer + 1
 	}
 	s.set(appName, userID, sessionID, fileName, nextVersion, &artifactEntry{
-		part:           req.Part,
+		part:           part,
 		createTime:     createTime,
 		customMetadata: customMetadata,
 	})
@@ -236,8 +239,19 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 	version := req.Version
 
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	entry, err := s.resolve(appName, userID, sessionID, fileName, version)
+	s.mu.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	// Copy after unlocking. A stored entry never changes after Save, and inline
+	// data can be large.
+	return &LoadResponse{Part: clonePart(entry.part)}, nil
+}
 
+// resolve returns the entry Load reports for the named artifact, following
+// artifact references. The caller must hold s.mu for reading.
+func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, version int64) (*artifactEntry, error) {
 	// An artifact part may be a reference (its FileData.FileURI uses the
 	// "artifact://" scheme), pointing at another artifact rather than storing
 	// data. Resolve it here, re-validating scope at each hop so a reference can
@@ -271,7 +285,7 @@ func (s *inMemoryService) Load(ctx context.Context, req *LoadRequest) (*LoadResp
 		}
 
 		if !isArtifactRef(entry.part) {
-			return &LoadResponse{Part: entry.part}, nil
+			return entry, nil
 		}
 
 		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
