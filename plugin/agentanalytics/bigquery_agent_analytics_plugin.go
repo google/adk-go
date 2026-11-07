@@ -647,9 +647,10 @@ type eventData struct {
 	// customMetadataScrubbed reports that customMetadata was already run
 	// through scrubA2ACustomMetadata.
 	customMetadataScrubbed bool
-	// customMetadataTruncated reports that scrubbing customMetadata hit a
-	// safety cap or placeholder.
-	customMetadataTruncated bool
+	// customMetadataLost holds the keys of customMetadata whose values lost
+	// content to a safety cap or placeholder when scrubbed (see
+	// scrubA2ACustomMetadata).
+	customMetadataLost map[string]bool
 	// timestamp overrides span.timestamp when non-zero. Live callbacks leave
 	// it zero and set span.timestamp from the trace manager's clock; a
 	// mid-run purged activation (see purgeActivationLocked) sets it to
@@ -2047,8 +2048,9 @@ func (p *analyticsPlugin) jsonColumn(v any) (string, bool) {
 }
 
 // attributes assembles the attributes column: the event-specific attributes
-// followed by the common ones, plus whether scrubbing custom_metadata lost
-// content to a safety cap.
+// followed by the common ones, plus whether scrubbing lost content of an
+// entry that custom_metadata keeps to a safety cap or placeholder (see
+// eventData.customMetadataLost).
 func (p *analyticsPlugin) attributes(eventID string, id identity, agentName string, span trace.SpanContext, d *eventData) (map[string]any, bool) {
 	attrs := make(map[string]any, len(d.attributes)+6)
 	maps.Copy(attrs, d.attributes)
@@ -2069,6 +2071,12 @@ func (p *analyticsPlugin) attributes(eventID string, id identity, agentName stri
 	metaTrunc := false
 	if md := p.customMetadata.apply(d.customMetadata); md != nil {
 		attrs["custom_metadata"] = md
+		for k := range d.customMetadataLost {
+			if _, ok := md[k]; ok {
+				metaTrunc = true
+				break
+			}
+		}
 	}
 	return attrs, metaTrunc
 }

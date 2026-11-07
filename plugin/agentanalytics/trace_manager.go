@@ -124,6 +124,8 @@ type spanRecord struct {
 	// activation, retiredCauses and parent (see dropContexts), so that the
 	// record of a call that outlives its run keeps neither the context nor
 	// the span above it, whose record keeps the context of its own callback.
+	// An agent span retired from a late trace keeps it for as long as it
+	// keeps parent (see dropRetiredLateContextsLocked).
 	canceled func() (canceled bool, cause error)
 	// retiredCauses holds the openFailureCause of each activation that
 	// retireAgentLocked removed under this span while this span stayed open,
@@ -363,6 +365,47 @@ type retiredCause struct {
 	swallowableBySelf bool
 }
 
+// pendingRootSpan holds the span metadata and failure causes of a settled
+// activation in a root sub-node subtree that retireLateSettledLocked removed
+// from agentStack when no tool call was open, without retaining any callback
+// context or spanRecord pointer.
+type pendingRootSpan struct {
+	seq             uint64
+	spanID          string
+	parentSpanID    string
+	ancestorIdx     int
+	name            string
+	branch          string
+	path            string
+	start           time.Time
+	lastActivity    time.Time
+	ownContextCause error
+	retiredCauses   []retiredCause
+}
+
+func (s *pendingRootSpan) firstRetiredCause() error {
+	for _, c := range s.retiredCauses {
+		if c.err != nil {
+			return c.err
+		}
+	}
+	return nil
+}
+
+func (s *pendingRootSpan) openFailureCause() error {
+	return cmp.Or(s.ownContextCause, s.firstRetiredCause())
+}
+
+// pendingRootSubtree holds the settled activations of a root sub-node subtree
+// that retireLateSettledLocked removed from agentStack when no tool call was
+// open, in agentStack order (the root sub-node at index 0), so completeResponse
+// can still clear retiredCauses on them before a subsequent tool call under the
+// invocation span reports any remaining failures in endToolRunsLocked.
+type pendingRootSubtree struct {
+	rootSeq uint64
+	spans   []pendingRootSpan
+}
+
 // firstRetiredCause returns the first failure cause that an activation that
 // retired under rec left on it, or nil.
 func (rec *spanRecord) firstRetiredCause() error {
@@ -546,6 +589,14 @@ type invocationTrace struct {
 	// partial, themselves or through an activation that ran under them: if
 	// the caller stopped reading on such an event, they did not fail.
 	partialLineage map[string]bool
+	// pendingRootToolFailures holds the settled subtrees of late activations
+	// right under the invocation span on a node path below that span's that
+	// retireLateSettledLocked removed from agentStack when no tool call was
+	// open while carrying a failure cause. completeResponse clears staged
+	// retiredCauses when a late recovery event arrives, and the next tool call
+	// ending under the invocation span drains and reports any remaining
+	// failures in endToolRunsLocked.
+	pendingRootToolFailures []pendingRootSubtree
 }
 
 // recordedError is an unrecovered error of an invocation and the span ID of
@@ -2689,7 +2740,8 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	}
 	if inv.isLate {
 		// Nothing can end a retired late activation anymore, so once its
-		// cause moved up, its record keeps no callback context (see
+		// cause moved up, its record keeps no callback context, unless an
+		// open span or call still reaches it (see
 		// dropRetiredLateContextsLocked).
 		retired = append(retired, rec)
 		inv.dropRetiredLateContextsLocked(retired...)
@@ -2862,6 +2914,7 @@ func (inv *invocationTrace) reportedOverLocked(i int) map[string]bool {
 // write their AGENT_ERROR rows immediately; the others end without a row, as
 // retireAgentLocked ends them.
 func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]error, now time.Time, ambient string) []unclosedAgentSpan {
+	rootSeq := inv.agentStack[i].seq
 	purged := inv.subtreeLocked(i)
 	var purgedSpans []unclosedAgentSpan
 	for j := len(inv.agentStack) - 1; j >= i; j-- {
@@ -2881,10 +2934,13 @@ func (inv *invocationTrace) purgeActivationLocked(i int, failures map[string]err
 			path:      rec.path,
 			err:       err,
 			timestamp: end,
+			rootSeq:   rootSeq,
+			seq:       rec.seq,
 		})
 	}
 	// In the late state, nothing can end a purged activation anymore, so
-	// its record keeps no callback context once it leaves agentStack (see
+	// once it leaves agentStack, its record keeps no callback context unless
+	// an open span or call still reaches it (see
 	// dropRetiredLateContextsLocked). Only the removed records qualify: the
 	// span that agentStack[i] runs under may still be open.
 	var latePurged []*spanRecord
@@ -2982,6 +3038,12 @@ func (inv *invocationTrace) endToolRunsLocked(ctx context.Context, id identity, 
 		// not show that it failed, and its own callbacks, the end of a run
 		// that waits for it, or the end of the invocation end it.
 	}
+	if i == 0 && len(inv.pendingRootToolFailures) > 0 {
+		purged = append(purged, inv.drainPendingRootToolFailuresLocked(now, ambient)...)
+		slices.SortFunc(purged, func(a, b unclosedAgentSpan) int {
+			return cmp.Or(cmp.Compare(b.rootSeq, a.rootSeq), cmp.Compare(b.seq, a.seq))
+		})
+	}
 	return purged
 }
 
@@ -3068,6 +3130,8 @@ type unclosedAgentSpan struct {
 	// timestamp is the time of the latest callback under the activation,
 	// for the row's timestamp column and latency.
 	timestamp time.Time
+	rootSeq   uint64
+	seq       uint64
 }
 
 // completeResponse records that the author of a final, non-partial session
@@ -3124,6 +3188,9 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	now := tm.now()
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
+	// Any return, early ones included, can leave a late activation that
+	// nothing can end anymore (see retireLateSettledLocked).
+	defer inv.retireLateSettledLocked()
 	wasPartial := inv.lastSessionEventPartial
 	partialSpanID := inv.lastPartialSpanID
 	inv.clearLastPartialLocked()
@@ -3140,6 +3207,10 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 		// swallowable retiredCause (see retireAgentLocked).
 		for _, rec := range inv.agentStack {
 			rec.clearRetiredCauseFor(author, branch, id.path)
+		}
+		inv.clearPendingRootCausesForLocked(author, branch, id.path)
+		if inv.completePendingRootResponseLocked(id.path, author, branch, now) {
+			return
 		}
 		inv.retireDrainedDescendantsLocked(func(p *spanRecord, openSet map[string]bool) bool {
 			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
@@ -3206,7 +3277,6 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	// calls made returned, so none is marked as finished here (see
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
-	inv.retireLateSettledLocked()
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed
@@ -3341,6 +3411,7 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, calls []string, was
 		for _, rec := range inv.agentStack {
 			rec.clearRetiredCauseFor(base.name, base.branch, base.path)
 		}
+		inv.clearPendingRootCausesForLocked(base.name, base.branch, base.path)
 		return absorbOntoParent()
 	}
 	for _, j := range peerIdxs {
@@ -3694,11 +3765,15 @@ func (tm *traceManager) popUnclosedAgentSpans(ctx context.Context, id identity) 
 	}
 
 	if primaryErr == nil && !invocationEnded(ctx) {
-		// When AfterRun runs on the same goroutine that started the runner's
-		// root agent, settleEndedInSubtreeLocked(i, true, 0) settles the
-		// descendants in that root's subtree that canSettleInSubtreeLocked
-		// reaches before the reverse-order loop below pops any remaining
-		// unclosed spans.
+		// When AfterRun runs on the goroutine that started agentStack[1] (the
+		// runner's root agent, or an activation that stayed open after the
+		// root agent's span retired), settleEndedInSubtreeLocked(1, true, 0)
+		// records that agentStack[1] finished running, settles it, and
+		// settles the activations under it whose runs are known to be over
+		// before the reverse-order loop below pops any remaining unclosed
+		// spans. done and since 0 hold here: AfterRun runs only after the
+		// root agent's Run returned, and every agent run that started on this
+		// goroutine ran inside that Run, so it has returned too.
 		if len(inv.agentStack) > 1 {
 			if goid := currentGoroutineID(); goid != 0 && inv.agentStack[1].goroutineID == goid {
 				inv.settleEndedInSubtreeLocked(1, true, 0)
@@ -3830,9 +3905,10 @@ const noFrame = ^uint64(0)
 // call that returned, after the call started (see markToolRunsDoneLocked);
 // pushAgentSpan, when a later attempt of the activation's
 // workflow.ParallelWorker item started on the goroutine on which it ran (see
-// laterAttempt there); and endRestartedNodeRuns, when the workflow agent whose
+// laterAttempt there); endRestartedNodeRuns, when the workflow agent whose
 // scheduler ran it as the agent of a node attempt, and started that node
-// again, ended.
+// again, ended; and popUnclosedAgentSpans, for agentStack[1] when AfterRun
+// runs on the goroutine that started it, after the root agent's Run returned.
 //
 // Retiring a span on an event passes done == false, as the event does not
 // show that the run that wrote it returned: popTaskAgentSpan, through
@@ -3992,20 +4068,59 @@ func (inv *invocationTrace) settleFinishedLocked() {
 // nothing can end anymore. An activation that its BeforeAgentCallback
 // answered never gets an AfterAgentCallback, and in the late state, where
 // AfterRun has already run, popUnclosedAgentSpans never ends it either. Such
-// an activation is retired once it is settled (its run is over and it ended
-// its InvocationContext, see settleFinishedLocked), no tool call or agent
-// that is still open may have run it (see launcherOpenLocked), and the agent
-// that it runs under is no longer open: that agent ended while such a tool
-// call or agent still held the activation open, or the activation runs right
-// under the invocation span. While that agent is open, its own end retires
-// the activation with it (see retireAgentLocked). As there, an activation
-// that failed, and those that it runs under, stay, and so does one that
-// carries a failure cause (see spanRecord.openFailureCause), which failure
-// reporting reads as a failure too (see failuresLocked). The callbacks that
-// can release such an activation (the end of an agent, of a tool call or of
-// a model call, and a function response) call it last, once they no longer
-// hold an index into agentStack and have reported the failures that they
-// found.
+// an activation is retired once it and every open activation in its subtree
+// are settled (their runs are over and they ended their InvocationContext, see
+// settleFinishedLocked), no tool call or agent that is still open may have run
+// them (see launcherOpenLocked), none of them failed, and the agent that it
+// runs under is no longer open: that agent ended while such a tool call or
+// agent still held the activation open, or the activation runs right under the
+// invocation span. While an activation in the subtree is not settled yet, its
+// own end can still move a failure cause onto the settled activations above
+// it, so they stay until the whole subtree is settled. Likewise, while the
+// agent that an activation runs under is open, its own end retires the
+// activation with it, even one that carries a failure cause, and moves a
+// failure cause of what it retires up to the nearest span above it that is
+// still open (see retireAgentLocked). As there, an activation that failed,
+// and those that it runs under, stay. Here, so does one that carries a
+// failure cause (see spanRecord.openFailureCause) or runs an activation that
+// carries one, but only while something that is open can still read the cause
+// through it: an agent above it that is still open, through which failure
+// reporting (see failuresLocked) reads the cause and whose end moves the cause
+// up, or, for an activation that runs right under the invocation span on a
+// node path below the invocation span's, a tool call that is still open and
+// may end without its agent on agentStack (as the root agent's calls do in
+// RunLive, or when an agent ends before its tool call does), where the end of
+// the last such call reports the failures of those activations and of the ones
+// under them (see endToolRunsLocked). When no tool call is open as such a
+// settled activation right under the invocation span retires, its settled
+// subtree and failure causes are staged in pendingRootToolFailures before the
+// activation and the settled activations under it leave agentStack and drop
+// their callback contexts; completeResponse still clears staged retiredCauses
+// when a late recovery event arrives, and a tool call under the invocation
+// span that ends later reports any remaining failures in endToolRunsLocked in
+// the same order as on a live trace. Failure reporting reads the causes in
+// the subtree of the activation that it reports for, and writes the rows of
+// the activations that failed along their lineage on agentStack, so the
+// activations between the one that carries the cause and the one through
+// which it is read stay too, and for a failure cause the rows do not depend
+// on whether the reading comes as soon as the activations settle or only
+// later. That includes the cause of a collateral error (see recordedError)
+// whose cancellation started at a parallel branch, as when a parallel agent
+// cancels its other branches: the cause is then that branch's context
+// failure cause, which keeps the activations as above. When such a
+// cancellation started at another stop point, such as a workflow node,
+// spanRecord.openFailureCause does not return the cause and the scan of the
+// unrecovered errors in the body skips the error, so nothing keeps an
+// activation for it, and the rows that failure reporting writes from that
+// cause depend on whether the reading comes before the activation that the
+// error is attributed to retires or only later. Unlike a failure, a failure
+// cause keeps no activation on agentStack once nothing that is open can read
+// it: the activation then retires, as do those above it that the cause kept,
+// as it does with the agent above it when its last call ends before that agent
+// does. The callbacks that can release such an activation (the end of an
+// agent, of a tool call or of a model call, and a response event, see
+// completeResponse) call it last, once they no longer hold an index into
+// agentStack and have reported the failures that they found.
 func (inv *invocationTrace) retireLateSettledLocked() {
 	if !inv.isLate || len(inv.agentStack) <= 1 {
 		return
@@ -4021,7 +4136,7 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 	for j := 1; j < len(inv.agentStack); j++ {
 		d := inv.agentStack[j]
 		unresponded := (d.runDone || inv.launcherOpenLocked(d)) && !d.responded()
-		if failed[d.spanID] || unresponded || d.openFailureCause() != nil {
+		if failed[d.spanID] || unresponded {
 			markFailed(j)
 		}
 	}
@@ -4033,11 +4148,54 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 			markFailed(j)
 		}
 	}
+	// In RunLive the root agent has no span on agentStack, and an agent on
+	// agentStack can end before a tool call that it started does. In either
+	// case findAgentForContext returns -1 when the call ends, so
+	// endToolRunsLocked resolves the owner to the invocation span and reports
+	// the failures of the activations right under the invocation span on a
+	// node path below that span's, and of the ones under them.
+	invSpan := inv.agentStack[0]
 	var retired []*spanRecord
 	for {
 		openAgents := make(map[string]bool, len(inv.agentStack))
 		for _, rec := range inv.agentStack[1:] {
 			openAgents[rec.spanID] = true
+		}
+		subtreeSettled := func(idx int) bool {
+			subtree := inv.subtreeLocked(idx)
+			return !slices.ContainsFunc(inv.agentStack[idx:], func(d *spanRecord) bool {
+				return subtree[d.spanID] && (!d.runDone || !d.contextEnded || inv.launcherOpenLocked(d) || failed[d.spanID])
+			})
+		}
+		hasCause := func(idx int) bool {
+			subtree := inv.subtreeLocked(idx)
+			return slices.ContainsFunc(inv.agentStack[idx:], func(d *spanRecord) bool {
+				return subtree[d.spanID] && d.openFailureCause() != nil
+			})
+		}
+		// heldByCause reports whether agentStack[idx], or an activation that
+		// runs under it (see subtreeLocked), carries a failure cause that
+		// something that is open can still read through agentStack[idx]: an
+		// agent that it runs under and that is still open, following parent
+		// across the agents that already retired, or, for agentStack[idx]
+		// right under the invocation span on a node path below that span's, a
+		// tool call that is still open and may end with the invocation span as
+		// its owner in endToolRunsLocked, whose end reads the causes in its
+		// whole subtree through it. So while such a reader is open, the
+		// activation that carries the cause stays with each one between it and
+		// the reader, which keeps the lineage along which failure reporting
+		// writes rows (see failuresLocked). When no tool call is open, a
+		// settled activation right under the invocation span on a node path
+		// below that span's stages its settled subtree in
+		// pendingRootToolFailures and retires with the settled activations
+		// under it.
+		heldByCause := func(idx int) bool {
+			rec := inv.agentStack[idx]
+			readable := len(inv.toolSpans) > 0 && rec.parentSpanID == invSpan.spanID && isSubNodePath(rec.path, invSpan.path)
+			for a := rec.parent; !readable && a != nil && a.kind == spanKindAgent; a = a.parent {
+				readable = openAgents[a.spanID]
+			}
+			return readable && hasCause(idx)
 		}
 		changed := false
 		// Retiring an activation can release the activations that run under
@@ -4045,7 +4203,10 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 		for idx := len(inv.agentStack) - 1; idx >= 1; idx-- {
 			rec := inv.agentStack[idx]
 			parentOpen := rec.parent != nil && rec.parent.kind == spanKindAgent && openAgents[rec.parent.spanID]
-			if !parentOpen && rec.runDone && rec.contextEnded && !inv.launcherOpenLocked(rec) && !failed[rec.spanID] {
+			if !parentOpen && subtreeSettled(idx) && !heldByCause(idx) {
+				if rec.parentSpanID == invSpan.spanID && isSubNodePath(rec.path, invSpan.path) && hasCause(idx) {
+					inv.stagePendingRootSubtreeLocked(idx)
+				}
 				retired = append(retired, rec)
 				if rec.parent != nil && rec.parent.kind == spanKindAgent {
 					retired = append(retired, rec.parent)
@@ -4063,6 +4224,180 @@ func (inv *invocationTrace) retireLateSettledLocked() {
 		inv.dropRetiredLateContextsLocked(retired...)
 		inv.syncOpenAgentsLocked()
 	}
+}
+
+func (inv *invocationTrace) stagePendingRootSubtreeLocked(idx int) {
+	subtree := inv.subtreeLocked(idx)
+	var spans []pendingRootSpan
+	idxBySpanID := make(map[string]int)
+	for _, d := range inv.agentStack[idx:] {
+		if !subtree[d.spanID] {
+			continue
+		}
+		ancIdx := -1
+		for p := d.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+			if k, ok := idxBySpanID[p.spanID]; ok {
+				ancIdx = k
+				break
+			}
+		}
+		var causes []retiredCause
+		for _, c := range d.retiredCauses {
+			if c.err != nil {
+				causes = append(causes, c)
+			}
+		}
+		idxBySpanID[d.spanID] = len(spans)
+		spans = append(spans, pendingRootSpan{
+			seq:             d.seq,
+			spanID:          d.spanID,
+			parentSpanID:    d.parentSpanID,
+			ancestorIdx:     ancIdx,
+			name:            d.name,
+			branch:          d.branch,
+			path:            d.path,
+			start:           d.start,
+			lastActivity:    d.lastActivity,
+			ownContextCause: d.contextFailureCause(),
+			retiredCauses:   causes,
+		})
+	}
+	if len(spans) > 0 {
+		inv.pendingRootToolFailures = append(inv.pendingRootToolFailures, pendingRootSubtree{
+			rootSeq: inv.agentStack[idx].seq,
+			spans:   spans,
+		})
+	}
+}
+
+func (inv *invocationTrace) clearPendingRootCausesForLocked(name, branch, path string) {
+	for i := range inv.pendingRootToolFailures {
+		sub := &inv.pendingRootToolFailures[i]
+		for j := range sub.spans {
+			sub.spans[j].retiredCauses = slices.DeleteFunc(sub.spans[j].retiredCauses, func(c retiredCause) bool {
+				return c.swallowableBySelf && c.name == name && c.branch == branch && (path == "" || c.path == "" || c.path == path)
+			})
+		}
+	}
+	inv.prunePendingRootToolFailuresLocked()
+}
+
+func (inv *invocationTrace) prunePendingRootToolFailuresLocked() {
+	inv.pendingRootToolFailures = slices.DeleteFunc(inv.pendingRootToolFailures, func(sub pendingRootSubtree) bool {
+		return !slices.ContainsFunc(sub.spans, func(s pendingRootSpan) bool {
+			return s.openFailureCause() != nil
+		})
+	})
+}
+
+func (inv *invocationTrace) completePendingRootResponseLocked(path, name, branch string, now time.Time) bool {
+	branchSub, branchSpan := -1, -1
+	var branchSeq uint64
+	nameSub, nameSpan := -1, -1
+	var nameSeq uint64
+	for si := range inv.pendingRootToolFailures {
+		spans := inv.pendingRootToolFailures[si].spans
+		for j := range spans {
+			s := &spans[j]
+			if s.name != name || (path != "" && s.path != "" && s.path != path) {
+				continue
+			}
+			if s.branch == branch && (branchSub < 0 || s.seq > branchSeq) {
+				branchSub, branchSpan, branchSeq = si, j, s.seq
+			}
+			if nameSub < 0 || s.seq > nameSeq {
+				nameSub, nameSpan, nameSeq = si, j, s.seq
+			}
+		}
+	}
+	subIdx, spanIdx := branchSub, branchSpan
+	if subIdx < 0 {
+		subIdx, spanIdx = nameSub, nameSpan
+	}
+	if subIdx < 0 {
+		return false
+	}
+	sub := &inv.pendingRootToolFailures[subIdx]
+	for k := spanIdx; k >= 0; k = sub.spans[k].ancestorIdx {
+		if now.After(sub.spans[k].lastActivity) {
+			sub.spans[k].lastActivity = now
+		}
+	}
+	under := map[string]bool{sub.spans[spanIdx].spanID: true}
+	for j := spanIdx + 1; j < len(sub.spans); j++ {
+		d := &sub.spans[j]
+		if under[d.parentSpanID] && withinBranch(d.branch, branch) && withinPath(d.path, path, false) {
+			under[d.spanID] = true
+		}
+	}
+	for j := spanIdx; j < len(sub.spans); j++ {
+		if under[sub.spans[j].spanID] {
+			sub.spans[j].retiredCauses = nil
+		}
+	}
+	inv.prunePendingRootToolFailuresLocked()
+	return true
+}
+
+func (inv *invocationTrace) drainPendingRootToolFailuresLocked(now time.Time, ambient string) []unclosedAgentSpan {
+	traceID := inv.rowTraceID(ambient)
+	var out []unclosedAgentSpan
+	for _, sub := range inv.pendingRootToolFailures {
+		parentOf := make(map[string]string, len(sub.spans))
+		for _, s := range sub.spans {
+			parentOf[s.spanID] = s.parentSpanID
+		}
+		errs := make(map[string]error)
+		failed := make(map[string]bool)
+		var subtreeCause error
+		for _, s := range sub.spans {
+			if cause := s.firstRetiredCause(); cause != nil && errs[s.spanID] == nil {
+				errs[s.spanID] = cause
+				for cur := s.spanID; cur != "" && !failed[cur]; cur = parentOf[cur] {
+					if _, ok := parentOf[cur]; !ok {
+						break
+					}
+					failed[cur] = true
+				}
+			}
+			subtreeCause = cmp.Or(subtreeCause, s.openFailureCause())
+		}
+		if len(failed) == 0 && subtreeCause != nil && len(sub.spans) > 0 {
+			failed[sub.spans[0].spanID] = true
+		}
+		for j := len(sub.spans) - 1; j >= 0; j-- {
+			s := sub.spans[j]
+			if !failed[s.spanID] {
+				continue
+			}
+			err := cmp.Or(errs[s.spanID], subtreeCause)
+			if err == nil {
+				continue
+			}
+			end := now
+			if !s.lastActivity.IsZero() {
+				end = s.lastActivity
+			}
+			out = append(out, unclosedAgentSpan{
+				span: rowSpan{
+					traceID:       traceID,
+					spanID:        s.spanID,
+					parentSpanID:  s.parentSpanID,
+					latency:       map[string]any{"total_ms": end.Sub(s.start).Milliseconds()},
+					rootAgentName: inv.rootAgentName,
+				},
+				agentName: s.name,
+				branch:    s.branch,
+				path:      s.path,
+				err:       err,
+				timestamp: end,
+				rootSeq:   sub.rootSeq,
+				seq:       s.seq,
+			})
+		}
+	}
+	inv.pendingRootToolFailures = nil
+	return out
 }
 
 // launcherOpenLocked reports whether a tool call or an agent that is still open
@@ -5109,15 +5444,18 @@ func (rec *spanRecord) dropContexts() {
 	rec.retiredCauses = nil
 }
 
-// dropRetiredLateContextsLocked clears the callback contexts of agent spans
-// retired from a late trace, and clears parent on any retired ancestor that
-// is no longer reachable from the remaining open spans or calls. It avoids
-// clearing parent on a retired span that a remaining open span or call still
-// reaches through its parent chain (see subtreeLocked and
-// launcherOpenLocked).
+// dropRetiredLateContextsLocked drops what agent spans retired from a late
+// trace keep of the callbacks of their runs. It clears ended, activation and
+// retiredCauses on each of them, and canceled and parent on each one that no
+// remaining open span or call reaches through its parent chain (see
+// subtreeLocked and launcherOpenLocked) and on each retired span above it, up
+// to the first span that is still open or still reached. One that is still
+// reached keeps both: the cancellation checks of the span that reaches it
+// (see contextFailureCause, canceledByStop and collateralFailureCause) walk
+// up that chain and read canceled on each record in it.
 func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord) {
 	for _, r := range retired {
-		r.canceled, r.ended, r.activation, r.retiredCauses = nil, nil, nil, nil
+		r.ended, r.activation, r.retiredCauses = nil, nil, nil
 	}
 	keepParent := make(map[*spanRecord]bool)
 	markChain := func(s *spanRecord) {
@@ -5135,8 +5473,15 @@ func (inv *invocationTrace) dropRetiredLateContextsLocked(retired ...*spanRecord
 		markChain(s)
 	}
 	for _, r := range retired {
-		if !keepParent[r] {
-			r.parent = nil
+		// Walk up through the retired spans that no open span or call
+		// reaches anymore.
+		for s := r; !keepParent[s]; {
+			p := s.parent
+			s.canceled, s.parent = nil, nil
+			if p == nil || p.kind != spanKindAgent || slices.Contains(inv.agentStack, p) {
+				break
+			}
+			s = p
 		}
 	}
 }
