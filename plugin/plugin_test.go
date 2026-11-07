@@ -16,6 +16,8 @@ package plugin
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/genai"
@@ -94,5 +96,37 @@ func TestNew(t *testing.T) {
 				tt.validate(t, p)
 			}
 		})
+	}
+}
+
+func TestPluginCloseRunsCloseFuncOnce(t *testing.T) {
+	closeErr := errors.New("flush failed")
+	var calls atomic.Int32
+	p, err := New(Config{
+		Name: "counting",
+		CloseFunc: func() error {
+			calls.Add(1)
+			return closeErr
+		},
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if err := p.Close(); !errors.Is(err, closeErr) {
+				t.Errorf("Close() error = %v, want %v", err, closeErr)
+			}
+		})
+	}
+	wg.Wait()
+	if err := p.Close(); !errors.Is(err, closeErr) {
+		t.Errorf("Close() after the first calls error = %v, want %v", err, closeErr)
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("CloseFunc ran %d times, want 1", got)
 	}
 }
