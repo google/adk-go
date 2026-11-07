@@ -1193,11 +1193,11 @@ func TestModel_GenerateStream_TerminalToolCallsAreAuthoritative(t *testing.T) {
 	})
 
 	t.Run("the event's calls keep the place the turn's calls held", func(t *testing.T) {
-		// Replacing must not reorder: appending would move the call past text
-		// it preceded, where blocking reports it first for the same body.
+		// The snapshot omits streamed text, so it cannot mask adoption's
+		// ordering by replacing the whole turn afterward.
 		const evCallThenText = `{"type":"response.completed","response":{"id":"resp_1","model":"stream-model",` +
 			`"status":"completed","output":[` + callSF + `,` +
-			`{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`
+			`{"type":"message","content":[{"type":"output_text","text":"terminal"}]}]}}`
 		got, err := runStream(t, evCreated, evAddedNameOnly, evArgsDoneSF, evDelta1, evDelta2, evCallThenText)
 		if err != nil {
 			t.Fatalf("streaming err = %v", err)
@@ -2105,6 +2105,105 @@ func TestModel_GenerateStream_CompletedTextAfterEmptyFunctionArgs(t *testing.T) 
 			}
 			if diff := cmp.Diff(blocking[0].Content, final.Content); diff != "" {
 				t.Errorf("content mismatch (-blocking +streamed):\n%s", diff)
+			}
+		})
+	}
+}
+
+// When the terminal call restates its ID and arguments, an item-ID fallback
+// must not prevent recovery of text present only in the completed response.
+func TestModel_GenerateStream_CompletedTextAfterCallIDFallback(t *testing.T) {
+	const (
+		addedWithoutCallID = `{"type":"response.output_item.added","item":{"id":"item_1","type":"function_call","name":"ping"}}`
+		argsDone           = `{"type":"response.function_call_arguments.done","item_id":"item_1","arguments":"{}"}`
+		terminalCall       = `{"id":"item_1","type":"function_call","call_id":"call_1","name":"ping","arguments":"{}"}`
+	)
+	tests := []struct {
+		name         string
+		streamedText string
+		terminalText string
+		incomplete   bool
+		wantText     string
+	}{
+		{name: "terminal-only text", terminalText: "pong", wantText: "pong"},
+		{name: "terminal extends streamed text", streamedText: "po", terminalText: "pong", wantText: "pong"},
+		{name: "terminal omits streamed text", streamedText: "checking", terminalText: "pong", wantText: "checking"},
+		{name: "incomplete terminal keeps streamed text", streamedText: "po", terminalText: "pong", incomplete: true, wantText: "po"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, eventType := "completed", "response.completed"
+			if tc.incomplete {
+				status, eventType = "incomplete", "response.incomplete"
+			}
+			body := fmt.Sprintf(`{"id":"resp_1","model":"stream-model","status":%q,"output":[%s,{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}]}`, status, terminalCall, tc.terminalText)
+			events := []string{evCreated, addedWithoutCallID, argsDone}
+			if tc.streamedText != "" {
+				events = append(events, fmt.Sprintf(`{"type":"response.output_text.delta","delta":%q}`, tc.streamedText))
+			}
+			events = append(events, fmt.Sprintf(`{"type":%q,"response":%s}`, eventType, body))
+			got, err := runStream(t, events...)
+			if err != nil {
+				t.Fatalf("streaming failed with error type %T", err)
+			}
+			final := assertTurnShape(t, got)
+			if text := allText(final.Content); text != tc.wantText {
+				t.Errorf("final text mismatch: got %d bytes, want %d", len(text), len(tc.wantText))
+			}
+			wantCalls := []*genai.FunctionCall{{Name: "ping", ID: "call_1", Args: map[string]any{}}}
+			calls := functionCalls(final)
+			if len(calls) != len(wantCalls) {
+				t.Fatalf("final call count = %d, want %d", len(calls), len(wantCalls))
+			}
+			if call := calls[0]; !cmp.Equal(wantCalls[0], call) {
+				t.Errorf("final call mismatch: name matches=%t, ID matches=%t, arguments match=%t",
+					call.Name == wantCalls[0].Name, call.ID == wantCalls[0].ID, cmp.Equal(call.Args, wantCalls[0].Args))
+			}
+			var partialText string
+			for _, response := range got {
+				if response.Partial {
+					partialText += allText(response.Content)
+				}
+			}
+			if partialText != tc.streamedText {
+				t.Errorf("partial text mismatch: got %d bytes, want %d", len(partialText), len(tc.streamedText))
+			}
+		})
+	}
+}
+
+func TestModel_GenerateStream_CompletedContentSupersedesBeforeCallAdoption(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		callID string
+	}{
+		{name: "distinct call ID", callID: `,"call_id":"call_1"`},
+		{name: "omitted call ID"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"id":"resp_1","model":"stream-model","status":"completed","output":[` +
+				`{"type":"function_call","name":"get_weather"` + tc.callID + `},` +
+				`{"type":"function_call","name":"get_weather","call_id":"call_2","arguments":"{\"city\":\"NY\"}"}]}`
+			got, err := runStream(t, evCreated,
+				`{"type":"response.output_item.added","item":{"id":"item_2","type":"function_call","call_id":"call_2","name":"get_weather"}}`,
+				`{"type":"response.function_call_arguments.done","item_id":"item_2","arguments":"{\"city\":\"NY\"}"}`,
+				`{"type":"response.completed","response":`+body+`}`)
+			if err != nil {
+				t.Fatalf("streaming failed with error type %T", err)
+			}
+			blocked, err := runBlocking(t, body)
+			if err != nil {
+				t.Fatalf("blocking failed with error type %T", err)
+			}
+			calls := functionCalls(assertTurnShape(t, got))
+			if len(calls) != 2 {
+				t.Fatalf("final call count = %d, want 2", len(calls))
+			}
+			if len(calls[0].Args) != 0 {
+				t.Errorf("first call has %d arguments, want 0", len(calls[0].Args))
+			}
+			if !cmp.Equal(functionCalls(blocked[len(blocked)-1]), calls) {
+				t.Error("streaming calls differ from blocking")
 			}
 		})
 	}
