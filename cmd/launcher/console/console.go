@@ -124,11 +124,13 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			userInput, err := reader.ReadString('\n')
+			if len(userInput) > 0 {
+				inputChan <- userInput
+			}
 			if err != nil {
 				readErrChan <- err
 				return
 			}
-			inputChan <- userInput
 		}
 	}()
 	// Print an initial newline to work around PTY/exec buffering issues in some environments.
