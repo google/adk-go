@@ -75,6 +75,11 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			return
 		}
 	}
+	// The client may choose the session ID in the body instead of the path,
+	// matching adk-python's non-deprecated create route.
+	if sessionID.ID == "" {
+		sessionID.ID = createSessionRequest.SessionID
+	}
 	// Convert every event before creating anything, so an event the request
 	// cannot carry is a 400 with no session left behind, rather than a 500
 	// after the session is already stored.
