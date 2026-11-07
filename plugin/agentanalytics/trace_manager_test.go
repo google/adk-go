@@ -22548,3 +22548,62 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
 	}
 }
+
+func TestTraceManager_EmptyToolCallContextCleanup(t *testing.T) {
+	type payload struct{ _ [64]byte }
+	type payloadKey struct{}
+	ctx := context.Background()
+	tm := newTraceManager()
+	id := identity{invocationID: "empty-id-cleanup", agentName: "root"}
+	tm.invocationSpan(ctx, id, nil)
+	inv := tm.invocation(ctx, id)
+
+	completedPtr := func() weak.Pointer[payload] {
+		p := &payload{}
+		toolCtx := context.WithValue(ctx, payloadKey{}, p)
+		tm.pushToolCallSpan(toolCtx, id, "", "lookup")
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", true)
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", false)
+		return weak.Make(p)
+	}()
+
+	// Completing AfterTool deletes the context entry immediately while the
+	// invocation is still live.
+	for range 3 {
+		runtime.GC()
+	}
+	if completedPtr.Value() != nil {
+		t.Error("completed empty-ID tool context is still reachable after AfterTool + GC")
+	}
+
+	// Open / abandoned empty-ID contexts must be dropped on endInvocation without
+	// leaving context references on either inv or late state.
+	openPtr, endedPtr := func() (weak.Pointer[payload], weak.Pointer[payload]) {
+		p1, p2 := &payload{}, &payload{}
+		openCtx := context.WithValue(ctx, payloadKey{}, p1)
+		endedCtx := context.WithValue(ctx, payloadKey{}, p2)
+		tm.pushToolCallSpan(openCtx, id, "", "lookup")
+		tm.pushToolCallSpan(endedCtx, id, "", "lookup")
+		tm.popToolCallSpan(endedCtx, id, "", "lookup", true)
+		return weak.Make(p1), weak.Make(p2)
+	}()
+
+	tm.endInvocation(ctx, id)
+	inv.mu.Lock()
+	leftIDs := len(inv.emptyToolCallIDs)
+	leftPtrs := len(inv.emptyToolCallPtrs)
+	inv.mu.Unlock()
+	if leftIDs != 0 || leftPtrs != 0 {
+		t.Errorf("invocation retained empty-ID entries after endInvocation: ids=%d ptrs=%d", leftIDs, leftPtrs)
+	}
+
+	for range 3 {
+		runtime.GC()
+	}
+	if openPtr.Value() != nil {
+		t.Error("open empty-ID tool context is still reachable after endInvocation + GC")
+	}
+	if endedPtr.Value() != nil {
+		t.Error("error-ended empty-ID tool context is still reachable after endInvocation + GC")
+	}
+}

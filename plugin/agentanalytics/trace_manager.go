@@ -323,6 +323,10 @@ type spanRecord struct {
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
 	callStarted bool
+	// emptyCallSeq identifies the per-context synthetic token assigned to a
+	// tool call with an empty FunctionCallID so late handoff preserves only
+	// pointer identities whose spans remain active or error-ended.
+	emptyCallSeq uint64
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -497,6 +501,15 @@ type invocationTrace struct {
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
 	// such records last as long as the invocation.
 	completedTools map[string]*spanRecord
+	// emptyToolCallIDs maps a comparable empty-ID tool callback context and
+	// base key to a unique per-call sequence number within the invocation,
+	// preventing overlapping empty-ID calls on the same tool from colliding.
+	// Entries are deleted in AfterToolCallback and cleared at endInvocation.
+	emptyToolCallIDs map[emptyToolCallKey]uint64
+	// emptyToolCallPtrs tracks non-retaining pointer keys for late-state
+	// empty-ID tool calls handed over across endInvocation.
+	emptyToolCallPtrs map[emptyToolPtrKey]uint64
+	emptyToolCallSeq  uint64
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
 	// with the span ID of the agent activation that reported each of them.
@@ -1268,6 +1281,8 @@ type completedTrace struct {
 	// AfterModelCallback or AfterToolCallback that ADK may still run for them
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
+	endedEmptyToolPtrs      map[emptyToolPtrKey]uint64
+	endedEmptyToolSeq       uint64
 	position                *list.Element
 }
 
@@ -1604,12 +1619,48 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 		rec.dropContexts()
 		rec.handedOver = true
 	}
+	invEmptySeq := inv.emptyToolCallSeq
+	var handoffPtrs map[emptyToolPtrKey]uint64
+	if len(inv.emptyToolCallIDs) > 0 && len(tools)+len(endedTools) > 0 {
+		var liveSeqs map[uint64]bool
+		for _, rec := range tools {
+			if rec.emptyCallSeq != 0 {
+				if liveSeqs == nil {
+					liveSeqs = map[uint64]bool{}
+				}
+				liveSeqs[rec.emptyCallSeq] = true
+			}
+		}
+		for _, rec := range endedTools {
+			if rec.emptyCallSeq != 0 {
+				if liveSeqs == nil {
+					liveSeqs = map[uint64]bool{}
+				}
+				liveSeqs[rec.emptyCallSeq] = true
+			}
+		}
+		if len(liveSeqs) > 0 {
+			for k, seq := range inv.emptyToolCallIDs {
+				if !liveSeqs[seq] {
+					continue
+				}
+				if pk, ok := ptrKeyForEmptyTool(k.ctx, k.key); ok {
+					if handoffPtrs == nil {
+						handoffPtrs = map[emptyToolPtrKey]uint64{}
+					}
+					handoffPtrs[pk] = seq
+				}
+			}
+		}
+	}
 	// The calls leave inv, so that no spanRecord is reachable from both inv,
 	// guarded by inv.mu, and the late state, guarded by its own mu.
 	clear(inv.llmSpans)
 	clear(inv.completedModels)
 	clear(inv.toolSpans)
 	clear(inv.completedTools)
+	clear(inv.emptyToolCallIDs)
+	clear(inv.emptyToolCallPtrs)
 	inv.syncOpenCallsLocked()
 	inv.mu.Unlock()
 	if len(models)+len(tools) > 0 {
@@ -1618,15 +1669,30 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	if late := completed.late; late != nil {
 		late.mu.Lock()
 		late.lastSeq = max(late.lastSeq, lastSeq)
+		late.emptyToolCallSeq = max(late.emptyToolCallSeq, invEmptySeq)
 		maps.Copy(late.llmSpans, models)
 		maps.Copy(late.completedModels, endedModels)
 		maps.Copy(late.toolSpans, tools)
 		maps.Copy(late.completedTools, endedTools)
+		if len(handoffPtrs) > 0 {
+			if late.emptyToolCallPtrs == nil {
+				late.emptyToolCallPtrs = map[emptyToolPtrKey]uint64{}
+			}
+			maps.Copy(late.emptyToolCallPtrs, handoffPtrs)
+		}
 		late.syncOpenCallsLocked()
 		late.mu.Unlock()
 	} else {
 		completed.endedModels = withCalls(completed.endedModels, endedModels)
 		completed.endedTools = withCalls(completed.endedTools, endedTools)
+		if len(handoffPtrs) > 0 {
+			if completed.endedEmptyToolPtrs == nil {
+				completed.endedEmptyToolPtrs = maps.Clone(handoffPtrs)
+			} else {
+				maps.Copy(completed.endedEmptyToolPtrs, handoffPtrs)
+			}
+		}
+		completed.endedEmptyToolSeq = max(completed.endedEmptyToolSeq, invEmptySeq)
 	}
 	limit := max(tm.maxTracked, 64)
 	tm.pruneWaitingLocked(limit, limit/2)
@@ -1647,7 +1713,12 @@ func (tm *traceManager) lateLocked(completed *completedTrace, sc trace.SpanConte
 		late.restoreEvicted(completed.identity)
 		maps.Copy(late.completedModels, completed.endedModels)
 		maps.Copy(late.completedTools, completed.endedTools)
-		completed.endedModels, completed.endedTools = nil, nil
+		late.emptyToolCallSeq = completed.endedEmptyToolSeq
+		if len(completed.endedEmptyToolPtrs) > 0 {
+			late.emptyToolCallPtrs = completed.endedEmptyToolPtrs
+			completed.endedEmptyToolPtrs = nil
+		}
+		completed.endedModels, completed.endedTools, completed.endedEmptyToolSeq = nil, nil, 0
 		completed.late = late
 	}
 	return completed.late
@@ -4750,21 +4821,31 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 	return span
 }
 
+// pushToolCallSpan starts the span of a tool call with explicit callID and tool
+// name, disambiguating overlapping empty-ID calls by their callback context.
+func (tm *traceManager) pushToolCallSpan(ctx context.Context, id identity, callID, toolName string) rowSpan {
+	return tm.pushToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), callID == "")
+}
+
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
+	return tm.pushToolSpanWithKind(ctx, id, key, false)
+}
+
+func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, key string, emptyCallID bool) rowSpan {
 	inv := tm.lookupInvocation(ctx, id, false, true)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
-		return tm.pushToolSpan(ctx, id, key)
+		return tm.pushToolSpanWithKind(ctx, id, key, emptyCallID)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
+	key, emptySeq := inv.resolveToolCallKeyLocked(ctx, key, true, false, emptyCallID)
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
@@ -4781,6 +4862,7 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	rec := inv.newChild(owner, spanKindTool, now)
 	rec.canceled = canceledFunc(ctx)
 	rec.seq = inv.nextSeqLocked()
+	rec.emptyCallSeq = emptySeq
 	rec.callStarted = true
 	rec.ownActivation = owner.isActivationOf(ctx)
 	inv.toolSpans[key] = rec
@@ -4789,6 +4871,12 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 	span := inv.rowSpan(rec, nil, ambient)
 	span.timestamp = now
 	return span
+}
+
+// popToolCallSpan ends the span of a tool call identified by callID and tool
+// name, preserving per-context identity when callID is empty.
+func (tm *traceManager) popToolCallSpan(ctx context.Context, id identity, callID, toolName string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), fromError, callID == "")
 }
 
 // popToolSpan ends the span of a tool call and returns the place of its
@@ -4803,16 +4891,20 @@ func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key strin
 // activations that its tool calls ran and that never ended are ended—purged
 // if they failed, or retired quietly otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+	return tm.popToolSpanWithKind(ctx, id, key, fromError, false)
+}
+
+func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, key string, fromError, emptyCallID bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
-		return tm.popToolSpan(ctx, id, key, fromError)
+		return tm.popToolSpanWithKind(ctx, id, key, fromError, emptyCallID)
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key = callKey(ctx, key)
+	key, emptySeq := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, emptyCallID)
 	open := inv.toolSpans[key]
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
@@ -4855,6 +4947,7 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
 	if fromError {
 		rec.dropContexts()
+		rec.emptyCallSeq = emptySeq
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -5156,6 +5249,105 @@ func toolKey(id identity, functionCallID, toolName string) string {
 		return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + functionCallID
 	}
 	return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + toolName
+}
+
+type emptyToolCallKey struct {
+	ctx any
+	key string
+}
+
+type emptyToolPtrKey struct {
+	typ  reflect.Type
+	addr uintptr
+	key  string
+}
+
+var unhashableProbe = map[any]struct{}{struct{}{}: {}}
+
+func safeComparableKey(v any) (key any, ok bool) {
+	if v == nil || !reflect.TypeOf(v).Comparable() {
+		return nil, false
+	}
+	// reflect.Type.Comparable reports true for interfaces and structs with
+	// interface fields even when a concrete runtime value inside an interface
+	// field is unhashable. Probe a non-empty map so runtime hashing errors
+	// fall back safely without panicking.
+	defer func() {
+		if recover() != nil {
+			key, ok = nil, false
+		}
+	}()
+	_ = unhashableProbe[v]
+	return v, true
+}
+
+func ptrKeyForEmptyTool(v any, baseKey string) (emptyToolPtrKey, bool) {
+	if v == nil {
+		return emptyToolPtrKey{}, false
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		return emptyToolPtrKey{typ: rv.Type(), addr: rv.Pointer(), key: baseKey}, true
+	}
+	return emptyToolPtrKey{}, false
+}
+
+func emptyToolSeqKey(baseKey string, seq uint64) string {
+	return fmt.Sprintf("tc%d\x00%s", seq, baseKey)
+}
+
+func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKey string, push, fromError, emptyCallID bool) (string, uint64) {
+	if !emptyCallID {
+		return callKey(ctx, baseKey), 0
+	}
+	if inv.isLate {
+		pk, ok := ptrKeyForEmptyTool(ctx, baseKey)
+		if !ok {
+			return callKey(ctx, baseKey), 0
+		}
+		return resolveEmptyToolSeqLocked(&inv.emptyToolCallPtrs, pk, inv, ctx, baseKey, push, fromError)
+	}
+	ctxKey, ok := safeComparableKey(ctx)
+	if !ok {
+		return callKey(ctx, baseKey), 0
+	}
+	return resolveEmptyToolSeqLocked(&inv.emptyToolCallIDs, emptyToolCallKey{ctx: ctxKey, key: baseKey}, inv, ctx, baseKey, push, fromError)
+}
+
+func resolveEmptyToolSeqLocked[K comparable](m *map[K]uint64, k K, inv *invocationTrace, ctx context.Context, baseKey string, push, fromError bool) (string, uint64) {
+	if push {
+		inv.emptyToolCallSeq++
+		seq := inv.emptyToolCallSeq
+		if *m == nil {
+			*m = map[K]uint64{}
+		}
+		(*m)[k] = seq
+		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+	}
+	if seq, ok := (*m)[k]; ok {
+		resolved := callKey(ctx, emptyToolSeqKey(baseKey, seq))
+		if fromError {
+			if inv.toolSpans[resolved] != nil {
+				return resolved, seq
+			}
+			inv.emptyToolCallSeq++
+			seq = inv.emptyToolCallSeq
+			(*m)[k] = seq
+			return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+		}
+		delete(*m, k)
+		return resolved, seq
+	}
+	if fromError {
+		inv.emptyToolCallSeq++
+		seq := inv.emptyToolCallSeq
+		if *m == nil {
+			*m = map[K]uint64{}
+		}
+		(*m)[k] = seq
+		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+	}
+	return callKey(ctx, baseKey), 0
 }
 
 // toolKeyCall returns the function call ID, or else the tool name, that
