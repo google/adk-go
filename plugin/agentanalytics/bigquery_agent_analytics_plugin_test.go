@@ -27,6 +27,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -34,6 +37,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +54,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -326,17 +331,14 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	requestsChan := make(chan *storagepb.AppendRowsRequest, 100)
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requestsChan})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to dial test server: %v", err)
 	}
@@ -573,16 +575,13 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 		t.Fatalf("Failed to create bigquery client: %v", err)
 	}
 
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("failed to dial test server: %v", err)
 	}
@@ -1148,7 +1147,8 @@ func TestSensitiveKeyRedaction(t *testing.T) {
 			row := onlyRowOfType(t, rows, EventToolStarting)
 			checkJSONAt(t, jsonObjectColumn(t, row, "content"), fmt.Sprintf(
 				`{"api_key":%[1]q,"query":"weather","headers":{"Authorization":%[1]q,"Accept":"json"},"items":[{"client-secret":%[1]q}],"json":%[2]q}`,
-				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want)), "args")
+				tt.want, fmt.Sprintf(`{"api_key":%q}`, tt.want),
+			), "args")
 			checkJSONAt(t, jsonObjectColumn(t, row, "attributes"),
 				fmt.Sprintf(`{"temp:token":%q,"theme":"dark"}`, tt.want), "session_metadata", "state")
 
@@ -2321,15 +2321,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			if err != nil {
 				t.Fatalf("bq.NewClient: %v", err)
 			}
-			lis, err := net.Listen("tcp", "localhost:0")
-			if err != nil {
-				t.Fatalf("listen: %v", err)
-			}
+			lis := bufconn.Listen(1 << 20)
 			gSrv := grpc.NewServer()
 			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 			go func() { _ = gSrv.Serve(lis) }()
 			t.Cleanup(gSrv.Stop)
-			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatalf("dial: %v", err)
 			}
@@ -2544,15 +2541,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 // client was closed.
 func newTestWriteClient(t *testing.T) (*grpc.ClientConn, *bqstorage.BigQueryWriteClient) {
 	t.Helper()
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -2682,16 +2676,13 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bq.NewClient: %v", err)
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	requests := make(chan *storagepb.AppendRowsRequest, 10)
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -3142,18 +3133,78 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			text: `failed: {Credentials:token=" SECRET123"}`,
 			want: `failed: {Credentials:token="[REDACTED]"}`,
 		},
+		{
+			name: "credential keys with repeated and mixed separators",
+			text: "failed: api__key=SECRET123 stripe.api..key=SECRET123 OPENAI_API__KEY=SECRET123 foo.auth..code=SECRET123",
+			want: "failed: api__key=[REDACTED] stripe.api..key=[REDACTED] OPENAI_API__KEY=[REDACTED] foo.auth..code=[REDACTED]",
+		},
+		{
+			name: "joined shell password containing contraction-shaped words",
+			text: `export DB_PASSWORD=a:'s correct SECRET123 battery's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "quoted credential continued by plus sign",
+			text: `export DB_PASSWORD="prefix"+SECRET123`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "adjacent compound credential assignments",
+			text: `DB_PASSWORD="benign"GITHUB_TOKEN="SECRET123"`,
+			want: `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`,
+		},
+		{
+			name: "closed shell password with semicolon between contraction words",
+			text: `export DB_PASSWORD=a:'s correct staple SECRET123; the user's`,
+			want: `export DB_PASSWORD=[REDACTED]`,
+		},
+		{
+			name: "closed shell password with semicolon and following command",
+			text: `export DB_PASSWORD=a:'s correct; SECRET123 battery's; echo ok`,
+			want: `export DB_PASSWORD=[REDACTED]; echo ok`,
+		},
+		{
+			name: "unclosed password with semicolon after contraction prefix",
+			text: `password=a:'s correct; SECRET123 battery`,
+			want: `password=[REDACTED]`,
+		},
+		{
+			name: "compound camelCase and dotted keys with trailing separators",
+			text: `DB_PASSWORD_=SECRET123 GITHUB_TOKEN_="SECRET123" OpenAIAPIKey_=SECRET123 stripe.api..key_=SECRET123`,
+			want: `DB_PASSWORD_=[REDACTED] GITHUB_TOKEN_="[REDACTED]" OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED]`,
+		},
+		{
+			name: "YAML nested compound keys with trailing separators",
+			text: "credentials:\n  DB_PASSWORD_: SECRET123\n  stripe.api..key_: SECRET123\n  region: us",
+			// The baseline pass reads the line break and the first nested
+			// key as the value of credentials:, so that key is redacted
+			// with the value after it.
+			want: "credentials:[REDACTED]\n  stripe.api..key_:[REDACTED]\n  region: us",
+		},
+		{
+			name: "joined double quotes in Digest Authorization header",
+			text: `curl -H "Authorization: Digest username="bob", response="SECRET123""`,
+			want: `curl -H "Authorization: [REDACTED]"`,
+		},
+		{
+			name: "joined double quotes in X-Api-Key header",
+			text: `curl -H "X-Api-Key: "prefix" SECRET123"`,
+			want: `curl -H "X-Api-Key: [REDACTED]"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p, requests, mCtx := setupTestPlugin(t)
 			var errs callbackErrors
 			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
 			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
-			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, nil, errors.New(tt.text)))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "exchange"}, map[string]any{"input": tt.text}, errors.New(tt.text)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{Model: "gemini-test"}, errors.New(tt.text)))
 			errs.check(t)
 			p.AfterRunCallback()(mCtx)
 
-			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			rows := collectRows(t, requests, untilInvocationEnd)
 			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
 			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, tt.want)
@@ -3161,14 +3212,397 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != tt.want {
 				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, tt.want)
 			}
+			toolStartRow := onlyRowOfType(t, rows, EventToolStarting)
+			if got, _ := lookup(jsonObjectColumn(t, toolStartRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, tt.want)
+			}
 			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
 			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != tt.want {
 				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, tt.want)
 			}
-			if got := onlyRowOfType(t, rows, EventToolError)["error_message"]; got != tt.want {
+			toolErrRow := onlyRowOfType(t, rows, EventToolError)
+			if got := toolErrRow["error_message"]; got != tt.want {
 				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
 			}
+			if got, _ := lookup(jsonObjectColumn(t, toolErrRow, "content"), "args", "input"); got != tt.want {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, tt.want)
+			}
+			if got := onlyRowOfType(t, rows, EventLLMError)["error_message"]; got != tt.want {
+				t.Errorf("LLM_ERROR error_message = %v, want %q", got, tt.want)
+			}
 			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+				}
+			}
+		})
+	}
+}
+
+// TestRedactionRegressions checks, through the user message and model error
+// callbacks, that a dotted value that ends in a compound key name, which is
+// redacted with the value after that name, a quote inside a bare value, a
+// dotted OAuth or credential name in free text, a quote after a Python
+// string prefix, a dotted page access token, including one after a long run
+// of dots, and a quoted credential that its closing quote runs into, whether
+// padding, a letter, another quote, a name and a delimiter, a port or the next
+// pair, of one word or of several that start with whitespace, or joined to a
+// string of the other kind of quote, as a shell joins them, keep their
+// credentials out of content_parts and error_message, and that a quote inside
+// a bare value does not extend it over the next pair or the prose after it,
+// nor is a dotted pagination cursor or the pair that follows a quoted
+// credential redacted with it.
+func TestRedactionRegressions(t *testing.T) {
+	for _, tt := range []struct {
+		name, in, secret, want string
+	}{
+		{"dotted value that ends in a compound key name", "password=Summer.2024Password: dial tcp", "Summer.2024Password", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before another pair", "token=abc:'s note password='SECRET VALUE' rest", "SECRET VALUE", "token=[REDACTED] note password='[REDACTED]' rest"},
+		// The secret is xyz rather than abc, which the hexadecimal IDs in a
+		// row may hold, so that the check below does not find it there.
+		{"quote inside an outer-quoted bare value before prose", `failed: "token=xyz:'s"; the user's request`, "xyz", `failed: "token=[REDACTED]; the user's request`},
+		{"dotted OAuth name", "oauth2.authorization.code=SYNTHETIC_OAUTH_CODE", "SYNTHETIC_OAUTH_CODE", "oauth2.authorization.code=[REDACTED]"},
+		{"dotted credential name", "stripe.api.key=SYNTHETIC_STRIPE_KEY", "SYNTHETIC_STRIPE_KEY", "stripe.api.key=[REDACTED]"},
+		{"dotted value that ends in a dotted credential name", "password=my.stripe.api.key: dial tcp", "my.stripe.api.key", "password=[REDACTED] tcp"},
+		{"quote inside a bare value before a pair of another key", "token=abc:'s id=' 123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "token=[REDACTED] id=' 123' password=[REDACTED]"},
+		{"quote after a Python string prefix", "b'note=123' password='   SYNTHETIC_SECRET_VALUE", "SYNTHETIC_SECRET_VALUE", "b'note=123' password=[REDACTED]"},
+		{"bearer token padded with a key name and a delimiter", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173_TOKEN=" expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"bearer token that a letter runs into", `Bearer "R8_SYNTHETIC_CREDENTIAL_49173"expired`, "R8_SYNTHETIC_CREDENTIAL_49173", "Bearer [REDACTED]"},
+		{"shell value that a word runs into", `export "DB_PASSWORD"="R8_SYNTHETIC_CREDENTIAL_49173"suffix`, "R8_SYNTHETIC_CREDENTIAL_49173", `export "DB_PASSWORD"=[REDACTED]`},
+		{"dotted page access tokens", "fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN home.page_token: SYNTHETIC_PAGE_ACCESS_TOKEN", "SYNTHETIC_PAGE_ACCESS_TOKEN", "fb.page_token=[REDACTED] home.page_token:[REDACTED]"},
+		{"dotted cursors beside a dotted page access token", "x.next.page.token=cursor-1 fb.page_token=SYNTHETIC_PAGE_ACCESS_TOKEN prev.page.token: cursor-0", "SYNTHETIC_PAGE_ACCESS_TOKEN", "x.next.page.token=cursor-1 fb.page_token=[REDACTED] prev.page.token: cursor-0"},
+		{"nested quoted value that a letter runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800"x`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested quoted value that a quote runs into", `password=a= "prefix R8_SYNTHETIC_SECRET_4800""`, "R8_SYNTHETIC_SECRET_4800", "password=[REDACTED]"},
+		{"nested single-quoted value that a letter runs into", `token=a: 'prefix R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
+		{"quoted value before the pair of a credential key", `password="benign"token="R8_SYNTHETIC_SECRET_4700" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token="[REDACTED]" rest`},
+		{"quoted value joined to the pair of another key", `password="R8_SYNTHETIC_SECRET_4700"user="bob" rest`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]" rest`},
+		{"bearer token of several words that a letter runs into", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
+		{"shell value of several words that a letter runs into", `export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `export "DB_PASSWORD"=[REDACTED]`},
+		{"JSON key value of several words that a letter runs into", `failed: "password": " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"suffix`, "R8_SYNTHETIC_SECRET_4801", `failed: "password":"[REDACTED]"`},
+		{"quoted value that a name and a port run into", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802:8080`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED]"},
+		{"quoted value that a name and a delimiter run into", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_4802= rest`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED] rest"},
+		{"nested quoted value after a contraction that a letter runs into", `token=a:'s R8_SYNTHETIC_SECRET_4800'x`, "R8_SYNTHETIC_SECRET_4800", "token=[REDACTED]"},
+		{"value joined from strings of both kinds of quote", `DB_PASSWORD='my'"'"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", `DB_PASSWORD='[REDACTED]'`},
+		{"quoted value that a string of the other kind is joined to", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_TAIL_4802'`, "R8_SYNTHETIC_TAIL_4802", "password=[REDACTED]"},
+		{"dotted page access token after a long run of dots", "a" + strings.Repeat(".", 200) + "page_token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "a" + strings.Repeat(".", 200) + "page_token=[REDACTED]"},
+		{"quoted value followed by standalone key and spaced value", `password="benign"token: R8_SYNTHETIC_SECRET_4700`, "R8_SYNTHETIC_SECRET_4700", `password="[REDACTED]"token:[REDACTED]`},
+		{"quoted value followed by standalone key and quoted multi-word value", `password="benign"token: "R8_SYNTHETIC_SECRET_4700 R8_SYNTHETIC_SECRET_4701"`, "R8_SYNTHETIC_SECRET_4701", `password="[REDACTED]"token:"[REDACTED]"`},
+		{"quoted value followed by compound credential tail and port", `password="R8_SYNTHETIC_SECRET_4800"R8_SYNTHETIC_TAIL_TOKEN:8080`, "R8_SYNTHETIC_TAIL_TOKEN", "password=[REDACTED]"},
+		{"space-led multi-word bearer token before quoted prose", `Bearer " R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801_TOKEN=" expired in "prod"`, "R8_SYNTHETIC_SECRET_4801", `Bearer [REDACTED] in "prod"`},
+		{"space-led multi-word value inside single-quoted shell command", `cmd='export "DB_PASSWORD"=" R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801 "suffix; echo "done"'`, "R8_SYNTHETIC_SECRET_4801", `cmd='export "DB_PASSWORD"=[REDACTED]; echo "done"'`},
+		{"nested contraction-like single-quoted credential running into 's", `token=a:'s R8_SECRET_ABCD's`, "R8_SECRET_ABCD", "token=[REDACTED]"},
+		{"bearer value ending in key delimiter before quoted second value", `Bearer "R8_SYNTHETIC_SECRET_4800_TOKEN=" "R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "Bearer [REDACTED]"},
+		{"bare value ending in nested single-quoted key delimiter before quoted value", `password=a:'x_token=' "R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801"`, "R8_SYNTHETIC_SECRET_4801", "password=[REDACTED]"},
+		{"joined unclosed quote with multi-word tail", `password="R8_SYNTHETIC_SECRET_4800"'R8_SYNTHETIC_SECRET_4801 R8_SYNTHETIC_SECRET_4802`, "R8_SYNTHETIC_SECRET_4802", "password=[REDACTED]"},
+		{"prose apostrophe after colon before bearer credential", `token=abc:'s note Bearer ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note Bearer [REDACTED]`},
+		{"prose apostrophe after colon before single-quoted key", `token=abc:'s note 'password': ' R8_SYNTHETIC_SECRET_4800 R8_SYNTHETIC_SECRET_4801'suffix`, "R8_SYNTHETIC_SECRET_4801", `token=[REDACTED] note 'password':[REDACTED]`},
+		{"two-word page access token before long separator run", "fb.page" + strings.Repeat(".", 130) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 130) + "token=[REDACTED]"},
+		{"two-word page access token cut inside page by bound", "fb.page" + strings.Repeat(".", 125) + "token=R8_SYNTHETIC_CREDENTIAL_49173", "R8_SYNTHETIC_CREDENTIAL_49173", "fb.page" + strings.Repeat(".", 125) + "token=[REDACTED]"},
+		{"repeated underscore credential key in free text", "api__key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "api__key=[REDACTED]"},
+		{"repeated dot compound credential key in free text", "stripe.api..key=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "stripe.api..key=[REDACTED]"},
+		{"repeated dot auth code key in free text", "foo.auth..code=SYNTHETIC_CREDENTIAL_6301", "SYNTHETIC_CREDENTIAL_6301", "foo.auth..code=[REDACTED]"},
+		{"joined shell password with contraction-like words", `export DB_PASSWORD=a:'s correct horse battery's`, "correct horse", `export DB_PASSWORD=[REDACTED]`},
+		{"unclosed shell password after contraction-like prefix", `password=a:'s correct horse battery`, "correct horse", `password=[REDACTED]`},
+		{"plus-continued quoted credential value", `export DB_PASSWORD="prefix"+SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export DB_PASSWORD=[REDACTED]`},
+		{"slash-continued quoted credential value", `export "DB_PASSWORD"="prefix"/SYNTHETIC_CREDENTIAL_91827`, "SYNTHETIC_CREDENTIAL_91827", `export "DB_PASSWORD"=[REDACTED]`},
+		{"adjacent compound credential assignments preserve both keys", `DB_PASSWORD="benign"GITHUB_TOKEN="SYNTHETIC_FOLLOWING_6401"`, "SYNTHETIC_FOLLOWING_6401", `DB_PASSWORD="[REDACTED]"GITHUB_TOKEN="[REDACTED]"`},
+		{"closed shell password with semicolon between contraction words", `export DB_PASSWORD=a:'s correct staple horse; the user's`, "staple horse", `export DB_PASSWORD=[REDACTED]`},
+		{"closed shell password with semicolon before following command", `export DB_PASSWORD=a:'s correct staple horse; the user's; echo ok`, "staple horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed shell password with semicolon after contraction prefix", `password=a:'s correct; horse battery`, "horse battery", `password=[REDACTED]`},
+		{"trailing separator compound keys beside trailing separator cursors", `page_token_=cursor-1 DB_PASSWORD_=SYNTHETIC_CREDENTIAL_7319 OpenAIAPIKey_=SYNTHETIC_CREDENTIAL_7319 stripe.api..key_=SYNTHETIC_CREDENTIAL_7319 next.page.token_=cursor-2`, "SYNTHETIC_CREDENTIAL_7319", `page_token_=cursor-1 DB_PASSWORD_=[REDACTED] OpenAIAPIKey_=[REDACTED] stripe.api..key_=[REDACTED] next.page.token_=cursor-2`},
+		{"outer curly bracket around quoted shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; }`},
+		{"outer curly bracket around quoted password with inner closer and suffix", `failed: {password=a:'s} R12_SYNTHETIC_90517'suffix}`, "suffix", `failed: {password=[REDACTED]}`},
+		{"outer square bracket around quoted shell password with inner closer", `command: [ export DB_PASSWORD=a:'s] R12_SYNTHETIC_90517'; ]`, "R12_SYNTHETIC_90517", `command: [ export DB_PASSWORD=[REDACTED]; ]`},
+		{"outer curly bracket around unclosed shell password with inner closer", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]`},
+		{"outer curly bracket around quoted shell password before following command", `command: { export DB_PASSWORD=a:'s} R12_SYNTHETIC_90517'; echo ok; }`, "R12_SYNTHETIC_90517", `command: { export DB_PASSWORD=[REDACTED]; echo ok; }`},
+		{"intra-word underscore split compound password key", `DB_PASS_WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS_WORD=[REDACTED]`},
+		{"intra-word underscore split camelCase password key", `failed: dbPass_Word: R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `failed: dbPass_Word:[REDACTED]`},
+		{"intra-word underscore split dotted API key in JSON", `failed: {"stripe.api.k_ey": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {"stripe.api.k_ey":"[REDACTED]"}`},
+		{"intra-word double underscore split compound password key", `DB_PASS__WORD=R12_SYNTHETIC_90517`, "R12_SYNTHETIC_90517", `DB_PASS__WORD=[REDACTED]`},
+		{"intra-word split compound password key in YAML", "creds:\n  DB_PASS_WORD: R12_SYNTHETIC_90517", "R12_SYNTHETIC_90517", "creds:\n  DB_PASS_WORD:[REDACTED]"},
+		{"space-padded compound password key in JSON", `failed: {" DB_PASSWORD ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" DB_PASSWORD ":"[REDACTED]"}`},
+		{"space-padded camelCase password key in JSON", `failed: {" dbPassword ": "R12_SYNTHETIC_90517"}`, "R12_SYNTHETIC_90517", `failed: {" dbPassword ":"[REDACTED]"}`},
+		{"tab-padded compound password key in single-quoted dict", "failed: {'\tDB_PASSWORD\t': 'R12_SYNTHETIC_90517'}", "R12_SYNTHETIC_90517", "failed: {'\tDB_PASSWORD\t':'[REDACTED]'}"},
+		{"joined Bearer fragment inside contraction-led shell password", `export DB_PASSWORD=a:'s correct; horse Bearer '"R12_SYNTHETIC_7319"`, "correct; horse", `export DB_PASSWORD=[REDACTED]`},
+		{"joined single-quoted Bearer fragment inside shell password", `export DB_PASSWORD='my Bearer ''R12_SYNTHETIC_7319'; echo ok`, "R12_SYNTHETIC_7319", `export DB_PASSWORD='[REDACTED]'; echo ok`},
+		{"standalone joined shell Bearer token", `echo 'Bearer '"R12_SYNTHETIC_7319"; echo 'done'`, "R12_SYNTHETIC_7319", `echo 'Bearer [REDACTED]'; echo 'done'`},
+		{"state-prefixed temp key in a single-quoted dict", `failed: {'user:temp:scratch': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {'user:temp:scratch':'[REDACTED]'}`},
+		{"padded temp key that holds a delimiter in a single-quoted dict", `failed: {' temp:a=b ': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {' temp:a=b ':'[REDACTED]'}`},
+		{"padded key with whitespace after its state prefix", `failed: {" user: DB_PASSWORD ": "R13_SYNTHETIC_52816"}`, "R13_SYNTHETIC_52816", `failed: {" user: DB_PASSWORD ":"[REDACTED]"}`},
+		{"temp key that ends in a delimiter in a single-quoted dict", `failed: {'temp:a=': 'R13_SYNTHETIC_52816'}`, "R13_SYNTHETIC_52816", `failed: {'temp:a=':'[REDACTED]'}`},
+		{"padded quoted temp key after a contraction", `token=abc:'s note ' temp:a=b ': ' R13_SYNTHETIC_52816'`, "R13_SYNTHETIC_52816", `token=[REDACTED] note ' temp:a=b ':'[REDACTED]'`},
+		{"quote joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='"R13_SYNTHETIC_52816"; echo ok`, "R13_SYNTHETIC_52816", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"empty quoted part joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='""R13_SYNTHETIC_52816; echo ok`, "R13_SYNTHETIC_52816", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"quoted part joined inside a bare shell value", `export DB_PASSWORD=pre"correct horse R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"quoted parts joined inside a bare shell value", `export DB_PASSWORD=pre'correct horse'"R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed quoted part joined inside a bare shell value", `export DB_PASSWORD=pre"correct horse R13_SYNTHETIC_52816`, "horse", `export DB_PASSWORD=[REDACTED]`},
+		{"quoted part joined inside a bare shell value before a pair", `export DB_PASSWORD=pre"correct horse"token=R13_SYNTHETIC_52816; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]token=[REDACTED]; echo ok`},
+		{"single-quoted part that starts with whitespace joined to a bare shell value", `export DB_PASSWORD=pre' correct horse R13_SYNTHETIC_52816'; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"unclosed quoted part that starts with whitespace joined to a bare shell value", `export DB_PASSWORD=pre" correct horse R13_SYNTHETIC_52816`, "horse", `export DB_PASSWORD=[REDACTED]`},
+		{"quoted part joined inside a bare shell value before a quoted key", `export DB_PASSWORD=pre"correct horse""token": "R13_SYNTHETIC_52816"; echo ok`, "horse", `export DB_PASSWORD=[REDACTED]"token":"[REDACTED]"; echo ok`},
+		{"cursor keys with split direction words beside a page access token", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=R13_SYNTHETIC_52816`, "R13_SYNTHETIC_52816", `n_e_x_t_page_token=cursor-1 p_r_e_v_i_o_u_s_page_token=cursor-0 fb.page_token=[REDACTED]`},
+		{"single-quoted part joined inside a bare shell value before a bare suffix", `export DB_PASSWORD=pre'correct horse R14_SYNTHETIC_728109'suffix; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"single-quoted part joined inside a bare shell value before a suffix secret", `export DB_PASSWORD=pre'correct horse R14_SHELL_SUFFIX_SECRET'suffix; echo ok`, "R14_SHELL_SUFFIX_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"single-quoted part whose closing quote stands between letters", `password=pre'a b'c`, "b'c", `password=[REDACTED]`},
+		{"unclosed single-quoted part joined inside a bare shell value", `export DB_PASSWORD=pre'correct horse R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]`},
+		{"bare suffix joined to the closing quote after a later label", `export DB_PASSWORD=a:'s note label='R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"bare suffix joined to a quoted part that ends in a later label", `export DB_PASSWORD=pre"correct horse label="R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before the pair of another key", `export DB_PASSWORD=[REDACTED]label=R14_SYNTHETIC_728109; echo ok`, "R14_SYNTHETIC_728109", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before a pair with a short key", `export DB_PASSWORD=[REDACTED]x=R14_PLACEHOLDER_SECRET; echo ok`, "R14_PLACEHOLDER_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"literal placeholder before a quoted key that is not sensitive", `password=[REDACTED]"x": "R14_PLACEHOLDER_SECRET"`, "R14_PLACEHOLDER_SECRET", `password=[REDACTED]`},
+		{"quoted literal placeholder before the pair of another key", `export DB_PASSWORD="[REDACTED]"x=R14_PLACEHOLDER_SECRET; echo ok`, "R14_PLACEHOLDER_SECRET", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"comma-bearing temp key in a single-quoted dict", `failed: {'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'temp:a,b':'[REDACTED]'}`},
+		{"state-prefixed comma-bearing temp key in a single-quoted dict", `failed: {'user:temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'user:temp:a,b':'[REDACTED]'}`},
+		{"comma-bearing temp key after another dict entry", `failed: {'label': 'keep', 'temp:a,b': 'R14_TEMP_STRUCTURAL_SECRET'}`, "R14_TEMP_STRUCTURAL_SECRET", `failed: {'label': 'keep', 'temp:a,b':'[REDACTED]'}`},
+		{"contraction-like opening in single-quoted shell part", `export DB_PASSWORD=pre's R15_CONTRACTION_S'; echo ok`, "R15_CONTRACTION_S", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"newline immediately after opening single quote in shell part", "export DB_PASSWORD=pre'\nR15_MULTILINE_INITIAL'; echo ok", "R15_MULTILINE_INITIAL", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"CRLF immediately after opening single quote in shell part", "export DB_PASSWORD=pre'\r\nR15_MULTILINE_INITIAL'; echo ok", "R15_MULTILINE_INITIAL", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"later single-quoted fragment after quoted prefix and bare text", `export DB_PASSWORD="a"pre'correct horse ASTRA_SYNTHETIC_935817'suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"three-part bare and single-quoted shell credential", `DB_PASSWORD=pre'a b'mid'correct horse ASTRA_SYNTHETIC_935817'end`, "ASTRA_SYNTHETIC_935817", `DB_PASSWORD=[REDACTED]`},
+		{"unclosed later single-quoted shell fragment", `export DB_PASSWORD="a"pre'correct horse ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]`},
+		{"sensitive inner label with attached bare suffix", `export DB_PASSWORD=pre'correct ASTRA_SYNTHETIC_935817 token='suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"double-quoted sensitive inner label with attached bare suffix", `export DB_PASSWORD=pre"correct ASTRA_SYNTHETIC_935817 token="suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"contraction-led sensitive inner label with attached bare suffix", `export DB_PASSWORD=a:'s note ASTRA_SYNTHETIC_935817 token='suffix; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"brace-bearing temp key in a single-quoted dict", `failed: {'temp:cache/{user}': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'temp:cache/{user}':'[REDACTED]'}`},
+		{"state-prefixed brace-bearing temp key in a single-quoted dict", `failed: {'user:temp:a}b': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'user:temp:a}b':'[REDACTED]'}`},
+		{"brace-bearing temp key after another dict entry", `failed: {'label': 'keep', 'temp:cache/{user}': 'ASTRA_SYNTHETIC_935817'}`, "ASTRA_SYNTHETIC_935817", `failed: {'label': 'keep', 'temp:cache/{user}':'[REDACTED]'}`},
+		{"non-counter token_hint after quoted password", `DB_PASSWORD="a"token_hint=ASTRA_SYNTHETIC_935817`, "ASTRA_SYNTHETIC_935817", `DB_PASSWORD=[REDACTED]`},
+		{"non-counter my_tokens after placeholder", `password=[REDACTED]"my_tokens": "ASTRA_SYNTHETIC_935817"`, "ASTRA_SYNTHETIC_935817", `password=[REDACTED]`},
+		{"non-counter token_note after single-quoted shell part", `export DB_PASSWORD=pre'x y'token_note=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"plural access_tokens after quoted password", `export DB_PASSWORD="a"access_tokens=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"non-numeric token_count after quoted password", `export DB_PASSWORD="a"token_count=ASTRA_SYNTHETIC_935817; echo ok`, "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"inter-string prose after quoted key following placeholder", `password=[REDACTED]"token": " for user "ASTRA_SYNTHETIC_935817"`, "ASTRA_SYNTHETIC_935817", `password=[REDACTED]"token":"[REDACTED]"`},
+		{"single-word contraction-led single-quoted Bearer token", `Bearer pre's_ASTRA_SYNTHETIC_935817'`, "ASTRA_SYNTHETIC_935817", `Bearer [REDACTED]`},
+		{"contraction-led multiline single-quoted shell password", "export DB_PASSWORD=pre's\nASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"later multiline single-quoted shell fragment", "export DB_PASSWORD=\"a\"pre'\nASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"outer-quoted Bearer splice before second shell secret", `curl -H 'x: Bearer abc'"ASTRA_SYNTHETIC_935817"; export DB_PASSWORD=pre' ASTRA_SECOND_935817'; echo ok`, "ASTRA_SECOND_935817", `curl -H 'x: Bearer [REDACTED]'; export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"multiline contraction-led URL shell password", "export DB_PASSWORD=\"a\"pre's\nhttps://host:8080/ASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"multiline contraction-led joined-tail shell password with colon", "export DB_PASSWORD=pre's\nhost:ASTRA_SYNTHETIC_935817'tail; echo ok", "ASTRA_SYNTHETIC_935817", `export DB_PASSWORD=[REDACTED]; echo ok`},
+		{"bare temp key with opening brace", "temp:a{b=ASTRA_SYNTHETIC_935817", "ASTRA_SYNTHETIC_935817", "temp:a{b=[REDACTED]"},
+		{"unclosed single-quoted temp key with opening brace", "failed: {'temp:a{b: 'ASTRA_SYNTHETIC_935817'}", "ASTRA_SYNTHETIC_935817", "failed: {'temp:a{b:'[REDACTED]'}"},
+		{"multiline contraction shell splice with inner single quotes", "export DB_PASSWORD=pre's\nfoo='bar' ASTRA_SYNTHETIC_935817'; echo ok", "ASTRA_SYNTHETIC_935817", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"escaped quote before joined quote in Bearer header", `curl -H 'x: Bearer abc\'"ASTRA_SYNTHETIC_935817"; export DB_PASSWORD=pre' ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `curl -H 'x: Bearer [REDACTED]'; export DB_PASSWORD=[REDACTED]`},
+		{"glued suffix after outer-quoted Bearer before second Bearer", `x='Bearer ASTRA_SYNTHETIC_935817'x y='Bearer ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `x='Bearer [REDACTED]' y='Bearer [REDACTED]'`},
+		{"glued single-quote suffix after bare Bearer before second Bearer", `Bearer ASTRA_SYNTHETIC_935817'x1 y='Bearer ASTRA_SECOND_935817'`, "ASTRA_SECOND_935817", `Bearer [REDACTED] y='Bearer [REDACTED]'`},
+		{"joined single-quoted suffix inside double-quoted Bearer command", `echo "Bearer abc'ASTRA_SYNTHETIC_935817'" more`, "ASTRA_SYNTHETIC_935817", `echo "Bearer [REDACTED]" more`},
+		{"multiline double-quoted joined shell password with bare suffix", "export DB_PASSWORD=pre\"\nASTRA_SYNTHETIC_935817\"end; echo ok", "ASTRA_SYNTHETIC_935817", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: closed single-quoted part with a backslash-newline", "export DB_PASSWORD=\"a\"pre'\\\nSYNTHETIC_REVIEW_984731'; echo ok", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: lowercase word before a contraction ending and a shell operator", "export DB_PASSWORD=pre's\nfoo='bar' violetfern's; echo ok", "violetfern", "export DB_PASSWORD=[REDACTED]; echo ok"},
+		{"Round 16: unclosed contraction-shaped quote before a line break", "export DB_PASSWORD=pre'D\nSYNTHETIC_REVIEW_984731\ntoken=TAIL_984731; echo ok", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: unclosed part after a closed one runs past its line", "export DB_PASSWORD=\"a\"pre'correct\nSYNTHETIC_REVIEW_984731", "SYNTHETIC_REVIEW_984731", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: quoted token counter after a closed credential", "DB_PASSWORD=\"R16_SECRET_5521\"prompt_tokens=\"10\"", "R16_SECRET_5521", "DB_PASSWORD=\"[REDACTED]\"prompt_tokens=\"10\""},
+		{"Round 16: unclosed quoted API-key header over a later line", "x-api-key: \"abc\nREVIEW_SYNTHETIC_7319\nContent-Type: text/plain", "REVIEW_SYNTHETIC_7319", "x-api-key: [REDACTED]\nContent-Type: text/plain"},
+		{"Round 16: lowercase word before contraction ending at EOF", "export DB_PASSWORD=pre' violetfern's", "violetfern", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: multiline lowercase word before contraction ending without semicolon", "export DB_PASSWORD=pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export DB_PASSWORD=[REDACTED]\necho ok"},
+		{"Round 16: same-line lowercase word after unclosed contraction-shaped quote", "export DB_PASSWORD=pre'd synthetic_lower_991", "synthetic_lower_991", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: unclosed trailing single quote before newline in shell assignment", "export DB_PASSWORD=pre'\nSYNTHETIC_TRAIL_991", "SYNTHETIC_TRAIL_991", "export DB_PASSWORD=[REDACTED]"},
+		{"Round 16: closed multiline quoted Authorization header containing colon", "Authorization: \"abc\npart2: SYNTHETIC_HDR_995\"", "SYNTHETIC_HDR_995", "Authorization: [REDACTED]"},
+		{"Round 16: indented multiline JSON in x-api-key header", "x-api-key: \"{\n  sub_field: SYNTHETIC_HDR_995\n}\"", "SYNTHETIC_HDR_995", "x-api-key: [REDACTED]"},
+		{"Round 16: single-line curl Authorization header with opposite quote preserves next line", "curl -H 'Authorization: Bearer abc\"def'\necho KEEP_LINE_2", "abc\"def", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
+		{"Round 16: multiline outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\nSYNTHETIC_CURL_901'\necho KEEP_LINE_2", "SYNTHETIC_CURL_901", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
+		{"Round 16: compound shell assignment with quoted space and multiline contraction", "export DB_PASSWORD=\"a b\"pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export DB_PASSWORD=[REDACTED]\necho ok"},
+		{"Round 16: quoted variable name in shell assignment with multiline contraction", "export \"DB_PASSWORD\"=pre's\nfoo='bar' violetfern's\necho ok", "violetfern", "export \"DB_PASSWORD\"=[REDACTED]\necho ok"},
+		{"Round 16: prose contraction before Authorization header preserves subsequent lines", "Couldn't authenticate. Authorization: Bearer zqsecretb\nZQKEEP_L2\nZQKEEP_L3", "zqsecretb", "Couldn't authenticate. Authorization: [REDACTED]\nZQKEEP_L2\nZQKEEP_L3"},
+		{"Round 16: nested multiline quoted Authorization header inside outer quote", "echo 'x-api-key: \"abc\npart2: zqsecretac\"'\necho ZQKEEP_X", "zqsecretac", "echo 'x-api-key: [REDACTED]'\necho ZQKEEP_X"},
+		{"Round 16: blank continuation line inside outer-quoted curl Authorization header", "curl -H 'Authorization: Bearer abc\n\nzqsecretc'\necho ZQKEEP_X", "zqsecretc", "curl -H 'Authorization: [REDACTED]'\necho ZQKEEP_X"},
+		{"Round 16: nested multiline quoted Authorization header followed by trailing outer-quoted line", "curl -H 'Authorization: \"part1\npart2: sub\"\nSYNTHETIC_LINE3_905'\necho KEEP_LINE_4", "SYNTHETIC_LINE3_905", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_4"},
+		{"Round 16: unicode em-space before nested multiline quoted Authorization header", "curl -H 'Authorization: Bearer\u2003\"abc\npart2: SYNTHETIC_EMSPACE_905\"'\necho KEEP_LINE_2", "SYNTHETIC_EMSPACE_905", "curl -H 'Authorization: [REDACTED]'\necho KEEP_LINE_2"},
+		{"long shell assignment over 256-byte lookbehind window", "export DB_PASSWORD=" + strings.Repeat("a", 300) + "'s syntheticvioletfern's", "syntheticvioletfern", "export DB_PASSWORD=[REDACTED]"},
+		{"lowercase shell assignment without export", "db_password=pre's syntheticvioletfern's", "syntheticvioletfern", "db_password=[REDACTED]"},
+		{"backslash-LF continuation after export", "export\\\nDB_PASSWORD=pre's syntheticvioletfern's", "syntheticvioletfern", "export\\\nDB_PASSWORD=[REDACTED]"},
+		{"colon-led continuation inside closed outer-quoted curl header", "curl -H 'Authorization: abc\npart2: syntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]'\necho ok"},
+		{"empty first line in outer-quoted curl header", "curl -H 'Authorization: \nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H 'Authorization: [REDACTED]'\necho ok"},
+		{"prior-line outer quote before Authorization header", "curl -H '\nAuthorization: abc\nsyntheticvioletfern'\necho ok", "syntheticvioletfern", "curl -H '\nAuthorization: [REDACTED]'\necho ok"},
+		{"unquoted whitespace-folded Authorization header continuation", "Authorization: Bearer abc\n  syntheticvioletfern\nContent-Type: text/plain", "syntheticvioletfern", "Authorization: [REDACTED]\nContent-Type: text/plain"},
+		{"Cookie header with multiple attributes", "Cookie: sid=syntheticvioletfern; preference=light", "syntheticvioletfern", "Cookie: [REDACTED]"},
+		{"Set-Cookie header with attributes", "Set-Cookie: session=syntheticvioletfern; Path=/; HttpOnly", "syntheticvioletfern", "Set-Cookie: [REDACTED]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-test", Contents: []*genai.Content{textContent("user", tt.in)}}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", tt.in)}, nil))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 8)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) || strings.Contains(s, "R12_SYNTHETIC_") || strings.Contains(s, "R13_SYNTHETIC_") || strings.Contains(s, "R14_") || strings.Contains(s, "R15_") || strings.Contains(s, "ASTRA_SYNTHETIC_") {
+					t.Errorf("%q: %s row holds secret in %s", tt.in, et, s)
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventLLMRequest),
+				string(EventLLMResponse),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+				string(EventStateDelta),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("%q: missing event row %s (seen %v)", tt.in, wantEvent, seen)
+				}
+			}
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			toolMsg, _ := onlyRowOfType(t, rows, EventToolError)["error_message"].(string)
+			msg, _ := onlyRowOfType(t, rows, EventLLMError)["error_message"].(string)
+			if strings.Contains(text, tt.secret) || strings.Contains(toolMsg, tt.secret) || strings.Contains(msg, tt.secret) {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, which hold %q", tt.in, text, toolMsg, msg, tt.secret)
+			}
+			if text != tt.want || toolMsg != tt.want || msg != tt.want {
+				t.Errorf("%q: text %q, tool error_message %q, llm error_message %q, want %q", tt.in, text, toolMsg, msg, tt.want)
+			}
+		})
+	}
+}
+
+// TestUserinfoUserName checks that the user name of a url.Userinfo in a tool
+// argument, which may be the credential itself, as the token of a
+// token-authenticated git remote is, is redacted from a Go value as from a
+// string.
+func TestUserinfoUserName(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		user *url.Userinfo
+	}{
+		{"user name only", url.User("SECRETTOKEN")},
+		{"user name with a password", url.UserPassword("SECRETTOKEN", "x-oauth-basic")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			u := &url.URL{Scheme: "https", Host: "github.com", Path: "/o/r", User: tt.user}
+			var errs callbackErrors
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "clone"}, map[string]any{"remote": u, "remote_url": u.String()}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			b, _ := json.Marshal(jsonObjectColumn(t, onlyRowOfType(t, collectRows(t, requests, untilInvocationEnd), EventToolStarting), "content"))
+			if strings.Contains(string(b), "SECRETTOKEN") {
+				t.Errorf("content = %s, which holds the user name", b)
+			}
+		})
+	}
+}
+
+// guardedJob is an error whose Error method, promoted from the error it
+// embeds, is on the value, and whose other fields another goroutine updates
+// under a lock.
+type guardedJob struct {
+	error
+	mu       sync.Mutex
+	attempts int
+}
+
+// statusText is fmt.Stringer under an unexported name, so that a struct that
+// embeds it has no exported field.
+type statusText interface{ String() string }
+
+// guardedStatus is a fmt.Stringer like guardedJob.
+type guardedStatus struct {
+	statusText
+	mu      sync.Mutex
+	updates int
+}
+
+// TestFormatterDoesNotCopyGuardedState checks that writing a tool result
+// that holds pointers to values whose Error or String method is on the value
+// does not copy the values, which reads the fields that another goroutine
+// updates under a lock, with redaction on or off: run with -race.
+func TestFormatterDoesNotCopyGuardedState(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		disable    bool
+		job, state string
+	}{
+		{"redaction on", false, `{}`, `{}`},
+		{"redaction off", true, `"job failed"`, `"1s"`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &guardedJob{error: errors.New("job failed")}
+			s := &guardedStatus{statusText: time.Second}
+			stop, done := make(chan struct{}), make(chan struct{})
+			defer func() {
+				close(stop)
+				<-done
+			}()
+			go func() {
+				defer close(done)
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+						j.mu.Lock()
+						j.attempts++
+						j.mu.Unlock()
+						s.mu.Lock()
+						s.updates++
+						s.mu.Unlock()
+					}
+				}
+			}()
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.DisableSensitiveKeyRedaction = tt.disable })
+			for range 20 {
+				if _, err := p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{}, map[string]any{"job": j, "status": s}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.AfterRunCallback()(mCtx)
+			rows := rowsOfType(collectRows(t, requests, untilInvocationEnd), EventToolCompleted)
+			if len(rows) != 20 {
+				t.Fatalf("got %d TOOL_COMPLETED rows, want 20", len(rows))
+			}
+			for _, row := range rows {
+				content := jsonObjectColumn(t, row, "content")
+				checkJSONAt(t, content, tt.job, "result", "job")
+				checkJSONAt(t, content, tt.state, "result", "status")
+			}
+		})
+	}
+}
+
+// TestEscapedWhitespaceAfterBearerInJSONText checks that a Bearer token after
+// a Unicode space in JSON text, which the text writes as an escape or which
+// the text is written back with as an escape, is kept out of every row, as a
+// text part, a string tool argument or an error message.
+func TestEscapedWhitespaceAfterBearerInJSONText(t *testing.T) {
+	const secret = "SYNTHETIC_SECRET"
+	for _, tt := range []struct{ name, text string }{
+		{"escaped no-break space", `{"h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"escaped ideographic space", `{"h":"Bearer\u3000SYNTHETIC_SECRET"}`},
+		{"escaped line separator", `{"h":"Bearer\u2028SYNTHETIC_SECRET"}`},
+		{"escaped no-break space beside a redacted key", `{"password":"x","h":"Bearer\u00a0SYNTHETIC_SECRET"}`},
+		{"raw line separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2028SYNTHETIC_SECRET\"}"},
+		{"raw paragraph separator beside a redacted key", "{\"password\":\"x\",\"h\":\"Bearer\u2029SYNTHETIC_SECRET\"}"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.text)))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			for _, row := range collectRows(t, requests, untilInvocationEnd) {
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
 					t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
 				}
@@ -3206,8 +3640,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 		wantContent string
 		// wantResponse is the AGENT_RESPONSE content.response, if it is not
 		// "text: '" + the content + "'". The response is redacted again
-		// once the text is quoted, and a redacted value that runs to the
-		// end of the text then also takes the closing "'".
+		// once the text is quoted, and a multiline redacted value whose
+		// newline resets quote tracking then also takes the closing "'".
 		wantResponse string
 	}{
 		{
@@ -3221,10 +3655,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `login failed: password="[REDACTED]"`,
 		},
 		{
-			name:         "API key before a wrapped error",
-			text:         "api_key=prodSECRET123-api-key: permission denied",
-			want:         "api_key=[REDACTED]",
-			wantResponse: "text: 'api_key=[REDACTED]",
+			name: "API key before a wrapped error",
+			text: "api_key=prodSECRET123-api-key: permission denied",
+			want: "api_key=[REDACTED]",
 		},
 		{
 			name: "token in prose",
@@ -3252,10 +3685,9 @@ func TestValueEndingInKeyName(t *testing.T) {
 			want: `password="[REDACTED]" tcp`,
 		},
 		{
-			name:         "temp: key on the line of credentials",
-			text:         "credentials: temp:foo: SECRET123",
-			want:         "credentials:[REDACTED]",
-			wantResponse: "text: 'credentials:[REDACTED]",
+			name: "temp: key on the line of credentials",
+			text: "credentials: temp:foo: SECRET123",
+			want: "credentials:[REDACTED]",
 		},
 		{
 			name:         "temp: key on an indented line under credentials",
@@ -3446,8 +3878,8 @@ func TestValueEndingInKeyName(t *testing.T) {
 		{
 			name:        "bare token value ending with escaped quote before password key",
 			text:        `token=abc\"password\": SECRET123`,
-			want:        redactedSensitiveTextPlaceholder,
-			wantContent: redactedSensitiveTextPlaceholder,
+			want:        "token=[REDACTED]",
+			wantContent: "token=[REDACTED]",
 		},
 		{
 			name:        "prefixed quoted string where earlier token swallows escaped newline before password",
@@ -3540,11 +3972,10 @@ func TestValueEndingInKeyName(t *testing.T) {
 			wantContent: redactedSensitiveTextPlaceholder,
 		},
 		{
-			name:         "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
-			text:         "failed: {Password:abc-token: }\bSECRET123",
-			want:         "failed: {Password:[REDACTED]",
-			wantContent:  "failed: {Password:[REDACTED]",
-			wantResponse: "text: 'failed: {Password:[REDACTED]",
+			name:        "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			text:        "failed: {Password:abc-token: }\bSECRET123",
+			want:        "failed: {Password:[REDACTED]",
+			wantContent: "failed: {Password:[REDACTED]",
 		},
 		{
 			name:        "Go struct field ending in key name followed by space, backspace byte and closing brace",
@@ -3732,23 +4163,31 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 	}
 
 	t.Run("file URI", func(t *testing.T) {
-		const uri = "https://example.com/search?q=basic%20recipes"
-		p, requests, mCtx := setupTestPlugin(t)
-		var errs callbackErrors
-		errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
-			Role:  "user",
-			Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
-		}))
-		errs.check(t)
-		p.AfterRunCallback()(mCtx)
+		for _, uri := range []string{
+			"https://example.com/search?q=basic%20recipes",
+			// Path segments that end in a credential name, but are not one.
+			"https://example.com/docs/reset-password/step-2",
+			"gs://bucket/db-password/notes.txt",
+		} {
+			t.Run(uri, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				var errs callbackErrors
+				errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{
+					Role:  "user",
+					Parts: []*genai.Part{{FileData: &genai.FileData{MIMEType: "text/html", FileURI: uri}}},
+				}))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
 
-		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-		userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
-		if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
-			t.Errorf("content_parts = %v, want uri %q", parts, uri)
-		}
-		if got := userRow["is_truncated"]; got != false {
-			t.Errorf("is_truncated = %v, want false", got)
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["uri"] != uri {
+					t.Errorf("content_parts = %v, want uri %q", parts, uri)
+				}
+				if got := userRow["is_truncated"]; got != false {
+					t.Errorf("is_truncated = %v, want false", got)
+				}
+			})
 		}
 	})
 
@@ -4043,16 +4482,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *
 
 	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
 		t.Helper()
-		lis, err := net.Listen("tcp", "localhost:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
+		lis := bufconn.Listen(1 << 20)
 		gSrv := grpc.NewServer()
 		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 		go func() { _ = gSrv.Serve(lis) }()
 		t.Cleanup(gSrv.Stop)
 
-		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -4190,16 +4626,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTabl
 	srv := &committedStreamTestServer{
 		createdStreamName: "projects/test-project/datasets/test_dataset/tables/test-table/streams/committed-http-1",
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
 	go func() { _ = gSrv.Serve(lis) }()
 	t.Cleanup(gSrv.Stop)
 
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -4380,9 +4813,11 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 					return key
 				}
 				key := newWeakKey()
-				deadline := time.Now().Add(2 * time.Second)
+				deadline := time.Now().Add(5 * time.Second)
 				for time.Now().Before(deadline) {
 					runtime.GC()
+					runtime.GC()
+					runtime.Gosched()
 					if _, ok := pluginRegistry.Load(key); !ok {
 						return
 					}
@@ -4465,17 +4900,14 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 			}
 			defer func() { _ = bqClient.Close() }()
 
-			lis, err := net.Listen("tcp", "localhost:0")
-			if err != nil {
-				t.Fatalf("failed to listen: %v", err)
-			}
+			lis := bufconn.Listen(1 << 20)
 			defer func() { _ = lis.Close() }()
 			gSrv := grpc.NewServer()
 			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)})
 			go func() { _ = gSrv.Serve(lis) }()
 			defer gSrv.Stop()
 
-			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 			if err != nil {
 				t.Fatalf("failed to dial: %v", err)
 			}
@@ -4507,7 +4939,7 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 			}, 1)
 		}()
 
-		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 			runtime.GC()
 			runtime.Gosched()
 			if _, ok := pluginRegistry.Load(weakKey); cleaned.Load() && weakKey.Value() == nil && !ok {
@@ -4599,27 +5031,41 @@ func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructo
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var key weak.Pointer[baseplugin.Plugin]
-			func() {
-				h := &pluginHolder{}
-				p, closeOwned := tc.newPlugin(t, h)
-				h.plugin = p
-				if !tc.leaveOpen {
-					if err := p.Close(); err != nil {
-						t.Fatalf("Close() error = %v", err)
-					}
-				}
-				if closeOwned != nil {
-					closeOwned()
-				}
-				key = weak.Make(p)
-			}()
+			key := makeAndDropTestPlugin(t, tc.newPlugin, tc.leaveOpen)
 			if !waitPluginCollected(key) {
 				_, registered := pluginRegistry.Load(key)
 				t.Fatalf("after GC: plugin collected = %v, registry entry removed = %v; want both", key.Value() == nil, !registered)
 			}
 		})
 	}
+}
+
+//go:noinline
+func makeAndDropTestPlugin(t *testing.T, newPlugin func(*testing.T, *pluginHolder) (*baseplugin.Plugin, func()), leaveOpen bool) weak.Pointer[baseplugin.Plugin] {
+	ch := make(chan weak.Pointer[baseplugin.Plugin], 1)
+	go func() {
+		defer close(ch)
+		h := &pluginHolder{}
+		p, closeOwned := newPlugin(t, h)
+		h.plugin = p
+		key := weak.Make(p)
+		if !leaveOpen {
+			if err := p.Close(); err != nil {
+				t.Errorf("Close() error = %v", err)
+			}
+		}
+		p = nil
+		h = nil
+		if closeOwned != nil {
+			closeOwned()
+		}
+		ch <- key
+	}()
+	key, ok := <-ch
+	if !ok {
+		t.FailNow()
+	}
+	return key
 }
 
 // pluginHolder stands for an application object that holds a plugin and is
@@ -4655,14 +5101,15 @@ func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.Round
 	if err != nil {
 		t.Fatalf("bq.NewClient: %v", err)
 	}
-	lis, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	lis := bufconn.Listen(1 << 20)
 	gSrv := grpc.NewServer()
 	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
-	go func() { _ = gSrv.Serve(lis) }()
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	srvDone := make(chan struct{})
+	go func() {
+		defer close(srvDone)
+		_ = gSrv.Serve(lis)
+	}()
+	conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -4687,15 +5134,18 @@ func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.Round
 		_ = bqClient.Close()
 		_ = conn.Close()
 		gSrv.Stop()
+		<-srvDone
 	}
 }
 
 // waitPluginCollected runs the garbage collector until the plugin that key
 // points to has been collected and its pluginRegistry entry removed, and
-// reports whether both happened within five seconds.
+// reports whether both happened within thirty seconds.
 func waitPluginCollected(key weak.Pointer[baseplugin.Plugin]) bool {
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); {
 		runtime.GC()
+		runtime.GC()
+		runtime.Gosched()
 		if _, ok := pluginRegistry.Load(key); !ok && key.Value() == nil {
 			return true
 		}
@@ -4830,16 +5280,13 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 
 	newMockGRPCWriteConn := func(t *testing.T) *grpc.ClientConn {
 		t.Helper()
-		lis, err := net.Listen("tcp", "localhost:0")
-		if err != nil {
-			t.Fatalf("listen: %v", err)
-		}
+		lis := bufconn.Listen(1 << 20)
 		gSrv := grpc.NewServer()
 		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
 		go func() { _ = gSrv.Serve(lis) }()
 		t.Cleanup(gSrv.Stop)
 
-		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient("passthrough:///bufnet", grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }), grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -5032,4 +5479,907 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
 		}
 	})
+}
+
+// TestRound22CallbackRegressions checks that the callbacks keep the
+// credentials of round22SensitiveErrors out of every row that they write,
+// whether the credential comes as text or as a plain error in tool
+// arguments, a tool result or a state delta, and that they write the
+// scrubbed text as the content_parts of the user message and as the
+// error_message of the tool, model and invocation errors.
+func TestRound22CallbackRegressions(t *testing.T) {
+	for _, tt := range round22SensitiveErrors() {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-test", Contents: []*genai.Content{textContent("user", tt.in)}}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", tt.in)}, nil))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in, "result_err": errors.New(tt.in)}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in, "note_err": errors.New(tt.in)}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 9)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) {
+					t.Errorf("%s row holds %q: %s", et, tt.secret, elideText(s))
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventLLMRequest),
+				string(EventLLMResponse),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+				string(EventStateDelta),
+				string(EventInvocationError),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("missing event row %s (seen %v)", wantEvent, seen)
+				}
+			}
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			for _, got := range []struct{ name, text string }{
+				{"USER_MESSAGE_RECEIVED text", text},
+				{"TOOL_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventToolError)["error_message"])},
+				{"LLM_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventLLMError)["error_message"])},
+				{"INVOCATION_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventInvocationError)["error_message"])},
+			} {
+				if got.text != tt.want {
+					t.Errorf("%s = %s, want %s", got.name, elideText(got.text), elideText(tt.want))
+				}
+			}
+		})
+	}
+}
+
+func TestRound23CallbackRegressions(t *testing.T) {
+	for _, tt := range round23SensitiveErrors() {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			// Error-only callback payloads (no parallel raw string field) to pin
+			// plain-error redaction across TOOL_STARTING, TOOL_COMPLETED, and STATE_DELTA.
+			errOnlyArgs := map[string]any{"err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{Model: "gemini-test", Contents: []*genai.Content{textContent("user", tt.in)}}))
+			errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: textContent("model", tt.in)}, nil))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, errOnlyArgs))
+			errs.add(p.AfterToolCallback()(mCtx, tl, errOnlyArgs, map[string]any{"result_err": errors.New(tt.in)}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, errOnlyArgs, errors.New(tt.in)))
+			errs.add(p.OnModelErrorCallback()(mCtx, &model.LLMRequest{}, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note_err": errors.New(tt.in)}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			seen := make(map[string]bool, 9)
+			for _, row := range rows {
+				et := fmt.Sprint(row["event_type"])
+				seen[et] = true
+				if s := fmt.Sprint(row); strings.Contains(s, tt.secret) {
+					t.Errorf("%s row holds %q: %s", et, tt.secret, elideText(s))
+				}
+			}
+			for _, wantEvent := range []string{
+				string(EventUserMessageReceived),
+				string(EventLLMRequest),
+				string(EventLLMResponse),
+				string(EventToolStarting),
+				string(EventToolCompleted),
+				string(EventToolError),
+				string(EventLLMError),
+				string(EventStateDelta),
+				string(EventInvocationError),
+			} {
+				if !seen[wantEvent] {
+					t.Errorf("missing event row %s (seen %v)", wantEvent, seen)
+				}
+			}
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			for _, got := range []struct{ name, text string }{
+				{"USER_MESSAGE_RECEIVED text", text},
+				{"TOOL_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventToolError)["error_message"])},
+				{"LLM_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventLLMError)["error_message"])},
+				{"INVOCATION_ERROR error_message", fmt.Sprint(onlyRowOfType(t, rows, EventInvocationError)["error_message"])},
+			} {
+				if got.text != tt.want {
+					t.Errorf("%s = %s, want %s", got.name, elideText(got.text), elideText(tt.want))
+				}
+			}
+		})
+	}
+}
+
+// TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang is a subprocess
+// regression test: a constructor that calls t.Fatal must fail promptly rather
+// than hang the goroutine that makeAndDropTestPlugin launches.
+func TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang(t *testing.T) {
+	if os.Getenv("GO_WANT_MAKE_AND_DROP_HELPER") == "1" {
+		makeAndDropTestPlugin(t, func(t *testing.T, _ *pluginHolder) (*baseplugin.Plugin, func()) {
+			t.Fatal("synthetic constructor failure")
+			return nil, nil
+		}, false)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMakeAndDropTestPlugin_ConstructorFailureDoesNotHang$")
+	cmd.Env = append(os.Environ(), "GO_WANT_MAKE_AND_DROP_HELPER=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("subprocess exited successfully; want a non-zero exit from t.Fatal")
+	}
+	if !strings.Contains(string(out), "synthetic constructor failure") {
+		t.Errorf("subprocess output does not mention the failure:\n%s", out)
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("subprocess timed out; want a prompt failure, not a hang")
+	}
+}
+
+func TestRound27CallbackRegressions(t *testing.T) {
+	const secret = "SYNTH_R27_COOKIE"
+	// Cookie-prose sentences that must be preserved across all callbacks.
+	proseCases := []struct{ name, in string }{
+		{"50% cookie prose", "The cookie: 50% was left."},
+		{"2.5-ounce cookie prose", "The cookie: 2.5-ounce pieces remained."},
+		{"(2 pieces) cookie prose", "The cookie: (2 pieces) was delicious."},
+		{"quoted chocolate cookie prose", `The cookie: "chocolate" was great.`},
+		{"-2 degrees cookie prose", "The cookie: -2 degrees outside."},
+		{"curly-quoted chocolate cookie prose", "The cookie: “chocolate” was delicious."},
+	}
+	for _, tt := range proseCases {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := json.Marshal(map[string]string{"note": tt.in})
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": string(b), "err": errors.New(string(b))}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: string(b)}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(string(b))))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": string(b)}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			// The cookie-prose JSON must be preserved in all event rows.
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != string(b) {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(string(b)))
+			}
+			if !json.Valid([]byte(text)) {
+				t.Errorf("USER_MESSAGE_RECEIVED not valid JSON: %s", text)
+			}
+			// TOOL_ERROR and STATE_DELTA rows must not contain the redacted
+			// placeholder, proving the cookie-prose was preserved.
+			toolErrText := fmt.Sprint(onlyRowOfType(t, rows, EventToolError)["error_message"])
+			if toolErrText != string(b) {
+				t.Errorf("TOOL_ERROR = %s, want %s", elideText(toolErrText), elideText(string(b)))
+			}
+			for _, row := range rows {
+				if et := fmt.Sprint(row["event_type"]); et == string(EventStateDelta) || et == string(EventToolError) {
+					if s := fmt.Sprint(row); strings.Contains(s, redactedValue) {
+						t.Errorf("%s row contains %q: %s", et, redactedValue, elideText(s))
+					}
+				}
+			}
+		})
+	}
+	// Cookie header JSON that must redact its secret.
+	redactCases := []struct{ name, in, want string }{
+		{"JSON note with cookie header", `{"note":"Cookie: sid=` + secret + `"}`, `{"note":"Cookie: [REDACTED]"}`},
+		{"JSON cookie key", `{"Cookie":"sid=` + secret + `"}`, `{"Cookie":"[REDACTED]"}`},
+	}
+	for _, tt := range redactCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(tt.want))
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("row holds secret %q: %s", secret, elideText(s))
+				}
+			}
+		})
+	}
+	// Multiline apostrophe cases that must scrub the secret.
+	multilineCases := []struct{ name, in, want string }{
+		{"multiline pad newline", "password='it's pad\n" + secret, "password=[REDACTED]"},
+		{"multiline pad line2", "password='it's pad\nline2\n" + secret, "password=[REDACTED]"},
+		{"multiline apostrophe user", "password='it's\n" + secret + "' user=x", "password='[REDACTED]' user=x"},
+		{"punctuation apostrophe", "password='it's, " + secret + "' user=x", "password='[REDACTED]' user=x"},
+	}
+	for _, tt := range multilineCases {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in, "err": errors.New(tt.in)}
+			errs.add(p.OnUserMessageCallback()(mCtx, &genai.Content{Role: "user", Parts: []*genai.Part{{Text: tt.in}}}))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:      "ev-state",
+				Author:  "test-agent",
+				Actions: session.EventActions{StateDelta: map[string]any{"note": tt.in}},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			// USER_MESSAGE_RECEIVED must match the expected redaction (including preservation of user=x).
+			parts, _ := onlyRowOfType(t, rows, EventUserMessageReceived)["content_parts"].([]map[string]any)
+			if len(parts) != 1 {
+				t.Fatalf("content_parts = %v, want one part", parts)
+			}
+			text, _ := parts[0]["text"].(string)
+			if text != tt.want {
+				t.Errorf("USER_MESSAGE_RECEIVED = %s, want %s", elideText(text), elideText(tt.want))
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					et := fmt.Sprint(row["event_type"])
+					t.Errorf("%s row holds secret %q: %s", et, secret, elideText(s))
+				}
+			}
+		})
+	}
+}
+
+func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
+	const secret = "SYNTH_REVIEW_ONLY_CREDENTIAL"
+	inputs := []struct {
+		name string
+		in   string
+	}{
+		{
+			name: "Digest Authorization joined double quotes",
+			in:   `curl -H "Authorization: Digest username="bob", response="` + secret + `""`,
+		},
+		{
+			name: "X-Api-Key joined double quotes",
+			in:   `curl -H "X-Api-Key: "prefix" ` + secret + `"`,
+		},
+		{
+			name: "JSON-wrapped Digest Authorization joined quotes",
+			in:   `{"error": "curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\""}`,
+		},
+		{
+			name: "Same-line multi-header Digest Authorization joined quotes",
+			in:   `curl -H "X-Api-Key: first_key" -H "Authorization: Digest username="bob", response="` + secret + `""`,
+		},
+		{
+			name: "Unspaced comma-joined Digest Authorization quotes",
+			in:   `curl -H "Authorization: Digest username="bob,response="` + secret + `""`,
+		},
+		{
+			name: "Unspaced comma-joined X-Api-Key quotes",
+			in:   `curl -H "X-Api-Key: "prefix,"` + secret + `"`,
+		},
+		{
+			name: "Single-quoted apostrophe before semicolon",
+			in:   `curl -H 'Authorization: Bearer 'bob's_` + secret + `; echo 'PUBLIC_KEEP'`,
+		},
+		{
+			name: "Doubly-escaped JSON-wrapped Digest Authorization with trailing URL",
+			in:   `{"b":"KEEP_B","h":"curl -H \"Authorization: Digest username=\\\"bob\\\", response=\\\"` + secret + `\\\"\" https://PUBLIC_KEEP.example.com"}`,
+		},
+		{
+			name: "X-Api-Key joined quotes with closing brace before semicolon",
+			in:   `curl -H "X-Api-Key: "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "X-Api-Key joined quotes with closing bracket before semicolon",
+			in:   `curl -H "X-Api-Key: "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Authorization joined quotes with closing brace before semicolon",
+			in:   `curl -H "Authorization: Bearer "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Authorization joined quotes with closing bracket before semicolon",
+			in:   `curl -H "Authorization: Bearer "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quotes with closing brace before semicolon",
+			in:   `curl -H "Cookie: "pre}` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quotes with closing bracket before semicolon",
+			in:   `curl -H "Cookie: "pre]` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Escaped quote multi-header bare scan does not consume next header",
+			in:   `curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`,
+		},
+		{
+			name: "X-Api-Key multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"X-Api-Key: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote newline after quote",
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"Authorization: Bearer \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote newline after quote",
+			in:   "curl -H \"Authorization: Bearer \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote closing on subsequent line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote unspaced closing on subsequent line",
+			in:   "curl -H \"Cookie: \"pre'" + secret + "\ntail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote newline after quote",
+			in:   "curl -H \"Cookie: \"pre'\n" + secret + " tail'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent quoted fragments on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent command on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'; echo 'public\nmore'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with subsequent double-quoted fragment on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\ntail'\"more\nend\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon preceding closing quote at end of line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon and credential on second line closing at EOL",
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "X-Api-Key multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"X-Api-Key: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Authorization multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"Authorization: Bearer \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie multiline joined single quote with colon on second line and subsequent fragments",
+			in:   "curl -H \"Cookie: \"pre'\nX-Note: " + secret + "'foo' more\nend'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Escaped-quote multiline joined single quote closing at colon-preceded quote at EOL",
+			in:   "curl -H \\\"X-Api-Key: \\\"pre' " + secret + "\nX-Note: '\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Same-line possessive before quoted Authorization header",
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `'`,
+		},
+		{
+			name: "Same-line possessive before quoted Cookie header",
+			in:   `curl -H "X-Api-Key: "Bob's Cookie: 'theme=dark; sid=` + secret + `'`,
+		},
+		{
+			name: "Same-line digit-stem possessive before quoted Authorization header",
+			in:   `curl -H "X-Api-Key: "v2's Authorization: 'Bearer ` + secret + `'`,
+		},
+		{
+			name: "Same-line possessive in prose prefix preserves next-line PUBLIC_KEEP",
+			in:   "I ran curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer " + secret + "' and it failed\nPUBLIC_KEEP",
+		},
+		{
+			name: "Same-line possessive before Authorization header with trailing contraction fails closed",
+			in:   `curl -H "X-Api-Key: "Bob's Authorization: 'Bearer ` + secret + `' didn't work`,
+		},
+		{
+			name: "JSON-wrapped same-line possessive before quoted Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped same-line possessive before balanced-quote Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's Authorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped escaped newline possessive before quoted Authorization header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's\nAuthorization: 'Bearer ` + secret + `'\"", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Same-line double-quote inch mark before quoted Cookie header",
+			in:   `curl -H 'X-Api-Key: 'size12" Cookie: "theme=dark; sid=` + secret + `" PUBLIC_KEEP`,
+		},
+		{
+			name: "Multiline possessive before LF Cookie header",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'",
+		},
+		{
+			name: "Multiline possessive before CRLF Cookie header",
+			in:   "curl -H \"X-Api-Key: \"Bob's\r\nCookie: 'theme=dark; sid=" + secret + "'",
+		},
+		{
+			name: "Multiline curl-v transcript possessive before Set-Cookie header",
+			in:   "> curl -H \"X-Api-Key: \"Bob's demo key\n< HTTP/1.1 200 OK PUBLIC_KEEP\n< Set-Cookie: 'theme=dark; session=" + secret + "'",
+		},
+		{
+			name: "Multiline double-quote inch mark before Cookie header",
+			in:   "curl -H 'X-Api-Key: 'size12\"\nCookie: \"theme=dark; sid=" + secret + "\"",
+		},
+		{
+			name: "Multiline possessive before Cookie header preserves third-line possessive note",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nCookie: 'theme=dark; sid=" + secret + "'\nNote: Alice's PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline possessive before unredacted X-Note preserves PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nX-Note: 'PUBLIC_KEEP'",
+		},
+		{
+			name: "Multiline joined single quote with contraction on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization single quote with contraction and trailing command",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo don't PUBLIC_KEEP",
+		},
+		{
+			name: "CRLF multiline joined Cookie single quote with possessive on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' Bob's\r\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined single quote with closing-line contraction before second auth header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's PUBLIC_KEEP; Authorization: 'Bearer " + secret + "'",
+		},
+		{
+			name: "Multiline joined single quote with closing-line contraction adjacent to second auth header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' it's Authorization: 'Bearer " + secret + "'",
+		},
+		{
+			name: "Bare digit stem without contraction suffix does not skip credential",
+			in:   `curl -H "X-Api-Key: "abc123' ` + secret,
+		},
+		{
+			name: "Multiline joined single quote closing at unclosed Cookie header fails closed",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail; echo TAIL_CMD",
+		},
+		{
+			name: "JSON double-escaped newline before quoted second header",
+			in:   `{"cmd": "curl -H \"X-Api-Key: \"Bob's\\nAuthorization: 'Bearer ` + secret + `'", "note": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Multiline joined single quote with plural possessive on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\ntail' the users' keys PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization single quote with plural possessive and trailing command",
+			in:   "curl -H \"Authorization: Bearer \"pre' " + secret + "\ntail'; echo users' PUBLIC_KEEP",
+		},
+		{
+			name: "CRLF multiline joined Cookie single quote with plural possessive on closing line",
+			in:   "curl -H \"Cookie: \"pre' " + secret + "\r\ntail' James'\r\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined single quote with leading secret token and plural possessive on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre'\n" + secret + " tail' users' PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline possessive before key-value line with trailing plural possessive",
+			in:   "curl -H \"X-Api-Key: \"Bob's\ntoken: tail' " + secret + " users'\necho PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Cookie header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested X-Api-Key header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: 'part1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested Proxy-Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nProxy-Authorization: 'Basic\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested X-Auth-Token header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Auth-Token: 'part1\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Nested empty quoted Authorization header closing joined single quote across newline",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: '\nBearer " + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Double-quoted nested Authorization header closing joined quote across newline",
+			in:   "curl -H 'X-Api-Key: 'pre\" " + secret + "\nAuthorization: \"Bearer\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Non-joined inner single quote before multiline Authorization header",
+			in:   "curl -H \"X-Api-Key: 'pre " + secret + "\nAuthorization: 'Bearer\n" + secret + "_SECOND'; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined single quote before double-quoted nested X-Api-Key header",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Api-Key: \"part1\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined plural possessive before double-quoted nested X-Api-Key header",
+			in:   "curl -H \"X-Api-Key: \"users' " + secret + "\nX-Api-Key: \"part1\n" + secret + "_SECOND\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Unclosed joined quote before Cookie header with unpaired trailing double quote",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'tail'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "JSON-wrapped unclosed joined quote before Cookie header",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'tail'; echo \"unpaired","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped nested Cookie header preserving sibling note",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'theme=dark; sid=` + secret + `_SECOND'","note":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-wrapped nested Authorization header spanning newline",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nAuthorization: 'Bearer\n` + secret + `_SECOND'","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Multiline nested Authorization header with space on line 2 unclosed to EOF",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer " + secret + "_TOK1\n" + secret + "_SECOND",
+		},
+		{
+			name: "Multiline nested Authorization header with unpaired double quote on line 3",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'Bearer " + secret + "_TOK1\n" + secret + "_SECOND'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline nested Cookie header with semicolon on line 2 unclosed to EOF",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=" + secret + "_TOK1; x=2\n" + secret + "_SECOND",
+		},
+		{
+			name: "Plural possessive before parenthesized secret",
+			in:   "curl -H \"X-Api-Key: \"users' (" + secret + "); echo tail",
+		},
+		{
+			name: "Plural possessive before dash-prefixed secret variants",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "\"; " + secret + "_TWO; --tok-" + secret + "_THREE",
+		},
+		{
+			name: "Final-line nested Cookie with semicolon before opaque fragment",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; " + secret + "_OPAQUE",
+		},
+		{
+			name: "Final-line nested Authorization with pipe before token part 2",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nAuthorization: 'tok1|" + secret + "_PART2",
+		},
+		{
+			name: "Plural possessive before CLI non-header flags and custom header flags",
+			in:   "curl -H \"X-Api-Key: \"users' -a \"" + secret + "\"; -p " + secret + "_TWO; --token " + secret + "_THREE; --header=X-Custom:" + secret + "_FOUR; -H=X-Custom:" + secret + "_FIVE",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag keeping ok field",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' --token \"` + secret + `\"","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Plural possessive before unmatched closing paren secret",
+			in:   "curl -H \"X-Api-Key: \"users')" + secret + "; echo tail",
+		},
+		{
+			name: "Plural possessive before non-header flags and custom header preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before -a secret preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -a " + secret + " -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before custom non-auth header preceding auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -H \"X-Custom: " + secret + "\" -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive before semicolon curl auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H \"Authorization: Bearer " + secret + "_TWO\"",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag before curl auth header keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H \"Authorization: Bearer ` + secret + `_TWO\"","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Quoted open paren earlier on line before plural possessive close paren",
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users') ` + secret + `; echo tail`,
+		},
+		{
+			name: "Open paren inside header value before plural possessive close paren",
+			in:   "curl -H \"X-Api-Key: \"pre(mid users') " + secret + "; echo tail",
+		},
+		{
+			name: "Unclosed subshell paren followed by bare secret argument",
+			in:   "(curl -H \"X-Api-Key: \"users') " + secret + "; echo tail",
+		},
+		{
+			name: "Final-line nested Cookie before semicolon true and trailing secrets",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: 'sid=1; true; " + secret + "_TWO; echo " + secret + "_THREE; env " + secret + "_FOUR; sudo " + secret + "_FIVE; curl -u user:" + secret + "_SIX https://example.com",
+		},
+		{
+			name: "Final-line JSON wrapped Cookie before semicolon true preserving ok field",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + `\nCookie: 'sid=1; true; ` + secret + `_TWO","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Final-line raw-newline JSON wrapped Cookie before semicolon true",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"pre' ` + secret + "\nCookie: 'sid=1; true; " + secret + `_TWO","ok":"TAIL"}`,
+		},
+		{
+			name: "Plural possessive before non-header flag and single-quoted auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + " -H 'Authorization: Bearer " + secret + "_TWO'",
+		},
+		{
+			name: "Plural possessive before semicolon curl and single-quoted auth header",
+			in:   "curl -H \"X-Api-Key: \"users' -tok_" + secret + "; curl -H 'Authorization: Bearer " + secret + "_TWO'",
+		},
+		{
+			name: "Plural possessive JSON wrapped non-header flag before single-quoted auth header keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' -tok_` + secret + `; curl -H 'Authorization: Bearer ` + secret + `_TWO'","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Cross-subshell plural possessive before trailing unclosed paren secret",
+			in:   `(curl -H "X-Api-Key: "users') && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "Cross-subshell contraction before plural possessive close paren secret",
+			in:   `(echo it's) && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "JSON wrapped cross-subshell contraction before plural possessive close paren secret keeping ok",
+			in:   `{"cmd":"(echo it's) && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Quoted open paren earlier on line before semicolon secret",
+			in:   `echo "(note)" && curl -H "X-Api-Key: "users'); ` + secret,
+		},
+		{
+			name: "Plural possessive before brace secret",
+			in:   `curl -H "X-Api-Key: "users'} ` + secret,
+		},
+		{
+			name: "Escaped quote before comma secret",
+			in:   `curl -H "X-Api-Key: "tok", ` + secret,
+		},
+		{
+			name: "Apostrophe before comma secret",
+			in:   `curl -H "X-Api-Key: "tok', ` + secret,
+		},
+		{
+			name: "JSON wrapped inner escaped quote before comma secret keeping ok",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"tok\", ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Unclosed inline open paren before semicolon keeps tail",
+			in:   `curl -H "X-Api-Key: "pre(tok` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Dollar command substitution subshell preserves trailing command",
+			in:   `$(curl -H "X-Api-Key: "users') && echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cross-field escaped JSON open subshell with unclosed single quote does not leak next field",
+			in:   `{"a":"(echo 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Cross-field escaped JSON contraction plus open single quote resets on closing quote",
+			in:   `{"a":"(curl -H \"X-Api-Key: \"it's 'open","b":"' && curl -H \"X-Api-Key: \"users'); ` + secret + `","ok":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Trailing apostrophe rejects non-auth Accept header before trailing auth header",
+			in:   `curl -H "X-Api-Key: "users' -H "Accept: ` + secret + `" -H 'Authorization: Bearer ` + secret + `_TWO'`,
+		},
+		{
+			name: "Trailing apostrophe rejects URL query parameter",
+			in:   `curl -H "X-Api-Key: "users' https://api.example.com/v1?x=` + secret,
+		},
+		{
+			name: "Trailing apostrophe rejects env assignment wrapper before curl auth header",
+			in:   `curl -H "X-Api-Key: "users'; env FOO=` + secret + ` curl -H 'Authorization: Bearer ` + secret + `_TWO'`,
+		},
+		{
+			name: "Multiline trailing apostrophe rejects cookie prose with unclosed quote",
+			in:   "curl -H \"X-Api-Key: \"users'\ntok' The cookie: Monster 'unclosed " + secret,
+		},
+		{
+			name: "Multiline trailing apostrophe rejects second-line trailing apostrophe before secret",
+			in:   "curl -H \"X-Api-Key: \"users'\nusers' " + secret,
+		},
+		{
+			name: "Escaped JSON trailing apostrophe preserves quoted clean URL",
+			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' \"https://PUBLIC_KEEP.example.com/v1\"","ok":"OK_KEEP"}`,
+		},
+	}
+	for _, tt := range inputs {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			tl := &fakeTool{name: "run"}
+			args := map[string]any{"cmd": tt.in}
+			llmReq := &model.LLMRequest{
+				Model:    "gemini-test",
+				Contents: []*genai.Content{textContent("user", tt.in)},
+			}
+			llmResp := &model.LLMResponse{
+				Content: textContent("model", tt.in),
+			}
+			ev := &session.Event{
+				ID:          "ev-joined-quotes",
+				Author:      "test-agent",
+				Actions:     session.EventActions{StateDelta: map[string]any{"cmd": tt.in}},
+				LLMResponse: *llmResp,
+			}
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.in)))
+			errs.add(p.BeforeRunCallback()(mCtx))
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.BeforeModelCallback()(mCtx, llmReq))
+			errs.add(p.AfterModelCallback()(mCtx, llmResp, nil))
+			errs.add(p.OnModelErrorCallback()(mCtx, llmReq, errors.New(tt.in)))
+			errs.add(p.BeforeToolCallback()(mCtx, tl, args))
+			errs.add(p.AfterToolCallback()(mCtx, tl, args, map[string]any{"out": tt.in}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, tl, args, errors.New(tt.in)))
+			errs.add(p.OnEventCallback()(mCtx, ev))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			payloadEventTypes := map[string]bool{
+				string(EventUserMessageReceived): true,
+				string(EventLLMRequest):          true,
+				string(EventLLMResponse):         true,
+				string(EventLLMError):            true,
+				string(EventToolStarting):        true,
+				string(EventToolCompleted):       true,
+				string(EventToolError):           true,
+				string(EventStateDelta):          true,
+				string(EventAgentResponse):       true,
+			}
+			for _, row := range rows {
+				if s := fmt.Sprint(row); strings.Contains(s, secret) {
+					t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
+				}
+				if strings.Contains(tt.in, "PUBLIC_KEEP") {
+					evType, _ := row["event_type"].(string)
+					if payloadEventTypes[evType] {
+						if s := fmt.Sprint(row); !strings.Contains(s, "PUBLIC_KEEP") {
+							t.Errorf("%v row lost PUBLIC_KEEP: %s", evType, elideText(s))
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestFileDataEscapedQuoteMultiHeaderRedacted(t *testing.T) {
+	const secret = "SYNTH_REVIEW_SECOND_SECRET_8402"
+	uri := `https://example.com/run?cmd=curl -H "X-Api-Key: first\" -H "Authorization: Bearer x,` + secret + `"`
+	p, requests, mCtx := setupTestPlugin(t)
+	content := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{
+			{FileData: &genai.FileData{MIMEType: "text/plain", FileURI: uri}},
+		},
+	}
+	var errs callbackErrors
+	errs.add(p.OnUserMessageCallback()(mCtx, content))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+	if s := fmt.Sprint(userRow); strings.Contains(s, secret) {
+		t.Fatalf("USER_MESSAGE_RECEIVED row leaked %q: %s", secret, elideText(s))
+	}
+	for _, row := range rows {
+		if s := fmt.Sprint(row); strings.Contains(s, secret) {
+			t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
+		}
+	}
 }

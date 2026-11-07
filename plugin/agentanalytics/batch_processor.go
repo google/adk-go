@@ -1230,9 +1230,20 @@ func (s *streamWriter) closeActiveStream() {
 // cancelFinalizations ends the finalizations of retired streams that are
 // still running, and any that would start later.
 func (s *streamWriter) cancelFinalizations() {
-	if s.finalizeCancel != nil {
-		s.finalizeCancel()
+	s.mu.Lock()
+	cancel := s.finalizeCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
+}
+
+func (s *streamWriter) clearContexts() {
+	s.mu.Lock()
+	s.baseCtx = nil
+	s.finalizeCtx = nil
+	s.finalizeCancel = nil
+	s.mu.Unlock()
 }
 
 // waitFinalizations waits for the finalizations of retired streams to end.
@@ -1700,6 +1711,14 @@ func (b *BatchProcessor) stopAcceptingRows() {
 // the uploads and the writes of the drain.
 func (b *BatchProcessor) Close() {
 	b.closeOnce.Do(func() {
+		defer func() {
+			b.flushMu.Lock()
+			b.baseCtx = nil
+			b.uploadCtx = nil
+			b.cancelUploads = nil
+			b.flushMu.Unlock()
+			b.streamWriter.clearContexts()
+		}()
 		b.stopAcceptingRows()
 		if b.started.Load() {
 			<-b.done

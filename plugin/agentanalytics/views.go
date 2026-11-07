@@ -777,6 +777,9 @@ func (s *pluginState) stopAsyncViewCreation() {
 	// Close cancels its client wait below and waits for the pass to return
 	// (a job already submitted to BigQuery may still finish on the server).
 	s.runner = nil
+	s.lifeCancel = nil
+	s.viewsCancel = nil
+	s.asyncViewsDone = nil
 	s.viewsMu.Unlock()
 
 	if lifeCancel != nil {
