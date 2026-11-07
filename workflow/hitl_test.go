@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -355,4 +356,36 @@ func TestScheduler_WaitForOutputPause_SuspendsWorkflow(t *testing.T) {
 	if downstreamRan.Load() {
 		t.Error("downstream ran; a WaitForOutput pause must suspend the workflow, not complete the parent")
 	}
+}
+
+// TestNewRequestInputEvent_UsesUUIDProvider pins that an auto-generated
+// InterruptID comes from the configured UUID provider, like the surrounding
+// event ID already does. Temporal replay installs a deterministic provider, so
+// an interrupt ID from another source changes on replay and the stored reply no
+// longer resumes the graph.
+func TestNewRequestInputEvent_UsesUUIDProvider(t *testing.T) {
+	const suppliedID = "11111111-1111-4111-8111-111111111111"
+	ctx := newMockCtx(t).WithContext(platform.WithUUIDProvider(
+		t.Context(), func() string { return suppliedID },
+	))
+
+	t.Run("auto-generated interrupt ID", func(t *testing.T) {
+		ev := NewRequestInputEvent(ctx, session.RequestInput{Message: "Approve?"})
+		if got := ev.RequestedInput.InterruptID; got != suppliedID {
+			t.Errorf("InterruptID = %q, want provider value %q", got, suppliedID)
+		}
+		if got := ev.ID; got != suppliedID {
+			t.Errorf("event ID = %q, want provider value %q", got, suppliedID)
+		}
+	})
+
+	t.Run("explicit interrupt ID", func(t *testing.T) {
+		ev := NewRequestInputEvent(ctx, session.RequestInput{
+			InterruptID: "human_review",
+			Message:     "Approve?",
+		})
+		if got, want := ev.RequestedInput.InterruptID, "human_review"; got != want {
+			t.Errorf("InterruptID = %q, want explicit ID %q", got, want)
+		}
+	})
 }

@@ -15,11 +15,11 @@
 package workflow
 
 import (
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -71,7 +71,7 @@ const WorkflowInputFunctionCallName = "adk_request_input"
 //	}
 func NewRequestInputEvent(ctx agent.InvocationContext, req session.RequestInput) *session.Event {
 	if req.InterruptID == "" {
-		req.InterruptID = uuid.NewString()
+		req.InterruptID = platform.NewUUID(ctx)
 	}
 
 	ev := session.NewEvent(ctx, ctx.InvocationID())
