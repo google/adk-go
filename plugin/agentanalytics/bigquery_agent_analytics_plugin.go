@@ -987,9 +987,13 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 const finishTaskToolName = "finish_task"
 
 // isTaskCompletedResult reports whether a finish_task response map carries the
-// successful completion sentinel ("result": "Task completed.").
+// successful completion sentinel ("result": "Task completed.") without a
+// classified tool result error (such as top-level boolean isError or is_error).
 func isTaskCompletedResult(resp map[string]any) bool {
 	if len(resp) == 0 {
+		return false
+	}
+	if _, isErr := classifyToolResultError(resp); isErr {
 		return false
 	}
 	res, ok := resp["result"].(string)
@@ -997,8 +1001,9 @@ func isTaskCompletedResult(resp map[string]any) bool {
 }
 
 // hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed."), which ends a
-// task-mode LLM agent in ADK without running its AfterAgentCallback.
+// finish_task function response ("result": "Task completed." without a
+// classified tool result error), which ends a task-mode LLM agent in ADK
+// without running its AfterAgentCallback.
 func hasTaskCompletedResponse(c *genai.Content) bool {
 	if c == nil {
 		return false
@@ -1227,17 +1232,17 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		}
 		return nil, nil
 	}
-	if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
-		// The finish_task response event that follows reaches OnEventCallback
-		// without the context of the activation that made the call.
-		p.traces.noteTaskFinished(ctx, id, callID)
-	}
 	if !confirmationOutcome {
 		if msg, ok := classifyToolResultError(result); ok {
 			if !closedByError {
 				p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 			}
 			return nil, nil
+		}
+		if name == finishTaskToolName && isTaskCompletedResult(result) {
+			// The finish_task response event that follows reaches OnEventCallback
+			// without the context of the activation that made the call.
+			p.traces.noteTaskFinished(ctx, id, callID)
 		}
 	}
 	if confirmationOutcome {

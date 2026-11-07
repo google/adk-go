@@ -5167,123 +5167,197 @@ func TestPlugin_ToolResultIsError(t *testing.T) {
 		}
 	})
 
-	t.Run("finish_task returning is_error true does not call noteTaskFinished", func(t *testing.T) {
-		p, requests, _ := setupTestPlugin(t)
-		var runCount atomic.Int32
-		injectErrPlugin, err := baseplugin.New(baseplugin.Config{
-			Name: "inject_finish_task_is_error",
-			AfterToolCallback: func(ctx agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
-				if err == nil && tl != nil && tl.Name() == "finish_task" && ctx.FunctionCallID() == "call-shared" && runCount.Load() == 2 {
-					delete(result, "result")
-					result["is_error"] = true
-				}
-				return nil, nil
-			},
-		})
-		if err != nil {
-			t.Fatalf("baseplugin.New: %v", err)
-		}
-
-		// Run 1 calls finish_task("call-shared") and succeeds.
-		// Run 2 (started while Run 1's finish_task response event is still held back,
-		// so Run 2 sits above Run 1 on agentStack) first calls finish_task("call-shared")
-		// which injectErrPlugin turns into {"is_error": true}, and then calls
-		// finish_task("call-second") which succeeds. If Run 2's failed "call-shared"
-		// wrongly called noteTaskFinished, both activations would claim "call-shared"
-		// and finishedTaskLocked would fall back to the top-of-stack activation (Run 2)
-		// instead of closing Run 1's span on Run 1's event.
-		var turn atomic.Int32
-		taskModel := &callbackTestLLM{
-			name: "task-model",
-			gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
-				return func(yield func(*model.LLMResponse, error) bool) {
-					n := turn.Add(1)
-					callID := "call-shared"
-					if n == 3 {
-						callID = "call-second"
-					}
-					yield(&model.LLMResponse{
-						Content: &genai.Content{
-							Role: "model",
-							Parts: []*genai.Part{{
-								FunctionCall: &genai.FunctionCall{
-									ID:   callID,
-									Name: "finish_task",
-									Args: map[string]any{"result": "done"},
-								},
-							}},
-						},
-					}, nil)
-				}
-			},
-		}
-		taskAgent, err := llmagent.New(llmagent.Config{
-			Name:  "task",
-			Mode:  llmagent.ModeTask,
-			Model: taskModel,
-		})
-		if err != nil {
-			t.Fatalf("llmagent.New(task): %v", err)
-		}
-		root, err := agent.New(agent.Config{
-			Name: "root",
-			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-				return func(yield func(*session.Event, error) bool) {
-					var held []*session.Event
-					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
-					for i := 0; i < 2; i++ {
-						runCount.Add(1)
-						for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
-							if err != nil {
-								yield(nil, err)
-								return
-							}
-							if hasTaskCompletedResponse(ev.Content) {
-								held = append(held, ev)
-								continue
-							}
-							if !yield(ev, nil) {
-								return
-							}
-						}
-					}
-					for _, ev := range held {
-						if !yield(ev, nil) {
-							return
-						}
-					}
-				}
-			},
-		})
-		if err != nil {
-			t.Fatalf("agent.New(root): %v", err)
-		}
-
-		for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-			if runErr != nil {
-				t.Fatalf("runner.Run error: %v", runErr)
+	t.Run("isTaskCompletedResult and hasTaskCompletedResponse reject mixed error maps", func(t *testing.T) {
+		finishResp := func(m map[string]any) *genai.Content {
+			return &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call-1",
+						Name:     finishTaskToolName,
+						Response: m,
+					},
+				}},
 			}
 		}
+		for _, tc := range []struct {
+			name string
+			resp map[string]any
+			want bool
+		}{
+			{name: "genuine sentinel", resp: map[string]any{"result": "Task completed."}, want: true},
+			{name: "isError false", resp: map[string]any{"result": "Task completed.", "isError": false}, want: true},
+			{name: "is_error false", resp: map[string]any{"result": "Task completed.", "is_error": false}, want: true},
+			{name: "isError non-boolean string true", resp: map[string]any{"result": "Task completed.", "isError": "true"}, want: true},
+			{name: "mixed sentinel and isError true", resp: map[string]any{"result": "Task completed.", "isError": true}, want: false},
+			{name: "mixed sentinel and is_error true", resp: map[string]any{"result": "Task completed.", "is_error": true}, want: false},
+			{name: "error map without sentinel", resp: map[string]any{"error": "bad"}, want: false},
+			{name: "nil map", resp: nil, want: false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := isTaskCompletedResult(tc.resp); got != tc.want {
+					t.Errorf("isTaskCompletedResult(%v) = %v, want %v", tc.resp, got, tc.want)
+				}
+				if got := hasTaskCompletedResponse(finishResp(tc.resp)); got != tc.want {
+					t.Errorf("hasTaskCompletedResponse(%v) = %v, want %v", tc.resp, got, tc.want)
+				}
+			})
+		}
+		if hasTaskCompletedResponse(nil) {
+			t.Error("hasTaskCompletedResponse(nil) = true, want false")
+		}
+		if hasTaskCompletedResponse(&genai.Content{
+			Role: "user",
+			Parts: []*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{
+					ID:       "call-other",
+					Name:     "other_tool",
+					Response: map[string]any{"result": "Task completed."},
+				},
+			}},
+		}) {
+			t.Error("hasTaskCompletedResponse(other_tool) = true, want false")
+		}
+	})
 
-		rows := collectRows(t, requests, untilInvocationEnd)
-		requireInvocationCompletedOK(t, rows)
-		toolErrRow := onlyRowOfType(t, rows, EventToolError)
-		if got := toolErrRow["error_message"]; got != "Tool returned an MCP result with isError=true." {
-			t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
-		}
-		if got := len(rowsOfType(rows, EventToolCompleted)); got != 2 {
-			t.Fatalf("got %d TOOL_COMPLETED rows, want 2; events: %v", got, eventTypes(rows))
-		}
-		starts := agentRowsOfType(rows, EventAgentStarting, "task")
-		ends := agentRowsOfType(rows, EventAgentCompleted, "task")
-		if len(starts) != 2 || len(ends) != 2 {
-			t.Fatalf("task rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want 2 of each", len(starts), len(ends))
-		}
-		if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
-			t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
-		}
-		if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
-			t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
+	t.Run("finish_task returning is_error true does not call noteTaskFinished", func(t *testing.T) {
+		for _, preserveResult := range []bool{false, true} {
+			name := "without_sentinel"
+			if preserveResult {
+				name = "with_Task_completed_sentinel"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var runCount atomic.Int32
+				injectErrPlugin, err := baseplugin.New(baseplugin.Config{
+					Name: "inject_finish_task_is_error",
+					AfterToolCallback: func(ctx agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+						if err == nil && tl != nil && tl.Name() == "finish_task" && ctx.FunctionCallID() == "call-shared" && runCount.Load() == 2 {
+							if !preserveResult {
+								delete(result, "result")
+							}
+							result["is_error"] = true
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
+
+				// Run 1 calls finish_task("call-shared") and succeeds.
+				// Run 2 (started while Run 1's finish_task response event is still held back,
+				// so Run 2 sits above Run 1 on agentStack) first calls finish_task("call-shared")
+				// which injectErrPlugin marks with is_error=true, and then calls
+				// finish_task("call-second") which succeeds. If Run 2's failed "call-shared"
+				// wrongly called noteTaskFinished, both activations would claim "call-shared"
+				// and finishedTaskLocked would fall back to the top-of-stack activation (Run 2)
+				// instead of closing Run 1's span on Run 1's event.
+				var turn atomic.Int32
+				taskModel := &callbackTestLLM{
+					name: "task-model",
+					gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							n := turn.Add(1)
+							callID := "call-shared"
+							if n == 3 {
+								callID = "call-second"
+							}
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   callID,
+											Name: "finish_task",
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+							}, nil)
+						}
+					},
+				}
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "task",
+					Mode:  llmagent.ModeTask,
+					Model: taskModel,
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(task): %v", err)
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							var held []*session.Event
+							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+							for i := 0; i < 2; i++ {
+								runCount.Add(1)
+								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+									if err != nil {
+										yield(nil, err)
+										return
+									}
+									if hasTaskCompletedResponse(ev.Content) {
+										held = append(held, ev)
+										continue
+									}
+									if !yield(ev, nil) {
+										return
+									}
+								}
+							}
+							for _, ev := range held {
+								if !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				toolErrRow := onlyRowOfType(t, rows, EventToolError)
+				if got := toolErrRow["error_message"]; got != "Tool returned an MCP result with isError=true." {
+					t.Errorf("TOOL_ERROR error_message = %v, want %q", got, "Tool returned an MCP result with isError=true.")
+				}
+				wantToolCompleted := 2
+				wantEnds := 2
+				if preserveResult {
+					// When "result": "Task completed." is preserved on Run 2's error,
+					// ModeTask exits Run 2 after call-shared without calling call-second,
+					// so only Run 1 emits TOOL_COMPLETED and AGENT_COMPLETED.
+					wantToolCompleted = 1
+					wantEnds = 1
+				}
+				if got := len(rowsOfType(rows, EventToolCompleted)); got != wantToolCompleted {
+					t.Fatalf("got %d TOOL_COMPLETED rows, want %d; events: %v", got, wantToolCompleted, eventTypes(rows))
+				}
+				starts := agentRowsOfType(rows, EventAgentStarting, "task")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+				if len(starts) != 2 || len(ends) != wantEnds {
+					t.Fatalf("task rows: %d AGENT_STARTING (want 2) and %d AGENT_COMPLETED (want %d)", len(starts), len(ends), wantEnds)
+				}
+				if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
+				}
+				if wantEnds == 2 {
+					if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
+						t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
+					}
+				}
+			})
 		}
 	})
 
@@ -5494,109 +5568,154 @@ func TestMCPRecoverySingleToolError(t *testing.T) {
 		}
 	}
 
-	t.Run("buffered finish_task with Task completed and isError true attributes task completion", func(t *testing.T) {
-		p, requests, _ := setupTestPlugin(t)
-		var runCount atomic.Int32
-		injectErrPlugin, err := baseplugin.New(baseplugin.Config{
-			Name: "inject_finish_task_isError_preserving_result",
-			AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
-				if err == nil && tl != nil && tl.Name() == "finish_task" && runCount.Load() == 1 {
-					result["isError"] = true
-				}
-				return nil, nil
-			},
-		})
-		if err != nil {
-			t.Fatalf("baseplugin.New: %v", err)
-		}
-
-		var turn atomic.Int32
-		taskModel := &callbackTestLLM{
-			name: "task-model",
-			gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
-				return func(yield func(*model.LLMResponse, error) bool) {
-					callID := fmt.Sprintf("call-task-%d", turn.Add(1))
-					yield(&model.LLMResponse{
-						Content: &genai.Content{
-							Role: "model",
-							Parts: []*genai.Part{{
-								FunctionCall: &genai.FunctionCall{
-									ID:   callID,
-									Name: "finish_task",
-									Args: map[string]any{"result": "done"},
-								},
-							}},
-						},
-					}, nil)
-				}
-			},
-		}
-		taskAgent, err := llmagent.New(llmagent.Config{
-			Name:  "task",
-			Mode:  llmagent.ModeTask,
-			Model: taskModel,
-		})
-		if err != nil {
-			t.Fatalf("llmagent.New(task): %v", err)
-		}
-		root, err := agent.New(agent.Config{
-			Name: "root",
-			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-				return func(yield func(*session.Event, error) bool) {
-					var held []*session.Event
-					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
-					for i := 0; i < 2; i++ {
-						runCount.Add(1)
-						for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
-							if err != nil {
-								yield(nil, err)
-								return
-							}
-							if hasTaskCompletedResponse(ev.Content) {
-								held = append(held, ev)
-								continue
-							}
-							if !yield(ev, nil) {
-								return
-							}
-						}
-					}
-					for _, ev := range held {
-						if !yield(ev, nil) {
-							return
-						}
-					}
-				}
-			},
-		})
-		if err != nil {
-			t.Fatalf("agent.New(root): %v", err)
-		}
-
-		for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-			if runErr != nil {
-				t.Fatalf("runner.Run error: %v", runErr)
+	for _, flagKey := range []string{"isError", "is_error"} {
+		for _, buffered := range []bool{false, true} {
+			delivery := "unbuffered"
+			if buffered {
+				delivery = "buffered"
 			}
-		}
+			t.Run(flagKey+"/"+delivery+"/finish_task with Task completed and error flag does not complete task", func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				var runCount atomic.Int32
+				injectErrPlugin, err := baseplugin.New(baseplugin.Config{
+					Name: "inject_finish_task_error_preserving_result",
+					AfterToolCallback: func(_ agent.Context, tl tool.Tool, _, result map[string]any, err error) (map[string]any, error) {
+						if err == nil && tl != nil && tl.Name() == finishTaskToolName && runCount.Load() == 1 {
+							result[flagKey] = true
+						}
+						return nil, nil
+					},
+				})
+				if err != nil {
+					t.Fatalf("baseplugin.New: %v", err)
+				}
 
-		rows := collectRows(t, requests, untilInvocationEnd)
-		requireInvocationCompletedOK(t, rows)
-		if got := len(rowsOfType(rows, EventToolError)); got != 1 {
-			t.Fatalf("got %d TOOL_ERROR rows, want 1; events: %v", got, eventTypes(rows))
+				// Both task activations reuse the same function call ID ("call-0").
+				// Activation 1 gets {"result": "Task completed.", flagKey: true} and
+				// must emit TOOL_ERROR with zero AGENT_COMPLETED rows; Activation 2
+				// gets a genuine {"result": "Task completed."} and must complete its
+				// task span cleanly.
+				taskModel := &callbackTestLLM{
+					name: "task-model",
+					gen: func(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+						return func(yield func(*model.LLMResponse, error) bool) {
+							yield(&model.LLMResponse{
+								Content: &genai.Content{
+									Role: "model",
+									Parts: []*genai.Part{{
+										FunctionCall: &genai.FunctionCall{
+											ID:   "call-0",
+											Name: finishTaskToolName,
+											Args: map[string]any{"result": "done"},
+										},
+									}},
+								},
+							}, nil)
+						}
+					},
+				}
+				taskAgent, err := llmagent.New(llmagent.Config{
+					Name:  "task",
+					Mode:  llmagent.ModeTask,
+					Model: taskModel,
+				})
+				if err != nil {
+					t.Fatalf("llmagent.New(task): %v", err)
+				}
+				hasFinishTaskResponse := func(c *genai.Content) bool {
+					if c == nil {
+						return false
+					}
+					for _, part := range c.Parts {
+						if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == finishTaskToolName {
+							return true
+						}
+					}
+					return false
+				}
+				root, err := agent.New(agent.Config{
+					Name: "root",
+					Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+						return func(yield func(*session.Event, error) bool) {
+							var held []*session.Event
+							nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+							for i := 0; i < 2; i++ {
+								runCount.Add(1)
+								for ev, err := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+									if err != nil {
+										yield(nil, err)
+										return
+									}
+									// Match FunctionResponse.Name rather than hasTaskCompletedResponse
+									// so even the rejected finish_task event reaches OnEventCallback.
+									if buffered && hasFinishTaskResponse(ev.Content) {
+										held = append(held, ev)
+										continue
+									}
+									if !yield(ev, nil) {
+										return
+									}
+								}
+							}
+							for _, ev := range held {
+								if !yield(ev, nil) {
+									return
+								}
+							}
+						}
+					},
+				})
+				if err != nil {
+					t.Fatalf("agent.New(root): %v", err)
+				}
+
+				for _, runErr := range newTestRunner(t, root, injectErrPlugin, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+					if runErr != nil {
+						t.Fatalf("runner.Run error: %v", runErr)
+					}
+				}
+
+				rows := collectRows(t, requests, untilInvocationEnd)
+				requireInvocationCompletedOK(t, rows)
+				if got := len(rowsOfType(rows, EventAgentError)); got != 0 {
+					t.Fatalf("got %d AGENT_ERROR rows, want 0; events: %v", got, eventTypes(rows))
+				}
+
+				starts := agentRowsOfType(rows, EventAgentStarting, "task")
+				ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+				if len(starts) != 2 {
+					t.Fatalf("got %d task AGENT_STARTING rows, want 2", len(starts))
+				}
+				if len(ends) != 1 {
+					t.Fatalf("got %d task AGENT_COMPLETED rows, want 1 (failed finish_task must not emit AGENT_COMPLETED); ends=%v", len(ends), ends)
+				}
+				if got, want := ends[0]["span_id"], starts[1]["span_id"]; got != want {
+					t.Errorf("task AGENT_COMPLETED span_id = %v, want Activation 2 span_id %v (Activation 1 span_id = %v)", got, want, starts[0]["span_id"])
+				}
+
+				toolStarts := rowsOfType(rows, EventToolStarting)
+				if len(toolStarts) != 2 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 2", len(toolStarts))
+				}
+				toolErr := onlyRowOfType(t, rows, EventToolError)
+				if got := toolErr["error_message"]; got != mcpToolErrorMessage {
+					t.Errorf("TOOL_ERROR error_message = %v, want %q", got, mcpToolErrorMessage)
+				}
+				if got, want := toolErr["span_id"], toolStarts[0]["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR span_id = %v, want Activation 1 TOOL_STARTING span_id %v", got, want)
+				}
+				if got, want := toolErr["parent_span_id"], starts[0]["span_id"]; got != want {
+					t.Errorf("TOOL_ERROR parent_span_id = %v, want Activation 1 AGENT_STARTING span_id %v", got, want)
+				}
+
+				toolDone := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := toolDone["span_id"], toolStarts[1]["span_id"]; got != want {
+					t.Errorf("TOOL_COMPLETED span_id = %v, want Activation 2 TOOL_STARTING span_id %v", got, want)
+				}
+				if got, want := toolDone["parent_span_id"], starts[1]["span_id"]; got != want {
+					t.Errorf("TOOL_COMPLETED parent_span_id = %v, want Activation 2 AGENT_STARTING span_id %v", got, want)
+				}
+			})
 		}
-		if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
-			t.Fatalf("got %d TOOL_COMPLETED rows, want 1; events: %v", got, eventTypes(rows))
-		}
-		starts := agentRowsOfType(rows, EventAgentStarting, "task")
-		ends := agentRowsOfType(rows, EventAgentCompleted, "task")
-		if len(starts) != 2 || len(ends) != 2 {
-			t.Fatalf("task rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want 2 of each", len(starts), len(ends))
-		}
-		if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
-			t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
-		}
-		if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
-			t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
-		}
-	})
+	}
 }
