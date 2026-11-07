@@ -62,7 +62,11 @@ type Config struct {
 	MemoryService memory.Service
 	// optional
 	PluginConfig PluginConfig
-	// optional
+	// optional. When true, Run and RunLive create the session if it does not
+	// exist. The session is created when the session ID is empty, so the
+	// service generates one, or when the session service's Get reports
+	// [session.ErrNotFound]. Any other Get error is returned as is, so a
+	// transient storage failure never replaces an existing session.
 	AutoCreateSession bool
 
 	// Compaction enables context compaction for the sessions this
@@ -536,7 +540,9 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 	if err == nil {
 		return getResp.Session, nil
 	}
-	if !r.autoCreateSession {
+	// Services reject an empty ID in Get with a validation error, not
+	// ErrNotFound. Create generates an ID for it.
+	if !r.autoCreateSession || (sessionID != "" && !errors.Is(err, session.ErrNotFound)) {
 		return nil, err
 	}
 	createResp, err := r.sessionService.Create(ctx, &session.CreateRequest{
