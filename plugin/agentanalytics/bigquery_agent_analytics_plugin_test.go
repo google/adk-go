@@ -5245,3 +5245,219 @@ func TestClose_SecondCallAfterCleanCloseSucceeds(t *testing.T) {
 		t.Fatalf("second Close() error = %v, want nil", err)
 	}
 }
+
+func TestNestedRetiredRecovery_Runner(t *testing.T) {
+	makeBranch := func(t *testing.T, name, childName string, childErr error, recoverText string) agent.Agent {
+		t.Helper()
+		child, err := agent.New(agent.Config{
+			Name: childName,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = childName
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", childName+" answer")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, childErr)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", childName, err)
+		}
+		par := newParallelAgent(t, name+"_par", child)
+		cfg := agent.Config{
+			Name:      name,
+			SubAgents: []agent.Agent{par},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		}
+		if recoverText != "" {
+			cfg.AfterAgentCallbacks = []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					return textContent("model", recoverText), nil
+				},
+			}
+		}
+		inner, err := agent.New(cfg)
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", name, err)
+		}
+		return inner
+	}
+
+	makeOuter := func(t *testing.T, recoverText string, subs ...agent.Agent) agent.Agent {
+		t.Helper()
+		cfg := agent.Config{
+			Name:      "outer",
+			SubAgents: subs,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, sub := range subs {
+						for ev, runErr := range sub.Run(ctx) {
+							if runErr != nil {
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				}
+			},
+		}
+		if recoverText != "" {
+			cfg.AfterAgentCallbacks = []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					return textContent("model", recoverText), nil
+				},
+			}
+		}
+		outer, err := agent.New(cfg)
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		return outer
+	}
+
+	makeBufferingRoot := func(t *testing.T, outer agent.Agent) agent.Agent {
+		t.Helper()
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{outer},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered []*session.Event
+					for ev, runErr := range outer.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil {
+							buffered = append(buffered, ev)
+						}
+					}
+					for _, ev := range buffered {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		return root
+	}
+
+	t.Run("inner recovers and outer forwards", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child branch failure"), "inner recovered")
+		outer := makeOuter(t, "", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("inner does not recover and outer recovers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child branch failure"), "")
+		outer := makeOuter(t, "outer recovered", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("neither inner nor outer recovers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child unrecovered failure"), "")
+		outer := makeOuter(t, "", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s3", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		if invErr["status"] != "ERROR" {
+			t.Errorf("INVOCATION_ERROR status = %v, want ERROR", invErr["status"])
+		}
+	})
+
+	t.Run("unrelated sibling failure stays intact when inner1 recovers", func(t *testing.T) {
+		for _, recoverFirst := range []bool{true, false} {
+			name := "recover first"
+			if !recoverFirst {
+				name = "fail silently first"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				err1 := errors.New("child1 recoverable error")
+				err2 := errors.New("child2 silent error")
+				inner1 := makeBranch(t, "inner1", "child1", err1, "inner1 recovered")
+				inner2 := makeBranch(t, "inner2", "child2", err2, "")
+				subs := []agent.Agent{inner1, inner2}
+				if !recoverFirst {
+					subs = []agent.Agent{inner2, inner1}
+				}
+				outer := makeOuter(t, "", subs...)
+				root := makeBufferingRoot(t, outer)
+
+				for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s4", textContent("user", "go"), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("runner.Run error = %v, want nil", err)
+					}
+				}
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+					t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+				}
+				invErr := onlyRowOfType(t, rows, EventInvocationError)
+				msg, _ := invErr["error_message"].(string)
+				if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
+					t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+				}
+			})
+		}
+	})
+}

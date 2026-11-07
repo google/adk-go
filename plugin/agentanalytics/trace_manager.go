@@ -349,18 +349,73 @@ type spanRecord struct {
 	activation any
 }
 
+// retiredSwallower identifies a retired custom ancestor that drained a child
+// failure without its own context failing, so recovery content from its own
+// AfterAgentCallback may clear the cause.
+type retiredSwallower struct {
+	name   string
+	branch string
+	path   string
+}
+
 // retiredCause is the failure cause of an activation that retired under an
 // open span (see spanRecord.retiredCauses), with the name, branch and node
 // path of the retired activation. swallowableBySelf reports that the retired
-// activation drained an inherited child failure without its own context
-// failing and is not a built-in workflow agent, so recovery content from its
-// own AfterAgentCallback may clear the cause.
+// activation (or an intermediate retired custom ancestor recorded in
+// swallowers) drained an inherited child failure without its own context
+// failing and is not a built-in workflow agent, so recovery content from any
+// of their AfterAgentCallbacks may clear the cause.
 type retiredCause struct {
 	err               error
 	name              string
 	branch            string
 	path              string
 	swallowableBySelf bool
+	swallowers        []retiredSwallower
+}
+
+// addSwallower records rec as a retired custom swallower eligible to clear c on
+// a later recovery response from rec.
+func (c *retiredCause) addSwallower(rec *spanRecord) {
+	if rec == nil {
+		return
+	}
+	if !c.swallowableBySelf {
+		c.name = rec.name
+		c.branch = rec.branch
+		c.path = rec.path
+		c.swallowableBySelf = true
+		return
+	}
+	if c.name == rec.name && c.branch == rec.branch && c.path == rec.path {
+		return
+	}
+	entry := retiredSwallower{name: rec.name, branch: rec.branch, path: rec.path}
+	if slices.Contains(c.swallowers, entry) {
+		return
+	}
+	c.swallowers = append(slices.Clone(c.swallowers), entry)
+}
+
+// matchesSwallower reports whether recovery content authored by (name, branch,
+// path) may clear c. An empty path on either side matches any path, as in
+// findAgent.
+func (c retiredCause) matchesSwallower(name, branch, path string) bool {
+	if !c.swallowableBySelf {
+		return false
+	}
+	matches := func(sName, sBranch, sPath string) bool {
+		return sName == name && sBranch == branch && (path == "" || sPath == "" || sPath == path)
+	}
+	if matches(c.name, c.branch, c.path) {
+		return true
+	}
+	for _, s := range c.swallowers {
+		if matches(s.name, s.branch, s.path) {
+			return true
+		}
+	}
+	return false
 }
 
 // firstRetiredCause returns the first failure cause that an activation that
@@ -375,11 +430,12 @@ func (rec *spanRecord) firstRetiredCause() error {
 }
 
 // clearRetiredCauseFor removes the swallowable failure causes that activations
-// of the agent name on branch, and on path, retired under rec with. An empty
-// path on either side matches any path, as in findAgent.
+// of the agent name on branch, and on path, retired under rec with or drained
+// as intermediate custom swallowers. An empty path on either side matches any
+// path, as in findAgent.
 func (rec *spanRecord) clearRetiredCauseFor(name, branch, path string) {
 	rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
-		return c.swallowableBySelf && c.name == name && c.branch == branch && (path == "" || c.path == "" || c.path == path)
+		return c.matchesSwallower(name, branch, path)
 	})
 }
 
@@ -2636,7 +2692,8 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 		}
 	}
 	ownCtxCause := rec.contextFailureCause()
-	inheritedCause := rec.firstRetiredCause()
+	inherited := slices.Clone(rec.retiredCauses)
+	rec.retiredCauses = nil
 	idx := i
 	inv.agentStack = slices.Delete(inv.agentStack, i, i+1)
 	// Also retire any unclosed descendant spans in rec's subtree (for example,
@@ -2644,7 +2701,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 	// AfterAgentCallback, including one whose direct parent already retired
 	// earlier while launcherOpenLocked held it open), except the failed ones
 	// and what runs under them.
-	var descendantOpenCause error
+	var descendantOpenCauses []retiredCause
 	var retired []*spanRecord
 	for idx < len(inv.agentStack) {
 		d := inv.agentStack[idx]
@@ -2662,9 +2719,53 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 				}
 			}
 			if drainedParent {
-				inheritedCause = cmp.Or(inheritedCause, d.openFailureCause())
-			} else if descendantOpenCause == nil {
-				descendantOpenCause = d.openFailureCause()
+				if dCause := d.contextFailureCause(); dCause != nil {
+					rc := retiredCause{
+						err:    dCause,
+						name:   d.name,
+						branch: d.branch,
+						path:   d.path,
+					}
+					for p := d.parent; p != nil && p != rec && p.kind == spanKindAgent; p = p.parent {
+						if !p.propagatesChildError && p.contextFailureCause() == nil {
+							rc.addSwallower(p)
+						}
+					}
+					inherited = append(inherited, rc)
+				}
+				for _, c := range d.retiredCauses {
+					if c.err == nil {
+						continue
+					}
+					for p := d.parent; p != nil && p != rec && p.kind == spanKindAgent; p = p.parent {
+						if !p.propagatesChildError && p.contextFailureCause() == nil {
+							c.addSwallower(p)
+						}
+					}
+					inherited = append(inherited, c)
+				}
+				d.retiredCauses = nil
+			} else {
+				if dCause := d.contextFailureCause(); dCause != nil {
+					descendantOpenCauses = append(descendantOpenCauses, retiredCause{
+						err:    dCause,
+						name:   rec.name,
+						branch: rec.branch,
+						path:   rec.path,
+					})
+				}
+				for _, c := range d.retiredCauses {
+					if c.err == nil {
+						continue
+					}
+					descendantOpenCauses = append(descendantOpenCauses, retiredCause{
+						err:    c.err,
+						name:   rec.name,
+						branch: rec.branch,
+						path:   rec.path,
+					})
+				}
+				d.retiredCauses = nil
 			}
 			if inv.isLate {
 				retired = append(retired, d)
@@ -2674,22 +2775,35 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 		}
 		idx++
 	}
-	if cause := cmp.Or(ownCtxCause, inheritedCause, descendantOpenCause); cause != nil {
-		swallowable := !rec.propagatesChildError && ownCtxCause == nil && inheritedCause != nil && descendantOpenCause == nil
+	var moved []retiredCause
+	if ownCtxCause != nil {
+		moved = append(moved, retiredCause{
+			err:    ownCtxCause,
+			name:   rec.name,
+			branch: rec.branch,
+			path:   rec.path,
+		})
+	}
+	canSwallow := !rec.propagatesChildError && ownCtxCause == nil && len(descendantOpenCauses) == 0
+	for _, c := range inherited {
+		if c.err == nil {
+			continue
+		}
+		if canSwallow {
+			c.addSwallower(rec)
+		}
+		moved = append(moved, c)
+	}
+	moved = append(moved, descendantOpenCauses...)
+	if len(moved) > 0 {
 		for anc := rec.parent; anc != nil; anc = anc.parent {
 			if slices.Contains(inv.agentStack, anc) {
-				// The cause stays linked to rec, so that recovery content from
-				// a custom agent's own AfterAgentCallback, which ADK runs
-				// after this plugin's, clears it when rec drained an inherited
-				// failure without its own context failing (see
+				// Any inherited swallowable causes keep every eligible custom
+				// swallower along the retired chain, so recovery content from
+				// an inner or outer custom agent's AfterAgentCallback clears its
+				// matching cause without dropping unrelated sibling failures (see
 				// completeResponse).
-				anc.retiredCauses = append(anc.retiredCauses, retiredCause{
-					err:               cause,
-					name:              rec.name,
-					branch:            rec.branch,
-					path:              rec.path,
-					swallowableBySelf: swallowable,
-				})
+				anc.retiredCauses = append(anc.retiredCauses, moved...)
 				break
 			}
 		}
@@ -3273,24 +3387,36 @@ func (inv *invocationTrace) retireDrainedDescendantsLocked(matchAnc func(p *span
 	})
 	for _, d := range retired {
 		ownCtxCause := d.contextFailureCause()
-		inheritedCause := d.firstRetiredCause()
-		if cause := cmp.Or(ownCtxCause, inheritedCause); cause != nil {
-			carrier := d
-			swallowable := !d.propagatesChildError && ownCtxCause == nil && inheritedCause != nil
+		var moved []retiredCause
+		if ownCtxCause != nil {
+			moved = append(moved, retiredCause{
+				err:    ownCtxCause,
+				name:   d.name,
+				branch: d.branch,
+				path:   d.path,
+			})
+		}
+		canSwallow := !d.propagatesChildError && ownCtxCause == nil
+		for _, c := range d.retiredCauses {
+			if c.err == nil {
+				continue
+			}
+			if canSwallow {
+				c.addSwallower(d)
+			}
+			moved = append(moved, c)
+		}
+		d.retiredCauses = nil
+		if len(moved) > 0 {
 			for anc := d.parent; anc != nil; anc = anc.parent {
 				if slices.Contains(inv.agentStack, anc) {
-					anc.retiredCauses = append(anc.retiredCauses, retiredCause{
-						err:               cause,
-						name:              carrier.name,
-						branch:            carrier.branch,
-						path:              carrier.path,
-						swallowableBySelf: swallowable,
-					})
+					anc.retiredCauses = append(anc.retiredCauses, moved...)
 					break
 				}
 				if anc.kind == spanKindAgent && !anc.propagatesChildError && anc.contextFailureCause() == nil {
-					carrier = anc
-					swallowable = true
+					for j := range moved {
+						moved[j].addSwallower(anc)
+					}
 				}
 			}
 		}
