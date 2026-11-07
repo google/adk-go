@@ -123,6 +123,9 @@ func (f *fileSystemSource) LoadResource(ctx context.Context, name, resourcePath 
 	}
 
 	fullPath := path.Join(name, cleanPath)
+	if err := rejectSymlinksInPath(f.filesystem, fullPath); err != nil {
+		return nil, err
+	}
 	file, err := f.filesystem.Open(fullPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -180,6 +183,11 @@ func (f *fileSystemSource) ListResources(ctx context.Context, name, resourceDire
 				}
 				return err
 			}
+			// Report symlinks as missing rather than let a caller load content
+			// from outside the skill directory through them.
+			if d.Type()&fs.ModeSymlink != 0 {
+				return nil
+			}
 			if !d.IsDir() {
 				resources = append(resources, p)
 			}
@@ -207,6 +215,11 @@ func (f *fileSystemSource) validateSkill(name string) error {
 // closer for the file.
 func (f *fileSystemSource) readSkill(name string) (*Frontmatter, *bufio.Reader, io.Closer, error) {
 	skillFilePath := path.Join(name, "SKILL.md")
+	if err := rejectSymlinksInPath(f.filesystem, skillFilePath); err != nil {
+		// A symlinked SKILL.md is not a skill; report it like a missing file so
+		// one bad directory does not abort scanning the others.
+		return nil, nil, nil, fmt.Errorf("%w: %q", ErrSkillNotFound, name)
+	}
 	file, err := f.filesystem.Open(skillFilePath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -225,4 +238,43 @@ func (f *fileSystemSource) readSkill(name string) (*Frontmatter, *bufio.Reader, 
 		return nil, nil, nil, fmt.Errorf("%w: name in SKILL.md (%q) does not match directory name (%q)", ErrInvalidSkillName, frontmatter.Name, name)
 	}
 	return frontmatter, reader, file, nil
+}
+
+// rejectSymlinksInPath returns ErrInvalidResourcePath when any component of
+// name is a symbolic link. fs.FS has no Lstat, so it reads each parent
+// directory and inspects the entry type before the path is opened.
+func rejectSymlinksInPath(fsys fs.FS, name string) error {
+	name = path.Clean(name)
+	if name == "." {
+		return nil
+	}
+	parent := "."
+	for _, component := range strings.Split(name, "/") {
+		if component == "" || component == "." {
+			continue
+		}
+		entries, err := fs.ReadDir(fsys, parent)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("read directory %q: %w", parent, err)
+		}
+		found := false
+		for _, entry := range entries {
+			if entry.Name() != component {
+				continue
+			}
+			found = true
+			if entry.Type()&fs.ModeSymlink != 0 {
+				return fmt.Errorf("%w: %q contains the symbolic link %q", ErrInvalidResourcePath, name, component)
+			}
+			break
+		}
+		if !found {
+			return nil
+		}
+		parent = path.Join(parent, component)
+	}
+	return nil
 }

@@ -244,6 +244,24 @@ func TestFileSystemSource_LoadResource(t *testing.T) {
 			want: []byte("image-data"),
 		},
 		{
+			name:         "Error Symlinked Resource",
+			resourcePath: "references/secret.txt",
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
+				"test-skill/SKILL.md":              &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+				"test-skill/references/secret.txt": &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("/etc/passwd")},
+			}}),
+			wantErr: ErrInvalidResourcePath,
+		},
+		{
+			name:         "Error Symlinked Parent Directory",
+			resourcePath: "references/sub/doc.txt",
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
+				"test-skill/SKILL.md":       &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+				"test-skill/references/sub": &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("/etc")},
+			}}),
+			wantErr: ErrInvalidResourcePath,
+		},
+		{
 			name:         "Error Skill Not Found",
 			resourcePath: "assets/image.png",
 			source:       NewFileSystemSource(plainFS{fstest.MapFS{}}),
@@ -372,6 +390,16 @@ func TestFileSystemSource_ListResources(t *testing.T) {
 				"test-skill/assets/images/image.png": &fstest.MapFile{Data: []byte("")},
 			}}),
 			want: []string{"assets/image.png", "assets/images/image.png"},
+		},
+		{
+			name:       "Success Symlink Excluded",
+			searchPath: "references",
+			source: NewFileSystemSource(plainFS{fstest.MapFS{
+				"test-skill/SKILL.md":            &fstest.MapFile{Data: []byte("---\nname: test-skill\ndescription: test\n---\n")},
+				"test-skill/references/real.txt": &fstest.MapFile{Data: []byte("")},
+				"test-skill/references/link.txt": &fstest.MapFile{Mode: fs.ModeSymlink, Data: []byte("real.txt")},
+			}}),
+			want: []string{"references/real.txt"},
 		},
 		{
 			name:       "Error Skill Not Found",
