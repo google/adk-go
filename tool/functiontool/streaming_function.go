@@ -185,6 +185,12 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 		}
 
 		for res, err := range f.handler(ctx, input) {
+			if err != nil {
+				// Wrap so live-mode streamingToolErrorMessage's exact *BeforeHandler
+				// assert does not treat handler-re-yielded framework errors as trusted
+				// pre-handler errors (TestStreamingHandlerReyieldedFrameworkError).
+				err = fmt.Errorf("%w", err)
+			}
 			if !yield(res, err) {
 				return
 			}
