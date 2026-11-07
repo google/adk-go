@@ -15,8 +15,8 @@
 package loadartifactstool_test
 
 import (
+	"context"
 	"errors"
-	"io/fs"
 	"strings"
 	"testing"
 
@@ -499,18 +499,117 @@ func TestLoadArtifactsTool_ProcessRequest_Artifacts_MultiPartFunctionResponse(t 
 	}
 }
 
+// faultyLoadService wraps a real artifact service and fails every Load with err.
+type faultyLoadService struct {
+	artifact.Service
+	err error
+}
+
+func (s *faultyLoadService) Load(context.Context, *artifact.LoadRequest) (*artifact.LoadResponse, error) {
+	return nil, s.err
+}
+
+// TestLoadArtifactsTool_ProcessRequest_LoadError keeps the assertions added in
+// #1574 against a failure the model cannot fix: the error is still returned, it
+// is named exactly once, and the underlying error survives that wrapping. The
+// sentinel asserted is the injected one rather than fs.ErrNotExist, because a
+// missing artifact is now reported to the model instead of ending the turn.
 func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
+	storageErr := errors.New("storage unavailable")
+
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContextWithService(t, &faultyLoadService{
+		Service: artifact.InMemoryService(),
+		err:     storageErr,
+	})
+
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{"doc1.txt"},
+					}),
+				},
+			},
+		},
+	}
+
+	requestProcessor, ok := loadArtifactsTool.(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("loadArtifactsTool does not implement RequestProcessor")
+	}
+
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("ProcessRequest should return an error when the artifact service fails, but got nil")
+	}
+	if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
+		t.Errorf("error names the failure %d times, want once: %v", got, err)
+	}
+	if !errors.Is(err, storageErr) {
+		t.Errorf("errors.Is(err, storageErr) = false, want true, got: %v", err)
+	}
+}
+
+// TestLoadArtifactsTool_ProcessRequest_CanceledContextIsReturned pins that a
+// canceled context is not mistaken for a name the model could fix.
+func TestLoadArtifactsTool_ProcessRequest_CanceledContextIsReturned(t *testing.T) {
+	loadArtifactsTool := loadartifactstool.New()
+	tc := createToolContextWithService(t, &faultyLoadService{
+		Service: artifact.InMemoryService(),
+		err:     context.Canceled,
+	})
+
+	llmRequest := &model.LLMRequest{
+		Contents: []*genai.Content{
+			{
+				Role: genai.RoleUser,
+				Parts: []*genai.Part{
+					genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
+						"artifact_names": []string{"doc1.txt"},
+					}),
+				},
+			},
+		},
+	}
+
+	requestProcessor := loadArtifactsTool.(toolinternal.RequestProcessor)
+	err := requestProcessor.ProcessRequest(tc, llmRequest)
+	if err == nil {
+		t.Fatal("ProcessRequest should return a canceled-context error, but got nil")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("errors.Is(err, context.Canceled) = false, got: %v", err)
+	}
+}
+
+// TestLoadArtifactsTool_ProcessRequest_ReportsNamesTheModelCanFix covers the
+// behavior change: a wrong or missing artifact name reaches the model as
+// content, the run continues, and artifacts that did load are still delivered.
+func TestLoadArtifactsTool_ProcessRequest_ReportsNamesTheModelCanFix(t *testing.T) {
 	tests := []struct {
-		name          string
-		artifactNames []string
+		name     string
+		names    []string
+		wantNote string
+		wantDoc1 bool
 	}{
 		{
-			name:          "missing artifact",
-			artifactNames: []string{"missing.txt"},
+			name:     "missing artifact",
+			names:    []string{"missing.txt"},
+			wantNote: `"missing.txt" was not found`,
 		},
 		{
-			name:          "missing artifact alongside a saved one",
-			artifactNames: []string{"doc1.txt", "missing.txt"},
+			name:     "missing artifact alongside a saved one",
+			names:    []string{"doc1.txt", "missing.txt"},
+			wantNote: `"missing.txt" was not found`,
+			wantDoc1: true,
+		},
+		{
+			name:     "repo path instead of an artifact name",
+			names:    []string{"src/main.go"},
+			wantNote: `"src/main.go" is not a valid artifact name`,
 		},
 	}
 
@@ -528,7 +627,7 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 						Role: genai.RoleUser,
 						Parts: []*genai.Part{
 							genai.NewPartFromFunctionResponse("load_artifacts", map[string]any{
-								"artifact_names": tt.artifactNames,
+								"artifact_names": tt.names,
 							}),
 						},
 					},
@@ -539,16 +638,24 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 			if !ok {
 				t.Fatal("loadArtifactsTool does not implement RequestProcessor")
 			}
+			if err := requestProcessor.ProcessRequest(tc, llmRequest); err != nil {
+				t.Fatalf("ProcessRequest returned an error for a name the model can fix: %v", err)
+			}
 
-			err := requestProcessor.ProcessRequest(tc, llmRequest)
-			if err == nil {
-				t.Fatal("ProcessRequest should return an error when an artifact cannot be loaded, but got nil")
+			var texts []string
+			for _, c := range llmRequest.Contents {
+				for _, part := range c.Parts {
+					if part.Text != "" {
+						texts = append(texts, part.Text)
+					}
+				}
 			}
-			if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
-				t.Errorf("error names the failure %d times, want once: %v", got, err)
+			joined := strings.Join(texts, "\n")
+			if !strings.Contains(joined, tt.wantNote) {
+				t.Errorf("contents do not tell the model %q; got:\n%s", tt.wantNote, joined)
 			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true, got: %v", err)
+			if tt.wantDoc1 && !strings.Contains(joined, "This is the content of doc1.txt") {
+				t.Errorf("the artifact that did load was not delivered; got:\n%s", joined)
 			}
 		})
 	}
@@ -556,9 +663,14 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 
 func createToolContext(t *testing.T) agent.Context {
 	t.Helper()
+	return createToolContextWithService(t, artifact.InMemoryService())
+}
+
+func createToolContextWithService(t *testing.T, svc artifact.Service) agent.Context {
+	t.Helper()
 
 	artifacts := &artifactinternal.Artifacts{
-		Service:   artifact.InMemoryService(),
+		Service:   svc,
 		AppName:   "app",
 		UserID:    "user",
 		SessionID: "session",
