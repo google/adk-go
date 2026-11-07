@@ -419,15 +419,16 @@ type Config struct {
 	// returned without an error reports a failure; see
 	// [ToolResultClassifier]. A ToolResultError verdict records the call as
 	// TOOL_ERROR instead of TOOL_COMPLETED, which also leaves out the
-	// AGENT_RESPONSE row of a tool in FinalResponseToolNames and the task
-	// completion that a successful finish_task call records; a ToolResultOK
-	// verdict records TOOL_COMPLETED, whatever the result holds; and a
-	// ToolResultAbstain verdict (the zero value) leaves the result to the
-	// plugin, which records it as TOOL_COMPLETED. When nil, every result that
-	// a tool returned without an error is recorded as TOOL_COMPLETED. The
+	// AGENT_RESPONSE row of a tool in FinalResponseToolNames (while a
+	// runtime-successful finish_task completion still completes the task span
+	// because classification leaves the agent-facing result unchanged); a
+	// ToolResultOK verdict records TOOL_COMPLETED, whatever the result holds;
+	// and a ToolResultAbstain verdict (the zero value) leaves the result to
+	// the plugin, which records it as TOOL_COMPLETED. When nil, every result
+	// that a tool returned without an error is recorded as TOOL_COMPLETED. The
 	// classifier is called even when EventAllowlist or EventDenylist drops
 	// the TOOL_COMPLETED and TOOL_ERROR rows, since its verdict also decides
-	// the AGENT_RESPONSE row and the task completion.
+	// the AGENT_RESPONSE row of a tool in FinalResponseToolNames.
 	ToolResultClassifier ToolResultClassifier
 
 	// DisableFlushOnRunEnd stops the synchronous best-effort flush when an

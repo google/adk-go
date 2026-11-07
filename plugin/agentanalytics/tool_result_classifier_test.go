@@ -715,6 +715,108 @@ func TestPlugin_ToolResultClassifier_Runner(t *testing.T) {
 			t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v", got, want)
 		}
 	})
+
+	t.Run("ERROR verdict on runtime-successful finish_task preserves activation attribution", func(t *testing.T) {
+		p, requests, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.ToolResultClassifier = func(_ agent.Context, tl tool.Tool, args, result map[string]any) ToolResultVerdict {
+				if tl != nil && tl.Name() == finishTaskToolName && args["result"] == "bad" && result["result"] == "Task completed." {
+					return ToolResultVerdict{Decision: ToolResultError}
+				}
+				return ToolResultVerdict{}
+			}
+		})
+
+		var turn atomic.Int32
+		taskModel := &funcStreamLLM{
+			fn: func(_ context.Context, yield func(*model.LLMResponse, error) bool) {
+				callID := "call-first"
+				resArg := "bad"
+				if turn.Add(1) == 2 {
+					callID = "call-second"
+					resArg = "good"
+				}
+				yield(&model.LLMResponse{
+					Content: &genai.Content{
+						Role: "model",
+						Parts: []*genai.Part{{
+							FunctionCall: &genai.FunctionCall{
+								ID:   callID,
+								Name: finishTaskToolName,
+								Args: map[string]any{"result": resArg},
+							},
+						}},
+					},
+				}, nil)
+			},
+		}
+		taskAgent, err := llmagent.New(llmagent.Config{
+			Name:  "task",
+			Mode:  llmagent.ModeTask,
+			Model: taskModel,
+		})
+		if err != nil {
+			t.Fatalf("llmagent.New(task): %v", err)
+		}
+		root, err := agent.New(agent.Config{
+			Name: "root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var held []*session.Event
+					nodeCtx := agent.PromoteWithDelta(ctx, &agent.CommonContextDelta{})
+					for i := 0; i < 2; i++ {
+						for ev, runErr := range llmagent.RunLLMAgentAsNode(taskAgent, nodeCtx, "work") {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if hasTaskCompletedResponse(ev.Content) {
+								held = append(held, ev)
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, ev := range held {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, runErr := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("runner.Run error: %v", runErr)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		requireInvocationCompletedOK(t, rows)
+		toolErrRow := onlyRowOfType(t, rows, EventToolError)
+		if got := toolErrRow["error_message"]; got != classifiedToolErrorMessage {
+			t.Errorf("TOOL_ERROR error_message = %v, want %q", got, classifiedToolErrorMessage)
+		}
+		if got := len(rowsOfType(rows, EventToolCompleted)); got != 1 {
+			t.Fatalf("got %d TOOL_COMPLETED rows, want 1; events: %v", got, eventTypes(rows))
+		}
+		starts := agentRowsOfType(rows, EventAgentStarting, "task")
+		ends := agentRowsOfType(rows, EventAgentCompleted, "task")
+		if len(starts) != 2 || len(ends) != 2 {
+			t.Fatalf("task rows: %d AGENT_STARTING and %d AGENT_COMPLETED, want 2 of each", len(starts), len(ends))
+		}
+		if got, want := ends[0]["span_id"], starts[0]["span_id"]; got != want {
+			t.Errorf("first AGENT_COMPLETED span_id = %v, want Run 1 span_id %v (Run 2 span_id = %v)", got, want, starts[1]["span_id"])
+		}
+		if got, want := ends[1]["span_id"], starts[1]["span_id"]; got != want {
+			t.Errorf("second AGENT_COMPLETED span_id = %v, want Run 2 span_id %v (Run 1 span_id = %v)", got, want, starts[0]["span_id"])
+		}
+	})
 }
 
 // TestPlugin_ToolResultClassifier_ConcurrentCalls classifies the parallel

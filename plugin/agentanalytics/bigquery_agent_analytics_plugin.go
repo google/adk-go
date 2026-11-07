@@ -998,6 +998,13 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
+// isTaskCompletedResult reports whether a finish_task tool result map carries
+// ADK's runtime completion envelope ("result": "Task completed.").
+func isTaskCompletedResult(resp map[string]any) bool {
+	res, ok := resp["result"].(string)
+	return ok && res == "Task completed."
+}
+
 // hasTaskCompletedResponse reports whether c carries a successful
 // finish_task function response ("result": "Task completed."), which ends a
 // task-mode LLM agent in ADK without running its AfterAgentCallback.
@@ -1010,8 +1017,7 @@ func hasTaskCompletedResponse(c *genai.Content) bool {
 			continue
 		}
 		if part.FunctionResponse.Name == finishTaskToolName {
-			result, ok := part.FunctionResponse.Response["result"].(string)
-			return ok && result == "Task completed."
+			return isTaskCompletedResult(part.FunctionResponse.Response)
 		}
 	}
 	return false
@@ -1236,6 +1242,15 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		// and the classifier sees it, as it does there.
 		result = map[string]any{"error": err.Error()}
 	}
+	if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
+		// Even when ToolResultClassifier records the call as TOOL_ERROR,
+		// classification does not alter result, so ADK still emits the
+		// finish_task completion event that reaches OnEventCallback without
+		// the calling activation's context. Non-completion envelopes (such as
+		// an earlier plugin rewriting result into an error map) do not end the
+		// task run and are not marked.
+		p.traces.noteTaskFinished(ctx, id, callID)
+	}
 	if !closedByError {
 		// A call whose failure OnToolErrorCallback already recorded has its
 		// TOOL_ERROR row; the classifier is not asked about the result that a
@@ -1244,11 +1259,6 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 			return nil, nil
 		}
-	}
-	if !confirmationOutcome && name == finishTaskToolName {
-		// The finish_task response event that follows reaches OnEventCallback
-		// without the context of the activation that made the call.
-		p.traces.noteTaskFinished(ctx, id, callID)
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
