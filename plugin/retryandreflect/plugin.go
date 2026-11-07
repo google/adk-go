@@ -29,6 +29,7 @@ import (
 	"text/template"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -47,6 +48,9 @@ var exceededTemplate = template.Must(template.New("ExceededTemplate").Parse(exce
 const (
 	reflectAndRetryResponseType = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
 	globalScopeKey              = "__global_reflect_and_retry_scope__"
+	// panicErrorType stands in for the Go type of a recovered tool panic, which
+	// names an internal package the model has no use for.
+	panicErrorType = "panic"
 )
 
 // TrackingScope defines the lifecycle scope for tracking tool failure counts.
@@ -258,8 +262,17 @@ func (r *retryAndReflect) resetFailuresForTool(ctx agent.Context, toolName strin
 	}
 }
 
-func (r *retryAndReflect) formatErrorDetails(err error) string {
-	return fmt.Sprintf("%T: %v", err, err)
+// modelError is the type and text of a failed call of the tool named toolName
+// that the plugin may put in the response it answers with, which the model,
+// the session and REST clients all see. A panic recovered from the tool's
+// handler, at any wrapping depth, becomes an opaque type and a generic
+// message, because the panic error's own text carries the panic value and the
+// goroutine stack.
+func modelError(toolName string, err error) (errType, details string) {
+	if text, panicked := toolinternal.ModelErrorText(toolName, err); panicked {
+		return panicErrorType, text
+	}
+	return fmt.Sprintf("%T", err), err.Error()
 }
 
 func (r *retryAndReflect) formatToolArgs(toolArgs map[string]any) string {
@@ -281,11 +294,11 @@ type templateData struct {
 
 func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs map[string]any, toolErr error, retryCount int) map[string]any {
 	argsSummary := r.formatToolArgs(toolArgs)
-	errorDetails := r.formatErrorDetails(toolErr)
+	errType, errDetails := modelError(tool.Name(), toolErr)
 
 	d := templateData{
 		ToolName:     tool.Name(),
-		ErrorDetails: errorDetails,
+		ErrorDetails: errType + ": " + errDetails,
 		ArgsSummary:  argsSummary,
 		RetryCount:   retryCount,
 		MaxRetries:   r.maxRetries,
@@ -299,8 +312,8 @@ func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs 
 
 	return map[string]any{
 		"response_type":       reflectAndRetryResponseType,
-		"error_type":          fmt.Sprintf("%T", toolErr),
-		"error_details":       toolErr.Error(),
+		"error_type":          errType,
+		"error_details":       errDetails,
 		"retry_count":         retryCount,
 		"reflection_guidance": strings.TrimSpace(buf.String()),
 	}
@@ -308,11 +321,11 @@ func (r *retryAndReflect) createToolReflectionResponse(tool tool.Tool, toolArgs 
 
 func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[string]any, toolErr error) map[string]any {
 	argsSummary := r.formatToolArgs(toolArgs)
-	errorDetails := r.formatErrorDetails(toolErr)
+	errType, errDetails := modelError(tool.Name(), toolErr)
 
 	d := templateData{
 		ToolName:     tool.Name(),
-		ErrorDetails: errorDetails,
+		ErrorDetails: errType + ": " + errDetails,
 		ArgsSummary:  argsSummary,
 	}
 
@@ -324,8 +337,8 @@ func (r *retryAndReflect) createToolRetryExceedMsg(tool tool.Tool, toolArgs map[
 
 	return map[string]any{
 		"response_type":       reflectAndRetryResponseType,
-		"error_type":          fmt.Sprintf("%T", toolErr),
-		"error_details":       toolErr.Error(),
+		"error_type":          errType,
+		"error_details":       errDetails,
 		"retry_count":         r.maxRetries,
 		"reflection_guidance": strings.TrimSpace(buf.String()),
 	}
