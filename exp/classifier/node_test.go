@@ -1414,3 +1414,96 @@ func TestInputSchemaDoesNotLaunderGenaiValues(t *testing.T) {
 		}
 	})
 }
+
+func TestNodeAppliesInputSchemaInParallelWorker(t *testing.T) {
+	schema := &jsonschema.Schema{
+		Type:       "object",
+		Properties: map[string]*jsonschema.Schema{"ticket": {Type: "string"}},
+		Required:   []string{"ticket"},
+	}
+	fc := &fixedClassifier{answer: choiceAnswer("billing")}
+	node, err := classifier.NewNode(classifier.NodeConfig{Name: "triage", Classifier: fc, Question: triageQuestion, InputSchema: schema})
+	if err != nil {
+		t.Fatalf("NewNode() unexpected error: %v", err)
+	}
+	pw, err := workflow.NewParallelWorker("each", node, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewParallelWorker() unexpected error: %v", err)
+	}
+	src := workflow.NewFunctionNode("src", func(ctx agent.Context, _ any) (*session.Event, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = []any{"not json"}
+		return ev, nil
+	}, workflow.NodeConfig{})
+	_, _, err = runWorkflowViaRunner(t, []workflow.Edge{
+		{From: workflow.Start, To: src},
+		{From: src, To: pw},
+	}, genai.NewContentFromText("seed", genai.RoleUser))
+	if !errors.Is(err, workflow.ErrInputValidation) {
+		t.Errorf("run error = %v, want ErrInputValidation", err)
+	}
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if len(fc.calls) != 0 {
+		t.Errorf("classifier calls = %d, want 0", len(fc.calls))
+	}
+}
+
+func TestNodeAppliesInputSchemaInParallelWorkerWithValidInput(t *testing.T) {
+	schema := &jsonschema.Schema{
+		Type: "object",
+		Properties: map[string]*jsonschema.Schema{
+			"ticket": {Type: "string"},
+		},
+		Required: []string{"ticket"},
+	}
+
+	fc := &fixedClassifier{answer: choiceAnswer("billing")}
+	node, err := classifier.NewNode(classifier.NodeConfig{
+		Name:        "triage",
+		Classifier:  fc,
+		Question:    triageQuestion,
+		InputSchema: schema,
+	})
+	if err != nil {
+		t.Fatalf("NewNode() unexpected error: %v", err)
+	}
+
+	pw, err := workflow.NewParallelWorker("each", node, 0, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewParallelWorker() unexpected error: %v", err)
+	}
+
+	src := workflow.NewFunctionNode("src", func(ctx agent.Context, _ any) (*session.Event, error) {
+		ev := session.NewEvent(ctx, ctx.InvocationID())
+		ev.Output = []any{
+			map[string]any{"ticket": "billing"},
+		}
+		return ev, nil
+	}, workflow.NodeConfig{})
+
+	_, _, err = runWorkflowViaRunner(t, []workflow.Edge{
+		{From: workflow.Start, To: src},
+		{From: src, To: pw},
+	}, genai.NewContentFromText("seed", genai.RoleUser))
+	if err != nil {
+		t.Fatalf("workflow run unexpected error: %v", err)
+	}
+
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+
+	if len(fc.calls) != 1 {
+		t.Fatalf("classifier calls = %d, want 1", len(fc.calls))
+	}
+
+	got, ok := fc.calls[0].Input.(map[string]any)
+	if !ok {
+		t.Fatalf("classifier input type = %T, want map[string]any", fc.calls[0].Input)
+	}
+
+	if got["ticket"] != "billing" {
+		t.Errorf("classifier input ticket = %v, want billing", got["ticket"])
+	}
+}
