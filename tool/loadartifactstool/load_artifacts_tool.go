@@ -209,7 +209,20 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 			// Although not used, we need to pass childCtx for early return in case of an error.
 			content, err := t.loadIndividualArtifact(childCtx, artifactsService, artifactName)
 			if err != nil {
-				return err
+				// A single missing or unreadable artifact must not abort the whole
+				// run. Report it to the model in place of the content instead, so
+				// the model can tell the user and continue with the artifacts that
+				// did load.
+				if ctxErr := childCtx.Err(); ctxErr != nil {
+					return ctxErr
+				}
+				results[i] = &genai.Content{
+					Parts: []*genai.Part{
+						genai.NewPartFromText(fmt.Sprintf("Failed to load artifact %s: %v", artifactName, err)),
+					},
+					Role: genai.RoleUser,
+				}
+				return nil
 			}
 			results[i] = content
 			return nil
@@ -227,7 +240,7 @@ func (t *artifactsTool) processLoadArtifactsFunctionCall(ctx agent.Context, req 
 func (t *artifactsTool) loadIndividualArtifact(ctx context.Context, artifactsService agent.Artifacts, artifactName string) (*genai.Content, error) {
 	resp, err := artifactsService.Load(ctx, artifactName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load artifact %s: %w", artifactName, err)
+		return nil, err
 	}
 	return &genai.Content{
 		Parts: []*genai.Part{
