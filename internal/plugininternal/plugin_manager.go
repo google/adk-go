@@ -128,6 +128,21 @@ func (pm *PluginManager) RunAfterRunCallback(cctx agent.InvocationContext) {
 	}
 }
 
+// RunOnRunErrorCallback notifies every plugin of an error exposed by the runner.
+func (pm *PluginManager) RunOnRunErrorCallback(ctx agent.InvocationContext, err error) {
+	for _, plugin := range pm.plugins {
+		if callback := plugin.OnRunErrorCallback(); callback != nil {
+			func() {
+				// Like Python's _notify_run_error, preserve the original run error.
+				// Recover per plugin so later observers still run. Unlike Python,
+				// do not log: library code has no application-owned logger.
+				defer func() { _ = recover() }()
+				callback(ctx, err)
+			}()
+		}
+	}
+}
+
 // RunOnEventCallback runs the OnEventCallback for all plugins.
 func (pm *PluginManager) RunOnEventCallback(cctx agent.InvocationContext, event *session.Event) (*session.Event, error) {
 	for _, plugin := range pm.plugins {
