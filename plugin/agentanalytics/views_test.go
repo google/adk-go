@@ -17,6 +17,7 @@ package agentanalytics
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,8 +26,10 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os/exec"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +50,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
@@ -487,6 +492,41 @@ func TestViewDefinitions_IdentifierValidation(t *testing.T) {
 			projectID: "proj",
 			datasetID: "ds",
 			tableName: "tbl;DROP",
+			wantErr:   "invalid BigQuery table name",
+		},
+		{
+			name:      "backtick in tableName",
+			projectID: "proj",
+			datasetID: "ds",
+			tableName: "table`01",
+			wantErr:   "invalid BigQuery table name",
+		},
+		{
+			name:      "backslash in tableName",
+			projectID: "proj",
+			datasetID: "ds",
+			tableName: `table\01`,
+			wantErr:   "invalid BigQuery table name",
+		},
+		{
+			name:      "newline in tableName",
+			projectID: "proj",
+			datasetID: "ds",
+			tableName: "table\n01",
+			wantErr:   "invalid BigQuery table name",
+		},
+		{
+			name:      "line separator U+2028 in tableName",
+			projectID: "proj",
+			datasetID: "ds",
+			tableName: "table\u202801",
+			wantErr:   "invalid BigQuery table name",
+		},
+		{
+			name:      "whitespace-only Unicode Zs in tableName",
+			projectID: "proj",
+			datasetID: "ds",
+			tableName: "\u00a0\u2003",
 			wantErr:   "invalid BigQuery table name",
 		},
 		{
@@ -3456,4 +3496,2662 @@ func TestNewBigQueryAgentAnalyticsPlugin_ResolvesProjectForTableAndViews(t *test
 			}
 		})
 	}
+}
+
+var finalSelectAliasRe = regexp.MustCompile(`(?m)\bAS\s+([a-z0-9_]+)\s*(?:,|$)`)
+
+func extractFinalSelectAliases(t *testing.T, query string) []string {
+	t.Helper()
+	const selectMarker = "\nSELECT\n  "
+	const fromMarker = "\nFROM\n"
+	start := strings.LastIndex(query, selectMarker)
+	end := strings.LastIndex(query, fromMarker)
+	if start < 0 || end < 0 || end <= start+len(selectMarker) {
+		t.Fatalf("failed to locate final SELECT ... FROM block in query:\n%s", query)
+	}
+	body := query[start+len(selectMarker) : end]
+	matches := finalSelectAliasRe.FindAllStringSubmatch(body, -1)
+	aliases := make([]string, 0, len(matches))
+	for _, m := range matches {
+		aliases = append(aliases, m[1])
+	}
+	return aliases
+}
+
+func extractRawEventsCTE(t *testing.T, query string) string {
+	t.Helper()
+	start := strings.Index(query, "raw_events AS (")
+	end := strings.Index(query, "ranked_events AS (")
+	if start < 0 || end < 0 || end <= start {
+		t.Fatalf("failed to locate raw_events CTE in query:\n%s", query)
+	}
+	return query[start:end]
+}
+
+func TestEvalViewDefinitions_ColumnsAndSQLStructure(t *testing.T) {
+	wantSessionColumns := []string{
+		"session_id",
+		"user_id",
+		"root_agent",
+		"session_start_timestamp",
+		"session_end_timestamp",
+		"turn_count",
+		"tool_call_count",
+		"tool_error_count",
+		"llm_error_count",
+		"agent_error_count",
+		"has_error",
+		"has_truncated_content",
+		"has_tool_loop",
+		"max_consecutive_identical_tool_calls",
+		"distinct_tools_used",
+		"total_prompt_tokens",
+		"total_completion_tokens",
+		"total_tokens",
+		"total_latency_ms",
+		"eval_ready",
+		"trace",
+	}
+	wantTurnColumns := []string{
+		"session_id",
+		"invocation_id",
+		"turn_index",
+		"user_id",
+		"root_agent",
+		"turn_start_timestamp",
+		"turn_end_timestamp",
+		"tool_call_count",
+		"tool_error_count",
+		"llm_error_count",
+		"agent_error_count",
+		"has_error",
+		"has_truncated_content",
+		"has_tool_loop",
+		"max_consecutive_identical_tool_calls",
+		"distinct_tools_used",
+		"total_prompt_tokens",
+		"total_completion_tokens",
+		"total_tokens",
+		"turn_latency_ms",
+		"eval_ready",
+		"trace",
+	}
+
+	defs, err := (Config{ProjectID: "p", DatasetID: "d", TableName: "t"}).EvalViewDefinitions()
+	if err != nil {
+		t.Fatalf("EvalViewDefinitions() error = %v", err)
+	}
+	if len(defs) != 2 {
+		t.Fatalf("len(EvalViewDefinitions) = %d, want 2", len(defs))
+	}
+
+	// Verify deterministic ordering across repeated calls.
+	defs2, err := (Config{ProjectID: "p", DatasetID: "d", TableName: "t"}).EvalViewDefinitions()
+	if err != nil {
+		t.Fatalf("second EvalViewDefinitions() error = %v", err)
+	}
+	if diff := cmp.Diff(defs, defs2); diff != "" {
+		t.Fatalf("EvalViewDefinitions() is not deterministic (-first +second):\n%s", diff)
+	}
+
+	sessionDef := defs[0]
+	turnDef := defs[1]
+	if sessionDef.Name != "v_eval_session" || sessionDef.EventType != "" {
+		t.Errorf("defs[0] = {Name:%q, EventType:%q}, want {Name:\"v_eval_session\", EventType:\"\"};", sessionDef.Name, sessionDef.EventType)
+	}
+	if turnDef.Name != "v_eval_turn" || turnDef.EventType != "" {
+		t.Errorf("defs[1] = {Name:%q, EventType:%q}, want {Name:\"v_eval_turn\", EventType:\"\"};", turnDef.Name, turnDef.EventType)
+	}
+
+	if got := extractFinalSelectAliases(t, sessionDef.Query); !cmp.Equal(got, wantSessionColumns) {
+		t.Errorf("v_eval_session columns mismatch (-want +got):\n%s", cmp.Diff(wantSessionColumns, got))
+	}
+	if got := extractFinalSelectAliases(t, turnDef.Query); !cmp.Equal(got, wantTurnColumns) {
+		t.Errorf("v_eval_turn columns mismatch (-want +got):\n%s", cmp.Diff(wantTurnColumns, got))
+	}
+
+	if !strings.HasPrefix(sessionDef.Query, "CREATE OR REPLACE VIEW `p.d.v_eval_session` AS\nWITH\n") {
+		t.Errorf("v_eval_session unexpected prefix:\n%s", sessionDef.Query[:120])
+	}
+	if !strings.HasPrefix(turnDef.Query, "CREATE OR REPLACE VIEW `p.d.v_eval_turn` AS\nWITH\n") {
+		t.Errorf("v_eval_turn unexpected prefix:\n%s", turnDef.Query[:120])
+	}
+
+	for _, def := range defs {
+		if strings.Contains(def.Query, ";") {
+			t.Errorf("%s query contains a semicolon", def.Name)
+		}
+		if got := strings.Count(def.Query, "`"); got != 4 {
+			t.Errorf("%s backtick count = %d, want 4", def.Name, got)
+		}
+		if !strings.Contains(def.Query, "FROM\n      `p.d.t`") {
+			t.Errorf("%s missing table reference `p.d.t`", def.Name)
+		}
+		for _, cte := range []string{
+			"raw_events AS (",
+			"ranked_events AS (",
+			"scoped_events AS (",
+			"deduped_events AS (",
+			"typed_events AS (",
+			"response_events AS (",
+			"annotated_events AS (",
+			"trace_events AS (",
+			"turn_rollup AS (",
+			"turns AS (",
+			"agent_rows AS (",
+			"agent_latest AS (",
+			"agent_tool_declarations AS (",
+			"agent_configs AS (",
+			"agent_maps AS (",
+		} {
+			if !strings.Contains(def.Query, cte) {
+				t.Errorf("%s missing CTE %q", def.Name, cte)
+			}
+		}
+		if strings.Contains(def.Query, "USING (") {
+			t.Errorf("%s must use NULL-safe IS NOT DISTINCT FROM join predicates instead of USING (...)", def.Name)
+		}
+	}
+
+	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24316, "711df689f948a07444d4056507448b5f12f7533c4edbe039233f9d193a87d047")
+	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 22880, "4b86e61259e3e4a6d77d53ff6b320d6554a88572bf5fe75dafbca604d664ae10")
+
+	if !strings.Contains(sessionDef.Query, "session_rollup AS (") {
+		t.Error("v_eval_session missing session_rollup CTE")
+	}
+	wantSessionJoin := "ON m.session_id = s.session_id\n  AND m.user_id IS NOT DISTINCT FROM s.user_id\n  AND m.app_name IS NOT DISTINCT FROM s.app_name"
+	if !strings.Contains(sessionDef.Query, wantSessionJoin) {
+		t.Error("v_eval_session missing composite NULL-safe agent_maps join")
+	}
+	wantTurnJoin := "ON m.session_id = t.session_id\n  AND m.user_id IS NOT DISTINCT FROM t.user_id\n  AND m.app_name IS NOT DISTINCT FROM t.app_name\n  AND m.invocation_id = t.invocation_id"
+	if !strings.Contains(turnDef.Query, wantTurnJoin) {
+		t.Error("v_eval_turn missing composite NULL-safe turn-scoped agent_maps join")
+	}
+	if !strings.Contains(turnDef.Query, "'turn_index', 0,\n        'turn_id', t.invocation_id") {
+		t.Error("v_eval_turn trace.turns[0] must normalize turn_index to 0 for single-turn evaluation")
+	}
+}
+
+func assertQuerySHA256(t *testing.T, viewName, query string, wantLen int, wantSHA256 string) {
+	t.Helper()
+	if len(query) != wantLen {
+		t.Errorf("len(%s.Query) = %d, want %d", viewName, len(query), wantLen)
+	}
+	sum := sha256.Sum256([]byte(query))
+	gotSHA256 := fmt.Sprintf("%x", sum)
+	if gotSHA256 != wantSHA256 {
+		t.Errorf("%s.Query sha256 = %s, want %s", viewName, gotSHA256, wantSHA256)
+	}
+}
+
+func TestEvalViewDefinitions_CustomViewPrefixAndValidation(t *testing.T) {
+	defs, err := (Config{
+		ProjectID:  "my-proj",
+		DatasetID:  "shared_ds",
+		TableName:  "events_a",
+		ViewPrefix: "v_agent_a",
+	}).EvalViewDefinitions()
+	if err != nil {
+		t.Fatalf("EvalViewDefinitions() error = %v", err)
+	}
+	if len(defs) != 2 || defs[0].Name != "v_agent_a_eval_session" || defs[1].Name != "v_agent_a_eval_turn" {
+		t.Fatalf("EvalViewDefinitions() names = [%q, %q], want [v_agent_a_eval_session, v_agent_a_eval_turn]", defs[0].Name, defs[1].Name)
+	}
+	if !strings.HasPrefix(defs[0].Query, "CREATE OR REPLACE VIEW `my-proj.shared_ds.v_agent_a_eval_session` AS\n") {
+		t.Errorf("defs[0] query header mismatch:\n%s", defs[0].Query[:120])
+	}
+	if !strings.HasPrefix(defs[1].Query, "CREATE OR REPLACE VIEW `my-proj.shared_ds.v_agent_a_eval_turn` AS\n") {
+		t.Errorf("defs[1] query header mismatch:\n%s", defs[1].Query[:120])
+	}
+
+	for _, badTable := range []string{"events", ".events", "proj.ds."} {
+		if _, err := buildEvalSessionViewSQL(badTable, "v", nil); err == nil || !strings.Contains(err.Error(), "dataset-qualified") {
+			t.Errorf("buildEvalSessionViewSQL(%q) error = %v, want dataset-qualified error", badTable, err)
+		}
+		if _, err := buildEvalTurnViewSQL(badTable, "v", nil); err == nil || !strings.Contains(err.Error(), "dataset-qualified") {
+			t.Errorf("buildEvalTurnViewSQL(%q) error = %v, want dataset-qualified error", badTable, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name:    "invalid project ID",
+			cfg:     Config{ProjectID: "proj` --", DatasetID: "ds", TableName: "tbl"},
+			wantErr: "invalid BigQuery project ID",
+		},
+		{
+			name:    "invalid dataset ID",
+			cfg:     Config{ProjectID: "proj", DatasetID: "bad-ds", TableName: "tbl"},
+			wantErr: "invalid BigQuery dataset ID",
+		},
+		{
+			name:    "invalid table name",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "tbl;DROP"},
+			wantErr: "invalid BigQuery table name",
+		},
+		{
+			name:    "backtick in table name",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "table`01"},
+			wantErr: "invalid BigQuery table name",
+		},
+		{
+			name:    "invalid view prefix",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "tbl", ViewPrefix: "bad prefix"},
+			wantErr: "invalid BigQuery view prefix",
+		},
+		{
+			name:    "overlong eval view name",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "tbl", ViewPrefix: strings.Repeat("v", maxBigQueryIdentifierLen)},
+			wantErr: "longer than 1024 bytes",
+		},
+		{
+			name:    "table name collides with v_eval_session",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "v_eval_session"},
+			wantErr: `BigQuery view name "v_eval_session" collides with the events table "v_eval_session"`,
+		},
+		{
+			name:    "table name collides case-insensitively with v_eval_turn",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "V_Eval_Turn"},
+			wantErr: `BigQuery view name "v_eval_turn" collides with the events table "V_Eval_Turn"`,
+		},
+		{
+			name:    "unknown column in PayloadColumnDenylist",
+			cfg:     Config{ProjectID: "proj", DatasetID: "ds", TableName: "tbl", PayloadColumnDenylist: []string{"session_id"}},
+			wantErr: "unsupported PayloadColumnDenylist entry",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := tc.cfg.EvalViewDefinitions(); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("EvalViewDefinitions() error = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
+	baseCfg := Config{ProjectID: "p", DatasetID: "d", TableName: "t"}
+
+	hashCases := []struct {
+		name              string
+		viewPrefix        string
+		denylist          []string
+		wantSessionLen    int
+		wantSessionSHA256 string
+		wantTurnLen       int
+		wantTurnSHA256    string
+	}{
+		{
+			name:              "default",
+			wantSessionLen:    24316,
+			wantSessionSHA256: "711df689f948a07444d4056507448b5f12f7533c4edbe039233f9d193a87d047",
+			wantTurnLen:       22880,
+			wantTurnSHA256:    "4b86e61259e3e4a6d77d53ff6b320d6554a88572bf5fe75dafbca604d664ae10",
+		},
+		{
+			name:              "deny content_parts",
+			denylist:          []string{columnContentParts},
+			wantSessionLen:    24429,
+			wantSessionSHA256: "d85b58b50f183a556962daa3cc07f1167a1fe0df1f885d4935c2d5662a57471a",
+			wantTurnLen:       22993,
+			wantTurnSHA256:    "56096c1258fd0c7e0c545155d9b9fc2f162606f75d0d60d0fa035c0db13d1bc2",
+		},
+		{
+			name:              "deny attributes",
+			denylist:          []string{columnAttributes},
+			wantSessionLen:    24338,
+			wantSessionSHA256: "53e24ffcde70783ba35e8a87d9f05c137dca411b19e09e4f1d0418e1857db680",
+			wantTurnLen:       22902,
+			wantTurnSHA256:    "a6a751735d9ca56d0b34bd0ca6bc98b3d0042edb21ce7690e5851fa8ff346ddb",
+		},
+		{
+			name:              "deny latency_ms",
+			denylist:          []string{columnLatencyMS},
+			wantSessionLen:    24338,
+			wantSessionSHA256: "21249eb5e4cce3be52794d4748fbe180f7d266d73cbbaf9582f07d8d4b267490",
+			wantTurnLen:       22902,
+			wantTurnSHA256:    "5694ea9a23ee0173ce05954c111ccc9b92e4a921943c3d77a41e3bc881c46fdd",
+		},
+		{
+			name:              "deny all three with custom ViewPrefix",
+			viewPrefix:        "custom_p",
+			denylist:          []string{columnContentParts, columnAttributes, columnLatencyMS},
+			wantSessionLen:    24480,
+			wantSessionSHA256: "beb232e14256968ec0ef1a0c432b35e0dbf02b4dde63cf71898fc365ab3d70a3",
+			wantTurnLen:       23044,
+			wantTurnSHA256:    "ce6161efb4dbc48dbd380fafa2541b73055431d6d85cb1ab3a957ce0f5ae68d9",
+		},
+	}
+
+	for _, tc := range hashCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseCfg
+			cfg.ViewPrefix = tc.viewPrefix
+			cfg.PayloadColumnDenylist = tc.denylist
+			defs, err := cfg.EvalViewDefinitions()
+			if err != nil {
+				t.Fatalf("EvalViewDefinitions() error = %v", err)
+			}
+			if len(defs) != 2 {
+				t.Fatalf("len(EvalViewDefinitions()) = %d, want 2", len(defs))
+			}
+			assertQuerySHA256(t, defs[0].Name, defs[0].Query, tc.wantSessionLen, tc.wantSessionSHA256)
+			assertQuerySHA256(t, defs[1].Name, defs[1].Query, tc.wantTurnLen, tc.wantTurnSHA256)
+		})
+	}
+
+	t.Run("default projects all payload columns", func(t *testing.T) {
+		defs, err := baseCfg.EvalViewDefinitions()
+		if err != nil {
+			t.Fatalf("EvalViewDefinitions() error = %v", err)
+		}
+		for _, def := range defs {
+			rawCTE := extractRawEventsCTE(t, def.Query)
+			for _, col := range []string{"\n      content,\n", "\n      content_parts,\n", "\n      attributes,\n", "\n      latency_ms,\n"} {
+				if !strings.Contains(rawCTE, col) {
+					t.Errorf("%s raw_events CTE missing %q:\n%s", def.Name, strings.TrimSpace(col), rawCTE)
+				}
+			}
+			if strings.Contains(rawCTE, "CAST(NULL AS JSON)") || strings.Contains(rawCTE, "ARRAY<STRUCT<") {
+				t.Errorf("%s raw_events CTE unexpectedly contains NULL projection:\n%s", def.Name, rawCTE)
+			}
+		}
+	})
+
+	t.Run("content_parts, attributes, and latency_ms denied project typed NULLs in raw_events", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.PayloadColumnDenylist = []string{columnContentParts, columnAttributes, columnLatencyMS}
+		defs, err := cfg.EvalViewDefinitions()
+		if err != nil {
+			t.Fatalf("EvalViewDefinitions() error = %v", err)
+		}
+		for _, def := range defs {
+			rawCTE := extractRawEventsCTE(t, def.Query)
+			for _, want := range []string{
+				"ARRAY<STRUCT<part_index INT64, mime_type STRING, text STRING, part_attributes STRING, storage_mode STRING>>[] AS content_parts",
+				"CAST(NULL AS JSON) AS attributes",
+				"CAST(NULL AS JSON) AS latency_ms",
+			} {
+				if !strings.Contains(rawCTE, want) {
+					t.Errorf("%s raw_events CTE missing %q:\n%s", def.Name, want, rawCTE)
+				}
+			}
+		}
+	})
+
+	t.Run("content denied is rejected", func(t *testing.T) {
+		cfg := baseCfg
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		if _, err := cfg.EvalViewDefinitions(); err == nil || !strings.Contains(err.Error(), `cannot build eval view SQL when "content" is in PayloadColumnDenylist`) {
+			t.Errorf("EvalViewDefinitions() with denied content error = %v, want content denylist error", err)
+		}
+	})
+}
+
+func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T) {
+	positiveCases := []struct {
+		name              string
+		tableName         string
+		wantEvalSHA       bool
+		wantSessionLen    int
+		wantSessionSHA256 string
+		wantTurnLen       int
+		wantTurnSHA256    string
+	}{
+		{
+			name:              "ASCII space",
+			tableName:         "table 01",
+			wantEvalSHA:       true,
+			wantSessionLen:    24323,
+			wantSessionSHA256: "317e2abf889526c6d187e4b63e787c1566e8869597a84803914db9774690fac4",
+			wantTurnLen:       22887,
+			wantTurnSHA256:    "4d4bb6bfd126b604ea6c4198c75ce377cb57a5a6fa96feeba140cdf407637458",
+		},
+		{
+			name:              "Unicode Zs NO-BREAK SPACE",
+			tableName:         "table\u00a001",
+			wantEvalSHA:       true,
+			wantSessionLen:    24324,
+			wantSessionSHA256: "da765bccf1395d7d887e0c207fdedbfb119e840556a6663411d51521d8767d39",
+			wantTurnLen:       22888,
+			wantTurnSHA256:    "908cb3af37e5f57bd56c1279e8db6d6e88fd1c95c280ce66c47266d9e568bd99",
+		},
+		{
+			name:      "Unicode Zs EM SPACE",
+			tableName: "table\u200301",
+		},
+		{
+			name:      "Unicode Zs IDEOGRAPHIC SPACE",
+			tableName: "table\u300001",
+		},
+		{
+			name:      "Unicode combining acute mark",
+			tableName: "tablea\u0301",
+		},
+	}
+
+	for _, tc := range positiveCases {
+		t.Run("accept_"+tc.name, func(t *testing.T) {
+			cfg := Config{ProjectID: "p", DatasetID: "d", TableName: tc.tableName}
+			wantTableRef := "`p.d." + tc.tableName + "`"
+
+			baseDefs, err := cfg.ViewDefinitions()
+			if err != nil {
+				t.Fatalf("ViewDefinitions() error = %v", err)
+			}
+			if len(baseDefs) == 0 {
+				t.Fatal("ViewDefinitions() returned 0 views")
+			}
+			for _, def := range baseDefs {
+				if !strings.Contains(def.Query, wantTableRef) {
+					t.Errorf("base view %s query missing %q", def.Name, wantTableRef)
+				}
+			}
+
+			evalDefs, err := cfg.EvalViewDefinitions()
+			if err != nil {
+				t.Fatalf("EvalViewDefinitions() error = %v", err)
+			}
+			if len(evalDefs) != 2 {
+				t.Fatalf("len(EvalViewDefinitions()) = %d, want 2", len(evalDefs))
+			}
+			for _, def := range evalDefs {
+				if !strings.Contains(def.Query, wantTableRef) {
+					t.Errorf("eval view %s query missing %q", def.Name, wantTableRef)
+				}
+			}
+			if tc.wantEvalSHA {
+				assertQuerySHA256(t, evalDefs[0].Name, evalDefs[0].Query, tc.wantSessionLen, tc.wantSessionSHA256)
+				assertQuerySHA256(t, evalDefs[1].Name, evalDefs[1].Query, tc.wantTurnLen, tc.wantTurnSHA256)
+			}
+		})
+	}
+
+	negativeCases := []struct {
+		name      string
+		tableName string
+	}{
+		{name: "backtick", tableName: "table`01"},
+		{name: "backslash", tableName: `table\01`},
+		{name: "newline", tableName: "table\n01"},
+		{name: "carriage return", tableName: "table\r01"},
+		{name: "NUL byte", tableName: "table\x0001"},
+		{name: "Unicode Zl U+2028", tableName: "table\u202801"},
+		{name: "Unicode Zp U+2029", tableName: "table\u202901"},
+		{name: "whitespace-only Zs", tableName: "\u00a0\u2003"},
+		{name: "semicolon", tableName: "tbl;DROP"},
+		{name: "dot", tableName: "proj.ds.tbl"},
+		{name: "exceeds max length", tableName: strings.Repeat("a", 1025)},
+		{name: "invalid UTF-8", tableName: "\xff\xfe"},
+	}
+
+	for _, tc := range negativeCases {
+		t.Run("reject_"+tc.name, func(t *testing.T) {
+			cfg := Config{ProjectID: "p", DatasetID: "d", TableName: tc.tableName}
+			if _, err := cfg.ViewDefinitions(); err == nil || !strings.Contains(err.Error(), "invalid BigQuery table name") {
+				t.Errorf("ViewDefinitions() error = %v, want invalid BigQuery table name", err)
+			}
+			if _, err := cfg.EvalViewDefinitions(); err == nil || !strings.Contains(err.Error(), "invalid BigQuery table name") {
+				t.Errorf("EvalViewDefinitions() error = %v, want invalid BigQuery table name", err)
+			}
+		})
+	}
+}
+
+func TestCreateEvalViews_ConfigValidation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rejects content in PayloadColumnDenylist when CreateEvalViews is true", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		cfg.CreateEvalViews = true
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		_, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), `CreateEvalViews cannot be used when "content" is in PayloadColumnDenylist`) {
+			t.Errorf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v, want content denylist rejection", err)
+		}
+	})
+
+	t.Run("allows content_parts, attributes, and latency_ms in PayloadColumnDenylist when CreateEvalViews is true", func(t *testing.T) {
+		p, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.PayloadColumnDenylist = []string{columnContentParts, columnAttributes, columnLatencyMS}
+		})
+		_ = p
+	})
+
+	t.Run("rejects required events in EventDenylist when CreateEvalViews is true", func(t *testing.T) {
+		for _, reqEvent := range append(append([]string(nil), evalViewRequiredEvents...), "EVENT") {
+			cfg := DefaultConfig()
+			cfg.ProjectID = "test-project"
+			cfg.DatasetID = "test_dataset"
+			cfg.TableName = "test-table"
+			cfg.CreateEvalViews = true
+			cfg.EventDenylist = []string{reqEvent}
+			_, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil)
+			if err == nil || !strings.Contains(err.Error(), "CreateEvalViews cannot be used when required events are in EventDenylist") {
+				t.Errorf("EventDenylist=[%q] error = %v, want required trace events error", reqEvent, err)
+			}
+		}
+	})
+
+	t.Run("allows non-required events in EventDenylist when CreateEvalViews is true", func(t *testing.T) {
+		p, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.EventDenylist = []string{EventStateDelta, EventNodeOutput}
+		})
+		_ = p
+	})
+
+	t.Run("rejects partial EventAllowlist and accepts full or EVENT-umbrella EventAllowlist", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		cfg.CreateEvalViews = true
+		cfg.EventAllowlist = []string{EventUserMessageReceived, EventAgentResponse}
+		_, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "CreateEvalViews cannot be used unless EventAllowlist includes all required events; missing:") || !strings.Contains(err.Error(), EventToolStarting) {
+			t.Errorf("partial EventAllowlist error = %v, want missing required events error", err)
+		}
+
+		pFull, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.EventAllowlist = append([]string(nil), evalViewRequiredEvents...)
+		})
+		_ = pFull
+
+		pUmbrella, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.EventAllowlist = []string{
+				"EVENT",
+				EventAgentStarting,
+				EventInvocationCompleted,
+				EventLLMRequest,
+				EventToolCompleted,
+				EventToolStarting,
+				EventUserMessageReceived,
+			}
+		})
+		_ = pUmbrella
+	})
+}
+
+func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
+	ctx := context.Background()
+
+	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		wc, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+		return wc
+	}
+
+	t.Run("CreateEvalViews with DisableCreateViews false creates 27 views on startup and in SyncViews", func(t *testing.T) {
+		const wantTotalViews = 27
+		allDone := make(chan struct{})
+		var jobCount atomic.Int32
+		var mu sync.Mutex
+		var jobQueries []string
+
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						b, _ := io.ReadAll(r.Body)
+						var payload struct {
+							Configuration struct {
+								Query struct {
+									Query string `json:"query"`
+								} `json:"query"`
+							} `json:"configuration"`
+						}
+						_ = json.Unmarshal(b, &payload)
+						mu.Lock()
+						jobQueries = append(jobQueries, payload.Configuration.Query.Query)
+						mu.Unlock()
+						if int(jobCount.Add(1)) == wantTotalViews {
+							close(allDone)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-1"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		cfg.CreateEvalViews = true
+
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+
+		select {
+		case <-allDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %d startup view DDL jobs; got %d", wantTotalViews, jobCount.Load())
+		}
+
+		mu.Lock()
+		gotQueries := append([]string(nil), jobQueries...)
+		mu.Unlock()
+		if len(gotQueries) != wantTotalViews {
+			t.Fatalf("startup DDL count = %d, want %d", len(gotQueries), wantTotalViews)
+		}
+		if !strings.Contains(gotQueries[len(gotQueries)-2], "v_eval_session") {
+			t.Errorf("second-to-last startup view query missing v_eval_session:\n%s", gotQueries[len(gotQueries)-2][:120])
+		}
+		if !strings.Contains(gotQueries[len(gotQueries)-1], "v_eval_turn") {
+			t.Errorf("last startup view query missing v_eval_turn:\n%s", gotQueries[len(gotQueries)-1][:120])
+		}
+
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) = false")
+		}
+		fakeRunner := &fakeViewRunner{}
+		bqaap.runner = fakeRunner
+		if err := bqaap.SyncViews(ctx); err != nil {
+			t.Fatalf("SyncViews() error = %v", err)
+		}
+		names := fakeRunner.executedNames()
+		if len(names) != wantTotalViews {
+			t.Fatalf("SyncViews() with CreateEvalViews=true executed %d views, want %d", len(names), wantTotalViews)
+		}
+		if names[len(names)-2] != "v_eval_session" || names[len(names)-1] != "v_eval_turn" {
+			t.Errorf("SyncViews() trailing views = %v, want [v_eval_session, v_eval_turn]", names[len(names)-2:])
+		}
+	})
+
+	t.Run("standalone CreateEvalViews with DisableCreateViews true creates only the 2 eval views on startup", func(t *testing.T) {
+		allDone := make(chan struct{})
+		var jobCount atomic.Int32
+		var mu sync.Mutex
+		var jobQueries []string
+
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						b, _ := io.ReadAll(r.Body)
+						var payload struct {
+							Configuration struct {
+								Query struct {
+									Query string `json:"query"`
+								} `json:"query"`
+							} `json:"configuration"`
+						}
+						_ = json.Unmarshal(b, &payload)
+						mu.Lock()
+						jobQueries = append(jobQueries, payload.Configuration.Query.Query)
+						mu.Unlock()
+						if int(jobCount.Add(1)) == 2 {
+							close(allDone)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-1"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		cfg.DisableCreateViews = true
+		cfg.CreateEvalViews = true
+		cfg.ViewPrefix = "v_only_eval"
+
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		select {
+		case <-allDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for 2 eval view DDL jobs; got %d", jobCount.Load())
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(jobQueries) != 2 {
+			t.Fatalf("executed %d DDL jobs, want 2", len(jobQueries))
+		}
+		if !strings.Contains(jobQueries[0], "v_only_eval_eval_session") || !strings.Contains(jobQueries[1], "v_only_eval_eval_turn") {
+			t.Errorf("unexpected standalone eval view queries:\n[0]=%s\n[1]=%s", jobQueries[0][:120], jobQueries[1][:120])
+		}
+	})
+
+	t.Run("SyncEvalViews executes the 2 eval views even when CreateEvalViews is false and validates config", func(t *testing.T) {
+		var nilPlugin *BigQueryAgentAnalyticsPlugin
+		if err := nilPlugin.SyncEvalViews(ctx); err == nil {
+			t.Error("nilPlugin.SyncEvalViews() error = nil, want error")
+		}
+
+		p, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = false
+			c.ViewPrefix = "v_manual"
+		})
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) = false")
+		}
+		fakeRunner := &fakeViewRunner{
+			errFor: map[string]error{
+				"v_manual_eval_session": &googleapi.Error{Code: http.StatusConflict, Message: "conflict"},
+			},
+		}
+		bqaap.runner = fakeRunner
+		if err := bqaap.SyncEvalViews(ctx); err != nil {
+			t.Fatalf("SyncEvalViews() error = %v, want nil", err)
+		}
+		if diff := cmp.Diff([]string{"v_manual_eval_session", "v_manual_eval_turn"}, fakeRunner.executedNames()); diff != "" {
+			t.Errorf("SyncEvalViews() executed names mismatch (-want +got):\n%s", diff)
+		}
+
+		// When content is in PayloadColumnDenylist (with CreateEvalViews=false at construction),
+		// SyncEvalViews rejects the call with a clear error.
+		pDeniedContent, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.PayloadColumnDenylist = []string{columnContent}
+		})
+		bqaapDenied, _ := AsBigQueryAgentAnalyticsPlugin(pDeniedContent)
+		bqaapDenied.runner = &fakeViewRunner{}
+		if err := bqaapDenied.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), `cannot create eval views when "content" is in PayloadColumnDenylist`) {
+			t.Errorf("SyncEvalViews() with content denied error = %v, want content denylist error", err)
+		}
+
+		// When a required trace event is excluded by EventDenylist (with CreateEvalViews=false),
+		// SyncEvalViews rejects the call.
+		pDeniedEvent, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.EventDenylist = []string{EventToolStarting}
+		})
+		bqaapDeniedEvent, _ := AsBigQueryAgentAnalyticsPlugin(pDeniedEvent)
+		bqaapDeniedEvent.runner = &fakeViewRunner{}
+		if err := bqaapDeniedEvent.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "cannot create eval views when required events are in EventDenylist") {
+			t.Errorf("SyncEvalViews() with TOOL_STARTING denied error = %v, want required trace events error", err)
+		}
+
+		// When TableName collides with v_eval_session and CreateEvalViews=true, startup skips view creation and logs why.
+		logger := &recordingLogger{}
+		pCollision, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.TableName = "v_eval_session"
+			c.Logger = logger
+		})
+		if !logger.contains("agentanalytics: skipping view creation") {
+			t.Errorf("expected startup log for skipped eval view creation on table collision, got:\n%s", logger)
+		}
+		bqaapCollision, _ := AsBigQueryAgentAnalyticsPlugin(pCollision)
+		bqaapCollision.runner = &fakeViewRunner{}
+		if err := bqaapCollision.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "collides with the events table") {
+			t.Errorf("SyncEvalViews() on colliding TableName error = %v, want collision error", err)
+		}
+	})
+}
+
+type evalAgentInvocationContext struct {
+	*mockInvocationContext
+	ag agent.Agent
+}
+
+func (c *evalAgentInvocationContext) Agent() agent.Agent { return c.ag }
+
+func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
+	evalDefs, err := (Config{ProjectID: "test-project", DatasetID: "test_dataset", TableName: "agent_events"}).EvalViewDefinitions()
+	if err != nil {
+		t.Fatalf("EvalViewDefinitions() error = %v", err)
+	}
+	jsonPathLiteralRe := regexp.MustCompile(`'(\$\.[^']+)'`)
+	extractedSet := make(map[string]bool)
+	for _, def := range evalDefs {
+		for _, m := range jsonPathLiteralRe.FindAllStringSubmatch(def.Query, -1) {
+			extractedSet[m[1]] = true
+		}
+	}
+	gotSQLPaths := make([]string, 0, len(extractedSet))
+	for p := range extractedSet {
+		gotSQLPaths = append(gotSQLPaths, p)
+	}
+	slices.Sort(gotSQLPaths)
+	wantSQLPaths := []string{
+		"$.adk.app_name",
+		"$.agent_description",
+		"$.args",
+		"$.cache_type",
+		"$.description",
+		"$.finish_reason",
+		"$.from_agent",
+		"$.function_response",
+		"$.name",
+		"$.parameters",
+		"$.response",
+		"$.result",
+		"$.root_agent_name",
+		"$.static_instruction",
+		"$.sub_agents",
+		"$.text_summary",
+		"$.to_agent",
+		"$.tool",
+		"$.tools",
+		"$.total_ms",
+		"$.usage.completion",
+		"$.usage.prompt",
+		"$.usage.total",
+	}
+	if diff := cmp.Diff(wantSQLPaths, gotSQLPaths); diff != "" {
+		t.Fatalf("extracted eval SQL JSON paths mismatch (-want +got):\n%s", diff)
+	}
+
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.DisableCreateViews = true
+	})
+	mCtx.appName = "weather-app"
+	mCtx.functionCallID = "fc-weather-1"
+	rootName := mCtx.AgentName()
+	if rootName == "" {
+		rootName = "test-agent"
+		mCtx.agentName = rootName
+	}
+
+	subAg, err := llmagent.New(llmagent.Config{
+		Name:        "summary-agent",
+		Description: "Summarizes weather",
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(summary-agent) error = %v", err)
+	}
+	rootAg, err := llmagent.New(llmagent.Config{
+		Name:        rootName,
+		Description: "Weather coordinator",
+		Model:       &scriptedLLM{},
+		Instruction: "Check weather before answering.",
+		SubAgents:   []agent.Agent{subAg},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(%s) error = %v", rootName, err)
+	}
+	invCtx := &evalAgentInvocationContext{
+		mockInvocationContext: mCtx,
+		ag:                    rootAg,
+	}
+
+	weatherTool := &declaredTool{
+		fakeTool: fakeTool{name: "get_weather", description: "Fetches current weather for a city"},
+		decl: &genai.FunctionDeclaration{
+			Name:                 "get_weather",
+			Description:          "Fetches current weather for a city",
+			ParametersJsonSchema: map[string]any{"type": "object"},
+		},
+	}
+
+	userMsg := &genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{{Text: "check weather in Paris"}},
+	}
+	toolRespMsg := &genai.Content{
+		Role: "user",
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       "fc-weather-1",
+				Name:     "get_weather",
+				Response: map[string]any{"temp_c": 20},
+			},
+		}},
+	}
+	llmReq := &model.LLMRequest{
+		Model: "gemini-2.5-pro",
+		Config: &genai.GenerateContentConfig{
+			SystemInstruction: &genai.Content{
+				Parts: []*genai.Part{{Text: "You are a helpful weather assistant."}},
+			},
+		},
+		Tools:    map[string]any{"get_weather": weatherTool},
+		Contents: []*genai.Content{userMsg, toolRespMsg},
+	}
+	llmResp := &model.LLMResponse{
+		ModelVersion: "gemini-2.5-pro-001",
+		FinishReason: genai.FinishReasonStop,
+		Content: &genai.Content{
+			Role:  "model",
+			Parts: []*genai.Part{{Text: "It is 20C and sunny in Paris."}},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:        12,
+			CandidatesTokenCount:    8,
+			TotalTokenCount:         20,
+			CachedContentTokenCount: 4,
+		},
+	}
+
+	var errs callbackErrors
+	errs.add(p.OnUserMessageCallback()(invCtx, userMsg))
+	errs.add(p.BeforeRunCallback()(invCtx))
+	errs.add(p.BeforeAgentCallback()(invCtx))
+	errs.add(p.BeforeModelCallback()(invCtx, llmReq))
+	errs.add(p.AfterModelCallback()(invCtx, llmResp, nil))
+	errs.add(p.BeforeToolCallback()(invCtx, weatherTool, map[string]any{"city": "Paris"}))
+	errs.add(p.AfterToolCallback()(invCtx, weatherTool, map[string]any{"city": "Paris"}, map[string]any{"temp_c": 20}, nil))
+
+	errs.add(p.OnEventCallback()(invCtx, &session.Event{
+		ID:     "ev-transfer-1",
+		Author: rootName,
+		Actions: session.EventActions{
+			TransferToAgent: "summary-agent",
+		},
+	}))
+	errs.add(p.OnEventCallback()(invCtx, &session.Event{
+		ID:          "ev-final-1",
+		Author:      rootName,
+		LLMResponse: *llmResp,
+	}))
+	errs.add(p.AfterAgentCallback()(invCtx))
+	errs.check(t)
+	p.AfterRunCallback()(invCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	byType := make(map[string]map[string]any, len(rows))
+	for _, r := range rows {
+		et, _ := r["event_type"].(string)
+		byType[et] = r
+	}
+
+	verifiedGoPaths := make(map[string]bool)
+	checkDocPath := func(label string, doc map[string]any, path string) {
+		t.Helper()
+		if _, ok := resolveJSONPath(doc, path); !ok {
+			t.Errorf("%s path %q did not resolve against emitted payload: %#v", label, path, doc)
+			return
+		}
+		verifiedGoPaths[path] = true
+	}
+	checkPath := func(eventType, col, path string) {
+		t.Helper()
+		row, ok := byType[eventType]
+		if !ok {
+			t.Fatalf("missing emitted row for event_type %s", eventType)
+		}
+		doc := jsonObjectColumn(t, row, col)
+		checkDocPath(eventType+"."+col, doc, path)
+	}
+
+	// Verify all JSON paths extracted in raw_events, parsed_events, and agent_rows match Go plugin payloads.
+	checkPath(EventUserMessageReceived, columnContent, "$.text_summary")
+	checkPath(EventAgentStarting, columnAttributes, "$.adk.app_name")
+	checkPath(EventAgentStarting, columnAttributes, "$.root_agent_name")
+	checkPath(EventAgentStarting, columnAttributes, "$.agent_description")
+	checkPath(EventAgentStarting, columnAttributes, "$.sub_agents")
+	checkPath(EventLLMRequest, columnAttributes, "$.tools")
+	checkPath(EventLLMResponse, columnContent, "$.usage.prompt")
+	checkPath(EventLLMResponse, columnContent, "$.usage.completion")
+	checkPath(EventLLMResponse, columnContent, "$.usage.total")
+	checkPath(EventLLMResponse, columnAttributes, "$.finish_reason")
+	checkPath(EventLLMResponse, columnAttributes, "$.cache_type")
+	checkPath(EventToolStarting, columnContent, "$.tool")
+	checkPath(EventToolStarting, columnContent, "$.args")
+	checkPath(EventToolCompleted, columnContent, "$.tool")
+	checkPath(EventToolCompleted, columnContent, "$.result")
+	checkPath(EventAgentTransfer, columnContent, "$.from_agent")
+	checkPath(EventAgentTransfer, columnContent, "$.to_agent")
+	checkPath(EventAgentResponse, columnContent, "$.response")
+	checkPath(EventInvocationCompleted, columnLatencyMS, "$.total_ms")
+
+	llmReqRow := byType[EventLLMRequest]
+	reqAttrs := jsonObjectColumn(t, llmReqRow, columnAttributes)
+	toolsSlice, ok := reqAttrs["tools"].([]any)
+	if !ok || len(toolsSlice) == 0 {
+		t.Fatalf("LLM_REQUEST.attributes.tools = %#v, want non-empty array", reqAttrs["tools"])
+	}
+	toolDecl, ok := toolsSlice[0].(map[string]any)
+	if !ok {
+		t.Fatalf("LLM_REQUEST.attributes.tools[0] = %#v, want object", toolsSlice[0])
+	}
+	checkDocPath("LLM_REQUEST.attributes.tools[0]", toolDecl, "$.name")
+	checkDocPath("LLM_REQUEST.attributes.tools[0]", toolDecl, "$.description")
+	checkDocPath("LLM_REQUEST.attributes.tools[0]", toolDecl, "$.parameters")
+
+	foundFuncResp := false
+	for _, part := range contentPartsOf(t, llmReqRow) {
+		rawPartAttrs, _ := part["part_attributes"].(string)
+		if rawPartAttrs == "" {
+			continue
+		}
+		var partAttrs map[string]any
+		if err := json.Unmarshal([]byte(rawPartAttrs), &partAttrs); err != nil {
+			t.Fatalf("LLM_REQUEST part_attributes JSON unmarshal error: %v (%q)", err, rawPartAttrs)
+		}
+		if _, ok := partAttrs["function_response"]; ok {
+			checkDocPath("LLM_REQUEST.content_parts[].part_attributes", partAttrs, "$.function_response")
+			foundFuncResp = true
+			break
+		}
+	}
+	if !foundFuncResp {
+		t.Fatalf("LLM_REQUEST content_parts missing $.function_response in part_attributes: %#v", llmReqRow[columnContentParts])
+	}
+
+	pythonOnlySQLPaths := map[string]bool{
+		// Emitted by Python plugin variants; eval views coalesce $.static_instruction with instruction fields.
+		"$.static_instruction": true,
+	}
+	for _, sqlPath := range gotSQLPaths {
+		if !verifiedGoPaths[sqlPath] && !pythonOnlySQLPaths[sqlPath] {
+			t.Errorf("eval SQL JSON path %q extracted from rendered views was not verified against Go-emitted rows", sqlPath)
+		}
+	}
+}
+
+const evalViewSQLiteRunnerScript = `
+import json
+import re
+import sqlite3
+import sys
+
+if sqlite3.sqlite_version_info < (3, 25, 0):
+    sys.stdout.write(json.dumps({"skip": f"sqlite3 {sqlite3.sqlite_version} < 3.25.0"}))
+    sys.exit(0)
+
+JSON_TAG = "\x1fJSON:"
+BOOL_COLS = {"has_error", "has_truncated_content", "has_tool_loop", "eval_ready"}
+
+
+def tag_json(obj):
+    return JSON_TAG + json.dumps(obj, separators=(",", ":"), sort_keys=True)
+
+
+def parse_tagged_or_json(val):
+    if val is None:
+        return None, False
+    if isinstance(val, str):
+        if val.startswith(JSON_TAG):
+            return json.loads(val[len(JSON_TAG):]), True
+        try:
+            return json.loads(val), False
+        except Exception:
+            return val, False
+    return val, False
+
+
+def resolve_json_path(doc, path):
+    if doc is None or path is None:
+        return None, False
+    if path == "$":
+        return doc, True
+    if not path.startswith("$."):
+        return None, False
+    cur = doc
+    for seg in path[2:].split("."):
+        if not isinstance(cur, dict) or seg not in cur:
+            return None, False
+        cur = cur[seg]
+    return cur, True
+
+
+def udf_json_value(raw_doc, path):
+    if raw_doc is None or path is None:
+        return None
+    doc, _ = parse_tagged_or_json(raw_doc)
+    val, ok = resolve_json_path(doc, path)
+    if not ok or val is None or isinstance(val, (dict, list)):
+        return None
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    return str(val)
+
+
+def udf_json_query(raw_doc, path):
+    if raw_doc is None or path is None:
+        return None
+    doc, _ = parse_tagged_or_json(raw_doc)
+    val, ok = resolve_json_path(doc, path)
+    if not ok:
+        return None
+    return tag_json(val)
+
+
+def udf_json_query_array(raw_doc):
+    if raw_doc is None:
+        return None
+    doc, _ = parse_tagged_or_json(raw_doc)
+    if not isinstance(doc, list):
+        return None
+    return json.dumps([tag_json(el) for el in doc])
+
+
+def udf_json_type(raw_doc):
+    if raw_doc is None:
+        return None
+    doc, is_tagged = parse_tagged_or_json(raw_doc)
+    if not is_tagged and isinstance(raw_doc, str):
+        try:
+            doc = json.loads(raw_doc)
+        except Exception:
+            return None
+    if doc is None:
+        return "null"
+    if isinstance(doc, bool):
+        return "boolean"
+    if isinstance(doc, (int, float)):
+        return "number"
+    if isinstance(doc, str):
+        return "string"
+    if isinstance(doc, list):
+        return "array"
+    if isinstance(doc, dict):
+        return "object"
+    return None
+
+
+def to_python_for_json(val):
+    if val is None:
+        return None
+    if isinstance(val, str) and val.startswith(JSON_TAG):
+        return json.loads(val[len(JSON_TAG):])
+    return val
+
+
+def udf_to_json_string(val):
+    if val is None:
+        return None
+    if isinstance(val, str) and val.startswith(JSON_TAG):
+        return val[len(JSON_TAG):]
+    return json.dumps(val, separators=(",", ":"), sort_keys=True)
+
+
+def udf_to_json(val):
+    if val is None:
+        return tag_json(None)
+    if isinstance(val, str) and val.startswith(JSON_TAG):
+        return val
+    return tag_json(val)
+
+
+def udf_json_object(*args):
+    if len(args) == 0:
+        return tag_json({})
+    if (
+        len(args) == 2
+        and isinstance(args[0], str)
+        and args[0].startswith(JSON_TAG)
+        and isinstance(args[1], str)
+        and args[1].startswith(JSON_TAG)
+    ):
+        keys = json.loads(args[0][len(JSON_TAG):])
+        vals = json.loads(args[1][len(JSON_TAG):])
+        if isinstance(keys, list) and isinstance(vals, list):
+            return tag_json(dict(zip(keys, vals)))
+    out = {}
+    for i in range(0, len(args), 2):
+        k = args[i]
+        v = args[i + 1]
+        if k is None:
+            continue
+        out[str(k)] = to_python_for_json(v)
+    return tag_json(out)
+
+
+def udf_json_array(*args):
+    return tag_json([to_python_for_json(a) for a in args])
+
+
+def udf_array_length(val):
+    if val is None:
+        return None
+    if isinstance(val, str):
+        s = val[len(JSON_TAG):] if val.startswith(JSON_TAG) else val
+        arr = json.loads(s)
+        if isinstance(arr, list):
+            return len(arr)
+    return 0
+
+
+def udf_regexp_contains(val, pattern):
+    if val is None or pattern is None:
+        return None
+    return 1 if re.search(pattern, str(val)) is not None else 0
+
+
+def udf_regexp_replace(val, pattern, repl):
+    if val is None or pattern is None or repl is None:
+        return None
+    return re.sub(pattern, str(repl), str(val))
+
+
+def udf_safe_cast_int64(val):
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except Exception:
+        return None
+
+
+def udf_format_timestamp(fmt, ts):
+    if ts is None:
+        return None
+    return str(ts)
+
+
+def udf_chr(code):
+    if code is None:
+        return None
+    return chr(int(code))
+
+
+class LogicalOrAgg:
+    def __init__(self):
+        self.seen = False
+        self.val = False
+
+    def step(self, x):
+        if x is not None:
+            self.seen = True
+            if bool(x):
+                self.val = True
+
+    def finalize(self):
+        return (1 if self.val else 0) if self.seen else None
+
+
+class LogicalAndAgg:
+    def __init__(self):
+        self.seen = False
+        self.val = True
+
+    def step(self, x):
+        if x is not None:
+            self.seen = True
+            if not bool(x):
+                self.val = False
+
+    def finalize(self):
+        return (1 if self.val else 0) if self.seen else None
+
+
+class ArrayConcatAgg:
+    def __init__(self):
+        self.items = []
+        self.seen = False
+
+    def step(self, raw_arr):
+        if raw_arr is None:
+            return
+        self.seen = True
+        s = raw_arr[len(JSON_TAG):] if isinstance(raw_arr, str) and raw_arr.startswith(JSON_TAG) else raw_arr
+        arr = json.loads(s)
+        if isinstance(arr, list):
+            self.items.extend(arr)
+
+    def finalize(self):
+        return tag_json(self.items) if self.seen else None
+
+
+def cmp_key(keys_and_dirs):
+    class K:
+        def __init__(self, kd):
+            self.kd = kd
+
+        def _cmp(self, other):
+            for (d1, v1), (_, v2) in zip(self.kd, other.kd):
+                if v1 == v2:
+                    continue
+                if v1 is None:
+                    res = -1
+                elif v2 is None:
+                    res = 1
+                else:
+                    res = -1 if v1 < v2 else 1
+                return res * d1
+            return 0
+
+        def __lt__(self, other):
+            return self._cmp(other) < 0
+
+        def __eq__(self, other):
+            return self._cmp(other) == 0
+    return K(keys_and_dirs)
+
+
+class BQArrayAgg:
+    def __init__(self):
+        self.rows = []
+        self.distinct = False
+        self.ignore_nulls = False
+        self.first_only = False
+
+    def step(self, distinct, ignore_nulls, first_only, val, *dir_and_keys):
+        self.distinct = bool(distinct)
+        self.ignore_nulls = bool(ignore_nulls)
+        self.first_only = bool(first_only)
+        if self.ignore_nulls and val is None:
+            return
+        kd = []
+        for i in range(0, len(dir_and_keys), 2):
+            kd.append((int(dir_and_keys[i]), dir_and_keys[i + 1]))
+        self.rows.append((kd, val))
+
+    def finalize(self):
+        if not self.rows:
+            return None
+        sorted_rows = sorted(self.rows, key=lambda r: cmp_key(r[0]))
+        vals = []
+        seen = set()
+        for _, v in sorted_rows:
+            py_v = to_python_for_json(v)
+            if self.distinct:
+                canon = json.dumps(py_v, sort_keys=True)
+                if canon in seen:
+                    continue
+                seen.add(canon)
+            vals.append((v, py_v))
+        if not vals:
+            return None
+        if self.first_only:
+            return vals[0][0]
+        return tag_json([pv for _, pv in vals])
+
+
+def normalize_sql_strings(sql):
+    out = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        if sql[i] in ("r", "R") and i + 1 < n and sql[i + 1] in ("'", '"'):
+            quote = sql[i + 1]
+            i += 2
+            buf = []
+            while i < n and sql[i] != quote:
+                buf.append(sql[i])
+                i += 1
+            i += 1
+            out.append("'" + "".join(buf).replace("'", "''") + "'")
+        elif sql[i] in ("'", '"'):
+            quote = sql[i]
+            i += 1
+            buf = []
+            while i < n and sql[i] != quote:
+                if sql[i] == "\\" and i + 1 < n:
+                    nxt = sql[i + 1]
+                    if nxt == "n":
+                        buf.append("\n")
+                    elif nxt == "r":
+                        buf.append("\r")
+                    elif nxt == "t":
+                        buf.append("\t")
+                    else:
+                        buf.append(nxt)
+                    i += 2
+                else:
+                    buf.append(sql[i])
+                    i += 1
+            i += 1
+            out.append("'" + "".join(buf).replace("'", "''") + "'")
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
+def find_matching_paren(s, open_idx):
+    depth = 0
+    in_str = False
+    i = open_idx
+    while i < len(s):
+        ch = s[i]
+        if ch == "'":
+            if in_str and i + 1 < len(s) and s[i + 1] == "'":
+                i += 2
+                continue
+            in_str = not in_str
+        elif not in_str:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return i
+        i += 1
+    raise ValueError(f"unmatched paren at {open_idx}")
+
+
+def split_top_level_commas(s):
+    parts = []
+    depth = 0
+    in_str = False
+    start = 0
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch == "'":
+            if in_str and i + 1 < len(s) and s[i + 1] == "'":
+                i += 2
+                continue
+            in_str = not in_str
+        elif not in_str:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                parts.append(s[start:i].strip())
+                start = i + 1
+        i += 1
+    parts.append(s[start:].strip())
+    return parts
+
+
+def strip_sql_strings(sql):
+    out = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        if sql[i] == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'" and i + 1 < n and sql[i + 1] == "'":
+                    i += 2
+                    continue
+                if sql[i] == "'":
+                    i += 1
+                    break
+                i += 1
+            out.append("''")
+        else:
+            out.append(sql[i])
+            i += 1
+    return "".join(out)
+
+
+ALLOWED_SQLITE_PAREN_IDENTS = {
+    "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "EXISTS", "OVER",
+    "PARTITION", "WHEN", "THEN", "ELSE", "AS", "ON", "BY",
+    "CAST", "COALESCE", "NULLIF", "MIN", "MAX", "SUM", "COUNT", "AVG",
+    "LAG", "LEAD", "ROW_NUMBER", "SUBSTR", "CHAR", "GROUP_CONCAT",
+    "JSON_EACH", "JSON_EXTRACT",
+    "JSON_VALUE", "JSON_QUERY", "JSON_QUERY_ARRAY", "JSON_TYPE",
+    "TO_JSON_STRING", "TO_JSON", "JSON_OBJECT", "JSON_ARRAY",
+    "ARRAY_LENGTH", "REGEXP_CONTAINS", "REGEXP_REPLACE", "SAFE_CAST_INT64",
+    "FORMAT_TIMESTAMP", "CHR", "LOGICAL_OR", "LOGICAL_AND",
+    "ARRAY_CONCAT_AGG", "BQ_ARRAY_AGG",
+}
+
+
+def replace_func_calls(sql, func_name, handler):
+    pat = re.compile(r"\b" + re.escape(func_name) + r"\s*\(", re.IGNORECASE)
+    while True:
+        prev = sql
+        pos = 0
+        while True:
+            m = None
+            in_str = False
+            i = 0
+            while i < len(sql):
+                if sql[i] == "'":
+                    if in_str and i + 1 < len(sql) and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    in_str = not in_str
+                    i += 1
+                    continue
+                if not in_str and i >= pos:
+                    cand = pat.match(sql, i)
+                    if cand:
+                        m = cand
+                        break
+                i += 1
+            if not m:
+                break
+            open_idx = m.end() - 1
+            close_idx = find_matching_paren(sql, open_idx)
+            inner = replace_func_calls(sql[open_idx + 1:close_idx], func_name, handler)
+            after = sql[close_idx + 1:]
+            repl, consumed_after = handler(inner, after)
+            sql = sql[:m.start()] + repl + after[consumed_after:]
+            pos = m.start() + len(repl)
+        if sql == prev:
+            break
+    return sql
+
+
+def transpile_bigquery_to_sqlite(bq_sql):
+    sql = re.sub(r"^\s*CREATE\s+OR\s+REPLACE\s+VIEW\s+\x60[^\x60]+\x60\s+AS\s*", "", bq_sql)
+    sql = re.sub(r"\x60[^\x60]+\x60", "events_table", sql)
+    sql = normalize_sql_strings(sql)
+
+    sql = re.sub(r"ARRAY<STRUCT<[^>]+>>\[\]", "'[]'", sql)
+    sql = re.sub(r"ARRAY<STRING>\[\]", f"'{JSON_TAG}[]'", sql)
+    sql = re.sub(r"CAST\(NULL\s+AS\s+JSON\)", "NULL", sql)
+    sql = replace_func_calls(
+        sql,
+        "SAFE_CAST",
+        lambda inner, _: (
+            "SAFE_CAST_INT64(" + re.sub(r"\s+AS\s+INT64\s*$", "", inner, flags=re.IGNORECASE) + ")",
+            0,
+        ),
+    )
+
+    sql = re.sub(
+        r"FROM\s+agent_latest,\s*UNNEST\(JSON_QUERY_ARRAY\(tool_declarations\)\)\s+AS\s+declaration\s+WITH\s+OFFSET\s+AS\s+declaration_offset",
+        "FROM (SELECT agent_latest.*, json_each.value AS declaration, json_each.key AS declaration_offset FROM agent_latest, json_each(COALESCE(JSON_QUERY_ARRAY(tool_declarations), '[]')))",
+        sql,
+    )
+
+    sql = re.sub(
+        r"ARRAY\(\s*SELECT\s+DISTINCT\s+tool\s+FROM\s+UNNEST\(s\.tools_used_by_turn\)\s+AS\s+tool\s+ORDER\s+BY\s+tool\s*\)",
+        "(SELECT COALESCE(BQ_ARRAY_AGG(1, 1, 0, value, 1, value), '\x1fJSON:[]') FROM json_each(CASE WHEN s.tools_used_by_turn IS NULL THEN '[]' WHEN substr(s.tools_used_by_turn, 1, 6) = char(31) || 'JSON:' THEN substr(s.tools_used_by_turn, 7) ELSE s.tools_used_by_turn END))",
+        sql,
+    )
+
+    agg_pat = re.compile(
+        r"\(\s*SELECT\s+STRING_AGG\(\s*p\.text\s*,\s*('(?:''|[^'])*')\s+ORDER\s+BY\s+p\.part_index\s*\)\s+FROM\s+UNNEST\(content_parts\)\s+AS\s+p\s+WHERE\s+",
+        re.DOTALL,
+    )
+    while True:
+        m = agg_pat.search(sql)
+        if not m:
+            break
+        open_idx = m.start()
+        close_idx = find_matching_paren(sql, open_idx)
+        sep = m.group(1)
+        where_body = sql[m.end():close_idx]
+        where_body = re.sub(r"\bp\.(part_index|mime_type|text|part_attributes|storage_mode)\b", r"json_extract(p.value, '$.\1')", where_body)
+        repl = (
+            f"(SELECT group_concat(_txt, {sep}) FROM ("
+            f"SELECT json_extract(p.value, '$.text') AS _txt "
+            f"FROM json_each(COALESCE(content_parts, '[]')) AS p "
+            f"WHERE {where_body} "
+            f"ORDER BY CAST(json_extract(p.value, '$.part_index') AS INTEGER) LIMIT -1"
+            f"))"
+        )
+        sql = sql[:open_idx] + repl + sql[close_idx + 1:]
+
+    ex_pat = re.compile(
+        r"EXISTS\(\s*SELECT\s+1\s+FROM\s+UNNEST\(content_parts\)\s+AS\s+p\s+WHERE\s+",
+        re.DOTALL,
+    )
+    while True:
+        m = ex_pat.search(sql)
+        if not m:
+            break
+        open_idx = sql.find("(", m.start())
+        close_idx = find_matching_paren(sql, open_idx)
+        where_body = sql[m.end():close_idx]
+        where_body = re.sub(r"\bp\.(part_index|mime_type|text|part_attributes|storage_mode)\b", r"json_extract(p.value, '$.\1')", where_body)
+        repl = f"EXISTS(SELECT 1 FROM json_each(COALESCE(content_parts, '[]')) AS p WHERE {where_body})"
+        sql = sql[:m.start()] + repl + sql[close_idx + 1:]
+
+    def rewrite_if(inner, _):
+        parts = split_top_level_commas(inner)
+        if len(parts) != 3:
+            raise ValueError(f"expected 3 arguments to IF(), got {len(parts)}: {inner}")
+        return f"CASE WHEN ({parts[0]}) THEN ({parts[1]}) ELSE ({parts[2]}) END", 0
+
+    sql = replace_func_calls(sql, "COUNTIF", lambda inner, _: (f"SUM(CASE WHEN ({inner}) THEN 1 ELSE 0 END)", 0))
+    sql = replace_func_calls(sql, "IF", rewrite_if)
+    sql = re.sub(r"\bIS\s+NOT\s+DISTINCT\s+FROM\b", "IS", sql, flags=re.IGNORECASE)
+
+    def rewrite_array_agg(inner, after):
+        s = inner.strip()
+        distinct = 0
+        if re.match(r"^DISTINCT\b", s, re.IGNORECASE):
+            distinct = 1
+            s = re.sub(r"^DISTINCT\s+", "", s, count=1, flags=re.IGNORECASE)
+        limit_1 = 0
+        if re.search(r"\s+LIMIT\s+1\s*$", s, re.IGNORECASE):
+            limit_1 = 1
+            s = re.sub(r"\s+LIMIT\s+1\s*$", "", s, count=1, flags=re.IGNORECASE)
+        order_exprs = []
+        depth = 0
+        in_str = False
+        order_pos = -1
+        i = 0
+        while i < len(s):
+            if s[i] == "'":
+                if in_str and i + 1 < len(s) and s[i + 1] == "'":
+                    i += 2
+                    continue
+                in_str = not in_str
+            elif not in_str:
+                if s[i] == "(":
+                    depth += 1
+                elif s[i] == ")":
+                    depth -= 1
+                elif depth == 0 and re.match(r"\bORDER\s+BY\b", s[i:], re.IGNORECASE):
+                    order_pos = i
+                    break
+            i += 1
+        if order_pos >= 0:
+            order_str = re.sub(r"^ORDER\s+BY\s+", "", s[order_pos:], count=1, flags=re.IGNORECASE)
+            s = s[:order_pos].strip()
+            for item in split_top_level_commas(order_str):
+                m_dir = re.search(r"\s+(ASC|DESC)\s*$", item, re.IGNORECASE)
+                direction = 1
+                if m_dir:
+                    if m_dir.group(1).upper() == "DESC":
+                        direction = -1
+                    item = item[:m_dir.start()].strip()
+                order_exprs.append((direction, item))
+
+        ignore_nulls = 0
+        if re.search(r"\s+IGNORE\s+NULLS\s*$", s, re.IGNORECASE):
+            ignore_nulls = 1
+            s = re.sub(r"\s+IGNORE\s+NULLS\s*$", "", s, count=1, flags=re.IGNORECASE)
+
+        m_off = re.match(r"^\s*\[SAFE_OFFSET\(0\)\]", after)
+        consumed = m_off.end() if m_off else 0
+        first_only = 1 if (m_off or limit_1) else 0
+
+        args = [str(distinct), str(ignore_nulls), str(first_only), s]
+        for d, expr in order_exprs:
+            args.append(str(d))
+            args.append(expr)
+        return f"BQ_ARRAY_AGG({', '.join(args)})", consumed
+
+    sql = replace_func_calls(sql, "ARRAY_AGG", rewrite_array_agg)
+
+    qual_pat = re.compile(
+        r"SELECT\s+(?P<cols>(?:(?!\bSELECT\b).)+?)\s+FROM\s+(?P<src>[a-zA-Z0-9_]+)\s+QUALIFY\s+(?P<qual>(?:(?!\n\s*\)\s*,).)+)",
+        re.DOTALL,
+    )
+    sql = qual_pat.sub(
+        lambda m: (
+            f"SELECT {m.group('cols')} FROM ("
+            f"SELECT *, CASE WHEN ({m.group('qual').strip()}) THEN 1 ELSE 0 END AS _qualify_keep "
+            f"FROM {m.group('src')}"
+            f") WHERE _qualify_keep = 1"
+        ),
+        sql,
+    )
+
+    stripped_sql = strip_sql_strings(sql)
+    assert re.search(
+        r"\b(IF|COUNTIF|ARRAY_AGG|QUALIFY|SAFE_CAST|SAFE_OFFSET)\s*\(",
+        stripped_sql,
+        re.IGNORECASE,
+    ) is None, f"untranspiled GoogleSQL call in SQLite SQL: {stripped_sql}"
+    assert re.search(
+        r"\b(IF|IIF|COUNTIF|ARRAY_AGG|QUALIFY|SAFE_CAST|SAFE_OFFSET|STRING_AGG|UNNEST)\b|\bIS\s+NOT\s+DISTINCT\s+FROM\b",
+        stripped_sql,
+        re.IGNORECASE,
+    ) is None, f"untranspiled GoogleSQL or SQLite>=3.32 construct in SQLite SQL: {stripped_sql}"
+    cte_names = {
+        m.group(1).upper()
+        for m in re.finditer(r"(?:\bWITH\b|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*\(", stripped_sql, re.IGNORECASE)
+    }
+    for m_id in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", stripped_sql):
+        ident = m_id.group(1).upper()
+        assert ident in ALLOWED_SQLITE_PAREN_IDENTS or ident in cte_names, (
+            f"unallowed or version-dependent SQLite function {ident}() in transpiled SQL"
+        )
+    return sql
+
+
+payload = json.load(sys.stdin)
+conn = sqlite3.connect(":memory:")
+conn.create_function("JSON_VALUE", 2, udf_json_value)
+conn.create_function("JSON_QUERY", 2, udf_json_query)
+conn.create_function("JSON_QUERY_ARRAY", 1, udf_json_query_array)
+conn.create_function("JSON_TYPE", 1, udf_json_type)
+conn.create_function("TO_JSON_STRING", 1, udf_to_json_string)
+conn.create_function("TO_JSON", 1, udf_to_json)
+conn.create_function("JSON_OBJECT", -1, udf_json_object)
+conn.create_function("JSON_ARRAY", -1, udf_json_array)
+conn.create_function("ARRAY_LENGTH", 1, udf_array_length)
+conn.create_function("REGEXP_CONTAINS", 2, udf_regexp_contains)
+conn.create_function("REGEXP_REPLACE", 3, udf_regexp_replace)
+conn.create_function("SAFE_CAST_INT64", 1, udf_safe_cast_int64)
+conn.create_function("FORMAT_TIMESTAMP", 2, udf_format_timestamp)
+conn.create_function("CHR", 1, udf_chr)
+conn.create_aggregate("LOGICAL_OR", 1, LogicalOrAgg)
+conn.create_aggregate("LOGICAL_AND", 1, LogicalAndAgg)
+conn.create_aggregate("ARRAY_CONCAT_AGG", 1, ArrayConcatAgg)
+conn.create_aggregate("BQ_ARRAY_AGG", -1, BQArrayAgg)
+
+conn.execute(
+    """
+    CREATE TABLE events_table (
+        timestamp TEXT,
+        event_id TEXT,
+        event_type TEXT,
+        agent TEXT,
+        session_id TEXT,
+        invocation_id TEXT,
+        user_id TEXT,
+        content TEXT,
+        content_parts TEXT,
+        attributes TEXT,
+        latency_ms TEXT,
+        status TEXT,
+        error_message TEXT,
+        is_truncated INTEGER
+    )
+    """
+)
+
+for r in payload["rows"]:
+    conn.execute(
+        """
+        INSERT INTO events_table (
+            timestamp, event_id, event_type, agent, session_id, invocation_id,
+            user_id, content, content_parts, attributes, latency_ms,
+            status, error_message, is_truncated
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            r.get("timestamp"),
+            r.get("event_id"),
+            r.get("event_type"),
+            r.get("agent"),
+            r.get("session_id"),
+            r.get("invocation_id"),
+            r.get("user_id"),
+            (JSON_TAG + r["content"]) if r.get("content") is not None else None,
+            json.dumps(r["content_parts"]) if r.get("content_parts") is not None else None,
+            (JSON_TAG + r["attributes"]) if r.get("attributes") is not None else None,
+            (JSON_TAG + r["latency_ms"]) if r.get("latency_ms") is not None else None,
+            r.get("status"),
+            r.get("error_message"),
+            (1 if r["is_truncated"] else 0) if r.get("is_truncated") is not None else None,
+        ),
+    )
+
+sqlite_sql = transpile_bigquery_to_sqlite(payload["query"])
+cur = conn.execute(sqlite_sql)
+cols = [d[0] for d in cur.description]
+out_rows = []
+for row in cur.fetchall():
+    d = {}
+    for col, v in zip(cols, row):
+        if isinstance(v, str) and v.startswith(JSON_TAG):
+            d[col] = json.loads(v[len(JSON_TAG):])
+        elif col in BOOL_COLS and v is not None:
+            d[col] = bool(v)
+        else:
+            d[col] = v
+    out_rows.append(d)
+sys.stdout.write(json.dumps({"rows": out_rows}))
+`
+
+type evalViewExecResultRow struct {
+	SessionID                        string         `json:"session_id"`
+	InvocationID                     string         `json:"invocation_id"`
+	TurnIndex                        int64          `json:"turn_index"`
+	UserID                           *string        `json:"user_id"`
+	RootAgent                        string         `json:"root_agent"`
+	TurnCount                        int64          `json:"turn_count"`
+	ToolCallCount                    int64          `json:"tool_call_count"`
+	ToolErrorCount                   int64          `json:"tool_error_count"`
+	LLMErrorCount                    int64          `json:"llm_error_count"`
+	AgentErrorCount                  int64          `json:"agent_error_count"`
+	HasError                         bool           `json:"has_error"`
+	HasTruncatedContent              bool           `json:"has_truncated_content"`
+	HasToolLoop                      bool           `json:"has_tool_loop"`
+	MaxConsecutiveIdenticalToolCalls int64          `json:"max_consecutive_identical_tool_calls"`
+	DistinctToolsUsed                []string       `json:"distinct_tools_used"`
+	TotalPromptTokens                int64          `json:"total_prompt_tokens"`
+	TotalCompletionTokens            int64          `json:"total_completion_tokens"`
+	TotalTokens                      int64          `json:"total_tokens"`
+	TotalLatencyMS                   int64          `json:"total_latency_ms"`
+	TurnLatencyMS                    int64          `json:"turn_latency_ms"`
+	EvalReady                        bool           `json:"eval_ready"`
+	Trace                            map[string]any `json:"trace"`
+}
+
+func serializeArrowDecodedRowsForSQLite(rows []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		cp := make(map[string]any, len(r))
+		for k, v := range r {
+			if ts, ok := v.(time.Time); ok {
+				cp[k] = ts.UTC().Format("2006-01-02T15:04:05.000000Z")
+			} else {
+				cp[k] = v
+			}
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
+func cloneEventRow(r map[string]any) map[string]any {
+	cp := make(map[string]any, len(r))
+	for k, v := range r {
+		if parts, ok := v.([]map[string]any); ok {
+			partsCopy := make([]map[string]any, len(parts))
+			for i, p := range parts {
+				pm := make(map[string]any, len(p))
+				for pk, pv := range p {
+					pm[pk] = pv
+				}
+				partsCopy[i] = pm
+			}
+			cp[k] = partsCopy
+		} else {
+			cp[k] = v
+		}
+	}
+	return cp
+}
+
+func executeEvalViewSQL(t *testing.T, query string, rows []map[string]any) []evalViewExecResultRow {
+	t.Helper()
+	pythonBin, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not found in PATH")
+	}
+	payloadBytes, err := json.Marshal(map[string]any{
+		"query": query,
+		"rows":  serializeArrowDecodedRowsForSQLite(rows),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(eval payload) error = %v", err)
+	}
+	cmd := exec.Command(pythonBin, "-c", evalViewSQLiteRunnerScript)
+	cmd.Stdin = bytes.NewReader(payloadBytes)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("sqlite3 eval view execution failed: %v\nstderr:\n%s", err, stderr.String())
+	}
+	var resp struct {
+		Skip string                  `json:"skip"`
+		Rows []evalViewExecResultRow `json:"rows"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal(sqlite3 output) error = %v\nraw:\n%s", err, stdout.String())
+	}
+	if resp.Skip != "" {
+		t.Skip(resp.Skip)
+	}
+	return resp.Rows
+}
+
+type syntheticTurnSpec struct {
+	appName          string
+	userID           string
+	sessionID        string
+	invocationID     string
+	agentName        string
+	agentDesc        string
+	instruction      string
+	toolDecl         *declaredTool
+	toolCallArgs     map[string]any
+	toolCallResult   map[string]any
+	pauseToolID      string
+	userMsg          *genai.Content
+	responseParts    []*genai.Part
+	promptTokens     int32
+	completionTokens int32
+	totalTokens      int32
+	pluginModifier   func(*Config)
+}
+
+func emitCallbackTurnRows(t *testing.T, spec syntheticTurnSpec) []map[string]any {
+	t.Helper()
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.DisableCreateViews = true
+		if spec.pluginModifier != nil {
+			spec.pluginModifier(c)
+		}
+	})
+	mCtx.appName = spec.appName
+	mCtx.userID = spec.userID
+	mCtx.sessionID = spec.sessionID
+	mCtx.invocationID = spec.invocationID
+	mCtx.agentName = spec.agentName
+	mCtx.functionCallID = "fc-" + spec.invocationID
+
+	rootAg, err := llmagent.New(llmagent.Config{
+		Name:        spec.agentName,
+		Description: spec.agentDesc,
+		Model:       &scriptedLLM{},
+		Instruction: spec.instruction,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New(%s) error = %v", spec.agentName, err)
+	}
+	invCtx := &evalAgentInvocationContext{
+		mockInvocationContext: mCtx,
+		ag:                    rootAg,
+	}
+
+	var errs callbackErrors
+	if spec.userMsg != nil {
+		errs.add(p.OnUserMessageCallback()(invCtx, spec.userMsg))
+	}
+	errs.add(p.BeforeRunCallback()(invCtx))
+	errs.add(p.BeforeAgentCallback()(invCtx))
+
+	reqTools := map[string]any{}
+	if spec.toolDecl != nil {
+		reqTools[spec.toolDecl.Name()] = spec.toolDecl
+	}
+	llmReq := &model.LLMRequest{
+		Model: "test-model-v1",
+		Tools: reqTools,
+	}
+	if spec.userMsg != nil {
+		llmReq.Contents = []*genai.Content{spec.userMsg}
+	}
+	errs.add(p.BeforeModelCallback()(invCtx, llmReq))
+
+	if spec.pauseToolID != "" && spec.toolDecl != nil {
+		pausePart := &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				ID:   spec.pauseToolID,
+				Name: spec.toolDecl.Name(),
+				Args: spec.toolCallArgs,
+			},
+		}
+		pauseResp := &model.LLMResponse{
+			FinishReason: genai.FinishReasonStop,
+			Content:      &genai.Content{Role: "model", Parts: []*genai.Part{pausePart}},
+		}
+		errs.add(p.AfterModelCallback()(invCtx, pauseResp, nil))
+		errs.add(p.BeforeToolCallback()(invCtx, spec.toolDecl, spec.toolCallArgs))
+		errs.add(p.OnEventCallback()(invCtx, &session.Event{
+			ID:                 "ev-pause-" + spec.invocationID,
+			Author:             spec.agentName,
+			LLMResponse:        *pauseResp,
+			LongRunningToolIDs: []string{spec.pauseToolID},
+		}))
+	} else {
+		if spec.toolDecl != nil && spec.toolCallArgs != nil {
+			errs.add(p.BeforeToolCallback()(invCtx, spec.toolDecl, spec.toolCallArgs))
+			errs.add(p.AfterToolCallback()(invCtx, spec.toolDecl, spec.toolCallArgs, spec.toolCallResult, nil))
+		}
+		var respContent *genai.Content
+		if len(spec.responseParts) > 0 {
+			respContent = &genai.Content{
+				Role:  "model",
+				Parts: spec.responseParts,
+			}
+		}
+		llmResp := &model.LLMResponse{
+			FinishReason: genai.FinishReasonStop,
+			Content:      respContent,
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     spec.promptTokens,
+				CandidatesTokenCount: spec.completionTokens,
+				TotalTokenCount:      spec.totalTokens,
+			},
+		}
+		errs.add(p.AfterModelCallback()(invCtx, llmResp, nil))
+		if respContent != nil {
+			errs.add(p.OnEventCallback()(invCtx, &session.Event{
+				ID:          "ev-final-" + spec.invocationID,
+				Author:      spec.agentName,
+				LLMResponse: *llmResp,
+			}))
+		}
+	}
+
+	errs.add(p.AfterAgentCallback()(invCtx))
+	errs.check(t)
+	p.AfterRunCallback()(invCtx)
+	return collectRows(t, requests, untilEventType(EventInvocationCompleted))
+}
+
+func extractModelResponseTextsFromTrace(t *testing.T, trace map[string]any) []string {
+	t.Helper()
+	turnsAny, ok := trace["turns"].([]any)
+	if !ok {
+		t.Fatalf("trace.turns = %#v, want []any", trace["turns"])
+	}
+	var texts []string
+	for _, turnAny := range turnsAny {
+		tm, _ := turnAny.(map[string]any)
+		eventsAny, _ := tm["events"].([]any)
+		for _, evAny := range eventsAny {
+			em, _ := evAny.(map[string]any)
+			cm, _ := em["content"].(map[string]any)
+			if cm["role"] != "model" {
+				continue
+			}
+			partsAny, _ := cm["parts"].([]any)
+			for _, pAny := range partsAny {
+				pm, _ := pAny.(map[string]any)
+				if txt, hasTxt := pm["text"].(string); hasTxt {
+					texts = append(texts, txt)
+				}
+			}
+		}
+	}
+	return texts
+}
+
+func TestEvalViews_SemanticExecution(t *testing.T) {
+	defaultDefs, err := (Config{ProjectID: "p", DatasetID: "d", TableName: "t"}).EvalViewDefinitions()
+	if err != nil {
+		t.Fatalf("EvalViewDefinitions() error = %v", err)
+	}
+	sessionSQL := defaultDefs[0].Query
+	turnSQL := defaultDefs[1].Query
+
+	t.Run("cross_user_and_cross_app_session_isolation_and_pause_windows", func(t *testing.T) {
+		alphaTool := &declaredTool{
+			fakeTool: fakeTool{name: "alpha_gate", description: "Alpha approval gate", longRunning: true},
+			decl: &genai.FunctionDeclaration{
+				Name:                 "alpha_gate",
+				Description:          "Alpha approval gate",
+				ParametersJsonSchema: map[string]any{"type": "object"},
+			},
+		}
+		bobTool := &declaredTool{
+			fakeTool: fakeTool{name: "bob_lookup", description: "Bob lookup"},
+			decl: &genai.FunctionDeclaration{
+				Name:        "bob_lookup",
+				Description: "Bob lookup",
+			},
+		}
+		betaTool := &declaredTool{
+			fakeTool: fakeTool{name: "beta_search", description: "Beta search"},
+			decl: &genai.FunctionDeclaration{
+				Name:                 "beta_search",
+				Description:          "Beta search",
+				ParametersJsonSchema: map[string]any{"type": "object"},
+			},
+		}
+
+		// Session 1: (app-alpha, alice, shared-sess) Turn 0 pauses for HITL/long-running tool.
+		aliceTurn0 := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:      "app-alpha",
+			userID:       "alice",
+			sessionID:    "shared-sess",
+			invocationID: "inv-10",
+			agentName:    "alpha-agent",
+			agentDesc:    "Alpha agent",
+			instruction:  "Use alpha_gate.",
+			toolDecl:     alphaTool,
+			toolCallArgs: map[string]any{"ticket": "T-1"},
+			pauseToolID:  "call-pause-1",
+			userMsg: &genai.Content{
+				Role:  "user",
+				Parts: []*genai.Part{{Text: "deploy service"}},
+			},
+		})
+		time.Sleep(2 * time.Millisecond)
+
+		// Session 2: (app-alpha, bob, shared-sess) arrives chronologically BETWEEN Alice's paused turn
+		// and Alice's resumed turn, sharing both app_name and session_id.
+		bobTurn0 := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:          "app-alpha",
+			userID:           "bob",
+			sessionID:        "shared-sess",
+			invocationID:     "inv-20",
+			agentName:        "bob-agent",
+			agentDesc:        "Bob agent",
+			instruction:      "Answer Bob.",
+			toolDecl:         bobTool,
+			toolCallArgs:     map[string]any{"q": "status"},
+			toolCallResult:   map[string]any{"ok": true},
+			userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "status check"}}},
+			responseParts:    []*genai.Part{{Text: "Bob status OK"}},
+			promptTokens:     10,
+			completionTokens: 5,
+			totalTokens:      15,
+		})
+		time.Sleep(2 * time.Millisecond)
+
+		// Session 1 resumed: (app-alpha, alice, shared-sess) Turn 1 supplies FunctionResponse and completes.
+		aliceTurn1 := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:      "app-alpha",
+			userID:       "alice",
+			sessionID:    "shared-sess",
+			invocationID: "inv-30",
+			agentName:    "alpha-agent",
+			agentDesc:    "Alpha agent",
+			instruction:  "Use alpha_gate.",
+			toolDecl:     alphaTool,
+			userMsg: &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:       "call-pause-1",
+						Name:     "alpha_gate",
+						Response: map[string]any{"approved": true},
+					},
+				}},
+			},
+			responseParts:    []*genai.Part{{Text: "Deployment completed"}},
+			promptTokens:     20,
+			completionTokens: 8,
+			totalTokens:      28,
+		})
+		time.Sleep(2 * time.Millisecond)
+
+		// Session 3: (app-beta, alice, shared-sess) shares BOTH user_id="alice" and session_id="shared-sess"
+		// under a second ADK application, and includes one row with adk.app_name omitted to verify
+		// invocation-scoped app_name backfill.
+		betaTurn0 := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:          "app-beta",
+			userID:           "alice",
+			sessionID:        "shared-sess",
+			invocationID:     "inv-40",
+			agentName:        "beta-agent",
+			agentDesc:        "Beta agent",
+			instruction:      "Search beta.",
+			toolDecl:         betaTool,
+			toolCallArgs:     map[string]any{"k": "v"},
+			toolCallResult:   map[string]any{"found": 1},
+			userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "find beta"}}},
+			responseParts:    []*genai.Part{{Text: "Beta result ready"}},
+			promptTokens:     7,
+			completionTokens: 3,
+			totalTokens:      10,
+		})
+		strippedOne := false
+		for i := range betaTurn0 {
+			if betaTurn0[i]["event_type"] == EventAgentResponse {
+				attrsDoc := jsonObjectColumn(t, betaTurn0[i], columnAttributes)
+				if adkMap, ok := attrsDoc["adk"].(map[string]any); ok {
+					delete(adkMap, "app_name")
+					b, _ := json.Marshal(attrsDoc)
+					betaTurn0[i][columnAttributes] = string(b)
+					betaTurn0[i]["user_id"] = ""
+					strippedOne = true
+				}
+			}
+		}
+		if !strippedOne {
+			t.Fatal("expected to strip adk.app_name from one row in betaTurn0")
+		}
+
+		allRows := slices.Concat(aliceTurn0, bobTurn0, aliceTurn1, betaTurn0)
+		sessions := executeEvalViewSQL(t, sessionSQL, allRows)
+		if len(sessions) != 3 {
+			t.Fatalf("len(v_eval_session rows) = %d, want 3 distinct sessions; got %+v", len(sessions), sessions)
+		}
+
+		byRoot := make(map[string]evalViewExecResultRow, len(sessions))
+		for _, s := range sessions {
+			byRoot[s.RootAgent] = s
+		}
+
+		alphaSess, ok := byRoot["alpha-agent"]
+		if !ok {
+			t.Fatalf("missing alpha-agent session in %+v", sessions)
+		}
+		if alphaSess.UserID == nil || *alphaSess.UserID != "alice" || alphaSess.TurnCount != 2 || !alphaSess.EvalReady || alphaSess.TotalTokens != 28 {
+			t.Errorf("alpha-agent session = %+v, want user_id=alice, turn_count=2, eval_ready=true, total_tokens=28", alphaSess)
+		}
+		alphaAgents, _ := alphaSess.Trace["agents"].(map[string]any)
+		if len(alphaAgents) != 1 || alphaAgents["alpha-agent"] == nil {
+			t.Errorf("alpha-agent trace.agents = %#v, want only alpha-agent", alphaAgents)
+		}
+
+		bobSess, ok := byRoot["bob-agent"]
+		if !ok {
+			t.Fatalf("missing bob-agent session in %+v", sessions)
+		}
+		if bobSess.UserID == nil || *bobSess.UserID != "bob" || bobSess.TurnCount != 1 || !bobSess.EvalReady || bobSess.TotalTokens != 15 {
+			t.Errorf("bob-agent session = %+v, want user_id=bob, turn_count=1, eval_ready=true, total_tokens=15", bobSess)
+		}
+
+		betaSess, ok := byRoot["beta-agent"]
+		if !ok {
+			t.Fatalf("missing beta-agent session in %+v", sessions)
+		}
+		if betaSess.UserID == nil || *betaSess.UserID != "alice" || betaSess.TurnCount != 1 || !betaSess.EvalReady || betaSess.TotalTokens != 10 {
+			t.Errorf("beta-agent session = %+v, want user_id=alice, turn_count=1, eval_ready=true, total_tokens=10", betaSess)
+		}
+		betaAgents, _ := betaSess.Trace["agents"].(map[string]any)
+		if len(betaAgents) != 1 || betaAgents["beta-agent"] == nil {
+			t.Errorf("beta-agent trace.agents = %#v, want only beta-agent", betaAgents)
+		}
+
+		turnRows := executeEvalViewSQL(t, turnSQL, allRows)
+		if len(turnRows) != 4 {
+			t.Fatalf("len(v_eval_turn rows) = %d, want 4", len(turnRows))
+		}
+		gotTurnIdx := make(map[string]int64, len(turnRows))
+		for _, tr := range turnRows {
+			gotTurnIdx[tr.InvocationID] = tr.TurnIndex
+		}
+		wantTurnIdx := map[string]int64{
+			"inv-10": 0,
+			"inv-30": 1,
+			"inv-20": 0,
+			"inv-40": 0,
+		}
+		if diff := cmp.Diff(wantTurnIdx, gotTurnIdx); diff != "" {
+			t.Errorf("v_eval_turn turn_index mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("null_app_name_and_null_user_id_join_preserves_agent_configs", func(t *testing.T) {
+		calcTool := &declaredTool{
+			fakeTool: fakeTool{name: "calc_sum", description: "Adds numbers"},
+			decl: &genai.FunctionDeclaration{
+				Name:                 "calc_sum",
+				Description:          "Adds numbers",
+				ParametersJsonSchema: map[string]any{"type": "object"},
+			},
+		}
+		rows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:          "",
+			userID:           "",
+			sessionID:        "sess-null-scope",
+			invocationID:     "inv-null-1",
+			agentName:        "calc-agent",
+			agentDesc:        "Calculator",
+			instruction:      "Compute sums.",
+			toolDecl:         calcTool,
+			toolCallArgs:     map[string]any{"a": 1, "b": 2},
+			toolCallResult:   map[string]any{"sum": 3},
+			userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "1+2"}}},
+			responseParts:    []*genai.Part{{Text: "3"}},
+			promptTokens:     5,
+			completionTokens: 2,
+			totalTokens:      7,
+		})
+		for i := range rows {
+			delete(rows[i], "user_id") // SQL NULL user_id alongside NULL $.adk.app_name
+		}
+
+		sessRows := executeEvalViewSQL(t, sessionSQL, rows)
+		if len(sessRows) != 1 {
+			t.Fatalf("len(v_eval_session) = %d, want 1", len(sessRows))
+		}
+		if sessRows[0].UserID != nil {
+			t.Errorf("UserID = %v, want nil", *sessRows[0].UserID)
+		}
+		agentsMap, _ := sessRows[0].Trace["agents"].(map[string]any)
+		calcCfg, ok := agentsMap["calc-agent"].(map[string]any)
+		if !ok {
+			t.Fatalf("trace.agents missing calc-agent when user_id and app_name are NULL: %#v", sessRows[0].Trace["agents"])
+		}
+		toolsArr, _ := calcCfg["tools"].([]any)
+		if len(toolsArr) != 1 {
+			t.Fatalf("calc-agent tools = %#v, want 1 tool declaration group (proving NULL-safe agent_configs join)", toolsArr)
+		}
+
+		// Also verify PayloadColumnDenylist=["attributes"] where attributes is projected as CAST(NULL AS JSON).
+		denyAttrsDefs, err := (Config{
+			ProjectID:             "p",
+			DatasetID:             "d",
+			TableName:             "t",
+			PayloadColumnDenylist: []string{columnAttributes},
+		}).EvalViewDefinitions()
+		if err != nil {
+			t.Fatalf("EvalViewDefinitions(deny attributes) error = %v", err)
+		}
+		denySessRows := executeEvalViewSQL(t, denyAttrsDefs[0].Query, rows)
+		if len(denySessRows) != 1 {
+			t.Fatalf("len(v_eval_session with attributes denied) = %d, want 1", len(denySessRows))
+		}
+		denyAgents, _ := denySessRows[0].Trace["agents"].(map[string]any)
+		if _, ok := denyAgents["calc-agent"]; !ok {
+			t.Errorf("attributes-denied v_eval_session dropped trace.agents: %#v", denyAgents)
+		}
+		denyTurnRows := executeEvalViewSQL(t, denyAttrsDefs[1].Query, rows)
+		if len(denyTurnRows) != 1 {
+			t.Fatalf("len(v_eval_turn with attributes denied) = %d, want 1", len(denyTurnRows))
+		}
+		turnAgents, _ := denyTurnRows[0].Trace["agents"].(map[string]any)
+		if _, ok := turnAgents["calc-agent"]; !ok {
+			t.Errorf("attributes-denied v_eval_turn dropped trace.agents: %#v", turnAgents)
+		}
+	})
+
+	t.Run("deduplicates_retried_event_id_and_preserves_empty_event_id_and_prefers_clean_copy", func(t *testing.T) {
+		lookupTool := &declaredTool{
+			fakeTool: fakeTool{name: "lookup_item", description: "Looks up an item"},
+			decl:     &genai.FunctionDeclaration{Name: "lookup_item", Description: "Looks up an item"},
+		}
+		baseRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:          "shop-app",
+			userID:           "u-retry",
+			sessionID:        "sess-retry",
+			invocationID:     "inv-retry-1",
+			agentName:        "shop-agent",
+			agentDesc:        "Shop helper",
+			instruction:      "Look up items once.",
+			toolDecl:         lookupTool,
+			toolCallArgs:     map[string]any{"sku": "SKU-9"},
+			toolCallResult:   map[string]any{"price": 42},
+			userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "price of SKU-9"}}},
+			responseParts:    []*genai.Part{{Text: "SKU-9 costs $42"}},
+			promptTokens:     15,
+			completionTokens: 9,
+			totalTokens:      24,
+		})
+
+		var withRetries []map[string]any
+		for _, r := range baseRows {
+			switch r["event_type"] {
+			case EventToolStarting:
+				// 3 copies with identical event_id (which previously triggered has_tool_loop=true and tool_call_count=3).
+				badFmt := cloneEventRow(r)
+				badFmt[columnContent] = strconv.Quote(formattingFailedPlaceholder)
+				withRetries = append(withRetries, badFmt, cloneEventRow(r), cloneEventRow(r))
+			case EventLLMResponse:
+				truncCopy := cloneEventRow(r)
+				truncCopy["is_truncated"] = true
+				withRetries = append(withRetries, truncCopy, cloneEventRow(r), cloneEventRow(r))
+			case EventAgentResponse:
+				failedUploadCopy := cloneEventRow(r)
+				failedUploadCopy[columnContentParts] = []map[string]any{{
+					"part_index":   int64(0),
+					"mime_type":    "text/plain",
+					"storage_mode": "INLINE",
+					"text":         uploadFailedText,
+				}}
+				failedUploadCopy["is_truncated"] = true
+				failedFmtCopy := cloneEventRow(r)
+				failedFmtCopy[columnContent] = strconv.Quote(formattingFailedPlaceholder)
+				delete(failedFmtCopy, columnContentParts)
+				withRetries = append(withRetries, failedFmtCopy, failedUploadCopy, cloneEventRow(r))
+			default:
+				withRetries = append(withRetries, cloneEventRow(r))
+			}
+		}
+
+		// Second turn in another session where 3 distinct TOOL_STARTING rows have empty/NULL event_id;
+		// all 3 must be preserved rather than collapsed into 1.
+		emptyIDRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:          "shop-app",
+			userID:           "u-empty-id",
+			sessionID:        "sess-empty-id",
+			invocationID:     "inv-empty-1",
+			agentName:        "shop-agent",
+			agentDesc:        "Shop helper",
+			instruction:      "Look up items.",
+			toolDecl:         lookupTool,
+			toolCallArgs:     map[string]any{"sku": "A"},
+			toolCallResult:   map[string]any{"price": 10},
+			userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "check three SKUs"}}},
+			responseParts:    []*genai.Part{{Text: "Checked all three"}},
+			promptTokens:     10,
+			completionTokens: 4,
+			totalTokens:      14,
+		})
+		var toolTemplate map[string]any
+		for i := range emptyIDRows {
+			if emptyIDRows[i]["event_type"] == EventToolStarting {
+				emptyIDRows[i]["event_id"] = ""
+				toolTemplate = emptyIDRows[i]
+				break
+			}
+		}
+		if toolTemplate == nil {
+			t.Fatal("missing TOOL_STARTING template row")
+		}
+		extraToolNullID := cloneEventRow(toolTemplate)
+		delete(extraToolNullID, "event_id")
+		extraToolNullID[columnContent] = `{"args":{"sku":"B"},"tool":"lookup_item","tool_origin":"LOCAL"}`
+		extraToolEmptyID := cloneEventRow(toolTemplate)
+		extraToolEmptyID["event_id"] = ""
+		extraToolEmptyID[columnContent] = `{"args":{"sku":"C"},"tool":"lookup_item","tool_origin":"LOCAL"}`
+		emptyIDRows = append(emptyIDRows, extraToolNullID, extraToolEmptyID)
+
+		turns := executeEvalViewSQL(t, turnSQL, slices.Concat(withRetries, emptyIDRows))
+		if len(turns) != 2 {
+			t.Fatalf("len(v_eval_turn) = %d, want 2", len(turns))
+		}
+		byInv := map[string]evalViewExecResultRow{}
+		for _, tr := range turns {
+			byInv[tr.InvocationID] = tr
+		}
+
+		retryTurn := byInv["inv-retry-1"]
+		if retryTurn.ToolCallCount != 1 || retryTurn.MaxConsecutiveIdenticalToolCalls != 1 || retryTurn.HasToolLoop {
+			t.Errorf("replayed turn tool metrics = (count=%d, max_consec=%d, loop=%v), want (1, 1, false)",
+				retryTurn.ToolCallCount, retryTurn.MaxConsecutiveIdenticalToolCalls, retryTurn.HasToolLoop)
+		}
+		if retryTurn.TotalPromptTokens != 15 || retryTurn.TotalCompletionTokens != 9 || retryTurn.TotalTokens != 24 {
+			t.Errorf("replayed turn tokens = (%d, %d, %d), want (15, 9, 24)",
+				retryTurn.TotalPromptTokens, retryTurn.TotalCompletionTokens, retryTurn.TotalTokens)
+		}
+		if retryTurn.HasTruncatedContent || !retryTurn.EvalReady {
+			t.Errorf("replayed turn (HasTruncatedContent=%v, EvalReady=%v), want (false, true)",
+				retryTurn.HasTruncatedContent, retryTurn.EvalReady)
+		}
+		if gotTexts := extractModelResponseTextsFromTrace(t, retryTurn.Trace); !cmp.Equal(gotTexts, []string{"SKU-9 costs $42"}) {
+			t.Errorf("replayed turn model texts = %#v, want [\"SKU-9 costs $42\"]", gotTexts)
+		}
+
+		emptyTurn := byInv["inv-empty-1"]
+		if emptyTurn.ToolCallCount != 3 || emptyTurn.HasToolLoop {
+			t.Errorf("empty-event_id turn = (tool_call_count=%d, has_tool_loop=%v), want (3, false)",
+				emptyTurn.ToolCallCount, emptyTurn.HasToolLoop)
+		}
+	})
+
+	t.Run("agent_response_reconstructs_from_content_parts_and_preserves_fallbacks", func(t *testing.T) {
+		literalCases := []struct {
+			id    string
+			parts []*genai.Part
+			want  string
+		}{
+			{id: "inv-delim-call", parts: []*genai.Part{{Text: "label | call: lookup"}}, want: "label | call: lookup"},
+			{id: "inv-delim-resp", parts: []*genai.Part{{Text: "summary | resp: lookup"}}, want: "summary | resp: lookup"},
+			{id: "inv-delim-other", parts: []*genai.Part{{Text: "note | other"}}, want: "note | other"},
+			{id: "inv-delim-exec", parts: []*genai.Part{{Text: "snippet | Executable code (PYTHON): x = 1"}}, want: "snippet | Executable code (PYTHON): x = 1"},
+			{id: "inv-delim-res", parts: []*genai.Part{{Text: "out | Code execution result (OUTCOME_OK): 1"}}, want: "out | Code execution result (OUTCOME_OK): 1"},
+			{id: "inv-delim-quote", parts: []*genai.Part{{Text: "left' | text: 'right"}}, want: "left' | text: 'right"},
+			{id: "inv-multipart", parts: []*genai.Part{{Text: "first | call: one"}, {Text: "second | other"}}, want: "first | call: one\nsecond | other"},
+		}
+
+		var rows []map[string]any
+		for _, tc := range literalCases {
+			rows = append(rows, emitCallbackTurnRows(t, syntheticTurnSpec{
+				appName:          "fmt-app",
+				userID:           "u-fmt",
+				sessionID:        "sess-" + tc.id,
+				invocationID:     tc.id,
+				agentName:        "fmt-agent",
+				agentDesc:        "Formatter test agent",
+				instruction:      "Echo text verbatim.",
+				userMsg:          &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "go"}}},
+				responseParts:    tc.parts,
+				promptTokens:     4,
+				completionTokens: 4,
+				totalTokens:      8,
+			})...)
+		}
+
+		// Offloaded GCS_REFERENCE text part (e.g. cross-language or offloaded writer row where content.response is "None").
+		offloadedRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "fmt-app",
+			userID:        "u-fmt",
+			sessionID:     "sess-offloaded",
+			invocationID:  "inv-offloaded",
+			agentName:     "fmt-agent",
+			agentDesc:     "Formatter test agent",
+			instruction:   "Echo long text.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "long"}}},
+			responseParts: []*genai.Part{{Text: "placeholder"}},
+		})
+		for i := range offloadedRows {
+			if offloadedRows[i]["event_type"] == EventAgentResponse {
+				offloadedRows[i][columnContent] = `{"response":"None"}`
+				offloadedRows[i][columnContentParts] = []map[string]any{{
+					"part_index":   int64(0),
+					"mime_type":    "text/plain",
+					"storage_mode": "GCS_REFERENCE",
+					"text":         "Long answer | call: details... [OFFLOADED]",
+				}}
+			}
+		}
+		rows = append(rows, offloadedRows...)
+
+		// Thought-only content_parts row: even if content.response contains "text: 'internal'",
+		// non-empty content_parts with only thought part_attributes must evaluate response_text to NULL.
+		thoughtOnlyRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "fmt-app",
+			userID:        "u-fmt",
+			sessionID:     "sess-thought-only",
+			invocationID:  "inv-thought-only",
+			agentName:     "fmt-agent",
+			agentDesc:     "Formatter test agent",
+			instruction:   "Think silently.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "think"}}},
+			responseParts: []*genai.Part{{Text: "placeholder"}},
+		})
+		for i := range thoughtOnlyRows {
+			if thoughtOnlyRows[i]["event_type"] == EventAgentResponse {
+				thoughtOnlyRows[i][columnContent] = `{"response":"text: 'internal reasoning'"}`
+				thoughtOnlyRows[i][columnContentParts] = []map[string]any{{
+					"part_index":      int64(0),
+					"mime_type":       "text/plain",
+					"storage_mode":    "INLINE",
+					"part_attributes": `{"thought":true}`,
+					"text":            "internal reasoning",
+				}}
+			}
+		}
+		rows = append(rows, thoughtOnlyRows...)
+
+		// FinalResponseToolNames row: empty content_parts, JSON object in content.response.
+		finalTool := &declaredTool{
+			fakeTool: fakeTool{name: "submit_final_answer", description: "Submits structured answer"},
+			decl:     &genai.FunctionDeclaration{Name: "submit_final_answer", Description: "Submits structured answer"},
+		}
+		finalToolRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:        "fmt-app",
+			userID:         "u-fmt",
+			sessionID:      "sess-final-tool",
+			invocationID:   "inv-final-tool",
+			agentName:      "fmt-agent",
+			agentDesc:      "Formatter test agent",
+			instruction:    "Submit via tool.",
+			toolDecl:       finalTool,
+			toolCallArgs:   map[string]any{"verdict": "approved", "score": 99},
+			toolCallResult: map[string]any{"ok": true},
+			userMsg:        &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "grade"}}},
+			pluginModifier: func(c *Config) {
+				c.FinalResponseToolNames = []string{"submit_final_answer"}
+			},
+		})
+		rows = append(rows, finalToolRows...)
+
+		turnResults := executeEvalViewSQL(t, turnSQL, rows)
+		byInv := make(map[string]evalViewExecResultRow, len(turnResults))
+		for _, tr := range turnResults {
+			byInv[tr.InvocationID] = tr
+		}
+
+		for _, tc := range literalCases {
+			gotTurn, ok := byInv[tc.id]
+			if !ok {
+				t.Fatalf("missing turn result for %s", tc.id)
+			}
+			if !gotTurn.EvalReady {
+				t.Errorf("%s EvalReady = false, want true", tc.id)
+			}
+			if gotTexts := extractModelResponseTextsFromTrace(t, gotTurn.Trace); !cmp.Equal(gotTexts, []string{tc.want}) {
+				t.Errorf("%s model response text mismatch (-want +got):\n%s", tc.id, cmp.Diff([]string{tc.want}, gotTexts))
+			}
+		}
+
+		if offTurn := byInv["inv-offloaded"]; !offTurn.EvalReady {
+			t.Errorf("inv-offloaded EvalReady = false, want true")
+		} else if gotTexts := extractModelResponseTextsFromTrace(t, offTurn.Trace); !cmp.Equal(gotTexts, []string{"Long answer | call: details... [OFFLOADED]"}) {
+			t.Errorf("inv-offloaded texts = %#v", gotTexts)
+		}
+
+		if thoughtTurn := byInv["inv-thought-only"]; thoughtTurn.EvalReady {
+			t.Errorf("inv-thought-only EvalReady = true, want false (thought-only content_parts must not produce response_text)")
+		} else if gotTexts := extractModelResponseTextsFromTrace(t, thoughtTurn.Trace); len(gotTexts) != 0 {
+			t.Errorf("inv-thought-only unexpectedly emitted model text: %#v", gotTexts)
+		}
+
+		if ftTurn := byInv["inv-final-tool"]; !ftTurn.EvalReady {
+			t.Errorf("inv-final-tool EvalReady = false, want true")
+		} else if gotTexts := extractModelResponseTextsFromTrace(t, ftTurn.Trace); !cmp.Equal(gotTexts, []string{`{"score":99,"verdict":"approved"}`}) {
+			t.Errorf("inv-final-tool texts = %#v, want structured JSON fallback", gotTexts)
+		}
+
+		// Also verify PayloadColumnDenylist=["content_parts"] fallback to formatted_response.
+		denyPartsDefs, err := (Config{
+			ProjectID:             "p",
+			DatasetID:             "d",
+			TableName:             "t",
+			PayloadColumnDenylist: []string{columnContentParts},
+		}).EvalViewDefinitions()
+		if err != nil {
+			t.Fatalf("EvalViewDefinitions(deny content_parts) error = %v", err)
+		}
+		plainRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "fmt-app",
+			userID:        "u-fmt",
+			sessionID:     "sess-denied-parts",
+			invocationID:  "inv-denied-parts",
+			agentName:     "fmt-agent",
+			agentDesc:     "Formatter test agent",
+			instruction:   "Plain answer.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "weather?"}}},
+			responseParts: []*genai.Part{{Text: "It is 20C and sunny."}},
+		})
+		deniedTurnResults := executeEvalViewSQL(t, denyPartsDefs[1].Query, plainRows)
+		if len(deniedTurnResults) != 1 || !deniedTurnResults[0].EvalReady {
+			t.Fatalf("content_parts-denied turn results = %+v, want 1 eval_ready turn", deniedTurnResults)
+		}
+		if gotTexts := extractModelResponseTextsFromTrace(t, deniedTurnResults[0].Trace); !cmp.Equal(gotTexts, []string{"It is 20C and sunny."}) {
+			t.Errorf("content_parts-denied fallback texts = %#v, want [\"It is 20C and sunny.\"]", gotTexts)
+		}
+	})
 }
