@@ -422,4 +422,37 @@ func TestTimeFractionalSeconds(t *testing.T) {
 	if gotFloat != want {
 		t.Errorf("convertSnake(time.Time) = %v, want %v", gotFloat, want)
 	}
+
+	// Verify whole-second timestamps
+	tmWhole := time.Unix(1700000000, 0)
+	gotWhole, err := convertSnake("", "", tmWhole)
+	if err != nil {
+		t.Fatalf("convertSnake() failed for whole second: %v", err)
+	}
+	if gotFloatWhole, ok := gotWhole.(float64); !ok || gotFloatWhole != 1700000000.0 {
+		t.Errorf("convertSnake(whole second) = %v, want 1700000000.0", gotWhole)
+	}
+
+	// Verify EmitJSON serialization output
+	event := session.Event{
+		ID:        "event-1",
+		Timestamp: time.UnixMicro(1733040000123456),
+	}
+	rw := httptest.NewRecorder()
+	if err := EmitJSON(rw, event); err != nil {
+		t.Fatalf("EmitJSON() failed: %v", err)
+	}
+
+	var jsonMap map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &jsonMap); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+	}
+
+	ts, ok := jsonMap["timestamp"].(float64)
+	if !ok {
+		t.Fatalf("timestamp missing or not float64 in JSON: %v", jsonMap)
+	}
+	if ts != want {
+		t.Errorf("EmitJSON timestamp = %v, want %v", ts, want)
+	}
 }
