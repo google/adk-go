@@ -76,8 +76,8 @@ func EventsSchema() bq.Schema {
 	}
 }
 
-// ArrowSchema returns the Arrow schema for the events table.
-func ArrowSchema() *arrow.Schema {
+// arrowSchema returns the Arrow schema for the events table.
+func arrowSchema() *arrow.Schema {
 	return arrow.NewSchema(
 		[]arrow.Field{
 			{Name: timestampField, Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
@@ -162,9 +162,9 @@ func projectEventsSchema(denied map[string]struct{}) bq.Schema {
 	return projected
 }
 
-// projectArrowSchema returns ArrowSchema without the columns in denied.
+// projectArrowSchema returns arrowSchema without the columns in denied.
 func projectArrowSchema(denied map[string]struct{}) *arrow.Schema {
-	schema := ArrowSchema()
+	schema := arrowSchema()
 	if len(denied) == 0 {
 		return schema
 	}
@@ -175,11 +175,6 @@ func projectArrowSchema(denied map[string]struct{}) *arrow.Schema {
 		}
 	}
 	return arrow.NewSchema(fields, nil)
-}
-
-// SerializedArrowSchema returns the serialized Arrow schema for the events table.
-func SerializedArrowSchema() ([]byte, error) {
-	return serializeArrowSchema(ArrowSchema())
 }
 
 func serializeArrowSchema(schema *arrow.Schema) ([]byte, error) {

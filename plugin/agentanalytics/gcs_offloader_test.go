@@ -60,7 +60,7 @@ import (
 
 // resolveUploads calls resolveUploadsForBatch with canDefer enabled for unit
 // tests that exercise upload resolution directly.
-func (b *BatchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
+func (b *batchProcessor) resolveUploads(ctx context.Context, pauseOnCallerDeadline bool, batch []map[string]any) {
 	b.resolveUploadsForBatch(ctx, uploadResolveOptions{
 		pauseOnCallerDeadline: pauseOnCallerDeadline,
 		canDefer:              true,
@@ -583,7 +583,7 @@ func TestResolveUploads_RewritesTheEntries(t *testing.T) {
 			{InlineData: &genai.Blob{MIMEType: "image/png", Data: []byte{1, 2, 3}}},
 		}})
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSPathPrefix: "logs", ConnectionID: "us.conn"}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -654,7 +654,7 @@ func TestResolveUploads_Authorizer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(7))
-			bp := &BatchProcessor{config: Config{GCSOffloader: &fakeOffloader{}, ConnectionID: tt.connectionID}}
+			bp := &batchProcessor{config: Config{GCSOffloader: &fakeOffloader{}, ConnectionID: tt.connectionID}}
 
 			bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -745,7 +745,7 @@ func TestResolveUploads_FailuresKeepTheInlineForm(t *testing.T) {
 			opts.offload = true
 			off := &fakeOffloader{hook: tt.hook, uri: tt.uri}
 			logger := &recordingLogger{}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: logger}, uploadTimeout: tt.timeout}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: logger}, uploadTimeout: tt.timeout}
 			ctx := tt.ctx
 			if ctx == nil {
 				ctx = context.Background()
@@ -786,7 +786,7 @@ func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -802,7 +802,7 @@ func TestResolveUploads_OneFailureDoesNotSpoilTheOthers(t *testing.T) {
 func TestResolveUploads_UploadsHaveADeadline(t *testing.T) {
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}, imageContent(1))
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -846,7 +846,7 @@ func TestResolveUploads_ConcurrencyIsBounded(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				return nil
 			}}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSMaxConcurrentUploads: tt.limit, Logger: &recordingLogger{}}}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, GCSMaxConcurrentUploads: tt.limit, Logger: &recordingLogger{}}}
 
 			bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -870,7 +870,7 @@ func TestResolveUploads_WithoutAnOffloaderThePartsStayInline(t *testing.T) {
 	opts := partsOptions{maxLen: 1000}
 	want := queuedRow(opts, imageContent(1))[columnContentParts]
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{config: Config{Logger: logger}}
+	bp := &batchProcessor{config: Config{Logger: logger}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -901,7 +901,7 @@ func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
 	}
 	noParts := map[string]any{rawPartsKey: []pendingUpload{{slot: 0, mimeType: "image/png", data: []byte{1}}}}
 	off := &fakeOffloader{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{plain, outOfRange, noParts})
 
@@ -919,7 +919,7 @@ func TestResolveUploads_RowsWithoutUploadsAreLeftAlone(t *testing.T) {
 }
 
 func TestBatchProcessor_ObjectPath(t *testing.T) {
-	bp := &BatchProcessor{config: Config{GCSPathPrefix: "p"}}
+	bp := &batchProcessor{config: Config{GCSPathPrefix: "p"}}
 	u := pendingUpload{contentOrd: 2, partIdx: 3, mimeType: "image/jpeg"}
 
 	t.Run("from the row", func(t *testing.T) {
@@ -2102,7 +2102,7 @@ func TestResolveUploads_DefaultConcurrencyIsEight(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, Logger: &recordingLogger{}}}
 
 	bp.resolveUploads(context.Background(), false, []map[string]any{row})
 
@@ -2481,7 +2481,7 @@ func TestResolveUploads_BatchLevelUploadTimeout(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 2,
@@ -2508,7 +2508,7 @@ func TestResolveUploads_BatchLevelUploadTimeout(t *testing.T) {
 
 func TestGCSOffloading_PendingUploadBytesCap(t *testing.T) {
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config:                Config{GCSOffloader: &fakeOffloader{}, BatchSize: 100, Logger: logger},
 		queue:                 make(chan map[string]any, 2),
 		maxPendingUploadBytes: 100,
@@ -2704,7 +2704,7 @@ func TestGCSOffloading_RunEndPausesStalledUploads(t *testing.T) {
 				cfg.BatchSize = 2
 				cfg.Logger = &recordingLogger{}
 				cfg.GCSOffloader = off
-				bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+				bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2777,7 +2777,7 @@ func TestGCSOffloading_RunEndOwnDeadlineErrorBeforeTheDeadlineDoesNotPause(t *te
 		cfg.BatchSize = 2
 		cfg.Logger = &recordingLogger{}
 		cfg.GCSOffloader = off
-		bp, err := NewBatchProcessor(context.Background(), nil, "test_stream", cfg)
+		bp, err := newBatchProcessor(context.Background(), nil, "test_stream", cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -3027,7 +3027,7 @@ func TestResolveUploads_BatchTimeoutCooldown(t *testing.T) {
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 2,
@@ -3492,7 +3492,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 				},
 			}
 			logger := &recordingLogger{}
-			bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, GCSMaxConcurrentUploads: tt.maxConcurrent, Logger: logger}}
+			bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: tt.uploadTimeout, GCSMaxConcurrentUploads: tt.maxConcurrent, Logger: logger}}
 			opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 50}
 
 			firstContents := []*genai.Content{imageContent(1)}
@@ -3565,7 +3565,7 @@ func TestResolveUploads_DeadlinesPauseTheUploads(t *testing.T) {
 }
 
 func TestGCSOffloading_ConfigurablePendingUploadBytesCap(t *testing.T) {
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             &fakeOffloader{},
 			GCSMaxPendingUploadBytes: 80,
@@ -3608,7 +3608,7 @@ func (l *panicOnBudgetLogger) Printf(format string, v ...any) {
 
 func TestGCSOffloading_BuildRowPanicReleasesReservedBytes(t *testing.T) {
 	logger := &panicOnBudgetLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             &fakeOffloader{},
 			GCSMaxPendingUploadBytes: 100,
@@ -3688,9 +3688,9 @@ func TestGCSOffloading_RunEndDeadlineDoesNotPauseHealthyStorage(t *testing.T) {
 	cfg.Logger = logger
 	cfg.GCSOffloader = off
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -3788,9 +3788,9 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 	cfg.Logger = logger
 	cfg.GCSOffloader = off
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -3871,9 +3871,9 @@ func TestGCSOffloading_FlushRunEndCapsSecondBatchUploadAtHalfRemainingBudget(t *
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -3941,9 +3941,9 @@ func TestGCSOffloading_FlushRunEndPausesBatchStartingWithThirtyPercentBudget(t *
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -4045,9 +4045,9 @@ func TestGCSOffloading_FlushRunEndBatchAfterEmptyBatchPausesStalledStorage(t *te
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 	defer bp.Close()
@@ -4113,7 +4113,7 @@ func TestGCSOffloading_DeferredTextRetryTruncationFlag(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
 	long := strings.Repeat("x", 200)
 
 	control := probeRow(t, textContent("user", long))
@@ -4156,7 +4156,7 @@ func TestGCSOffloading_BinaryOnlyDeferralKeepsFailedTextSummary(t *testing.T) {
 		}
 		return nil
 	}}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: &recordingLogger{}}}
 	long := strings.Repeat("y", 200)
 	mk := func() map[string]any {
 		return probeRow(t, &genai.Content{Role: "user", Parts: []*genai.Part{
@@ -4200,7 +4200,7 @@ func TestResolveUploads_PartialOutageBrownoutPausesUploads(t *testing.T) {
 		return ctx.Err()
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 4,
@@ -4247,7 +4247,7 @@ func TestGCSOffloading_DeferredUploadsHoldPendingByteReservation(t *testing.T) {
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -4372,7 +4372,7 @@ func TestResolveUploads_ConcurrencyLimitedBrownoutPausesUploads(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:            off,
 			GCSMaxConcurrentUploads: 1,
@@ -4392,7 +4392,7 @@ func TestGCSOffloading_FailedMultiAttributeUploadTruncatedFlag(t *testing.T) {
 	off := &fakeOffloader{hook: func(ctx context.Context, _ GCSUploadRequest) error {
 		return errors.New("gcs failure")
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: Config{
 			GCSOffloader:     off,
 			GCSUploadTimeout: time.Minute,
@@ -4457,9 +4457,9 @@ func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) 
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4514,9 +4514,9 @@ func TestGCSOffloading_CloseEarlyDropLoggerPanicReleasesUploadBytes(t *testing.T
 			return nil, status.Error(codes.OutOfRange, "offset beyond end")
 		},
 	}
-	bp, err := NewBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", cfg)
+	bp, err := newBatchProcessor(ctx, newScriptedWriteClient(t, srv), "", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor() error = %v", err)
+		t.Fatalf("newBatchProcessor() error = %v", err)
 	}
 
 	// Establish rotation cooldown before Close so the 3 upload rows form
@@ -4576,9 +4576,9 @@ func TestGCSOffloading_CloseLogsFinalFailureOfBackgroundFlushUploadItCancels(t *
 	cfg.GCSUploadTimeout = 5 * time.Second
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), wc, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	bp.Start()
 
@@ -4663,9 +4663,9 @@ func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
 
-	bp, err := NewBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(ctx, writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -4730,8 +4730,8 @@ func (reproPanicLogger) Printf(format string, _ ...any) {
 func (reproPanicLogger) Println(...any) {}
 
 func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T) {
-	newProcessor := func(off GCSContentOffloader, capBytes int64) *BatchProcessor {
-		return &BatchProcessor{
+	newProcessor := func(off GCSContentOffloader, capBytes int64) *batchProcessor {
+		return &batchProcessor{
 			config: applyDefaults(Config{
 				GCSOffloader:             off,
 				GCSUploadTimeout:         time.Minute,
@@ -4833,7 +4833,7 @@ func TestResolveUploads_PanickingLoggerReleasesDeferredReservation(t *testing.T)
 func TestRequeueDeferredUploads_PanickingLoggerKeepsBatch(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             stallingOffloader(&stalled),
 			GCSUploadTimeout:         time.Minute,
@@ -4882,7 +4882,7 @@ func TestReleaseRowUploads_PanickingLoggerReleasesLaterRows(t *testing.T) {
 	// bytes when it is released separately.
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             stallingOffloader(&stalled),
 			GCSUploadTimeout:         time.Minute,
@@ -4935,7 +4935,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 		return ctx.Err()
 	}}
 	logger := &callbackRaceLogger{}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -4986,8 +4986,8 @@ func TestReleaseRowUploads_SharedLoggerKeepsDropLinesWithTheirProcessor(t *testi
 		return ctx.Err()
 	}}
 	logger := &recordingLogger{}
-	newProcessor := func() *BatchProcessor {
-		return &BatchProcessor{
+	newProcessor := func() *batchProcessor {
+		return &batchProcessor{
 			config: applyDefaults(Config{
 				GCSOffloader:             off,
 				GCSUploadTimeout:         time.Minute,
@@ -5023,7 +5023,7 @@ func TestResolveUploads_CustomErrorUnderCallerDeadlineStaysDeferred(t *testing.T
 		<-ctx.Done()
 		return errors.New("custom offloader failure")
 	}}
-	bp := &BatchProcessor{
+	bp := &batchProcessor{
 		config: applyDefaults(Config{
 			GCSOffloader:             off,
 			GCSUploadTimeout:         time.Minute,
@@ -5072,7 +5072,7 @@ func stallingOffloader(stalled *atomic.Bool) *fakeOffloader {
 
 // uploadRows returns n rows, ev-0 to ev-<n-1>, that each queue a 16-byte
 // image for upload and reserve its bytes in bp.
-func uploadRows(bp *BatchProcessor, n int) []map[string]any {
+func uploadRows(bp *batchProcessor, n int) []map[string]any {
 	opts := partsOptions{maxLen: 1000, offload: true, inlineLimit: 10, reserveBytes: bp.tryReserveUploadBytes}
 	batch := make([]map[string]any, n)
 	for i := range batch {
@@ -5086,7 +5086,7 @@ func uploadRows(bp *BatchProcessor, n int) []map[string]any {
 // uploads stall, as a run-end flush with a depleted budget does, and checks
 // that every row has its upload deferred and that nothing about the deferred
 // uploads was logged.
-func deferUploads(t *testing.T, bp *BatchProcessor, batch []map[string]any) {
+func deferUploads(t *testing.T, bp *batchProcessor, batch []map[string]any) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
@@ -5122,17 +5122,17 @@ func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
 	const failure = "agentanalytics: GCS upload failed for event ev-deferred part 0 (3 bytes): context deadline exceeded; keeping the part inline"
 	tests := []struct {
 		name    string
-		settle  func(bp *BatchProcessor, batch []map[string]any)
+		settle  func(bp *batchProcessor, batch []map[string]any)
 		wantLog string
 	}{
 		{
 			name:    "the upload is requeued",
-			settle:  (*BatchProcessor).requeueDeferredUploads,
+			settle:  (*batchProcessor).requeueDeferredUploads,
 			wantLog: failure + " pending retry on next flush",
 		},
 		{
 			name:    "the upload is dropped",
-			settle:  (*BatchProcessor).clearDeferredUploads,
+			settle:  (*batchProcessor).clearDeferredUploads,
 			wantLog: failure,
 		},
 	}
@@ -5141,7 +5141,7 @@ func TestResolveUploads_DeferredUploadLogsRetryOnlyWhenRequeued(t *testing.T) {
 			var stalled atomic.Bool
 			stalled.Store(true)
 			logger := &recordingLogger{}
-			bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: logger}}
+			bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: logger}}
 			row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
 			row[eventIDField] = "ev-deferred"
 			batch := []map[string]any{row}
@@ -5173,7 +5173,7 @@ func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *tes
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
 	row[eventIDField] = "ev-custom"
 	batch := []map[string]any{row}
@@ -5211,7 +5211,7 @@ func TestResolveUploads_CustomOffloaderErrorAfterCallerDeadlineIsDeferred(t *tes
 func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
 	batch := uploadRows(bp, 3)
 	deferUploads(t, bp, batch)
 	if got := bp.pendingUploadBytes.Load(); got != 48 {
@@ -5238,7 +5238,7 @@ func TestClearDeferredUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
 	batch := uploadRows(bp, 3)
 	deferUploads(t, bp, batch)
 
@@ -5277,7 +5277,7 @@ func TestRequeueDeferredUploads_PanickingLoggerRequeuesEveryRow(t *testing.T) {
 func TestReleaseBatchUploads_PanickingLoggerReleasesEveryRow(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
 	batch := uploadRows(bp, 3)
 	// The first two rows have deferred uploads; the last still has its
 	// payload queued.
@@ -5325,9 +5325,9 @@ func TestGCSOffloading_FlushRunEndKeepsDeferredBatchWhenLoggerPanics(t *testing.
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = stallingOffloader(&stalled)
 	cfg.Logger = reproPanicLogger{}
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(func() {
 		stalled.Store(false)
@@ -5479,7 +5479,7 @@ func TestResolveUploads_CanceledCallerContextDefersUploads(t *testing.T) {
 		return nil
 	}}
 	logger := &recordingLogger{}
-	bp := &BatchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
+	bp := &batchProcessor{config: Config{GCSOffloader: off, GCSUploadTimeout: time.Minute, Logger: logger}}
 	row := queuedRow(partsOptions{maxLen: 1000, offload: true, inlineLimit: 10}, imageContent(1, 2, 3))
 	row[eventIDField] = "ev-canceled"
 	batch := []map[string]any{row}
@@ -5551,9 +5551,9 @@ func TestGCSOffloading_CloseRetriesUploadThatItCancelsInRunEndFlush(t *testing.T
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = logger
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(bp.Close)
 
@@ -5647,9 +5647,9 @@ func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = reproPanicLogger{}
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(func() {
 		closing.Store(true)
@@ -5697,7 +5697,7 @@ func TestGCSOffloading_FlushRunEndDropPathReleasesAllUploadsWhenLoggerPanics(t *
 func TestResolveUploads_UnsettledDeferredUploadsLoseNoReservationWhenLoggerPanics(t *testing.T) {
 	var stalled atomic.Bool
 	stalled.Store(true)
-	bp := &BatchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
+	bp := &batchProcessor{config: Config{GCSOffloader: stallingOffloader(&stalled), GCSUploadTimeout: time.Minute, Logger: reproPanicLogger{}}}
 	batch := uploadRows(bp, 2)
 	// The upload of the second row is deferred and left unsettled, while the
 	// first row still has its payload queued.
@@ -5776,9 +5776,9 @@ func TestGCSOffloading_FlushRunEndReleasesDeferredUploadsWhenAppendLogPanics(t *
 	cfg.RetryConfig.MaxRetries = 0
 	cfg.GCSOffloader = off
 	cfg.Logger = alwaysPanicLogger{}
-	bp, err := NewBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
+	bp, err := newBatchProcessor(context.Background(), writeClient, "projects/p/datasets/d/tables/t/_default", cfg)
 	if err != nil {
-		t.Fatalf("NewBatchProcessor: %v", err)
+		t.Fatalf("newBatchProcessor: %v", err)
 	}
 	t.Cleanup(func() {
 		closing.Store(true)
