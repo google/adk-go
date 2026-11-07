@@ -24,8 +24,10 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
+	agentinternal "google.golang.org/adk/v2/internal/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
@@ -71,10 +73,71 @@ func TestInstrumentInvocation_NestedOpensNoSpan(t *testing.T) {
 	ctx, outer := startInvokeWorkflowSpan(t.Context(), "outer", "s")
 	for range InstrumentInvocation(ctx, testAgent{}, "s", run) {
 	}
+	if !outer.IsRecording() {
+		t.Error("nested invocation ended the enclosing workflow span")
+	}
 	outer.End()
 
 	if got := len(exporter.GetSpans()); got != 1 {
 		t.Errorf("got %d spans, want only the outer one", got)
+	}
+}
+
+func TestInvocationWorkflowSpanOwnership(t *testing.T) {
+	for _, resumeChild := range []bool{false, true} {
+		name := "root"
+		if resumeChild {
+			name = "resumed_child"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(adkTelemetrySchemaVersionOptIn, "otel_semconv_1_44")
+			exporter := setupTestTracer(t)
+			root := &fakeAgent{State: agentinternal.State{AgentType: agentinternal.TypeWorkflowAgent}, name: "root"}
+			child := &fakeAgent{State: agentinternal.State{AgentType: agentinternal.TypeWorkflowAgent}, name: "child"}
+			ictx := &fakeInvocationContext{t: t, sessionID: "s", invocationID: "i"}
+			var invocation trace.Span
+			for range InstrumentInvocation(t.Context(), root, "s", func(ctx context.Context) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {
+					invocation = trace.SpanFromContext(ctx)
+					if !resumeChild {
+						var owned trace.Span
+						ctx, owned = StartNodeSpan(ctx, ictx, OperationAgent{Agent: root})
+						owned.End()
+						if !trace.SpanFromContext(ctx).IsRecording() {
+							t.Fatal("root workflow ended the runner's span")
+						}
+						if !trace.SpanContextFromContext(ctx).Equal(invocation.SpanContext()) {
+							t.Fatal("root workflow opened a duplicate span")
+						}
+					}
+					childCtx, childSpan := StartNodeSpan(ctx, ictx, OperationAgent{Agent: child})
+					if trace.SpanContextFromContext(childCtx).Equal(invocation.SpanContext()) {
+						t.Fatal("child workflow reused the root span")
+					}
+					childSpan.End()
+					if !invocation.IsRecording() {
+						t.Error("child workflow ended the runner's span")
+					}
+				}
+			}) {
+			}
+			spans := exporter.GetSpans()
+			if len(spans) != 2 {
+				t.Fatalf("ended spans = %d, want 2", len(spans))
+			}
+			if !spans[0].Parent.Equal(invocation.SpanContext()) {
+				t.Error("child workflow lost its invocation parent")
+			}
+			var nested bool
+			for _, attr := range spans[0].Attributes {
+				if attr.Key == genAIWorkflowNested {
+					nested = attr.Value.AsBool()
+				}
+			}
+			if !nested {
+				t.Error("child workflow is not marked nested")
+			}
+		})
 	}
 }
 

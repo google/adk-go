@@ -46,6 +46,9 @@ var (
 // workflowScopeKey marks a context as running inside an invoke_workflow span.
 type workflowScopeKey struct{}
 
+// invocationWorkflowKey names the workflow whose span the runner already owns.
+type invocationWorkflowKey struct{}
+
 // Operation is the internal sum-type which describes what can be used to start a span.
 type Operation interface {
 	isOperation()
@@ -95,6 +98,10 @@ func StartNodeSpan(ctx context.Context, ictx InvocationContext, op Operation) (c
 	switch o := op.(type) {
 	case OperationAgent:
 		if isWorkflowAgent(o.Agent) {
+			if name, ok := ctx.Value(invocationWorkflowKey{}).(string); ok && name == o.Agent.Name() {
+				// The runner ends this span after its callbacks and compaction.
+				return context.WithValue(ctx, invocationWorkflowKey{}, nil), noop.Span{}
+			}
 			return startInvokeWorkflowSpan(ctx, o.Agent.Name(), sessionID(ictx))
 		}
 		return startInvokeAgentSpan(ctx, ictx, o.Agent)

@@ -18,20 +18,41 @@ import (
 	"context"
 	"iter"
 
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 )
 
-// InstrumentInvocation wraps a runner invocation in an invoke_workflow span.
-// Under the legacy schema, for a workflow root (which opens that span itself),
-// and inside an existing invoke_workflow, run gets ctx unchanged.
-func InstrumentInvocation(ctx context.Context, root AgentLike, sessionID string, run func(context.Context) iter.Seq2[*session.Event, error]) iter.Seq2[*session.Event, error] {
-	// Unlike ADK Python, a nested invocation (e.g. agent as tool) gets no span: the spec omits implementation details.
-	if useLegacySchema() || isWorkflowAgent(root) || ctx.Value(workflowScopeKey{}) != nil {
-		return run(ctx)
+// StartInvocationSpan starts the runner's span before its plugin callbacks.
+// The caller must end it after callbacks and post-invocation work finish.
+// The legacy schema uses invocation; the default schema uses invoke_workflow.
+// Nested invocations in the default schema reuse their enclosing workflow
+// context and return a no-op span, so ending it cannot end the enclosing span.
+func StartInvocationSpan(ctx context.Context, root AgentLike, sessionID string) (context.Context, trace.Span) {
+	if useLegacySchema() {
+		return StartTrace(ctx, "invocation")
 	}
+	// Unlike ADK Python, nested invocations add no span, preserving the
+	// existing Go convention of omitting implementation details.
+	if ctx.Value(workflowScopeKey{}) != nil {
+		// A runner called by a callback may have the same root name, but it
+		// does not own the enclosing runner's workflow span.
+		return context.WithValue(ctx, invocationWorkflowKey{}, nil), noop.Span{}
+	}
+	ctx, span := startInvokeWorkflowSpan(ctx, root.Name(), sessionID)
+	if isWorkflowAgent(root) {
+		ctx = context.WithValue(ctx, invocationWorkflowKey{}, root.Name())
+	}
+	return ctx, span
+}
+
+// InstrumentInvocation keeps the runner's span open through event iteration,
+// including callbacks and deferred compaction.
+func InstrumentInvocation(ctx context.Context, root AgentLike, sessionID string, run func(context.Context) iter.Seq2[*session.Event, error]) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
-		ctx, span := startInvokeWorkflowSpan(ctx, root.Name(), sessionID)
+		ctx, span := StartInvocationSpan(ctx, root, sessionID)
 		var firstErr error
 		defer func() {
 			RecordError(span, firstErr)
