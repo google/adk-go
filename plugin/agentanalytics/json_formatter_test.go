@@ -873,6 +873,204 @@ func TestSanitizeURI(t *testing.T) {
 	}
 }
 
+func TestUnicodeWhitespaceCredentialRedaction(t *testing.T) {
+	separators := []struct {
+		name    string
+		literal string
+		escaped string
+	}{
+		{"vertical tab", "\v", `\u000b`},
+		{"next line", "\u0085", `\u0085`},
+		{"non-breaking space", "\u00a0", `\u00a0`},
+		{"em space", "\u2003", `\u2003`},
+		{"line separator", "\u2028", `\u2028`},
+		{"paragraph separator", "\u2029", `\u2029`},
+		{"ideographic space", "\u3000", `\u3000`},
+	}
+	for _, separator := range separators {
+		for _, scheme := range []struct {
+			name  string
+			token string
+		}{
+			{"Bearer", "SYNTHETIC_SECRET"},
+			{"Basic", "dXNlcjpTWU5USEVUSUNfU0VDUkVU"},
+		} {
+			for _, tt := range []struct {
+				name     string
+				raw      string
+				want     string
+				wantPart string
+			}{
+				{
+					name:     "literal",
+					raw:      scheme.name + separator.literal + scheme.token + separator.literal + "detail",
+					want:     scheme.name + " [REDACTED]" + separator.literal + "detail",
+					wantPart: scheme.name + " [REDACTED]" + separator.literal + "detail",
+				},
+				{
+					name:     "escaped",
+					raw:      scheme.name + separator.escaped + scheme.token,
+					want:     redactedSensitiveTextPlaceholder,
+					wantPart: redactedSensitiveTextPlaceholder,
+				},
+				{
+					name: "JSON string",
+					raw:  `{"message":"` + scheme.name + separator.escaped + scheme.token + `"}`,
+					want: `{"message":"` + scheme.name + ` [REDACTED]"}`,
+					// Raw JSON text fails closed when its escapes expose a credential.
+					wantPart: redactedSensitiveTextPlaceholder,
+				},
+			} {
+				t.Run(separator.name+"/"+scheme.name+"/"+tt.name, func(t *testing.T) {
+					if got := redactErrorMessage(tt.raw); got != tt.want {
+						t.Error("error message did not redact the credential while preserving surrounding text")
+					}
+					parts := FormatContentParts(singlePart(genai.NewPartFromText(tt.raw)), 1000)
+					if len(parts) != 1 {
+						t.Fatalf("FormatContentParts returned %d parts, want 1", len(parts))
+					}
+					if parts[0]["text"] != tt.wantPart {
+						t.Error("content part did not redact the credential while preserving surrounding text")
+					}
+				})
+			}
+		}
+	}
+
+	for _, tt := range []struct{ name, raw string }{
+		{"literal bearer prose", "the bearer\u00a0of\u00a0good news"},
+		{"escaped bearer prose", `the bearer\u00a0of good news`},
+		{"literal basic prose", "basic\u2003auth"},
+		{"escaped basic prose", `basic\u2003auth`},
+		{"JSON bearer prose", `{"message":"the bearer\u00a0of"}`},
+		{"JSON basic prose", `{"message":"basic\u2003auth"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			checkCredentialRedaction(t, tt.raw, tt.raw)
+		})
+	}
+}
+
+func checkCredentialRedaction(t *testing.T, raw, want string) {
+	t.Helper()
+	if redactErrorMessage(raw) != want {
+		t.Error("error redaction did not preserve the expected safe text")
+	}
+	parts := FormatContentParts(singlePart(genai.NewPartFromText(raw)), 1000)
+	if len(parts) != 1 {
+		t.Fatalf("FormatContentParts returned %d parts, want 1", len(parts))
+	}
+	if parts[0]["text"] != want {
+		t.Error("content redaction did not preserve the expected safe text")
+	}
+}
+
+func TestUnicodeWhitespaceNestedCredentialPatterns(t *testing.T) {
+	for _, separator := range " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000" {
+		sep := string(separator)
+		for _, scheme := range []string{"Bearer", "Basic"} {
+			prefix := scheme + sep
+			for _, tt := range []struct{ name, raw, want string }{
+				{"token key", "token: SYNTHETIC_SECRET", "token:[REDACTED]"},
+				{"token key before bearer", "token:Bearer SYNTHETIC_SECRET", "token:[REDACTED] [REDACTED]"},
+				{"token key before basic", "token:Basic dXNlcjpTWU5USEVUSUNfU0VDUkVU", "token:[REDACTED] [REDACTED]"},
+				{"state-prefixed token key", "user:token: SYNTHETIC_SECRET", "user:token:[REDACTED]"},
+				{"long temporary key", "temp:" + strings.Repeat("x", 160) + ": SYNTHETIC_SECRET", "temp:" + strings.Repeat("x", 160) + ":[REDACTED]"},
+				{"padded quoted key", `" password ": "SYNTHETIC_SECRET"`, `"password":"[REDACTED]"`},
+				{"compound key", "db.password: SYNTHETIC_SECRET", "db.password:[REDACTED]"},
+				{"quoted password key", `"password": "SYNTHETIC_SECRET"`, `"password":"[REDACTED]"`},
+				{"single quoted key", `'password': 'SYNTHETIC_SECRET'`, `'password':'[REDACTED]'`},
+				{"nested bearer", "Bearer SYNTHETIC_SECRET", "Bearer [REDACTED]"},
+				{"nested basic", "Basic dXNlcjpTWU5USEVUSUNfU0VDUkVU", "Basic [REDACTED]"},
+			} {
+				t.Run(strconv.QuoteRune(separator)+"/"+scheme+"/"+tt.name, func(t *testing.T) {
+					checkCredentialRedaction(t, prefix+tt.raw, prefix+tt.want)
+				})
+			}
+		}
+	}
+}
+
+func TestUnicodeWhitespaceEscapeSyntax(t *testing.T) {
+	for _, escaped := range []string{`\u00a0`, `\U00A0`, `\xa0`, `\XA0`, `\u0085`, `\x85`, `\u000b`, `\x0b`, `%0B`} {
+		for _, scheme := range []struct{ name, token string }{
+			{"Bearer", "SYNTHETIC_SECRET"},
+			{"Basic", "dXNlcjpTWU5USEVUSUNfU0VDUkVU"},
+		} {
+			t.Run(escaped+"/"+scheme.name, func(t *testing.T) {
+				checkCredentialRedaction(t, scheme.name+escaped+scheme.token, redactedSensitiveTextPlaceholder)
+			})
+		}
+	}
+}
+
+func TestUnicodeWhitespaceQuotedBearerValues(t *testing.T) {
+	for _, separator := range []string{" ", "\v", "\u00a0", "\u0085"} {
+		for _, tt := range []struct{ name, value string }{
+			{"double quoted pair", `"SYNTHETIC_PREFIX token=SYNTHETIC_SECRET"`},
+			{"single quoted pair", `'SYNTHETIC_PREFIX password: SYNTHETIC_SECRET'`},
+			{"quoted prose word", `"of"`},
+			{"terminal scheme word", "Bearer"},
+		} {
+			t.Run(strconv.Quote(separator)+"/"+tt.name, func(t *testing.T) {
+				checkCredentialRedaction(t, "Bearer"+separator+tt.value, "Bearer [REDACTED]")
+			})
+		}
+	}
+}
+
+func TestUnicodeWhitespacePreservesPercentBytes(t *testing.T) {
+	for _, escape := range []string{"%a0", "%85", "%C3%A0", "%C4%85", "%D0%A0", "%D1%85", `\u00e0`, `\x85`} {
+		t.Run(escape, func(t *testing.T) {
+			want := "100" + escape
+			if escape == `\x85` {
+				want = "100\u0085"
+			}
+			if canonicalizeCredentialMarker("100"+escape) != want {
+				t.Error("canonicalization changed a non-whitespace escape or percent byte")
+			}
+		})
+	}
+	for _, escape := range []string{"%A0", "%85", "%C3%A0", "%C4%85", "%D0%A0", "%D1%85"} {
+		t.Run("prose/"+escape, func(t *testing.T) {
+			raw := "the bearer" + escape + "bond is a financial instrument"
+			checkCredentialRedaction(t, raw, raw)
+		})
+		t.Run("URL/"+escape, func(t *testing.T) {
+			prefix := "GET https://example.com/cities/" + escape + "/items?api_key="
+			checkCredentialRedaction(t, prefix+"SYNTHETIC_SECRET failed", prefix+"%5BREDACTED%5D failed")
+		})
+	}
+}
+
+func TestUnicodeWhitespaceBearerTokenBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"bracket interior vertical tab", "Bearer\v[prefix\vdetail]", "Bearer [REDACTED]\vdetail]"},
+		{"bracket suffix vertical tab", "Bearer\v[REDACTED]SYNTHETIC_SECRET\vdetail", "Bearer [REDACTED]\vdetail"},
+		{"bracket interior NBSP", "Bearer\u00a0[prefix\u00a0detail]", "Bearer [REDACTED]\u00a0detail]"},
+		{"bracket interior NEL", "Bearer\u0085[prefix\u0085detail]", "Bearer [REDACTED]\u0085detail]"},
+		{"bracket suffix NBSP", "Bearer\u00a0[REDACTED]SYNTHETIC_SECRET\u00a0detail", "Bearer [REDACTED]\u00a0detail"},
+		{"bracket suffix NEL", "Bearer\u0085[REDACTED]SYNTHETIC_SECRET\u0085detail", "Bearer [REDACTED]\u0085detail"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if redactErrorMessage(tt.raw) != tt.want {
+				t.Error("error message redaction did not preserve text after the token boundary")
+			}
+			parts := FormatContentParts(singlePart(genai.NewPartFromText(tt.raw)), 1000)
+			if len(parts) != 1 {
+				t.Fatalf("FormatContentParts returned %d parts, want 1", len(parts))
+			}
+			if parts[0]["text"] != tt.want {
+				t.Error("content part redaction did not preserve text after the token boundary")
+			}
+		})
+	}
+}
+
 func TestRedactErrorMessage(t *testing.T) {
 	tests := []struct {
 		name string
