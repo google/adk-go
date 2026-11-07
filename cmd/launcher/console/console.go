@@ -124,7 +124,7 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			userInput, err := reader.ReadString('\n')
-			if len(userInput) > 0 {
+			if len(userInput) > 0 && (err == nil || errors.Is(err, io.EOF)) {
 				inputChan <- userInput
 			}
 			if err != nil {
