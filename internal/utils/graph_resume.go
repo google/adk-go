@@ -15,6 +15,9 @@
 package utils
 
 import (
+	"context"
+	"slices"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -35,7 +38,10 @@ func FunctionCallEvent(events session.Events, msg *genai.Content) *session.Event
 	if len(functionResponses) == 0 {
 		return nil
 	}
-	callID := functionResponses[0].ID
+	return findCallEvent(events, functionResponses[0].ID)
+}
+
+func findCallEvent(events session.Events, callID string) *session.Event {
 	for i := events.Len() - 1; i >= 0; i-- {
 		event := events.At(i)
 		for _, part := range FunctionCalls(event.Content) {
@@ -47,25 +53,58 @@ func FunctionCallEvent(events session.Events, msg *genai.Content) *session.Event
 	return nil
 }
 
-// GraphResumeIndex returns the index, among the sub-agents of ctx.Agent(), of
-// the one holding the graph workflow that made the call ctx.UserContent()
-// answers, or -1 if there is none. A sequential, parallel or loop agent starts
-// from that sub-agent: the ones ahead of or beside it never saw the call, and
-// an LLM agent among them fails on the unmatched response.
-func GraphResumeIndex(ctx agent.InvocationContext) int {
-	if len(FunctionResponses(ctx.UserContent())) == 0 {
-		return -1
+type graphResumeDoneKey struct{}
+
+// WithGraphResumeDone returns ctx with resuming marked as done, so
+// GraphResumeIndexes finds nothing for it or any agent run under it. A loop
+// agent runs its later passes with this context: the user content stays the
+// same for the whole turn, but only the first pass narrows. This only stops the
+// narrowing; a workflow on a later pass still sees the same message.
+func WithGraphResumeDone(ctx agent.InvocationContext) agent.InvocationContext {
+	return ctx.WithContext(context.WithValue(ctx, graphResumeDoneKey{}, true))
+}
+
+// GraphResumeIndexes returns, in ascending order, the indexes among the
+// sub-agents of ctx.Agent() of the ones holding a caller of the function
+// responses in ctx.UserContent(). It returns nil, meaning all sub-agents run,
+// when none of the callers is in a graph workflow under ctx.Agent(), or when
+// ctx is marked by WithGraphResumeDone.
+//
+// A parallel agent runs the selected sub-agents; a sequential or loop agent
+// starts from the lowest index. The ones skipped never saw the calls, and an
+// LLM agent among them fails on the unmatched responses.
+//
+// A node agent is found through SubAgents, so a workflow only matches if its
+// node agents are listed in workflowagent.Config.SubAgents. Otherwise all
+// sub-agents run.
+func GraphResumeIndexes(ctx agent.InvocationContext) []int {
+	if ctx.Value(graphResumeDoneKey{}) != nil {
+		return nil
 	}
-	ev := FunctionCallEvent(ctx.Session().Events(), ctx.UserContent())
-	if ev == nil {
-		return -1
-	}
-	for i, sub := range ctx.Agent().SubAgents() {
-		if calledFromGraph(sub, ev.Author, false) {
-			return i
+	selected := map[int]bool{}
+	inGraph := false
+	for _, response := range FunctionResponses(ctx.UserContent()) {
+		ev := findCallEvent(ctx.Session().Events(), response.ID)
+		if ev == nil {
+			continue
+		}
+		for i, sub := range ctx.Agent().SubAgents() {
+			if sub.FindAgent(ev.Author) == nil {
+				continue
+			}
+			selected[i] = true
+			inGraph = inGraph || calledFromGraph(sub, ev.Author, false)
 		}
 	}
-	return -1
+	if !inGraph {
+		return nil
+	}
+	indexes := make([]int, 0, len(selected))
+	for i := range selected {
+		indexes = append(indexes, i)
+	}
+	slices.Sort(indexes)
+	return indexes
 }
 
 // calledFromGraph reports whether the agent named author is in the tree of a,

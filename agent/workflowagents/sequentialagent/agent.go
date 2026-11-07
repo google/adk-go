@@ -85,8 +85,8 @@ type liveRunner interface {
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		subAgents := ctx.Agent().SubAgents()
-		if i := utils.GraphResumeIndex(ctx); i >= 0 {
-			subAgents = subAgents[i:]
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
 		}
 		for _, subAgent := range subAgents {
 			for event, err := range subAgent.Run(ctx) {

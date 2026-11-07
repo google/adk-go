@@ -81,8 +81,12 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 	)
 
 	subAgents := ctx.Agent().SubAgents()
-	if i := utils.GraphResumeIndex(ctx); i >= 0 {
-		subAgents = subAgents[i : i+1]
+	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+		selected := make([]agent.Agent, 0, len(indexes))
+		for _, i := range indexes {
+			selected = append(selected, subAgents[i])
+		}
+		subAgents = selected
 	}
 	for _, sa := range subAgents {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())

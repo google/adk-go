@@ -15,7 +15,11 @@
 package runner_test
 
 import (
+	"context"
+	"iter"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
 
@@ -264,6 +268,12 @@ func TestRun_FunctionResponseSkipsSiblingsOfGraphWorkflow(t *testing.T) {
 			},
 		},
 		{
+			name: "parallel, sibling after the workflow",
+			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
+				return parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{subAgents[1], subAgents[0]}}})
+			},
+		},
+		{
 			name: "loop",
 			newRoot: func(subAgents ...agent.Agent) (agent.Agent, error) {
 				return loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: subAgents}, MaxIterations: 1})
@@ -318,6 +328,262 @@ func TestRun_FunctionResponseSkipsSiblingsOfGraphWorkflow(t *testing.T) {
 			}
 			if tc.withAfter && !authors["after"] {
 				t.Error("resume did not run the sub-agent after the workflow")
+			}
+		})
+	}
+}
+
+// pausedWorkflow returns a graph workflow whose node ask asks for input and
+// whose node done runs after the answer.
+func pausedWorkflow(t *testing.T, name, ask, done string) agent.Agent {
+	t.Helper()
+	a, d := joinResumeAgent(t, ask, "ASK", true), joinResumeAgent(t, done, "DONE", false)
+	an, dn := joinResumeAgentNode(t, a), joinResumeAgentNode(t, d)
+	wf, err := workflowagent.New(workflowagent.Config{
+		Name: name, SubAgents: []agent.Agent{a, d},
+		Edges: []workflow.Edge{{From: workflow.Start, To: an}, {From: an, To: dn}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wf
+}
+
+// customAgent returns an agent that runs emit each time it runs and counts the
+// runs in *runs.
+func customAgent(t *testing.T, name string, runs *atomic.Int32, emit func(agent.InvocationContext, *session.Event)) agent.Agent {
+	t.Helper()
+	a, err := agent.New(agent.Config{Name: name, Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			runs.Add(1)
+			ev := session.NewEvent(ctx, ctx.InvocationID())
+			ev.Content = genai.NewContentFromText(name, genai.RoleModel)
+			if emit != nil {
+				emit(ctx, ev)
+			}
+			yield(ev, nil)
+		}
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func mustSequential(t *testing.T, name string, subAgents ...agent.Agent) agent.Agent {
+	t.Helper()
+	a, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func mustParallel(t *testing.T, name string, subAgents ...agent.Agent) agent.Agent {
+	t.Helper()
+	a, err := parallelagent.New(parallelagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+func mustLoop(t *testing.T, name string, maxIterations uint, subAgents ...agent.Agent) agent.Agent {
+	t.Helper()
+	a, err := loopagent.New(loopagent.Config{AgentConfig: agent.Config{Name: name, SubAgents: subAgents}, MaxIterations: maxIterations})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a
+}
+
+// runResumeTurn runs a first turn and then a turn with msg, and returns how
+// many events each author yielded on the second turn. onResume runs between
+// the two.
+func runResumeTurn(t *testing.T, root agent.Agent, msg *genai.Content, onResume func()) (map[string]int, error) {
+	t.Helper()
+	r, err := runner.New(runner.Config{AppName: "repro", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("first turn: %v", err)
+		}
+	}
+	if onResume != nil {
+		onResume()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	authors := map[string]int{}
+	for ev, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+		if err != nil {
+			return authors, err
+		}
+		authors[ev.Author]++
+	}
+	return authors, nil
+}
+
+// TestRun_FunctionResponseNarrowsOnlyFirstLoopPass checks that a composite
+// narrows to the workflow on the first pass of an enclosing loop only: every
+// later pass runs its full list.
+func TestRun_FunctionResponseNarrowsOnlyFirstLoopPass(t *testing.T) {
+	tests := []struct {
+		name    string
+		newRoot func(t *testing.T, other, wf agent.Agent) agent.Agent
+	}{
+		{"loop", func(t *testing.T, other, wf agent.Agent) agent.Agent {
+			return mustLoop(t, "root", 2, other, wf)
+		}},
+		{"sequential inside loop", func(t *testing.T, other, wf agent.Agent) agent.Agent {
+			return mustLoop(t, "root", 2, mustSequential(t, "inner", other, wf))
+		}},
+		{"parallel inside loop", func(t *testing.T, other, wf agent.Agent) agent.Agent {
+			return mustLoop(t, "root", 2, mustParallel(t, "inner", other, wf))
+		}},
+		{"loop inside loop", func(t *testing.T, other, wf agent.Agent) agent.Agent {
+			return mustLoop(t, "root", 2, mustLoop(t, "inner", 1, other, wf))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var runs atomic.Int32
+			other := customAgent(t, "other", &runs, nil)
+			root := tc.newRoot(t, other, pausedWorkflow(t, "wf", "b", "d"))
+			authors, err := runResumeTurn(t, root, resumeContent("b", workflow.WorkflowInputFunctionCallName, "approved"), func() { runs.Store(0) })
+			if err != nil {
+				t.Fatalf("resume error: %v", err)
+			}
+			if authors["d"] == 0 {
+				t.Errorf("resume did not reach downstream node d, authors = %v", authors)
+			}
+			if got := runs.Load(); got != 1 {
+				t.Errorf("other ran %d times on the resume turn, want 1 (second pass only)", got)
+			}
+		})
+	}
+}
+
+// TestRun_FunctionResponseEscalatorInLoopTerminates checks that an unbounded
+// loop ends on the resume turn when the sub-agent that escalates sits ahead of
+// the workflow. Skipping it on every pass would spin until the context ends.
+func TestRun_FunctionResponseEscalatorInLoopTerminates(t *testing.T) {
+	var runs atomic.Int32
+	esc := customAgent(t, "esc", &runs, func(ctx agent.InvocationContext, ev *session.Event) {
+		events := ctx.Session().Events()
+		for i := range events.Len() {
+			if a := events.At(i).Author; a == "b" || a == "d" {
+				ev.Actions.Escalate = true
+			}
+		}
+	})
+	root := mustLoop(t, "root", 0, mustSequential(t, "inner", esc, pausedWorkflow(t, "wf", "b", "d")))
+	authors, err := runResumeTurn(t, root, resumeContent("b", workflow.WorkflowInputFunctionCallName, "approved"), nil)
+	if err != nil {
+		t.Fatalf("resume did not terminate: authors = %v, err = %v", authors, err)
+	}
+	if authors["d"] == 0 {
+		t.Errorf("resume did not reach downstream node d, authors = %v", authors)
+	}
+}
+
+// TestRun_FunctionResponsesSelectEveryCaller checks that every response in the
+// message selects a sub-agent, whatever order the parts arrive in.
+func TestRun_FunctionResponsesSelectEveryCaller(t *testing.T) {
+	const externalCallID = "external-call"
+	externalCall := func(_ agent.InvocationContext, ev *session.Event) {
+		ev.Content = &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: externalCallID, Name: "external"}}}}
+	}
+	askA := resumeContent("a", workflow.WorkflowInputFunctionCallName, "approved").Parts[0]
+	askB := resumeContent("b", workflow.WorkflowInputFunctionCallName, "approved").Parts[0]
+	answerExternal := resumeContent(externalCallID, "external", "approved").Parts[0]
+
+	tests := []struct {
+		name    string
+		newRoot func(t *testing.T, wfA, wfB, other, caller agent.Agent) agent.Agent
+		parts   []*genai.Part
+		wantRan []string
+		// wantOther is how many times the sibling other runs on the resume turn.
+		wantOther int32
+	}{
+		{
+			name: "parallel resumes both workflows, not the sibling",
+			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
+				return mustParallel(t, "root", wfA, other, wfB)
+			},
+			parts:   []*genai.Part{askA, askB},
+			wantRan: []string{"c", "d"},
+		},
+		{
+			name: "parallel, parts in reverse order",
+			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
+				return mustParallel(t, "root", wfA, other, wfB)
+			},
+			parts:   []*genai.Part{askB, askA},
+			wantRan: []string{"c", "d"},
+		},
+		{
+			name: "sequential starts from the lowest index",
+			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
+				return mustSequential(t, "root", other, wfA, wfB)
+			},
+			parts:   []*genai.Part{askB, askA},
+			wantRan: []string{"c", "d"},
+		},
+		{
+			name: "loop starts from the lowest index",
+			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
+				return mustLoop(t, "root", 1, other, wfA, wfB)
+			},
+			parts:   []*genai.Part{askB, askA},
+			wantRan: []string{"c", "d"},
+		},
+		{
+			name: "parallel of sequences narrows inside each",
+			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
+				return mustParallel(t, "root", mustSequential(t, "seqA", other, wfA), wfB)
+			},
+			parts:   []*genai.Part{askA, askB},
+			wantRan: []string{"c", "d"},
+		},
+		{
+			name: "parallel also runs a sub-agent outside a graph that gets a response",
+			newRoot: func(t *testing.T, wfA, _, other, caller agent.Agent) agent.Agent {
+				return mustParallel(t, "root", wfA, other, caller)
+			},
+			parts:   []*genai.Part{askA, answerExternal},
+			wantRan: []string{"c", "caller"},
+		},
+		{
+			name: "no narrowing without a caller in a graph",
+			newRoot: func(t *testing.T, _, _, other, caller agent.Agent) agent.Agent {
+				return mustParallel(t, "root", other, caller)
+			},
+			parts:     []*genai.Part{resumeContent("unknown-call", "external", "approved").Parts[0], answerExternal},
+			wantRan:   []string{"caller"},
+			wantOther: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var otherRuns, callerRuns atomic.Int32
+			other := customAgent(t, "other", &otherRuns, nil)
+			caller := customAgent(t, "caller", &callerRuns, externalCall)
+			root := tc.newRoot(t, pausedWorkflow(t, "wfA", "a", "c"), pausedWorkflow(t, "wfB", "b", "d"), other, caller)
+			msg := &genai.Content{Role: genai.RoleUser, Parts: tc.parts}
+			authors, err := runResumeTurn(t, root, msg, func() { otherRuns.Store(0) })
+			if err != nil {
+				t.Fatalf("resume error: %v, authors = %v", err, authors)
+			}
+			for _, name := range tc.wantRan {
+				if authors[name] == 0 {
+					t.Errorf("%s did not run on the resume turn, authors = %v", name, authors)
+				}
+			}
+			if got := otherRuns.Load(); got != tc.wantOther {
+				t.Errorf("sibling other ran %d times on the resume turn, want %d", got, tc.wantOther)
 			}
 		})
 	}
