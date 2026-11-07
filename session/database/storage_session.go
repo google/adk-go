@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"google.golang.org/genai"
+	"gorm.io/gorm/schema"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
@@ -40,8 +41,12 @@ type storageSession struct {
 	Events []storageEvent `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID;constraint:OnDelete:CASCADE"`
 }
 
-// TableName explicitly sets the table name for the storageSession struct.
-func (storageSession) TableName() string {
+// TableName explicitly sets the table name for the storageSession struct,
+// respecting GORM's schema.Namer if provided.
+func (storageSession) TableName(namer schema.Namer) string {
+	if namer != nil {
+		return namer.TableName("sessions")
+	}
 	return "sessions"
 }
 
@@ -110,8 +115,12 @@ type storageEvent struct {
 	Session storageSession `gorm:"foreignKey:AppName,UserID,SessionID;references:AppName,UserID,ID"`
 }
 
-// TableName explicitly sets the table name for the storageEvent struct.
-func (storageEvent) TableName() string {
+// TableName explicitly sets the table name for the storageEvent struct,
+// respecting GORM's schema.Namer if provided.
+func (storageEvent) TableName(namer schema.Namer) string {
+	if namer != nil {
+		return namer.TableName("events")
+	}
 	return "events"
 }
 
@@ -400,8 +409,12 @@ type storageAppState struct {
 	UpdateTime time.Time `gorm:"precision:6"`
 }
 
-// TableName explicitly sets the table name for the AppState struct.
-func (storageAppState) TableName() string {
+// TableName explicitly sets the table name for the AppState struct,
+// respecting GORM's schema.Namer if provided.
+func (storageAppState) TableName(namer schema.Namer) string {
+	if namer != nil {
+		return namer.TableName("app_states")
+	}
 	return "app_states"
 }
 
@@ -413,7 +426,11 @@ type storageUserState struct {
 	UpdateTime time.Time `gorm:"precision:6"`
 }
 
-// TableName explicitly sets the table name for the UserState struct.
-func (storageUserState) TableName() string {
+// TableName explicitly sets the table name for the UserState struct,
+// respecting GORM's schema.Namer if provided.
+func (storageUserState) TableName(namer schema.Namer) string {
+	if namer != nil {
+		return namer.TableName("user_states")
+	}
 	return "user_states"
 }
