@@ -36,6 +36,7 @@ func TestIdentityRequestProcessor(t *testing.T) {
 		wantContains   []string
 		wantNotContain []string
 		wantNoSI       bool
+		wantUnchanged  bool
 	}{
 		{
 			name: "InjectsNameOnly",
@@ -78,6 +79,64 @@ func TestIdentityRequestProcessor(t *testing.T) {
 				s:     &State{Mode: ModeSingleTurn},
 			},
 			wantNoSI: true,
+		},
+		{
+			name: "NoOpWhenAllTransfersDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "isolated_agent"})),
+				s: &State{
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			wantNoSI: true,
+		},
+		{
+			name: "PreservesInstructionsWhenAllTransfersDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name:        "isolated_agent_with_instructions",
+					Description: "An isolated assistant.",
+				})),
+				s: &State{
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			existingSI:    genai.NewContentFromText("Be concise.", genai.RoleUser),
+			wantUnchanged: true,
+		},
+		{
+			name: "InjectsWhenOnlyParentTransferDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "peer_agent"})),
+				s:     &State{DisallowTransferToParent: true},
+			},
+			wantContains: []string{"Your internal name is \"peer_agent\"."},
+		},
+		{
+			name: "InjectsWhenOnlyPeerTransferDisabled",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{Name: "parent_agent"})),
+				s:     &State{DisallowTransferToPeers: true},
+			},
+			wantContains: []string{"Your internal name is \"parent_agent\"."},
+		},
+		{
+			name: "InjectsWhenParentAndPeerTransfersDisabledButHasSubAgent",
+			agent: &mockLLMAgent{
+				Agent: utils.Must(agent.New(agent.Config{
+					Name: "coordinator",
+					SubAgents: []agent.Agent{
+						utils.Must(agent.New(agent.Config{Name: "child_agent"})),
+					},
+				})),
+				s: &State{
+					DisallowTransferToParent: true,
+					DisallowTransferToPeers:  true,
+				},
+			},
+			wantContains: []string{"Your internal name is \"coordinator\"."},
 		},
 		{
 			name: "EmptyDescription",
@@ -175,7 +234,15 @@ func TestIdentityRequestProcessor(t *testing.T) {
 
 			if tt.wantNoSI {
 				if req.Config != nil && req.Config.SystemInstruction != nil {
-					t.Errorf("identityRequestProcessor() set SystemInstruction on non-LLM agent, got: %v", req.Config.SystemInstruction)
+					t.Error("identityRequestProcessor() set SystemInstruction, want none")
+				}
+				return
+			}
+
+			if tt.wantUnchanged {
+				if req.Config == nil || req.Config.SystemInstruction != tt.existingSI ||
+					len(tt.existingSI.Parts) != 1 || tt.existingSI.Parts[0].Text != "Be concise." {
+					t.Error("identityRequestProcessor() modified existing instructions")
 				}
 				return
 			}
