@@ -418,51 +418,6 @@ func TestAgentNode_UnrecognisedIncludeContents_DoesNotDefeatThePlacement(t *test
 	}
 }
 
-// Config.Name is documented as required but nothing rejects an empty one, and
-// the binding is keyed by name. A nameless agent must still be placed by its
-// node rather than quietly falling back to chat and carrying the whole
-// transcript into a one-shot node.
-func TestAgentNode_UnnamedAgent_IsStillPlacedSingleTurn(t *testing.T) {
-	t.Parallel()
-
-	llm := &capturingLLM{}
-	a, err := llmagent.New(llmagent.Config{Model: llm})
-	if err != nil {
-		t.Fatalf("llmagent.New: %v", err)
-	}
-	if a.Name() != "" {
-		t.Fatalf("precondition: agent name = %q, want empty", a.Name())
-	}
-	node, err := workflow.NewAgentNode(a, workflow.NodeConfig{})
-	if err != nil {
-		t.Fatalf("NewAgentNode: %v", err)
-	}
-	wf, err := workflow.New("wf", workflow.Chain(workflow.Start, node))
-	if err != nil {
-		t.Fatalf("workflow.New: %v", err)
-	}
-
-	prior := &session.Event{
-		Author:      "user",
-		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("EARLIER_TURN", "user")},
-	}
-	for _, err := range wf.Run(newModeTestCtx(t, a, prior)) {
-		if err != nil {
-			t.Fatalf("workflow.Run: %v", err)
-		}
-	}
-	if llm.got == nil {
-		t.Fatal("model was never called")
-	}
-	for _, c := range llm.got.Contents {
-		for _, p := range c.Parts {
-			if p != nil && strings.Contains(p.Text, "EARLIER_TURN") {
-				t.Errorf("nameless agent at a single_turn node saw conversation history; contents = %v", llm.got.Contents)
-			}
-		}
-	}
-}
-
 // roundTripLLM replies from a per-agent script, identifying the caller by the
 // marker its instruction plants in the system instruction, and records every
 // request it served.

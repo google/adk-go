@@ -80,9 +80,16 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 			continue
 		}
 
+		// Thought parts are the model's reasoning, not conversation, so they are
+		// neither searched nor returned, as in adk-python.
 		words := make(map[string]struct{})
 		var texts []string
+		var visibleParts []*genai.Part
 		for _, part := range event.LLMResponse.Content.Parts {
+			if part == nil || part.Thought {
+				continue
+			}
+			visibleParts = append(visibleParts, part)
 			if part.Text == "" {
 				continue
 			}
@@ -95,9 +102,12 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 			continue
 		}
 
+		content := *event.LLMResponse.Content
+		content.Parts = visibleParts
+
 		values = append(values, value{
 			id:             event.ID,
-			content:        event.LLMResponse.Content,
+			content:        &content,
 			author:         event.Author,
 			timestamp:      event.Timestamp,
 			customMetadata: event.CustomMetadata,
