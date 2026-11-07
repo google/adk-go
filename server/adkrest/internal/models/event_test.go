@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool/toolauth"
@@ -398,5 +399,24 @@ func TestToSessionEventTimestampBoundsMatchSessionDecoder(t *testing.T) {
 		if !got.Timestamp.Equal(decoded.Timestamp) {
 			t.Errorf("timestamp %v: ToSessionEvent = %v, session.Event decoder = %v", secs, got.Timestamp, decoded.Timestamp)
 		}
+	}
+}
+
+// TestMarshalEventWithNilPartDoesNotPanic: a nil entry in Content.Parts (a
+// null part in a stored create-session body reaches storage verbatim) must
+// serialize, not panic every endpoint that returns the session.
+func TestMarshalEventWithNilPartDoesNotPanic(t *testing.T) {
+	ev := session.Event{
+		ID: "e1",
+		LLMResponse: model.LLMResponse{
+			Content: &genai.Content{Parts: []*genai.Part{nil, genai.NewPartFromText("kept")}},
+		},
+	}
+	rawJSON, err := json.Marshal(models.FromSessionEvent(ev))
+	if err != nil {
+		t.Fatalf("json.Marshal(event with nil part) failed: %v", err)
+	}
+	if !bytes.Contains(rawJSON, []byte("kept")) {
+		t.Errorf("marshaled event lost the real part: %s", rawJSON)
 	}
 }

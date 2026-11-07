@@ -34,6 +34,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
+	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/server/adkrest/controllers"
@@ -778,5 +779,55 @@ func TestEventGraphHandlerRejectsANilAgent(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want %d (body %q)", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+}
+
+// TestEventGraphHandlerToleratesNilParts: a nil entry in an event's
+// Content.Parts (a null part stored from a request body) must not panic the
+// event-graph endpoint's function-call/response scans.
+func TestEventGraphHandlerToleratesNilParts(t *testing.T) {
+	const (
+		appName   = "test-app"
+		userID    = "test-user"
+		sessionID = "test-session"
+		eventID   = "test-event"
+	)
+
+	rootAgent, err := agent.New(agent.Config{Name: appName, Description: "graph test agent"})
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	event := &session.Event{ID: eventID, Author: appName}
+	event.LLMResponse.Content = &genai.Content{Parts: []*genai.Part{
+		nil,
+		{FunctionCall: &genai.FunctionCall{Name: "lookup"}},
+		{FunctionResponse: &genai.FunctionResponse{Name: "lookup"}},
+	}}
+	key := fakes.SessionKey{AppName: appName, UserID: userID, SessionID: sessionID}
+	sessionService := &fakes.FakeSessionService{
+		Sessions: map[fakes.SessionKey]fakes.TestSession{
+			key: {
+				Id:            key,
+				SessionState:  fakes.TestState{},
+				SessionEvents: fakes.TestEvents{event},
+				UpdatedAt:     time.Now(),
+			},
+		},
+	}
+
+	apiController := controllers.NewDebugAPIController(sessionService, agent.NewSingleLoader(rootAgent), nil)
+	req := httptest.NewRequest(http.MethodGet, "/events/"+eventID+"/graph", nil)
+	req = mux.SetURLVars(req, map[string]string{
+		"app_name":   appName,
+		"user_id":    userID,
+		"session_id": sessionID,
+		"event_id":   eventID,
+	})
+	rr := httptest.NewRecorder()
+
+	apiController.EventGraphHandler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %q)", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
