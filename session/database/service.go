@@ -23,10 +23,12 @@
 package database
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -330,6 +332,17 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 			return nil, fmt.Errorf("error on list sessions: %w", err)
 		}
 	}
+
+	// Sort here rather than with ORDER BY. SQLite stores update_time as RFC 3339
+	// text with the value's own offset, so it would compare text, not instants,
+	// for rows written in different zones.
+	slices.SortStableFunc(foundSessions, func(a, b storageSession) int {
+		return cmp.Or(
+			a.UpdateTime.Compare(b.UpdateTime),
+			strings.Compare(a.UserID, b.UserID),
+			strings.Compare(a.ID, b.ID),
+		)
+	})
 
 	// Create response sessions, transform the storageSessions into
 	responseSessions := make([]session.Session, 0, len(foundSessions))
