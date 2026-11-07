@@ -357,6 +357,11 @@ type uploadResolveOptions struct {
 // a caller that has to write the batch afterwards bounds ctx accordingly.
 // Nothing from the payloads is logged: only the event id, part index, byte size
 // and safe error metadata of parts that failed.
+// The failure of a deferred upload is not logged yet; clearDeferredUploads and
+// requeueDeferredUploads log it once it is known whether the upload is
+// retried. A write that panics before the caller settles the deferred uploads
+// leaves them to dropDeferredUploadsQuietly, which the caller defers. The
+// failure of an upload that is not deferred is logged at once.
 func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts uploadResolveOptions, batch []map[string]any) {
 	type rowSummary struct {
 		row     map[string]any
@@ -365,10 +370,12 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 	var tasks []*uploadTask
 	var summaries []rowSummary
 	var reservedTotal, deferredReserved int64
-	var staleDrops []deferredUploadFailure
+	// Deferred uploads that a caller left unsettled are dropped before the
+	// loop takes over the reservations of the queued payloads, so that a
+	// Logger that panics on their failures cannot leak any of those.
+	b.clearDeferredUploads(batch)
 	for i := range batch {
 		row := batch[i]
-		staleDrops = append(staleDrops, b.releaseDeferredRowUpload(row)...)
 		builder, _ := row[summaryBuilderKey].(*contentSummaryBuilder)
 		delete(row, summaryBuilderKey)
 		pending, ok := row[rawPartsKey].([]pendingUpload)
@@ -403,28 +410,23 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 			}
 		}
 	}
-	// A normal return leaves deferred rows with the caller, which still holds
-	// the batch. A panic does not: flushRunEnd has already taken the batch off
-	// the queue and has not stored it, and afterRun recovers the panic. Release
-	// those rows too, or their bytes stay reserved for the life of the process.
-	// This defer is registered first so it still runs when the log defer panics.
+	var completedNormally bool
 	defer func() {
-		if r := recover(); r != nil {
-			for i := range batch {
-				b.releaseDeferredRowUpload(batch[i])
+		if !completedNormally {
+			for _, row := range batch {
+				delete(row, deferredUploadsKey)
 			}
+			b.releaseUploadBytes(reservedTotal)
+		} else {
 			b.releaseUploadBytes(reservedTotal - deferredReserved)
-			panic(r)
 		}
-		b.releaseUploadBytes(reservedTotal - deferredReserved)
-	}()
-	defer func() {
-		logDroppedDeferredUploads(b.config.Logger, staleDrops)
 	}()
 
 	offloader := b.config.GCSOffloader
 	if len(tasks) == 0 || offloader == nil {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		if offloader == nil {
 			for _, t := range tasks {
 				if t.pending.isText {
@@ -441,12 +443,15 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 				s.builder.applyToRow(s.row)
 			}
 		}
+		completedNormally = true
 		return
 	}
 
 	uploadTimeout := cmp.Or(b.uploadTimeout, b.config.GCSUploadTimeout, gcsUploadTimeout)
 	if until := b.uploadCooldownUntil.Load(); until > 0 && time.Now().UnixNano() < until {
-		b.clearDeferredUploads(batch)
+		for _, row := range batch {
+			delete(row, deferredUploadsKey)
+		}
 		for _, t := range tasks {
 			t.err = errUploadCooldown
 			b.applyUpload(t, false)
@@ -454,6 +459,7 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 		for _, s := range summaries {
 			s.builder.applyToRow(s.row)
 		}
+		completedNormally = true
 		return
 	}
 	// The cause that WithTimeoutCause records tells which deadline ended the
@@ -483,7 +489,7 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 			defer func() { <-sem }()
 			var started bool
 			start := time.Now()
-			t.uri, t.err, started = b.upload(uploadCtx, offloader, t)
+			t.uri, started, t.err = b.upload(uploadCtx, offloader, t)
 			// Whether the deadline of uploadCtx had passed when the upload
 			// returned. An offloader can fail with a deadline error of its own,
 			// such as a per-request timeout, before that deadline, which then
@@ -546,7 +552,12 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 		deferred := false
 		if keepCutShort && t.err != nil {
 			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
-				d.pending = append(d.pending, t.pending)
+				eventID, _ := t.row[eventIDField].(string)
+				d.pending = append(d.pending, deferredUpload{
+					upload:     t.pending,
+					eventID:    eventID,
+					errSummary: safeUploadErrorSummary(t.err),
+				})
 				deferredReserved += t.pending.reserved
 				deferred = true
 			}
@@ -564,74 +575,71 @@ func (b *BatchProcessor) resolveUploadsForBatch(ctx context.Context, opts upload
 	for _, s := range summaries {
 		s.builder.applyToRow(s.row)
 	}
+	completedNormally = true
 }
 
-// deferredUploadFailure is the log context for one upload deferred in this pass.
-// It is not part of the queued payload.
-type deferredUploadFailure struct {
-	eventID string
-	partIdx int
-	size    int
-	summary string
+// deferredUpload is a failed upload of a batch whose uploads returned after
+// the caller's context had ended, by an expired deadline or a cancellation,
+// without pausing uploads across flushes: either one that the end of the
+// context cut short or skipped, or one that had already failed with another
+// error while a sibling upload kept the batch running.
+// Its failure is logged only once it is known whether the upload is retried:
+// when clearDeferredUploads drops it, or when requeueDeferredUploads queues it
+// again for the next flush.
+type deferredUpload struct {
+	upload     pendingUpload
+	eventID    string
+	errSummary string
 }
 
+// deferredRowUploads is what deferredUploadsKey holds: the deferred uploads of
+// a row, and what requeueDeferredUploads needs to put the row back in the form
+// it was queued in.
 type deferredRowUploads struct {
-	pending              []pendingUpload
+	pending              []deferredUpload
 	builder              *contentSummaryBuilder
 	nonDeferredTruncated bool
-	// failures is log context for uploads deferred in this pass. The retry
-	// sentence is logged from requeueDeferredUploads, only when that upload
-	// is actually put back on the row.
-	failures []deferredUploadFailure
 }
 
-// releaseDeferredRowUpload drops one row's deferred uploads and releases their
-// reserved bytes. Logging happens afterwards, so a panicking logger cannot
-// keep this row's reservation.
-func (b *BatchProcessor) releaseDeferredRowUpload(row map[string]any) []deferredUploadFailure {
-	d, ok := row[deferredUploadsKey].(*deferredRowUploads)
-	delete(row, deferredUploadsKey)
-	if !ok {
-		return nil
-	}
+// clearDeferredUploads drops the deferred uploads of the rows of batch, whose
+// parts keep the inline form that resolveUploadsForBatch gave them, and logs
+// their failures as final. The reservations of all the rows are released before
+// anything is logged, so that a panicking Logger cannot leak any of them.
+func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
+	b.logDeferredUploadFailures(b.dropDeferredUploadsQuietly(batch), false)
+}
+
+// dropDeferredUploadsQuietly drops the deferred uploads of the rows of batch
+// and releases their reservations without logging anything, and returns the
+// dropped uploads. A caller that writes a batch with deferred uploads defers
+// it, so that a write that panics, as a panicking Logger makes it do, before
+// the caller settles the deferred uploads cannot leak their reservations. On
+// a batch whose deferred uploads are settled, it does nothing.
+func (b *BatchProcessor) dropDeferredUploadsQuietly(batch []map[string]any) []deferredUpload {
+	var dropped []deferredUpload
 	var total int64
-	for _, u := range d.pending {
-		total += u.reserved
+	for _, row := range batch {
+		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
+		delete(row, deferredUploadsKey)
+		if !ok {
+			continue
+		}
+		for _, du := range d.pending {
+			total += du.upload.reserved
+		}
+		dropped = append(dropped, d.pending...)
 	}
 	b.releaseUploadBytes(total)
-	return d.failures
+	return dropped
 }
 
-func logDroppedDeferredUploads(logger Logger, failures []deferredUploadFailure) {
-	if logger == nil {
-		return
-	}
-	for _, f := range failures {
-		logger.Printf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-			f.eventID, f.partIdx, f.size, f.summary)
-	}
-}
-
-// clearDeferredRowUploads releases one row's deferred bytes without logging.
-// releaseRowUploads calls it once per row of a dropped batch, so a panicking
-// log here would skip the release of the rows after it. The failures stay on
-// the row, and clearDeferredUploads logs them once the batch is released.
-func (b *BatchProcessor) clearDeferredRowUploads(row map[string]any) {
-	if failures := b.releaseDeferredRowUpload(row); len(failures) > 0 {
-		row[deferredUploadsKey] = &deferredRowUploads{failures: failures}
-	}
-}
-
-func (b *BatchProcessor) clearDeferredUploads(batch []map[string]any) {
-	var failures []deferredUploadFailure
-	for _, row := range batch {
-		failures = append(failures, b.releaseDeferredRowUpload(row)...)
-	}
-	logDroppedDeferredUploads(b.config.Logger, failures)
-}
-
+// requeueDeferredUploads queues the deferred uploads of the rows of batch
+// again, with their parts back in the form they were queued in, so that the
+// next flush of batch retries them; the uploads keep their reservations. Their
+// failures are logged as pending that retry, but only once every row has been
+// requeued, so that a panicking Logger cannot leave a row without its uploads.
 func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
-	var failures []deferredUploadFailure
+	var requeued []deferredUpload
 	for _, row := range batch {
 		d, ok := row[deferredUploadsKey].(*deferredRowUploads)
 		delete(row, deferredUploadsKey)
@@ -639,8 +647,10 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 			continue
 		}
 		parts, _ := row[columnContentParts].([]map[string]any)
+		pending := make([]pendingUpload, 0, len(d.pending))
 		hasText := false
-		for _, u := range d.pending {
+		for _, du := range d.pending {
+			u := du.upload
 			if u.slot >= 0 && u.slot < len(parts) && !u.isText {
 				parts[u.slot]["text"] = inlineDataText
 			}
@@ -650,8 +660,9 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 					d.builder.omitTextFromSummary(u.contentOrd, u.partIdx)
 				}
 			}
+			pending = append(pending, u)
 		}
-		row[rawPartsKey] = d.pending
+		row[rawPartsKey] = pending
 		if d.builder != nil {
 			if hasText {
 				d.builder.applyToRow(row)
@@ -660,14 +671,16 @@ func (b *BatchProcessor) requeueDeferredUploads(batch []map[string]any) {
 		} else if hasText {
 			row["is_truncated"] = d.nonDeferredTruncated
 		}
-		failures = append(failures, d.failures...)
+		requeued = append(requeued, d.pending...)
 	}
-	// flushRunEnd stores the batch only after this function returns. Persist it
-	// first so a panicking logger cannot drop the batch or its reservations.
-	b.deferredBatch = batch
-	for _, f := range failures {
-		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
-			f.eventID, f.partIdx, f.size, f.summary)
+	b.logDeferredUploadFailures(requeued, true)
+}
+
+// logDeferredUploadFailures logs the failures of deferred uploads that were
+// dropped or, if retry is true, requeued.
+func (b *BatchProcessor) logDeferredUploadFailures(uploads []deferredUpload, retry bool) {
+	for _, du := range uploads {
+		b.logUploadFailure(du.eventID, du.upload, du.errSummary, retry)
 	}
 }
 
@@ -765,14 +778,14 @@ func stripURIQueries(msg string) string {
 // panic in it is turned into an error that names only its type. Once ctx is
 // done the offloader is no longer called, which is what ends the uploads that
 // were still waiting for their turn.
-func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, err error, started bool) {
+func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffloader, t *uploadTask) (uri string, started bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			uri, err = "", offloaderPanicError{valueType: fmt.Sprintf("%T", r)}
 		}
 	}()
 	if cerr := ctx.Err(); cerr != nil {
-		return "", cerr, false
+		return "", false, cerr
 	}
 	started = true
 	uri, err = offloader.UploadContent(ctx, GCSUploadRequest{
@@ -780,12 +793,23 @@ func (b *BatchProcessor) upload(ctx context.Context, offloader GCSContentOffload
 		Data:        t.pending.payload(),
 		ContentType: t.pending.contentType(),
 	})
-	return uri, err, started
+	return uri, started, err
 }
 
-// applyUpload rewrites the content_parts entry of a successful upload to
-// refer to the object, and logs a failed one. The entry already has the MIME
-// type of the part, as it was queued with the one that is uploaded.
+// applyUpload rewrites the content_parts entry of a successful upload to refer
+// to the object, or records the fallback state of a failed upload on the row
+// and part. When err == nil and uri is a gs:// URI, the inline payload is
+// replaced with the GCS reference: the part carries storage_mode, uri, and
+// object_ref, a text part keeps a textPreview, and the summary drops the text
+// part (the entry already has the MIME type of the part, as it was queued with
+// the one that is uploaded). Otherwise the failure is logged at once unless the
+// upload is deferred (whether a deferred upload is retried is only known later,
+// so its failure is logged when clearDeferredUploads drops it or
+// requeueDeferredUploads queues it again), and the fallback state is recorded:
+// for a binary part the part text becomes [UPLOAD FAILED]; for a text part the
+// inline text is kept, the summary retains it via retainInlineSummary, and
+// is_truncated is set to true when fallbackTruncated indicates the inline
+// fallback was itself truncated.
 func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	u := t.pending
 	err := t.err
@@ -793,23 +817,6 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 		err = errInvalidGCSURI
 	}
 	if err != nil {
-		eventID, _ := t.row[eventIDField].(string)
-		summary := safeUploadErrorSummary(err)
-		if deferred {
-			// Logged later: the plain failure when the upload is dropped, or
-			// the retry sentence when requeueDeferredUploads puts it back.
-			if d, ok := t.row[deferredUploadsKey].(*deferredRowUploads); ok {
-				d.failures = append(d.failures, deferredUploadFailure{
-					eventID: eventID,
-					partIdx: u.partIdx,
-					size:    u.size(),
-					summary: summary,
-				})
-			}
-		} else {
-			b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
-				eventID, u.partIdx, u.size(), summary)
-		}
 		if !u.isText {
 			t.part["text"] = uploadFailedText
 		} else {
@@ -820,6 +827,10 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 				fallbackText, _ := t.part["text"].(string)
 				t.builder.retainInlineSummary(u.contentOrd, u.partIdx, fallbackText, u.fallbackTruncated)
 			}
+		}
+		if !deferred {
+			eventID, _ := t.row[eventIDField].(string)
+			b.logUploadFailure(eventID, u, safeUploadErrorSummary(err), false)
 		}
 		return
 	}
@@ -834,6 +845,19 @@ func (b *BatchProcessor) applyUpload(t *uploadTask, deferred bool) {
 	} else {
 		t.part["text"] = mediaOffloadedText
 	}
+}
+
+// logUploadFailure logs that the upload of part u of the row of eventID
+// failed, with its byte size and errSummary but nothing from its payload.
+// retry reports whether the upload is retried on the next flush.
+func (b *BatchProcessor) logUploadFailure(eventID string, u pendingUpload, errSummary string, retry bool) {
+	if retry {
+		b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline pending retry on next flush",
+			eventID, u.partIdx, u.size(), errSummary)
+		return
+	}
+	b.config.logf("agentanalytics: GCS upload failed for event %s part %d (%d bytes): %s; keeping the part inline",
+		eventID, u.partIdx, u.size(), errSummary)
 }
 
 // gcsOffloader is the GCSContentOffloader that stores objects in a Cloud
