@@ -827,11 +827,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					// pushError would park here until the consumer pulls from
 					// outputCh, but the consumer may already be blocked in Send,
 					// which only Close can release. Buffer the terminal error so
-					// the iterator can deliver it, then close the session to end
-					// waits in Send and recvIter.
+					// the iterator can deliver it; the deferred Close above ends
+					// waits in Send and recvIter when this goroutine returns.
 					sess.setFinalError(ce.err)
 					cleanup()
-					sess.Close()
 					return
 				case <-sess.done:
 					cleanup()

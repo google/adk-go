@@ -728,10 +728,6 @@ type longRunningMockTool struct{ mockFunctionTool }
 
 func (*longRunningMockTool) IsLongRunning() bool { return true }
 
-// TestRunLiveMarksLongRunningCalls checks that a call to a long-running tool
-// received in live mode is recorded with its ID in LongRunningToolIDs. The
-// tool returns no response, so without the marker prompt assembly would treat
-// the pending call as unanswered and drop it on a later turn.
 // TestRunLiveToolResponseSharesSenderGoroutine pins that a tool response
 // reaches the model through the sender goroutine — the same single writer that
 // sends user input.
@@ -863,8 +859,9 @@ func TestRunLiveToolResponseSharesSenderGoroutine(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			mu.Lock()
-			t.Fatalf("tool response never reached the wire; payloads: %v", payloads)
+			snapshot := append([]string(nil), payloads...)
 			mu.Unlock()
+			t.Fatalf("tool response never reached the wire; payloads: %v", snapshot)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -905,6 +902,10 @@ func TestRunLiveToolResponseSharesSenderGoroutine(t *testing.T) {
 	assertNoRunLiveLeak(t, baseline)
 }
 
+// TestRunLiveMarksLongRunningCalls checks that a call to a long-running tool
+// received in live mode is recorded with its ID in LongRunningToolIDs. The
+// tool returns no response, so without the marker prompt assembly would treat
+// the pending call as unanswered and drop it on a later turn.
 func TestRunLiveMarksLongRunningCalls(t *testing.T) {
 	const toolCall = `{"toolCall":{"functionCalls":[{"id":"lr_1","name":"long_job","args":{}},{"id":"plain_1","name":"plain_job","args":{}}]}}`
 	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
@@ -1098,7 +1099,7 @@ gotResponse:
 		}
 	}
 
-	// Give a hypothetical stuck sender a window to show its behaviour; in the
+	// Give a hypothetical stuck sender a window to show its behavior; in the
 	// fixed flow none can appear.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
