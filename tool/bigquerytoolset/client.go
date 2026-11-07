@@ -35,9 +35,10 @@ import (
 )
 
 const (
-	bigqueryScope       = "https://www.googleapis.com/auth/bigquery"
-	defaultEndpoint     = "https://bigquery.googleapis.com/bigquery/v2/"
-	defaultMTLSEndpoint = "https://bigquery.mtls.googleapis.com/bigquery/v2/"
+	bigqueryScope           = "https://www.googleapis.com/auth/bigquery"
+	defaultEndpointTemplate = "https://bigquery.UNIVERSE_DOMAIN/bigquery/v2/"
+	defaultMTLSEndpoint     = "https://bigquery.mtls.googleapis.com/bigquery/v2/"
+	defaultUniverseDomain   = "googleapis.com"
 
 	// userAgentPrefix matches adk-python's BQ_USER_AGENT, so BigQuery can
 	// attribute traffic from both to the ADK BigQuery tools.
@@ -55,8 +56,9 @@ type client struct {
 func newClient(ctx context.Context, cfg Config) (*client, error) {
 	opts := []option.ClientOption{
 		option.WithScopes(bigqueryScope),
-		internaloption.WithDefaultEndpoint(defaultEndpoint),
+		internaloption.WithDefaultEndpointTemplate(defaultEndpointTemplate),
 		internaloption.WithDefaultMTLSEndpoint(defaultMTLSEndpoint),
+		internaloption.WithDefaultUniverseDomain(defaultUniverseDomain),
 	}
 	if cfg.ExternalAccessTokenKey != "" {
 		// Each call adds the token from the session state, so the shared
@@ -190,10 +192,4 @@ func errorResult(err error) map[string]any {
 		"status":        "ERROR",
 		"error_details": err.Error(),
 	}
-}
-
-// isContextError reports whether err ended the call because its context was
-// canceled or expired, rather than because of BigQuery.
-func isContextError(ctx context.Context, err error) bool {
-	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }

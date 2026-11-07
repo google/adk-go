@@ -16,7 +16,12 @@ package bigquerytoolset
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"maps"
 	"net/http"
@@ -215,7 +220,7 @@ func TestToolset_ToolNames(t *testing.T) {
 
 func TestToolset_FilterToolset(t *testing.T) {
 	f := newFakeBigQuery(t, nil)
-	ts := tool.FilterToolset(newTestToolset(t, Config{ClientOptions: f.clientOptions()}), tool.StringPredicate([]string{"list_dataset_ids"}))
+	ts := tool.FilterToolset(newTestToolset(t, Config{ClientOptions: f.clientOptions()}), tool.AllowedToolsPredicate([]string{"list_dataset_ids"}))
 
 	tools, err := ts.Tools(nil)
 	if err != nil {
@@ -289,10 +294,73 @@ func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
 	}
 }
 
+func TestToolset_SingleDefaultIDKeepsOtherArgRequired(t *testing.T) {
+	f := newFakeBigQuery(t, nil)
+	tests := []struct {
+		name         string
+		cfg          Config
+		tool         string
+		wantRequired []string
+		wantDesc     map[string]string
+	}{
+		{
+			name:         "project default on get_dataset_info",
+			cfg:          Config{DefaultProjectID: "my-project"},
+			tool:         "get_dataset_info",
+			wantRequired: []string{"dataset_id"},
+			wantDesc:     map[string]string{"project_id": "Defaults to 'my-project' when not provided.", "dataset_id": ""},
+		},
+		{
+			name:         "dataset default on get_dataset_info",
+			cfg:          Config{DefaultDatasetID: "my_dataset"},
+			tool:         "get_dataset_info",
+			wantRequired: []string{"project_id"},
+			wantDesc:     map[string]string{"project_id": "", "dataset_id": "Defaults to 'my_dataset' when not provided."},
+		},
+		{
+			name:         "dataset default on list_dataset_ids",
+			cfg:          Config{DefaultDatasetID: "my_dataset"},
+			tool:         "list_dataset_ids",
+			wantRequired: []string{"project_id"},
+			wantDesc:     map[string]string{"project_id": ""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			cfg.ClientOptions = f.clientOptions()
+			schema := declarationSchema(t, toolByName(t, newTestToolset(t, cfg), tc.tool).Declaration())
+			if diff := cmp.Diff(tc.wantRequired, schema.Required); diff != "" {
+				t.Errorf("required mismatch (-want +got):\n%s", diff)
+			}
+			for prop, want := range tc.wantDesc {
+				if got := schema.Properties[prop].Description; got != want {
+					t.Errorf("property %q description = %q, want %q", prop, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestListDatasetIDs_DefaultProjectID(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/my-project/datasets": {body: `{"datasets":[{"datasetReference":{"projectId":"my-project","datasetId":"a"}}]}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+
+	got := run(t, toolByName(t, ts, "list_dataset_ids"), map[string]any{})
+
+	want := map[string]any{"result": []any{"a"}}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestToolset_DefaultIDsFillMissingArgs(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
-		"GET /bigquery/v2/projects/my-project/datasets/my_dataset": {body: `{"id":"my-project:my_dataset"}`},
-		"GET /bigquery/v2/projects/other/datasets/my_dataset":      {body: `{"id":"other:my_dataset"}`},
+		"GET /bigquery/v2/projects/my-project/datasets/my_dataset":    {body: `{"id":"my-project:my_dataset"}`},
+		"GET /bigquery/v2/projects/other/datasets/my_dataset":         {body: `{"id":"other:my_dataset"}`},
+		"GET /bigquery/v2/projects/my-project/datasets/other_dataset": {body: `{"id":"my-project:other_dataset"}`},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project", DefaultDatasetID: "my_dataset"})
 	getDataset := toolByName(t, ts, "get_dataset_info")
@@ -305,6 +373,7 @@ func TestToolset_DefaultIDsFillMissingArgs(t *testing.T) {
 		{name: "omitted", args: map[string]any{}, want: "my-project:my_dataset"},
 		{name: "empty", args: map[string]any{"project_id": "", "dataset_id": ""}, want: "my-project:my_dataset"},
 		{name: "model names another project", args: map[string]any{"project_id": "other"}, want: "other:my_dataset"},
+		{name: "model names another dataset", args: map[string]any{"dataset_id": "other_dataset"}, want: "my-project:other_dataset"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -356,30 +425,20 @@ func TestListDatasetIDs_EmptyProject(t *testing.T) {
 	}
 }
 
-// TestGetInfoTools_ReturnRESTResource checks that the info tools return the
-// resource as the BigQuery REST API represents it, like adk-python's
-// to_api_repr and _properties, including fields this package does not model.
-func TestGetInfoTools_ReturnRESTResource(t *testing.T) {
+// TestGetDatasetInfo_ReturnsRESTResource checks that the tool returns the
+// dataset as the BigQuery REST API represents it, like adk-python's to_api_repr,
+// including fields this package does not model.
+func TestGetDatasetInfo_ReturnsRESTResource(t *testing.T) {
 	datasetBody := `{"kind":"bigquery#dataset","id":"p:d","datasetReference":{"projectId":"p","datasetId":"d"},"creationTime":"1640891845643","location":"US","maxTimeTravelHours":"168"}`
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets/d": {body: datasetBody},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
-	tests := []struct {
-		tool string
-		args map[string]any
-		want string
-	}{
-		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "d"}, want: datasetBody},
-	}
-	for _, tc := range tests {
-		t.Run(tc.tool, func(t *testing.T) {
-			got := run(t, toolByName(t, ts, tc.tool), tc.args)
-			if diff := cmp.Diff(decodeJSON(t, tc.want), roundTrip(t, got)); diff != "" {
-				t.Errorf("Run() mismatch (-want +got):\n%s", diff)
-			}
-		})
+	got := run(t, toolByName(t, ts, "get_dataset_info"), map[string]any{"project_id": "p", "dataset_id": "d"})
+
+	if diff := cmp.Diff(decodeJSON(t, datasetBody), roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -418,19 +477,193 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 // TestTools_CanceledContextIsAnError checks that a canceled invocation is not
 // reported to the model as a BigQuery failure.
 func TestTools_CanceledContextIsAnError(t *testing.T) {
+	cause := errors.New("my-cause")
+	tests := []struct {
+		name    string
+		newCtx  func(context.Context) context.Context
+		wantErr error
+	}{
+		{
+			name: "canceled",
+			newCtx: func(ctx context.Context) context.Context {
+				ctx, cancel := context.WithCancel(ctx)
+				cancel()
+				return ctx
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "canceled with a cause",
+			newCtx: func(ctx context.Context) context.Context {
+				ctx, cancel := context.WithCancelCause(ctx)
+				cancel(cause)
+				return ctx
+			},
+			wantErr: context.Canceled,
+		},
+		{
+			name: "expired with a cause",
+			newCtx: func(ctx context.Context) context.Context {
+				ctx, cancel := context.WithTimeoutCause(ctx, 0, cause)
+				t.Cleanup(cancel)
+				return ctx
+			},
+			wantErr: context.DeadlineExceeded,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeBigQuery(t, map[string]fakeResponse{
+				"GET /bigquery/v2/projects/p/datasets": {body: `{}`},
+			})
+			ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+
+			got, err := toolByName(t, ts, "list_dataset_ids").Run(newToolContext(t, tc.newCtx(t.Context()), nil), map[string]any{"project_id": "p"})
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("Run() = %v, %v, want error %v", got, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTools_DeadlineWhileReadingBodyIsAnError checks a deadline that expires
+// after the response headers arrived. For a non-2xx response
+// googleapi.CheckResponse drops the read error, so the error from run does not
+// say the context ended.
+func TestTools_DeadlineWhileReadingBodyIsAnError(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "1000")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte(`{`))
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(5 * time.Second):
+				}
+			}))
+			t.Cleanup(stalled.Close)
+			ts := newTestToolset(t, Config{ClientOptions: []option.ClientOption{
+				option.WithEndpoint(stalled.URL + "/bigquery/v2/"),
+				option.WithoutAuthentication(),
+			}})
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+
+			got, err := toolByName(t, ts, "list_dataset_ids").Run(newToolContext(t, ctx, nil), map[string]any{"project_id": "p"})
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Run() = %v, %v, want error %v", got, err, context.DeadlineExceeded)
+			}
+		})
+	}
+}
+
+// TestNewClient_Endpoint checks the endpoint without touching the network.
+func TestNewClient_Endpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []option.ClientOption
+		env  string
+		want string
+	}{
+		{name: "default", want: "https://bigquery.googleapis.com/bigquery/v2/"},
+		{name: "universe domain option", opts: []option.ClientOption{option.WithUniverseDomain("example.com")}, want: "https://bigquery.example.com/bigquery/v2/"},
+		{name: "universe domain environment variable", env: "example.com", want: "https://bigquery.example.com/bigquery/v2/"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", tc.env)
+			c, err := newClient(t.Context(), Config{ClientOptions: append(tc.opts, option.WithoutAuthentication())})
+			if err != nil {
+				t.Fatalf("newClient() error = %v", err)
+			}
+			if c.endpoint != tc.want {
+				t.Errorf("endpoint = %q, want %q", c.endpoint, tc.want)
+			}
+		})
+	}
+}
+
+// TestTools_TokenFetchUsesBigQueryScope runs a service account token fetch
+// against a fake token server.
+func TestTools_TokenFetchUsesBigQueryScope(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		scopes []string
+	)
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parsing the token request: %v", err)
+		}
+		parts := strings.Split(r.PostForm.Get("assertion"), ".")
+		if len(parts) != 3 {
+			t.Errorf("assertion has %d parts, want 3", len(parts))
+			return
+		}
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			t.Errorf("decoding the assertion: %v", err)
+		}
+		var claims struct {
+			Scope string `json:"scope"`
+		}
+		if err := json.Unmarshal(payload, &claims); err != nil {
+			t.Errorf("parsing the assertion: %v", err)
+		}
+		mu.Lock()
+		scopes = append(scopes, claims.Scope)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer","expires_in":3600}`))
+	}))
+	t.Cleanup(tokenServer.Close)
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets": {body: `{}`},
 	})
-	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
-	ctx, cancel := context.WithCancel(t.Context())
-	toolCtx := newToolContext(t, ctx, nil)
-	cancel()
+	ts := newTestToolset(t, Config{ClientOptions: []option.ClientOption{
+		option.WithEndpoint(f.server.URL + "/bigquery/v2/"),
+		option.WithAuthCredentialsJSON(option.ServiceAccount, serviceAccountJSON(t, tokenServer.URL)),
+	}})
 
-	_, err := toolByName(t, ts, "list_dataset_ids").Run(toolCtx, map[string]any{"project_id": "p"})
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("Run() error = %v, want context.Canceled", err)
+	got := run(t, toolByName(t, ts, "list_dataset_ids"), map[string]any{"project_id": "p"})
+	if got["status"] == "ERROR" {
+		t.Fatalf("Run() = %v, want a result", got)
 	}
+	if auth := f.lastRequest().Header.Get("Authorization"); auth != "Bearer tok" {
+		t.Errorf("Authorization = %q, want the fetched token", auth)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"https://www.googleapis.com/auth/bigquery"}; !slices.Equal(scopes, want) {
+		t.Errorf("token request scopes = %v, want %v", scopes, want)
+	}
+}
+
+func serviceAccountJSON(t *testing.T, tokenURI string) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(map[string]string{
+		"type":           "service_account",
+		"project_id":     "p",
+		"private_key_id": "key-id",
+		"private_key":    string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
+		"client_email":   "sa@p.iam.gserviceaccount.com",
+		"client_id":      "1",
+		"token_uri":      tokenURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func TestTools_UserAgent(t *testing.T) {

@@ -43,8 +43,9 @@ var (
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
-// are available. ctx is used only to set up the client. The toolset is safe
-// for concurrent use.
+// are available. The client ignores the cancellation of ctx but keeps its
+// values for fetching credentials later. The toolset is safe for concurrent
+// use.
 func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -118,7 +119,7 @@ func newTool[TArgs any](b *bigQuery, name, description string, run func(agent.Co
 	}, func(ctx agent.Context, args TArgs) (any, error) {
 		result, err := run(ctx, args)
 		if err != nil {
-			if isContextError(ctx, err) {
+			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			return errorResult(err), nil

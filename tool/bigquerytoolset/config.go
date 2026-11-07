@@ -25,7 +25,7 @@ import (
 // project and dataset in every call.
 type Config struct {
 	// ClientOptions configure the connection to the BigQuery API, for example
-	// [option.WithCredentialsFile], [option.WithTokenSource] or
+	// [option.WithAuthCredentialsFile], [option.WithTokenSource] or
 	// [option.WithEndpoint]. Without credentials among them, the tools use
 	// Application Default Credentials with the BigQuery scope.
 	ClientOptions []option.ClientOption
@@ -34,14 +34,17 @@ type Config struct {
 	// OAuth access token each call authenticates with, for an application that
 	// obtains the end user's token itself. A call fails, and the model is told
 	// so, when the state has no non-empty string under the key. New rejects
-	// ClientOptions that provide credentials alongside it, but cannot see
-	// inside an [option.WithHTTPClient]: such a client must not authenticate
-	// requests itself, or its credentials replace the end user's.
+	// [option.WithAPIKey], [option.WithTokenSource], [option.WithCredentials],
+	// [option.WithAuthCredentials], [option.WithAuthCredentialsFile] and
+	// [option.WithAuthCredentialsJSON] alongside it. It cannot see inside an
+	// [option.WithHTTPClient]: such a client must not authenticate requests
+	// itself, or its credentials replace the end user's.
 	ExternalAccessTokenKey string
 
-	// ApplicationName is added to the user agent of every BigQuery request,
-	// so BigQuery usage can be attributed to the agent. It must not contain
-	// spaces or characters a request header cannot carry.
+	// ApplicationName is added to the user agent of BigQuery requests, so
+	// BigQuery usage can be attributed to the agent. An [option.WithUserAgent]
+	// in ClientOptions replaces the whole header, including this name. It must
+	// not contain spaces or characters a request header cannot carry.
 	ApplicationName string
 
 	// DefaultProjectID is the project the tools use when the model does not
