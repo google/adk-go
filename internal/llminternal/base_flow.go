@@ -637,8 +637,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			// what unblocks them (issue #1152).
 			errChan := make(chan liveConnError)
 
-			// Send preprocessed content directly to model if any exists after early preprocessing
-			if len(nreq.Contents) > 0 {
+			// Send preprocessed content directly to model if any exists after
+			// early preprocessing, unless this connection resumes a session: the
+			// server restores that session's history from the handle, so
+			// replaying it would put the conversation in twice and, when it ends
+			// on a user turn, have the model answer that turn again. This
+			// matches adk-python, which skips send_history while it holds a
+			// resumption handle (live/_live_llm_flow.py).
+			resuming := liveConnectConfig.SessionResumption != nil && liveConnectConfig.SessionResumption.Handle != ""
+			if len(nreq.Contents) > 0 && !resuming {
 				if err := liveConn.SendHistory(ctx, nreq.Contents); err != nil {
 					log.Printf("failed to send history: %v\n", err) //nolint:forbidigo // pre-slog call site
 					sess.pushError(err)
