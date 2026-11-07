@@ -15,8 +15,6 @@
 package loadartifactstool_test
 
 import (
-	"errors"
-	"io/fs"
 	"strings"
 	"testing"
 
@@ -541,14 +539,37 @@ func TestLoadArtifactsTool_ProcessRequest_LoadError(t *testing.T) {
 			}
 
 			err := requestProcessor.ProcessRequest(tc, llmRequest)
-			if err == nil {
-				t.Fatal("ProcessRequest should return an error when an artifact cannot be loaded, but got nil")
+			if err != nil {
+				t.Fatalf("ProcessRequest() error = %v, want nil; a failed load must not abort the run", err)
 			}
-			if got := strings.Count(err.Error(), "failed to load artifact"); got != 1 {
-				t.Errorf("error names the failure %d times, want once: %v", got, err)
+			if got, want := len(llmRequest.Contents), 1+len(tt.artifactNames); got != want {
+				t.Fatalf("len(Contents) = %d, want %d", got, want)
 			}
-			if !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("errors.Is(err, fs.ErrNotExist) = false, want true, got: %v", err)
+
+			for i, artifactName := range tt.artifactNames {
+				content := llmRequest.Contents[1+i]
+				if content.Role != genai.RoleUser {
+					t.Errorf("content for %q has role %q, want %q", artifactName, content.Role, genai.RoleUser)
+				}
+				if artifactName == "doc1.txt" {
+					if len(content.Parts) != 2 {
+						t.Fatalf("content for %q has %d parts, want 2", artifactName, len(content.Parts))
+					}
+					if got, want := content.Parts[1].Text, "This is the content of doc1.txt"; got != want {
+						t.Errorf("loaded content = %q, want %q", got, want)
+					}
+					continue
+				}
+				if len(content.Parts) != 1 {
+					t.Fatalf("failure content for %q has %d parts, want 1", artifactName, len(content.Parts))
+				}
+				text := content.Parts[0].Text
+				if !strings.Contains(text, "Failed to load artifact "+artifactName) {
+					t.Errorf("failure content = %q, want it to name %q", text, artifactName)
+				}
+				if !strings.Contains(text, "not found") {
+					t.Errorf("failure content = %q, want it to explain the failure", text)
+				}
 			}
 		})
 	}
