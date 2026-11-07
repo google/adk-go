@@ -40,6 +40,7 @@ import (
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/server/adka2a/v2"
 	"google.golang.org/adk/v2/session"
@@ -2405,5 +2406,24 @@ func TestIsLoopbackHost(t *testing.T) {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestNewMessage_UsesUUIDProvider pins that the outgoing A2A message ID comes
+// from the configured UUID provider, like the turn's session events already do.
+// Temporal replay installs a deterministic provider, so an ID from a2a-go's own
+// source changes on every replay and the rebuilt session disagrees with what
+// the remote server received.
+func TestNewMessage_UsesUUIDProvider(t *testing.T) {
+	const suppliedID = "11111111-1111-4111-8111-111111111111"
+	ctx := platform.WithUUIDProvider(t.Context(), func() string { return suppliedID })
+
+	ictx := newTestInvocationContext(t, "a2a agent", newUserHello()).WithContext(ctx)
+	msg, err := newMessage(ictx, A2AConfig{})
+	if err != nil {
+		t.Fatalf("newMessage() error = %v", err)
+	}
+	if msg.ID != suppliedID {
+		t.Errorf("message ID = %q, want provider value %q", msg.ID, suppliedID)
 	}
 }
