@@ -33,7 +33,7 @@ import (
 	"google.golang.org/adk/v2/tool/toolutils"
 )
 
-func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider) (*mcpTool, error) {
+func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requireConfirmationProvider tool.ConfirmationProvider, metadataProvider MetadataProvider, onToolResult OnToolResultFunc) (*mcpTool, error) {
 	mcp := &mcpTool{
 		name:         t.Name,
 		originalName: t.Name,
@@ -46,6 +46,7 @@ func convertTool(t *mcp.Tool, client MCPClient, requireConfirmation bool, requir
 		requireConfirmation:         requireConfirmation,
 		requireConfirmationProvider: requireConfirmationProvider,
 		metadataProvider:            metadataProvider,
+		onToolResult:                onToolResult,
 	}
 
 	if t.InputSchema != nil {
@@ -70,6 +71,8 @@ type mcpTool struct {
 	requireConfirmationProvider tool.ConfirmationProvider
 
 	metadataProvider MetadataProvider
+
+	onToolResult OnToolResultFunc
 }
 
 // Name implements the tool.Tool.
@@ -146,6 +149,10 @@ func (t *mcpTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	res, err := t.mcpClient.CallTool(ctx, params)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call MCP tool %q with err: %w", t.name, err)
+	}
+
+	if t.onToolResult != nil {
+		t.onToolResult(ctx, params, res)
 	}
 
 	if res.IsError {

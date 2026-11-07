@@ -16,6 +16,7 @@ package mcptoolset
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +27,7 @@ import (
 
 type fixedResultMCPClient struct {
 	result *mcp.CallToolResult
+	err    error
 }
 
 type unsupportedContent struct {
@@ -33,7 +35,7 @@ type unsupportedContent struct {
 }
 
 func (c *fixedResultMCPClient) CallTool(context.Context, *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-	return c.result, nil
+	return c.result, c.err
 }
 
 func (*fixedResultMCPClient) ListTools(context.Context) ([]*mcp.Tool, error) {
@@ -591,6 +593,82 @@ func TestMCPToolRunContent(t *testing.T) {
 			}
 			if diff := cmp.Diff(test.want, got); diff != "" {
 				t.Errorf("Run() result mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestMCPToolRunOnToolResult(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    *mcp.CallToolResult
+		callErr   error
+		wantCalls int
+		wantErr   bool
+	}{
+		{
+			name: "success result exposes params and meta",
+			result: &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "ok"}},
+				Meta:    map[string]any{"io.modelcontextprotocol/elicitation": map[string]any{"url": "https://example.com"}},
+			},
+			wantCalls: 1,
+		},
+		{
+			name: "error result is observed before the call fails",
+			result: &mcp.CallToolResult{
+				IsError: true,
+				Content: []mcp.Content{&mcp.TextContent{Text: "boom"}},
+				Meta:    map[string]any{"trace": "abc"},
+			},
+			wantCalls: 1,
+			wantErr:   true,
+		},
+		{
+			name:      "transport error is not observed",
+			callErr:   errors.New("connection lost"),
+			wantCalls: 0,
+			wantErr:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls int
+			var gotParams *mcp.CallToolParams
+			var gotResult *mcp.CallToolResult
+			tool := &mcpTool{
+				name:         "test_tool",
+				originalName: "original_tool",
+				mcpClient:    &fixedResultMCPClient{result: test.result, err: test.callErr},
+				onToolResult: func(_ agent.Context, params *mcp.CallToolParams, result *mcp.CallToolResult) {
+					calls++
+					gotParams = params
+					gotResult = result
+				},
+			}
+
+			_, err := tool.Run(&agent.ContextMock{}, map[string]any{"city": "Paris"})
+			if got := err != nil; got != test.wantErr {
+				t.Fatalf("Run() err = %v, wantErr = %v", err, test.wantErr)
+			}
+			if calls != test.wantCalls {
+				t.Fatalf("OnToolResult calls = %d, want %d", calls, test.wantCalls)
+			}
+			if calls == 0 {
+				return
+			}
+			if gotParams.Name != "original_tool" {
+				t.Errorf("params.Name = %q, want %q", gotParams.Name, "original_tool")
+			}
+			if diff := cmp.Diff(map[string]any{"city": "Paris"}, gotParams.Arguments); diff != "" {
+				t.Errorf("params.Arguments mismatch (-want +got):\n%s", diff)
+			}
+			if gotResult != test.result {
+				t.Errorf("OnToolResult result = %p, want %p", gotResult, test.result)
+			}
+			if diff := cmp.Diff(test.result.Meta, gotResult.Meta); diff != "" {
+				t.Errorf("result.Meta mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
