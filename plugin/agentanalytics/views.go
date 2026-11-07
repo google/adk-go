@@ -364,11 +364,30 @@ var evalViewRequiredEvents = []string{
 	EventUserMessageReceived,
 }
 
-// evalViewSessionEvents holds the subset of evalViewRequiredEvents that are
-// emitted through logSessionEvent / logSessionSpanEvent and therefore matched
-// by the legacy "EVENT" filter alias in EventAllowlist and EventDenylist.
-var evalViewSessionEvents = newSet(
+// evalViewLegacyDeniedEvents holds the subset of evalViewRequiredEvents that
+// are dropped on at least one emission path when "EVENT" is in EventDenylist
+// (session/HITL/pause events emitted through logSessionEvent or
+// logSessionSpanEvent, plus TOOL_COMPLETED because resumed long-running tool
+// calls emit it through logSessionSpanEvent).
+var evalViewLegacyDeniedEvents = newSet(
 	EventAgentResponse,
+	EventAgentTransfer,
+	EventHITLConfirmationRequest,
+	EventHITLConfirmationCompleted,
+	EventHITLCredentialRequest,
+	EventHITLCredentialCompleted,
+	EventHITLInputRequest,
+	EventHITLInputCompleted,
+	EventToolCompleted,
+	EventToolPaused,
+)
+
+// evalViewLegacyAlwaysAllowedEvents holds the subset of evalViewRequiredEvents
+// whose every active runtime emitter checks shouldLogSessionEvent and is
+// therefore covered unconditionally by "EVENT" in EventAllowlist.
+// EventAgentResponse is checked separately in validateEvalViewConfig because
+// FinalResponseToolNames adds a logEvent emission path that ignores "EVENT".
+var evalViewLegacyAlwaysAllowedEvents = newSet(
 	EventAgentTransfer,
 	EventHITLConfirmationRequest,
 	EventHITLConfirmationCompleted,
@@ -393,8 +412,8 @@ func validateEvalViewConfig(c Config, deniedColumns map[string]struct{}, fromIni
 		var deniedEvents []string
 		for _, ev := range evalViewRequiredEvents {
 			_, denyEv := denylist[ev]
-			_, isSessionEv := evalViewSessionEvents[ev]
-			if denyEv || (denyLegacy && isSessionEv) {
+			_, legacyDenied := evalViewLegacyDeniedEvents[ev]
+			if denyEv || (denyLegacy && legacyDenied) {
 				deniedEvents = append(deniedEvents, ev)
 			}
 		}
@@ -408,8 +427,11 @@ func validateEvalViewConfig(c Config, deniedColumns map[string]struct{}, fromIni
 		var missingEvents []string
 		for _, ev := range evalViewRequiredEvents {
 			_, allowEv := allowlist[ev]
-			_, isSessionEv := evalViewSessionEvents[ev]
-			if !allowEv && !(allowLegacy && isSessionEv) {
+			_, allowedByLegacy := evalViewLegacyAlwaysAllowedEvents[ev]
+			if ev == EventAgentResponse && len(c.FinalResponseToolNames) == 0 {
+				allowedByLegacy = true
+			}
+			if !allowEv && !(allowLegacy && allowedByLegacy) {
 				missingEvents = append(missingEvents, ev)
 			}
 		}
@@ -1637,6 +1659,13 @@ func (r bqViewRunner) RunViewDDL(ctx context.Context, viewName, query string) er
 // Logger), failures are logged through logf rather than failing plugin
 // initialization.
 func syncAnalyticsViews(ctx context.Context, runner viewRunner, defs []ViewDefinition, logf func(format string, args ...any)) error {
+	return syncAnalyticsViewsWithRetryHint(ctx, runner, defs, logf, "SyncViews")
+}
+
+func syncAnalyticsViewsWithRetryHint(ctx context.Context, runner viewRunner, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string) error {
+	if retryMethod == "" {
+		retryMethod = "SyncViews"
+	}
 	var (
 		errs    []error
 		created int
@@ -1676,7 +1705,7 @@ func syncAnalyticsViews(ctx context.Context, runner viewRunner, defs []ViewDefin
 		errs = append(errs, fmt.Errorf("failed to create view %s: %w", def.Name, err))
 	}
 	if logf != nil && !errors.Is(ctx.Err(), context.Canceled) && failed > 0 {
-		logf("agentanalytics: view creation finished: %d created, %d failed of %d; call SyncViews to retry", created, failed, len(defs))
+		logf("agentanalytics: view creation finished: %d created, %d failed of %d; call %s to retry", created, failed, len(defs), retryMethod)
 	}
 	return errors.Join(errs...)
 }
@@ -1709,13 +1738,20 @@ func (p *BigQueryAgentAnalyticsPlugin) SyncViews(ctx context.Context) error {
 
 // SyncEvalViews creates or replaces the two pre-built agent evaluation
 // BigQuery views (<ViewPrefix>_eval_session and <ViewPrefix>_eval_turn)
-// synchronously using ctx. It runs even when [Config.CreateEvalViews] is false,
-// permanently cancels any in-flight startup view creation pass, and returns
-// an error if "content" is in [Config.PayloadColumnDenylist], if
-// [Config.EventDenylist] or [Config.EventAllowlist] filters out a required
-// trace event, or if any view DDL fails (with 409 Conflict / AlreadyExists
-// responses ignored). It shares the view gate and Close preemption semantics
-// of [BigQueryAgentAnalyticsPlugin.SyncViews].
+// synchronously using ctx. It runs even when [Config.CreateEvalViews] is false.
+//
+// Configuration and view definitions are validated first; if "content" is in
+// [Config.PayloadColumnDenylist], [Config.EventDenylist] or
+// [Config.EventAllowlist] filters out a required trace event, or the view
+// names fail validation or collide with the events table, SyncEvalViews returns
+// an error without canceling any in-flight startup view creation pass. Once
+// validated, it permanently cancels any in-flight startup pass and creates or
+// replaces only the two evaluation views (ignoring 409 Conflict / AlreadyExists
+// responses). If [Config.DisableCreateViews] is false and the canceled startup
+// pass had not finished creating the per-event views, call
+// [BigQueryAgentAnalyticsPlugin.SyncViews] afterwards to create the remaining
+// per-event views. It shares the view gate and Close preemption semantics of
+// [BigQueryAgentAnalyticsPlugin.SyncViews].
 func (p *BigQueryAgentAnalyticsPlugin) SyncEvalViews(ctx context.Context) error {
 	if p == nil || p.pluginState == nil {
 		return errors.New("agentanalytics: nil plugin")
@@ -1840,6 +1876,10 @@ func (s *pluginState) isClosed() bool {
 // logging failures through logf if it is not nil. The pass keeps client
 // reachable until it ends, because the runner refers to it only weakly.
 func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), client *bq.Client) {
+	s.startAsyncViewCreationWithRetryHint(parentCtx, defs, logf, "SyncViews", client)
+}
+
+func (s *pluginState) startAsyncViewCreationWithRetryHint(parentCtx context.Context, defs []ViewDefinition, logf func(format string, args ...any), retryMethod string, client *bq.Client) {
 	viewsCtx, viewsCancel := context.WithCancel(context.WithoutCancel(parentCtx))
 	done := make(chan struct{})
 	s.viewsMu.Lock()
@@ -1868,7 +1908,7 @@ func (s *pluginState) startAsyncViewCreation(parentCtx context.Context, defs []V
 		if s.isClosed() || viewsCtx.Err() != nil {
 			return
 		}
-		_ = syncAnalyticsViews(viewsCtx, runner, defs, logf)
+		_ = syncAnalyticsViewsWithRetryHint(viewsCtx, runner, defs, logf, retryMethod)
 	}()
 }
 

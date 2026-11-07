@@ -547,24 +547,33 @@ func newBigQueryAgentAnalyticsPlugin(
 	if (config.createViews() || config.CreateEvalViews) && state.runner != nil {
 		logf := config.viewLogf()
 		var startupDefs []ViewDefinition
-		var startupErr error
+		hasPerEventViews := false
 		if config.createViews() {
-			startupDefs = append(startupDefs, defs...)
-			startupErr = defsErr
+			if defsErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", defsErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, defs...)
+				hasPerEventViews = true
+			}
 		}
 		if config.CreateEvalViews {
-			startupDefs = append(startupDefs, evalDefs...)
-			if startupErr == nil {
-				startupErr = cmp.Or(evalConfigErr, evalDefsErr)
+			if evalErr := cmp.Or(evalConfigErr, evalDefsErr); evalErr != nil {
+				if logf != nil {
+					logf("agentanalytics: skipping view creation: %v", evalErr)
+				}
+			} else {
+				startupDefs = append(startupDefs, evalDefs...)
 			}
 		}
-		if startupErr != nil {
-			if logf != nil {
-				logf("agentanalytics: skipping view creation: %v", startupErr)
+		if len(startupDefs) > 0 {
+			retryMethod := "SyncViews"
+			if !hasPerEventViews {
+				retryMethod = "SyncEvalViews"
 			}
-		} else {
 			// Pass only the non-default Logger hook so the goroutine does not retain Config.
-			state.startAsyncViewCreation(ctx, startupDefs, logf, bqClient)
+			state.startAsyncViewCreationWithRetryHint(ctx, startupDefs, logf, retryMethod, bqClient)
 		}
 	}
 	return adkPlugin, nil
@@ -761,9 +770,8 @@ func (p *analyticsPlugin) logSessionEvent(ctx context.Context, id identity, even
 
 // logSessionSpanEvent runs spanFn before consulting shouldLogSessionEvent, so
 // session-event rows emitted outside OnEventCallback (such as user-message HITL
-// completions, resumed TOOL_COMPLETED rows, and finalResponseTools
-// AGENT_RESPONSE rows) honor the legacy "EVENT" filter alias while keeping
-// trace manager span side effects intact.
+// completions and resumed TOOL_COMPLETED rows) honor the legacy "EVENT" filter
+// alias while keeping trace manager span side effects intact.
 func (p *analyticsPlugin) logSessionSpanEvent(ctx context.Context, id identity, eventType string, spanFn func() rowSpan, build func(*eventData)) {
 	defer p.recoverCallback(eventType)
 	var span rowSpan

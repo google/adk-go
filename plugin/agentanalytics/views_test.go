@@ -4027,7 +4027,19 @@ func TestCreateEvalViews_ConfigValidation(t *testing.T) {
 	})
 
 	t.Run("rejects required events in EventDenylist when CreateEvalViews is true", func(t *testing.T) {
-		for _, reqEvent := range append(append([]string(nil), evalViewRequiredEvents...), "EVENT") {
+		wantLegacyDenied := []string{
+			EventAgentResponse,
+			EventAgentTransfer,
+			EventHITLConfirmationRequest,
+			EventHITLConfirmationCompleted,
+			EventHITLCredentialRequest,
+			EventHITLCredentialCompleted,
+			EventHITLInputRequest,
+			EventHITLInputCompleted,
+			EventToolCompleted,
+			EventToolPaused,
+		}
+		for _, reqEvent := range append(append([]string(nil), evalViewRequiredEvents...), legacyEventType) {
 			cfg := DefaultConfig()
 			cfg.ProjectID = "test-project"
 			cfg.DatasetID = "test_dataset"
@@ -4037,6 +4049,18 @@ func TestCreateEvalViews_ConfigValidation(t *testing.T) {
 			_, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil)
 			if err == nil || !strings.Contains(err.Error(), "CreateEvalViews cannot be used when required events are in EventDenylist") {
 				t.Errorf("EventDenylist=[%q] error = %v, want required trace events error", reqEvent, err)
+				continue
+			}
+			if reqEvent == legacyEventType {
+				_, rawList, found := strings.Cut(err.Error(), ": [")
+				if !found {
+					t.Errorf("EventDenylist=[%q] error = %v, want bracketed event list", reqEvent, err)
+					continue
+				}
+				gotDenied := strings.Fields(strings.TrimSuffix(rawList, "]"))
+				if diff := cmp.Diff(wantLegacyDenied, gotDenied); diff != "" {
+					t.Errorf("EventDenylist=[%q] denied events mismatch (-want +got):\n%s", reqEvent, diff)
+				}
 			}
 		}
 	})
@@ -4050,7 +4074,7 @@ func TestCreateEvalViews_ConfigValidation(t *testing.T) {
 		_ = p
 	})
 
-	t.Run("rejects partial EventAllowlist and accepts full or EVENT-umbrella EventAllowlist", func(t *testing.T) {
+	t.Run("rejects partial EventAllowlist and checks EVENT-umbrella parity with FinalResponseToolNames", func(t *testing.T) {
 		cfg := DefaultConfig()
 		cfg.ProjectID = "test-project"
 		cfg.DatasetID = "test_dataset"
@@ -4069,20 +4093,113 @@ func TestCreateEvalViews_ConfigValidation(t *testing.T) {
 		})
 		_ = pFull
 
-		pUmbrella, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+		umbrellaAllowlist := []string{
+			legacyEventType,
+			EventAgentStarting,
+			EventInvocationCompleted,
+			EventLLMRequest,
+			EventToolCompleted,
+			EventToolStarting,
+			EventUserMessageReceived,
+		}
+		// Without FinalResponseToolNames, "EVENT" covers AGENT_RESPONSE (only emitted via logSessionEvent).
+		pUmbrella, umbrellaReqs, umbrellaCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.DisableCreateViews = true
 			c.CreateEvalViews = true
-			c.EventAllowlist = []string{
-				"EVENT",
-				EventAgentStarting,
-				EventInvocationCompleted,
-				EventLLMRequest,
-				EventToolCompleted,
-				EventToolStarting,
-				EventUserMessageReceived,
-			}
+			c.EventAllowlist = append([]string(nil), umbrellaAllowlist...)
 		})
-		_ = pUmbrella
+		bqaapUmbrella, ok := AsBigQueryAgentAnalyticsPlugin(pUmbrella)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(pUmbrella) = false")
+		}
+		umbrellaRunner := &fakeViewRunner{}
+		bqaapUmbrella.runner = umbrellaRunner
+		if err := bqaapUmbrella.SyncEvalViews(ctx); err != nil {
+			t.Fatalf("pUmbrella.SyncEvalViews() error = %v, want nil", err)
+		}
+		if got := len(umbrellaRunner.executedNames()); got != 2 {
+			t.Errorf("pUmbrella.SyncEvalViews() executed %d views, want 2", got)
+		}
+		var umbrellaErrs callbackErrors
+		umbrellaErrs.add(pUmbrella.OnEventCallback()(umbrellaCtx, &session.Event{
+			ID:     "ev-umbrella-model",
+			Author: "agent",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "umbrella answer"}}},
+			},
+		}))
+		umbrellaErrs.check(t)
+		pUmbrella.AfterRunCallback()(umbrellaCtx)
+		umbrellaRows := collectRows(t, umbrellaReqs, untilEventType(EventInvocationCompleted))
+		if diff := cmp.Diff([]string{EventAgentResponse, EventInvocationCompleted}, eventTypes(umbrellaRows)); diff != "" {
+			t.Errorf("umbrella without FinalResponseToolNames emitted types mismatch (-want +got):\n%s", diff)
+		}
+
+		// With FinalResponseToolNames, final-response-tool AGENT_RESPONSE uses logEvent (no "EVENT" alias),
+		// so both CreateEvalViews=true and SyncEvalViews must reject umbrella allowlist missing AGENT_RESPONSE.
+		cfgUmbrellaFinal := DefaultConfig()
+		cfgUmbrellaFinal.ProjectID = "test-project"
+		cfgUmbrellaFinal.DatasetID = "test_dataset"
+		cfgUmbrellaFinal.TableName = "test-table"
+		cfgUmbrellaFinal.CreateEvalViews = true
+		cfgUmbrellaFinal.EventAllowlist = append([]string(nil), umbrellaAllowlist...)
+		cfgUmbrellaFinal.FinalResponseToolNames = []string{"final_answer"}
+		_, err = NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfgUmbrellaFinal, nil, nil)
+		if err == nil || !strings.Contains(err.Error(), "missing: [AGENT_RESPONSE]") {
+			t.Errorf("umbrella EventAllowlist + FinalResponseToolNames error = %v, want missing AGENT_RESPONSE", err)
+		}
+
+		pUmbrellaFinalSync, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = false
+			c.EventAllowlist = append([]string(nil), umbrellaAllowlist...)
+			c.FinalResponseToolNames = []string{"final_answer"}
+		})
+		bqaapUmbrellaFinalSync, _ := AsBigQueryAgentAnalyticsPlugin(pUmbrellaFinalSync)
+		rejectedRunner := &fakeViewRunner{}
+		bqaapUmbrellaFinalSync.runner = rejectedRunner
+		if err := bqaapUmbrellaFinalSync.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "missing: [AGENT_RESPONSE]") {
+			t.Errorf("SyncEvalViews() with umbrella EventAllowlist + FinalResponseToolNames error = %v, want missing AGENT_RESPONSE", err)
+		}
+		if got := len(rejectedRunner.executedNames()); got != 0 {
+			t.Errorf("failed SyncEvalViews() executed %d DDL queries, want 0", got)
+		}
+
+		// Control: explicit EventAgentResponse with FinalResponseToolNames succeeds and writes both
+		// final-response-tool and model AGENT_RESPONSE rows.
+		explicitAllowlist := append(append([]string(nil), umbrellaAllowlist...), EventAgentResponse)
+		pExplicitFinal, explicitReqs, explicitCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.EventAllowlist = explicitAllowlist
+			c.FinalResponseToolNames = []string{"final_answer"}
+		})
+		explicitCtx.functionCallID = "call-final-1"
+		bqaapExplicitFinal, _ := AsBigQueryAgentAnalyticsPlugin(pExplicitFinal)
+		explicitRunner := &fakeViewRunner{}
+		bqaapExplicitFinal.runner = explicitRunner
+		if err := bqaapExplicitFinal.SyncEvalViews(ctx); err != nil {
+			t.Fatalf("explicit AGENT_RESPONSE SyncEvalViews() error = %v, want nil", err)
+		}
+		if got := len(explicitRunner.executedNames()); got != 2 {
+			t.Errorf("explicit AGENT_RESPONSE SyncEvalViews() executed %d views, want 2", got)
+		}
+		var explicitErrs callbackErrors
+		explicitErrs.add(pExplicitFinal.AfterToolCallback()(explicitCtx, &fakeTool{name: "final_answer"}, map[string]any{"answer": "42"}, map[string]any{}, nil))
+		explicitErrs.add(pExplicitFinal.OnEventCallback()(explicitCtx, &session.Event{
+			ID:     "ev-explicit-model",
+			Author: "agent",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{Role: "model", Parts: []*genai.Part{{Text: "explicit model answer"}}},
+			},
+		}))
+		explicitErrs.check(t)
+		pExplicitFinal.AfterRunCallback()(explicitCtx)
+		explicitRows := collectRows(t, explicitReqs, untilEventType(EventInvocationCompleted))
+		wantExplicitTypes := []string{EventToolCompleted, EventAgentResponse, EventAgentResponse, EventInvocationCompleted}
+		if diff := cmp.Diff(wantExplicitTypes, eventTypes(explicitRows)); diff != "" {
+			t.Errorf("explicit AGENT_RESPONSE + FinalResponseToolNames emitted types mismatch (-want +got):\n%s", diff)
+		}
 	})
 }
 
@@ -4315,9 +4432,13 @@ func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
 			c.PayloadColumnDenylist = []string{columnContent}
 		})
 		bqaapDenied, _ := AsBigQueryAgentAnalyticsPlugin(pDeniedContent)
-		bqaapDenied.runner = &fakeViewRunner{}
+		deniedRunner := &fakeViewRunner{}
+		bqaapDenied.runner = deniedRunner
 		if err := bqaapDenied.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), `cannot create eval views when "content" is in PayloadColumnDenylist`) {
 			t.Errorf("SyncEvalViews() with content denied error = %v, want content denylist error", err)
+		}
+		if got := len(deniedRunner.executedNames()); got != 0 {
+			t.Errorf("bqaapDenied.SyncEvalViews() executed %d DDL queries, want 0", got)
 		}
 
 		// When a required trace event is excluded by EventDenylist (with CreateEvalViews=false),
@@ -4327,9 +4448,13 @@ func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
 			c.EventDenylist = []string{EventToolStarting}
 		})
 		bqaapDeniedEvent, _ := AsBigQueryAgentAnalyticsPlugin(pDeniedEvent)
-		bqaapDeniedEvent.runner = &fakeViewRunner{}
+		deniedEventRunner := &fakeViewRunner{}
+		bqaapDeniedEvent.runner = deniedEventRunner
 		if err := bqaapDeniedEvent.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "cannot create eval views when required events are in EventDenylist") {
 			t.Errorf("SyncEvalViews() with TOOL_STARTING denied error = %v, want required trace events error", err)
+		}
+		if got := len(deniedEventRunner.executedNames()); got != 0 {
+			t.Errorf("bqaapDeniedEvent.SyncEvalViews() executed %d DDL queries, want 0", got)
 		}
 
 		// When TableName collides with v_eval_session and CreateEvalViews=true, startup skips view creation and logs why.
@@ -4344,9 +4469,310 @@ func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
 			t.Errorf("expected startup log for skipped eval view creation on table collision, got:\n%s", logger)
 		}
 		bqaapCollision, _ := AsBigQueryAgentAnalyticsPlugin(pCollision)
-		bqaapCollision.runner = &fakeViewRunner{}
+		collisionRunner := &fakeViewRunner{}
+		bqaapCollision.runner = collisionRunner
 		if err := bqaapCollision.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "collides with the events table") {
 			t.Errorf("SyncEvalViews() on colliding TableName error = %v, want collision error", err)
+		}
+		if got := len(collisionRunner.executedNames()); got != 0 {
+			t.Errorf("bqaapCollision.SyncEvalViews() executed %d DDL queries, want 0", got)
+		}
+	})
+
+	t.Run("standalone CreateEvalViews logs SyncEvalViews retry hint when DDL fails", func(t *testing.T) {
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						return &http.Response{
+							StatusCode: http.StatusForbidden,
+							Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"Access Denied"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "test-table"
+		cfg.DisableCreateViews = true
+		cfg.CreateEvalViews = true
+		cfg.Logger = logger
+
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for !logger.contains("view creation finished") && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if want := "view creation finished: 0 created, 2 failed of 2; call SyncEvalViews to retry"; !logger.contains(want) {
+			t.Errorf("expected retry hint %q in logs, got:\n%s", want, logger.String())
+		}
+		if logger.contains("call SyncViews to retry") {
+			t.Errorf("eval-only startup pass should not tell caller to call SyncViews, got:\n%s", logger.String())
+		}
+	})
+
+	t.Run("startup still runs per-event views when eval views are skipped on TableName collision", func(t *testing.T) {
+		allDone := make(chan struct{})
+		var jobCount atomic.Int32
+		var mu sync.Mutex
+		var jobQueries []string
+
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						b, _ := io.ReadAll(r.Body)
+						var payload struct {
+							Configuration struct {
+								Query struct {
+									Query string `json:"query"`
+								} `json:"query"`
+							} `json:"configuration"`
+						}
+						_ = json.Unmarshal(b, &payload)
+						mu.Lock()
+						jobQueries = append(jobQueries, payload.Configuration.Query.Query)
+						mu.Unlock()
+						if int(jobCount.Add(1)) == len(eventViewSpecs) {
+							close(allDone)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-1"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "v_eval_session"
+		cfg.DisableCreateViews = false
+		cfg.CreateEvalViews = true
+		cfg.Logger = logger
+
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		select {
+		case <-allDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %d per-event startup views; got %d", len(eventViewSpecs), jobCount.Load())
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if !logger.contains("agentanalytics: skipping view creation") || !logger.contains("v_eval_session") {
+			t.Errorf("expected startup log for skipped eval view creation on TableName collision, got:\n%s", logger.String())
+		}
+		mu.Lock()
+		gotQueries := append([]string(nil), jobQueries...)
+		mu.Unlock()
+		if len(gotQueries) != len(eventViewSpecs) {
+			t.Fatalf("startup DDL count = %d, want %d", len(gotQueries), len(eventViewSpecs))
+		}
+		for _, q := range gotQueries {
+			if strings.Contains(q, "CREATE OR REPLACE VIEW `test-project.test_dataset.v_eval_turn`") {
+				t.Errorf("unexpected eval view DDL executed despite eval collision skip:\n%s", q[:min(120, len(q))])
+			}
+		}
+	})
+
+	t.Run("SyncEvalViews validation failure leaves blocked startup pass untouched and valid SyncEvalViews preempts it", func(t *testing.T) {
+		// 1. Failing validation in SyncEvalViews must NOT cancel an in-flight startup pass.
+		bgInFlight := make(chan struct{})
+		unblockBg := make(chan struct{})
+		allBgDone := make(chan struct{})
+		var bgCanceled atomic.Bool
+		var bgJobCount atomic.Int32
+
+		httpClientNoCancel := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						n := int(bgJobCount.Add(1))
+						if n == 1 {
+							close(bgInFlight)
+							select {
+							case <-r.Context().Done():
+								bgCanceled.Store(true)
+								return nil, r.Context().Err()
+							case <-unblockBg:
+							}
+						}
+						if n == len(eventViewSpecs) {
+							close(allBgDone)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-bg"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient1, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClientNoCancel))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient1.Close() })
+
+		cfg1 := DefaultConfig()
+		cfg1.ProjectID = "test-project"
+		cfg1.DatasetID = "test_dataset"
+		cfg1.TableName = "test-table"
+		cfg1.EventDenylist = []string{EventToolStarting}
+
+		p1, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg1, bqClient1, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		bqaap1, ok := AsBigQueryAgentAnalyticsPlugin(p1)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p1) = false")
+		}
+		select {
+		case <-bgInFlight:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for background startup view creation")
+		}
+		if err := bqaap1.SyncEvalViews(ctx); err == nil || !strings.Contains(err.Error(), "cannot create eval views when required events are in EventDenylist") {
+			t.Errorf("invalid SyncEvalViews() error = %v, want EventDenylist error", err)
+		}
+		if bgCanceled.Load() {
+			t.Error("invalid SyncEvalViews() should not cancel in-flight startup view creation")
+		}
+		close(unblockBg)
+		select {
+		case <-allBgDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %d startup views to finish; got %d", len(eventViewSpecs), bgJobCount.Load())
+		}
+		if err := p1.Close(); err != nil {
+			t.Fatalf("p1.Close() error = %v", err)
+		}
+
+		// 2. Valid SyncEvalViews preempts blocked startup pass and creates only the 2 eval views.
+		preemptInFlight := make(chan struct{})
+		preemptCanceled := make(chan struct{})
+		var preemptIdx atomic.Int32
+		var syncMu sync.Mutex
+		var syncQueries []string
+
+		httpClientPreempt := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						if preemptIdx.Add(1) == 1 {
+							close(preemptInFlight)
+							<-r.Context().Done()
+							close(preemptCanceled)
+							return nil, r.Context().Err()
+						}
+						b, _ := io.ReadAll(r.Body)
+						var payload struct {
+							Configuration struct {
+								Query struct {
+									Query string `json:"query"`
+								} `json:"query"`
+							} `json:"configuration"`
+						}
+						_ = json.Unmarshal(b, &payload)
+						syncMu.Lock()
+						syncQueries = append(syncQueries, payload.Configuration.Query.Query)
+						syncMu.Unlock()
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-sync"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient2, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClientPreempt))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient2.Close() })
+
+		logger := &recordingLogger{}
+		cfg2 := DefaultConfig()
+		cfg2.ProjectID = "test-project"
+		cfg2.DatasetID = "test_dataset"
+		cfg2.TableName = "test-table"
+		cfg2.Logger = logger
+
+		p2, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg2, bqClient2, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		t.Cleanup(func() { _ = p2.Close() })
+
+		bqaap2, ok := AsBigQueryAgentAnalyticsPlugin(p2)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p2) = false")
+		}
+		select {
+		case <-preemptInFlight:
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for background startup view creation to enter RoundTrip")
+		}
+		if err := bqaap2.SyncEvalViews(ctx); err != nil {
+			t.Fatalf("SyncEvalViews() error = %v, want nil", err)
+		}
+		select {
+		case <-preemptCanceled:
+		default:
+			t.Error("expected SyncEvalViews() to cancel in-flight background view creation")
+		}
+		syncMu.Lock()
+		gotSyncQueries := append([]string(nil), syncQueries...)
+		syncMu.Unlock()
+		if len(gotSyncQueries) != 2 {
+			t.Fatalf("SyncEvalViews() executed %d DDL jobs, want 2", len(gotSyncQueries))
+		}
+		if !strings.Contains(gotSyncQueries[0], "v_eval_session") || !strings.Contains(gotSyncQueries[1], "v_eval_turn") {
+			t.Errorf("SyncEvalViews() executed unexpected views:\n[0]=%s\n[1]=%s", gotSyncQueries[0][:min(120, len(gotSyncQueries[0]))], gotSyncQueries[1][:min(120, len(gotSyncQueries[1]))])
 		}
 	})
 }
@@ -4363,7 +4789,7 @@ func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalViewDefinitions() error = %v", err)
 	}
-	jsonPathLiteralRe := regexp.MustCompile(`'(\$\.[^']+)'`)
+	jsonPathLiteralRe := regexp.MustCompile(`'(\$(?:\.[^']+)?)'`)
 	extractedSet := make(map[string]bool)
 	for _, def := range evalDefs {
 		for _, m := range jsonPathLiteralRe.FindAllStringSubmatch(def.Query, -1) {
@@ -4376,6 +4802,7 @@ func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
 	}
 	slices.Sort(gotSQLPaths)
 	wantSQLPaths := []string{
+		"$",
 		"$.adk.app_name",
 		"$.agent_description",
 		"$.args",
@@ -4493,6 +4920,7 @@ func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
 	errs.add(p.AfterModelCallback()(invCtx, llmResp, nil))
 	errs.add(p.BeforeToolCallback()(invCtx, weatherTool, map[string]any{"city": "Paris"}))
 	errs.add(p.AfterToolCallback()(invCtx, weatherTool, map[string]any{"city": "Paris"}, map[string]any{"temp_c": 20}, nil))
+	errs.add(p.OnUserMessageCallback()(invCtx, toolRespMsg))
 
 	errs.add(p.OnEventCallback()(invCtx, &session.Event{
 		ID:     "ev-transfer-1",
@@ -4512,13 +4940,19 @@ func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
 	byType := make(map[string]map[string]any, len(rows))
+	var userRows []map[string]any
 	for _, r := range rows {
 		et, _ := r["event_type"].(string)
-		byType[et] = r
+		if _, exists := byType[et]; !exists {
+			byType[et] = r
+		}
+		if et == EventUserMessageReceived {
+			userRows = append(userRows, r)
+		}
 	}
 
 	verifiedGoPaths := make(map[string]bool)
-	checkDocPath := func(label string, doc map[string]any, path string) {
+	checkDocPath := func(label string, doc any, path string) {
 		t.Helper()
 		if _, ok := resolveJSONPath(doc, path); !ok {
 			t.Errorf("%s path %q did not resolve against emitted payload: %#v", label, path, doc)
@@ -4571,24 +5005,56 @@ func TestEvalViews_JSONPathCompatibilityWithWrittenRows(t *testing.T) {
 	checkDocPath("LLM_REQUEST.attributes.tools[0]", toolDecl, "$.description")
 	checkDocPath("LLM_REQUEST.attributes.tools[0]", toolDecl, "$.parameters")
 
-	foundFuncResp := false
-	for _, part := range contentPartsOf(t, llmReqRow) {
-		rawPartAttrs, _ := part["part_attributes"].(string)
-		if rawPartAttrs == "" {
-			continue
+	checkFuncRespPartAttr := func(label string, targetRows ...map[string]any) bool {
+		t.Helper()
+		for _, r := range targetRows {
+			for _, part := range contentPartsOf(t, r) {
+				rawPartAttrs, _ := part["part_attributes"].(string)
+				if rawPartAttrs == "" {
+					continue
+				}
+				var partAttrs map[string]any
+				if err := json.Unmarshal([]byte(rawPartAttrs), &partAttrs); err != nil {
+					t.Fatalf("%s part_attributes JSON unmarshal error: %v (%q)", label, err, rawPartAttrs)
+				}
+				if _, ok := partAttrs["function_response"]; ok {
+					checkDocPath(label+".content_parts[].part_attributes", partAttrs, "$.function_response")
+					return true
+				}
+			}
 		}
-		var partAttrs map[string]any
-		if err := json.Unmarshal([]byte(rawPartAttrs), &partAttrs); err != nil {
-			t.Fatalf("LLM_REQUEST part_attributes JSON unmarshal error: %v (%q)", err, rawPartAttrs)
-		}
-		if _, ok := partAttrs["function_response"]; ok {
-			checkDocPath("LLM_REQUEST.content_parts[].part_attributes", partAttrs, "$.function_response")
-			foundFuncResp = true
-			break
-		}
+		return false
 	}
-	if !foundFuncResp {
+	if !checkFuncRespPartAttr(EventUserMessageReceived, userRows...) {
+		t.Fatalf("USER_MESSAGE_RECEIVED content_parts missing $.function_response in part_attributes across %d rows", len(userRows))
+	}
+	if !checkFuncRespPartAttr(EventLLMRequest, llmReqRow) {
 		t.Fatalf("LLM_REQUEST content_parts missing $.function_response in part_attributes: %#v", llmReqRow[columnContentParts])
+	}
+
+	fmtP, fmtReqs, fmtCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.DisableCreateViews = true
+		c.Logger = &recordingLogger{}
+		c.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+	})
+	var fmtErrs callbackErrors
+	fmtErrs.add(fmtP.OnUserMessageCallback()(fmtCtx, &genai.Content{
+		Role:  "user",
+		Parts: []*genai.Part{{Text: "hi"}},
+	}))
+	fmtErrs.check(t)
+	fmtP.AfterRunCallback()(fmtCtx)
+	fmtRows := collectRows(t, fmtReqs, untilEventType(EventInvocationCompleted))
+	fmtRow := onlyRowOfType(t, fmtRows, EventUserMessageReceived)
+	fmtContent, ok := jsonColumnValue(t, fmtRow, columnContent)
+	if !ok {
+		t.Fatalf("FORMATTER_FAILED USER_MESSAGE_RECEIVED row missing %s column", columnContent)
+	}
+	checkDocPath("FORMATTER_FAILED.content", fmtContent, "$")
+	if got, ok := fmtContent.(string); !ok || got != "[FORMATTER_FAILED]" {
+		t.Errorf("FORMATTER_FAILED content = %#v, want %q", fmtContent, "[FORMATTER_FAILED]")
 	}
 
 	pythonOnlySQLPaths := map[string]bool{

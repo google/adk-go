@@ -309,13 +309,16 @@ type Config struct {
 	DebugContentFormatterErrors bool
 
 	// EventAllowlist, if non-empty, limits logging to the listed event types.
-	// The legacy umbrella name "EVENT" matches all session-event rows
-	// (such as STATE_DELTA, AGENT_TRANSFER, and AGENT_RESPONSE).
+	// The legacy umbrella name "EVENT" matches session-event emitters
+	// (STATE_DELTA, AGENT_TRANSFER, TOOL_PAUSED, HITL_*, OnEventCallback
+	// AGENT_RESPONSE, and resumed TOOL_COMPLETED); it does not match primary
+	// TOOL_COMPLETED rows or FinalResponseToolNames AGENT_RESPONSE rows.
 	EventAllowlist []string
 	// EventDenylist stops the listed event types from being logged. It takes
 	// precedence over EventAllowlist, including when "EVENT" is listed in
-	// EventAllowlist. The legacy umbrella name "EVENT" suppresses all
-	// session-event rows.
+	// EventAllowlist. The legacy umbrella name "EVENT" suppresses
+	// session-event emitters (including resumed TOOL_COMPLETED rows, though not
+	// primary TOOL_COMPLETED or FinalResponseToolNames AGENT_RESPONSE rows).
 	EventDenylist []string
 
 	// PayloadColumnDenylist names payload columns that are omitted from newly
@@ -490,7 +493,9 @@ type Config struct {
 	// HITL_INPUT_REQUEST_COMPLETED, AGENT_RESPONSE, and INVOCATION_COMPLETED
 	// events. Enabling CreateEvalViews when "content" is in
 	// PayloadColumnDenylist or when EventDenylist / EventAllowlist filters out
-	// any of these required events is a configuration error.
+	// any active emitter of these required events (including "EVENT" in
+	// EventAllowlist without explicit AGENT_RESPONSE when FinalResponseToolNames
+	// is non-empty, or "EVENT" in EventDenylist) is a configuration error.
 	//
 	// Because the evaluation views aggregate per session or turn, filtering on
 	// session_start_timestamp or turn_start_timestamp does not prune the
