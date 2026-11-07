@@ -32,6 +32,7 @@ import (
 )
 
 type mockMemory struct {
+	queries  []string
 	memories []memory.Entry
 	err      error
 }
@@ -41,6 +42,7 @@ func (m *mockMemory) AddSessionToMemory(ctx context.Context, s session.Session) 
 }
 
 func (m *mockMemory) SearchMemory(ctx context.Context, query string) (*memory.SearchResponse, error) {
+	m.queries = append(m.queries, query)
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -72,26 +74,6 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 		wantTextContains []string
 		wantTextOmits    []string
 	}{
-		{
-			name:            "nil user content",
-			userContent:     nil,
-			wantInstruction: false,
-		},
-		{
-			name:            "empty user content parts",
-			userContent:     &genai.Content{Parts: []*genai.Part{}},
-			wantInstruction: false,
-		},
-		{
-			name:            "user content with no text",
-			userContent:     &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{}}}},
-			wantInstruction: false,
-		},
-		{
-			name:            "text in later part is ignored",
-			userContent:     &genai.Content{Parts: []*genai.Part{{InlineData: &genai.Blob{}}, genai.NewPartFromText("later text")}},
-			wantInstruction: false,
-		},
 		{
 			name:            "no memories found",
 			userContent:     genai.NewContentFromText("test query", genai.RoleUser),
@@ -260,6 +242,79 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 					if strings.Contains(instruction, omit) {
 						t.Errorf("Instruction should not contain %q, got: %v", omit, instruction)
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestPreloadMemoryTool_SearchQuery(t *testing.T) {
+	tests := []struct {
+		name        string
+		userContent *genai.Content
+		wantQueries []string
+	}{
+		{name: "nil content"},
+		{name: "empty parts", userContent: &genai.Content{}},
+		{
+			name:        "no text",
+			userContent: &genai.Content{Parts: []*genai.Part{nil, {}, {InlineData: &genai.Blob{}}}},
+		},
+		{
+			name:        "single text part",
+			userContent: genai.NewContentFromText("my preferences", genai.RoleUser),
+			wantQueries: []string{"my preferences"},
+		},
+		{
+			name: "thought-only content",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+			}},
+		},
+		{
+			name: "thought before text",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "private reasoning", Thought: true},
+				{Text: "my preferences"},
+			}},
+			wantQueries: []string{"my preferences"},
+		},
+		{
+			name: "image before text",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{InlineData: &genai.Blob{MIMEType: "image/png"}},
+				{Text: "my preferences"},
+			}},
+			wantQueries: []string{"my preferences"},
+		},
+		{
+			name: "multiple text parts",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				{Text: "my"}, {Text: "preferences"},
+			}},
+			wantQueries: []string{"my preferences"},
+		},
+		{
+			name: "nil and empty parts around text",
+			userContent: &genai.Content{Parts: []*genai.Part{
+				nil, {}, {Text: "my"}, nil, {}, {Text: "preferences"}, {}, nil,
+			}},
+			wantQueries: []string{"my preferences"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mem := &mockMemory{}
+			ctx := createToolContext(t, mem, tt.userContent)
+			if err := preloadmemorytool.New().ProcessRequest(ctx, &model.LLMRequest{}); err != nil {
+				t.Fatalf("ProcessRequest failed: %v", err)
+			}
+			if len(mem.queries) != len(tt.wantQueries) {
+				t.Fatalf("memory search call count = %d, want %d", len(mem.queries), len(tt.wantQueries))
+			}
+			for i, want := range tt.wantQueries {
+				if got := mem.queries[i]; got != want {
+					t.Errorf("memory search query %d differs from expected (got %d bytes, want %d)", i, len(got), len(want))
 				}
 			}
 		})
