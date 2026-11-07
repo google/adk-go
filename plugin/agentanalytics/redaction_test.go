@@ -15,6 +15,7 @@
 package agentanalytics
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2863,6 +2864,12 @@ func TestScrubTextPatterns_CamelCaseScanIsLinear(t *testing.T) {
 		{
 			"many single-line JSON fields with apostrophe subshell tail", func(n int) string {
 				return `{"pre":"(x)` + strings.Repeat(`","k":"curl -H \"X-Api-Key: \"users') && echo y"`, n) + `"}`
+			},
+			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
+		},
+		{
+			"multiline joined header with later command substitution after semicolon", func(n int) string {
+				return strings.Repeat("curl -H \"X-Api-Key: \"pre's s1\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP\n", n)
 			},
 			func(in string) { _ = scrubTextPatterns(in) }, raceScaled(2000),
 		},
@@ -8771,4 +8778,3234 @@ func TestNestedJSONKeyScrubbingScalesLinearly(t *testing.T) {
 	if ratio > 6.0 {
 		t.Errorf("timing growth levels=11 / levels=9 = %.2fx (%v / %v), want <= 6x", ratio, t11, t9)
 	}
+}
+
+func TestMultilineJoinedHeaderLaterCommandSubst(t *testing.T) {
+	const secret = "SYNTH_BLIND_SECRET_71629"
+	cases := []struct {
+		name     string
+		in       string
+		want     string
+		noSecret bool
+		keepPub  bool
+	}{
+		{
+			name:     "X-Api-Key pre's with semicolon command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Authorization Bearer pre's with semicolon command substitution",
+			in:       "curl -H \"Authorization: Bearer \"pre's " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"Authorization: [REDACTED]\"; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre'foo with semicolon command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre'foo " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Authorization Bearer pre'foo with semicolon command substitution",
+			in:       "curl -H \"Authorization: Bearer \"pre'foo " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"Authorization: [REDACTED]\"; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre's with spaced && command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' && echo \"$(printf \"'\")\" && echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" && echo \"$(printf \"'\")\" && echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre's with pipe command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' | echo \"$(printf \"'\")\" | echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" | echo \"$(printf \"'\")\" | echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre's with URL argument before semicolon command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' https://example.com; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" https://example.com; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre's with non-sensitive header command substitution on closing line",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "X-Api-Key pre's with non-sensitive header command substitution followed by PUBLIC_KEEP",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(printf \"'\")\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(printf \"'\")\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name: "Single-line Bob's before non-sensitive header command substitution line concatenates in sh",
+			in:   "curl -H \"X-Api-Key: \"Bob's\nX-Note: \"$(printf \"'\") PUBLIC_KEEP\"",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"",
+		},
+		{
+			name:     "Unclosed pre' secret before non-sensitive header command substitution line concatenates in sh",
+			in:       "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: \"$(printf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"",
+			noSecret: true,
+		},
+		{
+			name: "Single-line Bob's before later line command substitution concatenates in sh",
+			in:   "curl -H \"X-Api-Key: \"Bob's\necho \"$(printf \"'\") PUBLIC_KEEP\"",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"",
+		},
+		{
+			name:    "Trailing apostrophe Bob' before balanced X-Note command substitution closes in sh",
+			in:      "curl -H \"X-Api-Key: \"Bob'\nX-Note: \"$(printf \"'\")\" PUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\" PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			name: "Trailing apostrophe Bob' before X-Note command substitution with inner PUBLIC_KEEP concatenates in sh",
+			in:   "curl -H \"X-Api-Key: \"Bob'\nX-Note: \"$(printf \"'\") PUBLIC_KEEP\"",
+			want: "curl -H \"X-Api-Key: [REDACTED]\"",
+		},
+		{
+			name:    "Trailing apostrophe Bob' before unbalanced quote after command substitution preserves PUBLIC_KEEP",
+			in:      "curl -H \"X-Api-Key: \"Bob'\nX-Note: \"$(printf \"'\")\" \"unclosed\nPUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\"\nX-Note: \"$(printf \"'\")\" \"unclosed\nPUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			name:     "Multiline pre's with literal double-quoted $(id) inside single quote before semicolon echo PUBLIC_KEEP",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nnote: \"$(id) tail'; echo \"PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"; echo \"PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's across two secrets spanning printf single quote in header assignment",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nhdr=\"$(printf \"'\")" + secret + "\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's followed by echo $(printf ') PUBLIC_KEEP",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\necho \"$(printf \"'\")\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's closing on possessive users' before URL and X-Note command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nusers' https://example.com -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" https://example.com -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's closing on users' followed by second auth header and X-Note command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nusers' -H \"Authorization: Bearer \"" + secret + " -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"Authorization: [REDACTED]\" -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with URL before semicolon and multiline command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' https://example.com; echo \"$(\nprintf \"'\"\n)\"; echo PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" https://example.com; echo \"$(\nprintf \"'\"\n)\"; echo PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with multiline command substitution inside X-Note header",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(\nprintf \"'\"\n) PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(\nprintf \"'\"\n) PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with case pattern paren inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(case x in a) printf \"'\" ;; esac) PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(case x in a) printf \"'\" ;; esac) PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with case optional paren and literal case word inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(case x in (a|b) echo case x in; printf \"'\" ;; esac) PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(case x in (a|b) echo case x in; printf \"'\" ;; esac) PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with hash comment containing unmatched paren inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(echo ok # )\nprintf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(echo ok # )\nprintf \"'\") PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with backtick command substitution containing quotes inside double quotes",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: `printf \"'\"` PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: `printf \"'\"` PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with parameter expansion nested quotes inside double quotes",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${TAG:-\"'\"} PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: ${TAG:-\"'\"} PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with double-backslash before command substitution inside double quotes",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\\\$(printf \"'\") PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: \\\\$(printf \"'\") PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with backslash-escaped outer double quotes around command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\\"$(printf \"'\")\\\" PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: \\\"$(printf \"'\")\\\" PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with backslash-escaped dollar command substitution inside double quotes",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\$(echo ok) PUBLIC_KEEP\"",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: \\$(echo ok) PUBLIC_KEEP\"",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline double-quoted pre fragment with nested double-quote inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre\"s " + secret + "\ntail\" -H \"X-Note: $(printf '\"')\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: $(printf '\"')\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with single-quoted default apostrophe inside double-quoted parameter expansion",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${FOO:-don't}\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: ${FOO:-don't}\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with contraction can't inside double-quoted parameter expansion",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${FOO:-can't}\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: ${FOO:-can't}\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with lone single quote inside double-quoted parameter expansion",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${FOO:-'}\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: ${FOO:-'}\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with nested double-quoted parameter expansion containing lone single quote",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${FOO:-${BAR:-'}}\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" -H \"X-Note: ${FOO:-${BAR:-'}}\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Single-line X-Api-Key with double-quoted parameter expansion apostrophe before concatenated secret",
+			in:       "curl -H \"X-Api-Key: \"pre\"${FOO:-don't}\"" + secret + " PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:    "Single-line X-Api-Key with double-quoted parameter expansion apostrophe ending arg before positional secret",
+			in:      "curl -H \"X-Api-Key: \"pre\"${FOO:-don't}\" " + secret + " PUBLIC_KEEP",
+			want:    "curl -H \"X-Api-Key: [REDACTED]\" " + secret + " PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			name:    "Single-line Authorization Bearer with double-quoted parameter expansion apostrophe before PUBLIC_KEEP",
+			in:      "curl -H \"Authorization: Bearer ${FOO:-don't}\" PUBLIC_KEEP",
+			want:    "curl -H \"Authorization: [REDACTED]\" PUBLIC_KEEP",
+			keepPub: true,
+		},
+		{
+			name:     "Multiline pre's with unquoted single-quoted brace inside parameter expansion",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' ${FOO:-'}'} PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" ${FOO:-'}'} PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with case in(a) optional paren without whitespace",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $(case x in(a) echo \"'\";; esac) PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $(case x in(a) echo \"'\";; esac) PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with multi-arm case in(a) and ;;(b) optional parens without whitespace",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $(case x in(a) echo 1;;(b) echo \"'\";;esac) PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $(case x in(a) echo 1;;(b) echo \"'\";;esac) PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with empty case in esac inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $(case x in esac) PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $(case x in esac) PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with quoted case word and in(a) optional paren without whitespace",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $(case \"$x\" in(a) echo \"'\";; esac) PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $(case \"$x\" in(a) echo \"'\";; esac) PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with non-header URL colon before semicolon and unpaired echo quote",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nhttps:'a'b'; echo \"unpaired\nPUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"; echo \"unpaired\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with tail and URL colon before semicolon and unpaired echo quote",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' https://example.com; echo \"unpaired\nPUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" https://example.com; echo \"unpaired\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with Cookie header spanning balanced quoted semicolon segments",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a='1; session='2'\nPUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's stopped by Cookie header with unpaired semicolon segment",
+			in:       "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: a='1; session='unpaired\nPUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"\nCookie: [REDACTED]\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with ANSI-C quoted apostrophe inside command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' \"$(printf $'don\\'t')\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" \"$(printf $'don\\'t')\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with unquoted ANSI-C quoted apostrophe and escaped backslash",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $'don\\'t' $'a\\\\' \"$(printf \"'\")\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $'don\\'t' $'a\\\\' \"$(printf \"'\")\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "JSON-wrapped multiline pre's with ANSI-C quoted apostrophe inside command substitution",
+			in:       "{\"cmd\":\"curl -H \\\"X-Api-Key: \\\"pre's " + secret + "\\ntail' \\\"$(printf $'don\\\\'t')\\\" PUBLIC_KEEP\"}",
+			want:     "{\"cmd\":\"curl -H \\\"X-Api-Key: [REDACTED]\\\" \\\"$(printf $'don\\\\'t')\\\" PUBLIC_KEEP\"}",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with rejected Cookie unpaired-quote line still redacts first-line secret",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a='1'; https:'a'b'; echo \"unpaired\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with Cookie unspaced URL colon and unpaired echo quote still redacts secret",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a=1' https:'a'b'; echo \"unpaired\nX-Note: ok\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with leading Cookie quoted pair and unpaired echo quote still redacts secret",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: '1'; FOO=bar; echo \"unpaired\nX-Note: ok\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with balanced Cookie and odd plain echo quotes preserves PUBLIC_KEEP",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a='1'; echo 'ok'tail\nPUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\"\nCookie: [REDACTED]\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with trailing apostrophe and rejected Cookie unpaired-quote line redacts secret",
+			in:       "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: a='1'; https:'a'b'; echo \"unpaired\nPUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with balanced ANSI-C backslash-escaped apostrophes before command substitution",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $'a\\'b' $'c\\'d' \"$(printf \"'\")\" PUBLIC_KEEP",
+			want:     "curl -H \"X-Api-Key: [REDACTED]\" $'a\\'b' $'c\\'d' \"$(printf \"'\")\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+		{
+			name:     "Multiline pre's with unbalanced ANSI-C escaped-backslash quote still redacts secret",
+			in:       "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $'a\\\\'b' $'c\\'d' \"$(printf \"'\")\" PUBLIC_KEEP",
+			noSecret: true,
+			keepPub:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotScrub := scrubTextPatterns(tc.in)
+			gotAuth := redactAuthHeaders(tc.in)
+			gotSan, _ := sanitizeRawText(tc.in)
+			gotErr := redactErrorMessage(tc.in)
+			stBytes, _, stErr := SmartTruncate(tc.in, 1<<20)
+			if stErr != nil {
+				t.Fatalf("SmartTruncate error: %v", stErr)
+			}
+			gotST := string(stBytes)
+
+			if tc.want != "" {
+				if gotScrub != tc.want {
+					t.Errorf("scrubTextPatterns:\n got: %q\nwant: %q", gotScrub, tc.want)
+				}
+				if gotAuth != tc.want {
+					t.Errorf("redactAuthHeaders:\n got: %q\nwant: %q", gotAuth, tc.want)
+				}
+				if gotSan != tc.want {
+					t.Errorf("sanitizeRawText:\n got: %q\nwant: %q", gotSan, tc.want)
+				}
+				if gotErr != tc.want {
+					t.Errorf("redactErrorMessage:\n got: %q\nwant: %q", gotErr, tc.want)
+				}
+			}
+			for label, out := range map[string]string{
+				"scrubTextPatterns":  gotScrub,
+				"redactAuthHeaders":  gotAuth,
+				"sanitizeRawText":    gotSan,
+				"redactErrorMessage": gotErr,
+				"SmartTruncate":      gotST,
+			} {
+				if tc.noSecret && strings.Contains(out, secret) {
+					t.Errorf("%s leaked %q: %q", label, secret, out)
+				}
+				if tc.keepPub && !strings.Contains(out, "PUBLIC_KEEP") {
+					t.Errorf("%s lost PUBLIC_KEEP: %q", label, out)
+				}
+			}
+		})
+	}
+}
+
+func TestIsHeaderValueOpenOnLine(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		needle   string
+		wantOpen bool
+	}{
+		{
+			name:     "URL colon before quote closing segment is not an open Cookie header",
+			line:     `tail' https:'a'b'; echo "unpaired`,
+			needle:   `b'`,
+			wantOpen: false,
+		},
+		{
+			name:     "Active Cookie header stays open across mid-line semicolon",
+			line:     `Cookie: a='1; session='unpaired`,
+			needle:   `'1;`,
+			wantOpen: true,
+		},
+		{
+			name:     "Active Set-Cookie header stays open across mid-line semicolon",
+			line:     `Set-Cookie: a='1; session='unpaired`,
+			needle:   `'1;`,
+			wantOpen: true,
+		},
+		{
+			name:     "Unquoted && resets prior Cookie header scope on line",
+			line:     `Cookie: a='1 && curl -H 'X-Note: 'unpaired`,
+			needle:   `X-Note: '`,
+			wantOpen: false,
+		},
+		{
+			name:     "Unquoted pipe resets prior Cookie header scope on line",
+			line:     `Cookie: a='1 | grep x='unpaired`,
+			needle:   `x='`,
+			wantOpen: false,
+		},
+		{
+			name:     "Prose Cookie mention does not trigger Cookie header tolerance",
+			line:     `Cookie: Monster ate 'foo; chocolate 'chip`,
+			needle:   `'foo;`,
+			wantOpen: false,
+		},
+		{
+			name:     "Cookie semicolon before non-header URL colon closes Cookie context before b'",
+			line:     `Cookie: a='1'; https:'a'b'; echo "unpaired`,
+			needle:   `b'`,
+			wantOpen: false,
+		},
+		{
+			name:     "Cookie leading quote plus non-Cookie assignment closes Cookie context before b'",
+			line:     `Cookie: '1'; FOO=bar; https:'a'b'; echo "unpaired`,
+			needle:   `b'`,
+			wantOpen: false,
+		},
+		{
+			name:     "Cookie balanced semicolon KV pairs remain open before non-header URL colon",
+			line:     `Cookie: a='1; session='2'; https:'a'b'; echo "unpaired`,
+			needle:   `'1;`,
+			wantOpen: true,
+		},
+		{
+			name:     "Cookie balanced semicolon KV pairs close before following non-header URL colon",
+			line:     `Cookie: a='1; session='2'; https:'a'b'; echo "unpaired`,
+			needle:   `b'`,
+			wantOpen: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := strings.Index(tc.line, tc.needle)
+			if idx < 0 {
+				t.Fatalf("needle %q not found in %q", tc.needle, tc.line)
+			}
+			qRel := strings.IndexByte(tc.needle, '\'')
+			if qRel < 0 {
+				t.Fatalf("single quote not found in needle %q", tc.needle)
+			}
+			closePos := idx + qRel + 1
+			if got := isHeaderValueOpenOnLine(tc.line, 0, closePos, false); got != tc.wantOpen {
+				t.Errorf("isHeaderValueOpenOnLine(%q, 0, %d, false) = %v, want %v", tc.line, closePos, got, tc.wantOpen)
+			}
+			if got := newHeaderQuoteScanner(tc.line).isHeaderValueOpenAt(closePos, false); got != tc.wantOpen {
+				t.Errorf("headerQuoteScanner.isHeaderValueOpenAt(%q, %d, false) = %v, want %v", tc.line, closePos, got, tc.wantOpen)
+			}
+		})
+	}
+}
+
+func TestCookieJoinedQuoteMultipassIdempotency(t *testing.T) {
+	const secret = "SYNTH_BLIND_OTHER_8264"
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{
+			name: "Cookie joined quote followed by single-quoted X-Api-Key header",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Set-Cookie joined quote followed by single-quoted X-Api-Key header",
+			in:   `curl -H 'Set-Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote followed by single-quoted X-Api-Key header and -v flag",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote without double quotes followed by single-quoted X-Api-Key header and -v flag",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y; curl -H 'X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote followed by single-quoted X-Api-Key header and non-sensitive -H header",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `' -H 'X-Other: pub'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote followed by leading-space single-quoted X-Api-Key header and -v flag",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H ' X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+		},
+	}
+
+	scrubbers := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{name: "scrubTextPatterns", fn: scrubTextPatterns},
+		{name: "redactErrorMessage", fn: redactErrorMessage},
+		{
+			name: "sanitizeRawText",
+			fn: func(s string) string {
+				out, _ := sanitizeRawText(s)
+				return out
+			},
+		},
+		{
+			name: "SmartTruncate",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(s, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(%q): %v", s, err)
+				}
+				var decoded string
+				if err := json.Unmarshal(b, &decoded); err != nil {
+					t.Fatalf("SmartTruncate unmarshal(%s): %v", string(b), err)
+				}
+				return decoded
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			authPass := redactAuthHeaders(tc.in)
+			if strings.Contains(authPass, secret) || strings.Contains(authPass, "'pre'") || strings.Contains(authPass, "'pre ") || !strings.Contains(authPass, "; echo PUBLIC_KEEP") {
+				t.Errorf("redactAuthHeaders failed invariants: %q", authPass)
+			}
+			for _, sc := range scrubbers {
+				t.Run(sc.name, func(t *testing.T) {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					for passIdx, out := range []string{p1, p2, p3} {
+						if strings.Contains(out, secret) {
+							t.Errorf("pass %d leaked %q: %q", passIdx+1, secret, out)
+						}
+						if strings.Contains(out, "'pre'") || strings.Contains(out, "'pre ") {
+							t.Errorf("pass %d leaked cookie pre fragment: %q", passIdx+1, out)
+						}
+						if !strings.Contains(out, "; echo PUBLIC_KEEP") {
+							t.Errorf("pass %d lost '; echo PUBLIC_KEEP': %q", passIdx+1, out)
+						}
+					}
+					if p2 != p1 {
+						t.Errorf("pass 2 != pass 1:\n p1: %q\n p2: %q", p1, p2)
+					}
+					if p3 != p2 {
+						t.Errorf("pass 3 != pass 2:\n p2: %q\n p3: %q", p2, p3)
+					}
+				})
+			}
+		})
+	}
+
+	t.Run("Quote-desynced X-Api-Key placeholder preserves trailing flags and PUBLIC_KEEP", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			in   string
+			keep string
+		}{
+			{
+				name: "Trailing -v flag after single-quoted header",
+				in:   `curl -H 'Cookie: [REDACTED]' 'foo'x; curl -H 'X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+				keep: `' -v; echo PUBLIC_KEEP`,
+			},
+			{
+				name: "Trailing -H header after single-quoted header",
+				in:   `curl -H 'Cookie: [REDACTED]' 'foo'x; curl -H 'X-Api-Key: ` + secret + `' -H 'X-Other: pub'; echo PUBLIC_KEEP`,
+				keep: `' -H 'X-Other: pub'; echo PUBLIC_KEEP`,
+			},
+			{
+				name: "Leading space in header key and trailing -v flag",
+				in:   `curl -H 'Cookie: [REDACTED]' 'foo'x; curl -H ' X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+				keep: `' -v; echo PUBLIC_KEEP`,
+			},
+			{
+				name: "Pre-redacted Cookie joined quote before leading-space X-Api-Key and -v",
+				in:   `curl -H 'Cookie:[REDACTED]' X-Note: ''foo'x=y"x=y"; curl -H ' X-Api-Key: [REDACTED]' -v; echo PUBLIC_KEEP`,
+				keep: `' -v; echo PUBLIC_KEEP`,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for _, sc := range scrubbers {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					for passIdx, out := range []string{p1, p2, p3} {
+						if strings.Contains(out, secret) {
+							t.Errorf("%s pass %d leaked secret: %q", sc.name, passIdx+1, out)
+						}
+						if !strings.Contains(out, tc.keep) {
+							t.Errorf("%s pass %d lost %q: %q", sc.name, passIdx+1, tc.keep, out)
+						}
+					}
+					if p2 != p1 {
+						t.Errorf("%s pass 2 != pass 1:\n p1: %q\n p2: %q", sc.name, p1, p2)
+					}
+					if p3 != p2 {
+						t.Errorf("%s pass 3 != pass 2:\n p2: %q\n p3: %q", sc.name, p2, p3)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("Non-header unquoted placeholder keeps following double-quoted secret redacted", func(t *testing.T) {
+		for _, tc := range []struct {
+			in   string
+			want string
+		}{
+			{
+				in:   `password=[REDACTED]"SECRET`,
+				want: `password=[REDACTED]`,
+			},
+			{
+				in:   `password=[REDACTED]" secret"`,
+				want: `password=[REDACTED]`,
+			},
+			{
+				in:   `curl -H 'X-Api-Key: [REDACTED]'SECRET`,
+				want: `curl -H 'X-Api-Key: [REDACTED]'`,
+			},
+			{
+				in:   `curl -H 'Cookie: [REDACTED]' 'foo'x; curl -H 'X-Api-Key: [REDACTED]'SECRET`,
+				want: `curl -H 'Cookie: [REDACTED]' 'foo'x; curl -H 'X-Api-Key: [REDACTED]'`,
+			},
+		} {
+			for _, sc := range scrubbers {
+				got := sc.fn(tc.in)
+				if got != tc.want {
+					t.Errorf("%s(%q) = %q, want %q", sc.name, tc.in, got, tc.want)
+				}
+			}
+		}
+	})
+
+	t.Run("Cookie prose prefix before shell concatenation and JSON-escaped boundaries", func(t *testing.T) {
+		smartTruncateCmd := func(s string) string {
+			b, _, err := SmartTruncate(map[string]any{"cmd": s}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%q): %v", s, err)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal(b, &decoded); err != nil {
+				t.Fatalf("SmartTruncate unmarshal(%s): %v", string(b), err)
+			}
+			out, _ := decoded["cmd"].(string)
+			return out
+		}
+		allScrubbers := append(append([]struct {
+			name string
+			fn   func(string) string
+		}(nil), scrubbers...), struct {
+			name string
+			fn   func(string) string
+		}{name: "SmartTruncateStructured", fn: smartTruncateCmd})
+
+		redactCases := []struct {
+			name   string
+			in     string
+			secret string
+			keep   string
+		}{
+			{
+				name:   "Single-quoted Cookie prose prefix glued to sid=",
+				in:     `curl -H 'Cookie: see note'sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to val=",
+				in:     `curl -H 'Cookie: please see'val=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie prose prefix glued to sid=",
+				in:     `curl -H "Cookie: see note"sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to slash key",
+				in:     `curl -H 'Cookie: see note'/x=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Set-Cookie prose prefix glued to sid=",
+				in:     `curl -H 'Set-Cookie: see note'sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to opaque token",
+				in:     `curl -H 'Cookie: see note'SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to shell variable",
+				in:     `curl -H 'Cookie: see note'$SYNTH_COOKIE_VAR; echo PUBLIC_KEEP`,
+				secret: "SYNTH_COOKIE_VAR",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to dollar command substitution",
+				in:     `curl -H 'Cookie: see note'$(printf '%s' SYNTH_R4_COOKIE_88123); echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to backtick command substitution",
+				in:     "curl -H 'Cookie: see note'`printf '%s' SYNTH_R4_COOKIE_88123`; echo PUBLIC_KEEP",
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to adjacent single-quoted pair",
+				in:     `curl -H 'Cookie: see note''sid=SYNTH_R4_COOKIE_88123'; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to backslash-escaped token",
+				in:     `curl -H 'Cookie: see note'\SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to comma sid=",
+				in:     `curl -H 'Cookie: see note',sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to colon token",
+				in:     `curl -H 'Cookie: see note':SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to period token",
+				in:     `curl -H 'Cookie: see note'.SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix glued to opaque token closed with quote before tail",
+				in:     `curl -H 'Cookie: see note'SYNTH_OPAQUE_TOKEN_99112'tail'; echo PUBLIC_KEEP`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Single-quoted Cookie prose prefix with mismatched trailing quote stops skipping ahead",
+				in:     `curl -H 'Cookie: see note'SYNTH_OPAQUE_TOKEN_99112'; echo TAIL`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to opaque token",
+				in:     `{"cmd": "curl -H \"Cookie: see note\"SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Set-Cookie prose prefix glued to opaque token",
+				in:     `{"cmd": "curl -H \"Set-Cookie: see note\"SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to sid=",
+				in:     `{"cmd": "curl -H \"Cookie: see note\"sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to comma sid=",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",sid=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to comma token=",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",token=SYNTH_R4_COOKIE_88123; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to comma opaque token",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",SYNTH_OPAQUE_TOKEN_99112; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_OPAQUE_TOKEN_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to comma quoted sid=",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",\"sid=SYNTH_R4_COOKIE_88123\"; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-escaped Cookie prose prefix glued to comma brace assignment",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",{a=SYNTH_R4_COOKIE_88123}; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R4_COOKIE_88123",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Unquoted Cookie with quoted first word glued to sid=",
+				in:     `Cookie: 'Monster'sid=SYNTH_R4_COOKIE_88123`,
+				secret: "SYNTH_R4_COOKIE_88123",
+			},
+			{
+				name:   "Unquoted Cookie with quoted first word glued to comma sid=",
+				in:     `Cookie: 'Monster',sid=SYNTH_R4_COOKIE_88123`,
+				secret: "SYNTH_R4_COOKIE_88123",
+			},
+			{
+				name:   "Unquoted Cookie with quoted first word followed by space comma sid=",
+				in:     `Cookie: 'Monster', sid=SYNTH_R4_COOKIE_88123`,
+				secret: "SYNTH_R4_COOKIE_88123",
+			},
+			{
+				name:   "Brace suffix object container after JSON-quoted Cookie with true then secret (B8)",
+				in:     `foo{k:"Cookie: see note",true,SYNTH_R5_COOKIE_99112}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Brace suffix object container with next field glued to secret",
+				in:     `foo{k:"Cookie: see note","next":1}SYNTH_R5_COOKIE_99112`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Brace suffix object container with next field comma and unkeyed secret",
+				in:     `foo{k:"Cookie: see note","next":1,SYNTH_R5_COOKIE_99112}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with spaced true and unquoted secret",
+				in:     `["Cookie: see note", true, SYNTH_R5_COOKIE_99112]`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object with spaced unquoted secret value",
+				in:     `{"k": "Cookie: see note", "note": SYNTH_R5_COOKIE_99112}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Log prefix JSON command with Cookie comma true and secret (B8c)",
+				in:     `log: {"cmd": "curl -H \"Cookie: see note\",true,SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Log prefix JSON command with single-quoted Cookie glued to secret (B8e)",
+				in:     `log: {"cmd": "curl -H 'Cookie: see note'SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Unquoted brace list with Cookie comma true and secret (B8f)",
+				in:     `echo {a,"Cookie: see note",true,SYNTH_R5_COOKIE_99112}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with escaped-DQ Cookie comma true and secret (C3)",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",true,SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with escaped-DQ Cookie comma number and secret (C4)",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",123,SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with escaped-DQ Cookie comma empty object and secret (C5)",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",{},SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with escaped-DQ Cookie comma quoted key and secret (C7)",
+				in:     `{"cmd": "curl -H \"Cookie: see note\",\"note\":SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with inner single-quoted Cookie glued to secret (C8)",
+				in:     `{"cmd": "curl -H 'Cookie: see note'SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with inner single-quoted Cookie glued to period secret (C9)",
+				in:     `{"cmd": "curl -H 'Cookie: see note'.SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with inner single-quoted Cookie comma true and secret (C10)",
+				in:     `{"cmd": "curl -H 'Cookie: see note',true,SYNTH_R5_COOKIE_99112"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object command with inner single-quoted Cookie comma true secret and PUBLIC_KEEP",
+				in:     `{"cmd": "curl -H 'Cookie: see note',true,SYNTH_R5_COOKIE_99112; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie via printf command substitution glued to secret (A12b)",
+				in:     `curl -H "$(printf 'Cookie: see note')SYNTH_R5_COOKIE_99112"`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Double-quoted Cookie via printf command substitution glued to secret with PUBLIC_KEEP",
+				in:     `curl -H "$(printf 'Cookie: see note')SYNTH_R5_COOKIE_99112"; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie via echo command substitution glued to secret",
+				in:     `curl -H "$(echo Cookie: see note)SYNTH_R5_COOKIE_99112"; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie via printf command substitution with trailing space before close paren",
+				in:     `curl -H "$(printf 'Cookie: see note' )SYNTH_R5_COOKIE_99112"; echo PUBLIC_KEEP`,
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie via backtick command substitution glued to secret",
+				in:     "curl -H \"`echo Cookie: see note`SYNTH_R5_COOKIE_99112\"; echo PUBLIC_KEEP",
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "JSON-wrapped double-quoted Cookie via printf command substitution glued to secret",
+				in:     `{"cmd":"curl -H \"$(printf 'Cookie: see note')SYNTH_R5_COOKIE_99112\"; echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+				keep:   "PUBLIC_KEEP",
+			},
+			{
+				name:   "Double-quoted Cookie ending with escaped quote before space and secret (C16b)",
+				in:     `curl -H "Cookie: see note\" SYNTH_R5_COOKIE_99112"`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Single-quoted escaped single-quote Cookie prefix comma true and secret",
+				in:     `'prefix \'Cookie: see note\',true,SYNTH_R5_COOKIE_99112'`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with Cookie string then true and unquoted secret",
+				in:     `["Cookie: see note",true,SYNTH_R5_COOKIE_99112]`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with Cookie string then malformed object secret",
+				in:     `["Cookie: see note",{a=SYNTH_R5_COOKIE_99112}]`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with Cookie string then integer and unquoted secret",
+				in:     `["Cookie: see note",123,SYNTH_R5_COOKIE_99112]`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with Cookie string then string and unquoted secret",
+				in:     `["Cookie: see note","ok",SYNTH_R5_COOKIE_99112]`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON array with Cookie string then true and glued suffix secret",
+				in:     `["Cookie: see note",true]SYNTH_R5_COOKIE_99112`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "JSON object with Cookie string value and unquoted secret value",
+				in:     `{"k":"Cookie: see note","note":SYNTH_R5_COOKIE_99112}`,
+				secret: "SYNTH_R5_COOKIE_99112",
+			},
+			{
+				name:   "Unquoted command substitution Cookie glued to secret",
+				in:     `$(echo Cookie: see note)SYNTH_R7_99112`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Unquoted command substitution Cookie glued to single-quoted secret",
+				in:     `$(echo Cookie: see note)'SYNTH_R7_99112'`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Unquoted backtick command substitution Cookie glued to secret",
+				in:     "`echo Cookie: see note`SYNTH_R7_99112",
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "JSON cmd with Cookie prose then single-quoted X-Api-Key preserves closing quotes",
+				in:     `{"cmd": "curl -H 'Cookie: see note'; echo 'X-Api-Key: SYNTH_R7_99112'"}`,
+				secret: "SYNTH_R7_99112",
+				keep:   `'"}`,
+			},
+			{
+				name:   "JSON cmd with Cookie prose then single-quoted Cookie kv preserves closing quotes",
+				in:     `{"cmd": "curl -H 'Cookie: see note'; echo 'Cookie: a=SYNTH_R7_99112'"}`,
+				secret: "SYNTH_R7_99112",
+				keep:   `'"}`,
+			},
+			{
+				name:   "JSON cmd with single-quoted X-Api-Key preserves closing quotes",
+				in:     `{"cmd": "echo 'X-Api-Key: SYNTH_R7_99112'"}`,
+				secret: "SYNTH_R7_99112",
+				keep:   `'"}`,
+			},
+			{
+				name:   "Nested escaped JSON cmd with Cookie prose and single-quoted X-Api-Key preserves closing quotes",
+				in:     `{"outer": "{\"cmd\": \"curl -H 'Cookie: see note'; echo 'X-Api-Key: SYNTH_R7_99112'\"}"}`,
+				secret: "SYNTH_R7_99112",
+				keep:   `'\"}"`,
+			},
+			{
+				name:   "JSON cmd with Cookie prose then escaped double-quoted X-Api-Key preserves closing quotes",
+				in:     `{"cmd": "curl -H \"Cookie: see note\"; echo \"X-Api-Key: SYNTH_R7_99112\""}`,
+				secret: "SYNTH_R7_99112",
+				keep:   `\""}`,
+			},
+			{
+				name:   "JSON object with Cookie prose value and malformed array containing semicolon",
+				in:     `{"a":"Cookie: SYNTH_R7_99112","b":[1; ok]}`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "JSON object with Cookie prose value and malformed object containing semicolon",
+				in:     `{"a":"Cookie: SYNTH_R7_99112","b":{"bad":1; ok}}`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Unquoted Cookie prose cmd subst before X-Api-Key header",
+				in:     `$(echo Cookie: see note); curl -H 'X-Api-Key: SYNTH_R8_99112'`,
+				secret: "SYNTH_R8_99112",
+				keep:   "Cookie: see note",
+			},
+			{
+				name:   "Repeated 32KB unquoted Cookie cmd subst before glued secret",
+				in:     strings.Repeat("$(echo Cookie: see note); ", 1200) + "$(echo Cookie: see note)SYNTH_R8_99112",
+				secret: "SYNTH_R8_99112",
+				keep:   "$(echo Cookie: see note); $(echo Cookie: see note)",
+			},
+			{
+				name:   "Unquoted nested Cookie cmd subst glued to secret",
+				in:     `$(echo $(echo Cookie: see note))SYNTH_R8_99112`,
+				secret: "SYNTH_R8_99112",
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key inside cmd subst",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: SYNTH_R8_99112')\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `')\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key inside cmd subst with PUBLIC_KEEP",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: SYNTH_R8_99112'); echo PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'); echo PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted Authorization Bearer inside cmd subst with PUBLIC_KEEP",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'Authorization: Bearer SYNTH_R8_99112'); echo PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'); echo PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted Cookie inside cmd subst with PUBLIC_KEEP",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'Cookie: a=SYNTH_R8_99112'); echo PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'); echo PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "JSON cmd single-quoted X-Api-Key inside cmd subst with PUBLIC_KEEP",
+				in:     `{"cmd": "$(echo 'X-Api-Key: SYNTH_R8_99112'); echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'); echo PUBLIC_KEEP"}`,
+			},
+			{
+				name:   "JSON cmd single-quoted Authorization Bearer inside cmd subst with PUBLIC_KEEP",
+				in:     `{"cmd": "$(echo 'Authorization: Bearer SYNTH_R8_99112'); echo PUBLIC_KEEP"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'); echo PUBLIC_KEEP"}`,
+			},
+			{
+				name:   "Nested escaped JSON Cookie prose then single-quoted X-Api-Key with PUBLIC_KEEP",
+				in:     `{"outer": "{\"cmd\": \"curl -H 'Cookie: see note'; echo 'X-Api-Key: SYNTH_R8_99112'; echo PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `'; echo PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key glued to suffix after cmd subst",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: x')SYNTH_R8_99112\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `\"}"`,
+			},
+			{
+				name:   "JSON cmd single-quoted X-Api-Key glued to suffix after cmd subst",
+				in:     `{"cmd": "$(echo 'X-Api-Key: x')SYNTH_R8_99112"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `"}`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key glued before next object field",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: x')SYNTH_R8_99112\", \"keep\": \"PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `\", \"keep\": \"PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key glued before next array element",
+				in:     `{"outer": "{\"arr\": [\"$(echo 'X-Api-Key: x')SYNTH_R8_99112\", \"PUBLIC_KEEP\"]}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `\", \"PUBLIC_KEEP\"]}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key inside cmd subst before next object field",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: SYNTH_R8_99112')\", \"keep\": \"PUBLIC_KEEP\"}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `')\", \"keep\": \"PUBLIC_KEEP\"}"`,
+			},
+			{
+				name:   "Nested escaped JSON single-quoted X-Api-Key inside cmd subst before next array element",
+				in:     `{"outer": "{\"arr\": [\"$(echo 'X-Api-Key: SYNTH_R8_99112')\", \"PUBLIC_KEEP\"]}"}`,
+				secret: "SYNTH_R8_99112",
+				keep:   `')\", \"PUBLIC_KEEP\"]}"`,
+			},
+		}
+
+		for _, tc := range redactCases {
+			t.Run(tc.name, func(t *testing.T) {
+				authPass := redactAuthHeaders(tc.in)
+				if strings.Contains(authPass, tc.secret) {
+					t.Errorf("redactAuthHeaders leaked %q: %q", tc.secret, authPass)
+				}
+				if tc.keep != "" && !strings.Contains(authPass, tc.keep) {
+					t.Errorf("redactAuthHeaders lost %q: %q", tc.keep, authPass)
+				}
+				for _, sc := range allScrubbers {
+					t.Run(sc.name, func(t *testing.T) {
+						p1 := sc.fn(tc.in)
+						p2 := sc.fn(p1)
+						p3 := sc.fn(p2)
+						for passIdx, out := range []string{p1, p2, p3} {
+							if strings.Contains(out, tc.secret) {
+								t.Errorf("pass %d leaked %q: %q", passIdx+1, tc.secret, out)
+							}
+							if tc.keep != "" && !strings.Contains(out, tc.keep) {
+								t.Errorf("pass %d lost %q: %q", passIdx+1, tc.keep, out)
+							}
+						}
+						if p2 != p1 {
+							t.Errorf("pass 2 != pass 1:\n p1: %q\n p2: %q", p1, p2)
+						}
+						if p3 != p2 {
+							t.Errorf("pass 3 != pass 2:\n p2: %q\n p3: %q", p2, p3)
+						}
+					})
+				}
+			})
+		}
+
+		proseKeepCases := []struct {
+			name string
+			in   string
+		}{
+			{name: "Quoted sentence prose", in: `"The cookie: Monster was here."`},
+			{name: "Key-value prose string", in: `msg="cookie: Monster was here" k=v`},
+			{name: "Spaced JSON prose object", in: `{"msg": "Cookie: Monster was here", "k": "v"}`},
+			{name: "Compact JSON prose object", in: `{"msg":"Cookie: Monster was here","k":"v"}`},
+			{name: "Compact nested JSON-in-JSON prose object", in: `{"body":"{\"msg\":\"Cookie: Monster was here\",\"k\":1}"}`},
+			{name: "Compact nested JSON-in-JSON last field prose", in: `{"body":"{\"msg\":\"Cookie: Monster was here\"}"}`},
+			{name: "Possessive Cookie prose users", in: `Cookie: user's browser settings`},
+			{name: "Possessive Cookie prose Bob", in: `Cookie: Bob's demo key`},
+			{name: "Single-quoted Cookie prose sentence", in: `'Cookie: Monster was here.'`},
+			{name: "Single-quoted Cookie prose with comma and space", in: `'Cookie: Monster was here', she said.`},
+			{name: "Parenthesized Cookie prose", in: `("Cookie: Monster was here.")`},
+			{name: "Bracketed Cookie prose", in: `["Cookie: Monster was here"]`},
+			{name: "Command-sub Cookie prose", in: `$(echo 'Cookie: Monster was here')`},
+			{name: "Single-quoted Cookie prose before semicolon command", in: `curl -H 'Cookie: Monster was here'; echo PUBLIC_KEEP`},
+			{name: "JSON array with Cookie prose then integer", in: `["Cookie: Monster was here",123]`},
+			{name: "JSON array with Cookie prose then string", in: `["Cookie: Monster was here","ok"]`},
+			{name: "JSON object with Cookie prose value and numeric sibling field", in: `{"k":"Cookie: Monster was here","n":1}`},
+			{name: "Nested escaped JSON array with Cookie prose value and numeric sibling", in: `{"body":"{\"arr\":[\"Cookie: Monster was here\",123],\"k\":1}"}`},
+			{name: "Unquoted command substitution Cookie prose", in: `$(echo Cookie: Monster was here)`},
+			{name: "Unquoted command substitution Cookie prose before semicolon", in: `$(echo Cookie: Monster was here); echo ok`},
+			{name: "Valid JSON array with semicolon inside nested string and Cookie prose", in: `{"a":"Cookie: Monster was here","b":["ok; keep"]}`},
+			{name: "Valid JSON object with semicolon inside nested string and Cookie prose", in: `{"a":"Cookie: Monster was here","b":{"ok":"a; keep"}}`},
+			{name: "Unquoted Cookie prose cmd subst before second cmd subst", in: `$(echo Cookie: see note); $(echo ok)`},
+			{name: "Unquoted Cookie Monster cmd subst before second cmd subst", in: `$(echo Cookie: Monster); $(echo ok)`},
+			{name: "Repeated 32KB unquoted Cookie prose cmd subst", in: strings.Repeat("$(echo Cookie: see note); ", 1200)},
+		}
+		for _, tc := range proseKeepCases {
+			t.Run("ProsePreserved/"+tc.name, func(t *testing.T) {
+				if authPass := redactAuthHeaders(tc.in); authPass != tc.in {
+					t.Errorf("redactAuthHeaders altered prose:\n got:  %q\n want: %q", authPass, tc.in)
+				}
+				for _, sc := range allScrubbers {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					if p1 != tc.in || p2 != tc.in || p3 != tc.in {
+						t.Errorf("%s altered prose:\n in: %q\n p1: %q\n p2: %q\n p3: %q", sc.name, tc.in, p1, p2, p3)
+					}
+				}
+			})
+		}
+
+		downstreamSecretCases := []struct {
+			name   string
+			in     string
+			secret string
+			keep   string
+		}{
+			{
+				name:   "Unquoted Cookie prose cmd subst before token secret",
+				in:     `$(echo Cookie: see note); token=SYNTH_R8_99112`,
+				secret: "SYNTH_R8_99112",
+				keep:   "Cookie: see note",
+			},
+			{
+				name:   "Unquoted Cookie Monster cmd subst before token secret",
+				in:     `$(echo Cookie: Monster); token=SYNTH_R8_99112`,
+				secret: "SYNTH_R8_99112",
+				keep:   "Cookie: Monster",
+			},
+			{
+				name:   "Unquoted Cookie prefix assignment and cmd subst before token secret",
+				in:     `$(echo Cookie: a b) x=1; token=SYNTH_R8_99112`,
+				secret: "SYNTH_R8_99112",
+				keep:   "Cookie: a b",
+			},
+		}
+		for _, tc := range downstreamSecretCases {
+			t.Run("DownstreamSecret/"+tc.name, func(t *testing.T) {
+				if authPass := redactAuthHeaders(tc.in); authPass != tc.in {
+					t.Errorf("redactAuthHeaders altered prose Cookie before downstream secret:\n in:  %q\n got: %q", tc.in, authPass)
+				}
+				for _, sc := range allScrubbers {
+					t.Run(sc.name, func(t *testing.T) {
+						p1 := sc.fn(tc.in)
+						p2 := sc.fn(p1)
+						p3 := sc.fn(p2)
+						for passIdx, out := range []string{p1, p2, p3} {
+							if strings.Contains(out, tc.secret) {
+								t.Errorf("pass %d leaked %q: %q", passIdx+1, tc.secret, out)
+							}
+							if !strings.Contains(out, tc.keep) {
+								t.Errorf("pass %d lost %q: %q", passIdx+1, tc.keep, out)
+							}
+						}
+						if p2 != p1 {
+							t.Errorf("pass 2 != pass 1:\n p1: %q\n p2: %q", p1, p2)
+						}
+						if p3 != p2 {
+							t.Errorf("pass 3 != pass 2:\n p2: %q\n p3: %q", p2, p3)
+						}
+					})
+				}
+			})
+		}
+
+		placeholderNegativeCases := []struct {
+			name   string
+			in     string
+			secret string
+		}{
+			{
+				name:   "JSON object with Cookie prose and malformed array semicolon before token secret",
+				in:     `{"a":"Cookie: see note","b":[1; token=SYNTH_R7_99112]}`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "JSON object with Cookie prose and malformed object semicolon before token secret",
+				in:     `{"a":"Cookie: see note","b":{"bad":1; token=SYNTH_R7_99112}}`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Forged outer quote closed before unquoted secret after inner placeholder",
+				in:     `"echo 'X-Api-Key: [REDACTED]'"SYNTH_R7_99112`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Forged unmatched double-quoted secret after single-quoted header placeholder",
+				in:     `curl -H 'X-Api-Key: [REDACTED]'"SYNTH_R7_99112"`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Forged quote glue after bare password placeholder",
+				in:     `password=[REDACTED]"SYNTH_R7_99112`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Forged space-containing quoted secret after bare password placeholder",
+				in:     `password=[REDACTED]" SYNTH_R7_99112"`,
+				secret: "SYNTH_R7_99112",
+			},
+			{
+				name:   "Forged nested JSON single-quoted X-Api-Key placeholder glued to secret",
+				in:     `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: [REDACTED]')SYNTH_R8_99112\"}"}`,
+				secret: "SYNTH_R8_99112",
+			},
+			{
+				name:   "Forged JSON single-quoted X-Api-Key placeholder glued to secret",
+				in:     `{"cmd": "$(echo 'X-Api-Key: [REDACTED]')SYNTH_R8_99112"}`,
+				secret: "SYNTH_R8_99112",
+			},
+		}
+		for _, tc := range placeholderNegativeCases {
+			t.Run("PlaceholderNegative/"+tc.name, func(t *testing.T) {
+				for _, sc := range allScrubbers {
+					t.Run(sc.name, func(t *testing.T) {
+						p1 := sc.fn(tc.in)
+						p2 := sc.fn(p1)
+						p3 := sc.fn(p2)
+						for passIdx, out := range []string{p1, p2, p3} {
+							if strings.Contains(out, tc.secret) {
+								t.Errorf("pass %d leaked %q: %q", passIdx+1, tc.secret, out)
+							}
+						}
+						if p2 != p1 {
+							t.Errorf("pass 2 != pass 1:\n p1: %q\n p2: %q", p1, p2)
+						}
+						if p3 != p2 {
+							t.Errorf("pass 3 != pass 2:\n p2: %q\n p3: %q", p2, p3)
+						}
+					})
+				}
+			})
+		}
+	})
+}
+
+func TestMultilineJoinedHeaderLinearScaling(t *testing.T) {
+	const secret = "SYNTH_SCALE_SECRET_99182"
+	sizes := []int{1250, 5000, 20000} // ~5 KB, ~20 KB, ~80 KB of `"a" ` tokens
+
+	buildQ1 := func(n int) string {
+		return "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' " + strings.Repeat("\"a\" ", n) + "\"$(printf \"'\")\"; echo PUBLIC_KEEP"
+	}
+	buildQ2 := func(n int) string {
+		return "curl -H \"X-Api-Key: \"Bob'\n" + strings.Repeat("\"a\" ", n) + "\"$(printf \"'\")\" PUBLIC_KEEP"
+	}
+	buildMultiHeader := func(headers, tokensPerHeader int) string {
+		var b strings.Builder
+		tokens := strings.Repeat("\"a\" ", tokensPerHeader)
+		for range headers {
+			b.WriteString("curl -H \"X-Api-Key: \"pre's ")
+			b.WriteString(secret)
+			b.WriteString("\ntail' ")
+			b.WriteString(tokens)
+			b.WriteString("-H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"\n")
+		}
+		return b.String()
+	}
+
+	bestOf3 := func(in string, fn func(string) string) time.Duration {
+		_ = fn(in) // warmup
+		var best time.Duration
+		for i := range 3 {
+			start := time.Now()
+			_ = fn(in)
+			elapsed := time.Since(start)
+			if i == 0 || elapsed < best {
+				best = elapsed
+			}
+		}
+		return best
+	}
+
+	checkScale := func(t *testing.T, label string, d5, d20, d80 time.Duration) {
+		t.Helper()
+		t.Logf("%s timings: ~5KB=%v, ~20KB=%v, ~80KB=%v", label, d5, d20, d80)
+		base20 := d20
+		if floor := 500 * time.Microsecond; base20 < floor {
+			base20 = floor
+		}
+		ratio := float64(d80) / float64(base20)
+		if d80 > 20*time.Millisecond && ratio > 8.0 {
+			t.Errorf("%s 80KB/20KB ratio = %.2fx (%v / %v), want <= 8.0x", label, ratio, d80, d20)
+		}
+	}
+
+	var q1Times, q2Times [3]time.Duration
+	for idx, n := range sizes {
+		q1 := buildQ1(n)
+		gotQ1 := scrubTextPatterns(q1)
+		if strings.Contains(gotQ1, secret) || !strings.Contains(gotQ1, "PUBLIC_KEEP") {
+			t.Fatalf("Q1(%d) failed functional check: %q", n, gotQ1)
+		}
+		q1Times[idx] = bestOf3(q1, scrubTextPatterns)
+
+		q2 := buildQ2(n)
+		gotQ2 := scrubTextPatterns(q2)
+		if !strings.Contains(gotQ2, "PUBLIC_KEEP") || !strings.Contains(gotQ2, "\"X-Api-Key: [REDACTED]\"") {
+			t.Fatalf("Q2(%d) failed functional check", n)
+		}
+		q2Times[idx] = bestOf3(q2, scrubTextPatterns)
+	}
+	checkScale(t, "Q1 (chainClosesFrom + trailing $(...))", q1Times[0], q1Times[1], q1Times[2])
+	checkScale(t, "Q2 (hasUnclosedQuoteOnNextLine + trailing $(...))", q2Times[0], q2Times[1], q2Times[2])
+
+	mhCounts := []struct{ headers, tokens int }{
+		{25, 40},  // ~5 KB
+		{100, 40}, // ~20 KB
+		{400, 40}, // ~80 KB
+	}
+	var mhTimes [3]time.Duration
+	for idx, cfg := range mhCounts {
+		mh := buildMultiHeader(cfg.headers, cfg.tokens)
+		gotMH := scrubTextPatterns(mh)
+		if strings.Contains(gotMH, secret) || !strings.Contains(gotMH, "PUBLIC_KEEP") {
+			t.Fatalf("multi-header(%d,%d) failed functional check", cfg.headers, cfg.tokens)
+		}
+		mhTimes[idx] = bestOf3(mh, scrubTextPatterns)
+	}
+	checkScale(t, "Multi-header x dquotes", mhTimes[0], mhTimes[1], mhTimes[2])
+
+	cookieSemi10k := "curl -H 'Cookie: a" + strings.Repeat("; b", 10000) + "; sid=" + secret + "'"
+	if got := scrubTextPatterns(cookieSemi10k); strings.Contains(got, secret) {
+		t.Fatalf("10k-semicolon Cookie leaked secret")
+	}
+	semi10kTime := bestOf3(cookieSemi10k, scrubTextPatterns)
+	t.Logf("10k-semicolon Cookie timing: %v", semi10kTime)
+	if semi10kTime > 50*time.Millisecond {
+		t.Errorf("10k-semicolon Cookie too slow: %v, want <= 50ms", semi10kTime)
+	}
+
+	cookieJSONSizes := []int{250, 1000, 4000} // ~5KB, ~20KB, ~80KB nested JSON-escaped Cookie headers
+	buildCookieJSON := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`{"body":"{\"msg\":\"`)
+		for range n {
+			b.WriteString(`Cookie: Monster was here; `)
+		}
+		b.WriteString(`\"}"}`)
+		return b.String()
+	}
+	var cjTimes [3]time.Duration
+	for idx, n := range cookieJSONSizes {
+		cj := buildCookieJSON(n)
+		gotCJ := scrubTextPatterns(cj)
+		if gotCJ != cj {
+			t.Fatalf("CookieJSON(%d) altered benign prose", n)
+		}
+		cjTimes[idx] = bestOf3(cj, scrubTextPatterns)
+	}
+	checkScale(t, "Cookie JSON-escaped closeAt x closeOnLine", cjTimes[0], cjTimes[1], cjTimes[2])
+
+	buildNestedJSONContainers := func(n int) string {
+		const item = "{\"body\":\"{\\\"arr\\\":[\\\"Cookie: Monster was here\\\",123,true,\\\"ok\\\"],\\\"obj\\\":{\\\"msg\\\":\\\"Cookie: Monster was here\\\",\\\"n\\\":1}}\"}\n"
+		var b strings.Builder
+		b.Grow(n * len(item))
+		for range n {
+			b.WriteString(item)
+		}
+		return b.String()
+	}
+	nestedContainerSizes := []int{40, 160, 640}
+	var nestedContainerTimes [3]time.Duration
+	for idx, n := range nestedContainerSizes {
+		nc := buildNestedJSONContainers(n)
+		gotNC := scrubTextPatterns(nc)
+		if gotNC != nc {
+			t.Fatalf("NestedJSONContainers(%d) altered benign prose", n)
+		}
+		nestedContainerTimes[idx] = bestOf3(nc, scrubTextPatterns)
+	}
+	checkScale(t, "Cookie nested JSON container classification", nestedContainerTimes[0], nestedContainerTimes[1], nestedContainerTimes[2])
+
+	buildNestedSubstLines := func(n int) string {
+		const item = "curl -H \"$(printf 'Cookie: see note')SYNTH_R5_COOKIE_99112\"; echo PUBLIC_KEEP\n"
+		var b strings.Builder
+		b.Grow(n * len(item))
+		for range n {
+			b.WriteString(item)
+		}
+		return b.String()
+	}
+	nestedSubstSizes := []int{70, 280, 1120}
+	var nestedSubstTimes [3]time.Duration
+	for idx, n := range nestedSubstSizes {
+		ns := buildNestedSubstLines(n)
+		gotNS := scrubTextPatterns(ns)
+		if strings.Contains(gotNS, "SYNTH_R5_COOKIE_99112") || !strings.Contains(gotNS, "PUBLIC_KEEP") {
+			t.Fatalf("NestedSubstLines(%d) failed redaction/preservation", n)
+		}
+		nestedSubstTimes[idx] = bestOf3(ns, scrubTextPatterns)
+	}
+	checkScale(t, "Cookie nested cmd-subst and single-quote lines", nestedSubstTimes[0], nestedSubstTimes[1], nestedSubstTimes[2])
+
+	buildUnquotedCookieSubst := func(n int) string {
+		const item = "$(echo Cookie: see note); "
+		var b strings.Builder
+		b.Grow(n*len(item) + len("$(echo Cookie: see note)") + len(secret))
+		for range n {
+			b.WriteString(item)
+		}
+		b.WriteString("$(echo Cookie: see note)")
+		b.WriteString(secret)
+		return b.String()
+	}
+	unquotedCookieSizes := []int{200, 800, 3200}
+	var unquotedCookieTimes [3]time.Duration
+	for idx, n := range unquotedCookieSizes {
+		uc := buildUnquotedCookieSubst(n)
+		gotUC := scrubTextPatterns(uc)
+		if strings.Contains(gotUC, secret) || !strings.Contains(gotUC, "$(echo Cookie: see note); ") {
+			t.Fatalf("UnquotedCookieSubst(%d) failed redaction/preservation", n)
+		}
+		if scrubTextPatterns(gotUC) != gotUC {
+			t.Fatalf("UnquotedCookieSubst(%d) not idempotent", n)
+		}
+		unquotedCookieTimes[idx] = bestOf3(uc, scrubTextPatterns)
+	}
+	checkScale(t, "Unquoted Cookie cmd-subst prose repetition", unquotedCookieTimes[0], unquotedCookieTimes[1], unquotedCookieTimes[2])
+
+	singleLineEscQuoteSubSizes := []int{50, 200, 800} // ~4KB, ~17KB, ~69KB single-line JSON escaped quotes + subshell placeholder
+	buildSingleLineEscQuoteSub := func(n int) string {
+		const item = `{"cmd":"echo \\\"lit (echo 'password=[REDACTED]'); echo PUBLIC_KEEP","ok":"PUBLIC_KEEP"} `
+		var b strings.Builder
+		b.Grow(n * len(item))
+		for range n {
+			b.WriteString(item)
+		}
+		return b.String()
+	}
+	var escQuoteSubTimes [3]time.Duration
+	for idx, n := range singleLineEscQuoteSubSizes {
+		in := buildSingleLineEscQuoteSub(n)
+		got := scrubTextPatterns(in)
+		if got != in {
+			t.Fatalf("SingleLineEscQuoteSub(%d) altered benign payload", n)
+		}
+		escQuoteSubTimes[idx] = bestOf3(in, scrubTextPatterns)
+	}
+	checkScale(t, "Single-line escaped-quote subshell placeholder", escQuoteSubTimes[0], escQuoteSubTimes[1], escQuoteSubTimes[2])
+
+	singleJSONEscSubSizes := []int{250, 1000, 4000} // ~12KB, ~48KB, ~192KB single huge JSON string with \\\"password=[REDACTED]\\\"
+	buildSingleJSONEscSub := func(n int) string {
+		const item = `(echo \\\"password=[REDACTED]\\\"); `
+		var b strings.Builder
+		b.Grow(64 + n*len(item))
+		b.WriteString(`{"cmd":"`)
+		for range n {
+			b.WriteString(item)
+		}
+		b.WriteString(`echo PUBLIC_KEEP","ok":"PUBLIC_KEEP"}`)
+		return b.String()
+	}
+	var singleJSONEscSubTimes [3]time.Duration
+	for idx, n := range singleJSONEscSubSizes {
+		in := buildSingleJSONEscSub(n)
+		got := scrubTextPatterns(in)
+		if got != in {
+			t.Fatalf("SingleJSONEscSub(%d) altered benign payload", n)
+		}
+		singleJSONEscSubTimes[idx] = bestOf3(in, scrubTextPatterns)
+	}
+	checkScale(t, "Single-JSON escaped-quote subshell placeholder", singleJSONEscSubTimes[0], singleJSONEscSubTimes[1], singleJSONEscSubTimes[2])
+}
+
+func TestCookieContainerB8bRedactedNotProsePreserved(t *testing.T) {
+	in := `foo{k:"Cookie: see note","next":1} SYNTH_R5_COOKIE_99112`
+	scrubbers := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{"redactAuthHeaders", redactAuthHeaders},
+		{"scrubTextPatterns", scrubTextPatterns},
+		{"redactErrorMessage", redactErrorMessage},
+		{"sanitizeRawText", func(s string) string {
+			out, _ := sanitizeRawText(s)
+			return out
+		}},
+		{"SmartTruncate_string", func(s string) string {
+			b, _, err := SmartTruncate(s, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(string) error: %v", err)
+			}
+			var out string
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatalf("json.Unmarshal(string) error: %v (raw=%s)", err, string(b))
+			}
+			return out
+		}},
+		{"SmartTruncate_map", func(s string) string {
+			b, _, err := SmartTruncate(map[string]any{"cmd": s}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(map) error: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatalf("json.Unmarshal(map) error: %v (raw=%s)", err, string(b))
+			}
+			v, _ := m["cmd"].(string)
+			return v
+		}},
+	}
+	for _, sc := range scrubbers {
+		t.Run(sc.name, func(t *testing.T) {
+			p1 := sc.fn(in)
+			p2 := sc.fn(p1)
+			p3 := sc.fn(p2)
+			if strings.Contains(p1, "see note") {
+				t.Fatalf("kept unredacted Cookie prose instead of redacting on secret suffix in %s: %q", sc.name, p1)
+			}
+			if !strings.Contains(p1, "Cookie: [REDACTED]") {
+				t.Fatalf("expected Cookie: [REDACTED] in %s: %q", sc.name, p1)
+			}
+			if p1 != p2 || p2 != p3 {
+				t.Fatalf("not multipass idempotent in %s: p1=%q p2=%q p3=%q", sc.name, p1, p2, p3)
+			}
+		})
+	}
+	malformedSemicolonCases := []string{
+		`{"a":"Cookie: hello world","b":[1; ok]}`,
+		`{"a":"Cookie: hello world","b":{"bad":1; ok}}`,
+	}
+	for _, mIn := range malformedSemicolonCases {
+		for _, sc := range scrubbers {
+			p1 := sc.fn(mIn)
+			p2 := sc.fn(p1)
+			if strings.Contains(p1, "hello world") {
+				t.Fatalf("expected malformed semicolon container %q to redact Cookie prose in %s: %q", mIn, sc.name, p1)
+			}
+			if !strings.Contains(p1, "Cookie: [REDACTED]") && p1 != unparseableJSONPlaceholder {
+				t.Fatalf("expected Cookie: [REDACTED] or unparseable JSON placeholder in %s: %q", sc.name, p1)
+			}
+			if p1 != p2 {
+				t.Fatalf("malformed semicolon container not idempotent in %s: p1=%q p2=%q", sc.name, p1, p2)
+			}
+		}
+	}
+}
+
+func TestSubshellAndPlaceholderBoundaryParity(t *testing.T) {
+	scrubbers := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{"redactAuthHeaders", redactAuthHeaders},
+		{"scrubTextPatterns", scrubTextPatterns},
+		{"redactErrorMessage", redactErrorMessage},
+		{"sanitizeRawText", func(s string) string {
+			out, _ := sanitizeRawText(s)
+			return out
+		}},
+		{"SmartTruncate_string", func(s string) string {
+			b, _, err := SmartTruncate(s, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(string) error: %v", err)
+			}
+			var out string
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatalf("json.Unmarshal(string) error: %v (raw=%s)", err, string(b))
+			}
+			return out
+		}},
+		{"SmartTruncate_map", func(s string) string {
+			b, _, err := SmartTruncate(map[string]any{"cmd": s}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(map) error: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(b, &m); err != nil {
+				t.Fatalf("json.Unmarshal(map) error: %v (raw=%s)", err, string(b))
+			}
+			v, _ := m["cmd"].(string)
+			return v
+		}},
+	}
+
+	leakCases := []struct {
+		name     string
+		in       string
+		secret   string
+		preserve string
+	}{
+		{
+			name:   "plain_subshell_sq_glued_secret",
+			in:     `(echo 'X-Api-Key: tok')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "plain_subshell_eq_apostrophe_glued_secret",
+			in:     `(echo 'X-Api-Key: tok=')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "plain_subshell_dash_apostrophe_glued_secret",
+			in:     `(echo 'X-Api-Key: tok-')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "plain_subshell_underscore_apostrophe_glued_secret",
+			in:     `(echo 'X-Api-Key: tok_')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "plain_subshell_slash_apostrophe_glued_secret",
+			in:     `(echo 'X-Api-Key: tok/')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "plain_subshell_glued_secret_before_semicolon",
+			in:       `(echo 'X-Api-Key: tok')SYNTH_LEAK_99112; echo PUBLIC_KEEP`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "plain_subshell_dq_glued_secret",
+			in:     `(echo "X-Api-Key: tok")SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "nested_subshell_sq_glued_secret",
+			in:     `((echo 'X-Api-Key: tok'))SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "nested_subshell_glued_secret_before_semicolon",
+			in:       `((echo 'X-Api-Key: tok'))SYNTH_LEAK_99112; echo PUBLIC_KEEP`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "json_subshell_glued_secret_preserves_next_field",
+			in:       `{"cmd": "(echo 'X-Api-Key: tok')SYNTH_LEAK_99112", "ok": "PUBLIC_KEEP"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_subshell_glued_secret_preserves_next_field",
+			in:       `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: tok')SYNTH_LEAK_99112\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_subshell_dogs_glued_secret_preserves_next_field",
+			in:       `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: dogs')SYNTH_LEAK_99112\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "forged_subshell_placeholder_glued_secret",
+			in:     `(echo 'X-Api-Key: [REDACTED]')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "forged_json_subshell_placeholder_glued_secret",
+			in:     `{"cmd": "(echo 'X-Api-Key: [REDACTED]')SYNTH_LEAK_99112"}`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "forged_nested_json_subshell_placeholder_glued_secret",
+			in:     `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: [REDACTED]')SYNTH_LEAK_99112\"}"}`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "forged_json_object_placeholder_glued_secret",
+			in:     `{"a": "X-Api-Key: [REDACTED]"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "log_forged_json_object_placeholder_glued_secret",
+			in:     `log: {"a": "X-Api-Key: [REDACTED]"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "forged_json_array_placeholder_glued_secret",
+			in:     `["X-Api-Key: [REDACTED]"]SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "log_forged_json_array_placeholder_glued_secret",
+			in:     `log: ["X-Api-Key: [REDACTED]"]SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "nested_json_subshell_dogs_semicolon_preserve",
+			in:       `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: dogs'); echo PUBLIC_KEEP\"}"}`,
+			secret:   "dogs",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_subshell_tok9_semicolon_preserve",
+			in:       `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: tok9'); echo PUBLIC_KEEP\"}"}`,
+			secret:   "tok9",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_subshell_escaped_dq_before_dogs_semicolon_preserve",
+			in:       `{"outer": "{\"cmd\": \"(echo \\\"a\\\"; echo 'X-Api-Key: dogs'); echo PUBLIC_KEEP\"}"}`,
+			secret:   "dogs",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_two_inner_fields_before_dogs_semicolon_preserve",
+			in:       `{"outer": "{\"a\": \"X-Api-Key: tok1\", \"cmd\": \"(echo 'X-Api-Key: dogs'); echo PUBLIC_KEEP\"}"}`,
+			secret:   "dogs",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "json_cmd_subst_escaped_dq_parity",
+			in:       `{"cmd": "$(echo \"X-Api-Key: SYNTH_L9_88112\"); echo PUBLIC_KEEP"}`,
+			secret:   "SYNTH_L9_88112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_cmd_subst_escaped_dq_parity",
+			in:       `{"outer": "{\"cmd\": \"$(echo \\\"X-Api-Key: SYNTH_L9_88112\\\"); echo PUBLIC_KEEP\"}"}`,
+			secret:   "SYNTH_L9_88112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "nested_json_cmd_subst_escaped_dq_glued_secret",
+			in:       `{"outer": "{\"cmd\": \"$(echo \\\"X-Api-Key: tok\\\")SYNTH_LEAK_99112; echo PUBLIC_KEEP\"}"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "forged_nested_json_cmd_subst_escaped_dq_placeholder_glued_secret",
+			in:     `{"outer": "{\"cmd\": \"$(echo \\\"X-Api-Key: [REDACTED]\\\")SYNTH_LEAK_99112\"}"}`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "json_cmd_subshell_escaped_dq_glued_secret_preserves_ok",
+			in:       `{"cmd": "echo hi; (echo 'X-Api-Key: tok')\"SYNTH_LEAK_99112", "ok": "PUBLIC_KEEP"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "json_obj_subshell_glued_secret",
+			in:     `{"cmd": "(echo 'X-Api-Key: tok')"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "json_obj_cmd_subst_glued_secret",
+			in:     `{"cmd": "$(echo 'X-Api-Key: tok')"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "json_arr_subshell_glued_secret",
+			in:     `["(echo 'X-Api-Key: tok')"]SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "nested_json_subshell_glued_secret",
+			in:     `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: tok')\"}"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "nested_json_header_glued_secret",
+			in:     `{"outer": "{\"a\": \"X-Api-Key: tok\"}"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "json_unescaped_shell_dq_wraps_header_and_trailing_secret",
+			in:       `{"cmd": "echo \"(echo 'X-Api-Key: tok'); echo SYNTH_LEAK_99112\"", "ok": "PUBLIC_KEEP"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+	}
+
+	for _, tc := range leakCases {
+		t.Run("Leak/"+tc.name, func(t *testing.T) {
+			for _, sc := range scrubbers {
+				t.Run(sc.name, func(t *testing.T) {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					for passIdx, out := range []string{p1, p2, p3} {
+						if strings.Contains(out, tc.secret) {
+							t.Errorf("pass %d leaked %q: %q", passIdx+1, tc.secret, out)
+						}
+						if tc.preserve != "" && !strings.Contains(out, tc.preserve) {
+							t.Errorf("pass %d dropped %q: %q", passIdx+1, tc.preserve, out)
+						}
+					}
+					if p2 != p1 || p3 != p2 {
+						t.Errorf("not idempotent across p1/p2/p3:\n p1: %q\n p2: %q\n p3: %q", p1, p2, p3)
+					}
+				})
+			}
+		})
+	}
+
+	kvForgedCases := []struct {
+		name           string
+		in             string
+		secret         string
+		preserve       string
+		checkJSONValid bool
+	}{
+		{
+			name:   "subshell_kv_placeholder_glued_secret",
+			in:     `(echo password=[REDACTED])SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "json_kv_placeholder_glued_secret",
+			in:     `{"a": "password=[REDACTED]"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "log_json_kv_placeholder_glued_secret",
+			in:     `log: {"a": "password=[REDACTED]"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "subshell_sq_kv_placeholder_glued_secret",
+			in:     `(password='[REDACTED]')SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "paren_wrapped_kv_placeholder_glued_secret",
+			in:     `password=([REDACTED])SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "json_subshell_sq_kv_placeholder_glued_secret_preserves_ok",
+			in:       `{"a": "(echo 'password=[REDACTED]')SYNTH_LEAK_99112", "ok": "PUBLIC_KEEP"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "json_obj_subshell_sq_kv_placeholder_glued_secret",
+			in:     `{"a": "(echo 'password=[REDACTED]')"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "nested_json_subshell_sq_kv_placeholder_inner_glued_secret",
+			in:     `{"outer": "{\"a\": \"(echo 'password=[REDACTED]')\"}SYNTH_LEAK_99112"}`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:   "nested_json_subshell_sq_kv_placeholder_outer_glued_secret",
+			in:     `{"outer": "{\"a\": \"(echo 'password=[REDACTED]')\"}"}SYNTH_LEAK_99112`,
+			secret: "SYNTH_LEAK_99112",
+		},
+		{
+			name:     "json_subshell_sq_kv_raw_secret_glued_secret_preserves_ok",
+			in:       `{"a": "(echo 'password=SYNTH_LEAK_99112_A')SYNTH_LEAK_99112_B", "ok": "PUBLIC_KEEP"}`,
+			secret:   "SYNTH_LEAK_99112",
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:   "json_subshell_sq_kv_raw_secret_no_ok_glued_secret",
+			in:     `{"a": "(echo 'password=SECRET_99112')SYNTH_LEAK_99112"}`,
+			secret: "99112",
+		},
+		{
+			name:           "json_subshell_esc_dq_kv_placeholder_glued_secret_preserves_ok",
+			in:             `{"a": "(echo \\\"password=[REDACTED]\\\"SYNTH_LEAK_99112)", "ok": "PUBLIC_KEEP"}`,
+			secret:         "SYNTH_LEAK_99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "nested_json_subshell_esc_dq_kv_placeholder_glued_secret_preserves_ok",
+			in:             `{"outer": "{\"a\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\"SYNTH_LEAK_99112)\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secret:         "SYNTH_LEAK_99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "json_subshell_esc_dq_kv_raw_glued_secret_preserves_ok",
+			in:             `{"a": "(echo \\\"password=SECRET_99112\\\"SYNTH_LEAK_99112)", "ok": "PUBLIC_KEEP"}`,
+			secret:         "99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "nested_json_3bs_pipe_secret_no_ok",
+			in:             `{"outer": "{\"a\": \"password=abc\\\"|SECRET_LEAK_99112\"}"}`,
+			secret:         "SECRET_LEAK_99112",
+			checkJSONValid: true,
+		},
+		{
+			name:           "nested_json_3bs_pipe_secret_preserves_ok",
+			in:             `{"outer": "{\"a\": \"password=abc\\\"|SECRET_LEAK_99112\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secret:         "SECRET_LEAK_99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "single_json_5bs_pipe_secret_no_ok",
+			in:             `{"a": "password=abc\\\\\"|SECRET_LEAK_99112"}`,
+			secret:         "SECRET_LEAK_99112",
+			checkJSONValid: true,
+		},
+		{
+			name:           "single_json_5bs_pipe_secret_preserves_ok",
+			in:             `{"a": "password=abc\\\\\"|SECRET_LEAK_99112", "ok": "PUBLIC_KEEP"}`,
+			secret:         "SECRET_LEAK_99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "nested_json_7bs_pipe_secret_preserves_ok",
+			in:             `{"outer": "{\"a\": \"password=abc\\\\\\\"|SECRET_LEAK_99112\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secret:         "SECRET_LEAK_99112",
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+	}
+	for _, tc := range kvForgedCases {
+		t.Run("KVForged/"+tc.name, func(t *testing.T) {
+			for _, sc := range scrubbers[1:] {
+				t.Run(sc.name, func(t *testing.T) {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					for passIdx, out := range []string{p1, p2, p3} {
+						if strings.Contains(out, tc.secret) {
+							t.Errorf("pass %d leaked %q: %q", passIdx+1, tc.secret, out)
+						}
+						if tc.preserve != "" && !strings.Contains(out, tc.preserve) {
+							t.Errorf("pass %d dropped %q: %q", passIdx+1, tc.preserve, out)
+						}
+					}
+					if tc.checkJSONValid {
+						if !json.Valid([]byte(p1)) {
+							t.Errorf("p1 is not valid JSON: %q", p1)
+						} else if strings.Contains(tc.in, `"outer":`) {
+							var outer map[string]string
+							if err := json.Unmarshal([]byte(p1), &outer); err != nil || !json.Valid([]byte(outer["outer"])) {
+								t.Errorf("p1 nested outer JSON invalid: %q (err=%v)", p1, err)
+							}
+						}
+					}
+					if p2 != p1 || p3 != p2 {
+						t.Errorf("not idempotent across p1/p2/p3:\n p1: %q\n p2: %q\n p3: %q", p1, p2, p3)
+					}
+				})
+			}
+		})
+	}
+
+	kvPreserveCases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "json_subshell_sq_password_placeholder_preserves_ok",
+			in:   `{"a": "(echo 'password=[REDACTED]')", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "(echo 'password=[REDACTED]')", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_semicolon_sq_password_placeholder_preserves_ok",
+			in:   `{"a": "echo 'password=[REDACTED]'; echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "echo 'password=[REDACTED]'; echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_semicolon_sq_password_raw_secret_preserves_ok",
+			in:   `{"a": "echo 'password=SECRET_99112'; echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "echo 'password=[REDACTED]'; echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "nested_json_subshell_sq_password_placeholder_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo 'password=[REDACTED]')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo 'password=[REDACTED]')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_sq_token_placeholder_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo 'token=[REDACTED]')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo 'token=[REDACTED]')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_sq_password_raw_secret_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo 'password=SECRET_99112')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo 'password=[REDACTED]')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_escaped_dq_password_raw_secret_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo \\\"password=SECRET_99112\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo \\\"password=[REDACTED]\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "json_subshell_esc_dq_password_placeholder_preserves_ok",
+			in:   `{"a": "(echo \\\"password=[REDACTED]\\\")", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "(echo \\\"password=[REDACTED]\\\")", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_subshell_esc_dq_password_raw_secret_preserves_ok",
+			in:   `{"a": "(echo \\\"password=SECRET_99112\\\")", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "(echo \\\"password=[REDACTED]\\\")", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "nested_json_subshell_double_esc_dq_password_placeholder_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_double_esc_dq_password_raw_secret_preserves_ok",
+			in:   `{"outer": "{\"a\": \"(echo \\\\\\\"password=SECRET_99112\\\\\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "json_cmd_subst_esc_dq_password_raw_preserves_trailing_echo",
+			in:   `{"cmd": "$(echo \\\"password=SECRET_99112\\\"); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "$(echo \\\"password=[REDACTED]\\\"); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_cmd_subst_esc_dq_password_placeholder_preserves_trailing_echo",
+			in:   `{"cmd": "$(echo \\\"password=[REDACTED]\\\"); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "$(echo \\\"password=[REDACTED]\\\"); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_cmd_subst_sq_password_raw_preserves_trailing_echo",
+			in:   `{"cmd": "$(echo 'password=SECRET_99112'); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "$(echo 'password=[REDACTED]'); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_subshell_esc_dq_password_raw_and_and_preserves_trailing_echo",
+			in:   `{"cmd": "(echo \\\"password=SECRET_99112\\\")&&echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "(echo \\\"password=[REDACTED]\\\")&&echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_subshell_esc_dq_password_raw_pipe_preserves_trailing_echo",
+			in:   `{"cmd": "(echo \\\"password=SECRET_99112\\\")|echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "(echo \\\"password=[REDACTED]\\\")|echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "nested_json_cmd_subst_esc_dq_password_raw_preserves_trailing_echo",
+			in:   `{"outer": "{\"cmd\": \"$(echo \\\\\\\"password=SECRET_99112\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"$(echo \\\\\\\"password=[REDACTED]\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_cmd_subst_esc_dq_password_placeholder_preserves_trailing_echo",
+			in:   `{"outer": "{\"cmd\": \"$(echo \\\\\\\"password=[REDACTED]\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"$(echo \\\\\\\"password=[REDACTED]\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_cmd_subst_sq_password_raw_preserves_trailing_echo",
+			in:   `{"outer": "{\"cmd\": \"$(echo 'password=SECRET_99112'); echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"$(echo 'password=[REDACTED]'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_esc_dq_password_raw_and_and_preserves_trailing_echo",
+			in:   `{"outer": "{\"cmd\": \"(echo \\\\\\\"password=SECRET_99112\\\\\\\")&&echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\")&&echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "json_subshell_esc_dq_semicolon_value_redacts_whole_value",
+			in:   `{"cmd": "(echo \\\"password=abc;def\\\"); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "(echo \\\"password=[REDACTED]\\\"); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_subshell_sq_semicolon_value_redacts_whole_value",
+			in:   `{"cmd": "(echo 'password=abc;def'); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "(echo 'password=[REDACTED]'); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "nested_json_subshell_esc_dq_semicolon_value_redacts_whole_value",
+			in:   `{"outer": "{\"cmd\": \"(echo \\\\\\\"password=abc;def\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"(echo \\\\\\\"password=[REDACTED]\\\\\\\"); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "nested_json_subshell_sq_semicolon_value_redacts_whole_value",
+			in:   `{"outer": "{\"cmd\": \"(echo 'password=abc;def'); echo PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"cmd\": \"(echo 'password=[REDACTED]'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "plain_subshell_sq_semicolon_value_redacts_whole_value",
+			in:   `(echo 'password=abc;def'); echo PUBLIC_KEEP`,
+			want: `(echo 'password=[REDACTED]'); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "plain_subshell_esc_dq_password_and_and_preserves_trailing_echo",
+			in:   `(echo \"password=SECRET_99112\")&&echo PUBLIC_KEEP`,
+			want: `(echo \"password=[REDACTED]\")&&echo PUBLIC_KEEP`,
+		},
+		{
+			name: "plain_subshell_esc_dq_password_pipe_preserves_trailing_echo",
+			in:   `(echo \"password=SECRET_99112\")|echo PUBLIC_KEEP`,
+			want: `(echo \"password=[REDACTED]\")|echo PUBLIC_KEEP`,
+		},
+		{
+			name: "plain_subshell_esc_dq_semicolon_value_redacts_whole_value",
+			in:   `(echo \"password=abc;def\"); echo PUBLIC_KEEP`,
+			want: `(echo \"password=[REDACTED]\"); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "plain_cmd_subst_esc_dq_semicolon_value_redacts_whole_value",
+			in:   `$(echo \"password=abc;def\"); echo PUBLIC_KEEP`,
+			want: `$(echo \"password=[REDACTED]\"); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "plain_cmd_subst_sq_pipe_preserves_trailing_echo",
+			in:   `$(echo 'password=abc;def')|echo PUBLIC_KEEP`,
+			want: `$(echo 'password=[REDACTED]')|echo PUBLIC_KEEP`,
+		},
+		{
+			name: "nested_json_3bs_pipe_preserves_valid_json",
+			in:   `{"outer": "{\"a\": \"password=abc\\\"|SECRET_LEAK_99112\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			want: `{"outer": "{\"a\": \"password=[REDACTED]\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "single_json_5bs_pipe_preserves_valid_json",
+			in:   `{"a": "password=abc\\\\\"|SECRET_LEAK_99112", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "password=[REDACTED]", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "compact_json_unpaired_esc_dq_preserves_sibling_fields",
+			in:   `{"a":"\\\"unpaired; password=abc;def","b":"\\\"foo\\\"","keep":"PUBLIC_KEEP"}`,
+			want: `{"a":"\\\"unpaired; password=[REDACTED];def","b":"\\\"foo\\\"","keep":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "nested_compact_json_unpaired_sq_preserves_sibling_fields",
+			in:   `{"outer":"{\"a\":\"'unpaired; password=abc;def\",\"b\":\"'x'\",\"keep\":\"PUBLIC_KEEP\"}"}`,
+			want: `{"outer":"{\"a\":\"'unpaired; password=[REDACTED];def\",\"b\":\"'x'\",\"keep\":\"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "json_skip_trailing_sq_resets_subsq_before_esc_dq_pipe",
+			in:   `{"a": "echo 'prefix token=[REDACTED] ok' (echo \\\"password=abc\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "echo 'prefix token=[REDACTED] ok' (echo \\\"password=[REDACTED]\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "json_skip_trailing_inner_dq_resets_beforeInnerDQ_before_esc_dq_pipe",
+			in:   `{"a": "echo \"prefix token=[REDACTED] ok\" (echo \\\"password=abc\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+			want: `{"a": "echo \"prefix token=[REDACTED] ok\" (echo \\\"password=[REDACTED]\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+		},
+	}
+	for _, tc := range kvPreserveCases {
+		t.Run("KVPreserve/"+tc.name, func(t *testing.T) {
+			for _, sc := range scrubbers[1:] {
+				t.Run(sc.name, func(t *testing.T) {
+					want := tc.want
+					if sc.name == "redactErrorMessage" && strings.HasPrefix(want, "{") && tc.in != tc.want {
+						var v any
+						if err := json.Unmarshal([]byte(want), &v); err == nil {
+							if b, err := json.Marshal(v); err == nil {
+								want = string(b)
+							}
+						}
+					}
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					if p1 != want {
+						t.Errorf("p1 = %q, want %q", p1, want)
+					}
+					if strings.HasPrefix(tc.in, "{") && !json.Valid([]byte(p1)) {
+						t.Errorf("p1 is not valid JSON: %q", p1)
+					}
+					if strings.Contains(p1, "UNPARSEABLE_JSON_BLOB") {
+						t.Errorf("unexpected UNPARSEABLE_JSON_BLOB collapse: %q", p1)
+					}
+					if p2 != p1 || p3 != p2 {
+						t.Errorf("not idempotent across p1/p2/p3:\n p1: %q\n p2: %q\n p3: %q", p1, p2, p3)
+					}
+				})
+			}
+		})
+	}
+
+	benignCases := []struct {
+		name            string
+		in              string
+		want            string
+		allowFailClosed bool
+	}{
+		{
+			name: "plain_subshell_semicolon_preserve",
+			in:   `(echo 'X-Api-Key: tok'); echo PUBLIC_KEEP`,
+			want: `(echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "nested_subshell_semicolon_preserve",
+			in:   `((echo 'X-Api-Key: tok')); echo PUBLIC_KEEP`,
+			want: `((echo 'X-Api-Key: [REDACTED]')); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "benign_subshell_placeholder_preserved",
+			in:   `(echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP`,
+			want: `(echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "benign_json_placeholder_exact",
+			in:   `{"a": "X-Api-Key: [REDACTED]"}`,
+			want: `{"a": "X-Api-Key: [REDACTED]"}`,
+		},
+		{
+			name: "benign_json_placeholder_with_trailing_space_word",
+			in:   `log: {"a": "X-Api-Key: [REDACTED]"} PUBLIC_KEEP`,
+			want: `log: {"a": "X-Api-Key: [REDACTED]"} PUBLIC_KEEP`,
+		},
+		{
+			name: "benign_nested_json_subshell_placeholder",
+			in:   `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: [REDACTED]')\"}"}`,
+			want: `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: [REDACTED]')\"}"}`,
+		},
+		{
+			name: "nested_json_header_redacts_cleanly",
+			in:   `{"outer": "{\"a\": \"X-Api-Key: tok\"}"}`,
+			want: `{"outer": "{\"a\": \"X-Api-Key: [REDACTED]\"}"}`,
+		},
+		{
+			name:            "json_literal_backslash_quote_before_subshell_preserves_tail",
+			in:              `{"cmd": "echo \\\"literal-quote (echo 'X-Api-Key: tok'); echo PUBLIC_KEEP"}`,
+			want:            `{"cmd": "echo \\\"literal-quote (echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP"}`,
+			allowFailClosed: true,
+		},
+		{
+			name:            "json_literal_backslash_quote_adjacent_to_subshell_preserves_tail",
+			in:              `{"cmd": "echo \\\"(echo 'X-Api-Key: tok'); echo PUBLIC_KEEP"}`,
+			want:            `{"cmd": "echo \\\"(echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP"}`,
+			allowFailClosed: true,
+		},
+		{
+			name: "json_literal_backslash_quote_pair_then_semicolon_subshell_preserves_tail",
+			in:   `{"cmd": "echo \\\"literal-quote\\\"; (echo 'X-Api-Key: tok'); echo PUBLIC_KEEP"}`,
+			want: `{"cmd": "echo \\\"literal-quote\\\"; (echo 'X-Api-Key: [REDACTED]'); echo PUBLIC_KEEP"}`,
+		},
+	}
+	for _, tc := range benignCases {
+		t.Run("Benign/"+tc.name, func(t *testing.T) {
+			for _, sc := range scrubbers {
+				t.Run(sc.name, func(t *testing.T) {
+					want := tc.want
+					if tc.allowFailClosed {
+						switch sc.name {
+						case "redactErrorMessage":
+							want = `{"cmd":"` + redactedSensitiveTextPlaceholder + `"}`
+						case "sanitizeRawText", "SmartTruncate_string", "SmartTruncate_map":
+							want = redactedSensitiveTextPlaceholder
+						}
+					} else if sc.name == "redactErrorMessage" && strings.HasPrefix(want, "{") && tc.in != tc.want {
+						var compact bytes.Buffer
+						if err := json.Compact(&compact, []byte(want)); err == nil {
+							want = compact.String()
+						}
+					}
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					if p1 != want {
+						t.Errorf("p1 = %q, want %q", p1, want)
+					}
+					if strings.HasPrefix(tc.in, "{") && p1 != redactedSensitiveTextPlaceholder && !json.Valid([]byte(p1)) {
+						t.Errorf("p1 is not valid JSON: %q", p1)
+					}
+					if p2 != p1 || p3 != p2 {
+						t.Errorf("not idempotent across p1/p2/p3:\n p1: %q\n p2: %q\n p3: %q", p1, p2, p3)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestShellPipeAndPrettyJSONUnclosedLinearScaling(t *testing.T) {
+	buildPipeJSON := func(n int) string {
+		seg := strings.Repeat("echo user's; ", n)
+		return `{"cmd":"$(` + seg + `password=SECRET_PIPE_SCALE's'|cat)","ok":"PUBLIC_KEEP"}`
+	}
+	buildUnclosedJSON := func(n int) string {
+		seg := strings.Repeat(`a `, n)
+		return `{"msg":"password=\"` + seg + `SECRET_UNCLOSED_SCALE","ok":"PUBLIC_KEEP"}`
+	}
+	buildPrettyNestedJSON := func(n int) string {
+		seg := strings.Repeat(`echo 'x'; `, n)
+		return "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(" + seg + "password=SECRET_PRETTY_SCALE)\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}"
+	}
+
+	patterns := []struct {
+		name   string
+		build  func(int) string
+		secret string
+		isJSON bool
+	}{
+		{name: "sq_apostrophe_pipe_json", build: buildPipeJSON, secret: "SECRET_PIPE_SCALE", isJSON: true},
+		{name: "glued_unclosed_inner_dq_json", build: buildUnclosedJSON, secret: "SECRET_UNCLOSED_SCALE", isJSON: true},
+		{name: "pretty_nested_json_subshell_sq", build: buildPrettyNestedJSON, secret: "SECRET_PRETTY_SCALE", isJSON: true},
+	}
+
+	scrubbers := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{name: "baselineTextKeyValues", fn: func(s string) string { return baselineTextKeyValues(s, nil) }},
+		{name: "scrubTextPatterns", fn: scrubTextPatterns},
+		{name: "redactErrorMessage", fn: redactErrorMessage},
+		{name: "sanitizeRawText", fn: func(s string) string { out, _ := sanitizeRawText(s); return out }},
+		{
+			name: "SmartTruncate_string",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(s, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(string) error: %v", err)
+				}
+				var out string
+				if err := json.Unmarshal(b, &out); err != nil {
+					t.Fatalf("json.Unmarshal(string) error: %v", err)
+				}
+				return out
+			},
+		},
+	}
+
+	for _, pat := range patterns {
+		t.Run(pat.name, func(t *testing.T) {
+			smallIn := pat.build(128)
+			bigIn := pat.build(2048) // 16x input scale
+			for _, sc := range scrubbers {
+				t.Run(sc.name, func(t *testing.T) {
+					t0 := time.Now()
+					smallOut := sc.fn(smallIn)
+					dSmall := time.Since(t0)
+
+					t1 := time.Now()
+					bigOut := sc.fn(bigIn)
+					dBig := time.Since(t1)
+
+					for _, out := range []string{smallOut, bigOut} {
+						if strings.Contains(out, pat.secret) {
+							t.Fatalf("%s leaked %q in output (len=%d)", sc.name, pat.secret, len(out))
+						}
+						if !strings.Contains(out, "PUBLIC_KEEP") {
+							t.Fatalf("%s dropped PUBLIC_KEEP in output", sc.name)
+						}
+						if pat.isJSON && !json.Valid([]byte(out)) {
+							t.Fatalf("%s produced invalid JSON (len=%d)", sc.name, len(out))
+						}
+					}
+
+					// 16x size must stay well below 256x quadratic growth (floor avoids sub-ms timer jitter).
+					budget := 48 * max(dSmall, 2*time.Millisecond)
+					if dBig > budget {
+						t.Fatalf("non-linear scaling for %s/%s: small=%v big=%v (budget=%v)", pat.name, sc.name, dSmall, dBig, budget)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestForwardValueEndNestedJSONParity(t *testing.T) {
+	inputs := []struct {
+		name   string
+		in     string
+		secret string
+	}{
+		{
+			name:   "compact",
+			in:     `{"outer":"{\"msg\":\"password=\\\" in config, api_key=\\\"\\\"UNCLOSED_FWD3\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secret: "UNCLOSED_FWD3",
+		},
+		{
+			name:   "pretty",
+			in:     `{"outer": "{\n  \"msg\": \"password=\\\" in config, api_key=\\\"\\\"UNCLOSED_FWD4\",\n  \"ok\": \"PUBLIC_KEEP\"\n}"}`,
+			secret: "UNCLOSED_FWD4",
+		},
+	}
+	cases := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{name: "baselineTextKeyValues", fn: func(s string) string { return baselineTextKeyValues(s, nil) }},
+		{name: "scrubTextPatterns", fn: scrubTextPatterns},
+		{name: "redactErrorMessage", fn: redactErrorMessage},
+		{name: "sanitizeRawText", fn: func(s string) string { out, _ := sanitizeRawText(s); return out }},
+		{
+			name: "SmartTruncate_string",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(s, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(string) error: %v", err)
+				}
+				var out string
+				if err := json.Unmarshal(b, &out); err != nil {
+					t.Fatalf("json.Unmarshal(string) error: %v", err)
+				}
+				return out
+			},
+		},
+		{
+			name: "SmartTruncate_map",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(map[string]any{"cmd": s}, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(map) error: %v", err)
+				}
+				var m map[string]any
+				if err := json.Unmarshal(b, &m); err != nil {
+					t.Fatalf("json.Unmarshal(map) error: %v", err)
+				}
+				v, _ := m["cmd"].(string)
+				return v
+			},
+		},
+	}
+	for _, inp := range inputs {
+		t.Run(inp.name, func(t *testing.T) {
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					p1 := tc.fn(inp.in)
+					p2 := tc.fn(p1)
+					p3 := tc.fn(p2)
+					if p2 != p1 || p3 != p2 {
+						t.Fatalf("not idempotent across 3 passes:\n p1=%q\n p2=%q\n p3=%q", p1, p2, p3)
+					}
+					if strings.Contains(p1, inp.secret) {
+						t.Fatalf("leaked secret in %q", p1)
+					}
+					if !strings.Contains(p1, "PUBLIC_KEEP") {
+						t.Fatalf("dropped PUBLIC_KEEP in %q", p1)
+					}
+					if !json.Valid([]byte(p1)) {
+						t.Fatalf("invalid outer JSON %q", p1)
+					}
+					var outer map[string]string
+					if err := json.Unmarshal([]byte(p1), &outer); err != nil || !json.Valid([]byte(outer["outer"])) {
+						t.Fatalf("invalid nested outer JSON %q (err=%v)", p1, err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestUnclosedInnerQuoteJSONPrettyAndSubshellParity(t *testing.T) {
+	scrubbers := []struct {
+		name       string
+		isBaseline bool
+		fn         func(string) string
+	}{
+		{
+			name:       "baselineTextKeyValues",
+			isBaseline: true,
+			fn: func(s string) string {
+				return baselineTextKeyValues(s, nil)
+			},
+		},
+		{
+			name: "scrubTextPatterns",
+			fn:   scrubTextPatterns,
+		},
+		{
+			name: "redactErrorMessage",
+			fn:   redactErrorMessage,
+		},
+		{
+			name: "sanitizeRawText",
+			fn: func(s string) string {
+				out, _ := sanitizeRawText(s)
+				return out
+			},
+		},
+		{
+			name: "SmartTruncate_string",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(s, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(string) error: %v", err)
+				}
+				var out string
+				if err := json.Unmarshal(b, &out); err != nil {
+					t.Fatalf("json.Unmarshal(string) error: %v (raw=%s)", err, string(b))
+				}
+				return out
+			},
+		},
+		{
+			name: "SmartTruncate_map",
+			fn: func(s string) string {
+				b, _, err := SmartTruncate(map[string]any{"cmd": s}, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate(map) error: %v", err)
+				}
+				var m map[string]any
+				if err := json.Unmarshal(b, &m); err != nil {
+					t.Fatalf("json.Unmarshal(map) error: %v (raw=%s)", err, string(b))
+				}
+				v, _ := m["cmd"].(string)
+				return v
+			},
+		},
+	}
+
+	cases := []struct {
+		name               string
+		in                 string
+		secrets            []string
+		preserve           string
+		checkJSONValid     bool
+		allowBaselineTail  bool
+		allowBaselineMulti bool
+	}{
+		{
+			name:           "unclosed_inner_esc_dq_compact_json",
+			in:             `{"msg":"password=\"SECRET123","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET123"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_esc_dq_spaced_comma_json",
+			in:             `{"msg":"password=\"SECRET123" , "ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET123"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_esc_dq_nested_json",
+			in:             `{"outer":"{\"msg\":\"password=\\\"SECRET123\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secrets:        []string{"SECRET123"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:               "unclosed_inner_esc_dq_multiword_json",
+			in:                 `{"msg":"password=\"correct horse","ok":"PUBLIC_KEEP"}`,
+			secrets:            []string{"correct", "horse"},
+			preserve:           "PUBLIC_KEEP",
+			checkJSONValid:     true,
+			allowBaselineMulti: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_compact_json",
+			in:                `{"msg":"password=\"SECRET\"TAIL_SECRET","ok":"PUBLIC_KEEP"}`,
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			preserve:          "PUBLIC_KEEP",
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_spaced_json",
+			in:                `{"msg":"password=\"SECRET\"TAIL_SECRET" , "ok":"PUBLIC_KEEP"}`,
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			preserve:          "PUBLIC_KEEP",
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_nested_json",
+			in:                `{"outer":"{\"msg\":\"password=\\\"SECRET\\\"TAIL_SECRET\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			preserve:          "PUBLIC_KEEP",
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_close_brace_json",
+			in:                `{"msg":"password=\"SECRET\"TAIL_SECRET"}`,
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_close_brace_nested_json",
+			in:                `{"outer":"{\"msg\":\"password=\\\"SECRET\\\"TAIL_SECRET\"}"}`,
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:              "paired_inner_esc_dq_glued_tail_pretty_nested_json",
+			in:                "{\"outer\":\"{\\n  \\\"msg\\\": \\\"password=\\\\\\\"SECRET\\\\\\\"TAIL_SECRET\\\"\\n}\"}",
+			secrets:           []string{"SECRET", "TAIL_SECRET"},
+			checkJSONValid:    true,
+			allowBaselineTail: true,
+		},
+		{
+			name:           "unclosed_inner_sq_compact_json",
+			in:             `{"msg":"password='SECRET123","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET123"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "esc_5bs_quote_pipe_secret_spaced_comma_json",
+			in:             `{"a": "password=abc\\\\\"|SECRET_LEAK_99112" , "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_LEAK_99112"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "esc_5bs_quote_pipe_secret_spaced_close_object_json",
+			in:             `{"a": "password=abc\\\\\"|SECRET_LEAK_99112" }`,
+			secrets:        []string{"SECRET_LEAK_99112"},
+			checkJSONValid: true,
+		},
+		{
+			name:           "esc_5bs_quote_pipe_secret_spaced_close_array_json",
+			in:             `["password=abc\\\\\"|SECRET_LEAK_99112" ]`,
+			secrets:        []string{"SECRET_LEAK_99112"},
+			checkJSONValid: true,
+		},
+		{
+			name:           "plain_esc_quote_with_trailing_secret_spaced_comma_json",
+			in:             `{"msg":"password=x\"SECRET123" , "ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET123"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_sq_apostrophe_immediate_pipe_json",
+			in:             `{"cmd":"$(echo user's; password=SECRET_PIPE's'|cat)","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_PIPE"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_two_sq_apostrophes_immediate_pipe_json",
+			in:             `{"cmd":"$(echo user's; echo bob's; password=SECRET_PIPE2's'|cat)","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_PIPE2"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "dq_wrapped_subshell_sq_apostrophe_immediate_pipe_json",
+			in:             "{\"cmd\":\"\\\"$(echo user's; password=SECRET_PIPE3's'|cat)\\\"\",\"ok\":\"PUBLIC_KEEP\"}",
+			secrets:        []string{"SECRET_PIPE3"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "dq_wrapped_subshell_two_apostrophes_pipe_json",
+			in:             "{\"cmd\":\"\\\"$(echo user's; echo bob's; password=SECRET_PIPE4's'|cat)\\\"\",\"ok\":\"PUBLIC_KEEP\"}",
+			secrets:        []string{"SECRET_PIPE4"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_closed_sq_pair_then_apostrophe_pipe_json",
+			in:             `{"cmd":"$(echo 'a' 'b'; password=SECRET_PIPE5's'|cat)","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_PIPE5"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:     "plain_subshell_sq_apostrophe_immediate_pipe",
+			in:       `$(echo user's; password=SECRET_PIPE6's'|cat) ok=PUBLIC_KEEP`,
+			secrets:  []string{"SECRET_PIPE6"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "plain_dq_subshell_two_apostrophes_pipe",
+			in:       `echo "$(echo user's; echo bob's; password=SECRET_PIPE7's'|cat)" ok=PUBLIC_KEEP`,
+			secrets:  []string{"SECRET_PIPE7"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:           "nested_json_subshell_sq_apostrophe_pipe",
+			in:             `{"outer":"{\"cmd\":\"$(echo user's; password=SECRET_PIPE8's'|cat)\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secrets:        []string{"SECRET_PIPE8"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_sq_msg_compact_json",
+			in:             `{"msg":"password='UNCLOSED_SQ","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_esc_sq_compact_json",
+			in:             `{"msg":"password=\\'UNCLOSED_ESCSQ","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_ESCSQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_backtick_compact_json",
+			in:             "{\"msg\":\"password=`UNCLOSED_BT\",\"ok\":\"PUBLIC_KEEP\"}",
+			secrets:        []string{"UNCLOSED_BT"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_esc_dq_inside_array_json",
+			in:             `["password=\"UNCLOSED_ARR","PUBLIC_KEEP"]`,
+			secrets:        []string{"UNCLOSED_ARR"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_inner_esc_dq_trailing_space_json",
+			in:             `{"msg":"password=\"UNCLOSED_SPC ","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SPC"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "glued_closed_then_unclosed_esc_dq_json",
+			in:             `{"msg":"password=\"a\"\"UNCLOSED_GLUED","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_GLUED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "glued_closed_then_unclosed_sq_json",
+			in:             `{"msg":"password='a''UNCLOSED_SQ_GLUED","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SQ_GLUED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "nested_json_glued_closed_then_unclosed_esc_dq",
+			in:             `{"outer":"{\"msg\":\"password=\\\"a\\\"\\\"UNCLOSED_NESTED\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secrets:        []string{"UNCLOSED_NESTED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "closed_subshell_then_glued_unclosed_esc_dq_in_json",
+			in:             `{"msg":"password=$(a)\"UNCLOSED_SUB","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SUB"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "quoted_closed_subshell_glued_unclosed_esc_dq_json",
+			in:             `{"msg":"password=\"$(echo 'a')\"\"UNCLOSED_SUB_GLUED","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SUB_GLUED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "quoted_closed_subshell_glued_unclosed_sq_in_json",
+			in:             `{"msg":"password='$(echo \"a\")''UNCLOSED_SUB_SQ_GLUED","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SUB_SQ_GLUED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_dq_inside_sq_quoted_subshell_in_json",
+			in:             `{"msg":"password='$(echo \"UNCLOSED_SUB_DQ_IN_SQ'","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SUB_DQ_IN_SQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "unclosed_subshell_sq_in_json",
+			in:             `{"msg":"password=\"$(echo 'UNCLOSED_SUBSQ\"","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_SUBSQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:               "forward_value_end_space_opens_later_unclosed_json",
+			in:                 `{"msg":"password=\" in config, api_key=\"\" \"UNCLOSED_FWD1","ok":"PUBLIC_KEEP"}`,
+			secrets:            []string{"UNCLOSED_FWD1"},
+			preserve:           "PUBLIC_KEEP",
+			checkJSONValid:     true,
+			allowBaselineMulti: true,
+		},
+		{
+			name:               "forward_value_end_joined_opens_later_unclosed_json",
+			in:                 `{"msg":"password=\" in config, api_key=\"\"UNCLOSED_FWD2","ok":"PUBLIC_KEEP"}`,
+			secrets:            []string{"UNCLOSED_FWD2"},
+			preserve:           "PUBLIC_KEEP",
+			checkJSONValid:     true,
+			allowBaselineMulti: true,
+		},
+		{
+			name:               "forward_value_end_joined_quote_opens_later_unclosed_json",
+			in:                 `{"msg":"password=\" in config, api_key=\"\"\"UNCLOSED_FWD2Q","ok":"PUBLIC_KEEP"}`,
+			secrets:            []string{"UNCLOSED_FWD2Q"},
+			preserve:           "PUBLIC_KEEP",
+			checkJSONValid:     true,
+			allowBaselineMulti: true,
+		},
+		{
+			name:           "delimited_step_unclosed_esc_dq_in_json",
+			in:             `{"msg":"password=\"a\"\"x\": \"UNCLOSED_DELIM","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_DELIM"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "oversized_value_end_unclosed_esc_dq_in_json",
+			in:             `{"msg":"` + strings.Repeat("k:", 38) + `password=a-token:...:= \"UNCLOSED_OVERSIZED","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_OVERSIZED"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "oversized_value_end_bare_in_json",
+			in:             `{"msg":"` + strings.Repeat("k:", 38) + `password=a-token:...:=UNCLOSED_OVERSIZED_BARE","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"UNCLOSED_OVERSIZED_BARE"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_subshell_sq_only",
+			in:             "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(echo 'x'; password=SECRET_SUBSQ)\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_SUBSQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_subshell_esc_dq_only",
+			in:             "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(echo \\\\\\\"x\\\\\\\"; password=SECRET_SUBESCDQ)\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_SUBESCDQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_array_subshell_sq",
+			in:             "{\n  \"outer\": \"[\\n  \\\"$(password=SECRET_ARR_SUBSQ)\\\"\\n  ]\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_ARR_SUBSQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_subshell_sq_apostrophe_pipe",
+			in:             "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(echo user's; password=SECRET_PRETTY_PIPE's'|cat)\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_PRETTY_PIPE"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "active_sub_sq_apostrophe_immediate_pipe_json",
+			in:             `{"cmd":"$(echo 'open; password=SECRET_ACTSQ_PIPE's'|cat)","ok":"PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_ACTSQ_PIPE"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_active_sub_sq",
+			in:             "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(echo 'open; password=SECRET_ACT_SUBSQ')\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_ACT_SUBSQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_active_sub_esc_dq",
+			in:             "{\n  \"outer\": \"{\\n  \\\"cmd\\\": \\\"$(echo \\\\\\\"open; password=SECRET_ACT_SUBESCDQ\\\\\\\")\\\"\\n  }\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_ACT_SUBESCDQ"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_newline_before_close",
+			in:             "{\"outer\":\"{\\n  \\\"a\\\": \\\"password=abc\\\\\\\"|SECRET_LEAK\\\"\\n}\"}",
+			secrets:        []string{"SECRET_LEAK"},
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_newline_before_comma",
+			in:             "{\"outer\": \"{\\n  \\\"a\\\": \\\"password=abc\\\\\\\"|SECRET_LEAK_99112\\\"\\n  , \\\"ok\\\": \\\"PUBLIC_KEEP\\\"\\n}\"}",
+			secrets:        []string{"SECRET_LEAK_99112"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_crlf_tab_before_close",
+			in:             "{\"outer\": \"{\\r\\n\\t\\\"a\\\": \\\"password=abc\\\\\\\"|SECRET_LEAK_99112\\\"\\r\\n}\"}",
+			secrets:        []string{"SECRET_LEAK_99112"},
+			checkJSONValid: true,
+		},
+		{
+			name:           "pretty_nested_json_array_newline_before_close",
+			in:             "{\"outer\": \"[\\n  \\\"password=abc\\\\\\\"|SECRET_LEAK_99112\\\"\\n]\"}",
+			secrets:        []string{"SECRET_LEAK_99112"},
+			checkJSONValid: true,
+		},
+		{
+			name:           "sq_apostrophe_before_paren_subshell_json",
+			in:             `{"a": "echo 'prefix token=abc's' (echo \\\"password=SECRET\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"abc", "SECRET"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "sq_apostrophe_before_paren_subshell_nested_json",
+			in:             `{"outer": "{\"a\": \"echo 'prefix token=abc's' (echo \\\\\\\"password=SECRET\\\\\\\")|echo PUBLIC_KEEP\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+			secrets:        []string{"abc", "SECRET"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:     "sq_apostrophe_before_paren_subshell_plaintext",
+			in:       `echo 'prefix token=abc's' (echo "password=SECRET")|echo PUBLIC_KEEP`,
+			secrets:  []string{"abc", "SECRET"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "sq_apostrophe_before_semicolon_and_paren_subshell_plaintext",
+			in:       `echo 'prefix token=abc's'; (echo "password=SECRET")|echo PUBLIC_KEEP`,
+			secrets:  []string{"abc", "SECRET"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:               "sq_apostrophe_followed_by_second_kv_keeps_second_kv_redacted",
+			in:                 `failed: 'token=don't' DB_PASSWORD='   R7_SECRET'`,
+			secrets:            []string{"don't", "R7_SECRET"},
+			preserve:           "failed:",
+			allowBaselineMulti: true,
+		},
+		{
+			name:           "sq_contraction_ok_json",
+			in:             `{"a": "echo 'token=abc's' ok", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"token=abc"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "sq_contraction_foo_bar_json",
+			in:             `{"a": "echo 'token=abc's' foo bar", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"token=abc"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "sq_contraction_comma_secret_json",
+			in:             `{"a": "echo 'token=abc,SECRET_SQ_COMMA's' ok", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_SQ_COMMA"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:     "sq_contraction_plain_ok",
+			in:       `echo 'token=abc's' ok PUBLIC_KEEP`,
+			secrets:  []string{"token=abc"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:     "sq_contraction_plain_comma_secret",
+			in:       `echo 'token=abc,SECRET_SQ_PLAIN's' PUBLIC_KEEP`,
+			secrets:  []string{"SECRET_SQ_PLAIN"},
+			preserve: "PUBLIC_KEEP",
+		},
+		{
+			name:           "subshell_escaped_sq_json_compact",
+			in:             `{"a": "$(echo \\'password=SECRET_ESC_SQ1\\')", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_ESC_SQ1"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_escaped_sq_json_pretty",
+			in:             "{\n  \"a\": \"$(echo \\\\'password=SECRET_ESC_SQ2\\\\')\",\n  \"ok\": \"PUBLIC_KEEP\"\n}",
+			secrets:        []string{"SECRET_ESC_SQ2"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_escaped_sq_nested_json_pretty",
+			in:             `{"outer": "{\n  \"a\": \"$(echo \\\\'password=SECRET_ESC_SQ3\\\\')\"\n  , \"ok\": \"PUBLIC_KEEP\"\n}"}`,
+			secrets:        []string{"SECRET_ESC_SQ3"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_escaped_sq_nested_json_compact",
+			in:             `{"outer":"{\"a\":\"$(echo \\\\'password=SECRET_ESC_SQ4\\\\')\",\"ok\":\"PUBLIC_KEEP\"}"}`,
+			secrets:        []string{"SECRET_ESC_SQ4"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_open_sq_contraction_pipe_json",
+			in:             `{"cmd": "$(echo 'it's ok; password=SECRET_SUB_PIPE1|LEAK_PIPE1')", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_SUB_PIPE1", "LEAK_PIPE1"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_open_sq_contraction_pipe_nested_json_pretty",
+			in:             `{"outer": "{\n  \"cmd\": \"$(echo 'it's ok; password=SECRET_SUB_PIPE2|LEAK_PIPE2')\",\n  \"ok\": \"PUBLIC_KEEP\"\n}"}`,
+			secrets:        []string{"SECRET_SUB_PIPE2", "LEAK_PIPE2"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_open_sq_contraction_semi_json",
+			in:             `{"cmd": "$(echo 'it's ok; password=SECRET_SUB_SEMI1;LEAK_SEMI1')", "ok": "PUBLIC_KEEP"}`,
+			secrets:        []string{"SECRET_SUB_SEMI1", "LEAK_SEMI1"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+		{
+			name:           "subshell_open_sq_contraction_semi_nested_json_pretty",
+			in:             `{"outer": "{\n  \"cmd\": \"$(echo 'it's ok; password=SECRET_SUB_SEMI2;LEAK_SUB_SEMI2')\",\n  \"ok\": \"PUBLIC_KEEP\"\n}"}`,
+			secrets:        []string{"SECRET_SUB_SEMI2", "LEAK_SUB_SEMI2"},
+			preserve:       "PUBLIC_KEEP",
+			checkJSONValid: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, sc := range scrubbers {
+				t.Run(sc.name, func(t *testing.T) {
+					p1 := sc.fn(tc.in)
+					p2 := sc.fn(p1)
+					p3 := sc.fn(p2)
+					if p2 != p1 || p3 != p2 {
+						t.Errorf("not idempotent across p1/p2/p3:\n p1: %q\n p2: %q\n p3: %q", p1, p2, p3)
+					}
+					if tc.preserve != "" && !strings.Contains(p1, tc.preserve) {
+						t.Errorf("dropped %q in %q", tc.preserve, p1)
+					}
+					if tc.checkJSONValid {
+						if !json.Valid([]byte(p1)) {
+							t.Errorf("p1 is not valid JSON: %q", p1)
+						} else if strings.Contains(tc.in, `"outer":`) {
+							var outer map[string]string
+							if err := json.Unmarshal([]byte(p1), &outer); err != nil || !json.Valid([]byte(outer["outer"])) {
+								t.Errorf("p1 nested outer JSON invalid: %q (err=%v)", p1, err)
+							}
+						}
+					}
+					if sc.isBaseline && (tc.allowBaselineTail || tc.allowBaselineMulti) {
+						return
+					}
+					for _, sec := range tc.secrets {
+						if strings.Contains(p1, sec) {
+							t.Errorf("leaked %q in %q", sec, p1)
+						}
+					}
+				})
+			}
+		})
+	}
+
+	t.Run("LinearScaling", func(t *testing.T) {
+		small := `{"msg":"` + strings.Repeat(`password=\"secret `, 250) + `","ok":"PUBLIC_KEEP"}`
+		large := `{"msg":"` + strings.Repeat(`password=\"secret `, 2000) + `","ok":"PUBLIC_KEEP"}`
+		t0 := time.Now()
+		outSmall := scrubTextPatterns(small)
+		dtSmall := time.Since(t0)
+		t1 := time.Now()
+		outLarge := scrubTextPatterns(large)
+		dtLarge := time.Since(t1)
+		if strings.Contains(outSmall, "secret") || !strings.Contains(outSmall, "PUBLIC_KEEP") || !json.Valid([]byte(outSmall)) {
+			t.Fatalf("small unclosed-quote payload invalid or leaked: %q", outSmall)
+		}
+		if strings.Contains(outLarge, "secret") || !strings.Contains(outLarge, "PUBLIC_KEEP") || !json.Valid([]byte(outLarge)) {
+			t.Fatalf("large unclosed-quote payload invalid or leaked: %q", outLarge[:min(len(outLarge), 200)])
+		}
+		if dtLarge > 25*max(dtSmall, time.Millisecond) && dtLarge > 500*time.Millisecond {
+			t.Fatalf("unclosed-quote scaling looks superlinear: small=%v large=%v", dtSmall, dtLarge)
+		}
+
+		subSmall := `{"a":"` + strings.Repeat(`echo 'token=abc's' (echo \"password=SECRET\")|echo `, 200) + `PUBLIC_KEEP"}`
+		subLarge := `{"a":"` + strings.Repeat(`echo 'token=abc's' (echo \"password=SECRET\")|echo `, 1600) + `PUBLIC_KEEP"}`
+		t2 := time.Now()
+		subOutSmall := scrubTextPatterns(subSmall)
+		dtSubSmall := time.Since(t2)
+		t3 := time.Now()
+		subOutLarge := scrubTextPatterns(subLarge)
+		dtSubLarge := time.Since(t3)
+		if strings.Contains(subOutSmall, "SECRET") || strings.Contains(subOutSmall, "abc") || !strings.Contains(subOutSmall, "PUBLIC_KEEP") || !json.Valid([]byte(subOutSmall)) {
+			t.Fatalf("small apostrophe subshell payload invalid or leaked: %q", subOutSmall)
+		}
+		if strings.Contains(subOutLarge, "SECRET") || strings.Contains(subOutLarge, "abc") || !strings.Contains(subOutLarge, "PUBLIC_KEEP") || !json.Valid([]byte(subOutLarge)) {
+			t.Fatalf("large apostrophe subshell payload invalid or leaked: %q", subOutLarge[:min(len(subOutLarge), 200)])
+		}
+		if dtSubLarge > 25*max(dtSubSmall, time.Millisecond) && dtSubLarge > 500*time.Millisecond {
+			t.Fatalf("apostrophe subshell scaling looks superlinear: small=%v large=%v", dtSubSmall, dtSubLarge)
+		}
+	})
 }

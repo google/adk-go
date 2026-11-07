@@ -6294,6 +6294,362 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 			name: "Escaped JSON trailing apostrophe preserves quoted clean URL",
 			in:   `{"cmd":"curl -H \"X-Api-Key: \"users' \"https://PUBLIC_KEEP.example.com/v1\"","ok":"OK_KEEP"}`,
 		},
+		{
+			name: "Multiline joined X-Api-Key pre's with later command substitution after semicolon",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization Bearer pre's with later command substitution after semicolon",
+			in:   "curl -H \"Authorization: Bearer \"pre's " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined X-Api-Key pre'foo with later command substitution after semicolon",
+			in:   "curl -H \"X-Api-Key: \"pre'foo " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined Authorization Bearer pre'foo with later command substitution after semicolon",
+			in:   "curl -H \"Authorization: Bearer \"pre'foo " + secret + "\ntail'; echo \"$(printf \"'\")\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline joined X-Api-Key with non-sensitive header command substitution on closing line",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline unclosed X-Api-Key before balanced X-Note command substitution line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: \"$(printf \"'\")\" PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline unclosed X-Api-Key concatenating non-sensitive header command substitution line",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nX-Note: \"$(printf \"'\") PUBLIC_TAIL\"",
+		},
+		{
+			name: "Trailing apostrophe X-Api-Key Bob' before balanced X-Note command substitution preserves PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"Bob'\nX-Note: \"$(printf \"'\")\" PUBLIC_KEEP",
+		},
+		{
+			name: "Trailing apostrophe X-Api-Key Bob' before unbalanced quote after command substitution preserves PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"Bob'\nX-Note: \"$(printf \"'\")\" \"unclosed\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with literal double-quoted command substitution inside single quote before semicolon echo PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nnote: \"$(id) tail'; echo \"PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's across two secrets spanning printf single quote in header assignment",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nhdr=\"$(printf \"'\")" + secret + "\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's followed by echo printf command substitution PUBLIC_KEEP",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\necho \"$(printf \"'\")\" PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's closing on possessive users' before URL and X-Note command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nusers' https://example.com -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's closing on users' followed by second auth header and X-Note command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nusers' -H \"Authorization: Bearer \"" + secret + " -H \"X-Note: $(printf \"'\") PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with URL before semicolon and multiline command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' https://example.com; echo \"$(\nprintf \"'\"\n)\"; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with multiline command substitution inside X-Note header",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(\nprintf \"'\"\n) PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with case pattern paren inside command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(case x in a) printf \"'\" ;; esac) PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with hash comment containing unmatched paren inside command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: $(echo ok # )\nprintf \"'\") PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with backtick command substitution containing quotes inside double quotes",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: `printf \"'\"` PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with parameter expansion nested quotes inside double quotes",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${TAG:-\"'\"} PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with double-backslash before command substitution inside double quotes",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\\\$(printf \"'\") PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with backslash-escaped outer double quotes around command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\\"$(printf \"'\")\\\" PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with backslash-escaped dollar command substitution inside double quotes",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: \\$(echo ok) PUBLIC_KEEP\"",
+		},
+		{
+			name: "Multiline pre's with single-quoted default apostrophe inside double-quoted parameter expansion",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' -H \"X-Note: ${FOO:-don't}\" PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with case in(a) optional paren without whitespace",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $(case x in(a) echo \"'\";; esac) PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with non-header URL colon before semicolon and unpaired echo quote",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nhttps:'a'b'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with Cookie header spanning balanced quoted semicolon segments",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a='1; session='2'\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's stopped by Cookie header with unpaired semicolon segment",
+			in:   "curl -H \"X-Api-Key: \"pre' " + secret + "\nCookie: a='1; session='unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with ANSI-C quoted apostrophe inside command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' \"$(printf $'don\\'t')\" PUBLIC_KEEP",
+		},
+		{
+			name: "Cookie joined quote followed by single-quoted X-Api-Key header",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Set-Cookie joined quote followed by single-quoted X-Api-Key header",
+			in:   `curl -H 'Set-Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote followed by single-quoted X-Api-Key header with -v flag",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H 'X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Cookie joined quote followed by leading-space single-quoted X-Api-Key header with -v flag",
+			in:   `curl -H 'Cookie: 'pre' X-Note: ''foo'x=y"x=y"; curl -H ' X-Api-Key: ` + secret + `' -v; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Multiline pre's with rejected Cookie unpaired-quote line redacts first-line secret",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a='1'; https:'a'b'; echo \"unpaired\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with Cookie unspaced URL colon and unpaired echo quote redacts secret",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: a=1' https:'a'b'; echo \"unpaired\nX-Note: ok\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with leading Cookie quoted pair and unpaired echo quote redacts secret",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\nCookie: '1'; FOO=bar; echo \"unpaired\nX-Note: ok\nPUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with balanced ANSI-C escaped quotes before command substitution",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $'a\\'b' $'c\\'d' \"$(printf \"'\")\" PUBLIC_KEEP",
+		},
+		{
+			name: "Multiline pre's with unbalanced ANSI-C escaped-backslash quote redacts secret",
+			in:   "curl -H \"X-Api-Key: \"pre's " + secret + "\ntail' $'a\\\\'b' $'c\\'d' \"$(printf \"'\")\" PUBLIC_KEEP",
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to sid=",
+			in:   `curl -H 'Cookie: see note'sid=` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to val=",
+			in:   `curl -H 'Cookie: please see'val=` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Double-quoted Cookie prose prefix glued to sid=",
+			in:   `curl -H "Cookie: see note"sid=` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to slash key",
+			in:   `curl -H 'Cookie: see note'/x=` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to opaque token",
+			in:   `curl -H 'Cookie: see note'` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to shell variable",
+			in:   `curl -H 'Cookie: see note'$` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to command substitution",
+			in:   `curl -H 'Cookie: see note'$(printf '%s' ` + secret + `); echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to backtick command substitution",
+			in:   "curl -H 'Cookie: see note'`printf '%s' " + secret + "`; echo PUBLIC_KEEP",
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to adjacent single-quoted pair",
+			in:   `curl -H 'Cookie: see note''sid=` + secret + `'; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to comma sid=",
+			in:   `curl -H 'Cookie: see note',sid=` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to colon token",
+			in:   `curl -H 'Cookie: see note':` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted Cookie prose prefix glued to period token",
+			in:   `curl -H 'Cookie: see note'.` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "JSON-escaped Cookie prose prefix glued to opaque token",
+			in:   `{"cmd": "curl -H \"Cookie: see note\"` + secret + `; echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-escaped Cookie prose prefix glued to sid=",
+			in:   `{"cmd": "curl -H \"Cookie: see note\"sid=` + secret + `; echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-escaped Cookie prose prefix glued to comma sid=",
+			in:   `{"cmd": "curl -H \"Cookie: see note\",sid=` + secret + `; echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-escaped Cookie prose prefix glued to comma token=",
+			in:   `{"cmd": "curl -H \"Cookie: see note\",token=` + secret + `; echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON-escaped Cookie prose prefix glued to comma opaque token",
+			in:   `{"cmd": "curl -H \"Cookie: see note\",` + secret + `; echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Brace suffix object container after JSON-quoted Cookie with true then secret",
+			in:   `foo{k:"Cookie: see note",true,` + secret + `}`,
+		},
+		{
+			name: "JSON object command with escaped-DQ Cookie comma true and secret",
+			in:   `{"cmd": "curl -H \"Cookie: see note\",true,` + secret + `"}`,
+		},
+		{
+			name: "JSON object command with inner single-quoted Cookie glued to secret",
+			in:   `{"cmd": "curl -H 'Cookie: see note'` + secret + `"}`,
+		},
+		{
+			name: "Double-quoted Cookie via printf command substitution glued to secret",
+			in:   `curl -H "$(printf 'Cookie: see note')` + secret + `"; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Single-quoted escaped single-quote Cookie prefix comma true and secret",
+			in:   `'prefix \'Cookie: see note\',true,` + secret + `'`,
+		},
+		{
+			name: "Unquoted command substitution Cookie glued to secret",
+			in:   `$(echo Cookie: see note)` + secret,
+		},
+		{
+			name: "JSON cmd with Cookie prose then single-quoted X-Api-Key",
+			in:   `{"cmd": "curl -H 'Cookie: see note'; echo 'X-Api-Key: ` + secret + `'"}`,
+		},
+		{
+			name: "Nested escaped JSON cmd with Cookie prose and single-quoted X-Api-Key",
+			in:   `{"outer": "{\"cmd\": \"curl -H 'Cookie: see note'; echo 'X-Api-Key: ` + secret + `'\"}"}`,
+		},
+		{
+			name: "Unquoted cmd subst Cookie prose before token secret",
+			in:   `$(echo Cookie: Monster PUBLIC_KEEP); token=` + secret,
+		},
+		{
+			name: "Nested escaped JSON single-quoted X-Api-Key inside cmd subst with PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: ` + secret + `'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Nested escaped JSON single-quoted Authorization Bearer inside cmd subst with PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"$(echo 'Authorization: Bearer ` + secret + `'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Nested escaped JSON single-quoted X-Api-Key glued before next object field",
+			in:   `{"outer": "{\"cmd\": \"$(echo 'X-Api-Key: x')` + secret + `\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Plain POSIX subshell single-quoted X-Api-Key glued to secret with PUBLIC_KEEP",
+			in:   `(echo 'X-Api-Key: tok')` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Nested POSIX subshell single-quoted X-Api-Key glued to secret with PUBLIC_KEEP",
+			in:   `((echo 'X-Api-Key: tok'))` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Forged plain subshell placeholder glued to secret with PUBLIC_KEEP",
+			in:   `(echo 'X-Api-Key: [REDACTED]')` + secret + `; echo PUBLIC_KEEP`,
+		},
+		{
+			name: "Forged nested JSON subshell placeholder glued to secret with PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: [REDACTED]')` + secret + `\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Nested escaped JSON plain subshell X-Api-Key with trailing PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"(echo 'X-Api-Key: ` + secret + `'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Nested escaped JSON escaped-quote then subshell X-Api-Key with trailing PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"(echo \\\"a\\\"; echo 'X-Api-Key: ` + secret + `'); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Nested escaped JSON cmd-subst escaped-quote X-Api-Key with trailing PUBLIC_KEEP",
+			in:   `{"outer": "{\"cmd\": \"$(echo \\\"X-Api-Key: ` + secret + `\\\"); echo PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "JSON subshell X-Api-Key glued escaped-quote secret preserving ok",
+			in:   `{"cmd": "echo hi; (echo 'X-Api-Key: tok')\"` + secret + `", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON container subshell X-Api-Key glued secret",
+			in:   `{"cmd": "(echo 'X-Api-Key: tok')"}` + secret,
+		},
+		{
+			name: "Nested JSON X-Api-Key glued secret",
+			in:   `{"outer": "{\"a\": \"X-Api-Key: tok\"}"}` + secret,
+		},
+		{
+			name: "Nested JSON subshell password redacts without breaking ok PUBLIC_KEEP",
+			in:   `{"outer": "{\"a\": \"(echo 'password=` + secret + `')\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "JSON literal backslash-escaped quote before subshell redacts without leak",
+			in:   `{"cmd": "echo \\\"literal-quote (echo 'X-Api-Key: ` + secret + `'); echo TAIL_TEXT"}`,
+		},
+		{
+			name: "JSON literal backslash-escaped quotes before subshell preserve PUBLIC_KEEP",
+			in:   `{"cmd": "echo \\\"literal-quote\\\"; (echo 'X-Api-Key: ` + secret + `'); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON subshell escaped-quote password placeholder preserves sibling ok",
+			in:   `{"a": "(echo \\\"password=` + secret + `\\\")", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON subshell escaped-quote password glued secret preserves sibling ok",
+			in:   `{"a": "(echo \\\"password=[REDACTED]\\\"` + secret + `)", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Nested JSON subshell double-escaped-quote password preserves sibling ok",
+			in:   `{"outer": "{\"a\": \"(echo \\\\\\\"password=` + secret + `\\\\\\\")\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "JSON cmd-subst escaped-quote password preserves semicolon PUBLIC_KEEP",
+			in:   `{"cmd": "$(echo \\\"password=` + secret + `\\\"); echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON subshell escaped-quote password preserves and-and PUBLIC_KEEP",
+			in:   `{"cmd": "(echo \\\"password=` + secret + `\\\")&&echo PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Nested JSON 3-backslash pipe secret preserves ok PUBLIC_KEEP",
+			in:   `{"outer": "{\"a\": \"password=abc\\\"|` + secret + `\", \"ok\": \"PUBLIC_KEEP\"}"}`,
+		},
+		{
+			name: "Single JSON 5-backslash pipe secret preserves ok PUBLIC_KEEP",
+			in:   `{"a": "password=abc\\\\\"|` + secret + `", "ok": "PUBLIC_KEEP"}`,
+		},
+		{
+			name: "Compact JSON unpaired escaped quote preserves keep PUBLIC_KEEP",
+			in:   `{"a":"\\\"unpaired; password=` + secret + `;def","b":"\\\"foo\\\"","keep":"PUBLIC_KEEP"}`,
+		},
+		{
+			name: "JSON skip trailing single quote resets subSQ before pipe PUBLIC_KEEP",
+			in:   `{"a": "echo 'prefix token=[REDACTED] ok' (echo \\\"password=` + secret + `\\\")|echo PUBLIC_KEEP", "ok": "PUBLIC_KEEP"}`,
+		},
 	}
 	for _, tt := range inputs {
 		t.Run(tt.name, func(t *testing.T) {
@@ -6340,17 +6696,26 @@ func TestJoinedHeaderQuotesRedactedInAllCallbacks(t *testing.T) {
 				string(EventStateDelta):          true,
 				string(EventAgentResponse):       true,
 			}
+			seen := make(map[string]bool, len(payloadEventTypes))
 			for _, row := range rows {
+				evType, _ := row["event_type"].(string)
+				if payloadEventTypes[evType] {
+					seen[evType] = true
+				}
 				if s := fmt.Sprint(row); strings.Contains(s, secret) {
 					t.Errorf("%v row leaked %q: %s", row["event_type"], secret, elideText(s))
 				}
 				if strings.Contains(tt.in, "PUBLIC_KEEP") {
-					evType, _ := row["event_type"].(string)
 					if payloadEventTypes[evType] {
 						if s := fmt.Sprint(row); !strings.Contains(s, "PUBLIC_KEEP") {
 							t.Errorf("%v row lost PUBLIC_KEEP: %s", evType, elideText(s))
 						}
 					}
+				}
+			}
+			for evType := range payloadEventTypes {
+				if !seen[evType] {
+					t.Errorf("missing expected payload event type %s", evType)
 				}
 			}
 		})

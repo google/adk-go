@@ -923,7 +923,22 @@ func canonicalizeCredentialMarker(s string) string {
 		return s
 	}
 	var output []rune
-	for _, r := range s {
+	ansicClose := -1
+	for i, r := range s {
+		if i >= ansicClose {
+			ansicClose = -1
+		}
+		if ansicClose < 0 && r == '$' && i+1 < len(s) && s[i+1] == '\'' {
+			bs := 0
+			for bs < i && s[i-1-bs] == '\\' {
+				bs++
+			}
+			if bs%2 == 0 {
+				if end := scanANSICQuotedClose(s, i+2, false); end >= 0 {
+					ansicClose = end
+				}
+			}
+		}
 		output = append(output, r)
 		for {
 			escapeStart := -1
@@ -943,7 +958,7 @@ func canonicalizeCredentialMarker(s string) string {
 				escapeStart = n - 3
 				digits = string(output[n-2:])
 				percent = true
-			} else if n >= 2 && output[n-2] == '\\' && (output[n-1] == '"' || output[n-1] == '\'') {
+			} else if n >= 2 && output[n-2] == '\\' && (output[n-1] == '"' || (output[n-1] == '\'' && ansicClose < 0)) {
 				output = append(output[:n-2], output[n-1])
 				continue
 			}
@@ -1791,11 +1806,13 @@ func scrubErrorTextWithBudgetUncached(msg string, depth int, budget *nodeBudget)
 		}
 		if decoded, ok := decodeJSONDocumentWithBudget(trimBOMAndSpace(msg), budget); ok {
 			redacted, valChanged, valLost := redactJSONValue(decoded, depth+1, budget)
-			if !valLost && valChanged {
-				scrubbedJSON, _ := scrubErrorJSONStringsWithBudget(redacted, depth+1, budget)
-				if b, err := json.Marshal(scrubbedJSON); err == nil {
-					if exposes2, ok2 := jsonExposesCredentialWithBudget(msg, string(b), depth, budget); ok2 && !exposes2 {
-						return string(b)
+			if !valLost {
+				scrubbedJSON, strChanged := scrubErrorJSONStringsWithBudget(redacted, depth+1, budget)
+				if valChanged || (strChanged && countFailClosedPlaceholders(scrubbedJSON) <= countFailClosedPlaceholders(redacted) && onlyNestedJSONContainerChanges(redacted, scrubbedJSON, budget)) {
+					if b, err := json.Marshal(scrubbedJSON); err == nil {
+						if exposes2, ok2 := jsonExposesCredentialWithBudget(msg, string(b), depth, budget); ok2 && !exposes2 {
+							return string(b)
+						}
 					}
 				}
 			}
@@ -1806,6 +1823,72 @@ func scrubErrorTextWithBudgetUncached(msg string, depth int, budget *nodeBudget)
 		return redactedSensitiveTextPlaceholder
 	}
 	return scrubbed
+}
+
+func onlyNestedJSONContainerChanges(before, after any, budget *nodeBudget) bool {
+	switch b := before.(type) {
+	case map[string]any:
+		a, ok := after.(map[string]any)
+		if !ok || len(a) != len(b) {
+			return false
+		}
+		for k, bv := range b {
+			av, exists := a[k]
+			if !exists || !onlyNestedJSONContainerChanges(bv, av, budget) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		a, ok := after.([]any)
+		if !ok || len(a) != len(b) {
+			return false
+		}
+		for i := range b {
+			if !onlyNestedJSONContainerChanges(b[i], a[i], budget) {
+				return false
+			}
+		}
+		return true
+	case string:
+		a, ok := after.(string)
+		if !ok {
+			return false
+		}
+		if a == b {
+			return true
+		}
+		trimmed := trimBOMAndSpace(b)
+		if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+			return false
+		}
+		_, valid := decodeJSONDocumentWithBudget(trimmed, budget)
+		return valid
+	default:
+		return reflect.DeepEqual(before, after)
+	}
+}
+
+func countFailClosedPlaceholders(v any) int {
+	switch x := v.(type) {
+	case map[string]any:
+		n := 0
+		for k, val := range x {
+			n += countFailClosedPlaceholders(k) + countFailClosedPlaceholders(val)
+		}
+		return n
+	case []any:
+		n := 0
+		for _, val := range x {
+			n += countFailClosedPlaceholders(val)
+		}
+		return n
+	case string:
+		if x == redactedSensitiveTextPlaceholder || x == unparseableJSONPlaceholder || x == maxDepthPlaceholder || x == sanitizeBudgetPlaceholder {
+			return 1
+		}
+	}
+	return 0
 }
 
 // keptLiterals returns the non-redacted literal slices left in scrubbed after
@@ -2217,40 +2300,22 @@ func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int, inJSON bool
 					bs++
 				}
 				if p+bs < lineEnd && s[p+bs] == '"' && bs%4 == 1 {
-					j := p + bs + 1
-					closed := false
-					for j < lineEnd {
-						if s[j] == '\\' {
-							bs2 := 0
-							for j+bs2 < lineEnd && s[j+bs2] == '\\' {
-								bs2++
-							}
-							if j+bs2 < lineEnd && s[j+bs2] == '"' {
-								if bs2%4 == 1 {
-									p = j + bs2 + 1
-									closed = true
-									break
-								}
-								j += bs2 + 1
-								continue
-							}
-							j += bs2
-							if bs2%2 == 1 && j < lineEnd {
-								j++
-							}
-							continue
-						}
-						if s[j] == '"' {
-							p = j + 1
-							closed = true
-							break
-						}
-						j++
-					}
-					if !closed {
+					end := h.doubleQuoteCloseJSONWithin(p+bs+1, lineEnd, true)
+					if end < 0 {
 						return stamp(false)
 					}
+					p = end
 					continue
+				}
+				if p+bs < lineEnd && (s[p+bs] == '$' || s[p+bs] == '`') {
+					if bs%4 == 2 {
+						p += bs + 1
+						continue
+					}
+					if bs%4 == 0 {
+						p += bs
+						continue
+					}
 				}
 				if bs%2 == 1 && p+bs < lineEnd {
 					p += bs + 1
@@ -2267,21 +2332,43 @@ func (h *headerQuoteScanner) isShellBalancedFrom(start, lineEnd int, inJSON bool
 			}
 			p += 1 + end + 1
 		case '"':
-			j := p + 1
-			for j < lineEnd {
-				if s[j] == '\\' {
-					j += 2
-					continue
-				}
-				if s[j] == '"' {
-					break
-				}
-				j++
-			}
-			if j >= lineEnd {
+			end := h.doubleQuoteCloseWithin(p+1, lineEnd)
+			if end < 0 {
 				return stamp(false)
 			}
-			p = j + 1
+			p = end
+		case '$':
+			if p+1 < lineEnd && s[p+1] == '\'' {
+				end := scanANSICQuotedClose(s[:lineEnd], p+2, inJSON)
+				if end < 0 {
+					return stamp(false)
+				}
+				p = end
+				continue
+			}
+			if p+1 < lineEnd && s[p+1] == '(' {
+				end := h.cmdSubstCloseWithin(p+2, lineEnd, inJSON)
+				if end < 0 {
+					return stamp(false)
+				}
+				p = end
+				continue
+			}
+			if p+1 < lineEnd && s[p+1] == '{' {
+				end := h.paramExpCloseWithin(p+2, false, lineEnd, inJSON)
+				if end < 0 {
+					return stamp(false)
+				}
+				p = end
+				continue
+			}
+			p++
+		case '`':
+			end := h.backtickCloseWithin(p+1, lineEnd, false, inJSON)
+			if end < 0 {
+				return stamp(false)
+			}
+			p = end
 		case '#':
 			if p == 0 || s[p-1] == ' ' || s[p-1] == '\t' || strings.IndexByte(";&|()", s[p-1]) >= 0 {
 				return stamp(true)
@@ -2909,43 +2996,80 @@ func (h *headerQuoteScanner) hasOpenSubshellBefore(headerStart int, escJSON bool
 		}
 		return len(s)
 	}
-	if !h.subShellReady || h.subEscJSON != escJSON || headerStart < h.subPos {
-		ls := 0
-		if nl := strings.LastIndexAny(s[:headerStart], "\r\n"); nl >= 0 {
-			ls = nl + 1
-		}
-		h.subShellReady = true
-		h.subLineStart = ls
-		h.subRealLineEnd = realLineEnd(ls)
-		h.subEscJSON = escJSON
-		h.subPos = ls
-		h.subDepth = 0
-		h.subInSingle = false
-		h.subInDouble = false
-		h.subCmdPos = true
-	} else if headerStart > h.subRealLineEnd {
-		ls := h.subPos
-		if nl := strings.LastIndexAny(s[h.subPos:headerStart], "\r\n"); nl >= 0 {
-			ls = h.subPos + nl + 1
-		}
-		h.subLineStart = ls
-		h.subRealLineEnd = realLineEnd(ls)
-		h.subPos = ls
-		h.subDepth = 0
-		h.subInSingle = false
-		h.subInDouble = false
-		h.subCmdPos = true
+	stateIdx := 0
+	if escJSON {
+		stateIdx = 1
 	}
-	for h.subPos < headerStart {
-		p := h.subPos
+	st := &h.subStates[stateIdx]
+	var ls int
+	var scopeStart int
+	var inInnerJSONStr bool
+	if !st.ready || headerStart != st.pos {
+		if !st.ready || headerStart < st.pos {
+			if nl := strings.LastIndexAny(s[:headerStart], "\r\n"); nl >= 0 {
+				ls = nl + 1
+			}
+		} else if headerStart > st.realLineEnd {
+			ls = st.realLineEnd + 1
+			if nl := strings.LastIndexAny(s[ls:headerStart], "\r\n"); nl >= 0 {
+				ls += nl + 1
+			}
+		} else {
+			ls = st.lineStart
+		}
+		scopeStart = ls
+		if escJSON && h.hasCurLine && h.curLine.k <= headerStart && headerStart <= h.curLine.lineLim {
+			if h.curLine.inner == "\\\"" && h.curInnerJSONKind != jsonContainerNone && h.curLine.innerOpenEnd > scopeStart && h.curLine.innerOpenEnd <= headerStart {
+				scopeStart = h.curLine.innerOpenEnd
+				inInnerJSONStr = true
+			} else if h.curLine.outer == "\"" && h.curOuterJSONKind != jsonContainerNone && h.curLine.outerOpenEnd > scopeStart && h.curLine.outerOpenEnd <= headerStart {
+				scopeStart = h.curLine.outerOpenEnd
+			}
+		}
+	}
+	if !st.ready || headerStart < st.pos {
+		st.ready = true
+		st.lineStart = ls
+		st.realLineEnd = realLineEnd(ls)
+		st.scopeStart = scopeStart
+		st.inInnerJSONStr = inInnerJSONStr
+		st.pos = scopeStart
+		st.depth = 0
+		st.inSingle = false
+		st.inDouble = false
+		st.cmdPos = true
+	} else if headerStart > st.realLineEnd {
+		st.lineStart = ls
+		st.realLineEnd = realLineEnd(ls)
+		st.scopeStart = scopeStart
+		st.inInnerJSONStr = inInnerJSONStr
+		st.pos = scopeStart
+		st.depth = 0
+		st.inSingle = false
+		st.inDouble = false
+		st.cmdPos = true
+	} else if scopeStart > st.scopeStart {
+		if scopeStart > st.pos {
+			st.pos = scopeStart
+		}
+		st.scopeStart = scopeStart
+		st.inInnerJSONStr = inInnerJSONStr
+		st.depth = 0
+		st.inSingle = false
+		st.inDouble = false
+		st.cmdPos = true
+	}
+	for st.pos < headerStart {
+		p := st.pos
 		c := s[p]
 		if escJSON {
 			if c == '"' {
-				h.subDepth = 0
-				h.subInSingle = false
-				h.subInDouble = false
-				h.subCmdPos = true
-				h.subPos++
+				st.depth = 0
+				st.inSingle = false
+				st.inDouble = false
+				st.cmdPos = true
+				st.inInnerJSONStr = false
+				st.pos++
 				continue
 			}
 			if c == '\\' {
@@ -2955,114 +3079,124 @@ func (h *headerQuoteScanner) hasOpenSubshellBefore(headerStart int, escJSON bool
 				}
 				if p+bs < headerStart && s[p+bs] == '"' {
 					if bs%2 == 0 {
-						h.subDepth = 0
-						h.subInSingle = false
-						h.subInDouble = false
-						h.subCmdPos = true
-						h.subPos = p + bs + 1
+						st.depth = 0
+						st.inSingle = false
+						st.inDouble = false
+						st.cmdPos = true
+						st.inInnerJSONStr = false
+						st.pos = p + bs + 1
 						continue
 					}
-					if h.subInSingle {
-						h.subPos = p + bs + 1
+					if st.inInnerJSONStr && bs%4 == 1 {
+						st.depth = 0
+						st.inSingle = false
+						st.inDouble = false
+						st.cmdPos = true
+						st.inInnerJSONStr = false
+						st.pos = p + bs + 1
 						continue
 					}
-					h.subInDouble = !h.subInDouble
-					h.subCmdPos = false
-					h.subPos = p + bs + 1
+					if st.inSingle {
+						st.pos = p + bs + 1
+						continue
+					}
+					if (!st.inInnerJSONStr && bs%4 == 1) || (st.inInnerJSONStr && bs%8 == 3) {
+						st.inDouble = !st.inDouble
+					}
+					st.cmdPos = false
+					st.pos = p + bs + 1
 					continue
 				}
-				if h.subInSingle {
-					h.subPos = p + bs
+				if st.inSingle {
+					st.pos = p + bs
 					continue
 				}
 				if bs%2 == 1 && p+bs < headerStart && s[p+bs] == '\'' {
-					if !h.subInDouble {
-						h.subInSingle = true
+					if !st.inDouble {
+						st.inSingle = true
 					}
-					h.subCmdPos = false
-					h.subPos = p + bs + 1
+					st.cmdPos = false
+					st.pos = p + bs + 1
 					continue
 				}
-				h.subCmdPos = false
-				h.subPos = p + bs
+				st.cmdPos = false
+				st.pos = p + bs
 				continue
 			}
-			if h.subInSingle {
+			if st.inSingle {
 				if c == '\'' {
-					h.subInSingle = false
+					st.inSingle = false
 				}
-				h.subPos++
+				st.pos++
 				continue
 			}
 		} else {
-			if h.subInSingle {
+			if st.inSingle {
 				if c == '\'' {
-					h.subInSingle = false
+					st.inSingle = false
 				}
-				h.subPos++
+				st.pos++
 				continue
 			}
-			if h.subInDouble {
+			if st.inDouble {
 				if c == '\\' && p+1 < headerStart {
-					h.subPos += 2
+					st.pos += 2
 					continue
 				}
 				if c == '"' {
-					h.subInDouble = false
+					st.inDouble = false
 				}
-				h.subPos++
+				st.pos++
 				continue
 			}
 			if c == '\\' {
-				h.subCmdPos = false
+				st.cmdPos = false
 				if p+1 < headerStart {
-					h.subPos += 2
+					st.pos += 2
 				} else {
-					h.subPos++
+					st.pos++
 				}
 				continue
 			}
 			if c == '"' {
-				h.subInDouble = true
-				h.subCmdPos = false
-				h.subPos++
+				st.inDouble = true
+				st.cmdPos = false
+				st.pos++
 				continue
 			}
 		}
-		if h.subInDouble {
-			h.subPos++
+		if st.inDouble {
+			st.pos++
 			continue
 		}
 		switch c {
 		case '\'':
 			if !isWordApostropheAt(s, p) {
-				h.subInSingle = true
+				st.inSingle = true
 			}
-			h.subCmdPos = false
+			st.cmdPos = false
 		case '(':
-			if h.subCmdPos {
-				h.subDepth++
-			}
+			st.depth++
 		case ')':
-			if h.subDepth > 0 {
-				h.subDepth--
+			if st.depth > 0 {
+				st.depth--
 			}
-			h.subCmdPos = false
+			st.cmdPos = false
 		case ';', '|', '&':
-			h.subCmdPos = true
+			st.cmdPos = true
 		case ' ', '\t':
 		case '$':
 			if p+1 < len(s) && s[p+1] == '(' {
-				h.subCmdPos = true
+				st.cmdPos = true
 			} else {
-				h.subCmdPos = false
+				st.cmdPos = false
 			}
 		default:
-			h.subCmdPos = false
+			st.cmdPos = false
 		}
-		h.subPos++
+		st.pos++
 	}
-	return h.subDepth > 0
+	return st.depth > 0
 }
 
 // parenClosesCleanlyAt reports whether h.s[parenPos] == ')' closes a genuine
@@ -3074,22 +3208,41 @@ func (h *headerQuoteScanner) parenClosesCleanlyAt(headerStart, parenPos, lineEnd
 	if !h.hasOpenSubshellBefore(headerStart, escJSON) {
 		return false
 	}
-	p := skipHorizDelimSpace(h.s, parenPos+1)
+	return parenCloseSuffixOK(h.s, parenPos, lineEnd, inJSON, jsonEscaped)
+}
+
+func parenCloseSuffixOK(s string, parenPos, lineEnd int, inJSON, jsonEscaped bool) bool {
+	escJSON := inJSON || jsonEscaped
+	p := skipHorizDelimSpace(s, parenPos+1)
+	for p < lineEnd && s[p] == ')' {
+		p = skipHorizDelimSpace(s, p+1)
+	}
 	if p >= lineEnd {
 		return true
 	}
-	switch h.s[p] {
-	case ';', '|', ')', '#':
+	switch s[p] {
+	case ';', '|', '#':
 		return true
 	case '&':
-		return p+1 < lineEnd && h.s[p+1] == '&'
+		return p+1 < lineEnd && s[p+1] == '&'
 	case '"':
-		return escJSON
+		return escJSON && jsonCloseBoundaryOK(s, p+1, lineEnd, false, true)
+	case '\\':
+		return jsonEscaped && p+1 < lineEnd && s[p+1] == '"' && jsonCloseBoundaryOK(s, p+2, lineEnd, true, true)
 	case ',', '}', ']':
-		return inJSON && !jsonEscaped
+		return inJSON && !jsonEscaped && jsonCloseBoundaryOK(s, p, lineEnd, false, true)
 	default:
 		return false
 	}
+}
+
+func substClosesAtParen(substTop *intListNode, parenPos int) bool {
+	for node := substTop; node != nil; node = node.prev {
+		if node.val == parenPos+1 {
+			return true
+		}
+	}
+	return false
 }
 
 // apostropheTailStopsOnLine reports whether the remainder of the header line
@@ -3210,6 +3363,41 @@ func (h *headerQuoteScanner) apostropheTailStopsOnLine(headerStart, k, lineEnd i
 		return h.isShellBalancedFrom(restPos+tokLen, lineEnd, escJSON)
 	}
 	return len(rest) >= 3 && rest[0] >= '0' && rest[0] <= '9' && (rest[1] == '>' || rest[1] == '<')
+}
+
+// isShortLowerProseTail reports whether s[k+1:lineEnd] after a word-apostrophe
+// (such as "Bob's demo key") ends the line in a short sequence of at least two
+// plain lowercase ASCII words separated by horizontal spaces. Keeping the bound
+// constant preserves O(N) scanning while distinguishing benign prose tails from
+// single opaque or credential-shaped tokens.
+func isShortLowerProseTail(s string, k, lineEnd int) bool {
+	p := k + 1
+	for p < lineEnd && s[p] >= 'a' && s[p] <= 'z' {
+		p++
+	}
+	if p >= lineEnd || lineEnd-p > 64 {
+		return false
+	}
+	words := 0
+	for p < lineEnd {
+		sp := skipHorizDelimSpace(s[:lineEnd], p)
+		if sp == p || sp >= lineEnd {
+			return false
+		}
+		wStart := sp
+		for sp < lineEnd && s[sp] >= 'a' && s[sp] <= 'z' {
+			sp++
+		}
+		if sp-wStart < 2 {
+			return false
+		}
+		words++
+		if words > 6 {
+			return false
+		}
+		p = sp
+	}
+	return words >= 2
 }
 
 // isTrailingDigitApostropheAt reports whether s[k] is a single quote directly
@@ -3442,8 +3630,20 @@ func (h *headerQuoteScanner) isCandidateHeaderApostrophe(k, closePos, lineEnd in
 func unescapeBackslashControls(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	ansicEnd := -1
+	noMoreANSIC := false
 	for i := 0; i < len(s); i++ {
+		if i == ansicEnd {
+			ansicEnd = -1
+		}
 		if s[i] != '\\' {
+			if ansicEnd < 0 && !noMoreANSIC && s[i] == '$' && i+1 < len(s) && s[i+1] == '\'' && (i == 0 || s[i-1] != '\\') {
+				if end := scanANSICQuotedClose(s, i+2, false); end >= 0 {
+					ansicEnd = end
+				} else {
+					noMoreANSIC = true
+				}
+			}
 			b.WriteByte(s[i])
 			continue
 		}
@@ -3466,11 +3666,33 @@ func unescapeBackslashControls(s string) string {
 			b.WriteByte('\r')
 		case 't':
 			b.WriteByte('\t')
-		case '/', '"', '\'':
+		case '/', '"':
 			b.WriteByte(c)
+		case '\'':
+			if ansicEnd >= 0 && j < ansicEnd {
+				if (j-i)%2 == 1 {
+					b.WriteString(`\'`)
+				} else {
+					b.WriteString(`\\'`)
+				}
+			} else {
+				b.WriteByte(c)
+			}
 		default:
-			b.WriteByte('\\')
-			b.WriteByte(c)
+			if (c == '$' || c == '`') && (j-i)%2 == 0 {
+				b.WriteString(`\\`)
+				b.WriteByte(c)
+			} else {
+				if ansicEnd < 0 && !noMoreANSIC && c == '$' && j+1 < len(s) && s[j+1] == '\'' && (j-i)%2 == 0 {
+					if end := scanANSICQuotedClose(s, j+2, false); end >= 0 {
+						ansicEnd = end
+					} else {
+						noMoreANSIC = true
+					}
+				}
+				b.WriteByte('\\')
+				b.WriteByte(c)
+			}
 		}
 		i = j
 	}
@@ -3760,7 +3982,7 @@ func refineCuts(s string, cuts []textRange) []textRange {
 		}
 		quoted := quotes.before(s, t.start)
 		if strings.HasPrefix(s[t.start:t.end], redactedValue) &&
-			(placeholderEnds(s, t.start+len(redactedValue), quoted) || closesOuterQuote(s, t.start+len(redactedValue), c.end, 0, quoted)) {
+			(placeholderEnds(s, t.start+len(redactedValue), quoted, quotes.innerAt(s, t.start), quotes.subSingleAt(s, t.start), quotes.subEscDoubleAt(s, t.start)) || closesOuterQuote(s, t.start+len(redactedValue), c.end, 0, quoted)) {
 			continue
 		}
 		out = appendWithoutPlaceholders(out, s, t)
@@ -4112,41 +4334,110 @@ func baselineAuthHeaders(s string, rec *passRecorder) string {
 		// single quote between two letters, as the one of Bob's is, reads
 		// as an apostrophe and leaves the cut at the end of the line.
 		if outer, inner := quotes.openBefore(loc[0], loc[3]); outer != "" || inner != "" {
+			inSingleInJSON := outer == `"` && hasSingleQuoteBeforeHeader(s, loc[1]) &&
+				((inner == "" && quotes.inJSON()) || (inner == `\"` && quotes.curInnerJSONKind != jsonContainerNone))
+			inEscDQInInnerJSON := outer == `"` && inner == `\"` && quotes.curInnerJSONKind != jsonContainerNone && hasEscDQBeforeHeader(s, loc[1])
 			if outer == `"` && inner == `\"` {
-				if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEnd(loc[3], end); ok {
-					cutInner := inner
-					cutOuter := ""
-					if len(closedQuotes) > len(inner) {
-						cutOuter = outer
-					}
-					cutEnd := closingQuotesStart(s, loc[3], endPos, cutOuter, cutInner)
-					if closedQuotes != "" && cutEnd == endPos {
-						repl += closedQuotes
-					}
-					end = cutEnd
-				}
-			} else if outer == "" && inner != "" {
-				if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
-					k, unclosed := quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
-					if unclosed == "" && k < end && (s[k] == ' ' || s[k] == '\t' || s[k] == ';' || s[k] == '&' || s[k] == '|') {
-						cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
-						if cutEnd == k {
-							repl += inner
+				if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEnd(loc[1], end, inSingleInJSON, inEscDQInInnerJSON); ok {
+					if closedQuotes == "" {
+						end = endPos
+					} else {
+						cutInner := inner
+						cutOuter := ""
+						if len(closedQuotes) > len(inner) && !strings.HasSuffix(closedQuotes, inner) {
+							cutOuter = outer
+						}
+						cutEnd := closingQuotesStart(s, loc[3], endPos, cutOuter, cutInner)
+						if closedQuotes != "" && cutEnd == endPos {
+							repl += closedQuotes
 						}
 						end = cutEnd
 					}
 				}
-			} else if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
-				var unclosed string
-				k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
-				if unclosed == "" {
-					cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
-					if cutEnd == k {
-						repl += inner + outer
+			} else if outer == "" && inner != "" {
+				singleHandled := false
+				if inner == `\"` && (quotes.curInnerSubSQ || hasSingleQuoteBeforeHeader(s, loc[1])) {
+					for k := loc[1]; k < end; {
+						if s[k] == '\\' {
+							bs := 0
+							for k+bs < end && s[k+bs] == '\\' {
+								bs++
+							}
+							if k+bs < end && s[k+bs] == '"' && bs%4 == 1 {
+								break
+							}
+							k += bs
+							continue
+						}
+						if s[k] == '\'' && (!isWordApostropheAt(s, k) || isTrailingApostrophe(s, k)) {
+							if endPos, unclosed := quotes.joinedHeaderArgEnd(k+1, end, "", false, false); unclosed == "" && endPos == k+1 {
+								end = k
+								singleHandled = true
+								break
+							}
+						}
+						k++
 					}
-					end = cutEnd
-				} else {
-					end = k
+				}
+				if !singleHandled {
+					if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
+						k, unclosed := quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
+						if unclosed == "" && k < end && (s[k] == ' ' || s[k] == '\t' || s[k] == ';' || s[k] == '&' || s[k] == '|') {
+							cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
+							if cutEnd == k {
+								repl += inner
+							}
+							end = cutEnd
+						}
+					}
+				}
+			} else {
+				singleHandled := false
+				if inSingleInJSON {
+					for k := loc[1]; k < end; {
+						if s[k] == '\\' {
+							if k+1 < end {
+								k += 2
+							} else {
+								k++
+							}
+							continue
+						}
+						if s[k] == '"' {
+							break
+						}
+						if s[k] == '\'' {
+							if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEndAt(k+1, end, outer, "'"); ok {
+								if (endPos > k+1 && s[endPos-1] == '"' && s[endPos-2] == '\'') || (endPos == k+1 && closedQuotes != "") {
+									end = k
+								} else {
+									cutEnd := closingQuotesStart(s, loc[3], endPos, outer, "")
+									if closedQuotes != "" && cutEnd == endPos {
+										repl += closedQuotes
+									}
+									end = cutEnd
+								}
+								singleHandled = true
+								break
+							}
+						}
+						k++
+					}
+				}
+				if !singleHandled {
+					if k := quoteCloseScan(s[:end], loc[3], outer, inner); k > loc[3] {
+						var unclosed string
+						k, unclosed = quotes.joinedHeaderArgEnd(k, end, outer, quotes.inJSON(), false)
+						if unclosed == "" {
+							cutEnd := closingQuotesStart(s, loc[3], k, outer, inner)
+							if cutEnd == k && !(k < end && outer != "" && s[k] == outer[0]) {
+								repl += inner + outer
+							}
+							end = cutEnd
+						} else {
+							end = k
+						}
+					}
 				}
 			}
 		} else if !isCookieHeaderKey(s[loc[2]:loc[3]]) {
@@ -4608,13 +4899,15 @@ func foldKeyLetter(s string, i int) (byte, int) {
 }
 
 // baselineTextKeyValues replaces each baselineTextKeyValTokenAtRe match in s as
-// baselineRedactTextKeyValue does, skipping dotted or hyphenated pagination
+// baselineRedactTextKeyValueWithQuotes does, skipping dotted or hyphenated pagination
 // cursor suffixes ("token" preceded by "." or "-" where isPageTokenName holds)
 // before running baselineTextKeyValTokenAtRe so long runs of dotted cursor
 // names stay linear while preserving baselineFindKeyValToken's exact regexp
 // behavior.
 func baselineTextKeyValues(s string, rec *passRecorder) string {
 	var brackets openBrackets
+	var quotes openQuotes
+	var sh shellAssignScanner
 	var b strings.Builder
 	last, pos := 0, 0
 	for i := 0; i < len(s); i++ {
@@ -4636,7 +4929,12 @@ func baselineTextKeyValues(s string, rec *passRecorder) string {
 			continue
 		}
 		loc = offsetLoc(loc, i)
-		repl, end := baselineRedactTextKeyValue(s, loc, &brackets)
+		quoted := quotes.before(s, loc[0])
+		innerQuoted := quotes.innerAt(s, loc[0])
+		subSQ := quotes.subSingleAt(s, loc[0])
+		subEscDQ := quotes.subEscDoubleAt(s, loc[0])
+		repl, end := baselineRedactTextKeyValueWithQuotes(&sh, s, loc, &brackets, &quotes, quoted, innerQuoted, subSQ, subEscDQ)
+		quotes.skip(s, max(end, loc[0]+1))
 		b.WriteString(s[last:loc[0]])
 		b.WriteString(repl)
 		rec.copied(last, loc[0]-last)
@@ -4655,14 +4953,14 @@ func baselineTextKeyValues(s string, rec *passRecorder) string {
 	return b.String()
 }
 
-// baselineRedactTextKeyValue replaces a baselineTextKeyValTokenRe match,
+// baselineRedactTextKeyValueWithQuotes replaces a baselineTextKeyValTokenRe match,
 // keeping the key, its quote, the delimiter and the quotes around the value.
 // A value that is itself a sensitive key is left in place, so that the pair
 // it starts is matched on its own, and one that only ends in a key name is
 // redacted together with the value of the pair it starts (see
 // baselineNestsSensitiveKey). brackets counts the brackets opened before the
 // key.
-func baselineRedactTextKeyValue(s string, loc []int, brackets *openBrackets) (string, int) {
+func baselineRedactTextKeyValueWithQuotes(sh *shellAssignScanner, s string, loc []int, brackets *openBrackets, quotes *openQuotes, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) (string, int) {
 	if loc[2] > 0 && (s[loc[2]-1] == '.' || s[loc[2]-1] == '-') {
 		if isPageTokenName(s[dottedKeyStart(s, loc[2]):loc[3]]) {
 			return s[loc[0]:loc[7]], loc[7]
@@ -4676,7 +4974,7 @@ func baselineRedactTextKeyValue(s string, loc []int, brackets *openBrackets) (st
 	open := brackets.before(s, loc[0])
 	start, end := loc[8], loc[9]
 	if pEnd := placeholderCut(s, start); pEnd > 0 {
-		if pEnd == len(s) || quotesEndLine(s, pEnd) || len(openingQuote(s, pEnd)) == 2 || ((s[pEnd] == '"' || s[pEnd] == '\'') && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0)) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd]) >= 0 {
+		if pEnd == len(s) || quotesEndLine(s, pEnd) || len(openingQuote(s, pEnd)) == 2 || ((s[pEnd] == '"' || s[pEnd] == '\'') && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0)) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd]) >= 0 || placeholderEndsQuote(s, pEnd, quoted, innerQuoted, subSQ, subEscDQ) {
 			brackets.skip(pEnd)
 			return s[loc[0]:pEnd], pEnd
 		}
@@ -4700,7 +4998,7 @@ func baselineRedactTextKeyValue(s string, loc []int, brackets *openBrackets) (st
 		brackets.skip(end)
 		return s[loc[2]:loc[3]] + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
 	}
-	end = baselineTextValueEnd(s, start, end, open)
+	end = baselineTextValueEndWithQuotes(sh, quotes, s, start, end, open, quoted, innerQuoted, subSQ, subEscDQ)
 	brackets.skip(end)
 	if end == start {
 		return s[loc[0]:end], end
@@ -4755,11 +5053,114 @@ func enclosingQuotedTempPair(s string, keyStart, keyEnd int) []int {
 // opened before the key (see trimEnclosingClosers). open is the number of
 // brackets opened before the key.
 func baselineTextValueEnd(s string, start, end, open int) int {
+	return baselineTextValueEndWithQuotes(nil, nil, s, start, end, open, 0, 0, false, false)
+}
+
+func baselineTextValueEndWithQuotes(sh *shellAssignScanner, quotes *openQuotes, s string, start, end, open int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
+	if inner, quote := unquoteValue(s[start:end]); quote != "" && isRedactedValue(inner) {
+		return end
+	}
+	if open > 0 || innerQuoted&(4|8) != 0 {
+		end = textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, subSQ, subEscDQ, quotes)
+		if end > start && openingQuote(s, start) == "" &&
+			(quoted != 0 || innerQuoted != 0 || subSQ || subEscDQ) &&
+			strings.IndexByte(s[start:end], '|') >= 0 {
+			end = baselineStopBeforeClosingPipe(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
+		}
+		return trimTrailingSubshellOrJSONQuotes(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
+	}
 	if _, quote := unquoteValue(s[start:end]); quote != "" {
 		return end
 	}
 	rest := baselineSensitiveValueEnd(s, start, start)
-	return rest + len(trimEnclosingClosers(s[rest:max(end, rest)], open))
+	end = rest + len(trimEnclosingClosers(s[rest:max(end, rest)], open))
+	if rest == start && openingQuote(s, start) == "" {
+		end = extendSubshellQuotedValueEnd(quotes, s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
+	}
+	if end > start && openingQuote(s, start) == "" &&
+		(quoted != 0 || innerQuoted != 0 || subSQ || subEscDQ) &&
+		strings.IndexByte(s[start:end], '|') >= 0 {
+		end = baselineStopBeforeClosingPipe(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
+	}
+	return trimTrailingSubshellOrJSONQuotes(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
+}
+
+func baselineStopBeforeClosingPipe(s string, start, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
+	curInner, curSubSQ, curSubEscDQ := innerQuoted, subSQ, subEscDQ
+	for i := start; i < end; i++ {
+		if i <= start {
+			continue
+		}
+		if s[i] == '\\' {
+			k := i
+			for k < end && s[k] == '\\' {
+				k++
+			}
+			nBS := k - i
+			if k < end && (s[k] == '"' || s[k] == '\'') && nBS%2 == 1 {
+				if s[k] == '"' && curSubEscDQ && !curSubSQ &&
+					((curInner&4 == 0 && nBS%4 == 3) || (curInner&4 != 0 && (nBS%8 == 7 || nBS%4 == 3))) {
+					qLen := 4
+					if curInner&4 != 0 && nBS%8 == 7 {
+						qLen = 8
+					}
+					qStart := k + 1 - qLen
+					if qStart >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+						return qStart
+					}
+					curSubEscDQ = false
+					i = k
+					continue
+				}
+				if s[k] == '"' && nBS%4 == 1 && (curInner|quoted)&4 != 0 && !curSubSQ && !curSubEscDQ {
+					if k-1 >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+						return k - 1
+					}
+					if curInner&4 != 0 {
+						curInner &^= 4
+					}
+					i = k
+					continue
+				}
+				if s[k] == '\'' && nBS%4 == 1 && (curInner|quoted)&8 != 0 {
+					if k-1 >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+						return k - 1
+					}
+					if curInner&8 != 0 {
+						curInner &^= 8
+					}
+					i = k
+					continue
+				}
+				i = k
+				continue
+			} else {
+				i = k - 1
+				continue
+			}
+		} else if curSubSQ && s[i] == '\'' {
+			if closedQuoteBeforePipe(s, i+1, len(s)) {
+				return i
+			}
+			if isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+				if pipeEnd := sqCloseBeforePipe(s, i); pipeEnd >= 0 {
+					return pipeEnd
+				}
+				continue
+			}
+			curSubSQ = false
+		} else if !curSubSQ && !curSubEscDQ && ((quoted&2 != 0 && s[i] == '\'') || (quoted&1 != 0 && s[i] == '"')) {
+			if closedQuoteBeforePipe(s, i+1, len(s)) {
+				return i
+			}
+			if s[i] == '\'' && quoted&2 != 0 && isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+				if pipeEnd := sqCloseBeforePipe(s, i); pipeEnd >= 0 {
+					return pipeEnd
+				}
+			}
+		}
+	}
+	return end
 }
 
 // baselineNestsSensitiveKey tells whether the value matched at s[start:end]
@@ -5172,7 +5573,7 @@ func cookieValueIsProse(s string, start int) bool {
 		at = sp
 	}
 	for at < len(s) && s[at] != '\r' && s[at] != '\n' {
-		if s[at] == '"' || s[at] == '\'' || (s[at] == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\'' || s[at+1] == 'n' || s[at+1] == 'r' || s[at+1] == 't' || s[at+1] == '\\')) {
+		if s[at] == '"' || s[at] == '\'' || (s[at] == '$' && at+1 < len(s) && s[at+1] == '(') || s[at] == '`' || (s[at] == '\\' && at+1 < len(s) && (s[at+1] == '"' || s[at+1] == '\'' || s[at+1] == 'n' || s[at+1] == 'r' || s[at+1] == 't' || s[at+1] == '\\')) {
 			if restHoldsCookiePair(s, at, false) {
 				return false
 			}
@@ -5189,14 +5590,14 @@ func cookieValueIsProse(s string, start int) bool {
 				k++
 				continue
 			}
-			if c == '\'' && isMidWordApostrophe(s, k) {
+			if c == '\'' && isMidWordApostrophe(s, k) && startsContraction(s, k, 1) {
 				k++
 				continue
 			}
 			if c == '\\' && k+1 < len(s) && (s[k+1] == '"' || s[k+1] == '\'' || s[k+1] == 'n' || s[k+1] == 'r' || s[k+1] == 't' || s[k+1] == '\\') {
 				break
 			}
-			if c <= ' ' || c == ';' || c == ',' || c == '"' || c == '\'' {
+			if c <= ' ' || c == ';' || c == ',' || c == '"' || c == '\'' || (c == '$' && k+1 < len(s) && s[k+1] == '(') || c == '`' {
 				break
 			}
 			r, width := utf8.DecodeRuneInString(s[k:])
@@ -5266,8 +5667,28 @@ func restHoldsCookiePair(s string, at int, keyed bool) bool {
 	// name is where the run of key name bytes that ends at s[i] starts, if
 	// s[at], a space or a tab starts it, or -1.
 	name := at
+	nestedEscSQ := false
 	for i := at; i < len(s); i++ {
-		switch c := s[i]; {
+		c := s[i]
+		if nestedEscSQ {
+			switch c {
+			case '=':
+				return true
+			case '\r', '\n':
+				return true
+			case '\\':
+				if i+1 < len(s) && s[i+1] == '\'' {
+					if !cookieProseCloseBoundaryOK(s, i+2, len(s), jsonContainerNone, true) {
+						return true
+					}
+					nestedEscSQ = false
+					i++
+					name = -1
+				}
+			}
+			continue
+		}
+		switch {
 		case c == '=':
 			if !keyed || name < 0 || name == i || !isBareTextKey(s[name:i]) {
 				return true
@@ -5275,6 +5696,8 @@ func restHoldsCookiePair(s string, at int, keyed bool) bool {
 			name = -1
 		case c == '\r' || c == '\n':
 			return false
+		case (c == '$' && i+1 < len(s) && s[i+1] == '(') || c == '`':
+			return true
 		case c == ':':
 			const errNoCookieColon = ": named cookie not present"
 			if len(s)-i >= len(errNoCookieColon) && strings.EqualFold(s[i:i+len(errNoCookieColon)], errNoCookieColon) {
@@ -5301,15 +5724,34 @@ func restHoldsCookiePair(s string, at int, keyed bool) bool {
 			name = -1
 		case c == ' ' || c == '\t':
 			name = i + 1
-		case c == '\\' && i+1 < len(s) && (s[i+1] == 'n' || s[i+1] == 'r' || s[i+1] == 't' || s[i+1] == '\\'):
-			keyed = false
-			i++
-			name = i + 1
+		case c == '\\' && i+1 < len(s):
+			switch s[i+1] {
+			case '\'':
+				if i > at && isTextKeyByte(s[i-1]) && startsContraction(s, i+1, 1) {
+					i++
+					name = -1
+					continue
+				}
+				if i > at && !canOpenNestedEscDQInProse(s, i) {
+					return true
+				}
+				nestedEscSQ = true
+				i++
+				name = -1
+			case 'n', 'r', 't', '\\':
+				keyed = false
+				i++
+				name = i + 1
+			default:
+				if name >= 0 && !isTextKeyByte(c) {
+					name = -1
+				}
+			}
 		case name >= 0 && !isTextKeyByte(c):
 			name = -1
 		}
 	}
-	return false
+	return nestedEscSQ
 }
 
 // isProseCookieWord reports whether w, the first token of the text after a
@@ -5465,26 +5907,837 @@ func isProseQuantity(w string) bool {
 // is the scanner of s that found outer and inner; it finds where they close
 // (see headerQuoteScanner.closeAt), so that the checks for all the headers
 // inside one long quoted string read that string once, not once each.
+// cookieProseCloseBoundaryOK reports whether s[after:lineEnd] after a closing
+// quote of a candidate Cookie or Set-Cookie prose segment forms a clean
+// non-concatenated boundary. Whitespace, line breaks, shell command separators
+// (;, &, |), closing grouping brackets followed by a clean boundary, sentence
+// punctuation followed by whitespace/EOF/separator, and (when allowJSONDelim is
+// true) JSON comma delimiters before valid JSON tokens are accepted; adjacent
+// word/token/quote/escape/substitution characters or punctuation glued directly
+// to non-whitespace tokens indicate shell concatenation and fail closed.
+type jsonContainerKind uint8
+
+const (
+	jsonContainerNone jsonContainerKind = iota
+	jsonContainerObject
+	jsonContainerArray
+)
+
+type jsonContainerEntry struct {
+	openChar byte
+	pos      int
+	isJSON   bool
+}
+
+type jsonContainerNode struct {
+	entry jsonContainerEntry
+	prev  *jsonContainerNode
+}
+
+type intListNode struct {
+	val  int
+	prev *intListNode
+}
+
+func jsonContainerMatches(openChar, closeChar byte) bool {
+	return (openChar == '{' && closeChar == '}') || (openChar == '[' && closeChar == ']')
+}
+
+func isJSONContainerWordOrDollar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '$'
+}
+
+func isJSONObjectOpenerHead(s string, pos int) bool {
+	p := pos + 1
+	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n') {
+		p++
+	}
+	if p >= len(s) {
+		return false
+	}
+	if s[p] == '}' {
+		return true
+	}
+	if s[p] == '"' {
+		lim := min(len(s), p+128)
+		bs := 0
+		for i := p + 1; i < lim; i++ {
+			c := s[i]
+			if c == '\r' || c == '\n' {
+				return false
+			}
+			if c == '\\' {
+				bs++
+				continue
+			}
+			if c == '"' && bs%2 == 0 {
+				after := i + 1
+				afterLim := min(len(s), after+64)
+				for after < afterLim && (s[after] == ' ' || s[after] == '\t' || s[after] == '\r' || s[after] == '\n') {
+					after++
+				}
+				return after < len(s) && s[after] == ':'
+			}
+			bs = 0
+		}
+		return false
+	}
+	if s[p] == '\\' {
+		openBS := 0
+		for openBS < 8 && p+openBS < len(s) && s[p+openBS] == '\\' {
+			openBS++
+		}
+		if openBS%2 == 1 && p+openBS < len(s) && s[p+openBS] == '"' {
+			wantMod := openBS % 4
+			lim := min(len(s), p+openBS+1+128)
+			bs := 0
+			for i := p + openBS + 1; i < lim; i++ {
+				c := s[i]
+				if c == '\r' || c == '\n' {
+					return false
+				}
+				if c == '\\' {
+					bs++
+					continue
+				}
+				if c == '"' {
+					if bs%2 == 1 && bs%4 == wantMod {
+						after := i + 1
+						afterLim := min(len(s), after+64)
+						for after < afterLim && (s[after] == ' ' || s[after] == '\t' || s[after] == '\r' || s[after] == '\n') {
+							after++
+						}
+						return after < len(s) && s[after] == ':'
+					}
+					return false
+				}
+				bs = 0
+			}
+		}
+	}
+	return false
+}
+
+func isJSONContainerOpener(s string, pos int) bool {
+	if pos < 0 || pos >= len(s) {
+		return false
+	}
+	if pos > 0 && isJSONContainerWordOrDollar(s[pos-1]) {
+		return false
+	}
+	if s[pos] == '{' {
+		return isJSONObjectOpenerHead(s, pos)
+	}
+	if s[pos] != '[' {
+		return false
+	}
+	p := pos + 1
+	for p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n') {
+		p++
+	}
+	if p >= len(s) {
+		return false
+	}
+	switch s[p] {
+	case ']', '"', '[', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return true
+	case '{':
+		return isJSONObjectOpenerHead(s, p)
+	case '\\':
+		bs := 0
+		for bs < 8 && p+bs < len(s) && s[p+bs] == '\\' {
+			bs++
+		}
+		return bs%2 == 1 && p+bs < len(s) && s[p+bs] == '"'
+	case 't', 'f', 'n':
+		for _, kw := range []string{"true", "false", "null"} {
+			if strings.HasPrefix(s[p:min(len(s), p+len(kw))], kw) {
+				after := p + len(kw)
+				if after >= len(s) {
+					return true
+				}
+				c := s[after]
+				return c == ',' || c == ']' || c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"'
+			}
+		}
+	}
+	return false
+}
+
+func classifyQuoteJSONContainer(s string, quotePos, boundStart int, escaped bool, jsonTop *jsonContainerNode) jsonContainerKind {
+	if jsonTop == nil || !jsonTop.entry.isJSON {
+		return jsonContainerNone
+	}
+	top := jsonTop.entry
+	if top.pos < boundStart || quotePos <= top.pos {
+		return jsonContainerNone
+	}
+	p := quotePos
+	if escaped {
+		for p > boundStart && s[p-1] == '\\' {
+			p--
+		}
+	}
+	for p > top.pos+1 {
+		c := s[p-1]
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			p--
+			continue
+		}
+		break
+	}
+	if p == top.pos+1 {
+		if top.openChar == '[' {
+			return jsonContainerArray
+		}
+		return jsonContainerObject
+	}
+	if p <= top.pos {
+		return jsonContainerNone
+	}
+	delim := s[p-1]
+	if delim != ':' && delim != ',' {
+		return jsonContainerNone
+	}
+	if top.openChar == '[' {
+		return jsonContainerArray
+	}
+	return jsonContainerObject
+}
+
+func atLineEnd(s string, p, lineEnd int) bool {
+	return p >= lineEnd || s[p] == '\r' || s[p] == '\n'
+}
+
+func cookieProseCloseBoundaryOK(s string, after, lineEnd int, jsonKind jsonContainerKind, innerEscaped bool) bool {
+	p := after
+	for !atLineEnd(s, p, lineEnd) && (s[p] == ')' || s[p] == ']' || s[p] == '}') {
+		p++
+	}
+	if atLineEnd(s, p, lineEnd) {
+		return true
+	}
+	c := s[p]
+	if r, _ := utf8.DecodeRuneInString(s[p:]); isDelimSpace(r) {
+		return true
+	}
+	if c == ';' || c == '&' || c == '|' {
+		return true
+	}
+	if c == ',' || c == '.' || c == ':' || c == '!' || c == '?' {
+		if c == ',' && jsonKind != jsonContainerNone {
+			after := skipHorizDelimSpace(s[:min(lineEnd, p+64)], p+1)
+			if atLineEnd(s, after, lineEnd) {
+				return true
+			}
+			return jsonDelimAfterComma(s, after, lineEnd, jsonKind, innerEscaped)
+		}
+		q := p + 1
+		for !atLineEnd(s, q, lineEnd) && (s[q] == ')' || s[q] == ']' || s[q] == '}') {
+			q++
+		}
+		if atLineEnd(s, q, lineEnd) {
+			return true
+		}
+		if r, _ := utf8.DecodeRuneInString(s[q:]); isDelimSpace(r) {
+			return true
+		}
+		return s[q] == ';' || s[q] == '&' || s[q] == '|'
+	}
+	return false
+}
+
+func looksLikeJSONValueAt(s string, p, lineEnd int, escaped bool) (int, bool) {
+	if atLineEnd(s, p, lineEnd) {
+		return 0, false
+	}
+	lim := min(lineEnd, p+256)
+	c := s[p]
+	if escaped && c == '\\' {
+		if p+1 >= lim || s[p+1] != '"' {
+			return 0, false
+		}
+		bs := 0
+		for i := p + 2; i < lim; i++ {
+			ch := s[i]
+			if ch == '\r' || ch == '\n' {
+				return 0, false
+			}
+			if ch == '\\' {
+				bs++
+				continue
+			}
+			if ch == '"' {
+				if bs%2 == 1 {
+					if bs%4 == 1 {
+						return i + 1, true
+					}
+					bs = 0
+					continue
+				}
+				return 0, false
+			}
+			bs = 0
+		}
+		if p+256 <= lineEnd && lim < lineEnd {
+			return lim, true
+		}
+		return 0, false
+	}
+	if !escaped && c == '"' {
+		bs := 0
+		for i := p + 1; i < lim; i++ {
+			ch := s[i]
+			if ch == '\r' || ch == '\n' {
+				return 0, false
+			}
+			if ch == '\\' {
+				bs++
+				continue
+			}
+			if ch == '"' && bs%2 == 0 {
+				return i + 1, true
+			}
+			bs = 0
+		}
+		if p+256 <= lineEnd && lim < lineEnd {
+			return lim, true
+		}
+		return 0, false
+	}
+	if c == '{' {
+		if !isJSONObjectOpenerHead(s, p) {
+			return 0, false
+		}
+		if escaped {
+			after := skipHorizDelimSpace(s[:min(lineEnd, p+64)], p+1)
+			if !atLineEnd(s, after, lineEnd) && s[after] == '}' {
+				return after + 1, true
+			}
+		}
+		depth := 0
+		inStr := false
+		bs := 0
+		for i := p; i < lim; i++ {
+			ch := s[i]
+			if ch == '\r' || ch == '\n' {
+				return lim, true
+			}
+			if !inStr {
+				if ch == '=' || ch == ';' {
+					return 0, false
+				}
+				switch ch {
+				case '{', '[':
+					depth++
+				case '}', ']':
+					depth--
+					if depth == 0 {
+						return i + 1, true
+					}
+				case '"':
+					if escaped {
+						return 0, false
+					}
+					inStr = true
+					bs = 0
+				case '\\':
+					if escaped && i+1 < lim && s[i+1] == '"' {
+						inStr = true
+						i++
+						bs = 0
+					}
+				}
+			} else {
+				if ch == '\\' {
+					bs++
+					continue
+				}
+				if ch == '"' {
+					if !escaped && bs%2 == 0 {
+						inStr = false
+					} else if escaped && bs%2 == 1 && bs%4 == 1 {
+						inStr = false
+					}
+				}
+				bs = 0
+			}
+		}
+		return lim, true
+	}
+	if c == '[' {
+		if !isJSONContainerOpener(s, p) {
+			return 0, false
+		}
+		depth := 0
+		inStr := false
+		bs := 0
+		for i := p; i < lim; i++ {
+			ch := s[i]
+			if ch == '\r' || ch == '\n' {
+				return lim, true
+			}
+			if !inStr {
+				if ch == '=' || ch == ';' {
+					return 0, false
+				}
+				switch ch {
+				case '[', '{':
+					depth++
+				case ']', '}':
+					depth--
+					if depth == 0 {
+						return i + 1, true
+					}
+				case '"':
+					if escaped {
+						return 0, false
+					}
+					inStr = true
+					bs = 0
+				case '\\':
+					if escaped && i+1 < lim && s[i+1] == '"' {
+						inStr = true
+						i++
+						bs = 0
+					}
+				}
+			} else {
+				if ch == '\\' {
+					bs++
+					continue
+				}
+				if ch == '"' {
+					if !escaped && bs%2 == 0 {
+						inStr = false
+					} else if escaped && bs%2 == 1 && bs%4 == 1 {
+						inStr = false
+					}
+				}
+				bs = 0
+			}
+		}
+		return lim, true
+	}
+	if c == '-' || (c >= '0' && c <= '9') {
+		i := p
+		if c == '-' {
+			i++
+			if atLineEnd(s, i, lineEnd) || s[i] < '0' || s[i] > '9' {
+				return 0, false
+			}
+		}
+		for !atLineEnd(s, i, lineEnd) && ((s[i] >= '0' && s[i] <= '9') || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		return i, true
+	}
+	for _, kw := range []string{"true", "false", "null"} {
+		if strings.HasPrefix(s[p:min(lineEnd, p+len(kw))], kw) {
+			return p + len(kw), true
+		}
+	}
+	return 0, false
+}
+
+func jsonArrayChainOK(s string, p, lineEnd int, escaped bool) bool {
+	for step := 0; step < 8; step++ {
+		if step > 0 {
+			p = skipHorizDelimSpace(s[:min(lineEnd, p+64)], p)
+		}
+		if atLineEnd(s, p, lineEnd) {
+			return step > 0
+		}
+		next, ok := looksLikeJSONValueAt(s, p, lineEnd, escaped)
+		if !ok {
+			return false
+		}
+		if p+256 <= lineEnd && next == p+256 && next < lineEnd {
+			return true
+		}
+		next = skipHorizDelimSpace(s[:min(lineEnd, next+64)], next)
+		if atLineEnd(s, next, lineEnd) {
+			return true
+		}
+		ch := s[next]
+		if escaped && ch == '"' {
+			return jsonCloseBoundaryOK(s, next+1, lineEnd, false, true)
+		}
+		switch ch {
+		case ',':
+			p = next + 1
+		case ']':
+			return jsonCloseBoundaryOK(s, next+1, lineEnd, escaped, true)
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func jsonCloseBoundaryOK(s string, after, lineEnd int, escaped, allowComma bool) bool {
+	for {
+		if atLineEnd(s, after, lineEnd) {
+			return true
+		}
+		if escaped && s[after] == '"' {
+			escaped = false
+			allowComma = true
+			after++
+			continue
+		}
+		if r, _ := utf8.DecodeRuneInString(s[after:]); isDelimSpace(r) {
+			return true
+		}
+		ac := s[after]
+		if ac == ';' || ac == '&' || ac == '|' {
+			return true
+		}
+		if ac == '}' || ac == ']' {
+			after++
+			for after < lineEnd && (s[after] == '}' || s[after] == ']') {
+				after++
+			}
+			continue
+		}
+		if ac == '.' || ac == '!' || ac == '?' {
+			if atLineEnd(s, after+1, lineEnd) {
+				return true
+			}
+			r, _ := utf8.DecodeRuneInString(s[after+1:])
+			return isDelimSpace(r)
+		}
+		if ac == ',' {
+			afterC := skipHorizDelimSpace(s[:min(lineEnd, after+64)], after+1)
+			if atLineEnd(s, afterC, lineEnd) {
+				return true
+			}
+			if !allowComma {
+				_, valOK := looksLikeJSONValueAt(s, afterC, lineEnd, escaped)
+				return valOK
+			}
+			if jsonArrayChainOK(s, afterC, lineEnd, escaped) {
+				return true
+			}
+			return looksLikeJSONKeyAfterCommaDepth(s, afterC, lineEnd, escaped, false)
+		}
+		return false
+	}
+}
+
+// jsonDelimAfterComma reports whether s[p:lineEnd] after a comma following a
+// closing quote starts a valid compact JSON token rather than a shell-joined
+// continuation such as ",sid=...".
+func jsonDelimAfterComma(s string, p, lineEnd int, jsonKind jsonContainerKind, escaped bool) bool {
+	if atLineEnd(s, p, lineEnd) {
+		return false
+	}
+	if jsonKind == jsonContainerObject {
+		return looksLikeJSONKeyAfterComma(s, p, lineEnd, escaped)
+	}
+	if jsonKind == jsonContainerArray {
+		return jsonArrayChainOK(s, p, lineEnd, escaped)
+	}
+	return false
+}
+
+func jsonCommaBreakOK(s string, after, lineEnd int, outerJSONKind jsonContainerKind, escaped bool) bool {
+	if atLineEnd(s, after, lineEnd) {
+		return true
+	}
+	if outerJSONKind == jsonContainerArray {
+		return jsonArrayChainOK(s, after, lineEnd, escaped)
+	}
+	return looksLikeJSONKeyAfterComma(s, after, lineEnd, escaped)
+}
+
+// looksLikeJSONKeyAfterComma reports whether a quoted token at s[p:lineEnd]
+// after a JSON comma cleanly closes as valid JSON object field(s) within
+// bounded lookahead.
+func looksLikeJSONKeyAfterComma(s string, p, lineEnd int, escaped bool) bool {
+	return looksLikeJSONKeyAfterCommaDepth(s, p, lineEnd, escaped, true)
+}
+
+func looksLikeJSONKeyAfterCommaDepth(s string, p, lineEnd int, escaped, allowCommaClose bool) bool {
+	for step := 0; step < 8; step++ {
+		if step > 0 {
+			p = skipHorizDelimSpace(s[:min(lineEnd, p+64)], p)
+			if atLineEnd(s, p, lineEnd) {
+				return true
+			}
+		}
+		limit := min(lineEnd, p+256)
+		valPos := -1
+		if escaped {
+			if p+1 >= limit || s[p] != '\\' || s[p+1] != '"' {
+				return false
+			}
+			bs := 0
+			for i := p + 2; i < limit; i++ {
+				c := s[i]
+				if c == '\r' || c == '\n' || c == '=' {
+					return false
+				}
+				if c == '\\' {
+					bs++
+					continue
+				}
+				if c == '"' {
+					if bs%2 == 1 {
+						if bs%4 == 1 {
+							after := skipHorizDelimSpace(s[:min(lineEnd, i+64)], i+1)
+							if atLineEnd(s, after, lineEnd) || s[after] != ':' {
+								return false
+							}
+							valPos = skipHorizDelimSpace(s[:min(lineEnd, after+65)], after+1)
+							break
+						}
+						bs = 0
+						continue
+					}
+					return false
+				}
+				bs = 0
+			}
+		} else {
+			if p >= limit || s[p] != '"' {
+				return false
+			}
+			bs := 0
+			for i := p + 1; i < limit; i++ {
+				c := s[i]
+				if c == '\r' || c == '\n' || c == '=' {
+					return false
+				}
+				if c == '\\' {
+					bs++
+					continue
+				}
+				if c == '"' && bs%2 == 0 {
+					after := skipHorizDelimSpace(s[:min(lineEnd, i+64)], i+1)
+					if atLineEnd(s, after, lineEnd) || s[after] != ':' {
+						return false
+					}
+					valPos = skipHorizDelimSpace(s[:min(lineEnd, after+65)], after+1)
+					break
+				}
+				bs = 0
+			}
+		}
+		if valPos < 0 {
+			return false
+		}
+		if atLineEnd(s, valPos, lineEnd) {
+			return true
+		}
+		valEnd, valOK := looksLikeJSONValueAt(s, valPos, lineEnd, escaped)
+		if !valOK {
+			return false
+		}
+		if valPos+256 <= lineEnd && valEnd == valPos+256 && valEnd < lineEnd {
+			return true
+		}
+		next := skipHorizDelimSpace(s[:min(lineEnd, valEnd+64)], valEnd)
+		if atLineEnd(s, next, lineEnd) {
+			return true
+		}
+		if escaped && s[next] == '"' {
+			return true
+		}
+		switch s[next] {
+		case ',':
+			p = next + 1
+		case '}':
+			return jsonCloseBoundaryOK(s, next+1, lineEnd, escaped, allowCommaClose)
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func checkCookieSubBounds(s string, start, lineEnd int, contentEnd *int, subSQ bool, findSubSQClose func(int, int) int, substTop *intListNode) bool {
+	for node := substTop; node != nil; node = node.prev {
+		endPos := node.val
+		if endPos <= *contentEnd {
+			if !cookieProseCloseBoundaryOK(s, endPos, *contentEnd, jsonContainerNone, false) {
+				return false
+			}
+			if endPos > start && endPos-1 < *contentEnd {
+				*contentEnd = endPos - 1
+			}
+		} else if endPos <= lineEnd {
+			if !cookieProseCloseBoundaryOK(s, endPos, lineEnd, jsonContainerNone, false) {
+				return false
+			}
+		}
+	}
+	if subSQ {
+		sqAt := findSubSQClose(start, *contentEnd)
+		if sqAt < 0 {
+			return false
+		}
+		if !cookieProseCloseBoundaryOK(s, sqAt+1, *contentEnd, jsonContainerNone, false) {
+			return false
+		}
+		*contentEnd = sqAt
+	}
+	return true
+}
+
+type escDQCache struct {
+	s             string
+	from          int
+	end           int
+	escDQSlashPos []int
+	badOutside    []bool
+}
+
+func canOpenNestedEscDQInProse(s string, pos int) bool {
+	if pos <= 0 {
+		return false
+	}
+	prev := s[pos-1]
+	if prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == '(' || prev == '[' || prev == '{' || prev == ':' || prev == ';' {
+		return true
+	}
+	r, _ := utf8.DecodeLastRuneInString(s[:pos])
+	return isDelimSpace(r)
+}
+
+func hasConcatOrUnclosedEscDQ(c *escDQCache, s string, start, end int) bool {
+	if c != nil && len(c.s) == len(s) && c.s == s && c.end == end && c.from <= start {
+		if len(c.escDQSlashPos) == 0 {
+			return false
+		}
+		idx, _ := slices.BinarySearch(c.escDQSlashPos, start)
+		return c.badOutside[idx]
+	}
+	var slashPos []int
+	var openOK []bool
+	var closeOK []bool
+	bs := 0
+	for i := start; i < end; i++ {
+		ch := s[i]
+		if ch == '\\' {
+			bs++
+			continue
+		}
+		if ch == '"' && bs%4 == 1 {
+			slashPos = append(slashPos, i-1)
+			openOK = append(openOK, canOpenNestedEscDQInProse(s, i-1))
+			closeOK = append(closeOK, cookieProseCloseBoundaryOK(s, i+1, end, jsonContainerNone, true))
+		}
+		bs = 0
+	}
+	var badOutside []bool
+	if len(slashPos) > 0 {
+		badOutside = make([]bool, len(slashPos)+1)
+		for j := len(slashPos) - 1; j >= 0; j-- {
+			if !openOK[j] || j+1 >= len(slashPos) || !closeOK[j+1] || badOutside[j+2] {
+				badOutside[j] = true
+			}
+		}
+	}
+	if c != nil {
+		*c = escDQCache{
+			s:             s,
+			from:          start,
+			end:           end,
+			escDQSlashPos: slashPos,
+			badOutside:    badOutside,
+		}
+	}
+	if len(slashPos) == 0 {
+		return false
+	}
+	return badOutside[0]
+}
+
 func cookieLineProseAllowed(s string, start, lineEnd int, outer, inner string, quotes *headerQuoteScanner) bool {
 	if outer == "" && inner == "" {
-		return cookieValueIsProse(s, start)
-	}
-	scanFrom := start
-	if q := openingQuote(s, start); q != "" && (q == outer || q == inner) {
-		qcOuter, qcInner := q, ""
-		if len(q) == 2 {
-			qcOuter, qcInner = "", q
+		contentEnd := len(s)
+		if quotes != nil {
+			for node := quotes.curSubstTop; node != nil; node = node.prev {
+				endPos := node.val
+				if endPos > start && endPos <= lineEnd {
+					if !cookieProseCloseBoundaryOK(s, endPos, lineEnd, jsonContainerNone, false) {
+						return false
+					}
+					if endPos-1 < contentEnd {
+						contentEnd = endPos - 1
+					}
+				}
+			}
 		}
-		closeIdx := quoteCloseScan(s, start+len(q), qcOuter, qcInner)
-		if closeIdx > start+len(q) && closeIdx <= lineEnd {
-			scanFrom = closeIdx
-		}
+		return cookieValueIsProse(s[:contentEnd], start)
 	}
-	k := quotes.closeAt(scanFrom, outer, inner)
+	k := quotes.closeAt(start, outer, inner)
 	if k < 0 || k > lineEnd {
 		return false
 	}
+	if k < lineEnd && openingQuote(s, k) != "" {
+		return false
+	}
 	contentEnd := closingQuotesStart(s, start, k, outer, inner)
+	outerBoundJSON := jsonContainerNone
+	var innerBoundJSON jsonContainerKind
+	var outerSubSQ, innerSubSQ bool
+	var outerSubstTop, innerSubstTop *intListNode
+	if quotes != nil {
+		switch inner {
+		case "":
+			if outer == `"` {
+				outerBoundJSON = quotes.curOuterJSONKind
+			}
+		case `\"`:
+			innerBoundJSON = quotes.curInnerJSONKind
+		}
+		outerSubSQ = quotes.curOuterSubSQ
+		innerSubSQ = quotes.curInnerSubSQ
+		outerSubstTop = quotes.curSubstTop
+		innerSubstTop = quotes.curInnerSubstTop
+	}
+	if !cookieProseCloseBoundaryOK(s, k, lineEnd, outerBoundJSON, outer == "" && inner != "") {
+		return false
+	}
+	if outer != "" && inner != "" {
+		innerK := quotes.closeAt(start, "", inner)
+		if innerK > start && innerK <= contentEnd {
+			innerContentEnd := closingQuotesStart(s, start, innerK, "", inner)
+			afterInner := innerK
+			for afterInner < k && (s[afterInner] == ')' || s[afterInner] == ']' || s[afterInner] == '}') {
+				afterInner++
+			}
+			afterInner = skipHorizDelimSpace(s[:k], afterInner)
+			if afterInner+len(outer) != k || s[afterInner:k] != outer {
+				if !cookieProseCloseBoundaryOK(s, innerK, lineEnd, innerBoundJSON, true) {
+					return false
+				}
+			}
+			contentEnd = innerContentEnd
+		}
+	}
+	if inner != "" {
+		if inner == `\"` && !checkCookieSubBounds(s, start, lineEnd, &contentEnd, innerSubSQ, func(from, limit int) int {
+			return quotes.subSQCloseAt(1, from, limit)
+		}, innerSubstTop) {
+			return false
+		}
+	} else if !checkCookieSubBounds(s, start, lineEnd, &contentEnd, outerSubSQ, func(from, limit int) int {
+		return quotes.subSQCloseAt(0, from, limit)
+	}, outerSubstTop) {
+		return false
+	}
+	if outer == `"` && inner == "" {
+		var escCache *escDQCache
+		if quotes != nil {
+			escCache = &quotes.escDQ
+		}
+		if hasConcatOrUnclosedEscDQ(escCache, s, start, contentEnd) {
+			return false
+		}
+	}
 	return cookieValueIsProse(s[:contentEnd], start)
 }
 
@@ -5493,21 +6746,22 @@ func cookieLineProseAllowed(s string, start, lineEnd int, outer, inner string, q
 // and a colon in prose, as in The cookie: Monster was here., rather than as a
 // Cookie or Set-Cookie header: name is Cookie or Set-Cookie (see
 // isCookieHeaderKey), delim is a colon, any quote that opens the value or
-// encloses s[start] closes on the same line, and the value slice up to any
-// enclosing closing quote reads as prose (see cookieValueIsProse).
+// encloses s[start] closes on the same line with a non-concatenated boundary
+// (mirroring cookieLineProseAllowed), and the value slice up to any enclosing
+// closing quote reads as prose (see cookieValueIsProse).
 // Structured Cookie and Set-Cookie fields, whose keys are quoted or whose
 // values are read by key, are redacted whatever their values hold.
-func isCookieProse(s, name, delim string, start int, quotes *openQuotes) bool {
+func isCookieProse(s, name, delim string, start int, inBracketContainer bool, quotes *openQuotes) bool {
 	if strings.TrimFunc(delim, isDelimSpace) != ":" || !isCookieHeaderKey(name) {
 		return false
 	}
 	quoted := quotes.before(s, start)
-	allQuoted := quoted | quotes.innerAt(s, start)
-	scanFrom := start
-	// If the value opens with a quote, check that the quote closes on the
-	// same line; if it does not, the value is a header inside a quoted
-	// string, not prose.
-	if q := openingQuote(s, start); q != "" {
+	inner := quotes.innerAt(s, start)
+	lineEnd := len(s)
+	// If the value opens with a quote of a different kind than what is already
+	// open, check that it closes on the same line; if it does not, the value
+	// is a header inside a quoted string, not prose.
+	if q := openingQuote(s, start); q != "" && (quoted|inner)&quoteKind(q) == 0 {
 		qcOuter, qcInner := q, ""
 		if len(q) == 2 {
 			qcOuter, qcInner = "", q
@@ -5516,18 +6770,86 @@ func isCookieProse(s, name, delim string, start int, quotes *openQuotes) bool {
 		if closeIdx < 0 || closeIdx >= len(s) || s[closeIdx] == '\r' || s[closeIdx] == '\n' {
 			return false
 		}
-		if allQuoted&quoteKind(q) != 0 {
-			scanFrom = closeIdx
-		}
 	}
-	if allQuoted != 0 {
-		endQuote := quotes.endOnLine(s, scanFrom, allQuoted)
-		if endQuote < 0 {
+	sliceEnd := len(s)
+	if quoted != 0 || inner != 0 {
+		outerJSONKind := jsonContainerNone
+		if inBracketContainer && quotes != nil && quoted == 1 {
+			outerJSONKind = quotes.openJSONKind
+		}
+		innerJSONKind := jsonContainerNone
+		if quotes != nil && inner == 4 {
+			innerJSONKind = quotes.inner.jsonKind
+		}
+		var outerAt, outerAfter int
+		if quoted != 0 {
+			outerAt, outerAfter = quotes.closeOnLine(s, start, quoted)
+			if outerAt < 0 {
+				return false
+			}
+			outerBoundJSON := outerJSONKind
+			if inner != 0 {
+				outerBoundJSON = jsonContainerNone
+			}
+			if !cookieProseCloseBoundaryOK(s, outerAfter, lineEnd, outerBoundJSON, quoted == 4 || quoted == 8) {
+				return false
+			}
+			sliceEnd = outerAt
+		}
+		if inner != 0 {
+			innerAt, innerAfter := quotes.closeOnLine(s, start, inner)
+			if innerAt >= 0 && (quoted == 0 || innerAt < outerAt) {
+				afterInner := innerAfter
+				if quoted != 0 {
+					for afterInner < outerAt && (s[afterInner] == ')' || s[afterInner] == ']' || s[afterInner] == '}') {
+						afterInner++
+					}
+					afterInner = skipHorizDelimSpace(s[:outerAt], afterInner)
+				}
+				if quoted == 0 || afterInner != outerAt {
+					if !cookieProseCloseBoundaryOK(s, innerAfter, lineEnd, innerJSONKind, true) {
+						return false
+					}
+				}
+				sliceEnd = innerAt
+			} else if quoted == 0 {
+				return false
+			}
+		}
+		if inner != 0 {
+			if inner == 4 && quotes != nil && !checkCookieSubBounds(s, start, lineEnd, &sliceEnd, quotes.inner.subSQ, func(from, limit int) int {
+				return quotes.subSQCloseOnLine(s, 1, from, limit)
+			}, quotes.inner.substTop) {
+				return false
+			}
+		} else if quotes != nil && !checkCookieSubBounds(s, start, lineEnd, &sliceEnd, quotes.subSQ, func(from, limit int) int {
+			return quotes.subSQCloseOnLine(s, 0, from, limit)
+		}, quotes.substTop) {
 			return false
 		}
-		s = s[:endQuote]
+	} else if quotes != nil {
+		for node := quotes.substTop; node != nil; node = node.prev {
+			endPos := node.val
+			if endPos > start && endPos <= lineEnd {
+				if !cookieProseCloseBoundaryOK(s, endPos, lineEnd, jsonContainerNone, false) {
+					return false
+				}
+				if endPos-1 < sliceEnd {
+					sliceEnd = endPos - 1
+				}
+			}
+		}
 	}
-	return cookieValueIsProse(s, start)
+	if quoted == 1 && inner == 0 {
+		var escCache *escDQCache
+		if quotes != nil {
+			escCache = &quotes.escDQ
+		}
+		if hasConcatOrUnclosedEscDQ(escCache, s, start, sliceEnd) {
+			return false
+		}
+	}
+	return cookieValueIsProse(s[:sliceEnd], start)
 }
 
 // hasFoldedHeaderContinuation reports whether canFold is true and the line
@@ -5591,17 +6913,35 @@ type headerQuoteScanner struct {
 	joinedEntryOuter, joinedUnclosed     string
 	joinedInJSON, joinedEscJSON          bool
 	curOuterJSON                         bool
+	curOuterJSONKind, curInnerJSONKind   jsonContainerKind
+	curOuterSubSQ, curInnerSubSQ         bool
+	curSubstTop, curInnerSubstTop        *intListNode
 	jsonOuterFrom, jsonOuterLineEnd      int
 	jsonOuterEnd                         int
 	plainPrefixReady                     bool
 	plainPrefixBits                      []uint64
+	cookieOpenReady                      bool
+	cookieOpenBits                       []uint64
 	proseCloseMemo                       map[int]bool
 	closeTailStops                       map[int]bool
-	subShellReady                        bool
-	subLineStart, subRealLineEnd         int
-	subEscJSON                           bool
-	subPos, subDepth                     int
-	subInSingle, subInDouble, subCmdPos  bool
+	subStates                            [2]subshellScanState
+	shellMemos                           shellCloseMemo
+	subSQEnds                            [2]quoteCloseCache
+	escDQ                                escDQCache
+	nextLineUnclosedMemo                 map[int]bool
+}
+
+type subshellScanState struct {
+	ready          bool
+	lineStart      int
+	realLineEnd    int
+	scopeStart     int
+	inInnerJSONStr bool
+	pos            int
+	depth          int
+	inSingle       bool
+	inDouble       bool
+	cmdPos         bool
 }
 
 // newHeaderQuoteScanner returns a headerQuoteScanner for s.
@@ -5615,6 +6955,22 @@ func (h *headerQuoteScanner) inJSON() bool {
 	return h != nil && h.curOuterJSON
 }
 
+func (h *headerQuoteScanner) subSQCloseAt(slot, from, limit int) int {
+	if h == nil || from >= limit {
+		return -1
+	}
+	c := &h.subSQEnds[slot]
+	if c.from <= from && c.lineEnd == limit && (c.at >= from || c.at < 0) {
+		return c.at
+	}
+	at := -1
+	if rel := strings.IndexByte(h.s[from:limit], '\''); rel >= 0 {
+		at = from + rel
+	}
+	*c = quoteCloseCache{from: from, at: at, after: at + 1, lineEnd: limit}
+	return at
+}
+
 // shellScanner returns the scanner that answers inShellAssignment for the
 // text that h reads, or nil if h is nil.
 func (h *headerQuoteScanner) shellScanner() *shellAssignScanner {
@@ -5622,6 +6978,24 @@ func (h *headerQuoteScanner) shellScanner() *shellAssignScanner {
 		return nil
 	}
 	return h.shell
+}
+
+func endsAtOuterWithClosers(s string, pos, outerEnd int) bool {
+	for pos < outerEnd {
+		switch s[pos] {
+		case ' ', '\t', ')', ']', '}', '\'':
+			pos++
+		case '\\':
+			if pos+1 < outerEnd && (s[pos+1] == '"' || s[pos+1] == '\'') {
+				pos += 2
+			} else {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // jsonWrappedInnerHeaderEndAt resolves where an inner escaped-quoted header
@@ -5666,7 +7040,14 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEndAt(k, lineEnd int, entryOu
 	if outerEnd < 0 {
 		return 0, "", false
 	}
-	endPos, unclosed := h.joinedHeaderArgEnd(k, outerEnd, entryOuter, false, true)
+	inJSONInner := entryInner == "'"
+	escJSONInner := !inJSONInner
+	outerBoundaryOK := outerEnd >= lineEnd || jsonCloseBoundaryOK(s, outerEnd+1, lineEnd, false, true)
+	endPos, unclosed := h.joinedHeaderArgEnd(k, outerEnd, entryOuter, inJSONInner, escJSONInner)
+	if !outerBoundaryOK && (unclosed != "" || endsAtOuterWithClosers(s, endPos, outerEnd)) {
+		tailEnd, _ := h.joinedHeaderArgEnd(outerEnd+1, lineEnd, "", false, false)
+		return tailEnd, "", true
+	}
 	if unclosed == "" && endPos < outerEnd {
 		return endPos, entryInner, true
 	}
@@ -5676,10 +7057,90 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEndAt(k, lineEnd int, entryOu
 	return outerEnd, entryInner, true
 }
 
+func hasSingleQuoteBeforeHeader(s string, from int) bool {
+	ks := from
+	for ks > 0 && (s[ks-1] == ' ' || s[ks-1] == '\t') {
+		ks--
+	}
+	if ks == 0 || s[ks-1] != ':' {
+		return false
+	}
+	ks--
+	for ks > 0 && (s[ks-1] == ' ' || s[ks-1] == '\t') {
+		ks--
+	}
+	for ks > 0 && ((s[ks-1] >= 'a' && s[ks-1] <= 'z') || (s[ks-1] >= 'A' && s[ks-1] <= 'Z') || (s[ks-1] >= '0' && s[ks-1] <= '9') || s[ks-1] == '-' || s[ks-1] == '_' || s[ks-1] == '.') {
+		ks--
+	}
+	if ks == 0 || s[ks-1] != '\'' {
+		return false
+	}
+	if ks == 1 {
+		return true
+	}
+	p := s[ks-2]
+	return p == ' ' || p == '\t' || p == '=' || p == ',' || p == '[' || p == '(' || p == '"' || p == ';'
+}
+
+func hasEscDQBeforeHeader(s string, from int) bool {
+	ks := from
+	for ks > 0 && (s[ks-1] == ' ' || s[ks-1] == '\t') {
+		ks--
+	}
+	if ks == 0 || s[ks-1] != ':' {
+		return false
+	}
+	ks--
+	for ks > 0 && (s[ks-1] == ' ' || s[ks-1] == '\t') {
+		ks--
+	}
+	for ks > 0 && ((s[ks-1] >= 'a' && s[ks-1] <= 'z') || (s[ks-1] >= 'A' && s[ks-1] <= 'Z') || (s[ks-1] >= '0' && s[ks-1] <= '9') || s[ks-1] == '-' || s[ks-1] == '_' || s[ks-1] == '.') {
+		ks--
+	}
+	if ks < 4 || s[ks-4:ks] != `\\\"` {
+		return false
+	}
+	if ks == 4 {
+		return true
+	}
+	p := s[ks-5]
+	return p == ' ' || p == '\t' || p == '=' || p == ',' || p == '[' || p == '(' || p == '"' || p == ';'
+}
+
+func (h *headerQuoteScanner) singleQuoteClosesInEscapedJSON(k, lineEnd int) bool {
+	if h == nil || k >= lineEnd {
+		return false
+	}
+	s := h.s
+	if innerEnd := h.doubleQuoteCloseJSONWithin(k+1, lineEnd, true); innerEnd >= k+3 && s[innerEnd-2:innerEnd] == `\"` {
+		if jsonCloseBoundaryOK(s, innerEnd, lineEnd, true, true) {
+			if endPos, unclosed := h.joinedHeaderArgEnd(k+1, innerEnd-2, "", false, true); unclosed == "" && endPos == k+1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (h *headerQuoteScanner) escDQCloseTargetInEscapedJSON(after, lineEnd int) (int, bool) {
+	if h == nil || after > lineEnd {
+		return 0, false
+	}
+	s := h.s
+	if innerEnd := h.doubleQuoteCloseJSONWithin(after, lineEnd, true); innerEnd >= after+2 && s[innerEnd-2:innerEnd] == `\"` {
+		if jsonCloseBoundaryOK(s, innerEnd, lineEnd, true, true) {
+			if endPos, unclosed := h.joinedHeaderArgEnd(after, innerEnd-2, "", false, true); unclosed == "" {
+				return endPos, true
+			}
+		}
+	}
+	return 0, false
+}
+
 // jsonWrappedInnerHeaderEnd scans s[from:lineEnd] for an inner escaped-quoted
 // header closing inside an outer JSON string and returns its end offset and
 // closed quote suffix.
-func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int) (int, string, bool) {
+func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int, inSingleInJSON, inEscDQInInnerJSON bool) (int, string, bool) {
 	if h == nil || from >= lineEnd {
 		return 0, "", false
 	}
@@ -5699,6 +7160,13 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int) (int, 
 				if bs%2 == 1 {
 					if bs%4 == 1 && s[k+bs] == '"' {
 						inner = ""
+					} else if inEscDQInInnerJSON && bs%4 == 3 && s[k+bs] == '"' {
+						if endPos, ok := h.escDQCloseTargetInEscapedJSON(k+bs+1, lineEnd); ok {
+							if endPos == k+bs+1 {
+								return k, "", true
+							}
+							return endPos, s[k : k+bs+1], true
+						}
 					}
 					k += bs + 1
 				} else {
@@ -5708,6 +7176,9 @@ func (h *headerQuoteScanner) jsonWrappedInnerHeaderEnd(from, lineEnd int) (int, 
 				k += bs
 			}
 			continue
+		}
+		if inSingleInJSON && c == '\'' && h.singleQuoteClosesInEscapedJSON(k, lineEnd) {
+			return k, "", true
 		}
 		if c == '"' {
 			return 0, "", false
@@ -5730,14 +7201,46 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 		return k, ""
 	}
 	s := h.s
-	if h.joinedLineEnd == lineEnd && h.joinedEntryOuter == entryOuter && h.joinedInJSON == inJSON && h.joinedEscJSON == jsonEscaped && k >= h.joinedFrom && k <= h.joinedEnd {
+	stopInnerJSON := jsonEscaped && entryOuter != "" && h.curInnerJSONKind != jsonContainerNone
+	stopJSON := (inJSON && !jsonEscaped) || stopInnerJSON
+	substTop := h.curSubstTop
+	jsonKind := h.curOuterJSONKind
+	substEscJSON := jsonEscaped
+	if jsonEscaped && entryOuter == "" {
+		substTop = h.curInnerSubstTop
+		jsonKind = jsonContainerNone
+		substEscJSON = false
+	}
+	if h.curSubstTop == nil && h.curInnerSubstTop == nil && h.curInnerJSONKind == jsonContainerNone && h.joinedLineEnd == lineEnd && h.joinedEntryOuter == entryOuter && h.joinedInJSON == inJSON && h.joinedEscJSON == jsonEscaped && k >= h.joinedFrom && k <= h.joinedEnd {
 		return h.joinedEnd, h.joinedUnclosed
 	}
 	escJSON := inJSON || jsonEscaped
 	start := k
+	if substTop != nil {
+		substNodes := make([]int, 0, 4)
+		for node := substTop; node != nil; node = node.prev {
+			substNodes = append(substNodes, node.val)
+		}
+		for idx := len(substNodes) - 1; idx >= 0; idx-- {
+			closeAt := substNodes[idx]
+			if closeAt >= k && closeAt <= lineEnd && !cookieProseCloseBoundaryOK(s, closeAt, lineEnd, jsonKind, substEscJSON) {
+				k = closeAt
+				break
+			}
+		}
+		if k >= lineEnd {
+			return lineEnd, ""
+		}
+	}
+	cookieOpen := h.isHeaderValueOpenAt(start, escJSON)
+	hasOpenSubshell := h.hasOpenSubshellBefore(start, escJSON)
 	if start > 0 && s[start-1] == '\'' && (isWordApostropheAt(s, start-1) || isTrailingDigitApostropheAt(s, start-1)) {
 		if parenPos := skipHorizDelimSpace(s, k); parenPos < lineEnd && s[parenPos] == ')' {
-			if !h.parenClosesCleanlyAt(start, parenPos, lineEnd, inJSON, jsonEscaped) {
+			if substClosesAtParen(substTop, parenPos) {
+				if !parenCloseSuffixOK(s, parenPos, lineEnd, inJSON, jsonEscaped) {
+					return lineEnd, ""
+				}
+			} else if !h.parenClosesCleanlyAt(start, parenPos, lineEnd, inJSON, jsonEscaped) {
 				return lineEnd, ""
 			}
 		}
@@ -5746,9 +7249,20 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 		return k, ""
 	}
 	parenDepth := 0
+	jsonSpanActive := false
 	unclosedParenNoCloseUntil := -1
 	var matchedParenSet map[int]bool
 	matchedParenUntil := -1
+	quoteCloseWithin := func(from, limit int, outer, inner string) int {
+		switch {
+		case outer == `"` && inner == "":
+			return h.doubleQuoteCloseWithin(from, limit)
+		case outer == "" && inner == `\"`:
+			return h.doubleQuoteCloseJSONWithin(from, limit, false)
+		default:
+			return quoteCloseScan(s[:limit], from, outer, inner)
+		}
+	}
 	hasBalancedCloseParen := func(openPos int) bool {
 		if openPos < unclosedParenNoCloseUntil {
 			return false
@@ -5771,7 +7285,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 				} else {
 					qInner = q
 				}
-				closePos := quoteCloseScan(s[:lineEnd], p+len(q), qOuter, qInner)
+				closePos := quoteCloseWithin(p+len(q), lineEnd, qOuter, qInner)
 				if closePos < 0 {
 					segEnd = p
 					break
@@ -5822,7 +7336,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 				} else {
 					qInner = q
 				}
-				closePos := quoteCloseScan(s[:segEnd], p+len(q), qOuter, qInner)
+				closePos := quoteCloseWithin(p+len(q), segEnd, qOuter, qInner)
 				if closePos < 0 {
 					break
 				}
@@ -5861,8 +7375,12 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			continue
 		}
 		if q := openingQuote(s, k); q != "" {
-			if inJSON && q == `"` && k+1 < lineEnd && (s[k+1] == ',' || s[k+1] == '}' || s[k+1] == ']') {
-				break
+			if inJSON && !jsonEscaped && q == `"` && k+1 < lineEnd {
+				c1 := s[k+1]
+				if (c1 == ',' && jsonCommaBreakOK(s, skipHorizDelimSpace(s[:lineEnd], k+2), lineEnd, h.curOuterJSONKind, false)) ||
+					((c1 == '}' || c1 == ']') && jsonCloseBoundaryOK(s, k+2, lineEnd, false, true)) {
+					break
+				}
 			}
 			var qOuter, qInner string
 			if len(q) == 1 {
@@ -5870,15 +7388,32 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			} else {
 				qInner = q
 			}
-			closePos := quoteCloseScan(s[:lineEnd], k+len(q), qOuter, qInner)
+			closePos := quoteCloseWithin(k+len(q), lineEnd, qOuter, qInner)
 			if closePos < 0 {
-				if q == "'" && isWordApostropheAt(s, k) && !h.singleQuoteClosesAfterLine(lineEnd) &&
-					(!isTrailingApostrophe(s, k) || (h.apostropheTailStopsOnLine(start, k, lineEnd, inJSON, jsonEscaped) && (inJSON || jsonEscaped || !h.hasUnclosedQuoteOnNextLine(lineEnd)))) {
-					k++
-					continue
+				if q == "'" && isWordApostropheAt(s, k) && !h.singleQuoteClosesAfterLine(lineEnd) {
+					if isTrailingApostrophe(s, k) {
+						if h.apostropheTailStopsOnLine(start, k, lineEnd, inJSON, jsonEscaped) && (inJSON || jsonEscaped || !h.hasUnclosedQuoteOnNextLine(lineEnd)) {
+							k++
+							continue
+						}
+						if h.joinedQuoteCloseAt(lineEnd, "'", "") >= 0 && !h.apostropheTailStopsOnLine(start, k, lineEnd, inJSON, jsonEscaped) && !h.hasUnclosedQuoteOnNextLine(lineEnd) {
+							return lineEnd, ""
+						}
+					} else {
+						if h.apostropheTailStopsOnLine(start, k, lineEnd, inJSON, jsonEscaped) || isShortLowerProseTail(s, k, lineEnd) {
+							k++
+							continue
+						}
+						if inJSON && !jsonEscaped {
+							if after := k + len(q); after < lineEnd && (((s[after] == '}' || s[after] == ']') && jsonCloseBoundaryOK(s, after, lineEnd, false, true)) || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
+								break
+							}
+						}
+						return lineEnd, ""
+					}
 				}
 				if inJSON && !jsonEscaped {
-					if after := k + len(q); after < lineEnd && (s[after] == '}' || s[after] == ']' || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
+					if after := k + len(q); after < lineEnd && (((s[after] == '}' || s[after] == ']') && jsonCloseBoundaryOK(s, after, lineEnd, false, true)) || (s[after] == ',' && (after+1 >= lineEnd || s[after+1] == ' ' || s[after+1] == '\t'))) {
 						break
 					}
 				}
@@ -5904,7 +7439,7 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 				}
 			}
 			if spanEndsWithAuthHeaderPrefix(s, k+len(q), closePos-len(q)) {
-				nextClose := quoteCloseScan(s[:lineEnd], closePos, qOuter, qInner)
+				nextClose := quoteCloseWithin(closePos, lineEnd, qOuter, qInner)
 				if nextClose >= 0 {
 					if h.isShellBalancedFrom(nextClose, lineEnd, escJSON) {
 						k = nextClose
@@ -5925,6 +7460,27 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			k = closePos
 			continue
 		}
+		if s[k] == '$' && k+1 < lineEnd && (s[k+1] == '(' || s[k+1] == '{' || s[k+1] == '\'') {
+			var nextK int
+			switch s[k+1] {
+			case '(':
+				nextK = h.cmdSubstCloseWithin(k+2, lineEnd, escJSON)
+			case '{':
+				nextK = h.paramExpCloseWithin(k+2, false, lineEnd, escJSON)
+			default:
+				nextK = scanANSICQuotedClose(s[:lineEnd], k+2, escJSON)
+			}
+			if nextK >= 0 {
+				k = nextK
+				continue
+			}
+		}
+		if s[k] == '`' {
+			if nextK := h.backtickCloseWithin(k+1, lineEnd, false, escJSON); nextK >= 0 {
+				k = nextK
+				continue
+			}
+		}
 		if s[k] == '\\' {
 			if k+1 < lineEnd {
 				k += 2
@@ -5933,15 +7489,27 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 			}
 			continue
 		}
-		if inJSON && !jsonEscaped && (s[k] == '}' || s[k] == ']') {
-			break
-		}
-		if k == start && inJSON && !jsonEscaped && (s[k] == ',' || s[k] == ':') {
-			break
-		}
-		if inJSON && !jsonEscaped && s[k] == ',' {
-			if k+1 >= lineEnd || s[k+1] == ' ' || s[k+1] == '\t' {
+		if stopJSON && (s[k] == '}' || s[k] == ']') {
+			if jsonCloseBoundaryOK(s, k+1, lineEnd, stopInnerJSON, true) {
 				break
+			}
+		}
+		if k == start && inJSON && !jsonEscaped && s[k] == ':' {
+			break
+		}
+		if stopJSON && s[k] == ',' {
+			after := skipHorizDelimSpace(s[:lineEnd], k+1)
+			commaKind := h.curOuterJSONKind
+			if stopInnerJSON {
+				commaKind = h.curInnerJSONKind
+			}
+			if jsonCommaBreakOK(s, after, lineEnd, commaKind, stopInnerJSON) {
+				break
+			}
+			jsonSpanActive = true
+			if after < lineEnd {
+				k = after
+				continue
 			}
 		}
 		if s[k] == '(' {
@@ -5957,16 +7525,82 @@ func (h *headerQuoteScanner) joinedHeaderArgEnd(k, lineEnd int, entryOuter strin
 				k++
 				continue
 			}
-			break
+			hasSub := substClosesAtParen(substTop, k) || hasOpenSubshell
+			if hasSub && parenCloseSuffixOK(s, k, lineEnd, inJSON, jsonEscaped) {
+				break
+			}
+			if !hasSub || (k+1 < lineEnd && (s[k+1] == ' ' || s[k+1] == '\t')) {
+				return lineEnd, ""
+			}
+			k++
+			continue
 		}
 		r, w := utf8.DecodeRuneInString(s[k:])
-		if parenDepth == 0 && (isDelimSpace(r) || strings.IndexByte(";&|<>", s[k]) >= 0) {
-			break
+		if parenDepth == 0 {
+			if strings.IndexByte("&|<>", s[k]) >= 0 {
+				break
+			}
+			if s[k] == ';' {
+				if !cookieOpen || !cookieSemiContinues(s, k+1, lineEnd, inJSON && !jsonEscaped) {
+					break
+				}
+				k = skipHorizDelimSpace(s[:lineEnd], k+1)
+				continue
+			}
+			if isDelimSpace(r) {
+				if jsonSpanActive {
+					k = skipHorizDelimSpace(s[:lineEnd], k+w)
+					continue
+				}
+				if cookieOpen {
+					sp := skipHorizDelimSpace(s[:lineEnd], k+w)
+					if sp < lineEnd && s[sp] == ';' && cookieSemiContinues(s, sp+1, lineEnd, inJSON && !jsonEscaped) {
+						k = sp
+						continue
+					}
+				}
+				break
+			}
 		}
 		k += w
 	}
 	h.joinedFrom, h.joinedLineEnd, h.joinedEnd, h.joinedEntryOuter, h.joinedUnclosed, h.joinedInJSON, h.joinedEscJSON = start, lineEnd, k, entryOuter, "", inJSON, jsonEscaped
 	return k, ""
+}
+
+// cookieSemiContinues reports whether text after a ';' at s[from:lineEnd]
+// continues an active Cookie / Set-Cookie header with another cookie pair
+// (token=...) or standard Set-Cookie attribute flag rather than starting a
+// separate shell command such as "; echo ...".
+func cookieSemiContinues(s string, from, lineEnd int, jsonDelim bool) bool {
+	p := skipHorizDelimSpace(s[:lineEnd], from)
+	if p >= lineEnd {
+		return false
+	}
+	start := p
+	for p < lineEnd {
+		c := s[p]
+		if c == '=' {
+			return p > start
+		}
+		if c == ';' || strings.IndexByte("&|<>#", c) >= 0 || (jsonDelim && (c == ',' || c == '}' || c == ']' || c == '"')) {
+			if tok := s[start:p]; strings.EqualFold(tok, "httponly") || strings.EqualFold(tok, "secure") || strings.EqualFold(tok, "partitioned") {
+				return true
+			}
+			return false
+		}
+		r, w := utf8.DecodeRuneInString(s[p:])
+		if isDelimSpace(r) {
+			if tok := s[start:p]; strings.EqualFold(tok, "httponly") || strings.EqualFold(tok, "secure") || strings.EqualFold(tok, "partitioned") {
+				after := skipHorizDelimSpace(s[:lineEnd], p+w)
+				return after >= lineEnd || s[after] == ';' || strings.IndexByte("&|<>#", s[after]) >= 0
+			}
+			return false
+		}
+		p += w
+	}
+	tok := s[start:p]
+	return strings.EqualFold(tok, "httponly") || strings.EqualFold(tok, "secure") || strings.EqualFold(tok, "partitioned")
 }
 
 // lineQuoteState is the state of a scan of the lines of s for the quotes that
@@ -5984,6 +7618,14 @@ type lineQuoteState struct {
 	closingExplicitOuter           byte
 	braceDepth                     int
 	outerJSON                      bool
+	outerJSONTop                   *jsonContainerNode
+	innerJSONTop                   *jsonContainerNode
+	outerJSONKind                  jsonContainerKind
+	innerJSONKind                  jsonContainerKind
+	outerSubSQ                     bool
+	innerSubSQ                     bool
+	substTop                       *intListNode
+	innerSubstTop                  *intListNode
 }
 
 // newLineQuoteState returns the state of a scan of s from the start of a line
@@ -6016,7 +7658,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 	var lineStart int
 	if h.hasCurLine && i >= h.curLine.k && i <= h.curLine.lineLim {
 		lineStart = h.curLine.curLineStart
-		h.curLine.scan(h.shell, s, i, h.curLine.lineLim, lineStart)
+		h.curLine.scan(h.shell, h.shellMemoPtr(), s, i, h.curLine.lineLim, lineStart)
 		st = h.curLine
 	} else {
 		lineStart = strings.LastIndexAny(s[:i], "\r\n") + 1
@@ -6032,7 +7674,7 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 			if brk > 0 && s[brk] == '\n' && s[brk-1] == '\r' {
 				brk--
 			}
-			h.lines.scan(h.shell, s, brk, len(s), len(s)+1)
+			h.lines.scan(h.shell, h.shellMemoPtr(), s, brk, len(s), len(s)+1)
 			if quoteRestIsHeaderOrSpace(s, lineStart, i) {
 				st = h.lines
 				st.lineLim = lineEnd
@@ -6040,26 +7682,39 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 				st = newLineQuoteState(s, lineStart, len(s))
 				st.lineLim = lineEnd
 				st.braceDepth = h.lines.braceDepth
+				st.outerJSONTop = h.lines.outerJSONTop
+				st.substTop = h.lines.substTop
 			}
 		} else {
 			st = newLineQuoteState(s, lineStart, len(s))
 			st.lineLim = lineEnd
 		}
-		st.scan(h.shell, s, i, lineEnd, lineStart)
+		st.scan(h.shell, h.shellMemoPtr(), s, i, lineEnd, lineStart)
 	}
 	h.curLine = st
 	h.hasCurLine = true
 	h.curOuterJSON = st.outerJSON
+	h.curOuterJSONKind = st.outerJSONKind
+	h.curInnerJSONKind = st.innerJSONKind
+	h.curOuterSubSQ = st.outerSubSQ
+	h.curInnerSubSQ = st.innerSubSQ
+	h.curSubstTop = st.substTop
+	h.curInnerSubstTop = st.innerSubstTop
 	outer, inner = st.outer, st.inner
 	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
 	if inner != "" && innerPriorLine && !quoteRestIsHeaderOrSpace(s, st.innerOpenEnd, i) {
 		inner = ""
 		innerPriorLine = false
+		h.curInnerJSONKind = jsonContainerNone
+		h.curInnerSubSQ = false
+		h.curInnerSubstTop = nil
 	}
 	if outer != "" && outerPriorLine && inner == "" && !quoteRestIsHeaderOrSpace(s, st.outerOpenEnd, i) {
 		outer = ""
 		outerPriorLine = false
 		h.curOuterJSON = false
+		h.curOuterJSONKind = jsonContainerNone
+		h.curOuterSubSQ = false
 	}
 	if (outerPriorLine || innerPriorLine) && !h.quoteCloses(valStart, outer, inner) {
 		// A quote from a line before that never closes holds no string, so
@@ -6072,9 +7727,17 @@ func (h *headerQuoteScanner) openBefore(i, valStart int) (outer, inner string) {
 		st = newLineQuoteState(s, lineStart, len(s))
 		st.lineLim = lineLim
 		st.braceDepth = h.lines.braceDepth
-		st.scan(h.shell, s, i, lineLim, lineStart)
+		st.outerJSONTop = h.lines.outerJSONTop
+		st.substTop = h.lines.substTop
+		st.scan(h.shell, h.shellMemoPtr(), s, i, lineLim, lineStart)
 		h.curLine = st
 		h.curOuterJSON = st.outerJSON
+		h.curOuterJSONKind = st.outerJSONKind
+		h.curInnerJSONKind = st.innerJSONKind
+		h.curOuterSubSQ = st.outerSubSQ
+		h.curInnerSubSQ = st.innerSubSQ
+		h.curSubstTop = st.substTop
+		h.curInnerSubstTop = st.innerSubstTop
 		outer, inner = st.outer, st.inner
 	}
 	return outer, inner
@@ -6097,7 +7760,7 @@ func isJSONStringOpener(s string, lineStart, k int) bool {
 // scan advances st over s up to to, reading s up to bound, for the header
 // whose line starts at hdrLineStart, or, if hdrLineStart is past the end of
 // s, over lines before the line of a header only.
-func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrLineStart int) {
+func (st *lineQuoteState) scan(sh *shellAssignScanner, memos *shellCloseMemo, s string, to, bound, hdrLineStart int) {
 	k, curLineStart, lineLim := st.k, st.curLineStart, st.lineLim
 	outer, inner := st.outer, st.inner
 	outerOpenPos, outerOpenEnd := st.outerOpenPos, st.outerOpenEnd
@@ -6105,7 +7768,17 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 	outerPriorLine, innerPriorLine := st.outerPriorLine, st.innerPriorLine
 	closingExplicitOuter := st.closingExplicitOuter
 	braceDepth, outerJSON := st.braceDepth, st.outerJSON
+	outerJSONTop, innerJSONTop := st.outerJSONTop, st.innerJSONTop
+	outerJSONKind, innerJSONKind := st.outerJSONKind, st.innerJSONKind
+	outerSubSQ, innerSubSQ := st.outerSubSQ, st.innerSubSQ
+	substTop, innerSubstTop := st.substTop, st.innerSubstTop
 	for k < to {
+		for substTop != nil && k >= substTop.val {
+			substTop = substTop.prev
+		}
+		for innerSubstTop != nil && k >= innerSubstTop.val {
+			innerSubstTop = innerSubstTop.prev
+		}
 		c := s[k]
 		if c == '\r' || c == '\n' {
 			if c == '\r' && k+1 < bound && s[k+1] == '\n' {
@@ -6128,6 +7801,10 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				inner = ""
 				innerOpenPos, innerOpenEnd = -1, -1
 				innerPriorLine = false
+				innerJSONTop = nil
+				innerJSONKind = jsonContainerNone
+				innerSubSQ = false
+				innerSubstTop = nil
 			}
 			explicitOuter := outer != "" && outerOpenEnd >= 0 &&
 				(outerPriorLine || isExplicitLineQuoteOpener(sh, s, prevLineStart, outerOpenPos))
@@ -6142,6 +7819,8 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
 				outerJSON = false
+				outerJSONKind = jsonContainerNone
+				outerSubSQ = false
 			}
 			continue
 		}
@@ -6152,12 +7831,18 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
 				outerJSON = false
+				outerJSONKind = jsonContainerNone
+				outerSubSQ = false
 			}
 			k++
 		case c == '\\':
 			bs := 0
 			for k+bs < bound && s[k+bs] == '\\' {
 				bs++
+			}
+			if outer == `"` && inner == "" && outerSubSQ && bs%2 == 1 && k+bs < bound && s[k+bs] == '\'' {
+				k += bs
+				continue
 			}
 			if k+bs < bound && (s[k+bs] == '"' || s[k+bs] == '\'') {
 				if bs%2 == 1 {
@@ -6168,6 +7853,9 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 							inner = ""
 							innerOpenPos, innerOpenEnd = -1, -1
 							innerPriorLine = false
+							innerJSONKind = jsonContainerNone
+							innerSubSQ = false
+							innerSubstTop = nil
 						case "":
 							if outer == "" && !canOpenPriorLineQuote(sh, s, curLineStart, k, lineLim, k < hdrLineStart) && !inShellAssignment(sh, s, k) {
 								break
@@ -6176,18 +7864,23 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 							innerOpenPos = k
 							innerOpenEnd = k + len(q)
 							innerPriorLine = false
+							if q == `\"` && outer == `"` && !outerSubSQ && outerOpenEnd >= 0 {
+								innerJSONKind = classifyQuoteJSONContainer(s, k, outerOpenEnd, true, innerJSONTop)
+							} else {
+								innerJSONKind = jsonContainerNone
+							}
+							innerSubSQ = false
+							innerSubstTop = nil
 						}
 					}
 					k += bs + 1
 				} else {
 					k += bs
 				}
-			} else if bs > 1 {
-				k += bs
-			} else if k+1 < bound && s[k+1] != '\r' && s[k+1] != '\n' {
-				k += 2
+			} else if bs%2 == 1 && k+bs < bound && s[k+bs] != '\r' && s[k+bs] != '\n' {
+				k += bs + 1
 			} else {
-				k++
+				k += bs
 			}
 		case inner != "":
 			if outer != "" && c == outer[0] {
@@ -6196,6 +7889,31 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				innerOpenPos, innerOpenEnd = -1, -1
 				outerPriorLine, innerPriorLine = false, false
 				outerJSON = false
+				outerJSONKind = jsonContainerNone
+				innerJSONKind = jsonContainerNone
+				outerSubSQ = false
+				innerSubSQ = false
+				innerJSONTop = nil
+				innerSubstTop = nil
+			} else if inner == `\"` {
+				switch c {
+				case '\'':
+					if innerSubSQ {
+						innerSubSQ = false
+					} else if (!isMidWordApostrophe(s, k) || opensPrefixedString(s, k)) && !isTrailingApostrophe(s, k) || inShellAssignment(sh, s, k) {
+						innerSubSQ = true
+					}
+				case '$':
+					if k+1 < bound && s[k+1] == '(' {
+						if endPos := shellScanClose(memos, s, shellFrameCS, k+2, false, true, outer == `"`); endPos >= 0 {
+							innerSubstTop = &intListNode{val: endPos, prev: innerSubstTop}
+						}
+					}
+				case '`':
+					if endPos := shellScanClose(memos, s, shellFrameBT, k+1, true, true, outer == `"`); endPos >= 0 {
+						innerSubstTop = &intListNode{val: endPos, prev: innerSubstTop}
+					}
+				}
 			}
 			k++
 		case c == '"' || c == '\'':
@@ -6220,24 +7938,94 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 				outerOpenPos = k
 				outerOpenEnd = k + 1
 				outerPriorLine = false
+				outerSubSQ = false
+				innerJSONTop = nil
+				innerJSONKind = jsonContainerNone
+				innerSubSQ = false
+				innerSubstTop = nil
+				if outer == `"` {
+					outerJSONKind = classifyQuoteJSONContainer(s, k, 0, false, outerJSONTop)
+				} else {
+					outerJSONKind = jsonContainerNone
+				}
 				outerJSON = braceDepth > 0 && isJSONStringOpener(s, curLineStart, k)
 			} else if c == outer[0] {
 				outer = ""
 				outerOpenPos, outerOpenEnd = -1, -1
 				outerPriorLine = false
 				outerJSON = false
+				outerJSONKind = jsonContainerNone
+				outerSubSQ = false
+				innerJSONTop = nil
+				innerJSONKind = jsonContainerNone
+				innerSubSQ = false
+				innerSubstTop = nil
+			} else if outer == `"` && c == '\'' {
+				if outerSubSQ {
+					outerSubSQ = false
+				} else if (!isMidWordApostrophe(s, k) || opensPrefixedString(s, k)) && !isTrailingApostrophe(s, k) || inShellAssignment(sh, s, k) {
+					outerSubSQ = true
+				}
 			}
 			k++
 		default:
 			if outer == "" && inner == "" {
-				if c == '{' || c == '[' {
+				switch c {
+				case '{', '[':
 					braceDepth++
-				} else if (c == '}' || c == ']') && braceDepth > 0 {
-					braceDepth--
+					outerJSONTop = &jsonContainerNode{
+						entry: jsonContainerEntry{openChar: c, pos: k, isJSON: isJSONContainerOpener(s, k)},
+						prev:  outerJSONTop,
+					}
+				case '}', ']':
+					if braceDepth > 0 {
+						braceDepth--
+					}
+					if outerJSONTop != nil && jsonContainerMatches(outerJSONTop.entry.openChar, c) {
+						outerJSONTop = outerJSONTop.prev
+					}
+				case '$':
+					if k+1 < bound && s[k+1] == '(' {
+						if endPos := shellScanClose(memos, s, shellFrameCS, k+2, false, false, false); endPos >= 0 {
+							substTop = &intListNode{val: endPos, prev: substTop}
+						}
+					}
+				case '`':
+					if endPos := shellScanClose(memos, s, shellFrameBT, k+1, false, false, false); endPos >= 0 {
+						substTop = &intListNode{val: endPos, prev: substTop}
+					}
+				}
+			} else if outer == `"` && inner == "" {
+				if !outerSubSQ {
+					if c == '{' || c == '[' {
+						innerJSONTop = &jsonContainerNode{
+							entry: jsonContainerEntry{openChar: c, pos: k, isJSON: isJSONContainerOpener(s, k)},
+							prev:  innerJSONTop,
+						}
+					} else if (c == '}' || c == ']') && innerJSONTop != nil && jsonContainerMatches(innerJSONTop.entry.openChar, c) {
+						innerJSONTop = innerJSONTop.prev
+					}
+				}
+				if c == '$' && k+1 < bound && s[k+1] == '(' {
+					escJSON := outerJSONKind != jsonContainerNone
+					if endPos := shellScanClose(memos, s, shellFrameCS, k+2, false, escJSON, false); endPos >= 0 {
+						substTop = &intListNode{val: endPos, prev: substTop}
+					}
+				} else if c == '`' {
+					escJSON := outerJSONKind != jsonContainerNone
+					if endPos := shellScanClose(memos, s, shellFrameBT, k+1, true, escJSON, false); endPos >= 0 {
+						substTop = &intListNode{val: endPos, prev: substTop}
+					}
 				}
 			}
 			k++
 		}
+	}
+	for substTop != nil && k >= substTop.val {
+		substTop = substTop.prev
+	}
+	for innerSubstTop != nil && k >= innerSubstTop.val {
+		innerSubstTop = innerSubstTop.prev
 	}
 	*st = lineQuoteState{
 		k: k, curLineStart: curLineStart, lineLim: lineLim,
@@ -6248,6 +8036,14 @@ func (st *lineQuoteState) scan(sh *shellAssignScanner, s string, to, bound, hdrL
 		closingExplicitOuter: closingExplicitOuter,
 		braceDepth:           braceDepth,
 		outerJSON:            outerJSON,
+		outerJSONTop:         outerJSONTop,
+		innerJSONTop:         innerJSONTop,
+		outerJSONKind:        outerJSONKind,
+		innerJSONKind:        innerJSONKind,
+		outerSubSQ:           outerSubSQ,
+		innerSubSQ:           innerSubSQ,
+		substTop:             substTop,
+		innerSubstTop:        innerSubstTop,
 	}
 }
 
@@ -6328,6 +8124,12 @@ func (h *headerQuoteScanner) placeholderQuoteCloses(from int, outer, inner strin
 // in joinedCloses so multiline joined-quote lookahead scales linearly without
 // mutating proseCloses.
 func (h *headerQuoteScanner) joinedQuoteCloseAt(from int, outer, inner string) int {
+	if outer == `"` && inner == "" {
+		return h.doubleQuoteClosePos(from)
+	}
+	if outer == "" && inner == `\"` {
+		return h.doubleQuoteCloseJSONPos(from)
+	}
 	m := closeSlot(&h.joinedCloses, outer, inner)
 	if m == nil {
 		return quoteCloseScan(h.s, from, outer, inner)
@@ -6429,36 +8231,181 @@ func (h *headerQuoteScanner) closesProseLineWord(pos int) bool {
 	return stamp((h.plainPrefixBits[start>>6]>>(start&63))&1 != 0)
 }
 
+// isHeaderValueOpenOnLine reports whether a closing quote at closePos falls
+// inside an active non-prose Cookie / Set-Cookie header value on the same line.
+func isHeaderValueOpenOnLine(s string, lineStart, closePos int, escaped bool) bool {
+	if closePos <= lineStart || closePos >= len(s) {
+		return false
+	}
+	// If the character right after the closing quote is already whitespace or a
+	// shell command separator, the quote closed a value rather than opening one.
+	if s[closePos] == ' ' || s[closePos] == '\t' || s[closePos] == ';' || s[closePos] == '&' || s[closePos] == '|' {
+		return false
+	}
+	qPos := closePos - 1
+	if escaped && qPos > lineStart && s[qPos-1] == '\\' {
+		qPos--
+	}
+	if qPos <= lineStart {
+		return false
+	}
+	// Restrict mid-line semicolon tolerance to active non-prose Cookie and
+	// Set-Cookie headers on the line, resetting if an unquoted & or |, or a
+	// non-Cookie ';' continuation, starts a later shell command before qPos.
+	lineLim := len(s)
+	if nl := strings.IndexAny(s[qPos:], "\r\n"); nl >= 0 {
+		lineLim = qPos + nl
+	}
+	cookieOpen := false
+	for p := lineStart; p < qPos; {
+		c := s[p]
+		if c == '&' || c == '|' || (c == ';' && cookieOpen && !cookieSemiContinues(s, p+1, lineLim, false)) {
+			cookieOpen = false
+			p++
+			continue
+		}
+		if wordBoundaryAt(s, p) && authHeaderKeys.mayStartAt(s[p:qPos], 0) {
+			if loc := authHeaderPrefixAtRe.FindStringSubmatchIndex(s[p:qPos]); loc != nil {
+				if isCookieHeaderKey(s[p+loc[2]:p+loc[3]]) && !cookieValueIsProse(s, p+loc[1]) {
+					cookieOpen = true
+				}
+				p += loc[1]
+				continue
+			}
+		}
+		p++
+	}
+	return cookieOpen
+}
+
+func (h *headerQuoteScanner) initCookieOpenBits() {
+	s := h.s
+	h.cookieOpenBits = make([]uint64, (len(s)+64)/64)
+	cookieOpen := false
+	lineLim := -1
+	for p := 0; p < len(s); {
+		if p >= lineLim {
+			lineLim = len(s)
+			if nl := strings.IndexAny(s[p:], "\r\n"); nl >= 0 {
+				lineLim = p + nl
+			}
+			cookieOpen = false
+		}
+		c := s[p]
+		if c == '&' || c == '|' || c == '\r' || c == '\n' || (c == ';' && cookieOpen && !cookieSemiContinues(s, p+1, lineLim, false)) {
+			cookieOpen = false
+			p++
+			continue
+		}
+		if cookieOpen {
+			h.cookieOpenBits[p>>6] |= 1 << (p & 63)
+		}
+		if (c == 'c' || c == 'C' || c == 's' || c == 'S') && wordBoundaryAt(s, p) && authHeaderKeys.mayStartAt(s[p:lineLim], 0) {
+			if loc := authHeaderPrefixAtRe.FindStringSubmatchIndex(s[p:lineLim]); loc != nil {
+				wasOpen := cookieOpen
+				if isCookieHeaderKey(s[p+loc[2]:p+loc[3]]) && !cookieValueIsProse(s, p+loc[1]) {
+					cookieOpen = true
+				}
+				end := p + loc[1]
+				if wasOpen {
+					for k := p + 1; k < end; k++ {
+						h.cookieOpenBits[k>>6] |= 1 << (k & 63)
+					}
+				}
+				p = end
+				continue
+			}
+		}
+		p++
+	}
+	h.cookieOpenReady = true
+}
+
+func (h *headerQuoteScanner) isHeaderValueOpenAt(closePos int, escaped bool) bool {
+	if h == nil || closePos <= 0 || closePos >= len(h.s) {
+		return false
+	}
+	s := h.s
+	if s[closePos] == ' ' || s[closePos] == '\t' || s[closePos] == ';' || s[closePos] == '&' || s[closePos] == '|' {
+		return false
+	}
+	qPos := closePos - 1
+	if escaped && qPos > 0 && s[qPos-1] == '\\' && s[qPos-1] != '\n' && s[qPos-1] != '\r' {
+		qPos--
+	}
+	if qPos <= 0 || s[qPos-1] == '\n' || s[qPos-1] == '\r' {
+		return false
+	}
+	if !h.cookieOpenReady {
+		h.initCookieOpenBits()
+	}
+	return (h.cookieOpenBits[qPos>>6]>>(qPos&63))&1 != 0
+}
+
 // chainClosesFrom reports whether a joined-quote close at closePos has
 // balanced shell quoting through the remainder of its chain under mode.
 func (h *headerQuoteScanner) chainClosesFrom(closePos int, escaped bool, mode chainMode) bool {
 	if h == nil {
 		return false
 	}
-	key := closePos<<4 | int(mode)<<2
+	s := h.s
+	allowMidSemi := !h.isHeaderValueOpenAt(closePos, escaped)
+	key := closePos<<5 | int(mode)<<3
 	if escaped {
 		key |= 1
 	}
 	if h.curOuterJSON {
 		key |= 2
 	}
+	if !allowMidSemi {
+		key |= 4
+	}
 	if v, ok := h.chainCloses[key]; ok {
 		return v
 	}
+	var visited []int
+	lastStamp := closePos
+	chainFlags := key & 31
 	stamp := func(res bool) bool {
 		if h.chainCloses == nil {
 			h.chainCloses = make(map[int]bool)
 		}
 		h.chainCloses[key] = res
+		if allowMidSemi {
+			for _, vPos := range visited {
+				h.chainCloses[(vPos<<5)|chainFlags] = res
+			}
+		}
 		return res
 	}
-	s := h.s
 	lineLim := len(s)
 	if nl := strings.IndexAny(s[closePos:], "\r\n"); nl >= 0 {
 		lineLim = closePos + nl
 	}
+	sep := closePos
+	for sep < lineLim && (s[sep] == ' ' || s[sep] == '\t') {
+		sep++
+	}
+	if sep < lineLim && (s[sep] == '&' || s[sep] == '|' || (s[sep] == ';' && (allowMidSemi || !cookieSemiContinues(s, sep+1, lineLim, h.curOuterJSON && !escaped)))) {
+		return stamp(true)
+	}
+	hasChainMemo := len(h.chainCloses) > 0
 	for k := closePos; k < lineLim; {
+		if allowMidSemi && k > closePos && (s[k-1] == ' ' || s[k-1] == '\t') {
+			if hasChainMemo {
+				if v, ok := h.chainCloses[(k<<5)|chainFlags]; ok {
+					return stamp(v)
+				}
+			}
+			if k-lastStamp >= 32 {
+				visited = append(visited, k)
+				lastStamp = k
+			}
+		}
 		c := s[k]
+		if c == '&' || c == '|' || (c == ';' && (allowMidSemi || !cookieSemiContinues(s, k+1, lineLim, h.curOuterJSON && !escaped))) {
+			return stamp(true)
+		}
 		if c == '#' && (k == 0 || s[k-1] == ' ' || s[k-1] == '\t' || strings.IndexByte(";&|()\r\n", s[k-1]) >= 0) {
 			return stamp(true)
 		}
@@ -6468,14 +8415,6 @@ func (h *headerQuoteScanner) chainClosesFrom(closePos int, escaped bool, mode ch
 					return stamp(true)
 				}
 			}
-		}
-		if !escaped && c == '\\' {
-			if k+1 < lineLim {
-				k += 2
-			} else {
-				k++
-			}
-			continue
 		}
 		if q := openingQuote(s[:lineLim], k); q != "" {
 			if h.curOuterJSON && !escaped && q == `"` && k+1 < lineLim && (s[k+1] == ',' || s[k+1] == '}' || s[k+1] == ']') {
@@ -6496,35 +8435,1085 @@ func (h *headerQuoteScanner) chainClosesFrom(closePos int, escaped bool, mode ch
 				qInner = q
 				qEsc = true
 			}
-			cPos := quoteCloseScan(s[:lineLim], k+len(q), qOuter, qInner)
-			if cPos >= 0 {
-				k = cPos
-				continue
+			var nextClose int
+			switch {
+			case qOuter == `"` && qInner == "":
+				nextClose = h.doubleQuoteClosePos(k + len(q))
+			case qOuter == "" && qInner == `\"`:
+				nextClose = h.doubleQuoteCloseJSONPos(k + len(q))
+			default:
+				if cPos := quoteCloseScan(s[:lineLim], k+len(q), qOuter, qInner); cPos >= 0 {
+					k = cPos
+					continue
+				}
+				nextClose = quoteCloseScan(s, lineLim, qOuter, qInner)
 			}
-			nextClose := quoteCloseScan(s, lineLim, qOuter, qInner)
 			if nextClose < 0 {
 				return stamp(false)
 			}
+			if nextClose <= lineLim {
+				k = nextClose
+				continue
+			}
 			nextMode := mode
-			if nextClose > lineLim && nextMode == chainSkipPossessives {
+			if nextMode == chainSkipPossessives {
 				nextMode = chainSkipContractions
 			}
 			return stamp(h.chainClosesFrom(nextClose, qEsc, nextMode))
+		}
+		if c == '\\' {
+			if !escaped {
+				if k+1 < lineLim {
+					k += 2
+				} else {
+					k++
+				}
+				continue
+			}
+			bs := 0
+			for k+bs < lineLim && s[k+bs] == '\\' {
+				bs++
+			}
+			if k+bs < lineLim && (s[k+bs] == '$' || s[k+bs] == '`') {
+				if bs%4 == 2 {
+					k += bs + 1
+					continue
+				}
+				if bs%4 == 0 {
+					k += bs
+					continue
+				}
+			}
+			if bs%2 == 1 && k+bs < lineLim {
+				k += bs + 1
+			} else {
+				k += bs
+			}
+			continue
+		}
+		if c == '$' && k+1 < lineLim && (s[k+1] == '(' || s[k+1] == '{' || s[k+1] == '\'') {
+			var nextClose int
+			switch s[k+1] {
+			case '(':
+				nextClose = h.cmdSubstClosePos(k+2, escaped)
+			case '{':
+				nextClose = h.paramExpClosePos(k+2, false, escaped)
+			default:
+				nextClose = scanANSICQuotedClose(s, k+2, escaped)
+			}
+			if nextClose < 0 {
+				return stamp(false)
+			}
+			if nextClose <= lineLim {
+				k = nextClose
+				continue
+			}
+			nextMode := mode
+			if nextMode == chainSkipPossessives {
+				nextMode = chainSkipContractions
+			}
+			return stamp(h.chainClosesFrom(nextClose, escaped, nextMode))
+		}
+		if c == '`' {
+			nextClose := h.backtickClosePos(k+1, false, escaped)
+			if nextClose < 0 {
+				return stamp(false)
+			}
+			if nextClose <= lineLim {
+				k = nextClose
+				continue
+			}
+			nextMode := mode
+			if nextMode == chainSkipPossessives {
+				nextMode = chainSkipContractions
+			}
+			return stamp(h.chainClosesFrom(nextClose, escaped, nextMode))
 		}
 		k++
 	}
 	return stamp(true)
 }
 
-// joinedQuoteCloses reports whether outer and inner close at or after from and
-// leave balanced shell quoting under strict lexical mode, prose-contraction
-// mode, or (when the closing quote terminates a plain prose word on its line)
-// plural-possessive mode.
+type shellFrameKind uint8
+
+const (
+	shellFrameDQ shellFrameKind = iota
+	shellFrameCS
+	shellFramePE
+	shellFrameBT
+)
+
+type casePhase uint8
+
+const (
+	caseExpectWord casePhase = iota
+	caseExpectIn
+	casePattern
+	caseBody
+)
+
+type caseState struct {
+	parenDepth    int
+	phase         casePhase
+	sawWord       bool
+	hasOptParen   bool
+	allowOptParen bool
+	justAfterSemi bool
+}
+
+type shellFrame struct {
+	kind       shellFrameKind
+	openPos    int
+	inDouble   bool
+	parenDepth int
+	braceDepth int
+	cmdPos     bool
+	cases      []caseState
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+func isPOSIXShellWordBreak(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', '#', '\\', '\'', '"', '`', '$', ';', '&', '|', '(', ')', '<', '>':
+		return true
+	default:
+		return false
+	}
+}
+
+func isShellCommentBoundaryByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\r', '\n', ';', '&', '|', '(', ')', '{', '}':
+		return true
+	default:
+		return false
+	}
+}
+
+type shellCloseMemo struct {
+	dq       map[int]int
+	cmdSubst map[int]int
+	paramExp map[int]int
+	backtick map[int]int
+}
+
+func (m *shellCloseMemo) lookup(kind shellFrameKind, from int, inDouble, jsonEscaped, stopAtOuterJSONQuote bool) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	key := (from << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+	switch kind {
+	case shellFrameDQ:
+		if m.dq != nil {
+			v, ok := m.dq[key]
+			return v, ok
+		}
+	case shellFrameCS:
+		if m.cmdSubst != nil {
+			v, ok := m.cmdSubst[key]
+			return v, ok
+		}
+	case shellFramePE:
+		if m.paramExp != nil {
+			peKey := (from << 3) | (b2i(inDouble) << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+			v, ok := m.paramExp[peKey]
+			return v, ok
+		}
+	case shellFrameBT:
+		if m.backtick != nil {
+			btKey := (from << 3) | (b2i(inDouble) << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+			v, ok := m.backtick[btKey]
+			return v, ok
+		}
+	}
+	return 0, false
+}
+
+func (m *shellCloseMemo) store(kind shellFrameKind, from int, inDouble, jsonEscaped, stopAtOuterJSONQuote bool, val int) {
+	if m == nil {
+		return
+	}
+	key := (from << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+	switch kind {
+	case shellFrameDQ:
+		if m.dq == nil {
+			m.dq = make(map[int]int)
+		}
+		m.dq[key] = val
+	case shellFrameCS:
+		if m.cmdSubst == nil {
+			m.cmdSubst = make(map[int]int)
+		}
+		m.cmdSubst[key] = val
+	case shellFramePE:
+		if m.paramExp == nil {
+			m.paramExp = make(map[int]int)
+		}
+		peKey := (from << 3) | (b2i(inDouble) << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+		m.paramExp[peKey] = val
+	case shellFrameBT:
+		if m.backtick == nil {
+			m.backtick = make(map[int]int)
+		}
+		btKey := (from << 3) | (b2i(inDouble) << 2) | (b2i(jsonEscaped) << 1) | b2i(stopAtOuterJSONQuote)
+		m.backtick[btKey] = val
+	}
+}
+
+func (h *headerQuoteScanner) shellMemoPtr() *shellCloseMemo {
+	if h == nil {
+		return nil
+	}
+	return &h.shellMemos
+}
+
+func (h *headerQuoteScanner) doubleQuoteClosePos(from int) int {
+	if h != nil && from >= 0 && from < len(h.s) {
+		s := h.s
+		end := min(from+64, len(s))
+		for k := from; k < end; k++ {
+			switch s[k] {
+			case '\\', '$', '`':
+				goto full
+			case '"':
+				return k + 1
+			}
+		}
+	}
+full:
+	return shellScanClose(h.shellMemoPtr(), h.s, shellFrameDQ, from, false, false, false)
+}
+
+func (h *headerQuoteScanner) doubleQuoteCloseWithin(from, limit int) int {
+	cPos := h.doubleQuoteClosePos(from)
+	if cPos < 0 || cPos > limit {
+		return -1
+	}
+	return cPos
+}
+
+func (h *headerQuoteScanner) doubleQuoteCloseJSONPos(from int) int {
+	return shellScanClose(h.shellMemoPtr(), h.s, shellFrameDQ, from, false, true, false)
+}
+
+func (h *headerQuoteScanner) doubleQuoteCloseJSONWithin(from, limit int, stopAtOuterJSONQuote bool) int {
+	cPos := shellScanClose(h.shellMemoPtr(), h.s, shellFrameDQ, from, false, true, stopAtOuterJSONQuote)
+	if cPos < 0 || cPos > limit {
+		return -1
+	}
+	return cPos
+}
+
+func (h *headerQuoteScanner) cmdSubstClosePos(from int, jsonEscaped bool) int {
+	return shellScanClose(h.shellMemoPtr(), h.s, shellFrameCS, from, false, jsonEscaped, false)
+}
+
+func (h *headerQuoteScanner) cmdSubstCloseWithin(from, limit int, jsonEscaped bool) int {
+	cPos := shellScanClose(h.shellMemoPtr(), h.s, shellFrameCS, from, false, jsonEscaped, false)
+	if cPos < 0 || cPos > limit {
+		return -1
+	}
+	return cPos
+}
+
+func (h *headerQuoteScanner) paramExpClosePos(from int, inDouble, jsonEscaped bool) int {
+	return shellScanClose(h.shellMemoPtr(), h.s, shellFramePE, from, inDouble, jsonEscaped, false)
+}
+
+func (h *headerQuoteScanner) paramExpCloseWithin(from int, inDouble bool, limit int, jsonEscaped bool) int {
+	cPos := shellScanClose(h.shellMemoPtr(), h.s, shellFramePE, from, inDouble, jsonEscaped, false)
+	if cPos < 0 || cPos > limit {
+		return -1
+	}
+	return cPos
+}
+
+func (h *headerQuoteScanner) backtickClosePos(from int, inDouble, jsonEscaped bool) int {
+	return shellScanClose(h.shellMemoPtr(), h.s, shellFrameBT, from, inDouble, jsonEscaped, false)
+}
+
+func (h *headerQuoteScanner) backtickCloseWithin(from, limit int, inDouble, jsonEscaped bool) int {
+	cPos := shellScanClose(h.shellMemoPtr(), h.s, shellFrameBT, from, inDouble, jsonEscaped, false)
+	if cPos < 0 || cPos > limit {
+		return -1
+	}
+	return cPos
+}
+
+func noteCSWordPart(f *shellFrame) {
+	f.cmdPos = false
+	if n := len(f.cases); n > 0 {
+		top := &f.cases[n-1]
+		switch top.phase {
+		case caseExpectWord:
+			top.sawWord = true
+		case casePattern:
+			top.justAfterSemi = false
+			top.allowOptParen = false
+		}
+	}
+}
+
+func scanSingleQuotedClose(s string, from int, jsonEscaped bool) int {
+	if !jsonEscaped {
+		if rel := strings.IndexByte(s[from:], '\''); rel >= 0 {
+			return from + rel + 1
+		}
+		return -1
+	}
+	for j := from; j < len(s); {
+		c := s[j]
+		if c == '\'' {
+			return j + 1
+		}
+		if c == '"' {
+			return -1
+		}
+		if c == '\\' {
+			bs := 0
+			for j+bs < len(s) && s[j+bs] == '\\' {
+				bs++
+			}
+			if bs%2 == 1 && j+bs < len(s) {
+				j += bs + 1
+			} else {
+				j += bs
+			}
+			continue
+		}
+		j++
+	}
+	return -1
+}
+
+// scanANSICQuotedClose scans past the closing single quote of an ANSI-C $'...'
+// string starting immediately after $', handling backslash escapes (and doubled
+// backslashes when jsonEscaped is true).
+func scanANSICQuotedClose(s string, from int, jsonEscaped bool) int {
+	if !jsonEscaped {
+		for j := from; j < len(s); j++ {
+			if s[j] == '\'' {
+				return j + 1
+			}
+			if s[j] == '\\' {
+				j++
+			}
+		}
+		return -1
+	}
+	for j := from; j < len(s); {
+		c := s[j]
+		if c == '\'' {
+			return j + 1
+		}
+		if c == '"' {
+			return -1
+		}
+		if c == '\\' {
+			bs := 0
+			for j+bs < len(s) && s[j+bs] == '\\' {
+				bs++
+			}
+			if j+bs < len(s) {
+				next := s[j+bs]
+				if next == '"' {
+					if bs%2 == 0 {
+						return -1
+					}
+					j += bs + 1
+					continue
+				}
+				if next == '\'' {
+					if bs%2 == 1 || bs%4 == 2 {
+						j += bs + 1
+						continue
+					}
+					j += bs
+					continue
+				}
+			}
+			if bs%2 == 1 && j+bs < len(s) {
+				j += bs + 1
+			} else {
+				j += bs
+			}
+			continue
+		}
+		j++
+	}
+	return -1
+}
+
+func makeShellFrame(kind shellFrameKind, openPos int, inDouble bool) shellFrame {
+	f := shellFrame{kind: kind, openPos: openPos, inDouble: inDouble}
+	switch kind {
+	case shellFrameCS:
+		f.parenDepth = 1
+		f.cmdPos = true
+	case shellFramePE:
+		f.braceDepth = 1
+	}
+	return f
+}
+
+// shellScanClose returns the byte offset just after the closing delimiter of a
+// POSIX shell construct (double quote, $(...), ${...}, or `...`) starting at
+// s[from:], or -1 if unclosed. Memoized on h by construct kind and start
+// offset so scanning across any number of headers remains strictly O(N).
+func shellScanClose(memos *shellCloseMemo, s string, startKind shellFrameKind, from int, inDouble, jsonEscaped, stopAtOuterJSONQuote bool) int {
+	if from < 0 || from > len(s) {
+		return -1
+	}
+	if v, ok := memos.lookup(startKind, from, inDouble, jsonEscaped, stopAtOuterJSONQuote); ok {
+		return v
+	}
+	var stackBuf [16]shellFrame
+	stack := stackBuf[:0]
+	stack = append(stack, makeShellFrame(startKind, from, inDouble))
+
+	failAll := func() int {
+		for idx := range stack {
+			memos.store(stack[idx].kind, stack[idx].openPos, stack[idx].inDouble, jsonEscaped, stopAtOuterJSONQuote, -1)
+		}
+		return -1
+	}
+
+	k := from
+	pushOrJump := func(kind shellFrameKind, childFrom int, childInDouble bool) (int, bool, bool) {
+		if v, ok := memos.lookup(kind, childFrom, childInDouble, jsonEscaped, stopAtOuterJSONQuote); ok {
+			if v < 0 {
+				return -1, false, false
+			}
+			return v, true, false
+		}
+		stack = append(stack, makeShellFrame(kind, childFrom, childInDouble))
+		return childFrom, false, true
+	}
+
+	closeTop := func(endPos int) (int, bool) {
+		top := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		memos.store(top.kind, top.openPos, top.inDouble, jsonEscaped, stopAtOuterJSONQuote, endPos)
+		if len(stack) == 0 {
+			return endPos, true
+		}
+		parent := &stack[len(stack)-1]
+		if parent.kind == shellFrameCS {
+			noteCSWordPart(parent)
+		}
+		return endPos, false
+	}
+
+	for len(stack) > 0 {
+		if k >= len(s) {
+			return failAll()
+		}
+		f := &stack[len(stack)-1]
+		c := s[k]
+
+		switch f.kind {
+		case shellFrameDQ:
+			switch c {
+			case '\\':
+				if !jsonEscaped {
+					if k+1 < len(s) {
+						k += 2
+					} else {
+						k++
+					}
+					continue
+				}
+				bs := 0
+				for k+bs < len(s) && s[k+bs] == '\\' {
+					bs++
+				}
+				if k+bs < len(s) && s[k+bs] == '"' {
+					if bs%4 == 1 {
+						endPos, done := closeTop(k + bs + 1)
+						if done {
+							return endPos
+						}
+						k = endPos
+						continue
+					}
+					if bs%4 == 3 {
+						k += bs + 1
+						continue
+					}
+					k += bs
+					continue
+				}
+				if k+bs < len(s) && (s[k+bs] == '$' || s[k+bs] == '`') {
+					if bs%4 == 2 {
+						k += bs + 1
+						continue
+					}
+					if bs%4 == 0 {
+						k += bs
+						continue
+					}
+				}
+				if bs%2 == 1 && k+bs < len(s) {
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			case '"':
+				if !jsonEscaped || stopAtOuterJSONQuote {
+					endPos, done := closeTop(k + 1)
+					if done {
+						return endPos
+					}
+					k = endPos
+					continue
+				}
+				return failAll()
+			case '$':
+				if k+1 < len(s) && (s[k+1] == '(' || s[k+1] == '{') {
+					kind := shellFrameCS
+					if s[k+1] == '{' {
+						kind = shellFramePE
+					}
+					nextK, _, _ := pushOrJump(kind, k+2, kind == shellFramePE)
+					if nextK < 0 {
+						return failAll()
+					}
+					k = nextK
+					continue
+				}
+				k++
+			case '`':
+				nextK, _, _ := pushOrJump(shellFrameBT, k+1, true)
+				if nextK < 0 {
+					return failAll()
+				}
+				k = nextK
+			default:
+				k++
+			}
+
+		case shellFrameBT:
+			switch c {
+			case '\\':
+				if !jsonEscaped {
+					if k+1 < len(s) && (s[k+1] == '\\' || s[k+1] == '`' || s[k+1] == '$' || s[k+1] == '\n' || (f.inDouble && s[k+1] == '"')) {
+						k += 2
+					} else {
+						k++
+					}
+					continue
+				}
+				bs := 0
+				for k+bs < len(s) && s[k+bs] == '\\' {
+					bs++
+				}
+				if k+bs < len(s) && (s[k+bs] == '`' || s[k+bs] == '$') {
+					if bs%4 == 2 {
+						k += bs + 1
+						continue
+					}
+					if bs%4 == 0 {
+						k += bs
+						continue
+					}
+				}
+				if bs%2 == 1 && k+bs < len(s) {
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			case '`':
+				endPos, done := closeTop(k + 1)
+				if done {
+					return endPos
+				}
+				k = endPos
+			case '"':
+				if jsonEscaped {
+					return failAll()
+				}
+				k++
+			default:
+				k++
+			}
+
+		case shellFramePE:
+			switch c {
+			case '\\':
+				if !jsonEscaped {
+					if k+1 < len(s) {
+						k += 2
+					} else {
+						k++
+					}
+					continue
+				}
+				bs := 0
+				for k+bs < len(s) && s[k+bs] == '\\' {
+					bs++
+				}
+				if k+bs < len(s) && s[k+bs] == '"' {
+					if bs%4 == 1 {
+						nextK, _, _ := pushOrJump(shellFrameDQ, k+bs+1, false)
+						if nextK < 0 {
+							return failAll()
+						}
+						k = nextK
+						continue
+					}
+					if bs%4 == 3 {
+						k += bs + 1
+						continue
+					}
+					k += bs
+					continue
+				}
+				if k+bs < len(s) && (s[k+bs] == '$' || s[k+bs] == '`') {
+					if bs%4 == 2 {
+						k += bs + 1
+						continue
+					}
+					if bs%4 == 0 {
+						k += bs
+						continue
+					}
+				}
+				if bs%2 == 1 && k+bs < len(s) {
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			case '\'':
+				if f.inDouble {
+					k++
+					continue
+				}
+				sqEnd := scanSingleQuotedClose(s, k+1, jsonEscaped)
+				if sqEnd < 0 {
+					return failAll()
+				}
+				k = sqEnd
+			case '"':
+				if jsonEscaped {
+					return failAll()
+				}
+				nextK, _, _ := pushOrJump(shellFrameDQ, k+1, false)
+				if nextK < 0 {
+					return failAll()
+				}
+				k = nextK
+			case '$':
+				if !f.inDouble && k+1 < len(s) && s[k+1] == '\'' {
+					acEnd := scanANSICQuotedClose(s, k+2, jsonEscaped)
+					if acEnd < 0 {
+						return failAll()
+					}
+					k = acEnd
+					continue
+				}
+				if k+1 < len(s) && (s[k+1] == '(' || s[k+1] == '{') {
+					kind := shellFrameCS
+					if s[k+1] == '{' {
+						kind = shellFramePE
+					}
+					nextK, _, _ := pushOrJump(kind, k+2, kind == shellFramePE && f.inDouble)
+					if nextK < 0 {
+						return failAll()
+					}
+					k = nextK
+					continue
+				}
+				k++
+			case '`':
+				nextK, _, _ := pushOrJump(shellFrameBT, k+1, f.inDouble)
+				if nextK < 0 {
+					return failAll()
+				}
+				k = nextK
+			case '{':
+				f.braceDepth++
+				k++
+			case '}':
+				f.braceDepth--
+				if f.braceDepth == 0 {
+					endPos, done := closeTop(k + 1)
+					if done {
+						return endPos
+					}
+					k = endPos
+					continue
+				}
+				k++
+			default:
+				k++
+			}
+
+		case shellFrameCS:
+			switch c {
+			case ' ', '\t', '\r':
+				if n := len(f.cases); n > 0 && f.cases[n-1].phase == caseExpectWord && f.cases[n-1].sawWord {
+					f.cases[n-1].phase = caseExpectIn
+					f.cases[n-1].sawWord = false
+				}
+				k++
+			case '\n':
+				if n := len(f.cases); n > 0 && f.cases[n-1].phase == caseExpectWord && f.cases[n-1].sawWord {
+					f.cases[n-1].phase = caseExpectIn
+					f.cases[n-1].sawWord = false
+				}
+				f.cmdPos = true
+				k++
+			case '#':
+				if k == f.openPos || isShellCommentBoundaryByte(s[k-1]) {
+					for k < len(s) && s[k] != '\n' {
+						if jsonEscaped && s[k] == '"' {
+							break
+						}
+						k++
+					}
+					continue
+				}
+				noteCSWordPart(f)
+				k++
+			case '\\':
+				if !jsonEscaped {
+					if k+1 < len(s) && s[k+1] == '\n' {
+						k += 2
+						continue
+					}
+					noteCSWordPart(f)
+					if k+1 < len(s) {
+						k += 2
+					} else {
+						k++
+					}
+					continue
+				}
+				bs := 0
+				for k+bs < len(s) && s[k+bs] == '\\' {
+					bs++
+				}
+				if k+bs < len(s) && s[k+bs] == '"' {
+					if bs%4 == 1 {
+						noteCSWordPart(f)
+						nextK, _, _ := pushOrJump(shellFrameDQ, k+bs+1, false)
+						if nextK < 0 {
+							return failAll()
+						}
+						k = nextK
+						continue
+					}
+					if bs%4 == 3 {
+						noteCSWordPart(f)
+						k += bs + 1
+						continue
+					}
+					k += bs
+					continue
+				}
+				if k+bs < len(s) && (s[k+bs] == '$' || s[k+bs] == '`') {
+					if bs%4 == 2 {
+						noteCSWordPart(f)
+						k += bs + 1
+						continue
+					}
+					if bs%4 == 0 {
+						k += bs
+						continue
+					}
+				}
+				noteCSWordPart(f)
+				if bs%2 == 1 && k+bs < len(s) {
+					k += bs + 1
+				} else {
+					k += bs
+				}
+			case '\'':
+				noteCSWordPart(f)
+				sqEnd := scanSingleQuotedClose(s, k+1, jsonEscaped)
+				if sqEnd < 0 {
+					return failAll()
+				}
+				k = sqEnd
+			case '"':
+				if jsonEscaped {
+					return failAll()
+				}
+				noteCSWordPart(f)
+				nextK, _, _ := pushOrJump(shellFrameDQ, k+1, false)
+				if nextK < 0 {
+					return failAll()
+				}
+				k = nextK
+			case '$':
+				if k+1 < len(s) && s[k+1] == '\'' {
+					noteCSWordPart(f)
+					acEnd := scanANSICQuotedClose(s, k+2, jsonEscaped)
+					if acEnd < 0 {
+						return failAll()
+					}
+					k = acEnd
+					continue
+				}
+				if k+1 < len(s) && (s[k+1] == '(' || s[k+1] == '{') {
+					noteCSWordPart(f)
+					kind := shellFrameCS
+					if s[k+1] == '{' {
+						kind = shellFramePE
+					}
+					nextK, _, _ := pushOrJump(kind, k+2, false)
+					if nextK < 0 {
+						return failAll()
+					}
+					k = nextK
+					continue
+				}
+				noteCSWordPart(f)
+				k++
+			case '`':
+				noteCSWordPart(f)
+				nextK, _, _ := pushOrJump(shellFrameBT, k+1, false)
+				if nextK < 0 {
+					return failAll()
+				}
+				k = nextK
+			case ';':
+				if n := len(f.cases); n > 0 {
+					top := &f.cases[n-1]
+					if f.parenDepth == top.parenDepth && top.phase == caseBody {
+						if strings.HasPrefix(s[k:], ";;&") {
+							top.phase = casePattern
+							top.justAfterSemi = true
+							top.hasOptParen = false
+							top.allowOptParen = true
+							f.cmdPos = false
+							k += 3
+							continue
+						}
+						if strings.HasPrefix(s[k:], ";;") || strings.HasPrefix(s[k:], ";&") {
+							top.phase = casePattern
+							top.justAfterSemi = true
+							top.hasOptParen = false
+							top.allowOptParen = true
+							f.cmdPos = false
+							k += 2
+							continue
+						}
+					}
+				}
+				f.cmdPos = true
+				k++
+			case '&', '|':
+				if n := len(f.cases); n > 0 {
+					top := &f.cases[n-1]
+					if c == '|' && f.parenDepth == top.parenDepth && top.phase == casePattern {
+						top.justAfterSemi = false
+						top.allowOptParen = false
+						f.cmdPos = false
+						k++
+						continue
+					}
+				}
+				if k+1 < len(s) && (s[k+1] == c || (c == '|' && s[k+1] == '&')) {
+					k += 2
+				} else {
+					k++
+				}
+				f.cmdPos = true
+			case '<', '>':
+				k++
+			case '(':
+				if n := len(f.cases); n > 0 {
+					top := &f.cases[n-1]
+					if top.phase == casePattern && f.parenDepth == top.parenDepth && !top.hasOptParen && top.allowOptParen {
+						top.hasOptParen = true
+						top.allowOptParen = false
+						top.justAfterSemi = false
+						f.parenDepth++
+						f.cmdPos = false
+						k++
+						continue
+					}
+				}
+				f.parenDepth++
+				f.cmdPos = true
+				k++
+			case ')':
+				if n := len(f.cases); n > 0 {
+					top := &f.cases[n-1]
+					if top.phase == casePattern && f.parenDepth == top.parenDepth {
+						top.phase = caseBody
+						top.justAfterSemi = false
+						top.allowOptParen = false
+						f.cmdPos = true
+						k++
+						continue
+					}
+					if top.phase == casePattern && top.hasOptParen && f.parenDepth == top.parenDepth+1 {
+						f.parenDepth--
+						top.hasOptParen = false
+						top.phase = caseBody
+						top.justAfterSemi = false
+						top.allowOptParen = false
+						f.cmdPos = true
+						k++
+						continue
+					}
+				}
+				f.parenDepth--
+				if f.parenDepth == 0 {
+					endPos, done := closeTop(k + 1)
+					if done {
+						return endPos
+					}
+					k = endPos
+					continue
+				}
+				f.cmdPos = false
+				k++
+			default:
+				wStart := k
+				for k < len(s) && !isPOSIXShellWordBreak(s[k]) {
+					k++
+				}
+				word := s[wStart:k]
+				isWordConcat := k < len(s) && (s[k] == '\'' || s[k] == '"' || s[k] == '$' || s[k] == '`' || s[k] == '\\')
+				n := len(f.cases)
+				switch {
+				case n > 0 && f.cases[n-1].phase == caseExpectWord:
+					f.cases[n-1].sawWord = true
+					f.cmdPos = false
+				case !isWordConcat && n > 0 && f.cases[n-1].phase == caseExpectIn:
+					if word == "in" {
+						f.cases[n-1].phase = casePattern
+						f.cases[n-1].justAfterSemi = true
+						f.cases[n-1].allowOptParen = true
+					}
+					f.cmdPos = false
+				case n > 0 && f.cases[n-1].phase == casePattern:
+					top := &f.cases[n-1]
+					if !isWordConcat && top.justAfterSemi && word == "esac" {
+						f.cases = f.cases[:n-1]
+					} else {
+						top.justAfterSemi = false
+						top.allowOptParen = false
+					}
+					f.cmdPos = false
+				default:
+					wasCmdPos := f.cmdPos
+					if !isWordConcat && wasCmdPos {
+						switch word {
+						case "esac":
+							if n > 0 && f.parenDepth == f.cases[n-1].parenDepth && f.cases[n-1].phase == caseBody {
+								f.cases = f.cases[:n-1]
+							}
+							f.cmdPos = false
+						case "case":
+							f.cases = append(f.cases, caseState{parenDepth: f.parenDepth, phase: caseExpectWord})
+							f.cmdPos = false
+						case "{", "if", "then", "else", "elif", "while", "until", "do", "!", "time":
+							f.cmdPos = true
+						default:
+							f.cmdPos = false
+						}
+					} else {
+						f.cmdPos = false
+					}
+				}
+			}
+		}
+	}
+	return -1
+}
+
+// hasUnquotedSingleQuoteInShellLine reports whether s[next:nextEnd], read in
+// unquoted POSIX shell mode (skipping double-quoted strings, $(...), ${...},
+// backticks, backslash escapes, and # comments), contains a single quote.
+func (h *headerQuoteScanner) hasUnquotedSingleQuoteInShellLine(next, nextEnd int) bool {
+	s := h.s
+	for k := next; k < nextEnd; {
+		switch s[k] {
+		case '\\':
+			if k+1 < nextEnd {
+				k += 2
+			} else {
+				k++
+			}
+		case '\'':
+			return true
+		case '"':
+			cPos := h.doubleQuoteCloseWithin(k+1, nextEnd)
+			if cPos < 0 {
+				return false
+			}
+			k = cPos
+		case '$':
+			if k+1 < nextEnd && s[k+1] == '(' {
+				cPos := h.cmdSubstCloseWithin(k+2, nextEnd, false)
+				if cPos < 0 {
+					return false
+				}
+				k = cPos
+				continue
+			}
+			if k+1 < nextEnd && s[k+1] == '{' {
+				cPos := h.paramExpCloseWithin(k+2, false, nextEnd, false)
+				if cPos < 0 {
+					return false
+				}
+				k = cPos
+				continue
+			}
+			if k+1 < nextEnd && s[k+1] == '\'' {
+				cPos := scanANSICQuotedClose(s[:nextEnd], k+2, false)
+				if cPos < 0 {
+					return false
+				}
+				k = cPos
+				continue
+			}
+			k++
+		case '`':
+			cPos := h.backtickCloseWithin(k+1, nextEnd, false, false)
+			if cPos < 0 {
+				return false
+			}
+			k = cPos
+		case '#':
+			if k == next || s[k-1] == ' ' || s[k-1] == '\t' || strings.IndexByte(";&|()", s[k-1]) >= 0 {
+				return false
+			}
+			k++
+		default:
+			k++
+		}
+	}
+	return false
+}
+
 // hasUnclosedQuoteOnNextLine reports whether the first non-empty line after
-// lineEnd does not open a new header and contains a single quote.
+// lineEnd does not open a new header and contains an unquoted single quote.
 func (h *headerQuoteScanner) hasUnclosedQuoteOnNextLine(lineEnd int) bool {
 	if h == nil || lineEnd >= len(h.s) || (h.s[lineEnd] != '\n' && h.s[lineEnd] != '\r') {
 		return false
+	}
+	if h.nextLineUnclosedMemo != nil {
+		if v, ok := h.nextLineUnclosedMemo[lineEnd]; ok {
+			return v
+		}
+	}
+	stamp := func(v bool) bool {
+		if h.nextLineUnclosedMemo == nil {
+			h.nextLineUnclosedMemo = make(map[int]bool)
+		}
+		h.nextLineUnclosedMemo[lineEnd] = v
+		return v
 	}
 	s := h.s
 	next := lineEnd + 1
@@ -6546,12 +9535,15 @@ func (h *headerQuoteScanner) hasUnclosedQuoteOnNextLine(lineEnd int) bool {
 		}
 	}
 	if next >= nextEnd || startsHeaderLine(s, next) {
-		return false
+		return stamp(false)
 	}
-	closePos := h.joinedQuoteCloseAt(lineEnd, "'", "")
-	return closePos > next && closePos <= nextEnd
+	return stamp(h.hasUnquotedSingleQuoteInShellLine(next, nextEnd))
 }
 
+// joinedQuoteCloses reports whether outer and inner close at or after from and
+// leave balanced shell quoting under strict lexical mode, prose-contraction
+// mode, or (when the closing quote terminates a plain prose word on its line)
+// plural-possessive mode.
 func (h *headerQuoteScanner) joinedQuoteCloses(from int, outer, inner string) bool {
 	if h == nil || from >= len(h.s) {
 		return false
@@ -6560,22 +9552,24 @@ func (h *headerQuoteScanner) joinedQuoteCloses(from int, outer, inner string) bo
 	if closePos < 0 {
 		return false
 	}
-	if outer == "'" && inner == "" && closePos > 0 && isWordApostropheAt(h.s, closePos-1) && isTrailingApostrophe(h.s, closePos-1) {
-		stops, ok := h.closeTailStops[closePos]
-		if !ok {
-			closeLineStart := strings.LastIndexAny(h.s[:closePos-1], "\r\n") + 1
-			closeLineEnd := len(h.s)
-			if nl := strings.IndexAny(h.s[closePos:], "\r\n"); nl >= 0 {
-				closeLineEnd = closePos + nl
+	if outer == "'" && inner == "" && closePos > 0 {
+		if isWordApostropheAt(h.s, closePos-1) && isTrailingApostrophe(h.s, closePos-1) {
+			stops, ok := h.closeTailStops[closePos]
+			if !ok {
+				closeLineStart := strings.LastIndexAny(h.s[:closePos-1], "\r\n") + 1
+				closeLineEnd := len(h.s)
+				if nl := strings.IndexAny(h.s[closePos:], "\r\n"); nl >= 0 {
+					closeLineEnd = closePos + nl
+				}
+				stops = h.apostropheTailStopsOnLine(closeLineStart, closePos-1, closeLineEnd, false, false)
+				if h.closeTailStops == nil {
+					h.closeTailStops = make(map[int]bool)
+				}
+				h.closeTailStops[closePos] = stops
 			}
-			stops = h.apostropheTailStopsOnLine(closeLineStart, closePos-1, closeLineEnd, false, false)
-			if h.closeTailStops == nil {
-				h.closeTailStops = make(map[int]bool)
+			if !stops {
+				return false
 			}
-			h.closeTailStops[closePos] = stops
-		}
-		if !stops {
-			return false
 		}
 	}
 	esc := inner != ""
@@ -6892,6 +9886,10 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 	curLineStart := from
 	entryOuter, entryInner := outer, inner
 	joinedMultiline := false
+	inSingleInJSON := outer == `"` && quotes != nil && hasSingleQuoteBeforeHeader(s, from) &&
+		((inner == "" && quotes.inJSON()) || (inner == `\"` && quotes.curInnerJSONKind != jsonContainerNone))
+	inSingleInEscapedText := outer == "" && inner == `\"` && quotes != nil && (quotes.curInnerSubSQ || hasSingleQuoteBeforeHeader(s, from))
+	inEscDQInInnerJSON := outer == `"` && inner == `\"` && quotes != nil && quotes.curInnerJSONKind != jsonContainerNone && hasEscDQBeforeHeader(s, from)
 	for k := from; ; {
 		if k < end {
 			if outer != "" || inner != "" {
@@ -6935,6 +9933,13 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 								case "":
 									inner = q
 								}
+							} else if inEscDQInInnerJSON && inner == `\"` && bs%4 == 3 && s[k+bs] == '"' && k < lineEnd && quotes != nil {
+								if endPos, ok := quotes.escDQCloseTargetInEscapedJSON(k+bs+1, lineEnd); ok {
+									if endPos == k+bs+1 {
+										return k, ""
+									}
+									return endPos, s[k : k+bs+1]
+								}
 							}
 							k += bs + 1
 						} else {
@@ -6948,17 +9953,72 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 						k++
 					}
 				case inner != "":
-					if outer != "" && c == outer[0] {
+					if inner == "'" && c == '\'' {
+						inner = ""
+					} else if outer != "" && c == outer[0] {
 						outer, inner = "", ""
+					} else if inner == `\"` && c == '\'' && k < lineEnd && quotes != nil {
+						if inSingleInJSON && quotes.singleQuoteClosesInEscapedJSON(k, lineEnd) {
+							return k, ""
+						}
+						if inSingleInEscapedText && (!isWordApostropheAt(s, k) || isTrailingApostrophe(s, k)) {
+							if endPos, unclosed := quotes.joinedHeaderArgEnd(k+1, lineEnd, "", false, false); unclosed == "" && endPos == k+1 {
+								return k, ""
+							}
+						}
 					}
 					k++
 				default:
+					if outer == `"` && inner == "" && quotes != nil {
+						if c == '$' && k+1 < end && (s[k+1] == '(' || s[k+1] == '{') {
+							var nextK int
+							if s[k+1] == '(' {
+								nextK = quotes.cmdSubstClosePos(k+2, quotes.inJSON())
+							} else {
+								nextK = quotes.paramExpClosePos(k+2, true, quotes.inJSON())
+							}
+							if nextK >= 0 {
+								k = nextK
+								if k > end {
+									end = len(s)
+									if nl := strings.IndexAny(s[k:], "\r\n"); nl >= 0 {
+										end = k + nl
+									}
+									curLineStart = strings.LastIndexAny(s[:k], "\r\n") + 1
+									closesChecked = false
+								}
+								continue
+							}
+						}
+						if c == '`' {
+							if nextK := quotes.backtickClosePos(k+1, true, quotes.inJSON()); nextK >= 0 {
+								k = nextK
+								if k > end {
+									end = len(s)
+									if nl := strings.IndexAny(s[k:], "\r\n"); nl >= 0 {
+										end = k + nl
+									}
+									curLineStart = strings.LastIndexAny(s[:k], "\r\n") + 1
+									closesChecked = false
+								}
+								continue
+							}
+						}
+					}
+					if inSingleInJSON && c == '\'' && outer == `"` && inner == "" && k < lineEnd {
+						if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEndAt(k+1, lineEnd, entryOuter, "'"); ok {
+							if (endPos > k+1 && s[endPos-1] == '"' && s[endPos-2] == '\'') || (endPos == k+1 && closedQuotes != "") {
+								return k, ""
+							}
+							return endPos, closedQuotes
+						}
+					}
 					if c == outer[0] {
 						outer = ""
 					}
 					k++
 				}
-				if outer == `"` && entryInner == `\"` && inner == "" && k <= lineEnd {
+				if outer == `"` && (entryInner == `\"` || (entryInner == "'" && quotes != nil && quotes.inJSON())) && inner == "" && k <= lineEnd {
 					if endPos, closedQuotes, ok := quotes.jsonWrappedInnerHeaderEndAt(k, lineEnd, entryOuter, entryInner); ok {
 						return endPos, closedQuotes
 					}
@@ -6967,7 +10027,16 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 					nestedEnd = 0
 					if joinedMultiline && (entryOuter != "" || entryInner != "") {
 						if qLen := len(prevOuter) + len(prevInner); qLen > 0 && k-qLen > from && spanEndsWithNestedHeaderPrefix(s, from, k-qLen) {
-							if nextClose := quoteCloseScan(s[:end], k, prevOuter, prevInner); nextClose >= 0 {
+							var nextClose int
+							switch {
+							case prevOuter == `"` && prevInner == "" && quotes != nil:
+								nextClose = quotes.doubleQuoteCloseWithin(k, end)
+							case prevOuter == "" && prevInner == `\"` && quotes != nil:
+								nextClose = quotes.doubleQuoteCloseJSONWithin(k, end, false)
+							default:
+								nextClose = quoteCloseScan(s[:end], k, prevOuter, prevInner)
+							}
+							if nextClose >= 0 {
 								if quotes == nil || quotes.isShellBalancedFrom(nextClose, end, quotes.inJSON()) {
 									k = nextClose
 								} else {
@@ -6987,7 +10056,7 @@ func authHeaderValueEnd(s string, from, end int, outer, inner string, canFold bo
 											p++
 											continue
 										}
-										if c == '"' || c == '}' || c == ']' {
+										if (c == '"' && jsonCloseBoundaryOK(s, p+1, end, false, true)) || ((c == '}' || c == ']') && jsonCloseBoundaryOK(s, p, end, false, true)) {
 											return p, entryInner + entryOuter
 										}
 									}
@@ -8573,14 +11642,17 @@ func redactJSONKeyValue(s string, loc []int, quotes *openQuotes) (string, int) {
 		quotes.skip(s, end)
 		return `"` + keyName + `":"` + redactedValue + `"`, end
 	}
-	if pEnd := placeholderCut(s, loc[4]); pEnd > 0 && placeholderEnds(s, pEnd, quoted) {
+	innerQuoted := quotes.innerAt(s, loc[4])
+	subSQ := quotes.subSingleAt(s, loc[4])
+	subEscDQ := quotes.subEscDoubleAt(s, loc[4])
+	if pEnd := placeholderCut(s, loc[4]); pEnd > 0 && placeholderEnds(s, pEnd, quoted, innerQuoted, subSQ, subEscDQ) {
 		if closes && pEnd > loc[4] {
 			quotes.drop()
 		}
 		quotes.skip(s, pEnd)
 		return s[loc[0]:loc[2]] + keyName + s[loc[3]:pEnd], pEnd
 	}
-	end := textValueEnd(sh, s, loc[4], loc[5], 0, quoted)
+	end := textValueEndWithEnclosing(sh, s, loc[4], loc[5], 0, quoted, innerQuoted, subSQ, subEscDQ, quotes)
 	if closes && end > loc[4] {
 		quotes.drop()
 	}
@@ -8618,23 +11690,26 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		// again.
 		return s[loc[0]:loc[7]], loc[7]
 	}
-	if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], quotes) {
+	open := brackets.before(s, loc[0])
+	if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], open > 0, quotes) {
 		// A Cookie or Set-Cookie name and a colon in prose, as in
 		// The cookie: Monster was here., which redactAuthHeaders leaves as
 		// it is too. What follows the delimiter is scanned again.
 		return s[loc[0]:loc[7]], loc[7]
 	}
-	open := brackets.before(s, loc[0])
 	start, end := loc[8], loc[9]
 	quoted := quotes.before(s, start)
+	innerQuoted := quotes.innerAt(s, start)
+	subSQ := quotes.subSingleAt(s, start)
+	subEscDQ := quotes.subEscDoubleAt(s, start)
 	keyName := scrubJSONMapKey(s[loc[2]:loc[3]], 0)
 	if pEnd := placeholderCut(s, start); pEnd > 0 {
-		if loc[4] == loc[5] && loc[2] > 0 && s[loc[2]-1] == '"' && pEnd < len(s) && s[pEnd] == '"' {
+		if loc[4] == loc[5] && loc[2] > 0 && s[loc[2]-1] == '"' && pEnd < len(s) && s[pEnd] == '"' && placeholderDelimBoundary(s, pEnd, quoted, false) {
 			brackets.skip(loc[7])
 			quotes.skip(s, loc[7])
 			return s[loc[0]:loc[7]], loc[7]
 		}
-		if pEnd <= end && (s[start] == '"' || s[start] == '\'') && pEnd < len(s) && s[pEnd] == s[start] && (pEnd+1 == len(s) || strings.IndexByte(" \t\r\n,;)]}", s[pEnd+1]) >= 0) {
+		if pEnd <= end && (s[start] == '"' || s[start] == '\'') && pEnd < len(s) && s[pEnd] == s[start] && placeholderDelimBoundary(s, pEnd+1, quoted, false) {
 			end = pEnd + 1
 			brackets.skip(end)
 			quotes.skip(s, end)
@@ -8644,7 +11719,7 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		// the value when non-whitespace characters follow it. If the
 		// placeholder ends there, keep it up to pEnd; otherwise read the
 		// full value to its end.
-		if placeholderEnds(s, pEnd, quoted) {
+		if placeholderEnds(s, pEnd, quoted, innerQuoted, subSQ, subEscDQ) || authHeaderPlaceholderEnds(s, loc, pEnd, quoted, innerQuoted) {
 			brackets.skip(pEnd)
 			quotes.skip(s, pEnd)
 			return s[loc[0]:loc[2]] + keyName + s[loc[3]:pEnd], pEnd
@@ -8670,17 +11745,18 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 		return s[loc[0]:start], start
 	case valueEndingInKeyName:
 		_, quote := unquoteValue(s[start:end])
-		end = nestedPairEndWith(sh, s, pair, end, open, quoted)
+		end = nestedPairEndWithEnclosing(sh, s, pair, end, open, quoted, innerQuoted)
 		brackets.skip(end)
 		quotes.skip(s, end)
 		return keyName + s[loc[4]:loc[5]] + s[loc[6]:loc[7]] + quote + redactedValue + quote, end
 	}
-	if redEnd := redactedPrefixEnd(s, start, end, quoted); redEnd >= 0 {
+	if redEnd := redactedPrefixEnd(s, start, end, quoted, innerQuoted, subSQ, subEscDQ); redEnd >= 0 {
 		brackets.skip(redEnd)
 		quotes.skip(s, redEnd)
 		return s[loc[0]:loc[2]] + keyName + s[loc[3]:redEnd], redEnd
 	}
-	end = textValueEnd(sh, s, start, end, open, quoted)
+	end = textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, subSQ, subEscDQ, quotes)
+	end = trimTrailingSubshellOrJSONQuotes(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
 	brackets.skip(end)
 	if q := openingQuote(s, start); q != "" && end > start && closesString(s, start, q, quoted) {
 		// The opening quote of the value, which would close the string open
@@ -8711,9 +11787,9 @@ func redactTextKeyValue(s string, loc []int, brackets *openBrackets, quotes *ope
 // a Bearer token. A pair or a quoted key whose key is not sensitive ends no
 // value, so password=[REDACTED]x=SECRET is redacted whole, as
 // password=pre"a b"x=SECRET is.
-func redactedPrefixEnd(s string, start, end int, quoted quoteKinds) int {
+func redactedPrefixEnd(s string, start, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
 	redEnd := start + len(redactedValue)
-	if redEnd >= end || !strings.HasPrefix(s[start:end], redactedValue) || !placeholderEnds(s, redEnd, quoted) {
+	if redEnd >= end || !strings.HasPrefix(s[start:end], redactedValue) || !placeholderEnds(s, redEnd, quoted, innerQuoted, subSQ, subEscDQ) {
 		return -1
 	}
 	return redEnd
@@ -8735,43 +11811,481 @@ func redactedPrefixEnd(s string, start, end int, quoted quoteKinds) int {
 // its line, as the quote that redactAuthHeaders leaves after the placeholder
 // of curl -H 'Authorization: Bearer abc' closes the string that holds the
 // header (see closingQuotesStart).
-func placeholderEnds(s string, end int, quoted quoteKinds) bool {
+func placeholderEnds(s string, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) bool {
 	if startsRedactedPair(s, end, quoted) || startsBearerKeyword(s, end) || quotesEndLine(s, end) {
 		return true
 	}
+	return placeholderEndsQuote(s, end, quoted, innerQuoted, subSQ, subEscDQ)
+}
+
+func placeholderEndsQuote(s string, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) bool {
+	if subSQ && end < len(s) && s[end] == '\'' {
+		if placeholderDelimBoundary(s, end+1, quoted|innerQuoted, true) {
+			return true
+		}
+	}
+	if subEscDQ {
+		if innerQuoted&4 != 0 && end+8 <= len(s) && s[end:end+8] == `\\\\\\\"` {
+			if placeholderDelimBoundary(s, end+8, quoted|innerQuoted, true) {
+				return true
+			}
+		} else if end+4 <= len(s) && s[end:end+4] == `\\\"` {
+			if placeholderDelimBoundary(s, end+4, quoted|innerQuoted, true) {
+				return true
+			}
+		}
+	}
 	// A closing quote after [REDACTED] that matches the enclosing quote
-	// kind, followed by whitespace, a structural delimiter, or the end
-	// of the string, ends the placeholder. This prevents redactTextKeyValue
-	// from eating the closing quote and the rest of the line (as in
-	// 'Authorization: [REDACTED]' user=bob). The quote must match the
-	// enclosing quote kind so that password=[REDACTED]" secret" (where
-	// no quote is open before [REDACTED]) still redacts " secret".
-	if quoted != 0 {
+	// kind (outer or nested), followed by whitespace, a structural delimiter,
+	// or the end of the string, ends the placeholder. This prevents
+	// redactTextKeyValue from eating the closing quote and the rest of the
+	// line (as in 'Authorization: [REDACTED]' user=bob or JSON-wrapped
+	// shell/nested-JSON values). The quote must match an active enclosing
+	// quote kind so that password=[REDACTED]" secret" (where no quote is
+	// open before [REDACTED]) still redacts " secret".
+	enclosing := quoted | innerQuoted
+	if enclosing != 0 {
 		if q := openingQuote(s, end); q != "" {
 			k := end + len(q)
-			matched := quoted&quoteKind(q) != 0
-			if !matched && len(q) == 2 && quoted&quoteKind(q[1:2]) != 0 {
+			qk := quoteKind(q)
+			matched := enclosing&qk != 0
+			if matched {
+				enclosing &^= qk
+			} else if len(q) == 2 && enclosing&quoteKind(q[1:2]) != 0 {
 				if k < len(s) && s[k] == q[1] {
 					k++
 				}
+				enclosing &^= quoteKind(q[1:2])
 				matched = true
-			} else if matched && len(q) == 2 && k < len(s) && (s[k] == '"' || s[k] == '\'') && quoted&quoteKind(s[k:k+1]) != 0 {
+			}
+			if matched && len(q) == 2 && k < len(s) && (s[k] == '"' || s[k] == '\'') && enclosing&quoteKind(s[k:k+1]) != 0 {
+				enclosing &^= quoteKind(s[k : k+1])
 				k++
 			}
-			if matched {
-				for k < len(s) && (s[k] == '"' || s[k] == '\'') && quoted&quoteKind(s[k:k+1]) != 0 {
-					k++
-				}
-				if k >= len(s) {
-					return true
-				}
-				if s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r' || s[k] == ',' || s[k] == ';' || s[k] == ')' || s[k] == ']' || s[k] == '}' {
-					return true
-				}
+			if matched && placeholderDelimBoundary(s, k, enclosing, true) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func hasUnnestedEscapedDoubleQuote(s string) bool {
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\\' {
+			j++
+		}
+		if j < len(s) && s[j] == '"' && (j-i)%4 == 1 {
+			return true
+		}
+		i = j
+	}
+	return false
+}
+
+func hasUnescapedDoubleQuote(s string) bool {
+	bs := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' {
+			bs++
+			continue
+		}
+		if s[i] == '"' && bs%2 == 0 {
+			return true
+		}
+		bs = 0
+	}
+	return false
+}
+
+func skipJSONWhitespace(s string, k int) int {
+	for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\r' || s[k] == '\n') {
+		k++
+	}
+	return k
+}
+
+func trimTrailingJSONEscapedWSAndClosers(s string, start, end int) (cand int, trimmedWS bool) {
+	cand = end
+	for cand > start {
+		c := s[cand-1]
+		if c == ')' || c == ']' || c == '}' {
+			cand--
+			continue
+		}
+		if c == ' ' || c == '\t' || c == '\r' || c == '\n' {
+			cand--
+			trimmedWS = true
+			continue
+		}
+		if cand >= start+2 && (c == 'n' || c == 'r' || c == 't') && s[cand-2] == '\\' {
+			k := cand - 2
+			for k > start && s[k-1] == '\\' {
+				k--
+			}
+			if (cand-1-k)%2 == 1 {
+				cand -= 2
+				trimmedWS = true
+				continue
+			}
+		}
+		break
+	}
+	return cand, trimmedWS
+}
+
+func enclosingSQClosedAt(s string, start, cand int, quoted quoteKinds, subSQ bool) bool {
+	if cand <= start || s[cand-1] != '\'' {
+		return false
+	}
+	bs := 0
+	if subSQ {
+		cur := true
+		for i := start; i < cand; i++ {
+			if s[i] == '\\' {
+				bs++
+				continue
+			}
+			b := bs
+			bs = 0
+			if s[i] != '\'' || b%2 == 1 {
+				continue
+			}
+			if cur {
+				if isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+					continue
+				}
+				cur = false
+			} else if (!isMidWordApostrophe(s, i) || opensPrefixedString(s, i)) && !isTrailingApostrophe(s, i) {
+				cur = true
+			}
+		}
+		return !cur
+	}
+	if quoted&2 == 0 {
+		return false
+	}
+	cur := quoteKinds(2)
+	for i := start; i < cand; i++ {
+		if s[i] == '\\' {
+			bs++
+			continue
+		}
+		b := bs
+		bs = 0
+		if s[i] != '\'' || b%2 == 1 {
+			continue
+		}
+		if isApostrophe(s, i, 2, cur) {
+			continue
+		}
+		switch cur {
+		case 0:
+			cur = 2
+		case 2:
+			cur = 0
+		}
+	}
+	return cur == 0
+}
+
+func hasJSONValueCloserAfter(s string, after int, allowEscWS bool) bool {
+	ws := skipJSONWhitespace(s, after)
+	for allowEscWS && ws+1 < len(s) && s[ws] == '\\' && (s[ws+1] == 'n' || s[ws+1] == 'r' || s[ws+1] == 't') {
+		ws = skipJSONWhitespace(s, ws+2)
+	}
+	return ws < len(s) && (s[ws] == ',' || s[ws] == '}' || s[ws] == ']')
+}
+
+func trimUnclosedOuterClosingQuote(s string, start, end int, q string, quoted, innerQuoted quoteKinds) int {
+	enclosing := (quoted | innerQuoted) &^ quoteKind(q)
+	if enclosing == 0 {
+		return end
+	}
+	if s[end-1] == '"' || s[end-1] == '\'' {
+		bs := 0
+		for k := end - 2; k >= start && s[k] == '\\'; k-- {
+			bs++
+		}
+		qk := quoteKinds(1)
+		if s[end-1] == '\'' {
+			qk = 2
+		}
+		switch {
+		case bs%2 == 0 && enclosing&qk != 0:
+			if qk == 2 && isApostrophe(s, end-1, 2, 2) {
+				return end
+			}
+			if endsString(s, end-1, s[end-1:end], enclosing) && hasJSONValueCloserAfter(s, end, innerQuoted&4 != 0) {
+				return end - 1
+			}
+		case bs%4 == 1 && end >= start+2 && enclosing&(qk<<2) != 0:
+			if endsString(s, end-2, s[end-2:end], enclosing) && hasJSONValueCloserAfter(s, end, true) {
+				return end - 2
+			}
+		}
+	}
+	return end
+}
+
+func startsJSONObjectCommaMember(s string, commaIdx int) bool {
+	if commaIdx < 0 || commaIdx >= len(s) || s[commaIdx] != ',' {
+		return false
+	}
+	j := skipJSONWhitespace(s, commaIdx+1)
+	if j >= len(s) || s[j] != '"' {
+		return false
+	}
+	j++
+	limit := min(len(s), j+256)
+	for j < limit {
+		if s[j] == '\\' {
+			if j+1 >= limit {
+				return false
+			}
+			j += 2
+			continue
+		}
+		if s[j] == '"' {
+			k := skipJSONWhitespace(s, j+1)
+			return k < len(s) && s[k] == ':'
+		}
+		if s[j] == '\n' || s[j] == '\r' {
+			return false
+		}
+		j++
+	}
+	return false
+}
+
+func trimTrailingSubshellOrJSONQuotes(s string, start, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
+	if end <= start {
+		return end
+	}
+	if q := openingQuote(s, start); q != "" {
+		if _, quote := unquoteValue(s[start:end]); quote == "" {
+			return trimUnclosedOuterClosingQuote(s, start, end, q, quoted, innerQuoted)
+		}
+		return end
+	}
+	if quoted&1 == 0 {
+		if !subSQ && innerQuoted == 0 && !subEscDQ {
+			cand, trimmedWS := trimTrailingJSONEscapedWSAndClosers(s, start, end)
+			bracketCand := end
+			for bracketCand > start && (s[bracketCand-1] == ')' || s[bracketCand-1] == ']' || s[bracketCand-1] == '}') {
+				bracketCand--
+			}
+			delimOK := bracketCand < end || (end < len(s) && strings.IndexByte(";|&)]}", s[end]) >= 0)
+			switch {
+			case quoted&2 != 0:
+				ws := skipHorizDelimSpace(s, end)
+				shellAfterWS := ws > end && ws < len(s) && (strings.IndexByte(";|&)]}(`", s[ws]) >= 0 || strings.HasPrefix(s[ws:], "$("))
+				hasInteriorSQ := bracketCand > start+1 && strings.ContainsRune(s[start:bracketCand-1], '\'')
+				if bracketCand > start+1 && s[bracketCand-1] == '\'' && enclosingSQClosedAt(s, start, bracketCand, quoted, false) &&
+					(delimOK || shellAfterWS || (hasInteriorSQ && placeholderDelimBoundary(s, end, quoted&^2, true) && !startsRedactedPair(s, ws, quoted&^2))) {
+					return bracketCand - 1
+				}
+			case quoted&4 != 0:
+				if cand >= start+2 && s[cand-1] == '"' {
+					bs := 0
+					for k := cand - 2; k >= 0 && s[k] == '\\'; k-- {
+						bs++
+					}
+					wsOK := trimmedWS && placeholderDelimBoundary(s, end, quoted, true)
+					if bs%4 == 1 && !hasUnnestedEscapedDoubleQuote(s[start:cand-2]) && (delimOK || wsOK) {
+						return cand - 2
+					}
+				}
+			case quoted&8 != 0:
+				if bracketCand >= start+2 && s[bracketCand-1] == '\'' {
+					bs := 0
+					for k := bracketCand - 2; k >= 0 && s[k] == '\\'; k-- {
+						bs++
+					}
+					if bs%4 == 1 && !strings.Contains(s[start:bracketCand-2], `\'`) && delimOK {
+						return bracketCand - 2
+					}
+				}
+			}
+		}
+		return end
+	}
+	if !subSQ && innerQuoted&4 == 0 && !subEscDQ {
+		cand := end
+		for cand > start && (s[cand-1] == ')' || s[cand-1] == ']' || s[cand-1] == '}') {
+			cand--
+		}
+		if cand > start+1 && s[cand-1] == '"' {
+			bs := 0
+			for k := cand - 2; k >= start && s[k] == '\\'; k-- {
+				bs++
+			}
+			noUnescDQ := !hasUnescapedDoubleQuote(s[start : cand-1])
+			escQuoteOnly := strings.ContainsRune(s[start:cand-1], '"') && noUnescDQ
+			ws := skipJSONWhitespace(s, end)
+			jsonClose := cand < end || (ws < len(s) && (s[ws] == ',' || s[ws] == '}' || s[ws] == ']') && placeholderDelimBoundary(s, ws, quoted&^1, false))
+			innerQuoteOrSub := escQuoteOnly || ((subSQ || subEscDQ || openingQuote(s, start) != "") && noUnescDQ)
+			prettyOrStructClose := (ws > end || (cand >= start+2 && s[cand-2] == ')') || startsJSONObjectCommaMember(s, ws)) && noUnescDQ
+			if bs%2 == 0 && ((!strings.ContainsRune(s[start:cand-1], '"') && (cand < end || (end < len(s) && s[end] == ')'))) || ((innerQuoteOrSub || prettyOrStructClose) && jsonClose)) {
+				return cand - 1
+			}
+		}
+		return end
+	}
+	p := end
+	remClose := quoted
+	boundaryOK := false
+	if remClose&1 != 0 && p > start && s[p-1] == '"' {
+		bs := 0
+		for k := p - 2; k >= start && s[k] == '\\'; k-- {
+			bs++
+		}
+		if bs%2 == 0 && placeholderDelimBoundary(s, p, remClose&^1, false) {
+			p--
+			remClose &^= 1
+			boundaryOK = true
+		}
+	}
+	if innerQuoted&4 != 0 && p >= start+2 {
+		cand, _ := trimTrailingJSONEscapedWSAndClosers(s, start, p)
+		if cand >= start+2 && s[cand-2:cand] == `\"` {
+			bs := 1
+			for k := cand - 3; k >= 0 && s[k] == '\\'; k-- {
+				bs++
+			}
+			if bs%4 == 1 && !hasUnnestedEscapedDoubleQuote(s[start:cand-2]) && (boundaryOK || placeholderDelimBoundary(s, p, remClose, true)) {
+				p = cand - 2
+				boundaryOK = true
+			}
+		}
+	}
+	if subEscDQ {
+		cand := p
+		for cand > start && (s[cand-1] == ')' || s[cand-1] == ']' || s[cand-1] == '}') {
+			cand--
+		}
+		if cand >= start+4 && s[cand-1] == '"' {
+			bs := 0
+			for k := cand - 2; k >= 0 && s[k] == '\\'; k-- {
+				bs++
+			}
+			qLen := 0
+			if innerQuoted&4 != 0 && bs%8 == 7 && cand >= start+8 {
+				qLen = 8
+			} else if bs%4 == 3 {
+				qLen = 4
+			}
+			if qLen > 0 && !strings.Contains(s[start:cand-qLen], `\"`) && (boundaryOK || placeholderDelimBoundary(s, p, remClose, true)) {
+				p = cand - qLen
+				boundaryOK = true
+			}
+		}
+	}
+	if subSQ && p > start {
+		cand := p
+		for cand > start && (s[cand-1] == ')' || s[cand-1] == ']' || s[cand-1] == '}') {
+			cand--
+		}
+		if cand > start && s[cand-1] == '\'' && enclosingSQClosedAt(s, start, cand, quoted, true) && (boundaryOK || placeholderDelimBoundary(s, p, remClose, true)) {
+			p = cand - 1
+		}
+	}
+	if p == start {
+		return end
+	}
+	return p
+}
+
+// authHeaderPlaceholderEnds preserves an outer wrapper quote right after a
+// redaction placeholder (e.g. 'X-Api-Key: [REDACTED]';) when quoted == 0,
+// preventing subsequent passes from losing track of the closing quote and
+// swallowing trailing text.
+func authHeaderPlaceholderEnds(s string, loc []int, end int, quoted, innerQuoted quoteKinds) bool {
+	if len(loc) < 8 || loc[4] != loc[5] || loc[2] <= 0 || end >= len(s) {
+		return false
+	}
+	if !strings.Contains(s[loc[5]:loc[7]], ":") {
+		return false
+	}
+	hdr := s[loc[2]:loc[7]]
+	if !authHeaderKeys.mayStartAt(hdr, 0) || authHeaderPrefixAtRe.FindStringIndex(hdr) == nil {
+		return false
+	}
+	qStart := loc[2]
+	for qStart > 0 && (s[qStart-1] == ' ' || s[qStart-1] == '\t') {
+		qStart--
+	}
+	if qStart <= 0 {
+		return false
+	}
+	prev := s[qStart-1]
+	if prev != '\'' && prev != '"' {
+		return false
+	}
+	bs := 0
+	for k := qStart - 2; k >= 0 && s[k] == '\\'; k-- {
+		bs++
+	}
+	q := s[qStart-1 : qStart]
+	nestedEscDQ := prev == '"' && bs%4 == 3 && qStart >= 4 && s[qStart-4:qStart] == `\\\"` && (quoted|innerQuoted)&quoteKind(`\"`) != 0
+	if nestedEscDQ {
+		q = s[qStart-4 : qStart]
+	} else if bs%2 == 1 {
+		q = s[qStart-2 : qStart]
+	}
+	if !nestedEscDQ && quoted&quoteKind(q) != 0 {
+		return false
+	}
+	if !strings.HasPrefix(s[end:], q) {
+		return false
+	}
+	after := end + len(q)
+	enclosing := quoted | innerQuoted
+	if !nestedEscDQ {
+		enclosing = quoted | (innerQuoted &^ quoteKind(q))
+	}
+	return placeholderDelimBoundary(s, after, enclosing, true)
+}
+
+func placeholderDelimBoundary(s string, k int, closingQuotes quoteKinds, allowAmpPipe bool) bool {
+	startK := k
+	sawBracket := false
+	for {
+		if k >= len(s) {
+			return true
+		}
+		switch s[k] {
+		case ' ', '\t', '\r', '\n', ',', ';':
+			return true
+		case '|':
+			return allowAmpPipe
+		case '&':
+			return allowAmpPipe && (k+1 >= len(s) || s[k+1] == '&' || s[k+1] == ' ' || s[k+1] == '\t')
+		case ')', ']', '}':
+			sawBracket = true
+			k++
+			continue
+		default:
+			if s[k] == '\\' && k+1 < len(s) && (s[k+1] == 'n' || s[k+1] == 'r' || s[k+1] == 't') {
+				k += 2
+				continue
+			}
+			if aq := openingQuote(s, k); aq != "" && closingQuotes&quoteKind(aq) != 0 {
+				closingQuotes &^= quoteKind(aq)
+				k += len(aq)
+				continue
+			}
+			if !sawBracket && k > startK && (startsRedactedPair(s, k, 0) || startsBearerKeyword(s, k)) {
+				return true
+			}
+			return false
+		}
+	}
 }
 
 // quotesEndLine reports whether s[i:] starts with quotes, each of which may
@@ -9359,6 +12873,10 @@ func gluedQuotedKeyStart(s string, start, end int, quoted quoteKinds) int {
 // unclosedQuoteOpens): quoted holds the quotes that leave a string open before
 // the value.
 func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
+	return textValueEndWithEnclosing(sh, s, start, end, open, quoted, 0, false, false, nil)
+}
+
+func textValueEndWithEnclosing(sh *shellAssignScanner, s string, start, end, open int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool, quotes *openQuotes) int {
 	if q := openingQuote(s, start); q != "" {
 		if closesString(s, start, q, quoted) && !ownsQuotedValue(s, start, end, q) {
 			return start
@@ -9373,17 +12891,17 @@ func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted
 			// the same kind closes the value. Extend end to that later closing
 			// quote so the full passphrase is redacted.
 			if strings.HasSuffix(q, "'") && end > start+len(q) {
-				if nextEnd := interiorApostropheEnd(sh, s, start, end, q, quoted); nextEnd > end {
-					if strings.HasSuffix(s[start:nextEnd], q) && (!quotedValueEnds(s[start:], nextEnd-start, quoted) || opensDelimitedValue(sh, s, nextEnd, quoted)) {
-						return runOnValueEnd(sh, s, start, nextEnd, open, quoted)
+				if nextEnd := interiorApostropheEnd(sh, s, start, end, q, quoted|innerQuoted); nextEnd > end {
+					if strings.HasSuffix(s[start:nextEnd], q) && (!quotedValueEnds(s[start:], nextEnd-start, quoted|innerQuoted) || opensDelimitedValueWithEnclosing(sh, s, nextEnd, open, quoted, innerQuoted)) {
+						return runOnValueEndWithEnclosing(sh, s, start, nextEnd, open, quoted, innerQuoted, subSQ)
 					}
 					return nextEnd
 				}
 			}
-			return runOnValueEnd(sh, s, start, end, open, quoted)
+			return runOnValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, subSQ)
 		}
-		if unclosedQuoteOpens(s, start, q, true, quoted) {
-			return len(s)
+		if unclosedQuoteOpens(s, start, q, true, quoted|innerQuoted) {
+			return unclosedEnclosingEnd(s, start+len(q), open, q, quoted, innerQuoted)
 		}
 	}
 	// A bare value that ends at a backslash-escaped line break, as in
@@ -9403,6 +12921,7 @@ func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted
 		if g := gluedQuotedKeyStart(s, start, end, quoted); g > start {
 			return g
 		}
+		end = extendSubshellQuotedValueEnd(quotes, s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
 	}
 	// rest is where the text after a JSON object or array value starts.
 	rest := sensitiveValueEndWith(sh, s, start, start)
@@ -9418,12 +12937,15 @@ func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted
 		if rest > start && !endsString(s, rest, openingQuote(s, rest), quoted) {
 			from = rest - 1
 		}
-		if opened := openedValueEnd(sh, s, from, end, open, false, quoted); opened > end {
+		if opened := openedValueEndWithEnclosing(sh, s, from, end, open, false, quoted, innerQuoted, subSQ, subEscDQ); opened != end {
+			if opened < end && opened >= start {
+				return rest + len(trimEnclosingClosers(s[rest:max(opened, rest)], open))
+			}
 			return opened
 		}
 	}
 	if rest == start {
-		if spaced := spacedValueEnd(sh, s, end, open, quoted); spaced > end {
+		if spaced := spacedValueEndWithEnclosing(sh, s, end, open, quoted, innerQuoted); spaced > end {
 			return spaced
 		}
 	}
@@ -9451,27 +12973,90 @@ func textValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted
 // ends in a delimiter, as the "x": of password="a""x": "b" does, runs on over
 // the quoted value, object or array that whitespace and the delimiter open
 // (see delimitedValueEnd), so that no value is left after it without its key.
+func unclosedEnclosingEnd(s string, afterOpen, open int, q string, quoted, innerQuoted quoteKinds) int {
+	enclosing := (quoted | innerQuoted) &^ quoteKind(q)
+	if enclosing == 0 || (open == 0 && innerQuoted&(4|8) == 0) {
+		return len(s)
+	}
+	for k := afterOpen; k < len(s); {
+		c := s[k]
+		if c == '\n' || c == '\r' {
+			return len(s)
+		}
+		if c == '\\' {
+			j := k
+			for j < len(s) && s[j] == '\\' {
+				j++
+			}
+			bs := j - k
+			if j < len(s) && (s[j] == '"' || s[j] == '\'') {
+				if bs%4 == 1 {
+					qk := quoteKinds(4)
+					if s[j] == '\'' {
+						qk = 8
+					}
+					if enclosing&qk != 0 && endsString(s, j-1, s[j-1:j+1], enclosing) && hasJSONValueCloserAfter(s, j+1, true) {
+						return j - 1
+					}
+				} else if bs%2 == 0 {
+					qk := quoteKinds(1)
+					if s[j] == '\'' {
+						qk = 2
+					}
+					if enclosing&qk != 0 && (qk != 2 || !isApostrophe(s, j, 2, 2)) && endsString(s, j, s[j:j+1], enclosing) && hasJSONValueCloserAfter(s, j+1, innerQuoted&4 != 0) {
+						return j
+					}
+				}
+				k = j + 1
+				continue
+			}
+			if bs%2 == 0 {
+				k = j
+				continue
+			}
+			if j < len(s) && s[j] != '\n' && s[j] != '\r' {
+				k = j + 1
+				continue
+			}
+			k = j
+			continue
+		}
+		if c == '"' && enclosing&1 != 0 && endsString(s, k, `"`, enclosing) && hasJSONValueCloserAfter(s, k+1, innerQuoted&4 != 0) {
+			return k
+		}
+		if c == '\'' && enclosing&2 != 0 && !isApostrophe(s, k, 2, 2) && endsString(s, k, `'`, enclosing) && hasJSONValueCloserAfter(s, k+1, innerQuoted&4 != 0) {
+			return k
+		}
+		k++
+	}
+	return len(s)
+}
+
 func runOnValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
+	return runOnValueEndWithEnclosing(sh, s, start, end, open, quoted, 0, false)
+}
+
+func runOnValueEndWithEnclosing(sh *shellAssignScanner, s string, start, end, open int, quoted, innerQuoted quoteKinds, subSQ bool) int {
 	inner, _ := unquoteValue(s[start:end])
 	if opensLaterValue(inner, s[end:]) {
-		return forwardValueEnd(sh, s, start, end, open, quoted)
+		return forwardValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted)
 	}
 	if kind, pair := afterClosedQuotePair(sh, s, end, quoted); kind == valueEndingInKeyName {
-		return nestedPairEndWith(sh, s, pair, end, open, quoted)
+		return nestedPairEndWithEnclosing(sh, s, pair, end, open, quoted, innerQuoted)
 	}
 	if startsRedactedPair(s, end, quoted) {
 		return end
 	}
-	word := runOnWordEnd(sh, s, end, quoted)
+	word := runOnWordEndWithEnclosing(sh, s, end, open, quoted, innerQuoted, subSQ)
 	for word > end && (s[word-1] == ':' || s[word-1] == '=') {
-		e, runsOn := delimitedValueEnd(sh, s, word, quoted)
+		e, runsOn := delimitedValueEndWithEnclosing(sh, s, word, open, quoted, innerQuoted)
 		if e < 0 {
 			break
 		}
 		if !runsOn {
 			return e
 		}
-		end, word = e, runOnWordEnd(sh, s, e, quoted)
+		end, word = e, runOnWordEndWithEnclosing(sh, s, e, open, quoted, innerQuoted, subSQ)
 	}
 	return end + len(trimEnclosingClosers(s[end:word], open))
 }
@@ -9485,8 +13070,8 @@ func runOnValueEnd(sh *shellAssignScanner, s string, start, end, open int, quote
 // is not closed opens a value that runs on to the end of s (see
 // unclosedQuoteOpens). sh, if bound to s, keeps what it works out (see
 // delimitedChainEnd).
-func delimitedValueEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (int, bool) {
-	d := delimitedChainEnd(sh, s, i, quoted)
+func delimitedValueEndWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds) (int, bool) {
+	d := delimitedChainEndWithEnclosing(sh, s, i, open, quoted, innerQuoted)
 	return d.end, d.runsOn
 }
 
@@ -9494,8 +13079,12 @@ func delimitedValueEnd(sh *shellAssignScanner, s string, i int, quoted quoteKind
 // brackets (")", "]" or "}") and ":" followed by horizontal whitespace and a
 // quoted value, JSON object or JSON array (see delimitedValueEnd).
 func opensDelimitedValue(sh *shellAssignScanner, s string, i int, quoted quoteKinds) bool {
+	return opensDelimitedValueWithEnclosing(sh, s, i, 0, quoted, 0)
+}
+
+func opensDelimitedValueWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds) bool {
 	if j := delimiterAfterClosers(s, i); j >= 0 {
-		return delimitedChainEnd(sh, s, j+1, quoted).end >= 0
+		return delimitedChainEndWithEnclosing(sh, s, j+1, open, quoted, innerQuoted).end >= 0
 	}
 	return false
 }
@@ -9521,8 +13110,12 @@ type delimitedEnd struct {
 
 // delimitedKey returns the key of shellAssignScanner.delimited for what
 // delimitedValueEnd returns at s[i:] when the quotes in quoted are open.
-func delimitedKey(i int, quoted quoteKinds) int {
-	return i<<8 | int(quoted)
+func delimitedKey(i, open int, quoted, innerQuoted quoteKinds) int {
+	openBit := 0
+	if open > 0 {
+		openBit = 1
+	}
+	return i<<9 | openBit<<8 | int(innerQuoted&0xf)<<4 | int(quoted&0xf)
 }
 
 // delimitedChainEnd returns what delimitedValueEnd returns for s[i:]. What
@@ -9534,8 +13127,9 @@ func delimitedKey(i int, quoted quoteKinds) int {
 // of the chain again from each value, and sh, if bound to s, keeps what it
 // worked out for each, so that a caller that asks about each value of the
 // chain in turn, as runOnValueEnd does, reads the chain once.
-func delimitedChainEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) delimitedEnd {
+func delimitedChainEndWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds) delimitedEnd {
 	bound := sh.boundTo(s)
+	enclosing := quoted | innerQuoted
 	// chain holds, for each value whose result waits on the next one, the
 	// offset it was asked about, where its quote opens and where it ends.
 	type link struct{ from, at, end int }
@@ -9543,16 +13137,16 @@ func delimitedChainEnd(sh *shellAssignScanner, s string, i int, quoted quoteKind
 	var d delimitedEnd
 	for {
 		if bound {
-			if memo, ok := sh.delimited[delimitedKey(i, quoted)]; ok {
+			if memo, ok := sh.delimited[delimitedKey(i, open, quoted, innerQuoted)]; ok {
 				d = memo
 				break
 			}
 		}
-		step, at, next := delimitedStep(sh, s, i, quoted)
+		step, at, next := delimitedStepWithEnclosing(sh, s, i, open, quoted, innerQuoted)
 		if next < 0 {
 			d = step
 			if bound {
-				sh.keepDelimited(i, quoted, d)
+				sh.keepDelimited(i, open, quoted, innerQuoted, d)
 			}
 			break
 		}
@@ -9564,13 +13158,13 @@ func delimitedChainEnd(sh *shellAssignScanner, s string, i int, quoted quoteKind
 		switch {
 		case d.end >= 0:
 			d = delimitedEnd{end: l.end, runsOn: true}
-		case valueStartsAt(s, l.at, true, quoted):
+		case valueStartsAt(s, l.at, true, enclosing):
 			d = delimitedEnd{end: l.end}
 		default:
 			d = delimitedEnd{end: -1}
 		}
 		if bound {
-			sh.keepDelimited(l.from, quoted, d)
+			sh.keepDelimited(l.from, open, quoted, innerQuoted, d)
 		}
 	}
 	return d
@@ -9578,11 +13172,11 @@ func delimitedChainEnd(sh *shellAssignScanner, s string, i int, quoted quoteKind
 
 // keepDelimited records d as what delimitedValueEnd returns at s[i:] when
 // the quotes in quoted are open.
-func (sc *shellAssignScanner) keepDelimited(i int, quoted quoteKinds, d delimitedEnd) {
+func (sc *shellAssignScanner) keepDelimited(i, open int, quoted, innerQuoted quoteKinds, d delimitedEnd) {
 	if sc.delimited == nil {
 		sc.delimited = make(map[int]delimitedEnd)
 	}
-	sc.delimited[delimitedKey(i, quoted)] = d
+	sc.delimited[delimitedKey(i, open, quoted, innerQuoted)] = d
 }
 
 // delimitedStep works out what delimitedValueEnd returns for s[i:] where
@@ -9592,8 +13186,9 @@ func (sc *shellAssignScanner) keepDelimited(i int, quoted quoteKinds, d delimite
 // ":" opens another value: it returns the end of the value in d.end, where
 // its quote opens in at, and next, the offset after the ":", where the
 // caller reads on.
-func delimitedStep(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (d delimitedEnd, at, next int) {
+func delimitedStepWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds) (d delimitedEnd, at, next int) {
 	none := delimitedEnd{end: -1}
+	enclosing := quoted | innerQuoted
 	at = skipHorizDelimSpace(s, i)
 	if at == i || at >= len(s) {
 		return none, at, -1
@@ -9602,24 +13197,24 @@ func delimitedStep(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (
 		return delimitedEnd{end: sensitiveValueEndWith(sh, s, at, at)}, at, -1
 	}
 	quote := openingQuote(s, at)
-	if quote == "" || closesString(s, at, quote, quoted) {
+	if quote == "" || closesString(s, at, quote, enclosing) {
 		return none, at, -1
 	}
 	q := quotedValueAt(sh, s, at)
 	if q == "" {
-		if unclosedQuoteOpens(s, at, quote, true, quoted) {
-			return delimitedEnd{end: len(s)}, at, -1
+		if unclosedQuoteOpens(s, at, quote, true, enclosing) {
+			return delimitedEnd{end: unclosedEnclosingEnd(s, at+len(quote), open, quote, quoted, innerQuoted)}, at, -1
 		}
 		return none, at, -1
 	}
 	end := at + len(q)
-	if !quotedValueEnds(s[at:], len(q), quoted) {
+	if !quotedValueEnds(s[at:], len(q), enclosing) {
 		return delimitedEnd{end: end, runsOn: true}, at, -1
 	}
 	if j := delimiterAfterClosers(s, end); j >= 0 {
 		return delimitedEnd{end: end}, at, j + 1
 	}
-	if !valueStartsAt(s, at, true, quoted) {
+	if !valueStartsAt(s, at, true, enclosing) {
 		return none, at, -1
 	}
 	return delimitedEnd{end: end}, at, -1
@@ -9645,56 +13240,112 @@ func delimitedStep(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (
 // DB_PASSWORD="a"pre' violetfern's is not. A single quote that
 // quotedValueRegex finds no closing quote for is closed by the quote of a
 // later \' on its line, as a shell reads it (see shellQuotedSegment).
-func runOnWordEnd(sh *shellAssignScanner, s string, i int, quoted quoteKinds) int {
-	end, _ := runOnWord(sh, s, i, quoted)
+func closesJSONContainerValue(s string, i int, q string, enclosing, innerQuoted quoteKinds, open int) bool {
+	if open == 0 && innerQuoted&quoteKind(q) == 0 {
+		return false
+	}
+	if !endsString(s, i, q, enclosing) {
+		return false
+	}
+	return hasJSONValueCloserAfter(s, i+len(q), innerQuoted&4 != 0)
+}
+
+// runOnWordEndWithEnclosing returns the end of the word starting at s[i:], stopping before
+// a closing quote that terminates an enclosing JSON container string.
+func runOnWordEndWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds, subSQ bool) int {
+	end, _ := runOnWordWithEnclosing(sh, s, i, open, quoted, innerQuoted, subSQ)
 	return end
 }
 
 // runOnWord returns the end of the word that starts at s[i:] (see
-// runOnWordEnd) and whether every quoted part that the word joins closes in
+// runOnWordEndWithEnclosing) and whether every quoted part that the word joins closes in
 // it, as the shell reads the word: not if a joined quote that no quote closes
 // runs the word on to the end of the text (see unclosedQuoteOpens), which
 // leaves the string that the quote opens open, nor if the word ends after a
 // quote that closes a string open before the word (see startsQuotedKey).
 func runOnWord(sh *shellAssignScanner, s string, i int, quoted quoteKinds) (int, bool) {
+	return runOnWordWithEnclosing(sh, s, i, 0, quoted, 0, false)
+}
+
+func runOnWordWithEnclosing(sh *shellAssignScanner, s string, i, open int, quoted, innerQuoted quoteKinds, subSQ bool) (int, bool) {
 	joined := true
+	enclosing := quoted | innerQuoted
+	allQuoted := enclosing
+	if subSQ {
+		allQuoted |= 2
+	}
 	for i < len(s) {
-		if q := openingQuote(s, i); q != "" && !endsString(s, i, q, quoted) {
-			if !joined && startsQuotedKey(s[i+len(q):], quoted) {
-				// A quote after bare word bytes that a sensitive or
-				// preserved quoted key and its value follow (see
-				// startsQuotedKey) closes the string that the word ends,
-				// as the quote after QQSA in "token":" a b "QQSA""token":
-				// does, rather than opening an empty string that joins
-				// the key to the word: the word ends after the quote, and
-				// the pair after it is matched on its own.
-				return i + len(q), false
+		if s[i] == '\\' {
+			j := i
+			for j < len(s) && s[j] == '\\' {
+				j++
 			}
-			m := findQuotedOrShellSegment(sh, s, i)
-			if m != "" {
-				inner, _ := unquoteValue(m)
-				last, _ := utf8.DecodeLastRuneInString(inner)
-				hasNL := spansLine(sh, s, i, len(m))
-				if !hasNL && (joined || !strings.HasSuffix(q, "'")) ||
-					!multilineContractionOpensPair(sh, s, i, m, quoted) &&
-						(quotedValueEnds(s[i:], len(m), quoted) ||
-							openingQuote(s, i+len(m)) != "" ||
-							(!startsContraction(s, i, len(q)) || !isDelimSpace(last)) && (!hasNL || !isDelimSpace(last)) && closingQuoteJoins(sh, s, i, m, true)) {
-					i += len(m)
-					joined = true
+			nBS := j - i
+			if j < len(s) && (s[j] == '"' || s[j] == '\'') && nBS%2 == 1 {
+				if nBS%4 == 1 {
+					if closesJSONContainerValue(s, j-1, s[j-1:j+1], enclosing, innerQuoted, open) {
+						return j - 1, false
+					}
+					if endsString(s, j-1, s[j-1:j+1], quoted) {
+						i = j + 1
+						joined = false
+						continue
+					}
+					i = j - 1
+				} else {
+					i = j + 1
+					joined = false
 					continue
 				}
-			} else {
-				// A quote that no quote closes opens a part that runs on to
-				// the end of the text, past its line too, as a shell reads
-				// it: DB_PASSWORD="a"pre'correct<LF>SECRET is one value. The
-				// closed part that the word starts with makes it a shell
-				// word, so a single quote that would read as the apostrophe
-				// of a contraction or a word in prose opens a part too, as
-				// those of DB_PASSWORD="a"pre'd secret and
-				// DB_PASSWORD="a"pre'<LF>SECRET do.
-				if unclosedQuoteOpens(s, i, q, true, quoted) {
-					return len(s), false
+			} else if nBS%2 == 0 {
+				i = j
+				joined = false
+				if i >= len(s) {
+					break
+				}
+			}
+		}
+		if q := openingQuote(s, i); q != "" {
+			if closesJSONContainerValue(s, i, q, enclosing, innerQuoted, open) {
+				return i, false
+			}
+			if !endsString(s, i, q, allQuoted) {
+				if !joined && startsQuotedKey(s[i+len(q):], quoted) {
+					// A quote after bare word bytes that a sensitive or
+					// preserved quoted key and its value follow (see
+					// startsQuotedKey) closes the string that the word ends,
+					// as the quote after QQSA in "token":" a b "QQSA""token":
+					// does, rather than opening an empty string that joins
+					// the key to the word: the word ends after the quote, and
+					// the pair after it is matched on its own.
+					return i + len(q), false
+				}
+				m := findQuotedOrShellSegment(sh, s, i)
+				if m != "" {
+					inner, _ := unquoteValue(m)
+					last, _ := utf8.DecodeLastRuneInString(inner)
+					hasNL := spansLine(sh, s, i, len(m))
+					if !hasNL && (joined || !strings.HasSuffix(q, "'")) ||
+						!multilineContractionOpensPair(sh, s, i, m, enclosing) &&
+							(quotedValueEnds(s[i:], len(m), enclosing) ||
+								openingQuote(s, i+len(m)) != "" ||
+								(!startsContraction(s, i, len(q)) || !isDelimSpace(last)) && (!hasNL || !isDelimSpace(last)) && closingQuoteJoins(sh, s, i, m, true)) {
+						i += len(m)
+						joined = true
+						continue
+					}
+				} else {
+					// A quote that no quote closes opens a part that runs on to
+					// the end of the text, past its line too, as a shell reads
+					// it: DB_PASSWORD="a"pre'correct<LF>SECRET is one value. The
+					// closed part that the word starts with makes it a shell
+					// word, so a single quote that would read as the apostrophe
+					// of a contraction or a word in prose opens a part too, as
+					// those of DB_PASSWORD="a"pre'd secret and
+					// DB_PASSWORD="a"pre'<LF>SECRET do.
+					if unclosedQuoteOpens(s, i, q, true, allQuoted) {
+						return unclosedEnclosingEnd(s, i+len(q), open, q, quoted, innerQuoted), false
+					}
 				}
 			}
 		}
@@ -9782,7 +13433,7 @@ func startsPlainPair(s string, end int) bool {
 // closing quote does not end a value, as in password=a = "b c"d, runs on (see
 // runOnValueEnd, where open is as for textValueEnd). Bare tokens after a
 // spaced delimiter, as in failed: password: x : retry, are left alone.
-func spacedValueEnd(sh *shellAssignScanner, s string, end, open int, quoted quoteKinds) int {
+func spacedValueEndWithEnclosing(sh *shellAssignScanner, s string, end, open int, quoted, innerQuoted quoteKinds) int {
 	at := skipHorizDelimSpace(s, end)
 	if at == end || at >= len(s) || (s[at] != ':' && s[at] != '=') {
 		return end
@@ -9794,21 +13445,22 @@ func spacedValueEnd(sh *shellAssignScanner, s string, end, open int, quoted quot
 	if c := s[at]; c == '{' || c == '[' {
 		return sensitiveValueEndWith(sh, s, at, at)
 	}
+	enclosing := quoted | innerQuoted
 	if quote := openingQuote(s, at); quote != "" {
-		if closesString(s, at, quote, quoted) {
+		if closesString(s, at, quote, enclosing) {
 			return end
 		}
 		if q := findQuotedValue(s[at:]); q != "" {
-			if !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(sh, s, at+len(q), quoted) {
-				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
+			if !quotedValueEnds(s[at:], len(q), enclosing) || opensDelimitedValueWithEnclosing(sh, s, at+len(q), open, quoted, innerQuoted) {
+				return runOnValueEndWithEnclosing(sh, s, at, at+len(q), open, quoted, innerQuoted, false)
 			}
-			if valueStartsAt(s, at, true, quoted) {
+			if valueStartsAt(s, at, true, enclosing) {
 				return at + len(q)
 			}
 			return end
 		}
-		if unclosedQuoteOpens(s, at, quote, true, quoted) {
-			return len(s)
+		if unclosedQuoteOpens(s, at, quote, true, enclosing) {
+			return unclosedEnclosingEnd(s, at+len(quote), open, quote, quoted, innerQuoted)
 		}
 	}
 	return end
@@ -9845,13 +13497,279 @@ func spacedValueEnd(sh *shellAssignScanner, s string, end, open int, quoted quot
 // the bytes of the bare value before it, with no delimiter between them, as
 // in DB_PASSWORD=pre"correct horse staple", opens a quoted part of the same
 // value too (see joinedQuoteEnd).
-func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trailingQuoteOpens bool, quoted quoteKinds) int {
+func closedQuoteBeforePipe(s string, afterQuote, end int) bool {
+	k := afterQuote
+	for k < end && (s[k] == ')' || s[k] == ']' || s[k] == '}') {
+		k++
+	}
+	return k < end && s[k] == '|'
+}
+
+func subSQClosedBefore(s string, start, end int) bool {
+	cur := true
+	bs := 0
+	for i := start; i < end; i++ {
+		if s[i] == '\\' {
+			bs++
+			continue
+		}
+		b := bs
+		bs = 0
+		if s[i] != '\'' || b%2 == 1 {
+			continue
+		}
+		if cur {
+			if isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+				continue
+			}
+			cur = false
+		} else if (!isMidWordApostrophe(s, i) || opensPrefixedString(s, i)) && !isTrailingApostrophe(s, i) {
+			cur = true
+		}
+	}
+	return !cur
+}
+
+func sqCloseBeforePipe(s string, i int) int {
+	for k := i; k < len(s); k++ {
+		if strings.IndexByte(" \t\r\n,;|&", s[k]) >= 0 {
+			return -1
+		}
+		if s[k] == '\'' {
+			if closedQuoteBeforePipe(s, k+1, len(s)) {
+				return k
+			}
+			if isMidWordApostrophe(s, k) && !opensPrefixedString(s, k) {
+				continue
+			}
+			return -1
+		}
+	}
+	return -1
+}
+
+func extendSubshellQuotedValueEnd(quotes *openQuotes, s string, start, end int, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
+	if end >= len(s) || (s[end] != ';' && s[end] != '&' && s[end] != ',') {
+		return end
+	}
+	subParen := quotes != nil && quotes.active != 0 && quotes.openInParen
+	var mode byte
+	switch {
+	case subEscDQ && innerQuoted&4 != 0:
+		mode = 3
+	case subEscDQ:
+		mode = 2
+	case (subSQ || (quoted&2 != 0 && innerQuoted == 0)) && !subSQClosedBefore(s, start, end):
+		mode = 1
+	case subParen && quoted&1 != 0 && innerQuoted == 0:
+		mode = 4
+	case subParen && quoted&4 != 0 && innerQuoted == 0:
+		mode = 5
+	case subParen && quoted&8 != 0 && innerQuoted == 0:
+		mode = 6
+	default:
+		return end
+	}
+	if quotes != nil && quotes.noSubCloseMode == mode && end >= quotes.noSubCloseFrom && end < quotes.noSubCloseUntil {
+		return end
+	}
+	recordFail := func(stop int) int {
+		if quotes != nil {
+			quotes.noSubCloseMode = mode
+			quotes.noSubCloseFrom = end
+			quotes.noSubCloseUntil = stop
+		}
+		return end
+	}
+	for k := end; k < len(s); {
+		c := s[k]
+		if c == '\n' || c == '\r' || c == ' ' || c == '\t' {
+			return recordFail(k)
+		}
+		if r, _ := utf8.DecodeRuneInString(s[k:]); isDelimSpace(r) {
+			return recordFail(k)
+		}
+		if (c == ';' || c == '&' || c == ',') && k+1 < len(s) && (startsRedactedPair(s, k+1, quoted) || startsBearerKeyword(s, k+1)) {
+			return recordFail(k)
+		}
+		qStart, qEnd := -1, -1
+		if c == '\\' {
+			j := k
+			for j < len(s) && s[j] == '\\' {
+				j++
+			}
+			nBS := j - k
+			if j < len(s) {
+				switch s[j] {
+				case '"':
+					if nBS%2 == 0 && quoted&1 != 0 && mode != 4 {
+						return recordFail(j)
+					}
+					if nBS%4 == 1 && (innerQuoted|quoted)&4 != 0 && mode != 5 {
+						return recordFail(j - 1)
+					}
+				case '\'':
+					if nBS%2 == 0 && quoted&2 != 0 && mode != 1 {
+						return recordFail(j)
+					}
+					if nBS%4 == 1 && (innerQuoted|quoted)&8 != 0 && mode != 6 {
+						return recordFail(j - 1)
+					}
+				}
+			}
+			switch mode {
+			case 1:
+				if j < len(s) && s[j] == '\'' {
+					qStart, qEnd = j, j+1
+				}
+			case 4:
+				if j < len(s) && s[j] == '"' && nBS%2 == 0 {
+					qStart, qEnd = j, j+1
+				}
+			case 2, 3:
+				if j < len(s) && s[j] == '"' {
+					if mode == 3 && nBS%8 == 7 {
+						qStart, qEnd = j-7, j+1
+					} else if nBS%4 == 3 {
+						qStart, qEnd = j-3, j+1
+					}
+				}
+			case 5, 6:
+				wantQuote := byte('"')
+				if mode == 6 {
+					wantQuote = '\''
+				}
+				if j < len(s) && s[j] == wantQuote && nBS%4 == 1 {
+					qStart, qEnd = j-1, j+1
+				}
+			}
+			if qStart < 0 {
+				if j == len(s) {
+					k = j
+				} else if nBS%2 == 1 && (s[j] == '"' || s[j] == '\'') {
+					k = j + 1
+				} else {
+					k = j
+				}
+				continue
+			}
+		} else {
+			switch c {
+			case '"':
+				if mode == 4 {
+					qStart, qEnd = k, k+1
+				} else if quoted&1 != 0 {
+					return recordFail(k)
+				}
+			case '\'':
+				if mode == 1 {
+					if isMidWordApostrophe(s, k) && !opensPrefixedString(s, k) {
+						k++
+						continue
+					}
+					qStart, qEnd = k, k+1
+				} else if quoted&2 != 0 {
+					return recordFail(k)
+				}
+			}
+			if qStart < 0 {
+				k++
+				continue
+			}
+		}
+		if qStart >= 0 {
+			if placeholderDelimBoundary(s, qEnd, quoted|innerQuoted, true) {
+				return qStart
+			}
+			return bareValueEnd(s, qEnd)
+		}
+	}
+	return recordFail(len(s))
+}
+
+func openedValueEndWithEnclosing(sh *shellAssignScanner, s string, start, end, open int, trailingQuoteOpens bool, quoted, innerQuoted quoteKinds, subSQ, subEscDQ bool) int {
+	curInner, curSubSQ, curSubEscDQ := innerQuoted, subSQ, subEscDQ
 	for i := start; i < end; i++ {
 		if s[i] != ':' && s[i] != '=' {
 			if i > start {
-				e, next := joinedQuoteEnd(sh, s, i, end, open, quoted)
+				if s[i] == '\\' {
+					k := i
+					for k < end && s[k] == '\\' {
+						k++
+					}
+					nBS := k - i
+					if k < end && (s[k] == '"' || s[k] == '\'') && nBS%2 == 1 {
+						if s[k] == '"' && curSubEscDQ && !curSubSQ &&
+							((curInner&4 == 0 && nBS%4 == 3) || (curInner&4 != 0 && (nBS%8 == 7 || nBS%4 == 3))) {
+							qLen := 4
+							if curInner&4 != 0 && nBS%8 == 7 {
+								qLen = 8
+							}
+							qStart := k + 1 - qLen
+							if qStart >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+								return qStart
+							}
+							curSubEscDQ = false
+							i = k
+							continue
+						}
+						if s[k] == '"' && nBS%4 == 1 && (curInner|quoted)&4 != 0 && !curSubSQ && !curSubEscDQ {
+							if k-1 >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+								return k - 1
+							}
+							if curInner&4 != 0 {
+								curInner &^= 4
+							}
+							i = k
+							continue
+						}
+						if s[k] == '\'' && nBS%4 == 1 && (curInner|quoted)&8 != 0 {
+							if k-1 >= start && closedQuoteBeforePipe(s, k+1, len(s)) {
+								return k - 1
+							}
+							if curInner&8 != 0 {
+								curInner &^= 8
+							}
+							i = k
+							continue
+						}
+						if k-1 > i {
+							i = k
+							continue
+						}
+					} else {
+						i = k - 1
+						continue
+					}
+				} else if curSubSQ && s[i] == '\'' {
+					if closedQuoteBeforePipe(s, i+1, len(s)) {
+						return i
+					}
+					if isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+						if pipeEnd := sqCloseBeforePipe(s, i); pipeEnd >= 0 {
+							return pipeEnd
+						}
+					} else {
+						curSubSQ = false
+						continue
+					}
+				} else if !curSubSQ && !curSubEscDQ && ((quoted&2 != 0 && s[i] == '\'') || (quoted&1 != 0 && s[i] == '"')) {
+					if closedQuoteBeforePipe(s, i+1, len(s)) {
+						return i
+					}
+					if s[i] == '\'' && quoted&2 != 0 && isMidWordApostrophe(s, i) && !opensPrefixedString(s, i) {
+						if pipeEnd := sqCloseBeforePipe(s, i); pipeEnd >= 0 {
+							return pipeEnd
+						}
+					}
+				}
+				e, next := joinedQuoteEndWithEnclosing(sh, s, i, end, open, quoted, curInner, curSubSQ)
 				if e > end {
 					return e
+				}
+				if s[i] == '\\' && next <= i+1 {
+					i = i + 1
+					continue
 				}
 				i = max(i, next-1)
 			}
@@ -9865,8 +13783,27 @@ func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trai
 		if c := s[at]; c == '{' || c == '[' {
 			e = sensitiveValueEndWith(sh, s, at, at)
 		} else if quote := openingQuote(s, at); quote != "" {
+			if quote == "'" && curSubSQ {
+				curSubSQ = false
+				i = at
+				continue
+			}
+			if quote == `\"` && curInner&4 != 0 && !curSubSQ && !curSubEscDQ {
+				curInner &^= 4
+				i = at + 1
+				continue
+			}
+			if quote == `\'` && curInner&8 != 0 {
+				curInner &^= 8
+				i = at + 1
+				continue
+			}
+			allQuoted := quoted | curInner
+			if curSubSQ {
+				allQuoted |= 2
+			}
 			checkClose := !trailingQuoteOpens || at >= end
-			if checkClose && at+len(quote) >= end && closesString(s, at, quote, quoted) {
+			if checkClose && at+len(quote) >= end && closesString(s, at, quote, allQuoted) {
 				return end
 			}
 			q := findQuotedValue(s[at:])
@@ -9877,8 +13814,8 @@ func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trai
 						return end
 					}
 				}
-				if unclosedQuoteOpens(s, at, quote, at >= end, quoted) {
-					return len(s)
+				if unclosedQuoteOpens(s, at, quote, at >= end, allQuoted) {
+					return unclosedEnclosingEnd(s, at+len(quote), open, quote, quoted, curInner)
 				}
 				return end
 			}
@@ -9900,22 +13837,22 @@ func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trai
 			// A quote that ends the bare value, or follows it, opens a quoted
 			// value that does not end where a value may end, as in
 			// password=a="b"c, even if trailingQuoteOpens is set.
-			runsOn := !quotedValueEnds(s[at:], len(q), quoted) || opensDelimitedValue(sh, s, at+len(q), quoted)
+			runsOn := !quotedValueEnds(s[at:], len(q), allQuoted) || opensDelimitedValueWithEnclosing(sh, s, at+len(q), open, quoted, curInner)
 			if at+len(quote) >= end && runsOn {
-				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
+				return runOnValueEndWithEnclosing(sh, s, at, at+len(q), open, quoted, curInner, curSubSQ)
 			}
 			// A quote inside the bare value whose quoted value runs on past
 			// it but does not end there opens a value that runs on, as in
 			// token=a:'s b 1'x, password=a='d b'c or
 			// export DB_PASSWORD=a:'s correct staple horse; the user's.
 			if at+len(quote) < end && at+len(q) > end && runsOn {
-				return runOnValueEnd(sh, s, at, at+len(q), open, quoted)
+				return runOnValueEndWithEnclosing(sh, s, at, at+len(q), open, quoted, curInner, curSubSQ)
 			}
 			// A quote or value that follows a quoted value closed in or at the
 			// end of the bare value, as in token=a:'b'' c d' or
 			// password=a:'x_token=' "b c", is read with it (see runOnValueEnd).
 			if at+len(q) <= end && runsOn {
-				if w := runOnValueEnd(sh, s, at, at+len(q), open, quoted); w > end {
+				if w := runOnValueEndWithEnclosing(sh, s, at, at+len(q), open, quoted, curInner, curSubSQ); w > end {
 					return w
 				}
 			}
@@ -9989,14 +13926,22 @@ func openedValueEnd(sh *shellAssignScanner, s string, start, end, open int, trai
 // closing quote for is closed by the quote of a later \' on its line, as in
 // DB_PASSWORD=pre' SECRET\'; echo ok (see shellQuotedSegment).
 func joinedQuoteEnd(sh *shellAssignScanner, s string, i, end, open int, quoted quoteKinds) (valueEnd, next int) {
+	return joinedQuoteEndWithEnclosing(sh, s, i, end, open, quoted, 0, false)
+}
+
+func joinedQuoteEndWithEnclosing(sh *shellAssignScanner, s string, i, end, open int, quoted, innerQuoted quoteKinds, subSQ bool) (valueEnd, next int) {
+	allQuoted := quoted | innerQuoted
+	if subSQ {
+		allQuoted |= 2
+	}
 	quote := openingQuote(s, i)
-	if quote == "" || s[i-1] == ':' || s[i-1] == '=' || s[i-1] == '\\' || closesString(s, i, quote, quoted) {
+	if quote == "" || s[i-1] == ':' || s[i-1] == '=' || s[i-1] == '\\' || closesString(s, i, quote, allQuoted) {
 		return end, i
 	}
 	q := findQuotedOrShellSegment(sh, s, i)
 	quote2 := openingQuote(s, i)
-	if q != "" && strings.HasSuffix(quote2, "'") && !spansLine(sh, s, i, len(q)) && !quotedValueEnds(s[i:], len(q), quoted) {
-		if nextEnd := interiorApostropheEnd(sh, s, i, i+len(q), quote2, quoted); nextEnd > i+len(q) {
+	if q != "" && strings.HasSuffix(quote2, "'") && !spansLine(sh, s, i, len(q)) && !quotedValueEnds(s[i:], len(q), allQuoted) {
+		if nextEnd := interiorApostropheEnd(sh, s, i, i+len(q), quote2, allQuoted); nextEnd > i+len(q) {
 			if strings.HasSuffix(s[i:nextEnd], quote2) {
 				q = s[i:nextEnd]
 			} else if prev, _ := utf8.DecodeLastRuneInString(s[:i]); isCamelTokenByte(s[i-1]) || unicode.IsLetter(prev) || unicode.IsNumber(prev) {
@@ -10022,15 +13967,15 @@ func joinedQuoteEnd(sh *shellAssignScanner, s string, i, end, open int, quoted q
 		if i+len(quote) < end {
 			if startsContraction(s, i, len(quote)) &&
 				(q == "" && unclosedContractionIsProse(sh, s, i, len(quote)) ||
-					q != "" && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!joins || multilineContractionOpensPair(sh, s, i, q, quoted))) {
+					q != "" && !quotedValueEnds(s[i:], len(q), allQuoted) && openingQuote(s, i+len(q)) == "" && (!joins || multilineContractionOpensPair(sh, s, i, q, allQuoted))) {
 				return end, i
 			}
-		} else if q == "" && !breaksLine || q != "" && !closingQuoteJoins(sh, s, i, q, false) && !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" {
+		} else if q == "" && !breaksLine || q != "" && !closingQuoteJoins(sh, s, i, q, false) && !quotedValueEnds(s[i:], len(q), allQuoted) && openingQuote(s, i+len(q)) == "" {
 			return end, i
 		}
 	}
 	if i+len(quote) >= end && !breaksLine && (skipHorizDelimSpace(s, i+len(quote)) == i+len(quote) || spansLine(sh, s, i, len(q))) &&
-		(q == "" || !quotedValueEnds(s[i:], len(q), quoted) && openingQuote(s, i+len(q)) == "" && (!strings.HasSuffix(quote, "'") && !spansLine(sh, s, i, len(q)) || !joins)) {
+		(q == "" || !quotedValueEnds(s[i:], len(q), allQuoted) && openingQuote(s, i+len(q)) == "" && (!strings.HasSuffix(quote, "'") && !spansLine(sh, s, i, len(q)) || !joins)) {
 		return end, i
 	}
 	if q == "" {
@@ -10046,7 +13991,23 @@ func joinedQuoteEnd(sh *shellAssignScanner, s string, i, end, open int, quoted q
 				return end, i
 			}
 		}
-		if unclosedQuoteOpens(s, i, quote, true, quoted) {
+		if unclosedQuoteOpens(s, i, quote, true, allQuoted) {
+			if clamped := unclosedEnclosingEnd(s, i+len(quote), open, quote, quoted, innerQuoted); clamped < len(s) {
+				return clamped, i
+			}
+			if quote == `\"` && quoted&1 != 0 {
+				bs := 0
+				for k := i + len(quote); k < len(s); k++ {
+					if s[k] == '\\' {
+						bs++
+						continue
+					}
+					if s[k] == '"' && bs%2 == 0 {
+						return max(end, k+1), i
+					}
+					bs = 0
+				}
+			}
 			return len(s), i
 		}
 		return end, i
@@ -10058,8 +14019,8 @@ func joinedQuoteEnd(sh *shellAssignScanner, s string, i, end, open int, quoted q
 	if inner, _ := unquoteValue(q); opensLaterConstruct(s, i, len(q), len(quote), inner, quoted) || opensQuotedPair(s, closing, len(quote), inner) {
 		return end, i
 	}
-	if !quotedValueEnds(s[i:], len(q), quoted) || opensDelimitedValue(sh, s, i+len(q), quoted) {
-		return runOnValueEnd(sh, s, i, i+len(q), open, quoted), i
+	if !quotedValueEnds(s[i:], len(q), allQuoted) || opensDelimitedValueWithEnclosing(sh, s, i+len(q), open, quoted, innerQuoted) {
+		return runOnValueEndWithEnclosing(sh, s, i, i+len(q), open, quoted, innerQuoted, subSQ), i
 	}
 	return i + len(q), i
 }
@@ -10771,12 +14732,16 @@ func nestedKeyName(name string, at int, lineStart bool) (nestedKeyKind, int) {
 // opened before the key of the value, and quoted the quotes that leave a
 // string open before the value.
 func nestedPairEnd(s string, pair, valueEnd, open int, quoted quoteKinds) int {
-	return nestedPairEndWith(nil, s, pair, valueEnd, open, quoted)
+	return nestedPairEndWithEnclosing(nil, s, pair, valueEnd, open, quoted, 0)
 }
 
 // nestedPairEndWith is nestedPairEnd, with sh answering inShellAssignment
 // for s (a fresh scanner is used if sh is nil).
 func nestedPairEndWith(sh *shellAssignScanner, s string, pair, valueEnd, open int, quoted quoteKinds) int {
+	return nestedPairEndWithEnclosing(sh, s, pair, valueEnd, open, quoted, 0)
+}
+
+func nestedPairEndWithEnclosing(sh *shellAssignScanner, s string, pair, valueEnd, open int, quoted, innerQuoted quoteKinds) int {
 	// A value longer than maxNestedKeyLen is read as a key only while each
 	// one ends further right than the one before it: keys apart from each
 	// other, as in a: KEY: KEY: KEY="x y", are read once each, but a run of
@@ -10797,12 +14762,12 @@ func nestedPairEndWith(sh *shellAssignScanner, s string, pair, valueEnd, open in
 		}
 		start, end := pair+loc[8], pair+loc[9]
 		if end-start > maxNestedKeyLen && end <= prevEnd {
-			return oversizedValueEnd(sh, s, start, end, open, quoted)
+			return oversizedValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted)
 		}
 		prevEnd = end
 		kind, next := nestsSensitiveKey(s, start, end, startsLine(s, pair+loc[7], start), true, quoted)
 		if kind == notNestedKey {
-			return textValueEnd(sh, s, start, end, open, quoted)
+			return textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false, false, nil)
 		}
 		pair, valueEnd = next, end
 	}
@@ -10822,12 +14787,12 @@ func nestedPairEndWith(sh *shellAssignScanner, s string, pair, valueEnd, open in
 // unless it does not open a value (see unclosedQuoteOpens), or a bare value.
 // Without a delimiter after it, the word is read as a bare value (see
 // textValueEnd). open and quoted are as for textValueEnd.
-func oversizedValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
+func oversizedValueEndWithEnclosing(sh *shellAssignScanner, s string, start, end, open int, quoted, innerQuoted quoteKinds) int {
 	closed := sensitiveValueEndWith(sh, s, start, start)
 	if closed > end {
 		return closed
 	}
-	if opened := openedValueEnd(sh, s, closed, end, open, true, quoted); opened > end {
+	if opened := openedValueEndWithEnclosing(sh, s, closed, end, open, true, quoted, innerQuoted, false, false); opened > end {
 		return opened
 	}
 	v := s[start:end]
@@ -10835,7 +14800,7 @@ func oversizedValueEnd(sh *shellAssignScanner, s string, start, end, open int, q
 	if !strings.HasSuffix(v, ":") && !strings.HasSuffix(v, "=") {
 		at = skipDelimSpace(s, end)
 		if at == len(s) || (s[at] != ':' && s[at] != '=') {
-			return textValueEnd(sh, s, start, end, open, quoted)
+			return textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false, false, nil)
 		}
 		at++
 	}
@@ -10844,28 +14809,30 @@ func oversizedValueEnd(sh *shellAssignScanner, s string, start, end, open int, q
 	if rest != "" && (rest[0] == '{' || rest[0] == '[') {
 		return sensitiveValueEndWith(sh, s, at, at)
 	}
+	enclosing := quoted | innerQuoted
 	if q := openingQuote(s, at); q != "" {
-		if closesString(s, at, q, quoted) {
-			return textValueEnd(sh, s, start, end, open, quoted)
+		if closesString(s, at, q, enclosing) {
+			return textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false, false, nil)
 		}
 		if qv := quotedValueRe.FindString(rest); qv != "" {
-			if !quotedValueEnds(rest, len(qv), quoted) {
-				return runOnValueEnd(sh, s, at, at+len(qv), open, quoted)
+			if !quotedValueEnds(rest, len(qv), enclosing) || opensDelimitedValueWithEnclosing(sh, s, at+len(qv), open, quoted, innerQuoted) {
+				return runOnValueEndWithEnclosing(sh, s, at, at+len(qv), open, quoted, innerQuoted, false)
 			}
-			if valueStartsAt(s, at, true, quoted) {
+			if valueStartsAt(s, at, true, enclosing) {
 				return at + len(qv)
 			}
-			return textValueEnd(sh, s, start, end, open, quoted)
+			return textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false, false, nil)
 		}
-		if unclosedQuoteOpens(s, at, q, true, quoted) {
-			return len(s)
+		if unclosedQuoteOpens(s, at, q, true, enclosing) {
+			return unclosedEnclosingEnd(s, at+len(q), open, q, quoted, innerQuoted)
 		}
-		return textValueEnd(sh, s, start, end, open, quoted)
+		return textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false, false, nil)
 	}
+	limit := unclosedEnclosingEnd(s, at, open, "", quoted, innerQuoted)
 	if n := strings.IndexAny(rest, regexpSpace+",;&"); n >= 0 {
-		return at + n
+		return min(at+n, limit)
 	}
-	return len(s)
+	return limit
 }
 
 // regexpSpace holds the bytes that \s matches in a regular expression such
@@ -11712,12 +15679,13 @@ func ownsQuotedValue(s string, start, end int, q string) bool {
 // to the end of s if a quote that opens a value is not closed, so that the
 // pairs it holds are redacted with it without pairing a closing quote across
 // whitespace with a following quoted value's opening quote.
-func forwardValueEnd(sh *shellAssignScanner, s string, start, end, open int, quoted quoteKinds) int {
+func forwardValueEndWithEnclosing(sh *shellAssignScanner, s string, start, end, open int, quoted, innerQuoted quoteKinds) int {
+	enclosing := quoted | innerQuoted
 	for {
 		inner, quote := unquoteValue(s[start:end])
 		if quote == "" || !opensLaterValue(inner, s[end:]) {
-			if quote != "" && (!quotedValueEnds(s[start:], end-start, quoted) || opensDelimitedValue(sh, s, end, quoted)) {
-				return runOnValueEnd(sh, s, start, end, open, quoted)
+			if quote != "" && (!quotedValueEnds(s[start:], end-start, enclosing) || opensDelimitedValueWithEnclosing(sh, s, end, open, quoted, innerQuoted)) {
+				return runOnValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, false)
 			}
 			return end
 		}
@@ -11726,8 +15694,8 @@ func forwardValueEnd(sh *shellAssignScanner, s string, start, end, open int, quo
 			if q2 := openingQuote(s, after); q2 != "" {
 				m := quotedValueRe.FindString(s[after:])
 				if m == "" {
-					if unclosedQuoteOpens(s, after, q2, true, quoted) {
-						return len(s)
+					if unclosedQuoteOpens(s, after, q2, true, enclosing) {
+						return unclosedEnclosingEnd(s, after+len(q2), open, q2, quoted, innerQuoted)
 					}
 					return end
 				}
@@ -11739,7 +15707,7 @@ func forwardValueEnd(sh *shellAssignScanner, s string, start, end, open int, quo
 			}
 			if readsAsProse(inner) && opensLaterPairAfterSpace(inner, s[end:]) {
 				qOpen := end - len(quote)
-				if m := quotedValueRe.FindString(s[qOpen:]); m != "" && quotedValueEnds(s[qOpen:], len(m), quoted) {
+				if m := quotedValueRe.FindString(s[qOpen:]); m != "" && quotedValueEnds(s[qOpen:], len(m), enclosing) {
 					return qOpen + len(m)
 				}
 			}
@@ -11748,14 +15716,14 @@ func forwardValueEnd(sh *shellAssignScanner, s string, start, end, open int, quo
 				bareEnd++
 			}
 			if kind, pair := nestsSensitiveKey(s, after, bareEnd, startsLine(s, end, after), true, quoted); kind != notNestedKey {
-				return nestedPairEndWith(sh, s, pair, bareEnd, open, quoted)
+				return nestedPairEndWithEnclosing(sh, s, pair, bareEnd, open, quoted, innerQuoted)
 			}
-			return textValueEnd(sh, s, after, bareEnd, open, quoted)
+			return textValueEndWithEnclosing(sh, s, after, bareEnd, open, quoted, innerQuoted, false, false, nil)
 		}
 		qOpen := end - len(quote)
 		m := quotedValueRe.FindString(s[qOpen:])
 		if m == "" {
-			return len(s)
+			return unclosedEnclosingEnd(s, qOpen+len(quote), open, quote, quoted, innerQuoted)
 		}
 		start, end = qOpen, qOpen+len(m)
 	}
@@ -11822,11 +15790,27 @@ type openQuotes struct {
 	// endScanSlot). They let redactBearerToken read a string once however
 	// many bearer tokens it holds, and a line once however many strings
 	// that do not end on it hold bearer tokens.
-	inner innerQuoteScan
-	ends  [6]stringEndScan
+	inner  innerQuoteScan
+	ends   [6]stringEndScan
+	closes [6]quoteCloseCache
 	// shell answers inShellAssignment for the text of the pass that owns
 	// these quotes (see shellFor).
-	shell *shellAssignScanner
+	shell           *shellAssignScanner
+	jsonTop         *jsonContainerNode
+	openJSONKind    jsonContainerKind
+	subSQ           bool
+	subEscDQ        bool
+	beforeInnerDQ   bool
+	parenDepth      int
+	openInParen     bool
+	noSubCloseMode  byte
+	noSubCloseFrom  int
+	noSubCloseUntil int
+	substTop        *intListNode
+	shellMemos      shellCloseMemo
+	memoStr         string
+	subSQEnds       [2]quoteCloseCache
+	escDQ           escDQCache
 }
 
 // shellFor returns the scanner that answers inShellAssignment for s, the
@@ -11840,13 +15824,26 @@ func (q *openQuotes) shellFor(s string) *shellAssignScanner {
 	return q.shell
 }
 
+func (q *openQuotes) shellMemosFor(s string) *shellCloseMemo {
+	if len(q.memoStr) != len(s) || q.memoStr != s {
+		q.shellMemos = shellCloseMemo{}
+		q.memoStr = s
+	}
+	return &q.shellMemos
+}
+
 // innerQuoteScan is where innerAt has read the string that opens at the
 // offset open-1, and the escaped quotes that are open there.
 type innerQuoteScan struct {
-	open  int // 1 + the offset of the opening quote of the string, or 0
-	pos   int // s[:pos] has been read
-	bs    int // consecutive backslashes immediately preceding s[pos]
-	kinds quoteKinds
+	open     int // 1 + the offset of the opening quote of the string, or 0
+	pos      int // s[:pos] has been read
+	bs       int // consecutive backslashes immediately preceding s[pos]
+	kinds    quoteKinds
+	jsonTop  *jsonContainerNode
+	jsonKind jsonContainerKind
+	subSQ    bool
+	subEscDQ bool
+	substTop *intListNode
 }
 
 // stringEndScan is the result of a search of endOnLine for the quotes in
@@ -11857,6 +15854,17 @@ type stringEndScan struct {
 	kinds   quoteKinds
 	from    int
 	at      int
+	lineEnd int
+}
+
+// quoteCloseCache records the first quote-close pair (at, after) for
+// openQuotes.closeOnLine in s[from:lineEnd], so repeated scans along a line
+// take O(N) total time.
+type quoteCloseCache struct {
+	kinds   quoteKinds
+	from    int
+	at      int
+	after   int
 	lineEnd int
 }
 
@@ -11884,19 +15892,112 @@ func (q *openQuotes) innerAt(s string, i int) quoteKinds {
 		*in = innerQuoteScan{open: q.openPos + 1, pos: q.openPos + 1}
 	}
 	for ; in.pos < i; in.pos++ {
-		switch b := s[in.pos]; b {
-		case '\n', '\r':
+		for in.substTop != nil && in.pos >= in.substTop.val {
+			in.substTop = in.substTop.prev
+		}
+		b := s[in.pos]
+		if b == '\n' || b == '\r' {
 			in.kinds, in.bs = 0, 0
-		case '\\':
+			in.jsonTop = nil
+			in.jsonKind = jsonContainerNone
+			in.subSQ = false
+			in.subEscDQ = false
+			in.substTop = nil
+			continue
+		}
+		if b == '\\' {
 			in.bs++
-		default:
-			if b == c && in.bs%4 == 1 {
-				in.kinds ^= kind
+			continue
+		}
+		bs := in.bs
+		in.bs = 0
+		if q.active == 1 && bs%2 == 0 {
+			switch in.kinds {
+			case 0:
+				switch b {
+				case '{', '[':
+					in.jsonTop = &jsonContainerNode{
+						entry: jsonContainerEntry{openChar: b, pos: in.pos, isJSON: isJSONContainerOpener(s, in.pos)},
+						prev:  in.jsonTop,
+					}
+				case '}', ']':
+					if in.jsonTop != nil && jsonContainerMatches(in.jsonTop.entry.openChar, b) {
+						in.jsonTop = in.jsonTop.prev
+					}
+				}
+			case 4:
+				switch b {
+				case '\'':
+					if (in.jsonKind != jsonContainerNone && bs%8 == 4) || (q.openJSONKind != jsonContainerNone && bs%4 == 2) {
+						continue
+					}
+					if in.subSQ {
+						if isMidWordApostrophe(s, in.pos) && !opensPrefixedString(s, in.pos) {
+							continue
+						}
+						in.subSQ = false
+					} else if (!isMidWordApostrophe(s, in.pos) || opensPrefixedString(s, in.pos)) && !isTrailingApostrophe(s, in.pos) {
+						in.subSQ = true
+					}
+				case '$':
+					if in.pos+1 < len(s) && s[in.pos+1] == '(' {
+						if endPos := shellScanClose(q.shellMemosFor(s), s, shellFrameCS, in.pos+2, false, true, true); endPos >= 0 {
+							in.substTop = &intListNode{val: endPos, prev: in.substTop}
+						}
+					}
+				case '`':
+					if endPos := shellScanClose(q.shellMemosFor(s), s, shellFrameBT, in.pos+1, true, true, true); endPos >= 0 {
+						in.substTop = &intListNode{val: endPos, prev: in.substTop}
+					}
+				}
 			}
-			in.bs = 0
+		}
+		if b == c && bs%4 == 1 {
+			if in.kinds == 0 {
+				in.kinds = kind
+				if kind == 4 && in.pos > q.openPos+1 {
+					in.jsonKind = classifyQuoteJSONContainer(s, in.pos-1, q.openPos+1, true, in.jsonTop)
+				} else {
+					in.jsonKind = jsonContainerNone
+				}
+				in.subSQ = false
+				in.subEscDQ = false
+				in.substTop = nil
+			} else {
+				in.kinds = 0
+				in.jsonKind = jsonContainerNone
+				in.subSQ = false
+				in.subEscDQ = false
+				in.substTop = nil
+			}
+		} else if q.active == 1 && in.kinds == 4 && b == '"' && bs%4 == 3 && !in.subSQ {
+			in.subEscDQ = !in.subEscDQ
 		}
 	}
+	for in.substTop != nil && in.pos >= in.substTop.val {
+		in.substTop = in.substTop.prev
+	}
 	return in.kinds
+}
+
+func (q *openQuotes) subSingleAt(s string, i int) bool {
+	if q == nil || q.active != 1 {
+		return false
+	}
+	if q.innerAt(s, i) == 4 {
+		return q.inner.subSQ
+	}
+	return q.subSQ
+}
+
+func (q *openQuotes) subEscDoubleAt(s string, i int) bool {
+	if q == nil || q.active != 1 {
+		return false
+	}
+	if q.innerAt(s, i) == 4 {
+		return q.inner.subEscDQ
+	}
+	return q.subEscDQ
 }
 
 // endOnLine returns the offset of the first quote in s[from:], before the
@@ -11935,6 +16036,82 @@ func (q *openQuotes) endOnLine(s string, from int, kinds quoteKinds) int {
 		bs = 0
 	}
 	return c.at
+}
+
+func (q *openQuotes) subSQCloseOnLine(s string, slot, from, limit int) int {
+	if from >= limit {
+		return -1
+	}
+	c := &q.subSQEnds[slot]
+	if c.from <= from && c.lineEnd == limit && (c.at >= from || c.at < 0) {
+		return c.at
+	}
+	at := -1
+	if rel := strings.IndexByte(s[from:limit], '\''); rel >= 0 {
+		at = from + rel
+	}
+	*c = quoteCloseCache{from: from, at: at, after: at + 1, lineEnd: limit}
+	return at
+}
+
+// closeOnLine returns (quoteStart, quoteEnd) for the first quote in s[from:]
+// before the end of its line that closes a string in kinds, or (-1, -1) if
+// none does. Unlike endOnLine, it returns the raw closing quote without
+// requiring endsString punctuation so callers can inspect the exact
+// post-closing-quote boundary, reading each line at most once per kind mask.
+func (q *openQuotes) closeOnLine(s string, from int, kinds quoteKinds) (int, int) {
+	if kinds == 0 {
+		return -1, -1
+	}
+	c := &q.closes[endScanSlot(kinds)]
+	if c.kinds == kinds && c.from <= from && (c.at >= from || c.at < 0 && from <= c.lineEnd) {
+		if c.at < 0 {
+			return -1, -1
+		}
+		return c.at, c.after
+	}
+	*c = quoteCloseCache{kinds: kinds, from: from, at: -1, after: -1, lineEnd: len(s)}
+	bs := 0
+	for k := from; k < len(s); k++ {
+		switch s[k] {
+		case '\n', '\r':
+			c.lineEnd = k
+			return -1, -1
+		case '\\':
+			bs++
+			continue
+		case '"':
+			if bs%2 == 0 {
+				if kinds&1 != 0 {
+					c.at, c.after = k, k+1
+					return c.at, c.after
+				}
+			} else if bs%4 == 1 {
+				if kinds&4 != 0 {
+					c.at, c.after = k-1, k+1
+					return c.at, c.after
+				}
+			}
+		case '\'':
+			if kinds == 2 {
+				c.at, c.after = k, k+1
+				return c.at, c.after
+			}
+			if bs%2 == 0 {
+				if kinds&2 != 0 {
+					c.at, c.after = k, k+1
+					return c.at, c.after
+				}
+			} else if bs%4 == 1 {
+				if kinds&8 != 0 {
+					c.at, c.after = k-1, k+1
+					return c.at, c.after
+				}
+			}
+		}
+		bs = 0
+	}
+	return -1, -1
 }
 
 // endScanSlot returns the index in openQuotes.ends of the search for kinds,
@@ -12013,16 +16190,19 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(loc[7], loc[0]+1)
 			continue
 		}
-		if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], &quotes) {
+		open := brackets.before(s, loc[0])
+		if loc[4] == loc[5] && isCookieProse(s, s[loc[2]:loc[3]], s[loc[6]:loc[7]], loc[8], open > 0, &quotes) {
 			pos = max(loc[7], loc[0]+1)
 			continue
 		}
-		open := brackets.before(s, loc[0])
 		start, end := loc[8], loc[9]
 		quoted := quotes.before(s, start)
+		innerQuoted := quotes.innerAt(s, start)
+		subSQ := quotes.subSingleAt(s, start)
+		subEscDQ := quotes.subEscDoubleAt(s, start)
 		if placeholderCut(s, start) == end {
 			// As in redactTextKeyValue.
-			if placeholderEnds(s, end, quoted) {
+			if placeholderEnds(s, end, quoted, innerQuoted, subSQ, subEscDQ) || authHeaderPlaceholderEnds(s, loc, end, quoted, innerQuoted) {
 				brackets.skip(end)
 				quotes.skip(s, end)
 				p.spans = append(p.spans, pairSpan{keyStart: loc[0], valStart: start, valEnd: end})
@@ -12051,14 +16231,15 @@ func (p *sensitivePairSpans) build(s string) {
 			pos = max(end, loc[0]+1)
 			continue
 		}
-		if redEnd := redactedPrefixEnd(s, start, end, quoted); redEnd >= 0 {
+		if redEnd := redactedPrefixEnd(s, start, end, quoted, innerQuoted, subSQ, subEscDQ); redEnd >= 0 {
 			brackets.skip(redEnd)
 			quotes.skip(s, redEnd)
 			p.spans = append(p.spans, pairSpan{keyStart: loc[0], valStart: start, valEnd: redEnd})
 			pos = max(redEnd, loc[0]+1)
 			continue
 		}
-		end = textValueEnd(sh, s, start, end, open, quoted)
+		end = textValueEndWithEnclosing(sh, s, start, end, open, quoted, innerQuoted, subSQ, subEscDQ, &quotes)
+		end = trimTrailingSubshellOrJSONQuotes(s, start, end, quoted, innerQuoted, subSQ, subEscDQ)
 		brackets.skip(end)
 		if q := openingQuote(s, start); q != "" && end > start && closesString(s, start, q, quoted) {
 			quotes.drop()
@@ -13415,11 +17596,29 @@ func isEnvVarName(name string) bool {
 
 // before reads s up to i and returns the active quote kind open there, or 0.
 func (q *openQuotes) before(s string, i int) quoteKinds {
+	return q.advance(s, i, 0)
+}
+
+func (q *openQuotes) advance(s string, i int, reopenOnly quoteKinds) quoteKinds {
+	skipMode := reopenOnly != 0
+	canOpen := reopenOnly
 	for ; q.pos < i; q.pos++ {
+		for q.substTop != nil && q.pos >= q.substTop.val {
+			q.substTop = q.substTop.prev
+		}
 		c := s[q.pos]
 		if c == '\n' || c == '\r' {
 			q.active = 0
 			q.bs = 0
+			q.openJSONKind = jsonContainerNone
+			q.subSQ = false
+			q.subEscDQ = false
+			q.beforeInnerDQ = false
+			q.parenDepth = 0
+			q.openInParen = false
+			if skipMode {
+				canOpen = 0
+			}
 			continue
 		}
 		if c == '\\' {
@@ -13428,6 +17627,51 @@ func (q *openQuotes) before(s string, i int) quoteKinds {
 		}
 		bs := q.bs
 		q.bs = 0
+		if bs%2 == 0 {
+			switch q.active {
+			case 0:
+				switch c {
+				case '(':
+					q.parenDepth++
+				case ')':
+					if q.parenDepth > 0 {
+						q.parenDepth--
+					}
+				case '{', '[':
+					q.jsonTop = &jsonContainerNode{
+						entry: jsonContainerEntry{openChar: c, pos: q.pos, isJSON: isJSONContainerOpener(s, q.pos)},
+						prev:  q.jsonTop,
+					}
+				case '}', ']':
+					if q.jsonTop != nil && jsonContainerMatches(q.jsonTop.entry.openChar, c) {
+						q.jsonTop = q.jsonTop.prev
+					}
+				case '$':
+					if q.pos+1 < len(s) && s[q.pos+1] == '(' {
+						if endPos := shellScanClose(q.shellMemosFor(s), s, shellFrameCS, q.pos+2, false, false, false); endPos >= 0 {
+							q.substTop = &intListNode{val: endPos, prev: q.substTop}
+						}
+					}
+				case '`':
+					if endPos := shellScanClose(q.shellMemosFor(s), s, shellFrameBT, q.pos+1, false, false, false); endPos >= 0 {
+						q.substTop = &intListNode{val: endPos, prev: q.substTop}
+					}
+				}
+			case 1:
+				if !q.beforeInnerDQ && ((c == '$' && q.pos+1 < len(s) && s[q.pos+1] == '(') || c == '`') {
+					escJSON := q.openJSONKind != jsonContainerNone
+					var endPos int
+					if c == '$' {
+						endPos = shellScanClose(q.shellMemosFor(s), s, shellFrameCS, q.pos+2, false, escJSON, false)
+					} else {
+						endPos = shellScanClose(q.shellMemosFor(s), s, shellFrameBT, q.pos+1, true, escJSON, false)
+					}
+					if endPos >= 0 {
+						q.substTop = &intListNode{val: endPos, prev: q.substTop}
+					}
+				}
+			}
+		}
 		if c != '"' && c != '\'' {
 			continue
 		}
@@ -13446,18 +17690,63 @@ func (q *openQuotes) before(s string, i int) quoteKinds {
 				kind = 8
 			}
 		default: // bs%4 == 3: inner escaped quote inside %q-style string (\\\" or \\\')
+			if q.active == 1 && !q.beforeInnerDQ && c == '"' && !q.subSQ {
+				q.subEscDQ = !q.subEscDQ
+			}
 			continue
+		}
+		if q.active == 1 && !q.beforeInnerDQ && kind == 2 {
+			if q.openJSONKind != jsonContainerNone && bs%4 == 2 {
+				continue
+			}
+			if q.subSQ {
+				if isMidWordApostrophe(s, q.pos) && !opensPrefixedString(s, q.pos) {
+					continue
+				}
+				q.subSQ = false
+				continue
+			}
+			if (!isMidWordApostrophe(s, q.pos) || opensPrefixedString(s, q.pos)) && !isTrailingApostrophe(s, q.pos) {
+				q.subSQ = true
+			}
+			continue
+		}
+		if q.active == 1 && kind == 4 {
+			q.beforeInnerDQ = !q.beforeInnerDQ
+			if q.beforeInnerDQ {
+				q.subEscDQ = false
+			}
 		}
 		if isApostrophe(s, q.pos, kind, q.active) {
 			continue
 		}
 		switch q.active {
 		case 0:
+			if skipMode && kind != canOpen {
+				continue
+			}
 			q.active = kind
 			q.openPos = q.pos
+			q.subSQ = false
+			q.subEscDQ = false
+			q.beforeInnerDQ = false
+			q.openInParen = q.parenDepth > 0 || q.substTop != nil
+			if kind == 1 {
+				q.openJSONKind = classifyQuoteJSONContainer(s, q.pos, 0, false, q.jsonTop)
+			} else {
+				q.openJSONKind = jsonContainerNone
+			}
 		case kind:
 			q.active = 0
+			q.openJSONKind = jsonContainerNone
+			q.subSQ = false
+			q.subEscDQ = false
+			q.beforeInnerDQ = false
+			q.openInParen = false
 		}
+	}
+	for q.substTop != nil && q.pos >= q.substTop.val {
+		q.substTop = q.substTop.prev
 	}
 	return q.active
 }
@@ -13477,57 +17766,15 @@ func (q *openQuotes) skip(s string, i int) {
 	if savedActive == 0 {
 		q.pos = i
 		q.bs = 0
+		for q.substTop != nil && q.pos >= q.substTop.val {
+			q.substTop = q.substTop.prev
+		}
 		return
 	}
 	if e := selfContainedValueEnd(s, q.pos, i); e > q.pos {
 		q.pos, q.bs = e, 0
 	}
-	for ; q.pos < i; q.pos++ {
-		c := s[q.pos]
-		if c == '\n' || c == '\r' {
-			q.active = 0
-			q.pos = i
-			q.bs = 0
-			return
-		}
-		if c == '\\' {
-			q.bs++
-			continue
-		}
-		bs := q.bs
-		q.bs = 0
-		if c != '"' && c != '\'' {
-			continue
-		}
-		var kind quoteKinds
-		switch {
-		case bs%2 == 0:
-			if c == '"' {
-				kind = 1
-			} else {
-				kind = 2
-			}
-		case bs%4 == 1:
-			if c == '"' {
-				kind = 4
-			} else {
-				kind = 8
-			}
-		default:
-			continue
-		}
-		if isApostrophe(s, q.pos, kind, q.active) {
-			continue
-		}
-		if kind == savedActive {
-			if q.active == 0 {
-				q.active = savedActive
-				q.openPos = q.pos
-			} else {
-				q.active = 0
-			}
-		}
-	}
+	q.advance(s, i, savedActive)
 	q.bs = 0
 }
 
@@ -13550,6 +17797,11 @@ func (q *openQuotes) unpaired(s string, i int, quote string) int {
 // would close that string, opens the value instead (see ownsQuotedValue).
 func (q *openQuotes) drop() {
 	q.active = 0
+	q.openJSONKind = jsonContainerNone
+	q.subSQ = false
+	q.subEscDQ = false
+	q.beforeInnerDQ = false
+	q.openInParen = false
 }
 
 // selfContainedValueEnd returns the end of the quoted value, JSON object or
