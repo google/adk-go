@@ -275,6 +275,43 @@ func TestCreateSession(t *testing.T) {
 	}
 }
 
+func TestCreateSessionDropsNilParts(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	sessionService := session.InMemoryService()
+	apiController := controllers.NewSessionsAPIController(sessionService)
+	rr := httptest.NewRecorder()
+
+	// The event without content exercises the nil check in the handler.
+	body := strings.NewReader(`{"events": [
+		{"author": "other_agent"},
+		{"author": "other_agent", "content": {"role": "model", "parts": [null, {"text": "It is sunny in Paris."}, null]}}
+	]}`)
+	apiController.CreateSessionHandler(rr, newSessionRequest(t, http.MethodPost, id, body, id.UserID))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("CreateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	stored, err := sessionService.Get(t.Context(), &session.GetRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	events := stored.Session.Events()
+	if events.Len() != 2 {
+		t.Fatalf("session has %d events, want 2", events.Len())
+	}
+	parts, err := json.Marshal(events.At(1).Content.Parts)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if want := `[{"text":"It is sunny in Paris."}]`; string(parts) != want {
+		t.Errorf("stored parts = %s, want %s", parts, want)
+	}
+}
+
 func TestDeleteSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",

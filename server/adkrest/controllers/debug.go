@@ -21,9 +21,9 @@ import (
 
 	"github.com/gorilla/mux"
 	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
-	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/server/adkrest/internal/services"
 	"google.golang.org/adk/v2/server/authz"
@@ -163,8 +163,8 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 	}
 
 	highlightedPairs := [][]string{}
-	fc := functionalCalls(event)
-	fr := functionalResponses(event)
+	fc := utils.FunctionCalls(utils.Content(event))
+	fr := utils.FunctionResponses(utils.Content(event))
 
 	if len(fc) > 0 {
 		for _, f := range fc {
@@ -200,30 +200,4 @@ func (c *DebugAPIController) EventGraphHandler(rw http.ResponseWriter, req *http
 		return
 	}
 	EncodeJSONResponse(map[string]string{"dotSrc": graph}, http.StatusOK, rw)
-}
-
-func functionalCalls(event *session.Event) []*genai.FunctionCall {
-	if event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
-		return nil
-	}
-	fc := []*genai.FunctionCall{}
-	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionCall != nil {
-			fc = append(fc, part.FunctionCall)
-		}
-	}
-	return fc
-}
-
-func functionalResponses(event *session.Event) []*genai.FunctionResponse {
-	if event.LLMResponse.Content == nil || event.LLMResponse.Content.Parts == nil {
-		return nil
-	}
-	fr := []*genai.FunctionResponse{}
-	for _, part := range event.LLMResponse.Content.Parts {
-		if part.FunctionResponse != nil {
-			fr = append(fr, part.FunctionResponse)
-		}
-	}
-	return fr
 }

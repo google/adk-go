@@ -711,7 +711,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 	// 2. Create an index (map) of function_response parts by their ID
 	partIndicesInMergedEvent := make(map[string]int)
 	for idx, part := range partsInMergedEvent {
-		if part.FunctionResponse != nil {
+		if part != nil && part.FunctionResponse != nil {
 			functionCallID := part.FunctionResponse.ID
 			partIndicesInMergedEvent[functionCallID] = idx
 		}
@@ -725,7 +725,7 @@ func mergeFunctionResponseEvents(functionResponseEvents []*session.Event) (*sess
 
 		// 4. Update or Append parts
 		for _, part := range event.LLMResponse.Content.Parts {
-			if part.FunctionResponse != nil {
+			if part != nil && part.FunctionResponse != nil {
 				functionCallID := part.FunctionResponse.ID
 				// If we've seen this response ID before, replace it
 				if idx, found := partIndicesInMergedEvent[functionCallID]; found {
@@ -843,8 +843,8 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 // This is to provide another agent's output as context to the current agent,
 // so that the current agent can continue to respond, such as summarizing
 // the previous agent's reply, etc.
-// Thought parts and standalone metadata are omitted. A non-empty event with no
-// remaining payload returns nil.
+// Thought parts, nil parts and standalone metadata are omitted. A non-empty
+// event with no remaining payload returns nil.
 func ConvertForeignEvent(ev *session.Event) *session.Event {
 	content := utils.Content(ev)
 	if content == nil || len(content.Parts) == 0 {
@@ -856,6 +856,9 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		Parts: []*genai.Part{{Text: "For context:"}},
 	}
 	for _, p := range content.Parts {
+		if p == nil {
+			continue
+		}
 		// Never replay another agent's private reasoning into the current
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
@@ -922,6 +925,12 @@ func shouldExcludeEvent(ev *session.Event) bool {
 		return false
 	}
 	for _, p := range c.Parts {
+		// adk-python rejects a null part when decoding a request or building
+		// Content, but here a nil part can already be in the session, for
+		// example from an SDK caller.
+		if p == nil {
+			continue
+		}
 		if p.FunctionCall != nil {
 			switch p.FunctionCall.Name {
 			case requestEUCFunctionCallName, toolconfirmation.FunctionCallName:
