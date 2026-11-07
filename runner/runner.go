@@ -726,9 +726,11 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// the branch it ran on (adk-python find_agent_to_run and
 		// restore_branch_from_history). Re-running the root would run agents
 		// that never saw the call, and they fail on the unmatched response.
-		// A call made inside a graph workflow is the exception: the root runs
-		// so the workflow can resume the interrupted node and the rest of the
-		// graph.
+		// A call made inside a graph workflow is the exception: the root runs,
+		// as on any other turn. The workflow resumes the interrupted node only
+		// for an adk_request_input response; any other response restarts the
+		// graph. Agents ahead of or beside the workflow run again, and an LLM
+		// agent among them fails on the unmatched response.
 		agentToRun, branch := r.rootAgent, ""
 		if ev := handleUserFunctionCallResponse(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {

@@ -32,10 +32,10 @@ import (
 	"google.golang.org/adk/v2/workflow"
 )
 
-// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a workflow
-// agent is the root, a user function response is routed to the sub-agent that
-// made the long-running call, on that sub-agent's branch, instead of re-running
-// the whole workflow.
+// TestRun_FunctionResponseResumesWorkflowSubAgent checks that when a sequential
+// or parallel agent is the root, a user function response is routed to the
+// sub-agent that made the long-running call, on that sub-agent's branch, instead
+// of re-running the root.
 func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -156,10 +156,11 @@ func hasFunctionResponse(contents []*genai.Content, callID string) bool {
 	return false
 }
 
-// TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow checks that a
-// response to a call made by a node of a graph workflow goes through the
-// workflow, at the root or nested, so Workflow.Resume runs the downstream
-// nodes. Running the node agent on its own would ask for input again.
+// TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow checks that an
+// adk_request_input response to a node of a graph workflow goes through the
+// workflow, when the workflow is the root or the only child, so Workflow.Resume
+// runs the downstream nodes. Running the node agent on its own would ask for
+// input again.
 func TestRun_FunctionResponseInsideGraphWorkflowResumesWorkflow(t *testing.T) {
 	tests := []struct {
 		name    string
