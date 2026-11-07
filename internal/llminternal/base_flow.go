@@ -564,7 +564,7 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			}
 
 			connectedAt := time.Now()
-			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name(), googlellm.GetGoogleLLMVariant(f.Model))
+			liveConn := googlellm.NewLiveConnection(liveSession, f.Model.Name())
 
 			cleanup := func() {
 				cancelConn()
@@ -1494,7 +1494,8 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								result = map[string]any{"error": err.Error()}
+								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
+								result = map[string]any{"error": errText}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1651,7 +1652,8 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 	}
 
 	if err != nil {
-		return map[string]any{"error": err.Error()}
+		errText, _ := toolinternal.ModelErrorText(tool.Name(), err)
+		return map[string]any{"error": errText}
 	}
 	return response
 }
