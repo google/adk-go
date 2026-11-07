@@ -874,7 +874,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			// TODO: generate and yield an auth event if needed.
 
 			if resp.Partial {
 				continue
@@ -891,12 +890,36 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 				continue
 			}
 
+			// generateAuthEvent also strips the configured secrets from the
+			// credential requests in ev, so it runs before ev is yielded. A config
+			// it rejects fails the run; adk-python raises the same error inside the
+			// tool that made the request, which fails its run too. On that error
+			// ev is deliberately not yielded, because it still holds the
+			// unredacted config; the tool results are dropped with it.
+			authEvent, err := generateAuthEvent(ctx, modelResponseEvent, ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
 
 			// Yield function responses before confirmation requests so consumers that
 			// pause for user approval still persist completed tool results.
 			if !yield(ev, nil) {
 				return
+			}
+
+			// adk-python yields the auth event before the function responses; ADK Go
+			// yields it after them, as it does the confirmation event, so a consumer
+			// that stops at the long-running auth request still persists the tool
+			// results.
+			if authEvent != nil {
+				if !yield(authEvent, nil) {
+					return
+				}
+				// The invocation now waits for the client's credential, so it is
+				// ended, as adk-python ends it here.
+				ctx.EndInvocation()
 			}
 
 			if toolConfirmationEvent != nil {
@@ -957,7 +980,9 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 					return
 				}
 				if ev != nil {
-					yield(ev, nil)
+					if !yield(ev, nil) {
+						return
+					}
 				}
 			}
 		}
