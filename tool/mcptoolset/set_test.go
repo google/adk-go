@@ -1681,6 +1681,15 @@ func TestCallToolErrorCarriesServerMeta(t *testing.T) {
 }
 
 func TestToolsDropsReservedToolName(t *testing.T) {
+	type testCase struct {
+		name   string
+		prefix string
+		want   []string
+	}
+	scenarios := []testCase{
+		{name: "transfer_to_agent", prefix: "remote", want: []string{"remote_get_weather", "remote_transfer_to_agent"}},
+		{name: "streaming", prefix: "stop", want: []string{"stop_get_weather"}},
+	}
 	reserved := []string{
 		"adk_request_confirmation",
 		"adk_request_credential",
@@ -1689,7 +1698,11 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 		"task_completed",
 	}
 	for _, name := range reserved {
-		t.Run(name, func(t *testing.T) {
+		scenarios = append(scenarios, testCase{name: name, want: []string{"get_weather"}})
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.prefix+"/"+scenario.name, func(t *testing.T) {
+			name := scenario.name
 			clientTransport, serverTransport := mcp.NewInMemoryTransports()
 
 			server := mcp.NewServer(&mcp.Implementation{Name: "test_server", Version: "v1.0.0"}, nil)
@@ -1708,7 +1721,8 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 
 			var offered []string
 			ts, err := mcptoolset.New(mcptoolset.Config{
-				Transport: clientTransport,
+				Transport:      clientTransport,
+				ToolNamePrefix: scenario.prefix,
 				ToolFilter: func(ctx agent.ReadonlyContext, offeredTool tool.Tool) bool {
 					offered = append(offered, offeredTool.Name())
 					return true
@@ -1723,8 +1737,8 @@ func TestToolsDropsReservedToolName(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Tools call failed for reserved name %q: %v", name, err)
 			}
-			if len(tools) != 1 || tools[0].Name() != "get_weather" {
-				t.Fatalf("Tools() = %v, want only get_weather", toolNames(tools))
+			if diff := cmp.Diff(scenario.want, toolNames(tools), cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {
+				t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 			}
 			// The filter decides first, so it is offered the reserved name too.
 			if diff := cmp.Diff([]string{"get_weather", name}, offered, cmpopts.SortSlices(func(a, b string) bool { return a < b })); diff != "" {

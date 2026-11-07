@@ -369,16 +369,16 @@ func (s *set) Tools(ctx agent.ReadonlyContext) ([]tool.Tool, error) {
 			continue
 		}
 
-		// A tool under a reserved name would be unreachable or would displace
-		// the framework's handling of the call. Dropping it keeps the rest of
-		// the toolset usable.
-		if llminternal.IsReservedToolName(mcpTool.Name) {
-			continue
-		}
-
 		if s.toolNamePrefix != "" {
 			t.name = s.toolNamePrefix + "_" + t.originalName
 			t.funcDeclaration.Name = t.name
+		}
+
+		// A tool under a reserved name would be unreachable or would displace
+		// the framework's handling of the call. Dropping it keeps the rest of
+		// the toolset usable.
+		if llminternal.IsReservedToolName(t.Name()) {
+			continue
 		}
 
 		adkTools = append(adkTools, t)
