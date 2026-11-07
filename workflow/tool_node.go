@@ -16,13 +16,17 @@ package workflow
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -117,6 +121,15 @@ func (n *ToolNode) runTool(toolCtx agent.Context, input any) (any, error) {
 
 	output, err := runnable.Run(toolCtx, toolInput)
 	if err != nil {
+		var panicErr *toolinternal.PanicError
+		if errors.As(err, &panicErr) {
+			// A recovered panic's text carries the panic value and the
+			// goroutine stack, and a workflow run error can reach REST
+			// clients and models. Keep the detail on the active span and
+			// surface a generic failure, as a function response would.
+			telemetry.RecordError(trace.SpanFromContext(toolCtx), err)
+			return nil, fmt.Errorf("tool %q execution failed with an internal error", n.tool.Name())
+		}
 		return nil, fmt.Errorf("tool %q execution failed: %w", n.tool.Name(), err)
 	}
 

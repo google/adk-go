@@ -21,6 +21,7 @@ import (
 	"iter"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1452,4 +1453,32 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 			t.Fatalf("finalize: unexpected error %v", err)
 		}
 	})
+}
+
+// A node's own panic must not put the panic value into the completion error
+// the run reports; the value and the stack belong on the span only (#2153).
+func TestRunNodePanicValueStaysOutOfCompletionError(t *testing.T) {
+	node := NewFunctionNode("boom", func(agent.Context, map[string]any) (map[string]any, error) {
+		panic("secret-user-data-123")
+	}, defaultNodeConfig)
+
+	out := make(chan queueItem, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	runNode(out, &wg, "boom", node, agent.NewContext(newMockCtx(t)), map[string]any{})
+	wg.Wait()
+
+	completion, ok := (<-out).(completionItem)
+	if !ok {
+		t.Fatal("expected a completionItem")
+	}
+	if completion.err == nil {
+		t.Fatal("expected the panicking node to fail its completion")
+	}
+	if strings.Contains(completion.err.Error(), "secret-user-data-123") {
+		t.Errorf("completion error carries the panic value: %.200q", completion.err.Error())
+	}
+	if want := `node "boom" panicked`; completion.err.Error() != want {
+		t.Errorf("completion error = %q, want %q", completion.err.Error(), want)
+	}
 }

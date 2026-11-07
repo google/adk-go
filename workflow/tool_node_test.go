@@ -493,3 +493,36 @@ func TestToolNode_DropsToolSuppliedCompaction(t *testing.T) {
 		t.Fatal("the node emitted no events, so nothing was checked")
 	}
 }
+
+// A recovered tool panic must not reach the run error: the panic text carries
+// the panic value and the goroutine stack, and a workflow run error travels to
+// REST clients and models (#2153).
+func TestToolNode_PanicTextStaysOutOfRunError(t *testing.T) {
+	pt, err := functiontool.New(functiontool.Config{Name: "lookup_order"}, func(agent.Context, struct{}) (struct{}, error) {
+		panic("secret-user-data-123")
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	node, err := NewToolNode(pt, defaultNodeConfig)
+	if err != nil {
+		t.Fatalf("NewToolNode: %v", err)
+	}
+	var gotErr error
+	for _, err := range node.Run(agent.NewContext(newMockCtx(t)), map[string]any{}) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected the panicking tool to fail the run")
+	}
+	for _, leak := range []string{"secret-user-data-123", "goroutine"} {
+		if strings.Contains(gotErr.Error(), leak) {
+			t.Errorf("run error carries %q: %.200q", leak, gotErr.Error())
+		}
+	}
+	if want := `tool "lookup_order" execution failed with an internal error`; gotErr.Error() != want {
+		t.Errorf("run error = %q, want %q", gotErr.Error(), want)
+	}
+}
