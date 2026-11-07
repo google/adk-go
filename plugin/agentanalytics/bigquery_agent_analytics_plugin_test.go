@@ -34,6 +34,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -50,6 +51,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -5030,6 +5032,432 @@ func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.
 		}
 		if closeCount != 2 {
 			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
+		}
+	})
+}
+
+func TestPlugin_CloseOnceAndAfterRunPanic(t *testing.T) {
+	t.Run("Close executes shutdown once across concurrent and repeated calls", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		okHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+
+		var closeCalls atomic.Int32
+		sentinelErr := errors.New("simulated bq close failure")
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCalls.Add(1)
+			_ = origClose(c)
+			return sentinelErr
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test-dataset"
+		cfg.TableName = "agent_events"
+		cfg.DisableCreateViews = true
+
+		bqClient, err := bq.NewClient(ctx, cfg.ProjectID, option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient() error = %v", err)
+		}
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+
+		adkPlugin, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin() error = %v", err)
+		}
+
+		const workers = 16
+		errs := make([]error, workers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := range workers {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-start
+				errs[idx] = adkPlugin.Close()
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		repeatErr := adkPlugin.Close()
+		if got := closeCalls.Load(); got != 1 {
+			t.Fatalf("closeBQClient called %d times across %d concurrent + 1 sequential Close() calls, want 1", got, workers)
+		}
+		for i, cErr := range errs {
+			if !errors.Is(cErr, sentinelErr) {
+				t.Errorf("concurrent Close()[%d] error = %v, want %v", i, cErr, sentinelErr)
+			}
+			if cErr != repeatErr {
+				t.Errorf("concurrent Close()[%d] returned distinct error value %v vs sequential Close() %v", i, cErr, repeatErr)
+			}
+		}
+	})
+
+	t.Run("afterRun panic before terminal span still ends invocation and flushes run-end batch", func(t *testing.T) {
+		ctx := context.Background()
+		lis := bufconn.Listen(1 << 20)
+		gSrv := grpc.NewServer()
+		requests := make(chan *storagepb.AppendRowsRequest, 100)
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: requests})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(
+			"passthrough:///bufnet",
+			grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return lis.Dial() }),
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+		)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient() error = %v", err)
+		}
+		t.Cleanup(func() { _ = writeClient.Close() })
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-proj"
+		cfg.DatasetID = "test-ds"
+		cfg.TableName = "test-tbl"
+		cfg.BatchSize = 100
+		cfg.BatchFlushIntv = time.Hour
+		cfg.DisableCreateViews = true
+
+		processor, err := NewBatchProcessor(ctx, writeClient, "projects/test-proj/datasets/test-ds/tables/test-tbl/streams/_default", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		t.Cleanup(processor.Close)
+
+		tm := newTraceManager()
+		ap := &analyticsPlugin{
+			config:    cfg,
+			processor: processor,
+			traces:    tm,
+		}
+
+		mCtx := &mockInvocationContext{
+			ctx:          ctx,
+			agentName:    "test-agent",
+			sessionID:    "sess-1",
+			invocationID: "inv-afterrun-panic",
+			userID:       "user-1",
+		}
+		if _, err := ap.beforeRun(mCtx); err != nil {
+			t.Fatalf("beforeRun() error = %v", err)
+		}
+		if _, err := ap.onUserMessage(mCtx, textContent("user", "hello")); err != nil {
+			t.Fatalf("onUserMessage() error = %v", err)
+		}
+
+		tm.mu.Lock()
+		_, liveBefore := tm.invocations["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if !liveBefore {
+			t.Fatal("expected invocation trace to be active before afterRun")
+		}
+
+		var panickedOnce atomic.Bool
+		tm.now = func() time.Time {
+			if panickedOnce.CompareAndSwap(false, true) {
+				panic("boom inside popUnclosedAgentSpans")
+			}
+			return time.Now()
+		}
+
+		ap.afterRun(mCtx)
+
+		tm.mu.Lock()
+		_, stillLive := tm.invocations["inv-afterrun-panic"]
+		_, inCompleted := tm.completed["inv-afterrun-panic"]
+		tm.mu.Unlock()
+		if stillLive {
+			t.Error("invocation remained in traces.invocations after panic in afterRun; want endInvocation cleanup")
+		}
+		if !inCompleted {
+			t.Error("invocation missing from traces.completed after panic in afterRun; want endInvocation completion record")
+		}
+
+		select {
+		case req := <-requests:
+			rows := decodeArrowRows(t, req)
+			if len(rows) < 2 {
+				t.Fatalf("flushed %d rows on afterRun panic, want >= 2 queued rows; event types: %v", len(rows), eventTypes(rows))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for flushRunEnd batch after panic in afterRun")
+		}
+
+		if got := processor.DropStats().AppendFailureDrops; got != 1 {
+			t.Errorf("AppendFailureDrops = %d, want 1 from recovered afterRun panic", got)
+		}
+	})
+}
+
+func TestClose_SecondCallAfterCleanCloseSucceeds(t *testing.T) {
+	p, _, _ := setupTestPluginWithConfig(t, nil)
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("first Close() error = %v, want nil", err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+}
+
+func TestNestedRetiredRecovery_Runner(t *testing.T) {
+	makeBranch := func(t *testing.T, name, childName string, childErr error, recoverText string) agent.Agent {
+		t.Helper()
+		child, err := agent.New(agent.Config{
+			Name: childName,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = childName
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", childName+" answer")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, childErr)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", childName, err)
+		}
+		par := newParallelAgent(t, name+"_par", child)
+		cfg := agent.Config{
+			Name:      name,
+			SubAgents: []agent.Agent{par},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		}
+		if recoverText != "" {
+			cfg.AfterAgentCallbacks = []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					return textContent("model", recoverText), nil
+				},
+			}
+		}
+		inner, err := agent.New(cfg)
+		if err != nil {
+			t.Fatalf("agent.New(%s): %v", name, err)
+		}
+		return inner
+	}
+
+	makeOuter := func(t *testing.T, recoverText string, subs ...agent.Agent) agent.Agent {
+		t.Helper()
+		cfg := agent.Config{
+			Name:      "outer",
+			SubAgents: subs,
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, sub := range subs {
+						for ev, runErr := range sub.Run(ctx) {
+							if runErr != nil {
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				}
+			},
+		}
+		if recoverText != "" {
+			cfg.AfterAgentCallbacks = []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					return textContent("model", recoverText), nil
+				},
+			}
+		}
+		outer, err := agent.New(cfg)
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		return outer
+	}
+
+	makeBufferingRoot := func(t *testing.T, outer agent.Agent) agent.Agent {
+		t.Helper()
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{outer},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered []*session.Event
+					for ev, runErr := range outer.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil {
+							buffered = append(buffered, ev)
+						}
+					}
+					for _, ev := range buffered {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		return root
+	}
+
+	t.Run("inner recovers and outer forwards", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child branch failure"), "inner recovered")
+		outer := makeOuter(t, "", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("inner does not recover and outer recovers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child branch failure"), "")
+		outer := makeOuter(t, "outer recovered", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s2", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v, agentErrorCounts=%v", n, eventTypes(rows), agentErrorCounts(rows))
+		}
+		if got := onlyRowOfType(t, rows, EventInvocationCompleted)["status"]; got != "OK" {
+			t.Errorf("INVOCATION_COMPLETED status = %v, want OK", got)
+		}
+	})
+
+	t.Run("neither inner nor outer recovers", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		inner := makeBranch(t, "inner", "child", errors.New("child unrecovered failure"), "")
+		outer := makeOuter(t, "", inner)
+		root := makeBufferingRoot(t, outer)
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s3", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		if invErr["status"] != "ERROR" {
+			t.Errorf("INVOCATION_ERROR status = %v, want ERROR", invErr["status"])
+		}
+	})
+
+	t.Run("unrelated sibling failure stays intact when inner1 recovers", func(t *testing.T) {
+		for _, recoverFirst := range []bool{true, false} {
+			name := "recover first"
+			if !recoverFirst {
+				name = "fail silently first"
+			}
+			t.Run(name, func(t *testing.T) {
+				p, requests, _ := setupTestPlugin(t)
+				err1 := errors.New("child1 recoverable error")
+				err2 := errors.New("child2 silent error")
+				inner1 := makeBranch(t, "inner1", "child1", err1, "inner1 recovered")
+				inner2 := makeBranch(t, "inner2", "child2", err2, "")
+				subs := []agent.Agent{inner1, inner2}
+				if !recoverFirst {
+					subs = []agent.Agent{inner2, inner1}
+				}
+				outer := makeOuter(t, "", subs...)
+				root := makeBufferingRoot(t, outer)
+
+				for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s4", textContent("user", "go"), agent.RunConfig{}) {
+					if err != nil {
+						t.Fatalf("runner.Run error = %v, want nil", err)
+					}
+				}
+				rows := collectRows(t, requests, untilInvocationEnd)
+				if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+					t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+				}
+				invErr := onlyRowOfType(t, rows, EventInvocationError)
+				msg, _ := invErr["error_message"].(string)
+				if strings.Contains(msg, err1.Error()) || !strings.Contains(msg, err2.Error()) {
+					t.Errorf("INVOCATION_ERROR error_message = %q, want %q and not %q", msg, err2.Error(), err1.Error())
+				}
+			})
 		}
 	})
 }

@@ -1008,7 +1008,6 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 		d.sourceEvent = ev
 		d.author = ev.Author
 		d.customMetadata = cleanCustomMeta
-		d.customMetadataScrubbed = true
 		d.customMetadataTruncated = a2aTrunc
 	}
 
