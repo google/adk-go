@@ -3653,8 +3653,8 @@ func TestEvalViewDefinitions_ColumnsAndSQLStructure(t *testing.T) {
 		}
 	}
 
-	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24316, "711df689f948a07444d4056507448b5f12f7533c4edbe039233f9d193a87d047")
-	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 22880, "4b86e61259e3e4a6d77d53ff6b320d6554a88572bf5fe75dafbca604d664ae10")
+	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24399, "2f53fa5462461f7b2095cffe35b4de0a4d99a4a4817264a9faecabf201cdfc70")
+	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 22963, "7c5694be00ea3b08c8a2a3c3477a58d9ad9a1e60962b0e8fb8a22ba369fd792c")
 
 	if !strings.Contains(sessionDef.Query, "session_rollup AS (") {
 		t.Error("v_eval_session missing session_rollup CTE")
@@ -3786,43 +3786,43 @@ func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
 	}{
 		{
 			name:              "default",
-			wantSessionLen:    24316,
-			wantSessionSHA256: "711df689f948a07444d4056507448b5f12f7533c4edbe039233f9d193a87d047",
-			wantTurnLen:       22880,
-			wantTurnSHA256:    "4b86e61259e3e4a6d77d53ff6b320d6554a88572bf5fe75dafbca604d664ae10",
+			wantSessionLen:    24399,
+			wantSessionSHA256: "2f53fa5462461f7b2095cffe35b4de0a4d99a4a4817264a9faecabf201cdfc70",
+			wantTurnLen:       22963,
+			wantTurnSHA256:    "7c5694be00ea3b08c8a2a3c3477a58d9ad9a1e60962b0e8fb8a22ba369fd792c",
 		},
 		{
 			name:              "deny content_parts",
 			denylist:          []string{columnContentParts},
-			wantSessionLen:    24429,
-			wantSessionSHA256: "d85b58b50f183a556962daa3cc07f1167a1fe0df1f885d4935c2d5662a57471a",
-			wantTurnLen:       22993,
-			wantTurnSHA256:    "56096c1258fd0c7e0c545155d9b9fc2f162606f75d0d60d0fa035c0db13d1bc2",
+			wantSessionLen:    24512,
+			wantSessionSHA256: "a377192d8cb4ad885846ab98b88af59f7e5c79b12d5abde633d109c61f328aeb",
+			wantTurnLen:       23076,
+			wantTurnSHA256:    "211155b175a845a08efee9d682c21ea31892172428d4834d34025fe162583ce5",
 		},
 		{
 			name:              "deny attributes",
 			denylist:          []string{columnAttributes},
-			wantSessionLen:    24338,
-			wantSessionSHA256: "53e24ffcde70783ba35e8a87d9f05c137dca411b19e09e4f1d0418e1857db680",
-			wantTurnLen:       22902,
-			wantTurnSHA256:    "a6a751735d9ca56d0b34bd0ca6bc98b3d0042edb21ce7690e5851fa8ff346ddb",
+			wantSessionLen:    24421,
+			wantSessionSHA256: "dca8504828dd66cc1aa550e63d317556f51412638d5675e5ccae72416f75a3f3",
+			wantTurnLen:       22985,
+			wantTurnSHA256:    "99e41cbcff72b13abc948e3fa61671080c905b45cf36d947ffd5909b29d4c1a1",
 		},
 		{
 			name:              "deny latency_ms",
 			denylist:          []string{columnLatencyMS},
-			wantSessionLen:    24338,
-			wantSessionSHA256: "21249eb5e4cce3be52794d4748fbe180f7d266d73cbbaf9582f07d8d4b267490",
-			wantTurnLen:       22902,
-			wantTurnSHA256:    "5694ea9a23ee0173ce05954c111ccc9b92e4a921943c3d77a41e3bc881c46fdd",
+			wantSessionLen:    24421,
+			wantSessionSHA256: "363ec9e4840cc227addb7731582f970699098c142f2ee5e1c49e4286f8b559cd",
+			wantTurnLen:       22985,
+			wantTurnSHA256:    "976c4ee8cfd0da0cd4b6f1df8a64ff652abd39af76b0046ca5e9784454b19395",
 		},
 		{
 			name:              "deny all three with custom ViewPrefix",
 			viewPrefix:        "custom_p",
 			denylist:          []string{columnContentParts, columnAttributes, columnLatencyMS},
-			wantSessionLen:    24480,
-			wantSessionSHA256: "beb232e14256968ec0ef1a0c432b35e0dbf02b4dde63cf71898fc365ab3d70a3",
-			wantTurnLen:       23044,
-			wantTurnSHA256:    "ce6161efb4dbc48dbd380fafa2541b73055431d6d85cb1ab3a957ce0f5ae68d9",
+			wantSessionLen:    24563,
+			wantSessionSHA256: "ace322c1087fa35daeef1c90c8f01778ea6ce5f8c45dbda27fd6d6b3201215c4",
+			wantTurnLen:       23127,
+			wantTurnSHA256:    "b534c15037c84c41078e369c2ca386a61f5444763e7b7f4c11fc86b787e89f7d",
 		},
 	}
 
@@ -3905,19 +3905,19 @@ func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T
 			name:              "ASCII space",
 			tableName:         "table 01",
 			wantEvalSHA:       true,
-			wantSessionLen:    24323,
-			wantSessionSHA256: "317e2abf889526c6d187e4b63e787c1566e8869597a84803914db9774690fac4",
-			wantTurnLen:       22887,
-			wantTurnSHA256:    "4d4bb6bfd126b604ea6c4198c75ce377cb57a5a6fa96feeba140cdf407637458",
+			wantSessionLen:    24406,
+			wantSessionSHA256: "a1f154f65f0ccd0d8766568b1ad4fc804d69a1a1c98ec915dcd98e38eab1864f",
+			wantTurnLen:       22970,
+			wantTurnSHA256:    "aee65535b9d6fcf2ece5b810f21394da6b88038061c7087a9303eab6863f869f",
 		},
 		{
 			name:              "Unicode Zs NO-BREAK SPACE",
 			tableName:         "table\u00a001",
 			wantEvalSHA:       true,
-			wantSessionLen:    24324,
-			wantSessionSHA256: "da765bccf1395d7d887e0c207fdedbfb119e840556a6663411d51521d8767d39",
-			wantTurnLen:       22888,
-			wantTurnSHA256:    "908cb3af37e5f57bd56c1279e8db6d6e88fd1c95c280ce66c47266d9e568bd99",
+			wantSessionLen:    24407,
+			wantSessionSHA256: "4761f26dcb9ea92cc0afac396441ab0ebc1a05f125541b1b668672366d97b057",
+			wantTurnLen:       22971,
+			wantTurnSHA256:    "b5dfb17c00cdd25119861698e45305c21d5a579ae6cd5eca36523073675bce6b",
 		},
 		{
 			name:      "Unicode Zs EM SPACE",
@@ -4607,6 +4607,182 @@ func TestCreateEvalViews_StartupAndSyncLifecycle(t *testing.T) {
 			if strings.Contains(q, "CREATE OR REPLACE VIEW `test-project.test_dataset.v_eval_turn`") {
 				t.Errorf("unexpected eval view DDL executed despite eval collision skip:\n%s", q[:min(120, len(q))])
 			}
+		}
+	})
+
+	t.Run("SyncViews isolates per-event and eval failures so valid view groups still sync and return joined errors", func(t *testing.T) {
+		// 1. Valid per-event views + colliding eval views (TableName="v_eval_session"):
+		// transient startup failure logs "call SyncViews to retry", and calling SyncViews
+		// executes all 25 per-event views while still reporting the eval collision error.
+		var failedFirstStartupJob atomic.Bool
+		allStartupDone := make(chan struct{})
+		var startupCount atomic.Int32
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						idx := int(startupCount.Add(1))
+						if idx == 1 && !failedFirstStartupJob.Swap(true) {
+							return &http.Response{
+								StatusCode: http.StatusForbidden,
+								Body:       io.NopCloser(strings.NewReader(`{"error":{"code":403,"message":"Access Denied"}}`)),
+							}, nil
+						}
+						if idx == len(eventViewSpecs) {
+							close(allStartupDone)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"job-1"},"status":{"state":"DONE"}}`)),
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.TableName = "v_eval_session"
+		cfg.DisableCreateViews = false
+		cfg.CreateEvalViews = true
+		cfg.Logger = logger
+
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, newWriteClient(t))
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		select {
+		case <-allStartupDone:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timed out waiting for %d startup views; got %d", len(eventViewSpecs), startupCount.Load())
+		}
+		// Give logger a moment to record async completion after final HTTP response.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) && !logger.contains("call SyncViews to retry") {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if !logger.contains("call SyncViews to retry") {
+			t.Fatalf("startup log missing SyncViews retry hint after transient failure; got:\n%s", logger.String())
+		}
+
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) = false")
+		}
+		fakeRunner := &fakeViewRunner{}
+		bqaap.runner = fakeRunner
+		syncErr := bqaap.SyncViews(ctx)
+		if syncErr == nil || !strings.Contains(syncErr.Error(), "collides with the events table") {
+			t.Errorf("SyncViews() error = %v, want eval TableName collision error", syncErr)
+		}
+		if got := len(fakeRunner.executedNames()); got != len(eventViewSpecs) {
+			t.Errorf("SyncViews() executed %d per-event views, want %d", got, len(eventViewSpecs))
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		// 2. Valid per-event views + evalConfigErr + partial DDL failure: all 25 per-event
+		// views run and both the DDL error and eval config error are joined.
+		pEvalDenied, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+		})
+		bqaapEvalDenied, _ := AsBigQueryAgentAnalyticsPlugin(pEvalDenied)
+		bqaapEvalDenied.evalConfigErr = errors.New("eval config error")
+		evalDeniedRunner := &fakeViewRunner{
+			errFor: map[string]error{"v_tool_error": errors.New("ddl failed")},
+		}
+		bqaapEvalDenied.runner = evalDeniedRunner
+		errEvalDenied := bqaapEvalDenied.SyncViews(ctx)
+		if errEvalDenied == nil || !strings.Contains(errEvalDenied.Error(), "ddl failed") || !strings.Contains(errEvalDenied.Error(), "eval config error") {
+			t.Errorf("SyncViews() error = %v, want joined ddl failed and eval config error", errEvalDenied)
+		}
+		if got := len(evalDeniedRunner.executedNames()); got != len(eventViewSpecs) {
+			t.Errorf("SyncViews() executed %d views, want %d per-event views", got, len(eventViewSpecs))
+		}
+
+		// 3. Colliding per-event views (TableName="v_llm_request") + valid eval views:
+		// the 2 eval views still sync while returning the per-event collision error.
+		pPerEventCollision, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.TableName = "v_llm_request"
+		})
+		bqaapPerEventCol, _ := AsBigQueryAgentAnalyticsPlugin(pPerEventCollision)
+		perEventColRunner := &fakeViewRunner{}
+		bqaapPerEventCol.runner = perEventColRunner
+		errPerEventCol := bqaapPerEventCol.SyncViews(ctx)
+		if errPerEventCol == nil || !strings.Contains(errPerEventCol.Error(), "collides with the events table") {
+			t.Errorf("SyncViews() error = %v, want per-event TableName collision error", errPerEventCol)
+		}
+		if diff := cmp.Diff([]string{"v_eval_session", "v_eval_turn"}, perEventColRunner.executedNames()); diff != "" {
+			t.Errorf("SyncViews() executed names mismatch (-want +got):\n%s", diff)
+		}
+
+		// 4. Both groups invalid: SyncViews returns joined error with 0 executed views.
+		pBothInvalid, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.TableName = "v_llm_request"
+		})
+		bqaapBothInvalid, _ := AsBigQueryAgentAnalyticsPlugin(pBothInvalid)
+		bqaapBothInvalid.evalConfigErr = errors.New("eval config error")
+		bothInvalidRunner := &fakeViewRunner{}
+		bqaapBothInvalid.runner = bothInvalidRunner
+		errBoth := bqaapBothInvalid.SyncViews(ctx)
+		if errBoth == nil || !strings.Contains(errBoth.Error(), "collides with the events table") || !strings.Contains(errBoth.Error(), "eval config error") {
+			t.Errorf("SyncViews() error = %v, want joined per-event collision and eval config errors", errBoth)
+		}
+		if got := len(bothInvalidRunner.executedNames()); got != 0 {
+			t.Errorf("SyncViews() executed %d views, want 0 when both groups are invalid", got)
+		}
+
+		// 5. Mixed valid per-event + colliding eval views closed mid-sync still returns errPluginClosed verbatim.
+		pClosedMidSync, _, _ := setupTestPluginWithConfig(t, func(c *Config) {
+			c.DisableCreateViews = true
+			c.CreateEvalViews = true
+			c.TableName = "v_eval_session"
+		})
+		bqaapClosedMidSync, _ := AsBigQueryAgentAnalyticsPlugin(pClosedMidSync)
+		inDDL := make(chan struct{})
+		closeDone := make(chan error, 1)
+		bqaapClosedMidSync.runner = &fakeViewRunner{
+			onRun: func(callCtx context.Context, viewName string) error {
+				select {
+				case <-inDDL:
+				default:
+					close(inDDL)
+					go func() {
+						closeDone <- pClosedMidSync.Close()
+					}()
+				}
+				<-callCtx.Done()
+				return callCtx.Err()
+			},
+		}
+		errClosed := bqaapClosedMidSync.SyncViews(ctx)
+		select {
+		case <-inDDL:
+			if closeErr := <-closeDone; closeErr != nil {
+				t.Fatalf("Close() error = %v", closeErr)
+			}
+		default:
+			t.Errorf("SyncViews() never entered DDL runner (err=%v)", errClosed)
+		}
+		if !errors.Is(errClosed, errPluginClosed) || errClosed.Error() != errPluginClosed.Error() {
+			t.Errorf("SyncViews() on mid-sync Close = %v, want exact errPluginClosed (%v)", errClosed, errPluginClosed)
 		}
 	})
 
@@ -6618,6 +6794,178 @@ func TestEvalViews_SemanticExecution(t *testing.T) {
 		}
 		if gotTexts := extractModelResponseTextsFromTrace(t, deniedTurnResults[0].Trace); !cmp.Equal(gotTexts, []string{"It is 20C and sunny."}) {
 			t.Errorf("content_parts-denied fallback texts = %#v, want [\"It is 20C and sunny.\"]", gotTexts)
+		}
+	})
+
+	t.Run("user_message_reconstructs_from_gcs_reference_and_skips_media_offloaded", func(t *testing.T) {
+		extractUserTexts := func(trace map[string]any) []string {
+			turnsAny, _ := trace["turns"].([]any)
+			var texts []string
+			for _, turnAny := range turnsAny {
+				tm, _ := turnAny.(map[string]any)
+				eventsAny, _ := tm["events"].([]any)
+				for _, evAny := range eventsAny {
+					em, _ := evAny.(map[string]any)
+					cm, _ := em["content"].(map[string]any)
+					if cm["role"] != "user" {
+						continue
+					}
+					partsAny, _ := cm["parts"].([]any)
+					for _, pAny := range partsAny {
+						pm, _ := pAny.(map[string]any)
+						if txt, hasTxt := pm["text"].(string); hasTxt {
+							texts = append(texts, txt)
+						}
+					}
+				}
+			}
+			return texts
+		}
+
+		// 1. End-to-end callback emission with real GCSOffloader offloading a text user prompt
+		// exceeding MaxInlineTextSize, leaving content_parts[].storage_mode="GCS_REFERENCE"
+		// and omitting content.text_summary.
+		off := &fakeOffloader{}
+		longPrompt := "Summarize quarterly metrics for " + strings.Repeat("segment-alpha-", 5)
+		e2eRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-gcs",
+			sessionID:     "sess-user-e2e-offloaded",
+			invocationID:  "inv-user-e2e-offloaded",
+			agentName:     "usr-agent",
+			agentDesc:     "User offload test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: longPrompt}}},
+			responseParts: []*genai.Part{{Text: "Summary ready."}},
+			pluginModifier: func(c *Config) {
+				c.GCSOffloader = off
+				c.ConnectionID = "us.my-connection"
+				c.MaxInlineTextSize = 40
+				c.BatchFlushIntv = 10 * time.Millisecond
+			},
+		})
+		var sawOffloadedUserRow bool
+		var wantUserPreview string
+		for _, r := range e2eRows {
+			if r["event_type"] == EventUserMessageReceived {
+				parts, _ := r[columnContentParts].([]map[string]any)
+				if len(parts) == 1 && parts[0]["storage_mode"] == "GCS_REFERENCE" {
+					sawOffloadedUserRow = true
+					wantUserPreview, _ = parts[0]["text"].(string)
+				}
+				if strings.Contains(fmt.Sprint(r[columnContent]), "segment-alpha-") {
+					t.Fatalf("expected USER_MESSAGE_RECEIVED content summary to omit offloaded text, got %v", r[columnContent])
+				}
+			}
+		}
+		if !sawOffloadedUserRow || !strings.HasSuffix(wantUserPreview, "... [OFFLOADED]") {
+			t.Fatalf("expected fakeOffloader to offload USER_MESSAGE_RECEIVED text prompt, preview=%q calls=%d", wantUserPreview, len(off.calls))
+		}
+
+		e2eTurns := executeEvalViewSQL(t, turnSQL, e2eRows)
+		if len(e2eTurns) != 1 || !e2eTurns[0].EvalReady {
+			t.Fatalf("e2e offloaded user prompt v_eval_turn = %+v, want 1 eval_ready turn", e2eTurns)
+		}
+		if gotUser := extractUserTexts(e2eTurns[0].Trace); !cmp.Equal(gotUser, []string{wantUserPreview}) {
+			t.Errorf("v_eval_turn user texts = %#v, want [%q]", gotUser, wantUserPreview)
+		}
+		e2eSessions := executeEvalViewSQL(t, sessionSQL, e2eRows)
+		if len(e2eSessions) != 1 || !e2eSessions[0].EvalReady {
+			t.Fatalf("e2e offloaded user prompt v_eval_session = %+v, want 1 eval_ready session", e2eSessions)
+		}
+		if gotUser := extractUserTexts(e2eSessions[0].Trace); !cmp.Equal(gotUser, []string{wantUserPreview}) {
+			t.Errorf("v_eval_session user texts = %#v, want [%q]", gotUser, wantUserPreview)
+		}
+
+		// 2. Direct SQL row shapes: GCS_REFERENCE text prompt recovers preview, whereas
+		// [MEDIA OFFLOADED] placeholders (non-text or text/plain) are excluded.
+		gcsRefUserRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-gcs",
+			sessionID:     "sess-user-gcs-ref",
+			invocationID:  "inv-user-gcs-ref",
+			agentName:     "usr-agent",
+			agentDesc:     "User offload test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "placeholder"}}},
+			responseParts: []*genai.Part{{Text: "Ack."}},
+		})
+		for i := range gcsRefUserRows {
+			if gcsRefUserRows[i]["event_type"] == EventUserMessageReceived {
+				gcsRefUserRows[i][columnContent] = "{}"
+				gcsRefUserRows[i][columnContentParts] = []map[string]any{{
+					"part_index":   int64(0),
+					"mime_type":    "text/plain",
+					"storage_mode": "GCS_REFERENCE",
+					"text":         "Prompt snippet... [OFFLOADED]",
+				}}
+			}
+		}
+
+		mediaUserRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-gcs",
+			sessionID:     "sess-user-media-offloaded",
+			invocationID:  "inv-user-media-offloaded",
+			agentName:     "usr-agent",
+			agentDesc:     "User offload test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "placeholder"}}},
+			responseParts: []*genai.Part{{Text: "Saw image."}},
+		})
+		for i := range mediaUserRows {
+			if mediaUserRows[i]["event_type"] == EventUserMessageReceived {
+				mediaUserRows[i][columnContent] = "{}"
+				mediaUserRows[i][columnContentParts] = []map[string]any{{
+					"part_index":   int64(0),
+					"mime_type":    "image/png",
+					"storage_mode": "GCS_REFERENCE",
+					"text":         mediaOffloadedText,
+				}}
+			}
+		}
+
+		mediaTextPlaceholderRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-gcs",
+			sessionID:     "sess-user-media-text-placeholder",
+			invocationID:  "inv-user-media-text-placeholder",
+			agentName:     "usr-agent",
+			agentDesc:     "User offload test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "placeholder"}}},
+			responseParts: []*genai.Part{{Text: "Ignored placeholder."}},
+		})
+		for i := range mediaTextPlaceholderRows {
+			if mediaTextPlaceholderRows[i]["event_type"] == EventUserMessageReceived {
+				mediaTextPlaceholderRows[i][columnContent] = "{}"
+				mediaTextPlaceholderRows[i][columnContentParts] = []map[string]any{{
+					"part_index":   int64(0),
+					"mime_type":    "text/plain",
+					"storage_mode": "GCS_REFERENCE",
+					"text":         mediaOffloadedText,
+				}}
+			}
+		}
+
+		directTurns := executeEvalViewSQL(t, turnSQL, slices.Concat(gcsRefUserRows, mediaUserRows, mediaTextPlaceholderRows))
+		byInv := make(map[string]evalViewExecResultRow, len(directTurns))
+		for _, tr := range directTurns {
+			byInv[tr.InvocationID] = tr
+		}
+		if gcsTurn := byInv["inv-user-gcs-ref"]; !gcsTurn.EvalReady {
+			t.Errorf("inv-user-gcs-ref EvalReady = false, want true")
+		} else if gotUser := extractUserTexts(gcsTurn.Trace); !cmp.Equal(gotUser, []string{"Prompt snippet... [OFFLOADED]"}) {
+			t.Errorf("inv-user-gcs-ref user texts = %#v, want [\"Prompt snippet... [OFFLOADED]\"]", gotUser)
+		}
+		for _, id := range []string{"inv-user-media-offloaded", "inv-user-media-text-placeholder"} {
+			gotTurn := byInv[id]
+			if gotTurn.EvalReady {
+				t.Errorf("%s EvalReady = true, want false (media placeholder must not satisfy user message text)", id)
+			}
+			if gotUser := extractUserTexts(gotTurn.Trace); len(gotUser) != 0 {
+				t.Errorf("%s unexpectedly emitted user text: %#v", id, gotUser)
+			}
 		}
 	})
 }

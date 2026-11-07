@@ -598,10 +598,13 @@ const evalViewCTEsTemplate = `WITH
             UNNEST(content_parts) AS p
           WHERE
             p.mime_type = 'text/plain'
-            AND COALESCE(p.storage_mode, 'INLINE') = 'INLINE'
+            AND COALESCE(p.storage_mode, 'INLINE')
+              IN ('INLINE', 'GCS_REFERENCE')
             AND COALESCE(p.part_attributes, '{}') = '{}'
             AND p.text IS NOT NULL
-            AND p.text NOT IN ('', '[BINARY DATA]', '[UPLOAD FAILED]')
+            AND p.text NOT IN (
+              '', '[BINARY DATA]', '[MEDIA OFFLOADED]', '[UPLOAD FAILED]'
+            )
         )
         WHEN NOT REGEXP_CONTAINS(
           COALESCE(
@@ -1717,15 +1720,19 @@ var errPluginClosed = errors.New("agentanalytics: plugin is closed")
 // synchronously using ctx. It runs even when DisableCreateViews is set,
 // permanently cancels any in-flight startup view creation pass, and returns
 // the joined per-view errors with 409 Conflict / AlreadyExists responses
-// ignored. Only canceling ctx or closing the plugin stops waiting on the
-// current DDL request and stops starting further view jobs; exceeding the
-// 30-second per-view timeout stops waiting on and fails only that view while
-// the pass continues with the remaining views (and in either case, a job
-// already submitted to BigQuery may still finish on the server). If Close is
-// called on the plugin, a SyncViews call holding the view gate is canceled and
-// Close waits for its current step to return, a SyncViews call waiting for the
-// gate returns immediately, and every closed path returns an
-// "agentanalytics: plugin is closed" error.
+// ignored. When one view group (per-event or evaluation) fails definition or
+// configuration validation while the other group is valid, the valid views
+// still run and their result is joined with the group validation error; if no
+// valid views remain, SyncViews returns the validation error without
+// canceling any in-flight startup pass. Only canceling ctx or closing the
+// plugin stops waiting on the current DDL request and stops starting further
+// view jobs; exceeding the 30-second per-view timeout stops waiting on and fails
+// only that view while the pass continues with the remaining views (and in
+// either case, a job already submitted to BigQuery may still finish on the
+// server). If Close is called on the plugin, a SyncViews call holding the view
+// gate is canceled and Close waits for its current step to return, a SyncViews
+// call waiting for the gate returns immediately, and every closed path returns
+// an "agentanalytics: plugin is closed" error.
 func (p *BigQueryAgentAnalyticsPlugin) SyncViews(ctx context.Context) error {
 	if p == nil || p.pluginState == nil {
 		return errors.New("agentanalytics: nil plugin")
@@ -1764,27 +1771,35 @@ func (s *pluginState) SyncViews(ctx context.Context) error {
 	if s == nil {
 		return errors.New("agentanalytics: nil plugin")
 	}
-	defs := s.defs
-	defsErr := s.defsErr
+	var defs []ViewDefinition
+	var errs []error
+	if s.defsErr != nil {
+		errs = append(errs, s.defsErr)
+	} else {
+		defs = append(defs, s.defs...)
+	}
 	if s.createEvalViews {
-		if defsErr == nil {
-			defsErr = cmp.Or(s.evalConfigErr, s.evalDefsErr)
-		}
-		if defsErr == nil {
-			defs = append(append([]ViewDefinition(nil), s.defs...), s.evalDefs...)
+		if evalErr := cmp.Or(s.evalConfigErr, s.evalDefsErr); evalErr != nil {
+			errs = append(errs, evalErr)
+		} else {
+			defs = append(defs, s.evalDefs...)
 		}
 	}
-	return s.syncViewsWithDefs(ctx, defs, defsErr, nil)
+	deferredErr := errors.Join(errs...)
+	if len(defs) == 0 {
+		return s.syncViewsWithDefs(ctx, nil, deferredErr, nil, nil)
+	}
+	return s.syncViewsWithDefs(ctx, defs, nil, nil, deferredErr)
 }
 
 func (s *pluginState) SyncEvalViews(ctx context.Context) error {
 	if s == nil {
 		return errors.New("agentanalytics: nil plugin")
 	}
-	return s.syncViewsWithDefs(ctx, s.evalDefs, s.evalDefsErr, s.evalConfigErr)
+	return s.syncViewsWithDefs(ctx, s.evalDefs, s.evalDefsErr, s.evalConfigErr, nil)
 }
 
-func (s *pluginState) syncViewsWithDefs(ctx context.Context, defs []ViewDefinition, defsErr, configErr error) error {
+func (s *pluginState) syncViewsWithDefs(ctx context.Context, defs []ViewDefinition, defsErr, configErr, deferredErr error) error {
 	if s == nil {
 		return errors.New("agentanalytics: nil plugin")
 	}
@@ -1833,13 +1848,11 @@ func (s *pluginState) syncViewsWithDefs(ctx context.Context, defs []ViewDefiniti
 	if s.isClosed() {
 		return errPluginClosed
 	}
-	if err := syncAnalyticsViews(ctx, runner, defs, nil); err != nil {
-		if s.isClosed() {
-			return errPluginClosed
-		}
-		return err
+	syncErr := syncAnalyticsViews(ctx, runner, defs, nil)
+	if s.isClosed() {
+		return errPluginClosed
 	}
-	return nil
+	return errors.Join(syncErr, deferredErr)
 }
 
 func (s *pluginState) ensureViewGate() chan struct{} {
