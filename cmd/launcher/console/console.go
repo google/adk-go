@@ -124,11 +124,16 @@ func (l *consoleLauncher) Run(ctx context.Context, config *launcher.Config) erro
 		reader := bufio.NewReader(os.Stdin)
 		for {
 			userInput, err := reader.ReadString('\n')
+			// ReadString returns any data read before an error alongside it.
+			// Deliver that final line before reporting EOF so a piped prompt
+			// lacking a trailing newline is not dropped.
+			if userInput != "" {
+				inputChan <- userInput
+			}
 			if err != nil {
 				readErrChan <- err
 				return
 			}
-			inputChan <- userInput
 		}
 	}()
 	// Print an initial newline to work around PTY/exec buffering issues in some environments.
