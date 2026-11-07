@@ -31,6 +31,7 @@ jobs:
     # the guard every fork gets a failing run on each push to main.
     if: github.repository == 'google/adk-go'
     runs-on: ubuntu-latest
+    environment: release-please
     permissions:
       contents: write        # create the release branch, the tag and the release
       pull-requests: write   # open and update the release PR

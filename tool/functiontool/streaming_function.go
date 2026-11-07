@@ -143,7 +143,7 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 				if !canYield {
 					panic(r)
 				}
-				yield("", &toolinternal.HandlerError{Err: fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack())})
+				yield("", toolinternal.NewPanicError(f.Name(), r, debug.Stack()))
 			}
 		}()
 
@@ -185,9 +185,6 @@ func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) it
 		}
 
 		for res, err := range f.handler(ctx, input) {
-			if err != nil {
-				err = &toolinternal.HandlerError{Err: err}
-			}
 			if !yield(res, err) {
 				return
 			}

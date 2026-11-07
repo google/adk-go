@@ -152,9 +152,13 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 			// the same part and would otherwise have carried it out unnoticed.
 			// Media is excluded from the report because this endpoint emits it
 			// below, as Chat Completions does.
-			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia); field != "" {
+			if field := shared.UnsupportedPayload(part, shared.PartFieldMedia, shared.PartFieldCodeExecution); field != "" {
 				return nil, false, fmt.Errorf("openai: unsupported content part: %s", field)
 			}
+			// Same fenced text adk-python's Responses converter sends. Chat
+			// Completions uses it too: dropping the parts there would hide
+			// the code and its output from the model.
+			codeText := shared.CodeExecutionText(part)
 			// Classified before any of it is emitted, for the same reason the
 			// check above runs first: media this endpoint cannot label must
 			// fail the request rather than leave with the text beside it.
@@ -180,6 +184,9 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 				if _, err := normalizeRole(curRole); err != nil {
 					return nil, false, err
 				}
+			}
+			if codeText != "" {
+				buffered = append(buffered, bufferedContent{text: codeText})
 			}
 			// After the part's own text, so that "describe this:" keeps its
 			// place ahead of the image it introduces, and before the call
@@ -208,7 +215,7 @@ func convertContents(contents []*genai.Content) (oairesponses.ResponseInputParam
 					return nil, false, err
 				}
 				items = append(items, oairesponses.ResponseInputItemUnionParam{OfFunctionCallOutput: respParam})
-			case !sendText && len(media) == 0 && !shared.ReplayedReasoning(part):
+			case !sendText && codeText == "" && len(media) == 0 && !shared.ReplayedReasoning(part):
 				// Nothing in the part reaches the request. It keeps the
 				// unsupported-content-part prefix the single message used
 				// before, so a caller matching on that still matches here.

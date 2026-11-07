@@ -24,6 +24,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -103,6 +104,13 @@ func confirmationEvent(id, invocationID string, ts int, callID string) *session.
 	ev.Actions.RequestedToolConfirmations = map[string]toolconfirmation.ToolConfirmation{
 		callID: {Hint: "approve?"},
 	}
+	return ev
+}
+
+// withAuthRequest attaches a credential request for callID to ev. A tool puts
+// the request on its own response for that call.
+func withAuthRequest(ev *session.Event, callID string) *session.Event {
+	ev.Actions.RequestedAuthConfigs = map[string]toolauth.Config{callID: {}}
 	return ev
 }
 

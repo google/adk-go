@@ -27,14 +27,16 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/sessiontestsuite"
 )
 
 func Test_databaseService(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, ChecksRequestedAuthConfigs: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyService(t)
 	})
@@ -252,6 +254,59 @@ func TestDatabaseService_StateUpdateTimeIsSet(t *testing.T) {
 	}
 }
 
+// The test database is SQLite without PRAGMA foreign_keys, so the ON DELETE
+// CASCADE on events is not enforced and only an explicit delete removes them.
+func TestDatabaseService_DeleteRemovesSessionEvents(t *testing.T) {
+	ctx := t.Context()
+	s := emptyService(t)
+	deleted := session.DeleteRequest{AppName: "app", UserID: "user", SessionID: "s1"}
+	// Sessions that share part of the deleted session's (app, user, session)
+	// key, so their events must survive the delete.
+	kept := []session.DeleteRequest{
+		{AppName: "app", UserID: "user", SessionID: "s2"},
+		{AppName: "app", UserID: "other-user", SessionID: "s1"},
+		{AppName: "other-app", UserID: "user", SessionID: "s1"},
+	}
+	for _, key := range append([]session.DeleteRequest{deleted}, kept...) {
+		created, err := s.Create(ctx, &session.CreateRequest{AppName: key.AppName, UserID: key.UserID, SessionID: key.SessionID})
+		if err != nil {
+			t.Fatalf("Create(%+v): %v", key, err)
+		}
+		event := &session.Event{
+			ID:          "e-" + key.AppName + "-" + key.UserID + "-" + key.SessionID,
+			Author:      "tool",
+			Timestamp:   time.Now(),
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("tool output", genai.RoleUser)},
+		}
+		if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+			t.Fatalf("AppendEvent(%+v): %v", key, err)
+		}
+	}
+
+	if err := s.Delete(ctx, &deleted); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	countEvents := func(key session.DeleteRequest) int64 {
+		t.Helper()
+		var n int64
+		if err := s.db.Model(&storageEvent{}).
+			Where("app_name = ? AND user_id = ? AND session_id = ?", key.AppName, key.UserID, key.SessionID).
+			Count(&n).Error; err != nil {
+			t.Fatalf("count events of %+v: %v", key, err)
+		}
+		return n
+	}
+	if got := countEvents(deleted); got != 0 {
+		t.Errorf("events left for deleted session %+v = %d, want 0", deleted, got)
+	}
+	for _, key := range kept {
+		if got := countEvents(key); got != 1 {
+			t.Errorf("events left for kept session %+v = %d, want 1", key, got)
+		}
+	}
+}
+
 func TestNewSessionServiceFromDB(t *testing.T) {
 	t.Run("nil db returns error", func(t *testing.T) {
 		_, err := NewSessionServiceFromDB(nil)
@@ -294,7 +349,7 @@ func TestNewSessionServiceFromDB(t *testing.T) {
 }
 
 func Test_databaseServiceFromDB(t *testing.T) {
-	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true}
+	opts := sessiontestsuite.SuiteOptions{SupportsUserProvidedSessionID: true, ChecksRequestedAuthConfigs: true}
 	sessiontestsuite.RunServiceTests(t, opts, func(t *testing.T) session.Service {
 		return emptyServiceFromDB(t)
 	})
@@ -572,31 +627,7 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 				t.Fatalf("Create: %v", err)
 			}
 
-			var got []string
-			record := func(op string) func(*gorm.DB) {
-				return func(tx *gorm.DB) {
-					table := tx.Statement.Table
-					if table != "app_states" && table != "user_states" {
-						return
-					}
-					stmt := op + " " + table
-					if _, ok := tx.Statement.Clauses["ON CONFLICT"]; ok {
-						stmt += " on conflict do nothing"
-					}
-					if _, ok := tx.Statement.Clauses["FOR"]; ok {
-						stmt += " for update"
-					}
-					got = append(got, stmt)
-				}
-			}
-			if err := s.db.Callback().Query().Before("gorm:query").Register("test:record_query", record("select")); err != nil {
-				t.Fatalf("register query callback: %v", err)
-			}
-			t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:record_query") })
-			if err := s.db.Callback().Create().Before("gorm:create").Register("test:record_create", record("insert")); err != nil {
-				t.Fatalf("register create callback: %v", err)
-			}
-			t.Cleanup(func() { _ = s.db.Callback().Create().Remove("test:record_create") })
+			got := recordStateRowStatements(t, s)
 
 			event := &session.Event{
 				ID:        "e1",
@@ -608,8 +639,8 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 				t.Fatalf("AppendEvent: %v", err)
 			}
 
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("AppendEvent state statements:\n got %q\nwant %q", got, tc.want)
+			if !slices.Equal(*got, tc.want) {
+				t.Errorf("AppendEvent state statements:\n got %q\nwant %q", *got, tc.want)
 			}
 
 			resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
@@ -623,6 +654,145 @@ func TestDatabaseService_AppendEvent_LocksSharedStateRows(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Create writes the same shared rows as AppendEvent, so it needs the same
+// locks. Without them, two sessions created at once for a new user both read
+// no row and the later write replaces the earlier one's keys, and a Create
+// racing an AppendEvent from another session can drop the append's keys.
+func TestDatabaseService_Create_LocksSharedStateRows(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state map[string]any
+		want  []string
+	}{
+		{
+			name: "no state",
+			want: []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "session only",
+			state: map[string]any{"s": 1},
+			want:  []string{"select app_states", "select user_states"},
+		},
+		{
+			name:  "app only",
+			state: map[string]any{"app:a": 1},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"select user_states",
+			},
+		},
+		{
+			name:  "user only",
+			state: map[string]any{"user:u": 2},
+			want: []string{
+				"select app_states",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+		{
+			name:  "app and user",
+			state: map[string]any{"app:a": 1, "user:u": 2, "s": 3},
+			want: []string{
+				"insert app_states on conflict do nothing",
+				"select app_states for update",
+				"insert user_states on conflict do nothing",
+				"select user_states for update",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := emptyService(t)
+			got := recordStateRowStatements(t, s)
+
+			created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: tc.state})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+
+			if !slices.Equal(*got, tc.want) {
+				t.Errorf("Create state statements:\n got %q\nwant %q", *got, tc.want)
+			}
+
+			resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			for key, want := range tc.state {
+				if v, err := resp.Session.State().Get(key); err != nil || v != float64(want.(int)) {
+					t.Errorf("state[%q] = %v, %v; want %v", key, v, err, want)
+				}
+			}
+		})
+	}
+}
+
+// When the shared rows already exist, Create must keep the keys another
+// session wrote there and return them in the new session's state.
+func TestDatabaseService_Create_KeepsExistingSharedState(t *testing.T) {
+	s := emptyService(t)
+	if _, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:a": 1, "user:u": 10}}); err != nil {
+		t.Fatalf("first Create: %v", err)
+	}
+
+	created, err := s.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", State: map[string]any{"app:b": 2, "user:v": 20}})
+	if err != nil {
+		t.Fatalf("second Create: %v", err)
+	}
+
+	resp, err := s.Get(t.Context(), &session.GetRequest{AppName: "app", UserID: "user", SessionID: created.Session.ID()})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := map[string]float64{"app:a": 1, "user:u": 10, "app:b": 2, "user:v": 20}
+	for name, state := range map[string]session.State{"Create": created.Session.State(), "Get": resp.Session.State()} {
+		for key, w := range want {
+			if v, err := state.Get(key); err != nil || fmt.Sprint(v) != fmt.Sprint(w) {
+				t.Errorf("%s state[%q] = %v, %v; want %v", name, key, v, err, w)
+			}
+		}
+	}
+}
+
+// recordStateRowStatements records the inserts and selects s issues against
+// the app_states and user_states tables from now until the test ends, noting
+// the ON CONFLICT and FOR UPDATE clauses that make them safe to run
+// concurrently. Updates are not recorded.
+func recordStateRowStatements(t *testing.T, s *databaseService) *[]string {
+	t.Helper()
+	var got []string
+	record := func(op string) func(*gorm.DB) {
+		return func(tx *gorm.DB) {
+			table := tx.Statement.Table
+			if table != "app_states" && table != "user_states" {
+				return
+			}
+			stmt := op + " " + table
+			if c, ok := tx.Statement.Clauses["ON CONFLICT"]; ok {
+				if onConflict, _ := c.Expression.(clause.OnConflict); onConflict.DoNothing {
+					stmt += " on conflict do nothing"
+				} else {
+					stmt += " on conflict do update"
+				}
+			}
+			if _, ok := tx.Statement.Clauses["FOR"]; ok {
+				stmt += " for update"
+			}
+			got = append(got, stmt)
+		}
+	}
+	if err := s.db.Callback().Query().Before("gorm:query").Register("test:record_query", record("select")); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Query().Remove("test:record_query") })
+	if err := s.db.Callback().Create().Before("gorm:create").Register("test:record_create", record("insert")); err != nil {
+		t.Fatalf("register create callback: %v", err)
+	}
+	t.Cleanup(func() { _ = s.db.Callback().Create().Remove("test:record_create") })
+	return &got
 }
 
 // TestDatabaseService_NonJSONStateErrorSurfaces guards against the

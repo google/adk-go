@@ -356,6 +356,10 @@ subject to choose the next version and build the release notes, and it skips
 anything with no recognized type without reporting an error. A mistitled PR
 merges green and then goes missing from the changelog.
 
+To have the release notes link the issue a PR fixes, end the commit message with
+a `Fixes #123` line. Release tooling reads issue references only from that
+final trailer block, never from the PR description.
+
 ## Self-review
 
 Read the change as if someone else wrote it, before you open the PR and again

@@ -48,26 +48,29 @@ func getUserFunctionCallAt(events session.Events, index int, agentName, scope st
 		return nil
 	}
 	candidate := events.At(index)
-	if candidate.Author != "user" {
+	if candidate.Author != "user" || candidate.Content == nil {
 		return nil
 	}
-	fnCallID, ok := getFunctionResponseCallID(candidate)
-	if !ok {
-		return nil
-	}
-	for i := index - 1; i >= 0; i-- {
-		request := events.At(i)
-		if request.IsolationScope != scope || !isFunctionCallEvent(request, fnCallID, agentName) {
+	for _, part := range candidate.Content.Parts {
+		if part == nil || part.FunctionResponse == nil {
 			continue
 		}
-		if agentName != "" && request.CustomMetadata[plugininternal.BeforeRunReplyKey] == true {
-			return nil
+		fnCallID := part.FunctionResponse.ID
+		for i := index - 1; i >= 0; i-- {
+			request := events.At(i)
+			if request.IsolationScope != scope || !isFunctionCallEvent(request, fnCallID, agentName) {
+				continue
+			}
+			if agentName != "" && request.CustomMetadata[plugininternal.BeforeRunReplyKey] == true {
+				// This cached call owns the ID; an older remote task must not resume.
+				break
+			}
+			result := &userFunctionCall{response: candidate}
+			tid, ctxID := adka2a.GetA2ATaskInfo(request)
+			result.taskID = tid
+			result.contextID = ctxID
+			return result
 		}
-		result := &userFunctionCall{response: candidate}
-		tid, ctxID := adka2a.GetA2ATaskInfo(request)
-		result.taskID = tid
-		result.contextID = ctxID
-		return result
 	}
 	return nil
 }
@@ -145,20 +148,6 @@ func unmatchedFunctionResponseText(fr *genai.FunctionResponse) string {
 		name = "<unnamed>"
 	}
 	return fmt.Sprintf("Tool %s returned: %s", name, marshalFunctionResponseJSON(fr.Response))
-}
-
-// getFunctionResponseCallID finds the first part with non-nil FunctionResponse and returns the call ID.
-func getFunctionResponseCallID(event *session.Event) (string, bool) {
-	if event.Content == nil {
-		return "", false
-	}
-	responsePartIndex := slices.IndexFunc(event.Content.Parts, func(part *genai.Part) bool {
-		return part != nil && part.FunctionResponse != nil
-	})
-	if responsePartIndex < 0 {
-		return "", false
-	}
-	return event.Content.Parts[responsePartIndex].FunctionResponse.ID, true
 }
 
 // toMissingRemoteSessionParts returns content parts for all events we think are not present in the remote session

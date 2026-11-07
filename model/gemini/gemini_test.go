@@ -770,3 +770,112 @@ func (h *headerInterceptor) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	return h.base.RoundTrip(req)
 }
+
+// TestModel_GenerateWithoutCandidates checks that a response without
+// candidates is converted rather than failed, with and without streaming: a
+// blocked prompt is reported through ErrorCode and ErrorMessage, and a
+// response with no prompt feedback is an empty model turn, as in adk-python's
+// LlmResponse.create.
+func TestModel_GenerateWithoutCandidates(t *testing.T) {
+	tests := []struct {
+		name             string
+		body             string
+		wantErrorCode    string
+		wantErrorMessage string
+	}{
+		{
+			name:             "blocked_prompt",
+			body:             `{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT","blockReasonMessage":"The prompt was blocked."}}`,
+			wantErrorCode:    "PROHIBITED_CONTENT",
+			wantErrorMessage: "The prompt was blocked.",
+		},
+		{
+			name: "no_prompt_feedback",
+			body: `{"modelVersion":"gemini-2.5-flash"}`,
+		},
+	}
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					contentType, body := "application/json", tt.body
+					if stream {
+						contentType, body = "text/event-stream", "data: "+tt.body+"\n\n"
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": {contentType}},
+						Body:       io.NopCloser(strings.NewReader(body)),
+					}, nil
+				})
+				llm, err := NewModel(t.Context(), "gemini-2.5-flash", &genai.ClientConfig{
+					APIKey:     "test-key",
+					Backend:    genai.BackendGeminiAPI,
+					HTTPClient: &http.Client{Transport: transport},
+				})
+				if err != nil {
+					t.Fatalf("NewModel() error = %v", err)
+				}
+				req := &model.LLMRequest{Contents: genai.Text("hello")}
+				var final *model.LLMResponse
+				for resp, err := range llm.GenerateContent(t.Context(), req, stream) {
+					if err != nil {
+						t.Fatalf("GenerateContent() error = %v", err)
+					}
+					if !resp.Partial {
+						final = resp
+					}
+				}
+				if final == nil {
+					t.Fatal("GenerateContent() yielded no final response")
+				}
+				if final.ErrorCode != tt.wantErrorCode || final.ErrorMessage != tt.wantErrorMessage {
+					t.Errorf("final response ErrorCode, ErrorMessage = %q, %q; want %q, %q", final.ErrorCode, final.ErrorMessage, tt.wantErrorCode, tt.wantErrorMessage)
+				}
+				if final.Content != nil && len(final.Content.Parts) > 0 {
+					t.Errorf("final response has %d parts, want none", len(final.Content.Parts))
+				}
+			})
+		}
+	}
+}
+
+func TestModel_MaybeAppendUserContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []*genai.Content
+		want     []*genai.Content
+	}{
+		{
+			name: "user turn last",
+			contents: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+			},
+		},
+		{
+			name: "model turn last",
+			contents: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+				genai.NewContentFromText("Response", genai.RoleModel),
+			},
+			want: []*genai.Content{
+				genai.NewContentFromText("Hello", genai.RoleUser),
+				genai.NewContentFromText("Response", genai.RoleModel),
+				genai.NewContentFromText("Continue processing previous requests as instructed. Exit or provide a summary if no more outputs are needed.", "user"),
+			},
+		},
+	}
+	// reference: test_maybe_append_user_content
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &model.LLMRequest{Contents: tt.contents}
+			(&geminiModel{}).maybeAppendUserContent(req)
+			if diff := cmp.Diff(tt.want, req.Contents); diff != "" {
+				t.Errorf("maybeAppendUserContent() diff (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

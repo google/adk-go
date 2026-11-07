@@ -15,13 +15,18 @@
 package models_test
 
 import (
+	"bytes"
+	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/server/adkrest/internal/models"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -31,6 +36,7 @@ import (
 func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 	ev := session.Event{
 		ID:             "e1",
+		Timestamp:      time.UnixMicro(1733040000123456).UTC(),
 		Author:         "agent",
 		IsolationScope: "scope-1",
 		Routes:         []string{"next-node", "fallback"},
@@ -44,7 +50,41 @@ func TestEventRoundTripPreservesWorkflowFields(t *testing.T) {
 		},
 	}
 
-	back := models.ToSessionEvent(models.FromSessionEvent(ev))
+	restEvent := models.FromSessionEvent(ev)
+	if restEvent.Timestamp != 1733040000.123456 {
+		t.Errorf("FromSessionEvent().Timestamp = %f, want 1733040000.123456", restEvent.Timestamp)
+	}
+	rawJSON, err := json.Marshal(restEvent)
+	if err != nil {
+		t.Fatalf("json.Marshal(restEvent) failed: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rawJSON, &wire); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON) failed: %v", err)
+	}
+	if gotTS, ok := wire["timestamp"].(float64); !ok || gotTS != 1733040000.123456 {
+		t.Errorf("wire[\"timestamp\"] = %v, want 1733040000.123456", wire["timestamp"])
+	}
+	var decodedRestEvent models.Event
+	if err := json.Unmarshal(rawJSON, &decodedRestEvent); err != nil {
+		t.Fatalf("json.Unmarshal(rawJSON, &decodedRestEvent) failed: %v", err)
+	}
+
+	back, err := models.ToSessionEvent(decodedRestEvent)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+
+	if !back.Timestamp.Equal(ev.Timestamp) {
+		t.Errorf("Timestamp = %v, want %v", back.Timestamp, ev.Timestamp)
+	}
+	zeroBack, err := models.ToSessionEvent(models.FromSessionEvent(session.Event{}))
+	if err != nil {
+		t.Fatalf("ToSessionEvent(zero event) failed: %v", err)
+	}
+	if !zeroBack.Timestamp.IsZero() {
+		t.Errorf("zero Timestamp round-trip = %v, want zero time.Time", zeroBack.Timestamp)
+	}
 
 	if back.IsolationScope != ev.IsolationScope {
 		t.Errorf("IsolationScope = %q, want %q", back.IsolationScope, ev.IsolationScope)
@@ -82,7 +122,11 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 
 	// Inbound: a client-supplied record must not survive.
 	in := models.Event{Actions: models.EventActions{Compaction: record}}
-	if got := models.ToSessionEvent(in); got.Actions.Compaction != nil {
+	got, err := models.ToSessionEvent(in)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.Compaction != nil {
 		t.Error("ToSessionEvent kept a client-supplied compaction record; it must be dropped")
 	}
 
@@ -94,5 +138,265 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 	if !out.Actions.Compaction.EndTimestamp.Equal(record.EndTimestamp) {
 		t.Errorf("EndTimestamp = %v, want %v", out.Actions.Compaction.EndTimestamp, record.EndTimestamp)
+	}
+}
+
+// decodeKeepingNumbers decodes data into v with numbers as json.Number, so two
+// numbers compare equal only when their digits do.
+func decodeKeepingNumbers(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+// TestRequestedAuthConfigsGoOutWithoutSecrets pins what a client sees of a
+// pending credential request: the whole config except the secrets in it,
+// wherever they sit.
+func TestRequestedAuthConfigsGoOutWithoutSecrets(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string // a toolauth.Config as JSON
+		want string // in without its secrets
+	}{
+		{
+			name: "oauth2 client and flow state",
+			in: `{
+				"authScheme": {"type": "oauth2", "flows": {"authorizationCode": {
+					"authorizationUrl": "https://idp.example/auth", "tokenUrl": "https://idp.example/token",
+					"scopes": {"files": "Read files"}}}},
+				"rawAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "clientSecret": "s3cret", "tokenEndpointAuthMethod": "client_secret_post"}},
+				"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "authUri": "https://idp.example/auth?state=st", "state": "st",
+					"authResponseUri": "https://app.example/cb?code=c0de", "authCode": "c0de",
+					"accessToken": "at", "refreshToken": "rt", "idToken": "it", "codeVerifier": "cv",
+					"expiresAt": 1700000000, "tokenEndpointAuthMethod": "client_secret_post"}},
+				"credentialKey": "drive"
+			}`,
+			want: `{
+				"authScheme": {"type": "oauth2", "flows": {"authorizationCode": {
+					"authorizationUrl": "https://idp.example/auth", "tokenUrl": "https://idp.example/token",
+					"scopes": {"files": "Read files"}}}},
+				"rawAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "tokenEndpointAuthMethod": "client_secret_post"}},
+				"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "authUri": "https://idp.example/auth?state=st", "state": "st",
+					"expiresAt": 1700000000, "tokenEndpointAuthMethod": "client_secret_post"}},
+				"credentialKey": "drive"
+			}`,
+		},
+		{
+			name: "http password, token and headers",
+			in: `{
+				"authScheme": {"type": "http", "scheme": "basic"},
+				"rawAuthCredential": {"authType": "http", "http": {"scheme": "basic",
+					"credentials": {"username": "ann", "password": "pw", "token": "tk"},
+					"additionalHeaders": {"X-Api-Key": "hk"}}},
+				"credentialKey": "basic"
+			}`,
+			want: `{
+				"authScheme": {"type": "http", "scheme": "basic"},
+				"rawAuthCredential": {"authType": "http", "http": {"scheme": "basic",
+					"credentials": {"username": "ann"}}},
+				"credentialKey": "basic"
+			}`,
+		},
+		{
+			name: "api key next to a service account key",
+			in: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"rawAuthCredential": {"authType": "apiKey", "apiKey": "ak"},
+				"exchangedAuthCredential": {"authType": "serviceAccount", "serviceAccount": {
+					"serviceAccountCredential": {"type": "service_account", "projectId": "p",
+						"privateKeyId": "kid", "privateKey": "pk", "clientEmail": "sa@p.example",
+						"clientId": "123", "authUri": "https://accounts.example/auth",
+						"tokenUri": "https://accounts.example/token",
+						"authProviderX509CertUrl": "https://certs.example/p",
+						"clientX509CertUrl": "https://certs.example/c", "universeDomain": "example.com"},
+					"scopes": ["cloud-platform"], "useDefaultCredential": false, "useIdToken": false}},
+				"credentialKey": "mixed"
+			}`,
+			want: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"rawAuthCredential": {"authType": "apiKey"},
+				"exchangedAuthCredential": {"authType": "serviceAccount", "serviceAccount": {
+					"serviceAccountCredential": {"type": "service_account", "projectId": "p",
+						"clientEmail": "sa@p.example",
+						"clientId": "123", "authUri": "https://accounts.example/auth",
+						"tokenUri": "https://accounts.example/token",
+						"authProviderX509CertUrl": "https://certs.example/p",
+						"clientX509CertUrl": "https://certs.example/c", "universeDomain": "example.com"},
+					"scopes": ["cloud-platform"], "useDefaultCredential": false, "useIdToken": false}},
+				"credentialKey": "mixed"
+			}`,
+		},
+		{
+			// Unknown keys keep the spelling they arrived with, so each secret
+			// name is dropped here only if the list holds that exact spelling.
+			name: "every secret key name as an unknown key",
+			in: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"credentialKey": "extra",
+				"keep": "me",
+				"password": "s", "token": "s",
+				"additionalHeaders": "s", "additional_headers": "s",
+				"clientSecret": "s", "client_secret": "s",
+				"authResponseUri": "s", "auth_response_uri": "s",
+				"authCode": "s", "auth_code": "s",
+				"accessToken": "s", "access_token": "s",
+				"refreshToken": "s", "refresh_token": "s",
+				"idToken": "s", "id_token": "s",
+				"codeVerifier": "s", "code_verifier": "s",
+				"privateKeyId": "s", "private_key_id": "s",
+				"privateKey": "s", "private_key": "s",
+				"apiKey": "s", "api_key": "s"
+			}`,
+			want: `{
+				"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"},
+				"credentialKey": "extra",
+				"keep": "me"
+			}`,
+		},
+		{
+			name: "unknown key keeps its digits and loses nested secrets",
+			in: `{
+				"authScheme": {"type": "oauth2", "flows": {"clientCredentials": {
+					"tokenUrl": "https://idp.example/token", "scopes": {}}}},
+				"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "tokenEndpointAuthMethod": "client_secret_post",
+					"provider": {"user": "ann", "id": 9007199254740993, "refresh_token": "rt",
+						"sessions": [{"access_token": "at", "scope": "files"}]}}},
+				"credentialKey": "cc"
+			}`,
+			want: `{
+				"authScheme": {"type": "oauth2", "flows": {"clientCredentials": {
+					"tokenUrl": "https://idp.example/token", "scopes": {}}}},
+				"exchangedAuthCredential": {"authType": "oauth2", "oauth2": {
+					"clientId": "app", "tokenEndpointAuthMethod": "client_secret_post",
+					"provider": {"user": "ann", "id": 9007199254740993,
+						"sessions": [{"scope": "files"}]}}},
+				"credentialKey": "cc"
+			}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg toolauth.Config
+			if err := json.Unmarshal([]byte(tc.in), &cfg); err != nil {
+				t.Fatalf("json.Unmarshal(in) failed: %v", err)
+			}
+			ev := session.Event{Actions: session.EventActions{
+				RequestedAuthConfigs: map[string]toolauth.Config{"call-1": cfg},
+			}}
+
+			b, err := json.Marshal(models.FromSessionEvent(ev))
+			if err != nil {
+				t.Fatalf("json.Marshal(event) failed: %v", err)
+			}
+
+			var got struct {
+				Actions struct {
+					RequestedAuthConfigs map[string]any `json:"requestedAuthConfigs"`
+				} `json:"actions"`
+			}
+			if err := decodeKeepingNumbers(b, &got); err != nil {
+				t.Fatalf("decodeKeepingNumbers(event) failed: %v", err)
+			}
+			var want any
+			if err := decodeKeepingNumbers([]byte(tc.want), &want); err != nil {
+				t.Fatalf("decodeKeepingNumbers(want) failed: %v", err)
+			}
+			if diff := cmp.Diff(want, got.Actions.RequestedAuthConfigs["call-1"]); diff != "" {
+				t.Errorf("requestedAuthConfigs[call-1] mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestRequestedAuthConfigsEncodeFailureFailsTheEvent pins that a config that
+// cannot be encoded stops the event from being written, instead of the request
+// silently going missing.
+func TestRequestedAuthConfigsEncodeFailureFailsTheEvent(t *testing.T) {
+	t.Parallel()
+
+	ev := session.Event{Actions: session.EventActions{
+		RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {
+			AuthScheme:    toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+			CredentialKey: "key",
+			Extra:         map[string]any{"ratio": math.NaN()},
+		}},
+	}}
+
+	if _, err := json.Marshal(models.FromSessionEvent(ev)); err == nil {
+		t.Error("json.Marshal(event) succeeded, want an error for a config that cannot be encoded")
+	}
+}
+
+// TestRequestedAuthConfigsAreNotTakenFromRequests pins that a client cannot
+// plant a credential request through a create-session body.
+func TestRequestedAuthConfigsAreNotTakenFromRequests(t *testing.T) {
+	t.Parallel()
+
+	body := `{"events": [{"author": "user", "actions": {"requestedAuthConfigs": {
+		"call-1": {"authScheme": {"type": "apiKey", "in": "header", "name": "X-Key"}}}}}]}`
+	var req models.CreateSessionRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("json.Unmarshal(body) failed: %v", err)
+	}
+	if len(req.Events) != 1 || len(req.Events[0].Actions.RequestedAuthConfigs) != 1 {
+		t.Fatalf("decoded %+v, want one event carrying one credential request", req.Events)
+	}
+
+	got, err := models.ToSessionEvent(req.Events[0])
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.RequestedAuthConfigs != nil {
+		t.Error("ToSessionEvent kept a client-supplied credential request; it must be dropped")
+	}
+}
+
+// TestToSessionEventTimestampBoundsMatchSessionDecoder pins the timestamps
+// ToSessionEvent accepts to the ones the session.Event JSON decoder accepts, so
+// the two bounds cannot drift apart. Zero is left out: the REST model reads it
+// as "no timestamp", while the session decoder reads it as the epoch.
+func TestToSessionEventTimestampBoundsMatchSessionDecoder(t *testing.T) {
+	for _, secs := range []float64{
+		0.5,
+		-0.5,
+		1,
+		1733040000.123456,
+		1733040000123, // epoch milliseconds, as JavaScript's Date.now() returns
+		1e13,          // overflows the int64 conversion without a bound
+		-1e13,
+		1e300,
+		-1e300,
+		-62135596800,        // first second of year 1
+		-62135596800.000001, // just before it
+		253402300799,        // last second of year 9999
+		253402300799.999999, // rounds up into year 10000
+		253402300800,        // first second of year 10000
+	} {
+		_, restErr := models.ToSessionEvent(models.Event{Timestamp: secs})
+		var decoded session.Event
+		raw, err := json.Marshal(map[string]any{"timestamp": secs})
+		if err != nil {
+			t.Fatalf("json.Marshal(%v) failed: %v", secs, err)
+		}
+		decodeErr := json.Unmarshal(raw, &decoded)
+		if (restErr == nil) != (decodeErr == nil) {
+			t.Errorf("timestamp %v: ToSessionEvent error = %v, session.Event decoder error = %v; want both nil or both non-nil", secs, restErr, decodeErr)
+			continue
+		}
+		if restErr != nil {
+			continue
+		}
+		got, _ := models.ToSessionEvent(models.Event{Timestamp: secs})
+		if !got.Timestamp.Equal(decoded.Timestamp) {
+			t.Errorf("timestamp %v: ToSessionEvent = %v, session.Event decoder = %v", secs, got.Timestamp, decoded.Timestamp)
+		}
 	}
 }

@@ -199,3 +199,42 @@ func TestPartsDataPartConversionRoundTrip(t *testing.T) {
 		t.Fatalf("toA2AParts() wrong result (+got,-want)\ngot = %v\nwant = %v\ndiff = %s", gotbackA2A, a2aPart, diff)
 	}
 }
+
+func TestToGenAIPartsEmptyText(t *testing.T) {
+	thought := a2a.NewTextPart("")
+	thought.SetMeta(ToA2AMetaKey("thought"), true)
+
+	testCases := []struct {
+		name  string
+		parts []*a2a.Part
+		want  []*genai.Part
+	}{
+		{
+			name:  "empty text",
+			parts: []*a2a.Part{a2a.NewTextPart("")},
+			want:  []*genai.Part{{Text: ""}},
+		},
+		{
+			name:  "empty text after text",
+			parts: []*a2a.Part{a2a.NewTextPart("Hello"), a2a.NewTextPart("")},
+			want:  []*genai.Part{{Text: "Hello"}, {Text: ""}},
+		},
+		{
+			name:  "empty thought",
+			parts: []*a2a.Part{thought},
+			want:  []*genai.Part{{Text: "", Thought: true}},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ToGenAIParts(tc.parts)
+			if err != nil {
+				t.Fatalf("ToGenAIParts() error = %v, want nil", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("ToGenAIParts() wrong result (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

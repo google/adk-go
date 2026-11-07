@@ -247,7 +247,11 @@ information on using pull requests.
     associated. If a relevant issue doesn't exist, please create one first, then
     reference it from the PR description with `Closes: #<number>` or
     `Related: #<number>`. Describe the problem and the solution in the PR
-    description as well, following the structure of our issue templates.
+    description as well, following the structure of our issue templates. For
+    the release notes to link the issue a PR fixes, the merged commit message
+    must also end with a line such as `Fixes #<number>`. On a single-commit PR,
+    end your commit message with it. On a PR with several commits, the
+    maintainer who merges moves it to the end of the squash message.
 -   Small, focused PRs. Keep changes minimal—one concern per PR.
 -   Library code must not write diagnostics to stdout, stderr, the standard
     `log` package's logger or `slog`'s default logger, and `golangci-lint`
@@ -259,7 +263,9 @@ information on using pull requests.
     title, and in the commit subject too on a single-commit PR, where that is
     what lands instead. Release tooling reads the landed subject to pick the
     next version and build the release notes, and silently skips anything with
-    no recognized type.
+    no recognized type. The `Require conventional subject` check flags a title
+    or subject that release tooling would skip. It accepts the types listed in
+    `.github/release-please-config.json`, plus `revert`.
 -   If the change alters behavior for anyone already on the current release, say
     so in the description: what differs, and who is affected. This includes bug
     fixes, since a fix that alters an observable result is still a behavior

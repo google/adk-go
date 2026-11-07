@@ -360,6 +360,184 @@ func TestRunner_PluginModifiesUserMessage(t *testing.T) {
 	}
 }
 
+// recordingModel records each request it receives and replies with a fixed
+// text.
+type recordingModel struct{ reqs []*model.LLMRequest }
+
+func (*recordingModel) Name() string { return "recording" }
+
+func (m *recordingModel) GenerateContent(_ context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.reqs = append(m.reqs, req)
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("ok", genai.RoleModel)}, nil)
+	}
+}
+
+// TestRunner_InboundMessageIsUserTurn guards that the inbound message is
+// stored and sent to the model as a user turn, whatever Role the caller set.
+// An empty Role used to be dropped when the request was built, and a "model"
+// Role made the caller's text look like the model's own earlier turn.
+func TestRunner_InboundMessageIsUserTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		role string
+	}{
+		{name: "empty role", role: ""},
+		{name: "model role", role: genai.RoleModel},
+		{name: "user role", role: genai.RoleUser},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			m := &recordingModel{}
+			a := must(llmagent.New(llmagent.Config{Name: "a", Model: m}))
+			sessionService := session.InMemoryService()
+			r, err := New(Config{AppName: "app", Agent: a, SessionService: sessionService})
+			if err != nil {
+				t.Fatalf("New() error = %v", err)
+			}
+			if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+				t.Fatalf("sessionService.Create() error = %v", err)
+			}
+
+			msg := &genai.Content{Role: tc.role, Parts: []*genai.Part{genai.NewPartFromText("hello model")}}
+			for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+				if err != nil {
+					t.Fatalf("r.Run() returned an error: %v", err)
+				}
+			}
+
+			// The caller's struct is left alone.
+			if msg.Role != tc.role {
+				t.Errorf("caller's msg.Role = %q, want it unchanged (%q)", msg.Role, tc.role)
+			}
+
+			// The model sees the message as a user turn.
+			if len(m.reqs) != 1 {
+				t.Fatalf("model got %d requests, want 1", len(m.reqs))
+			}
+			var sent []string
+			for _, c := range m.reqs[0].Contents {
+				for _, p := range c.Parts {
+					if p.Text == "hello model" {
+						sent = append(sent, c.Role)
+					}
+				}
+			}
+			if len(sent) != 1 || sent[0] != genai.RoleUser {
+				t.Errorf("model saw the inbound text with roles %q, want exactly [%q]", sent, genai.RoleUser)
+			}
+
+			// The stored event is a user turn too.
+			got, err := sessionService.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s"})
+			if err != nil {
+				t.Fatalf("sessionService.Get() error = %v", err)
+			}
+			first := got.Session.Events().At(0)
+			if first.Author != "user" || first.Content == nil || first.Content.Role != genai.RoleUser {
+				t.Errorf("stored inbound event = author %q content %+v, want author user and role %q", first.Author, first.Content, genai.RoleUser)
+			}
+		})
+	}
+}
+
+// TestRunner_SaveInputBlobsDoesNotMutateCallerMessage guards that replacing
+// inline blobs with placeholders edits the stored copy, not the caller's Parts.
+func TestRunner_SaveInputBlobsDoesNotMutateCallerMessage(t *testing.T) {
+	ctx := t.Context()
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) {}
+		},
+	}))
+	sessionService := session.InMemoryService()
+	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	r.artifactService = artifact.InMemoryService()
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+
+	blob := &genai.Part{InlineData: &genai.Blob{MIMEType: "application/octet-stream", Data: []byte("data")}}
+	msg := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromText("file"), blob}}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{SaveInputBlobsAsArtifacts: true}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if msg.Parts[1] != blob || blob.InlineData == nil {
+		t.Errorf("caller's message was modified: Parts[1] = %+v, want the original blob part", msg.Parts[1])
+	}
+}
+
+// TestRunner_InboundRoleNormalizedForContextAndPlugin guards the two other
+// places the inbound message flows: the invocation context's UserContent, and
+// a message returned by an OnUserMessageCallback plugin.
+func TestRunner_InboundRoleNormalizedForContextAndPlugin(t *testing.T) {
+	ctx := t.Context()
+	var gotUserContent *genai.Content
+	testAgent := must(agent.New(agent.Config{
+		Name: "test_agent",
+		Run: func(ic agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(func(*session.Event, error) bool) { gotUserContent = ic.UserContent() }
+		},
+	}))
+	sessionService := session.InMemoryService()
+	r, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+	msg := &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("hi")}}
+	for _, err := range r.Run(ctx, "u", "s", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r.Run() returned an error: %v", err)
+		}
+	}
+	if gotUserContent == nil || gotUserContent.Role != genai.RoleUser {
+		t.Errorf("ctx.UserContent() = %+v, want Role %q", gotUserContent, genai.RoleUser)
+	}
+
+	// A plugin that returns a message with no Role still yields a user turn.
+	roleless, err := plugin.New(plugin.Config{
+		Name: "roleless",
+		OnUserMessageCallback: func(agent.InvocationContext, *genai.Content) (*genai.Content, error) {
+			return &genai.Content{Parts: []*genai.Part{genai.NewPartFromText("from plugin")}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	r2, err := New(Config{AppName: "app", Agent: testAgent, SessionService: sessionService, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{roleless}}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := sessionService.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u", SessionID: "s2"}); err != nil {
+		t.Fatalf("sessionService.Create() error = %v", err)
+	}
+	gotUserContent = nil
+	for _, err := range r2.Run(ctx, "u", "s2", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("r2.Run() returned an error: %v", err)
+		}
+	}
+	if gotUserContent == nil || gotUserContent.Role != genai.RoleUser || gotUserContent.Parts[0].Text != "from plugin" {
+		t.Errorf("ctx.UserContent() with plugin = %+v, want the plugin message with Role %q", gotUserContent, genai.RoleUser)
+	}
+	got, err := sessionService.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u", SessionID: "s2"})
+	if err != nil {
+		t.Fatalf("sessionService.Get() error = %v", err)
+	}
+	first := got.Session.Events().At(0)
+	if first.Content == nil || first.Content.Role != genai.RoleUser || first.Content.Parts[0].Text != "from plugin" {
+		t.Errorf("stored event content = %+v, want the plugin message with Role %q", first.Content, genai.RoleUser)
+	}
+}
+
 // creates agentTree for tests and returns references to the agents
 func agentTree(t *testing.T) agentTreeStruct {
 	t.Helper()

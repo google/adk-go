@@ -62,6 +62,12 @@ func NewParallelWorker(name string, wrapped Node, maxConcurrency int, cfg NodeCo
 //
 // If any of the wrapped node executions returns a non-retryable error, the workflow
 // will fail fast, cancel other in-flight workers, and return this first encountered error.
+// When several items fail at about the same time, which of their errors is
+// returned is not specified.
+//
+// If ctx is done by the time the workers finish and no item has failed, Run
+// returns ctx.Err() and yields no output, even if every item succeeded. An
+// empty input starts no workers and always yields an empty list.
 //
 // In case the wrapped node produces more then one output event, they will be
 // aggregated into a list, and the final result will be a multi dimensional list.
@@ -165,6 +171,13 @@ func (n *ParallelWorker) Run(ctx agent.Context, input any) iter.Seq2[*session.Ev
 			}
 		}
 
+		// Items skipped at dispatch, and workers that return without an error
+		// once ctx is done, report no failure, so firstErr stays nil. Without
+		// this check Run would yield a partial or post-cancellation result as
+		// a success.
+		if firstErr == nil && ctx.Err() != nil {
+			firstErr = ctx.Err()
+		}
 		if firstErr != nil {
 			yield(nil, firstErr)
 			return

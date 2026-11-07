@@ -53,7 +53,6 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 		}
 		confirmationResponses := make(map[string]toolconfirmation.ToolConfirmation)
-		confirmationEventIndex := -1
 		for k := len(events) - 1; k >= 0; k-- {
 			event := events[k]
 			// Find the first event authored by user
@@ -72,15 +71,27 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				if funcResp.Response != nil {
 					resp, hasResponseKey := funcResp.Response["response"]
 					// ADK web client will send a request that is always encapsulated in a 'response' key.
+					// A client that has already decoded that JSON sends the decoded value
+					// instead, which adk-python accepts too (tool_confirmation.py,
+					// ToolConfirmation.from_response_dict).
 					if hasResponseKey && len(funcResp.Response) == 1 {
-						if jsonString, ok := resp.(string); ok {
-							err := json.Unmarshal([]byte(jsonString), &tc)
+						var jsonBytes []byte
+						switch v := resp.(type) {
+						case string:
+							jsonBytes = []byte(v)
+						case nil:
+							yield(nil, fmt.Errorf("error 'response' key found but value is null for confirmation function response for event id %q", event.ID))
+							return
+						default:
+							b, err := json.Marshal(v)
 							if err != nil {
-								yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
+								yield(nil, fmt.Errorf("error 'response' key found but failed marshaling its value for confirmation function response for event id %q: %w", event.ID, err))
 								return
 							}
-						} else {
-							yield(nil, fmt.Errorf("error 'response' key found but value is not a string for confirmation function response for event id %q", event.ID))
+							jsonBytes = b
+						}
+						if err := json.Unmarshal(jsonBytes, &tc); err != nil {
+							yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
 							return
 						}
 					} else {
@@ -98,12 +109,22 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				}
 				confirmationResponses[funcResp.ID] = tc
 			}
-			confirmationEventIndex = k
 			break
 		}
 
 		if len(confirmationResponses) == 0 {
 			return
+		}
+
+		responseLatestIndex := make(map[string]int)
+		firstAnswerIndex := make(map[string]int)
+		for idx, ev := range events {
+			for _, resp := range utils.FunctionResponses(ev.Content) {
+				responseLatestIndex[resp.ID] = idx
+				if _, ok := firstAnswerIndex[resp.ID]; !ok && ev.Author == "user" && resp.Name == toolconfirmation.FunctionCallName {
+					firstAnswerIndex[resp.ID] = idx
+				}
+			}
 		}
 
 		agentName := ctx.Agent().Name()
@@ -152,7 +173,6 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			}
 		}
 
-		// TODO could we skip events for >= confirmationEventIndex
 		for k := len(events) - 2; k >= 0; k-- {
 			event := events[k]
 			// Find the system generated FunctionCall event requesting the tool confirmation.
@@ -178,6 +198,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			// and the resulting StateDelta last-writer-wins merge all
 			// non-deterministic across runs.
 			var resumeOrder []string
+			confirmationIDByCallID := map[string]string{}
 			for _, functionCall := range calls {
 				confirmation, ok := confirmationResponses[functionCall.ID]
 				if !ok {
@@ -203,6 +224,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				if !seen {
 					resumeOrder = append(resumeOrder, originalFunctionCall.ID)
 				}
+				confirmationIDByCallID[originalFunctionCall.ID] = functionCall.ID
 				toolsToResumeByFunctionCallID[originalFunctionCall.ID] = &confirmedCall{
 					confirmation: &confirmation,
 					call:         *originalFunctionCall,
@@ -213,19 +235,14 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				continue
 			}
 
-			// TODO consider forward or backward pass instead of nested loops
-			// Remove the tools that have already been confirmed.
-			for j := len(events) - 1; j > confirmationEventIndex; j-- {
-				event = events[j]
-				responses := utils.FunctionResponses(event.Content)
-				if len(responses) == 0 {
-					continue
-				}
-				for _, resp := range responses {
-					delete(toolsToResumeByFunctionCallID, resp.ID)
-				}
-				if len(toolsToResumeByFunctionCallID) == 0 {
-					break
+			// Remove the tools that already have a result stored after the user's first
+			// answer to the confirmation (repeated approvals). The "requires confirmation"
+			// placeholder response is stored before that answer, and may sort after the
+			// request, so it must not count.
+			for callID := range toolsToResumeByFunctionCallID {
+				start := max(k, firstAnswerIndex[confirmationIDByCallID[callID]])
+				if idx, ok := responseLatestIndex[callID]; ok && idx > start {
+					delete(toolsToResumeByFunctionCallID, callID)
 				}
 			}
 			if len(toolsToResumeByFunctionCallID) == 0 {

@@ -341,6 +341,140 @@ func TestContentsRequestProcessor_IncludeContentsNone_IgnoresSiblingBranchPivot(
 	}
 }
 
+// TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult pins
+// that a tool result the caller posts back does not start the current turn.
+// A long-running tool is finished by running the agent again with its result
+// as the new, user-authored message. Anchoring there would cut the call the
+// result answers out of the request. Mirrors adk-python's
+// _is_submitted_tool_result in _get_current_turn_contents.
+func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *testing.T) {
+	t.Parallel()
+	const agentName = "testAgent"
+
+	start := genai.NewContentFromText("start the job", genai.RoleUser)
+	call := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "long_job", Args: map[string]any{}},
+	}}}
+	result := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "long_job", Response: map[string]any{"status": "done"}},
+	}}}
+	callWithoutID := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{Name: "long_job", Args: map[string]any{}},
+	}}}
+	resultWithoutID := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{Name: "long_job", Response: map[string]any{"status": "done"}},
+	}}}
+	orphan := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "no-such-call", Name: "long_job", Response: map[string]any{"status": "done"}},
+	}}}
+	question := genai.NewContentFromText("is it done yet?", genai.RoleUser)
+	notYet := genai.NewContentFromText("not yet", genai.RoleModel)
+	earlier := genai.NewContentFromText("hello", genai.RoleUser)
+	earlierReply := genai.NewContentFromText("hi, what should I run?", genai.RoleModel)
+	// A tool that asks for confirmation answers with an error, the agent asks
+	// the user, and the user's approval comes back as a function response.
+	confirmationError := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "long_job", Response: map[string]any{"error": "confirmation required"}},
+	}}}
+	confirmationRequest := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "confirm-1", Name: toolconfirmation.FunctionCallName, Args: map[string]any{}},
+	}}}
+	approval := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "confirm-1", Name: toolconfirmation.FunctionCallName, Response: map[string]any{"confirmed": true}},
+	}}}
+
+	ev := func(author string, c *genai.Content) *session.Event {
+		e := &session.Event{Author: author, LLMResponse: model.LLMResponse{Content: c}}
+		if author == agentName {
+			for _, call := range utils.FunctionCalls(c) {
+				e.LongRunningToolIDs = append(e.LongRunningToolIDs, call.ID)
+			}
+		}
+		return e
+	}
+
+	testCases := []struct {
+		name   string
+		events []*session.Event
+		want   []*genai.Content
+	}{
+		{
+			name:   "result right after the call",
+			events: []*session.Event{ev("user", start), ev(agentName, call), ev("user", result)},
+			want:   []*genai.Content{start, call, result},
+		},
+		{
+			name: "user turn while the tool was pending",
+			events: []*session.Event{
+				ev("user", start), ev(agentName, call),
+				ev("user", question), ev(agentName, notYet),
+				ev("user", result),
+			},
+			want: []*genai.Content{start, call, result},
+		},
+		{
+			// A finished turn ahead of the call: the anchor is the user
+			// message that led to the call, not the first event.
+			name: "earlier turn ahead of the call",
+			events: []*session.Event{
+				ev("user", earlier), ev(agentName, earlierReply),
+				ev("user", start), ev(agentName, call),
+				ev("user", question), ev(agentName, notYet),
+				ev("user", result),
+			},
+			want: []*genai.Content{start, call, result},
+		},
+		{
+			// Full-history mode pairs a call and a result that both lack an
+			// ID, so none mode reaches back to such a call too.
+			name: "call and result without IDs",
+			events: []*session.Event{
+				ev("user", start), ev(agentName, callWithoutID),
+				ev("user", question), ev(agentName, notYet),
+				ev("user", resultWithoutID),
+			},
+			want: []*genai.Content{start, callWithoutID, resultWithoutID},
+		},
+		{
+			name: "tool resumed after the user confirms it",
+			events: []*session.Event{
+				ev("user", start), ev(agentName, call), ev(agentName, confirmationError),
+				ev(agentName, confirmationRequest), ev("user", approval),
+				ev(agentName, result),
+			},
+			want: []*genai.Content{start, call, result},
+		},
+		{
+			name:   "result with no call stays out of the anchor search",
+			events: []*session.Event{ev("user", start), ev(agentName, call), ev("user", question), ev("user", orphan)},
+			want:   []*genai.Content{question},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := utils.Must(llmagent.New(llmagent.Config{
+				Name:            agentName,
+				Model:           &testModel{},
+				IncludeContents: llmagent.IncludeContentsNone,
+			}))
+			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+				Agent:   a,
+				Session: &fakeSession{events: tc.events},
+			})
+			req := &model.LLMRequest{}
+			for _, err := range llminternal.ContentsRequestProcessor(ctx, req, &llminternal.Flow{}) {
+				if err != nil {
+					t.Fatalf("ContentsRequestProcessor() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff(wantWithContinuation(tc.want), req.Contents); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 // TestContentsRequestProcessor_StrictIsolationFilterExcludesForeignScope
 // verifies that the contents from the different scope are not included
 // in the content for LLM.
