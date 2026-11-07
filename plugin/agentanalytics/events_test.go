@@ -233,6 +233,10 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 	})
 
 	t.Run("AGENT_STATE_CHECKPOINT keys and terminal-only checkpoints", func(t *testing.T) {
+		deepA2AMeta := map[string]any{"leaf": "ok"}
+		for range maxSanitizeDepth + 2 {
+			deepA2AMeta = map[string]any{"nested": deepA2AMeta}
+		}
 		tests := []struct {
 			name        string
 			meta        map[string]any
@@ -275,6 +279,15 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 				wantJSON:    `{"agent_state":null,"end_of_agent":true}`,
 			},
 			{
+				name: "un-allowlisted deep a2a metadata does not mark is_truncated",
+				meta: map[string]any{
+					"adk_agent_state": map[string]any{"step": 4},
+					"a2a:deep":        deepA2AMeta,
+				},
+				wantEmitted: true,
+				wantJSON:    `{"agent_state":{"step":4},"end_of_agent":false}`,
+			},
+			{
 				name: "nil state and non-terminal does not emit",
 				meta: map[string]any{
 					"agent_state":  nil,
@@ -286,9 +299,7 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
-					c.CustomMetadataAllowlist = []string{"agent_state", "adk_agent_state", "adk_end_of_agent", "end_of_agent"}
-				})
+				p, requests, mCtx := setupTestPlugin(t)
 				var errs callbackErrors
 				errs.add(p.OnEventCallback()(mCtx, &session.Event{
 					ID:     "ev-ckpt",
@@ -310,6 +321,9 @@ func TestSessionEvents_EmitRichLifecycleTypes(t *testing.T) {
 				}
 				row := onlyRowOfType(t, rows, EventAgentStateCheckpoint)
 				checkJSON(t, "AGENT_STATE_CHECKPOINT content", jsonObjectColumn(t, row, "content"), tt.wantJSON)
+				if got := row["is_truncated"]; got != false {
+					t.Errorf("is_truncated = %v, want false", got)
+				}
 			})
 		}
 	})
@@ -2576,8 +2590,36 @@ func TestCompaction_CyclicMetadataDoesNotHang(t *testing.T) {
 }
 
 func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
-	t.Run("AGENT_STATE_CHECKPOINT respects CustomMetadataAllowlist", func(t *testing.T) {
-		// When allowlist does not include agent_state, AGENT_STATE_CHECKPOINT is not emitted.
+	t.Run("AGENT_STATE_CHECKPOINT emits without CustomMetadataAllowlist while custom_metadata stays filtered", func(t *testing.T) {
+		// (a) Empty CustomMetadataAllowlist (default): AGENT_STATE_CHECKPOINT is emitted
+		// while attributes.custom_metadata is omitted.
+		pEmpty, requestsEmpty, mCtxEmpty := setupTestPlugin(t)
+		var errsEmpty callbackErrors
+		errsEmpty.add(pEmpty.OnEventCallback()(mCtxEmpty, &session.Event{
+			Author: "state-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"agent_state":      map[string]any{"step": 1},
+					"adk_agent_state":  map[string]any{"step": 2},
+					"end_of_agent":     true,
+					"adk_end_of_agent": true,
+				},
+			},
+		}))
+		errsEmpty.check(t)
+		pEmpty.AfterRunCallback()(mCtxEmpty)
+
+		rowsEmpty := collectRows(t, requestsEmpty, untilEventType(EventInvocationCompleted))
+		cpEmpty := onlyRowOfType(t, rowsEmpty, EventAgentStateCheckpoint)
+		checkJSONAt(t, jsonObjectColumn(t, cpEmpty, "content"), `2`, "agent_state", "step")
+		checkJSONAt(t, jsonObjectColumn(t, cpEmpty, "content"), `true`, "end_of_agent")
+		if _, ok := lookup(jsonObjectColumn(t, cpEmpty, "attributes"), "custom_metadata"); ok {
+			t.Errorf("attributes.custom_metadata present with empty allowlist: %s", cpEmpty["attributes"])
+		}
+
+		// Non-matching CustomMetadataAllowlist: AGENT_STATE_CHECKPOINT is emitted, and
+		// attributes.custom_metadata keeps only the allowlisted key while omitting all
+		// reserved checkpoint keys.
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.CustomMetadataAllowlist = []string{"unrelated_key"}
 		})
@@ -2586,7 +2628,11 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 			Author: "state-agent",
 			LLMResponse: model.LLMResponse{
 				CustomMetadata: map[string]any{
-					"agent_state": map[string]any{"step": 1},
+					"unrelated_key":    "kept-value",
+					"agent_state":      map[string]any{"step": 1},
+					"adk_agent_state":  map[string]any{"step": 1},
+					"end_of_agent":     false,
+					"adk_end_of_agent": true,
 				},
 			},
 		}))
@@ -2594,11 +2640,18 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 		p.AfterRunCallback()(mCtx)
 
 		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-		if got := len(rowsOfType(rows, EventAgentStateCheckpoint)); got != 0 {
-			t.Errorf("got %d AGENT_STATE_CHECKPOINT rows when not allowlisted, want 0", got)
+		cpRow := onlyRowOfType(t, rows, EventAgentStateCheckpoint)
+		checkJSONAt(t, jsonObjectColumn(t, cpRow, "content"), `1`, "agent_state", "step")
+		checkJSONAt(t, jsonObjectColumn(t, cpRow, "content"), `true`, "end_of_agent")
+		attrs := jsonObjectColumn(t, cpRow, "attributes")
+		checkJSONAt(t, attrs, `"kept-value"`, "custom_metadata", "unrelated_key")
+		for _, reserved := range []string{"agent_state", "adk_agent_state", "end_of_agent", "adk_end_of_agent"} {
+			if _, ok := lookup(attrs, "custom_metadata", reserved); ok {
+				t.Errorf("attributes.custom_metadata leaked un-allowlisted key %q: %s", reserved, cpRow["attributes"])
+			}
 		}
 
-		// When allowlist includes agent_state, AGENT_STATE_CHECKPOINT is emitted.
+		// (b) When agent_state is allowlisted, it appears in BOTH content and attributes.custom_metadata.
 		p2, requests2, mCtx2 := setupTestPluginWithConfig(t, func(c *Config) {
 			c.CustomMetadataAllowlist = []string{"agent_state"}
 		})
@@ -2607,7 +2660,8 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 			Author: "state-agent",
 			LLMResponse: model.LLMResponse{
 				CustomMetadata: map[string]any{
-					"agent_state": map[string]any{"step": 1},
+					"agent_state":  map[string]any{"step": 1},
+					"end_of_agent": true,
 				},
 			},
 		}))
@@ -2615,11 +2669,129 @@ func TestCustomMetadataAllowlist_GatingOnLifecycleEvents(t *testing.T) {
 		p2.AfterRunCallback()(mCtx2)
 
 		rows2 := collectRows(t, requests2, untilEventType(EventInvocationCompleted))
-		if got := len(rowsOfType(rows2, EventAgentStateCheckpoint)); got != 1 {
-			t.Fatalf("got %d AGENT_STATE_CHECKPOINT rows when allowlisted, want 1", got)
+		cpRow2 := onlyRowOfType(t, rows2, EventAgentStateCheckpoint)
+		checkJSONAt(t, jsonObjectColumn(t, cpRow2, "content"), `1`, "agent_state", "step")
+		checkJSONAt(t, jsonObjectColumn(t, cpRow2, "content"), `true`, "end_of_agent")
+		attrs2 := jsonObjectColumn(t, cpRow2, "attributes")
+		checkJSONAt(t, attrs2, `1`, "custom_metadata", "agent_state", "step")
+		if _, ok := lookup(attrs2, "custom_metadata", "end_of_agent"); ok {
+			t.Errorf("attributes.custom_metadata leaked un-allowlisted end_of_agent: %s", cpRow2["attributes"])
 		}
-		cpRow := onlyRowOfType(t, rows2, EventAgentStateCheckpoint)
-		checkJSONAt(t, jsonObjectColumn(t, cpRow, "content"), `1`, "agent_state", "step")
+
+		// (c) Sensitive keys and Bearer tokens inside un-allowlisted agent_state are redacted.
+		p3, requests3, mCtx3 := setupTestPlugin(t)
+		var errs3 callbackErrors
+		errs3.add(p3.OnEventCallback()(mCtx3, &session.Event{
+			Author: "state-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"agent_state": map[string]any{
+						"step":      4,
+						"api_key":   "sk-ckpt-secret-value",
+						"auth_note": "Bearer tok-ckpt-secret-value",
+					},
+				},
+			},
+		}))
+		errs3.check(t)
+		p3.AfterRunCallback()(mCtx3)
+
+		rows3 := collectRows(t, requests3, untilEventType(EventInvocationCompleted))
+		cpRow3 := onlyRowOfType(t, rows3, EventAgentStateCheckpoint)
+		content3 := jsonObjectColumn(t, cpRow3, "content")
+		checkJSONAt(t, content3, `4`, "agent_state", "step")
+		checkJSONAt(t, content3, `"[REDACTED]"`, "agent_state", "api_key")
+		checkJSONAt(t, content3, `"Bearer [REDACTED]"`, "agent_state", "auth_note")
+		for _, secret := range []string{"sk-ckpt-secret-value", "tok-ckpt-secret-value"} {
+			if s := fmt.Sprint(cpRow3); strings.Contains(s, secret) {
+				t.Errorf("AGENT_STATE_CHECKPOINT row leaked %q: %s", secret, s)
+			}
+		}
+
+		// (d) Unparseable JSON inside agent_state sets is_truncated = true, whereas an
+		// un-allowlisted "a2a:blob" or >50-depth "a2a:deep" outside custom_metadata does
+		// NOT set is_truncated = true.
+		const badJSON = `{"api_key": "x"`
+		p4, requests4, mCtx4 := setupTestPlugin(t)
+		var errs4 callbackErrors
+		errs4.add(p4.OnEventCallback()(mCtx4, &session.Event{
+			Author: "state-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"agent_state": map[string]any{"raw": badJSON},
+				},
+			},
+		}))
+		errs4.check(t)
+		p4.AfterRunCallback()(mCtx4)
+
+		rows4 := collectRows(t, requests4, untilEventType(EventInvocationCompleted))
+		cpRow4 := onlyRowOfType(t, rows4, EventAgentStateCheckpoint)
+		checkJSONAt(t, jsonObjectColumn(t, cpRow4, "content"), `"`+unparseableJSONPlaceholder+`"`, "agent_state", "raw")
+		if got := cpRow4["is_truncated"]; got != true {
+			t.Errorf("is_truncated with unparseable JSON inside agent_state = %v, want true", got)
+		}
+
+		deepA2AMeta := map[string]any{"leaf": "ok"}
+		for range maxSanitizeDepth + 2 {
+			deepA2AMeta = map[string]any{"nested": deepA2AMeta}
+		}
+		for _, tc := range []struct {
+			name    string
+			a2aKey  string
+			a2aVal  any
+			stepNum int
+		}{
+			{name: "un-allowlisted a2a:blob", a2aKey: "a2a:blob", a2aVal: badJSON, stepNum: 5},
+			{name: "un-allowlisted >50-depth a2a:deep", a2aKey: "a2a:deep", a2aVal: deepA2AMeta, stepNum: 6},
+		} {
+			p5, requests5, mCtx5 := setupTestPlugin(t)
+			var errs5 callbackErrors
+			errs5.add(p5.OnEventCallback()(mCtx5, &session.Event{
+				Author: "state-agent",
+				LLMResponse: model.LLMResponse{
+					CustomMetadata: map[string]any{
+						"adk_agent_state": map[string]any{"step": tc.stepNum},
+						tc.a2aKey:         tc.a2aVal,
+					},
+				},
+			}))
+			errs5.check(t)
+			p5.AfterRunCallback()(mCtx5)
+
+			rows5 := collectRows(t, requests5, untilEventType(EventInvocationCompleted))
+			cpRow5 := onlyRowOfType(t, rows5, EventAgentStateCheckpoint)
+			checkJSONAt(t, jsonObjectColumn(t, cpRow5, "content"), fmt.Sprintf("%d", tc.stepNum), "agent_state", "step")
+			if got := cpRow5["is_truncated"]; got != false {
+				t.Errorf("is_truncated with %s outside custom_metadata = %v, want false", tc.name, got)
+			}
+		}
+
+		// (e) EventDenylist: []string{EventAgentStateCheckpoint} suppresses AGENT_STATE_CHECKPOINT.
+		p6, requests6, mCtx6 := setupTestPluginWithConfig(t, func(c *Config) {
+			c.EventDenylist = []string{EventAgentStateCheckpoint}
+		})
+		var errs6 callbackErrors
+		errs6.add(p6.OnEventCallback()(mCtx6, &session.Event{
+			Author: "state-agent",
+			LLMResponse: model.LLMResponse{
+				Content: textContent("model", "done"),
+				CustomMetadata: map[string]any{
+					"agent_state":  map[string]any{"step": 6},
+					"end_of_agent": true,
+				},
+			},
+		}))
+		errs6.check(t)
+		p6.AfterRunCallback()(mCtx6)
+
+		rows6 := collectRows(t, requests6, untilEventType(EventInvocationCompleted))
+		if got := len(rowsOfType(rows6, EventAgentStateCheckpoint)); got != 0 {
+			t.Errorf("got %d AGENT_STATE_CHECKPOINT rows when denylisted, want 0", got)
+		}
+		if got := len(rowsOfType(rows6, EventAgentResponse)); got != 1 {
+			t.Errorf("got %d AGENT_RESPONSE rows alongside denylisted checkpoint, want 1", got)
+		}
 	})
 
 	t.Run("EVENT_COMPACTION via metadata respects CustomMetadataAllowlist", func(t *testing.T) {
@@ -2825,4 +2997,159 @@ func TestSensitiveKeys_StandardRedactionInCompactionAndA2A(t *testing.T) {
 		t.Errorf("A2A_INTERACTION attributes leaked sensitive keys: %s", rawAttrs)
 	}
 	checkJSONAt(t, attrs, `"exchange auth_code=[REDACTED] and code_verifier=[REDACTED]"`, "a2a_metadata", "a2a:request", "note")
+}
+
+func TestAgentStateCheckpoint_RetainedCustomMetadataTruncation(t *testing.T) {
+	deepMeta := map[string]any{"leaf": "ok"}
+	for range maxSanitizeDepth + 2 {
+		deepMeta = map[string]any{"nested": deepMeta}
+	}
+
+	tests := []struct {
+		name          string
+		allowlist     []string
+		meta          map[string]any
+		wantStep      int
+		wantTruncated bool
+		wantCustomKey string
+		wantCustomVal string
+		wantSubstr    string
+		omittedKeys   []string
+	}{
+		{
+			name:      "retained allowlisted ordinary key with malformed json marks is_truncated",
+			allowlist: []string{"note"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 1},
+				"note":            "{bad",
+			},
+			wantStep:      1,
+			wantTruncated: true,
+			wantCustomKey: "note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "retained allowlisted ordinary key exceeding max depth marks is_truncated",
+			allowlist: []string{"deep"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 2},
+				"deep":            deepMeta,
+			},
+			wantStep:      2,
+			wantTruncated: true,
+			wantCustomKey: "deep",
+			wantSubstr:    maxDepthPlaceholder,
+		},
+		{
+			name:      "retained allowlisted a2a key marks is_truncated",
+			allowlist: []string{"a2a:note"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 3},
+				"a2a:note":        "{bad",
+			},
+			wantStep:      3,
+			wantTruncated: true,
+			wantCustomKey: "a2a:note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "retained wildcard allowlisted a2a key marks is_truncated",
+			allowlist: []string{"*"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 4},
+				"a2a:note":        "{bad",
+			},
+			wantStep:      4,
+			wantTruncated: true,
+			wantCustomKey: "a2a:note",
+			wantCustomVal: unparseableJSONPlaceholder,
+		},
+		{
+			name:      "discarded unallowlisted ordinary key leaves is_truncated false",
+			allowlist: []string{"ok"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 5},
+				"ok":              "clean",
+				"dropped":         "{bad",
+			},
+			wantStep:      5,
+			wantTruncated: false,
+			wantCustomKey: "ok",
+			wantCustomVal: "clean",
+			omittedKeys:   []string{"dropped"},
+		},
+		{
+			name:      "discarded unallowlisted a2a key with empty allowlist leaves is_truncated false",
+			allowlist: nil,
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 6},
+				"a2a:dropped":     "{bad",
+			},
+			wantStep:      6,
+			wantTruncated: false,
+			omittedKeys:   []string{"a2a:dropped"},
+		},
+		{
+			name:      "discarded unallowlisted a2a key alongside allowlisted clean key leaves is_truncated false",
+			allowlist: []string{"ok"},
+			meta: map[string]any{
+				"adk_agent_state": map[string]any{"step": 7},
+				"ok":              "clean",
+				"a2a:dropped":     "{bad",
+			},
+			wantStep:      7,
+			wantTruncated: false,
+			wantCustomKey: "ok",
+			wantCustomVal: "clean",
+			omittedKeys:   []string{"a2a:dropped"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+				c.CustomMetadataAllowlist = tc.allowlist
+			})
+			var errs callbackErrors
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				Author: "state-agent",
+				LLMResponse: model.LLMResponse{
+					CustomMetadata: tc.meta,
+				},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			cpRow := onlyRowOfType(t, rows, EventAgentStateCheckpoint)
+			content := jsonObjectColumn(t, cpRow, "content")
+			checkJSONAt(t, content, fmt.Sprintf("%d", tc.wantStep), "agent_state", "step")
+			checkJSONAt(t, content, "false", "end_of_agent")
+
+			attrs := jsonObjectColumn(t, cpRow, "attributes")
+			if tc.wantCustomKey != "" {
+				if tc.wantSubstr != "" {
+					val, ok := lookup(attrs, "custom_metadata", tc.wantCustomKey)
+					if !ok {
+						t.Fatalf("attributes.custom_metadata.%s missing: %s", tc.wantCustomKey, cpRow["attributes"])
+					}
+					if rawAttrs, _ := cpRow["attributes"].(string); !strings.Contains(rawAttrs, tc.wantSubstr) {
+						t.Errorf("attributes.custom_metadata.%s (%v) missing %q: %s", tc.wantCustomKey, val, tc.wantSubstr, rawAttrs)
+					}
+				} else {
+					checkJSONAt(t, attrs, fmt.Sprintf("%q", tc.wantCustomVal), "custom_metadata", tc.wantCustomKey)
+				}
+			} else if _, hasCustom := lookup(attrs, "custom_metadata"); hasCustom {
+				t.Errorf("attributes.custom_metadata unexpectedly present: %s", cpRow["attributes"])
+			}
+			for _, omitted := range tc.omittedKeys {
+				if _, ok := lookup(attrs, "custom_metadata", omitted); ok {
+					t.Errorf("attributes.custom_metadata leaked discarded key %q: %s", omitted, cpRow["attributes"])
+				}
+			}
+			if got := cpRow["is_truncated"]; got != tc.wantTruncated {
+				t.Errorf("is_truncated = %v, want %t", got, tc.wantTruncated)
+			}
+		})
+	}
 }
