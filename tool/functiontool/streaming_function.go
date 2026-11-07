@@ -24,6 +24,7 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/internal/typeutil"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -128,9 +129,20 @@ func (f *streamingFunctionTool[TArgs]) Declaration() *genai.FunctionDeclaration 
 // RunStream executes the tool with the provided context and yields events.
 func (f *streamingFunctionTool[TArgs]) RunStream(ctx agent.Context, args any) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		// Consumer panics must propagate, and a stopped consumer cannot receive errors.
+		canYield := true
+		callerYield := yield
+		yield = func(result string, err error) bool {
+			canYield = false
+			canYield = callerYield(result, err)
+			return canYield
+		}
 		defer func() {
 			if r := recover(); r != nil {
-				yield("", fmt.Errorf("panic in tool %q: %v\nstack: %s", f.Name(), r, debug.Stack()))
+				if !canYield {
+					panic(r)
+				}
+				yield("", toolinternal.NewPanicError(f.Name(), r, debug.Stack()))
 			}
 		}()
 
