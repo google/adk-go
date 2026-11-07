@@ -23117,28 +23117,27 @@ func TestLateCauseHeldWhileRootToolCallOpen(t *testing.T) {
 }
 
 // TestLateCauseRetiresWithoutRootToolCall verifies that the failure cause of a
-// late activation right under the invocation span keeps it only while a tool
-// call is still open that may end with the invocation span as its owner (see
-// retireLateSettledLocked): o's tool call runs g on a branch outside o's, as a
-// tool that runs an agent with agent.InvocationContextDelta.Branch does, so g
-// runs under the invocation span (see parentFor), and g carries the cause that
-// b, a parallel branch below it whose context a failing sibling canceled,
-// left on it when b ended. Once o's call returns, g is settled, and as no tool
-// call is open, nothing that is open can read the cause (see heldByCause and
-// endToolRunsLocked), so g leaves the late state while o stays open. A tool
-// call under the invocation span that starts after o's call returned, as a call
-// of the root agent in RunLive may, finds g already retired, so its end writes
-// no AGENT_ERROR row for g, whereas on a live trace, which
-// retireLateSettledLocked leaves alone, g is still open and the end of such a
-// call writes one. Such a call that is open when o's call returns keeps g, and
-// the end of the last such call writes the row, as in
-// TestLateCauseHeldWhileRootToolCallOpen.
+// late activation right under the invocation span keeps it on agentStack only
+// while a tool call is still open that may end with the invocation span as its
+// owner (see retireLateSettledLocked): o's tool call runs g on a branch outside
+// o's, as a tool that runs an agent with agent.InvocationContextDelta.Branch
+// does, so g runs under the invocation span (see parentFor), and g carries the
+// cause that b, a parallel branch below it whose context a failing sibling
+// canceled, left on it when b ended. Once o's call returns, g is settled, and
+// as no tool call is open, g leaves agentStack and drops its callback contexts
+// while o stays open, staging its pending failure report on the late trace so
+// that a tool call under the invocation span that starts and ends after o's
+// call returned, as a call of the root agent in RunLive may, still writes g's
+// AGENT_ERROR row once, as on a live trace (see endToolRunsLocked). Such a
+// call that is open when o's call returns keeps g on agentStack until the last
+// such call ends, as in TestLateCauseHeldWhileRootToolCallOpen.
 func TestLateCauseRetiresWithoutRootToolCall(t *testing.T) {
 	ctx := context.Background()
 	tm := newTraceManager()
 	const invID = "inv-late-cause-no-root-call"
 	lateReviewEnded(tm, invID)
-	o := identity{invocationID: invID, agentName: "o", path: "o", branch: "o"}
+	live := identity{invocationID: invID, agentName: "live_agent"}
+	o := identity{invocationID: invID, agentName: "o", branch: "o"}
 	g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
 	b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
 	call := toolKey(o, "call-1", "t")
@@ -23161,9 +23160,527 @@ func TestLateCauseRetiresWithoutRootToolCall(t *testing.T) {
 
 	tm.popToolSpan(ctx, o, call, false)
 	if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
-		t.Errorf("late agents after o's tool call returned = %v, want [o]: nothing can read g's failure cause anymore", got)
+		t.Errorf("late agents after o's tool call returned = %v, want [o]: g retired when no tool call remained open", got)
 	}
 	checkLateRecordDropped(t, late, gRec)
+
+	call2 := toolKey(live, "call-2", "t")
+	tm.pushToolSpan(ctx, live, call2)
+	_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+	checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+
+	call3 := toolKey(live, "call-3", "t")
+	tm.pushToolSpan(ctx, live, call3)
+	if _, purged, _ = tm.popToolSpan(ctx, live, call3, false); len(purged) != 0 {
+		t.Errorf("%d AGENT_ERROR rows after call-3 returned, want none", len(purged))
+	}
+}
+
+// TestLateRootToolCallAfterCauseRetired verifies that when o's tool call
+// returns with no other tool call open, retiring a settled activation right
+// under the invocation span (and any settled activations under it) and
+// dropping their callback contexts, a subsequent tool call under the
+// invocation span (call-2) writes the same AGENT_ERROR rows on a late trace
+// as on a live trace, and a third tool call (call-3) does not repeat them.
+func TestLateRootToolCallAfterCauseRetired(t *testing.T) {
+	siblingErr := errors.New("sibling branch failed")
+	for _, tc := range []struct {
+		name     string
+		startSub func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord
+		wantRows []string
+	}{
+		{
+			name: "direct cause on g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				if !late {
+					return nil
+				}
+				return []*spanRecord{lateReviewAgent(t, tm, invID, "g")}
+			},
+			wantRows: []string{"g"},
+		},
+		{
+			name: "context cause of x under g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g.p"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/p/x", branch: "g.p"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				pctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(pctx, p)
+				xctx := &endedContext{Context: pctx, end: true}
+				tm.pushAgentSpan(xctx, x)
+				tm.pushLLMSpan(xctx, x)
+				var recs []*spanRecord
+				if late {
+					for _, name := range []string{"g", "p", "x"} {
+						recs = append(recs, lateReviewAgent(t, tm, invID, name))
+					}
+				}
+				tm.popAgentSpan(pctx, p)
+				cancel(siblingErr)
+				tm.popLLMSpan(xctx, x, true)
+				return recs
+			},
+			wantRows: []string{"g"},
+		},
+		{
+			name: "cause that b left on x under g",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/x/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, x)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				if !late {
+					return nil
+				}
+				return []*spanRecord{
+					lateReviewAgent(t, tm, invID, "g"),
+					lateReviewAgent(t, tm, invID, "x"),
+				}
+			},
+			wantRows: []string{"x", "g"},
+		},
+		{
+			name: "lineage m and x under g after intermediate p ended",
+			startSub: func(t *testing.T, tm *traceManager, invID string, late bool) []*spanRecord {
+				ctx := context.Background()
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g"}
+				m := identity{invocationID: invID, agentName: "m", path: "g/p/m", branch: "g"}
+				x := identity{invocationID: invID, agentName: "x", path: "g/p/m/x", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/p/m/x/b", branch: "g.b"}
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(ctx, p)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, m)
+				xctx := &endedContext{Context: ctx, end: true}
+				tm.pushAgentSpan(xctx, x)
+				tm.pushLLMSpan(xctx, x)
+				bctx, cancel := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(bctx, b)
+				cancel(siblingErr)
+				tm.popAgentSpan(bctx, b)
+				var recs []*spanRecord
+				if late {
+					for _, name := range []string{"g", "p", "m", "x"} {
+						recs = append(recs, lateReviewAgent(t, tm, invID, name))
+					}
+				}
+				tm.popAgentSpan(ctx, p)
+				tm.popLLMSpan(xctx, x, true)
+				return recs
+			},
+			wantRows: []string{"x", "m"},
+		},
+	} {
+		for _, late := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/late=%v", tc.name, late), func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-subsequent-root-call"
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				o := identity{invocationID: invID, agentName: "o", branch: "o"}
+				if late {
+					lateReviewEnded(tm, invID)
+				} else {
+					tm.invocationSpan(ctx, live, nil)
+				}
+				tm.pushAgentSpan(ctx, o)
+				call1 := toolKey(o, "call-1", "t")
+				tm.pushToolSpan(ctx, o, call1)
+				recs := tc.startSub(t, tm, invID, late)
+				if _, purged, _ := tm.popToolSpan(ctx, o, call1, false); len(purged) != 0 {
+					t.Fatalf("%d AGENT_ERROR rows after o's call-1 returned, want none", len(purged))
+				}
+				if late {
+					lateInv := lateReviewTrace(t, tm, invID)
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+						t.Errorf("late agents after o's call-1 returned = %v, want [o]", got)
+					}
+					for _, rec := range recs {
+						checkLateRecordDropped(t, lateInv, rec)
+					}
+				}
+
+				call2 := toolKey(live, "call-2", "t")
+				tm.pushToolSpan(ctx, live, call2)
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, tc.wantRows, siblingErr)
+
+				call3 := toolKey(live, "call-3", "t")
+				tm.pushToolSpan(ctx, live, call3)
+				if _, purged, _ = tm.popToolSpan(ctx, live, call3, false); len(purged) != 0 {
+					t.Errorf("%d AGENT_ERROR rows after call-3 returned, want none", len(purged))
+				}
+			})
+		}
+	}
+
+	for _, late := range []bool{false, true} {
+		for _, bothRetired := range []bool{false, true} {
+			t.Run(fmt.Sprintf("g1 with child x1 started after g2/bothRetired=%v/late=%v", bothRetired, late), func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-retired-then-held"
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				o := identity{invocationID: invID, agentName: "o", branch: "o"}
+				g1 := identity{invocationID: invID, agentName: "g1", path: "g1", branch: "g1"}
+				x1 := identity{invocationID: invID, agentName: "x1", path: "g1/x1", branch: "g1"}
+				b1 := identity{invocationID: invID, agentName: "b1", path: "g1/x1/b1", branch: "g1.b1"}
+				g2 := identity{invocationID: invID, agentName: "g2", path: "g2", branch: "g2"}
+				b2 := identity{invocationID: invID, agentName: "b2", path: "g2/b2", branch: "g2.b2"}
+				if late {
+					lateReviewEnded(tm, invID)
+				} else {
+					tm.invocationSpan(ctx, live, nil)
+				}
+				tm.pushAgentSpan(ctx, o)
+				call1 := toolKey(o, "call-1", "t")
+				tm.pushToolSpan(ctx, o, call1)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g2)
+				b2ctx, cancel2 := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(b2ctx, b2)
+				cancel2(siblingErr)
+				tm.popAgentSpan(b2ctx, b2)
+				// x1 under g1 starts after g2, so x1.seq > g2.seq while g1.seq < g2.seq.
+				x1ctx := &endedContext{Context: ctx, end: true}
+				tm.pushAgentSpan(x1ctx, x1)
+				b1ctx, cancel1 := context.WithCancelCause(ctx)
+				tm.pushAgentSpan(b1ctx, b1)
+				cancel1(siblingErr)
+				tm.popAgentSpan(b1ctx, b1)
+				if !bothRetired {
+					// Keep g2's subtree open across call-1 via an open model call on g2.
+					tm.pushLLMSpan(&endedContext{Context: ctx, end: true}, g2)
+				}
+				var g1Rec, x1Rec, g2Rec *spanRecord
+				if late {
+					g1Rec = lateReviewAgent(t, tm, invID, "g1")
+					x1Rec = lateReviewAgent(t, tm, invID, "x1")
+					g2Rec = lateReviewAgent(t, tm, invID, "g2")
+				}
+				tm.popToolSpan(ctx, o, call1, false)
+				if late {
+					lateInv := lateReviewTrace(t, tm, invID)
+					checkLateRecordDropped(t, lateInv, g1Rec)
+					checkLateRecordDropped(t, lateInv, x1Rec)
+					if bothRetired {
+						checkLateRecordDropped(t, lateInv, g2Rec)
+					}
+				}
+
+				call2 := toolKey(live, "call-2", "t")
+				tm.pushToolSpan(ctx, live, call2)
+				if !bothRetired {
+					tm.popLLMSpan(&endedContext{Context: ctx, end: true}, g2, true)
+					if late {
+						if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g2"}) {
+							t.Errorf("late agents while call-2 is open = %v, want [o g2]", got)
+						}
+					}
+				}
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, []string{"g2", "x1", "g1"}, siblingErr)
+				if late {
+					checkLateRecordDropped(t, lateReviewTrace(t, tm, invID), g2Rec)
+				}
+			})
+		}
+
+		t.Run(fmt.Sprintf("two subtrees retired sequentially before call-2/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-two-retired-subtrees"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g1 := identity{invocationID: invID, agentName: "g1", path: "g1", branch: "g1"}
+			b1 := identity{invocationID: invID, agentName: "b1", path: "g1/b1", branch: "g1.b1"}
+			g2 := identity{invocationID: invID, agentName: "g2", path: "g2", branch: "g2"}
+			b2 := identity{invocationID: invID, agentName: "b2", path: "g2/b2", branch: "g2.b2"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g1)
+			b1ctx, cancel1 := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(b1ctx, b1)
+			cancel1(siblingErr)
+			tm.popAgentSpan(b1ctx, b1)
+			var g1Rec *spanRecord
+			if late {
+				g1Rec = lateReviewAgent(t, tm, invID, "g1")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			if late {
+				checkLateRecordDropped(t, lateReviewTrace(t, tm, invID), g1Rec)
+			}
+
+			call1b := toolKey(o, "call-1b", "t")
+			tm.pushToolSpan(ctx, o, call1b)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g2)
+			b2ctx, cancel2 := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(b2ctx, b2)
+			cancel2(siblingErr)
+			tm.popAgentSpan(b2ctx, b2)
+			var g2Rec *spanRecord
+			if late {
+				g2Rec = lateReviewAgent(t, tm, invID, "g2")
+			}
+			tm.popToolSpan(ctx, o, call1b, false)
+			if late {
+				checkLateRecordDropped(t, lateReviewTrace(t, tm, invID), g2Rec)
+			}
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+			checkAgentErrorRows(t, purged, []string{"g2", "g1"}, siblingErr)
+		})
+
+		for _, mode := range []struct {
+			name              string
+			causeBeforeCall1  bool
+			call2OpenOnReturn bool
+		}{
+			{name: "cause on p before call-1 returns", causeBeforeCall1: true},
+			{name: "b under p fails after call-1 returns", causeBeforeCall1: false},
+			{name: "b under p fails after call-1 returns while call-2 is open", causeBeforeCall1: false, call2OpenOnReturn: true},
+		} {
+			t.Run(fmt.Sprintf("open child p under settled g/%s/late=%v", mode.name, late), func(t *testing.T) {
+				ctx := context.Background()
+				tm := newTraceManager()
+				const invID = "inv-open-child-under-settled-g"
+				live := identity{invocationID: invID, agentName: "live_agent"}
+				o := identity{invocationID: invID, agentName: "o", branch: "o"}
+				g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+				p := identity{invocationID: invID, agentName: "p", path: "g/p", branch: "g"}
+				b := identity{invocationID: invID, agentName: "b", path: "g/p/b", branch: "g.b"}
+				if late {
+					lateReviewEnded(tm, invID)
+				} else {
+					tm.invocationSpan(ctx, live, nil)
+				}
+				tm.pushAgentSpan(ctx, o)
+				call1 := toolKey(o, "call-1", "t")
+				tm.pushToolSpan(ctx, o, call1)
+				tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+				tm.pushAgentSpan(ctx, p)
+				tm.pushLLMSpan(ctx, p)
+				tm.popLLMSpan(ctx, p, true)
+				failB := func() {
+					bctx, cancel := context.WithCancelCause(ctx)
+					tm.pushAgentSpan(bctx, b)
+					cancel(siblingErr)
+					tm.popAgentSpan(bctx, b)
+				}
+				if mode.causeBeforeCall1 {
+					failB()
+				}
+				var gRec, pRec *spanRecord
+				if late {
+					gRec = lateReviewAgent(t, tm, invID, "g")
+					pRec = lateReviewAgent(t, tm, invID, "p")
+				}
+				call2 := toolKey(live, "call-2", "t")
+				if mode.call2OpenOnReturn {
+					tm.pushToolSpan(ctx, live, call2)
+				}
+				if _, purged, _ := tm.popToolSpan(ctx, o, call1, false); len(purged) != 0 {
+					t.Fatalf("%d AGENT_ERROR rows after o's call-1 returned, want none", len(purged))
+				}
+				if late {
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o", "g", "p"}) {
+						t.Errorf("late agents while p is still open = %v, want [o g p]", got)
+					}
+				}
+				if !mode.causeBeforeCall1 {
+					failB()
+				}
+				tm.popAgentSpan(ctx, p)
+				if late && !mode.call2OpenOnReturn {
+					lateInv := lateReviewTrace(t, tm, invID)
+					if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"o"}) {
+						t.Errorf("late agents after p ended = %v, want [o]", got)
+					}
+					checkLateRecordDropped(t, lateInv, pRec)
+					checkLateRecordDropped(t, lateInv, gRec)
+				}
+				if !mode.call2OpenOnReturn {
+					tm.pushToolSpan(ctx, live, call2)
+				}
+				_, purged, _ := tm.popToolSpan(ctx, live, call2, false)
+				checkAgentErrorRows(t, purged, []string{"g"}, siblingErr)
+				if late && mode.call2OpenOnReturn {
+					lateInv := lateReviewTrace(t, tm, invID)
+					checkLateRecordDropped(t, lateInv, pRec)
+					checkLateRecordDropped(t, lateInv, gRec)
+				}
+			})
+		}
+
+		t.Run(fmt.Sprintf("open ancestor a with settled m above open q/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-open-ancestor-settled-m-open-q"
+			a := identity{invocationID: invID, agentName: "a", path: "a", branch: "a"}
+			p := identity{invocationID: invID, agentName: "p", path: "a/p", branch: "a"}
+			m := identity{invocationID: invID, agentName: "m", path: "a/p/m", branch: "a"}
+			q := identity{invocationID: invID, agentName: "q", path: "a/p/m/q", branch: "a"}
+			b := identity{invocationID: invID, agentName: "b", path: "a/p/m/q/b", branch: "a.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, a, nil)
+			}
+			tm.pushAgentSpan(ctx, a)
+			call1 := toolKey(a, "call-1", "t")
+			tm.pushToolSpan(ctx, a, call1)
+			tm.pushAgentSpan(ctx, p)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, m)
+			tm.pushAgentSpan(ctx, q)
+			tm.pushLLMSpan(ctx, q)
+			tm.popAgentSpan(ctx, p)
+			tm.popLLMSpan(ctx, q, true)
+			tm.popToolSpan(ctx, a, call1, false)
+			if late {
+				if got := lateReviewStack(t, tm, invID); !slices.Equal(got, []string{"a", "m", "q"}) {
+					t.Errorf("late agents while q is still open = %v, want [a m q]", got)
+				}
+			}
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popAgentSpan(ctx, q)
+			call2 := toolKey(a, "call-2", "t")
+			tm.pushToolSpan(ctx, a, call2)
+			_, purged, _ := tm.popToolSpan(ctx, a, call2, false)
+			// p runs right under a and retired, so m has parentSpanID == p.spanID != a.spanID;
+			// when a ends via popUnclosedAgentSpans or popAgentSpan, m's cause moves up to a.
+			if len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows on a's call-2, want none", len(purged))
+			}
+			tm.popAgentSpan(ctx, a)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				lateInv.mu.Lock()
+				gotCause := lateInv.agentStack[0].firstRetiredCause()
+				lateInv.mu.Unlock()
+				if !errors.Is(gotCause, siblingErr) {
+					t.Errorf("failure cause on invocation span after a ended = %v, want %v", gotCause, siblingErr)
+				}
+			}
+		})
+
+		t.Run(fmt.Sprintf("custom agent c recovery event after g staged/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-staged-custom-recovery"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			c := identity{invocationID: invID, agentName: "c", path: "g/c", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/c/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			tm.pushAgentSpan(ctx, c)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.popAgentSpan(ctx, c)
+			var gRec *spanRecord
+			if late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			if late {
+				checkLateRecordDropped(t, lateReviewTrace(t, tm, invID), gRec)
+			}
+			// c's own AfterAgentCallback returns recovery content after call-1 retired g.
+			tm.completeResponse(ctx, live, "c", "g", nil)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after c recovered, want none: %v", len(purged), purged)
+			}
+		})
+
+		t.Run(fmt.Sprintf("x recovery event after popLLMSpan staged g and x/late=%v", late), func(t *testing.T) {
+			ctx := context.Background()
+			tm := newTraceManager()
+			const invID = "inv-staged-llm-recovery"
+			live := identity{invocationID: invID, agentName: "live_agent"}
+			o := identity{invocationID: invID, agentName: "o", branch: "o"}
+			g := identity{invocationID: invID, agentName: "g", path: "g", branch: "g"}
+			x := identity{invocationID: invID, agentName: "x", path: "g/x", branch: "g"}
+			b := identity{invocationID: invID, agentName: "b", path: "g/x/b", branch: "g.b"}
+			if late {
+				lateReviewEnded(tm, invID)
+			} else {
+				tm.invocationSpan(ctx, live, nil)
+			}
+			tm.pushAgentSpan(ctx, o)
+			call1 := toolKey(o, "call-1", "t")
+			tm.pushToolSpan(ctx, o, call1)
+			tm.pushAgentSpan(&endedContext{Context: ctx, end: true}, g)
+			xctx := &endedContext{Context: ctx, end: true}
+			tm.pushAgentSpan(xctx, x)
+			bctx, cancel := context.WithCancelCause(ctx)
+			tm.pushAgentSpan(bctx, b)
+			cancel(siblingErr)
+			tm.popAgentSpan(bctx, b)
+			tm.pushLLMSpan(xctx, x)
+			var gRec, xRec *spanRecord
+			if late {
+				gRec = lateReviewAgent(t, tm, invID, "g")
+				xRec = lateReviewAgent(t, tm, invID, "x")
+			}
+			tm.popToolSpan(ctx, o, call1, false)
+			// AfterModelCallback runs popLLMSpan before OnEventCallback runs completeResponse.
+			tm.popLLMSpan(xctx, x, true)
+			if late {
+				lateInv := lateReviewTrace(t, tm, invID)
+				checkLateRecordDropped(t, lateInv, gRec)
+				checkLateRecordDropped(t, lateInv, xRec)
+			}
+			tm.completeResponse(ctx, x, "x", "g", nil)
+
+			call2 := toolKey(live, "call-2", "t")
+			tm.pushToolSpan(ctx, live, call2)
+			if _, purged, _ := tm.popToolSpan(ctx, live, call2, false); len(purged) != 0 {
+				t.Errorf("%d AGENT_ERROR rows after x's recovery event, want none: %v", len(purged), purged)
+			}
+		})
+	}
 }
 
 // lateCallOrders are the orders in which call-1, a late tool call that runs
