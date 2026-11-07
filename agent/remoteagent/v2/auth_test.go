@@ -553,53 +553,6 @@ func TestRemoteAgent_AuthRefusesCrossOriginRedirect(t *testing.T) {
 	}
 }
 
-// TestSameCredentialTarget covers which redirects may carry the credential,
-// across the scheme and port combinations the end-to-end redirect tests above
-// do not reach: an upgrade to https, default ports written out or left
-// implicit, and schemes that are neither http nor https.
-func TestSameCredentialTarget(t *testing.T) {
-	tests := []struct {
-		name     string
-		from, to string
-		want     bool
-	}{
-		{name: "identical", from: "https://h/rpc", to: "https://h/other", want: true},
-		{name: "default port made explicit", from: "https://h/rpc", to: "https://h:443/rpc", want: true},
-		{name: "default http port made explicit", from: "http://h/rpc", to: "http://h:80/rpc", want: true},
-		{name: "host case differs", from: "https://Host/rpc", to: "https://host/rpc", want: true},
-		{name: "scheme upgraded to https, same explicit port", from: "http://h:8080/rpc", to: "https://h:8080/rpc", want: true},
-		{name: "scheme upgraded to https, both ports implicit", from: "http://h/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme upgraded to https, explicit default ports", from: "http://h:80/rpc", to: "https://h:443/rpc", want: true},
-		{name: "scheme upgraded to https onto a different port", from: "http://h/rpc", to: "https://h:9443/rpc", want: false},
-		{name: "scheme downgraded with implicit ports", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "unrelated scheme", from: "https://h/rpc", to: "ftp://h/rpc", want: false},
-		// Only http to https counts as an upgrade: either half alone is not one.
-		{name: "http to an unrelated scheme", from: "http://h/rpc", to: "ftp://h/rpc", want: false},
-		{name: "an unrelated scheme to https", from: "ftp://h/rpc", to: "https://h/rpc", want: false},
-		// An explicit default port on one side and an implicit one on the other
-		// is still each scheme's own default.
-		{name: "scheme upgraded to https, explicit http default to implicit", from: "http://h:80/rpc", to: "https://h/rpc", want: true},
-		{name: "scheme downgraded to http", from: "https://h/rpc", to: "http://h/rpc", want: false},
-		{name: "different host", from: "https://h/rpc", to: "https://other/rpc", want: false},
-		{name: "different port", from: "https://h:8443/rpc", to: "https://h:9443/rpc", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			from, err := url.Parse(tc.from)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.from, err)
-			}
-			to, err := url.Parse(tc.to)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", tc.to, err)
-			}
-			if got := sameCredentialTarget(from, to); got != tc.want {
-				t.Errorf("sameCredentialTarget(%q, %q) = %v, want %v", tc.from, tc.to, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestAuthHTTPClientRedirectCap covers the redirect limit. A custom
 // CheckRedirect replaces net/http's default cap rather than extending it, so a
 // same-origin redirect loop would otherwise spin forever.
@@ -618,9 +571,9 @@ func TestAuthHTTPClientRedirectCap(t *testing.T) {
 	if !strings.Contains(err.Error(), "stopped after") {
 		t.Errorf("Get() error = %v, want it to report the redirect cap", err)
 	}
-	// The literal, not maxRedirects: an expectation derived from the constant
-	// under test shrinks and grows with it, so the test can never fire on a
-	// change to the cap. 10 is net/http's own default, which a custom
+	// The literal, not credredirect.MaxRedirects: an expectation derived from
+	// the constant under test shrinks and grows with it, so the test can never
+	// fire on a change to the cap. 10 is net/http's own default, which a custom
 	// CheckRedirect replaces rather than extends.
 	if got := hits.Load(); got != 10 {
 		t.Errorf("server saw %d requests, want %d", got, 10)
