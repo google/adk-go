@@ -155,6 +155,9 @@ func (a *sequentialAgent) RunLive(ctx agent.InvocationContext) (agent.LiveSessio
 	var injectSubAgents func(agents []agent.Agent)
 	injectSubAgents = func(agents []agent.Agent) {
 		for _, subAgent := range agents {
+			if llmAgent, ok := subAgent.(llminternal.Agent); ok && llminternal.Reveal(llmAgent).OutputArtifact != "" {
+				continue
+			}
 			if visited[subAgent] {
 				continue
 			}
