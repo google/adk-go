@@ -28,4 +28,6 @@
 //     typed questions with probability distributions
 //   - [google.golang.org/adk/v2/exp/classifier/typesafe]: a classifier backed
 //     by TypeSafe's Jev decision models
+//   - [google.golang.org/adk/v2/exp/vertexairag]: a tool that grounds responses
+//     on a Vertex AI RAG corpus
 package exp
