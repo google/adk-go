@@ -141,6 +141,17 @@ func TestParse_Valid(t *testing.T) {
 			wantInstruction: "Markdown Body",
 		},
 		{
+			// Skills are shared between runtimes that add their own top-level
+			// keys. adk-python accepts them, so the loader ignores them too.
+			name:  "unknown top-level keys are ignored",
+			input: "---\nname: skill\ndescription: skill\nversion: 1.0.0\nuser-invocable: true\nargument-hint: \"[issue]\"\n---\nMarkdown Body",
+			want: &Frontmatter{
+				Name:        "skill",
+				Description: "skill",
+			},
+			wantInstruction: "Markdown Body",
+		},
+		{
 			name:  "allowed tools as specification scalar",
 			input: "---\nname: skill\ndescription: skill\nallowed-tools: Bash(git:*) Bash(jq:*) Read\n---\nMarkdown Body",
 			want: &Frontmatter{
@@ -257,10 +268,6 @@ func TestParse_InvalidFormat(t *testing.T) {
 		{
 			name:  "fails frontmatter validation",
 			input: "---\nname: INVALID_NAME\ndescription: test\n---\n# Markdown\nBody",
-		},
-		{
-			name:  "unknown fields",
-			input: "---\nname: skill\ndescription: skill\nunknown-field: field\n---\n# Markdown\nBody",
 		},
 		{
 			name:    "allowed tools with unexpected closing parenthesis",

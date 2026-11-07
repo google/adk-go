@@ -167,7 +167,6 @@ func Parse(r *bufio.Reader) (*Frontmatter, error) {
 
 	fmYAML := frontmatterYAML{}
 	decoder := yaml.NewDecoder(bytes.NewReader(yamlBytes.Bytes()))
-	decoder.KnownFields(true)
 	if err := decoder.Decode(&fmYAML); err != nil {
 		return nil, fmt.Errorf("parse frontmatter: %w", err)
 	}
