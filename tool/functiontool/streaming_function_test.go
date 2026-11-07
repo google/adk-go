@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
@@ -185,6 +187,101 @@ func TestStreamingFunctionToolStopsHandlerWhenConsumerStops(t *testing.T) {
 
 	if !cleanedUp {
 		t.Error("handler cleanup did not run after the consumer stopped")
+	}
+}
+
+func TestStreamingFunctionToolGateAndUngatedStream(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      functiontool.Config
+		args     any
+		wantErr  string
+		wantGate error
+		// wantRequested reports whether CheckConfirmation records a request.
+		wantRequested bool
+	}{
+		{
+			name:          "tool requires confirmation",
+			cfg:           functiontool.Config{RequireConfirmation: true},
+			args:          map[string]any{"value": "request"},
+			wantGate:      tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "provider requires confirmation for this input",
+			cfg: functiontool.Config{RequireConfirmationProvider: func(args streamingArgs) bool {
+				return args.Value == "request"
+			}},
+			args:          map[string]any{"value": "request"},
+			wantGate:      tool.ErrConfirmationRequired,
+			wantRequested: true,
+		},
+		{
+			name: "provider panics",
+			cfg: functiontool.Config{RequireConfirmationProvider: func(streamingArgs) bool {
+				panic("provider bug")
+			}},
+			args:    map[string]any{"value": "request"},
+			wantErr: "panic in tool",
+		},
+		{
+			name:    "arguments are not a map",
+			cfg:     functiontool.Config{RequireConfirmation: true},
+			args:    "not a map",
+			wantErr: "unexpected args type",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.cfg.Name = "streaming_tool"
+			handlerCalled := false
+			streamingTool := requireStreamingTool(t, test.cfg, func(_ agent.Context, args streamingArgs) iter.Seq2[string, error] {
+				handlerCalled = true
+				return func(yield func(string, error) bool) {
+					yield("handled "+args.Value, nil)
+				}
+			})
+			gated, ok := streamingTool.(toolinternal.ConfirmationGatedStreamingTool)
+			if !ok {
+				t.Fatalf("%T does not implement ConfirmationGatedStreamingTool, so the live flow cannot gate it before streaming", streamingTool)
+			}
+
+			actions := &session.EventActions{}
+			gateErr := gated.CheckConfirmation(newStreamingToolContext(t, actions, nil), test.args)
+			if test.wantErr != "" {
+				if gateErr == nil || !strings.Contains(gateErr.Error(), test.wantErr) {
+					t.Fatalf("CheckConfirmation() error = %v, want it to contain %q", gateErr, test.wantErr)
+				}
+			} else if !errors.Is(gateErr, test.wantGate) {
+				t.Fatalf("CheckConfirmation() error = %v, want %v", gateErr, test.wantGate)
+			}
+			if _, requested := actions.RequestedToolConfirmations["call-id"]; requested != test.wantRequested {
+				t.Errorf("confirmation requested = %t, want %t", requested, test.wantRequested)
+			}
+			if handlerCalled {
+				t.Fatal("CheckConfirmation() ran the handler")
+			}
+			if test.wantErr != "" {
+				return
+			}
+
+			// The ungated stream must not gate the call a second time.
+			ungatedActions := &session.EventActions{}
+			var values []string
+			for value, err := range gated.RunStreamUngated(newStreamingToolContext(t, ungatedActions, nil), test.args) {
+				if err != nil {
+					t.Fatalf("RunStreamUngated() error = %v, want none", err)
+				}
+				values = append(values, value)
+			}
+			if diff := cmp.Diff([]string{"handled request"}, values); diff != "" {
+				t.Errorf("RunStreamUngated() values mismatch (-want +got):\n%s", diff)
+			}
+			if len(ungatedActions.RequestedToolConfirmations) != 0 || ungatedActions.SkipSummarization {
+				t.Errorf("RunStreamUngated() changed actions: %+v", ungatedActions)
+			}
+		})
 	}
 }
 
