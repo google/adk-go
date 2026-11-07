@@ -17,6 +17,7 @@ package mcptoolset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -222,6 +223,22 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 	c.Transport = &trackingTransport{base: c.Transport}
 	if provider != nil {
 		c.Transport = &auth.Transport{Provider: provider, Base: c.Transport}
+		// A credential is attached to every request, so following a redirect to
+		// another origin would hand it to that origin. Keep the caller's own
+		// policy for same-origin redirects, and refuse everything else.
+		baseCheckRedirect := c.CheckRedirect
+		c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host) {
+				return fmt.Errorf("mcptoolset: refusing to follow cross-origin redirect from %s to %s with credentials attached", via[0].URL.Redacted(), req.URL.Redacted())
+			}
+			if baseCheckRedirect != nil {
+				return baseCheckRedirect(req, via)
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		}
 	}
 	return &c
 }
@@ -284,7 +301,9 @@ type Config struct {
 	// than a copy of http.DefaultClient, so the credential never reaches
 	// http.DefaultClient's Transport or CheckRedirect, and cookies set for one
 	// user's requests are not kept in its Jar. Requests are sent by
-	// http.DefaultTransport.
+	// http.DefaultTransport. Redirects to a different origin (scheme and host)
+	// are refused so the credential is never forwarded to it; same-origin
+	// redirects follow the HTTPClient's own CheckRedirect or the default policy.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two

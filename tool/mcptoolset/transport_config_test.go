@@ -425,3 +425,45 @@ func TestCommandTransportHelper(t *testing.T) {
 	fmt.Fprintf(os.Stderr, "helper started in %s\n", wd)
 	_, _ = io.Copy(io.Discard, os.Stdin)
 }
+
+// TestAuthRefusesCrossOriginRedirect verifies that a credential attached by
+// Config.Auth is never forwarded to a different origin by an HTTP redirect.
+func TestAuthRefusesCrossOriginRedirect(t *testing.T) {
+	tr, err := buildTransport(Config{Endpoint: testEndpoint, Auth: auth.StaticToken("tok")})
+	if err != nil {
+		t.Fatalf("buildTransport() error = %v", err)
+	}
+	st, ok := tr.(*mcp.StreamableClientTransport)
+	if !ok {
+		t.Fatalf("buildTransport() returned %T, want *mcp.StreamableClientTransport", tr)
+	}
+	if st.HTTPClient.CheckRedirect == nil {
+		t.Fatal("CheckRedirect is nil with Auth; the credential could follow a redirect to another origin")
+	}
+
+	origin, err := http.NewRequest(http.MethodGet, testEndpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameOrigin, err := http.NewRequest(http.MethodGet, testEndpoint+"/next", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.HTTPClient.CheckRedirect(sameOrigin, []*http.Request{origin}); err != nil {
+		t.Errorf("same-origin redirect error = %v, want nil", err)
+	}
+
+	for _, target := range []string{
+		"https://evil.example/steal",
+		"http://mcp.example/mcp",
+		"https://mcp.example:8443/steal",
+	} {
+		req, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.HTTPClient.CheckRedirect(req, []*http.Request{origin}); err == nil {
+			t.Errorf("CheckRedirect(%q) = nil, want an error for a cross-origin redirect", target)
+		}
+	}
+}
