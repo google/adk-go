@@ -1190,7 +1190,7 @@ func (p *analyticsPlugin) beforeTool(ctx agent.Context, t tool.Tool, args map[st
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
 	p.logEvent(ctx, id, EventToolStarting, func() rowSpan {
-		return p.traces.pushToolCallSpan(ctx, id, callID, name)
+		return p.traces.pushToolCallSpan(ctx, id, callID, name, args)
 	}, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
 		d.content = toolContent(name, "args", args, origin)
@@ -1248,7 +1248,7 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	span, purged, closedByError := p.traces.popToolCallSpan(ctx, id, callID, name, false)
+	span, purged, closedByError := p.traces.popToolCallSpan(ctx, id, callID, name, false, args)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
 	if closedByError {
@@ -1317,7 +1317,7 @@ func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[s
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	span, purged, _ := p.traces.popToolCallSpan(ctx, id, callID, name, true)
+	span, purged, _ := p.traces.popToolCallSpan(ctx, id, callID, name, true, args)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
 	p.logToolError(ctx, id, t, func() rowSpan {

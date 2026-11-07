@@ -6443,3 +6443,498 @@ func TestPlugin_RecoveredToolError_EmptyIDEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+type nonComparableMapToolCtx struct {
+	*mockInvocationContext
+	labels map[string]string
+}
+
+type nonComparableFuncToolCtx struct {
+	*mockInvocationContext
+	fn func() int
+}
+
+func TestPlugin_RecoveredToolError_SameContextOverlap(t *testing.T) {
+	ctxFactories := []struct {
+		name  string
+		build func(*mockInvocationContext) agent.Context
+	}{
+		{
+			name: "pointer_context",
+			build: func(m *mockInvocationContext) agent.Context {
+				return withFunctionCall(m, "")
+			},
+		},
+		{
+			name: "comparable_value_context",
+			build: func(m *mockInvocationContext) agent.Context {
+				return comparableValueToolCtx{mockInvocationContext: withFunctionCall(m, ""), tag: "shared-val"}
+			},
+		},
+		{
+			name: "non_comparable_slice_context",
+			build: func(m *mockInvocationContext) agent.Context {
+				return nonComparableSliceToolCtx{mockInvocationContext: withFunctionCall(m, ""), tags: []string{"shared-slice"}}
+			},
+		},
+	}
+
+	orders := []struct {
+		name         string
+		firstErrors  bool
+		finishFirst  int // index (0 or 1) that calls AfterTool first
+		freshLiteral bool
+		nestedArgs   bool
+	}{
+		{name: "error_call_errors_first_reused_args", firstErrors: true, finishFirst: 1},
+		{name: "success_call_finishes_before_error_reused_args", firstErrors: false, finishFirst: 0},
+		{name: "error_call_fresh_map_literals", firstErrors: true, finishFirst: 1, freshLiteral: true},
+		{name: "success_first_fresh_nested_map_literals", firstErrors: false, finishFirst: 0, freshLiteral: true, nestedArgs: true},
+	}
+
+	for _, cf := range ctxFactories {
+		t.Run(cf.name, func(t *testing.T) {
+			for _, ord := range orders {
+				t.Run(ord.name, func(t *testing.T) {
+					p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+						c.FinalResponseToolNames = []string{"final_answer"}
+					})
+					sharedCtx := cf.build(mCtx)
+					final := &fakeTool{name: "final_answer"}
+
+					makeArgs := func(ans string) map[string]any {
+						if ord.nestedArgs {
+							return map[string]any{
+								"answer": ans,
+								"tags":   []string{ans, "shared"},
+								"meta":   map[string]any{"k": ans, "n": 1},
+							}
+						}
+						return map[string]any{"answer": ans}
+					}
+					reusedBad := makeArgs("bad")
+					reusedGood := makeArgs("good")
+					getArgs := func(isErr bool) map[string]any {
+						if ord.freshLiteral {
+							if isErr {
+								return makeArgs("bad")
+							}
+							return makeArgs("good")
+						}
+						if isErr {
+							return reusedBad
+						}
+						return reusedGood
+					}
+
+					var errs callbackErrors
+					errs.add(p.BeforeAgentCallback()(mCtx))
+					errs.add(p.BeforeToolCallback()(sharedCtx, final, getArgs(ord.firstErrors)))
+					errs.add(p.BeforeToolCallback()(sharedCtx, final, getArgs(!ord.firstErrors)))
+
+					if ord.firstErrors {
+						errs.add(p.OnToolErrorCallback()(sharedCtx, final, getArgs(true), errors.New("boom-bad")))
+						if ord.finishFirst == 1 {
+							errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(false), map[string]any{"answer": "good"}, nil))
+							errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(true), map[string]any{"answer": "recovered"}, nil))
+						} else {
+							errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(true), map[string]any{"answer": "recovered"}, nil))
+							errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(false), map[string]any{"answer": "good"}, nil))
+						}
+					} else {
+						errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(false), map[string]any{"answer": "good"}, nil))
+						errs.add(p.OnToolErrorCallback()(sharedCtx, final, getArgs(true), errors.New("boom-bad")))
+						errs.add(p.AfterToolCallback()(sharedCtx, final, getArgs(true), map[string]any{"answer": "recovered"}, nil))
+					}
+
+					errs.add(p.AfterAgentCallback()(mCtx))
+					errs.check(t)
+					p.AfterRunCallback()(mCtx)
+
+					rows := collectRows(t, requests, untilInvocationEnd)
+					requireInvocationCompletedOK(t, rows)
+
+					starts := rowsOfType(rows, EventToolStarting)
+					if len(starts) != 2 {
+						t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+					}
+					if placeOf(starts[0]).span == placeOf(starts[1]).span {
+						t.Fatalf("expected distinct TOOL_STARTING spans, got %+v and %+v", placeOf(starts[0]), placeOf(starts[1]))
+					}
+					wantErrStart, wantOKStart := starts[1], starts[0]
+					if ord.firstErrors {
+						wantErrStart, wantOKStart = starts[0], starts[1]
+					}
+					errRow := onlyRowOfType(t, rows, EventToolError)
+					if got, want := placeOf(errRow), placeOf(wantErrStart); got != want {
+						t.Errorf("TOOL_ERROR span = %+v, want %+v", got, want)
+					}
+					mustLatency(t, errRow)
+					compRow := onlyRowOfType(t, rows, EventToolCompleted)
+					if got, want := placeOf(compRow), placeOf(wantOKStart); got != want {
+						t.Errorf("TOOL_COMPLETED span = %+v, want %+v", got, want)
+					}
+					mustLatency(t, compRow)
+					respRow := onlyRowOfType(t, rows, EventAgentResponse)
+					gotResp := jsonObjectColumn(t, respRow, "content")
+					respBody, _ := gotResp["response"].(map[string]any)
+					if respBody["answer"] != "good" {
+						t.Errorf("AGENT_RESPONSE response.answer = %v, want %q (full=%v)", respBody["answer"], "good", gotResp)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_NonComparableOverlap(t *testing.T) {
+	variants := []struct {
+		name  string
+		build func(*mockInvocationContext) (agent.Context, agent.Context)
+	}{
+		{
+			name: "slice_field",
+			build: func(m *mockInvocationContext) (agent.Context, agent.Context) {
+				base := withFunctionCall(m, "")
+				return nonComparableSliceToolCtx{mockInvocationContext: base, tags: []string{"c1"}},
+					nonComparableSliceToolCtx{mockInvocationContext: base, tags: []string{"c2"}}
+			},
+		},
+		{
+			name: "map_field",
+			build: func(m *mockInvocationContext) (agent.Context, agent.Context) {
+				base := withFunctionCall(m, "")
+				return nonComparableMapToolCtx{mockInvocationContext: base, labels: map[string]string{"id": "1", "env": "dev"}},
+					nonComparableMapToolCtx{mockInvocationContext: base, labels: map[string]string{"id": "2", "env": "prod"}}
+			},
+		},
+		{
+			name: "func_field",
+			build: func(m *mockInvocationContext) (agent.Context, agent.Context) {
+				base := withFunctionCall(m, "")
+				v1, v2 := 1, 2
+				return nonComparableFuncToolCtx{mockInvocationContext: base, fn: func() int { return v1 }},
+					nonComparableFuncToolCtx{mockInvocationContext: base, fn: func() int { return v2 }}
+			},
+		},
+		{
+			name: "wrapped_unhashable_interface",
+			build: func(m *mockInvocationContext) (agent.Context, agent.Context) {
+				base := withFunctionCall(m, "")
+				return wrappedUnhashableToolCtx{mockInvocationContext: base, meta: []string{"c1"}},
+					wrappedUnhashableToolCtx{mockInvocationContext: base, meta: map[string]any{"id": 2}}
+			},
+		},
+	}
+
+	for _, v := range variants {
+		t.Run(v.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				errorFirst  bool
+				sameArgText bool
+				shareArgs   bool
+			}{
+				{name: "error_first_distinct_args", errorFirst: true},
+				{name: "success_first_distinct_args", errorFirst: false},
+				{name: "error_first_identical_args", errorFirst: true, sameArgText: true},
+				{name: "success_first_identical_args", errorFirst: false, sameArgText: true},
+				{name: "success_first_shared_args", errorFirst: false, sameArgText: true, shareArgs: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+						c.FinalResponseToolNames = []string{"final_answer"}
+					})
+					ctx1, ctx2 := v.build(mCtx)
+					final := &fakeTool{name: "final_answer"}
+					args1 := map[string]any{"answer": "bad"}
+					args2 := map[string]any{"answer": "good"}
+					if tc.sameArgText {
+						args1 = map[string]any{"answer": "same"}
+						if tc.shareArgs {
+							args2 = args1
+						} else {
+							args2 = map[string]any{"answer": "same"}
+						}
+					}
+
+					var errs callbackErrors
+					errs.add(p.BeforeAgentCallback()(mCtx))
+					errs.add(p.BeforeToolCallback()(ctx1, final, args1))
+					errs.add(p.BeforeToolCallback()(ctx2, final, args2))
+					if tc.errorFirst {
+						errs.add(p.OnToolErrorCallback()(ctx1, final, args1, errors.New("boom-nc")))
+						errs.add(p.AfterToolCallback()(ctx2, final, args2, map[string]any{"answer": "good"}, nil))
+						errs.add(p.AfterToolCallback()(ctx1, final, args1, map[string]any{"answer": "recovered"}, nil))
+					} else {
+						errs.add(p.AfterToolCallback()(ctx2, final, args2, map[string]any{"answer": "good"}, nil))
+						errs.add(p.OnToolErrorCallback()(ctx1, final, args1, errors.New("boom-nc")))
+						errs.add(p.AfterToolCallback()(ctx1, final, args1, map[string]any{"answer": "recovered"}, nil))
+					}
+					errs.add(p.AfterAgentCallback()(mCtx))
+					errs.check(t)
+					p.AfterRunCallback()(mCtx)
+
+					rows := collectRows(t, requests, untilInvocationEnd)
+					requireInvocationCompletedOK(t, rows)
+					starts := rowsOfType(rows, EventToolStarting)
+					if len(starts) != 2 {
+						t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+					}
+					errRow := onlyRowOfType(t, rows, EventToolError)
+					if got, want := placeOf(errRow), placeOf(starts[0]); got != want {
+						t.Errorf("TOOL_ERROR span = %+v, want Call 1 span %+v", got, want)
+					}
+					mustLatency(t, errRow)
+					compRow := onlyRowOfType(t, rows, EventToolCompleted)
+					if got, want := placeOf(compRow), placeOf(starts[1]); got != want {
+						t.Errorf("TOOL_COMPLETED span = %+v, want Call 2 span %+v", got, want)
+					}
+					mustLatency(t, compRow)
+					respRow := onlyRowOfType(t, rows, EventAgentResponse)
+					wantResp := `{"response":{"answer":"good"}}`
+					if tc.sameArgText {
+						wantResp = `{"response":{"answer":"same"}}`
+					}
+					checkJSON(t, "Call 2 AGENT_RESPONSE", jsonObjectColumn(t, respRow, "content"), wantResp)
+				})
+			}
+		})
+	}
+}
+
+func TestPlugin_RecoveredToolError_LateValueContextHandoff(t *testing.T) {
+	ctxKinds := []struct {
+		name  string
+		build func(*mockInvocationContext, string) agent.Context
+	}{
+		{
+			name: "comparable_value_context",
+			build: func(m *mockInvocationContext, tag string) agent.Context {
+				return comparableValueToolCtx{mockInvocationContext: withFunctionCall(m, ""), tag: tag}
+			},
+		},
+		{
+			name: "non_comparable_slice_context",
+			build: func(m *mockInvocationContext, tag string) agent.Context {
+				return nonComparableSliceToolCtx{mockInvocationContext: withFunctionCall(m, ""), tags: []string{tag, "late"}}
+			},
+		},
+		{
+			name: "non_comparable_map_context",
+			build: func(m *mockInvocationContext, tag string) agent.Context {
+				return nonComparableMapToolCtx{mockInvocationContext: withFunctionCall(m, ""), labels: map[string]string{"tag": tag}}
+			},
+		},
+	}
+
+	for _, ck := range ctxKinds {
+		t.Run(ck.name, func(t *testing.T) {
+			t.Run("late_success_preserves_span_and_latency", func(t *testing.T) {
+				p, requests, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				toolCtx := ck.build(mCtx, "late-ok")
+				final := &fakeTool{name: "final_answer"}
+				args := map[string]any{"answer": "good"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(toolCtx, final, args))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				if _, err := p.AfterToolCallback()(toolCtx, final, args, map[string]any{"answer": "good"}, nil); err != nil {
+					t.Fatalf("late AfterToolCallback: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("p.Close: %v", err)
+				}
+
+				rows := drainAllRows(t, requests)
+				startRow := onlyRowOfType(t, rows, EventToolStarting)
+				compRow := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := placeOf(compRow), placeOf(startRow); got != want {
+					t.Errorf("late TOOL_COMPLETED span = %+v, want TOOL_STARTING span %+v", got, want)
+				}
+				mustLatency(t, compRow)
+				respRow := onlyRowOfType(t, rows, EventAgentResponse)
+				checkJSON(t, "late AGENT_RESPONSE", jsonObjectColumn(t, respRow, "content"), `{"response":{"answer":"good"}}`)
+			})
+
+			t.Run("live_error_then_late_recovered_aftertool_suppresses_completion", func(t *testing.T) {
+				p, requests, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				toolCtx := ck.build(mCtx, "live-err")
+				final := &fakeTool{name: "final_answer"}
+				args := map[string]any{"answer": "bad"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(toolCtx, final, args))
+				errs.add(p.OnToolErrorCallback()(toolCtx, final, args, errors.New("boom-live")))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				if _, err := p.AfterToolCallback()(toolCtx, final, args, map[string]any{"answer": "recovered"}, nil); err != nil {
+					t.Fatalf("late AfterToolCallback: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("p.Close: %v", err)
+				}
+
+				rows := drainAllRows(t, requests)
+				startRow := onlyRowOfType(t, rows, EventToolStarting)
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got, want := placeOf(errRow), placeOf(startRow); got != want {
+					t.Errorf("TOOL_ERROR span = %+v, want %+v", got, want)
+				}
+				mustLatency(t, errRow)
+				if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", n, eventTypes(rows))
+				}
+				if n := len(rowsOfType(rows, EventAgentResponse)); n != 0 {
+					t.Errorf("got %d AGENT_RESPONSE rows, want 0; events=%v", n, eventTypes(rows))
+				}
+			})
+
+			t.Run("late_error_then_late_recovered_aftertool_suppresses_completion", func(t *testing.T) {
+				p, requests, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				toolCtx := ck.build(mCtx, "late-err")
+				final := &fakeTool{name: "final_answer"}
+				args := map[string]any{"answer": "bad"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(toolCtx, final, args))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				if _, err := p.OnToolErrorCallback()(toolCtx, final, args, errors.New("boom-late")); err != nil {
+					t.Fatalf("late OnToolErrorCallback: %v", err)
+				}
+				if _, err := p.AfterToolCallback()(toolCtx, final, args, map[string]any{"answer": "recovered"}, nil); err != nil {
+					t.Fatalf("late AfterToolCallback: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("p.Close: %v", err)
+				}
+
+				rows := drainAllRows(t, requests)
+				startRow := onlyRowOfType(t, rows, EventToolStarting)
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got, want := placeOf(errRow), placeOf(startRow); got != want {
+					t.Errorf("late TOOL_ERROR span = %+v, want %+v", got, want)
+				}
+				mustLatency(t, errRow)
+				if n := len(rowsOfType(rows, EventToolCompleted)); n != 0 {
+					t.Errorf("got %d TOOL_COMPLETED rows, want 0; events=%v", n, eventTypes(rows))
+				}
+				if n := len(rowsOfType(rows, EventAgentResponse)); n != 0 {
+					t.Errorf("got %d AGENT_RESPONSE rows, want 0; events=%v", n, eventTypes(rows))
+				}
+			})
+
+			t.Run("overlapping_shared_context_across_AfterRun", func(t *testing.T) {
+				p, requests, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				sharedCtx := ck.build(mCtx, "shared-late")
+				final := &fakeTool{name: "final_answer"}
+				call1Args := map[string]any{"answer": "bad"}
+				call2Args := map[string]any{"answer": "good"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(sharedCtx, final, call1Args))
+				errs.add(p.BeforeToolCallback()(sharedCtx, final, call2Args))
+				errs.add(p.OnToolErrorCallback()(sharedCtx, final, call1Args, errors.New("boom-late-overlap")))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				if _, err := p.AfterToolCallback()(sharedCtx, final, call2Args, map[string]any{"answer": "good"}, nil); err != nil {
+					t.Fatalf("late Call 2 AfterToolCallback: %v", err)
+				}
+				if _, err := p.AfterToolCallback()(sharedCtx, final, call1Args, map[string]any{"answer": "recovered"}, nil); err != nil {
+					t.Fatalf("late Call 1 AfterToolCallback: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("p.Close: %v", err)
+				}
+
+				rows := drainAllRows(t, requests)
+				starts := rowsOfType(rows, EventToolStarting)
+				if len(starts) != 2 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+				}
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got, want := placeOf(errRow), placeOf(starts[0]); got != want {
+					t.Errorf("TOOL_ERROR span = %+v, want Call 1 span %+v", got, want)
+				}
+				mustLatency(t, errRow)
+				compRow := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := placeOf(compRow), placeOf(starts[1]); got != want {
+					t.Errorf("TOOL_COMPLETED span = %+v, want Call 2 span %+v", got, want)
+				}
+				mustLatency(t, compRow)
+				respRow := onlyRowOfType(t, rows, EventAgentResponse)
+				checkJSON(t, "late Call 2 AGENT_RESPONSE", jsonObjectColumn(t, respRow, "content"), `{"response":{"answer":"good"}}`)
+			})
+
+			t.Run("overlapping_distinct_contexts_across_AfterRun", func(t *testing.T) {
+				p, requests, mCtx := newTestPluginWithConfig(t, func(c *Config) {
+					c.FinalResponseToolNames = []string{"final_answer"}
+				})
+				ctx1 := ck.build(mCtx, "late-distinct-1")
+				ctx2 := ck.build(mCtx, "late-distinct-2")
+				final := &fakeTool{name: "final_answer"}
+				call1Args := map[string]any{"answer": "bad"}
+				call2Args := map[string]any{"answer": "good"}
+
+				var errs callbackErrors
+				errs.add(p.BeforeAgentCallback()(mCtx))
+				errs.add(p.BeforeToolCallback()(ctx1, final, call1Args))
+				errs.add(p.BeforeToolCallback()(ctx2, final, call2Args))
+				errs.add(p.OnToolErrorCallback()(ctx1, final, call1Args, errors.New("boom-late-distinct")))
+				errs.add(p.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				p.AfterRunCallback()(mCtx)
+
+				if _, err := p.AfterToolCallback()(ctx2, final, call2Args, map[string]any{"answer": "good"}, nil); err != nil {
+					t.Fatalf("late Call 2 AfterToolCallback: %v", err)
+				}
+				if _, err := p.AfterToolCallback()(ctx1, final, call1Args, map[string]any{"answer": "recovered"}, nil); err != nil {
+					t.Fatalf("late Call 1 AfterToolCallback: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("p.Close: %v", err)
+				}
+
+				rows := drainAllRows(t, requests)
+				starts := rowsOfType(rows, EventToolStarting)
+				if len(starts) != 2 {
+					t.Fatalf("got %d TOOL_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+				}
+				errRow := onlyRowOfType(t, rows, EventToolError)
+				if got, want := placeOf(errRow), placeOf(starts[0]); got != want {
+					t.Errorf("TOOL_ERROR span = %+v, want Call 1 span %+v", got, want)
+				}
+				mustLatency(t, errRow)
+				compRow := onlyRowOfType(t, rows, EventToolCompleted)
+				if got, want := placeOf(compRow), placeOf(starts[1]); got != want {
+					t.Errorf("TOOL_COMPLETED span = %+v, want Call 2 span %+v", got, want)
+				}
+				mustLatency(t, compRow)
+				respRow := onlyRowOfType(t, rows, EventAgentResponse)
+				checkJSON(t, "late distinct Call 2 AGENT_RESPONSE", jsonObjectColumn(t, respRow, "content"), `{"response":{"answer":"good"}}`)
+			})
+		})
+	}
+}

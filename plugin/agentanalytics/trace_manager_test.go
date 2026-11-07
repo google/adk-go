@@ -22558,43 +22558,63 @@ func TestTraceManager_EmptyToolCallContextCleanup(t *testing.T) {
 	tm.invocationSpan(ctx, id, nil)
 	inv := tm.invocation(ctx, id)
 
-	completedPtr := func() weak.Pointer[payload] {
+	type nonComparableSliceCtx struct {
+		context.Context
+		tags []*payload
+	}
+
+	completedPtr, completedArgPtr := func() (weak.Pointer[payload], weak.Pointer[payload]) {
 		p := &payload{}
-		toolCtx := context.WithValue(ctx, payloadKey{}, p)
-		tm.pushToolCallSpan(toolCtx, id, "", "lookup")
-		tm.popToolCallSpan(toolCtx, id, "", "lookup", true)
-		tm.popToolCallSpan(toolCtx, id, "", "lookup", false)
-		return weak.Make(p)
+		argP := &payload{}
+		toolCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p),
+			tags:    []*payload{p},
+		}
+		args := map[string]any{"p": argP}
+		tm.pushToolCallSpan(toolCtx, id, "", "lookup", args)
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", true, args)
+		tm.popToolCallSpan(toolCtx, id, "", "lookup", false, args)
+		return weak.Make(p), weak.Make(argP)
 	}()
 
-	// Completing AfterTool deletes the context entry immediately while the
-	// invocation is still live.
+	// Completing AfterTool deletes the context and argument entry immediately
+	// while the invocation is still live.
 	for range 3 {
 		runtime.GC()
 	}
 	if completedPtr.Value() != nil {
 		t.Error("completed empty-ID tool context is still reachable after AfterTool + GC")
 	}
+	if completedArgPtr.Value() != nil {
+		t.Error("completed empty-ID tool args are still reachable after AfterTool + GC")
+	}
 
-	// Open / abandoned empty-ID contexts must be dropped on endInvocation without
-	// leaving context references on either inv or late state.
-	openPtr, endedPtr := func() (weak.Pointer[payload], weak.Pointer[payload]) {
-		p1, p2 := &payload{}, &payload{}
-		openCtx := context.WithValue(ctx, payloadKey{}, p1)
-		endedCtx := context.WithValue(ctx, payloadKey{}, p2)
-		tm.pushToolCallSpan(openCtx, id, "", "lookup")
-		tm.pushToolCallSpan(endedCtx, id, "", "lookup")
-		tm.popToolCallSpan(endedCtx, id, "", "lookup", true)
-		return weak.Make(p1), weak.Make(p2)
+	// Open / abandoned empty-ID contexts and args must be dropped on endInvocation
+	// without retaining references on either inv or late state.
+	openPtr, openArgPtr, endedPtr, endedArgPtr := func() (weak.Pointer[payload], weak.Pointer[payload], weak.Pointer[payload], weak.Pointer[payload]) {
+		p1, ap1, p2, ap2 := &payload{}, &payload{}, &payload{}, &payload{}
+		openCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p1),
+			tags:    []*payload{p1},
+		}
+		endedCtx := nonComparableSliceCtx{
+			Context: context.WithValue(ctx, payloadKey{}, p2),
+			tags:    []*payload{p2},
+		}
+		openArgs := map[string]any{"p": ap1}
+		endedArgs := map[string]any{"p": ap2}
+		tm.pushToolCallSpan(openCtx, id, "", "lookup", openArgs)
+		tm.pushToolCallSpan(endedCtx, id, "", "lookup", endedArgs)
+		tm.popToolCallSpan(endedCtx, id, "", "lookup", true, endedArgs)
+		return weak.Make(p1), weak.Make(ap1), weak.Make(p2), weak.Make(ap2)
 	}()
 
 	tm.endInvocation(ctx, id)
 	inv.mu.Lock()
-	leftIDs := len(inv.emptyToolCallIDs)
-	leftPtrs := len(inv.emptyToolCallPtrs)
+	leftCalls := len(inv.emptyToolCalls)
 	inv.mu.Unlock()
-	if leftIDs != 0 || leftPtrs != 0 {
-		t.Errorf("invocation retained empty-ID entries after endInvocation: ids=%d ptrs=%d", leftIDs, leftPtrs)
+	if leftCalls != 0 {
+		t.Errorf("invocation retained empty-ID entries after endInvocation: calls=%d", leftCalls)
 	}
 
 	for range 3 {
@@ -22603,7 +22623,13 @@ func TestTraceManager_EmptyToolCallContextCleanup(t *testing.T) {
 	if openPtr.Value() != nil {
 		t.Error("open empty-ID tool context is still reachable after endInvocation + GC")
 	}
+	if openArgPtr.Value() != nil {
+		t.Error("open empty-ID tool args are still reachable after endInvocation + GC")
+	}
 	if endedPtr.Value() != nil {
 		t.Error("error-ended empty-ID tool context is still reachable after endInvocation + GC")
+	}
+	if endedArgPtr.Value() != nil {
+		t.Error("error-ended empty-ID tool args are still reachable after endInvocation + GC")
 	}
 }
