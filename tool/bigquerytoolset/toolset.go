@@ -19,14 +19,18 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 // Each tool's description is adk-python's docstring for the tool, without the
@@ -43,9 +47,9 @@ var (
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
-// are available. The client ignores the cancellation of ctx but keeps its
-// values for fetching credentials later. The toolset is safe for concurrent
-// use.
+// are available. The client ignores the cancellation of ctx, and some
+// credential types keep its values for fetching tokens later. The toolset is
+// safe for concurrent use.
 func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -110,9 +114,9 @@ func newTool[TArgs any](b *bigQuery, name, description string, run func(agent.Co
 	if err != nil {
 		return nil, fmt.Errorf("bigquerytoolset: inferring the input schema of %s: %w", name, err)
 	}
-	b.applyDefaults(schema)
+	defaulted := b.applyDefaults(schema)
 
-	return functiontool.New(functiontool.Config{
+	inner, err := functiontool.New(functiontool.Config{
 		Name:        name,
 		Description: strings.TrimRight(description, "\n"),
 		InputSchema: schema,
@@ -126,13 +130,48 @@ func newTool[TArgs any](b *bigQuery, name, description string, run func(agent.Co
 		}
 		return result, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &nullDefaultsTool{FunctionTool: inner.(toolinternal.FunctionTool), defaulted: defaulted}, nil
+}
+
+// nullDefaultsTool treats a null argument that has a configured default like
+// an omitted one, as adk-python's BigQueryTool does. The declaration still
+// says string, so validation rejects the null unless it is dropped first.
+type nullDefaultsTool struct {
+	toolinternal.FunctionTool
+	defaulted []string
+}
+
+// ProcessRequest registers t rather than the wrapped tool, because the LLM
+// flow calls what is registered on the request.
+func (t *nullDefaultsTool) ProcessRequest(_ agent.Context, req *model.LLMRequest) error {
+	return toolutils.PackTool(req, t)
+}
+
+// Run drops null defaulted arguments and runs the wrapped tool.
+func (t *nullDefaultsTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	m, ok := args.(map[string]any)
+	if !ok {
+		return t.FunctionTool.Run(ctx, args)
+	}
+	cleaned := maps.Clone(m)
+	for _, arg := range t.defaulted {
+		if v, ok := cleaned[arg]; ok && v == nil {
+			delete(cleaned, arg)
+		}
+	}
+	return t.FunctionTool.Run(ctx, cleaned)
 }
 
 // applyDefaults makes each argument with a configured default optional and
 // says so in its description, as adk-python's BigQueryTool does. Without
 // this the model cannot know which project or dataset the agent builder
-// meant, and asks the user at the start of every conversation.
-func (b *bigQuery) applyDefaults(schema *jsonschema.Schema) {
+// meant, and asks the user at the start of every conversation. It returns the
+// arguments that got a default.
+func (b *bigQuery) applyDefaults(schema *jsonschema.Schema) []string {
+	var defaulted []string
 	for arg, def := range map[string]string{
 		"project_id": b.defaultProjectID,
 		"dataset_id": b.defaultDatasetID,
@@ -143,5 +182,7 @@ func (b *bigQuery) applyDefaults(schema *jsonschema.Schema) {
 		}
 		prop.Description = fmt.Sprintf("Defaults to '%s' when not provided.", def)
 		schema.Required = slices.DeleteFunc(schema.Required, func(r string) bool { return r == arg })
+		defaulted = append(defaulted, arg)
 	}
+	return defaulted
 }

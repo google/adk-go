@@ -39,6 +39,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 )
@@ -291,6 +292,9 @@ func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
 		if got := schema.Properties[prop].Description; got != want {
 			t.Errorf("property %q description = %q, want %q", prop, got, want)
 		}
+		if got := schema.Properties[prop].Type; got != "string" {
+			t.Errorf("property %q type = %q, want string", prop, got)
+		}
 	}
 }
 
@@ -345,14 +349,29 @@ func TestToolset_SingleDefaultIDKeepsOtherArgRequired(t *testing.T) {
 func TestListDatasetIDs_DefaultProjectID(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/my-project/datasets": {body: `{"datasets":[{"datasetReference":{"projectId":"my-project","datasetId":"a"}}]}`},
+		"GET /bigquery/v2/projects/other/datasets":      {body: `{"datasets":[{"datasetReference":{"projectId":"other","datasetId":"b"}}]}`},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+	listDatasets := toolByName(t, ts, "list_dataset_ids")
 
-	got := run(t, toolByName(t, ts, "list_dataset_ids"), map[string]any{})
+	tests := []struct {
+		name string
+		args map[string]any
+		want []any
+	}{
+		{name: "omitted", args: map[string]any{}, want: []any{"a"}},
+		{name: "null", args: map[string]any{"project_id": nil}, want: []any{"a"}},
+		{name: "model names another project", args: map[string]any{"project_id": "other"}, want: []any{"b"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := run(t, listDatasets, tc.args)
 
-	want := map[string]any{"result": []any{"a"}}
-	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
-		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+			want := map[string]any{"result": tc.want}
+			if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+				t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -372,6 +391,9 @@ func TestToolset_DefaultIDsFillMissingArgs(t *testing.T) {
 	}{
 		{name: "omitted", args: map[string]any{}, want: "my-project:my_dataset"},
 		{name: "empty", args: map[string]any{"project_id": "", "dataset_id": ""}, want: "my-project:my_dataset"},
+		{name: "null", args: map[string]any{"project_id": nil, "dataset_id": nil}, want: "my-project:my_dataset"},
+		{name: "null project, model names another dataset", args: map[string]any{"project_id": nil, "dataset_id": "other_dataset"}, want: "my-project:other_dataset"},
+		{name: "null dataset, model names another project", args: map[string]any{"project_id": "other", "dataset_id": nil}, want: "other:my_dataset"},
 		{name: "model names another project", args: map[string]any{"project_id": "other"}, want: "other:my_dataset"},
 		{name: "model names another dataset", args: map[string]any{"dataset_id": "other_dataset"}, want: "my-project:other_dataset"},
 	}
@@ -382,6 +404,88 @@ func TestToolset_DefaultIDsFillMissingArgs(t *testing.T) {
 				t.Errorf("Run() = %v, want id %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestToolset_NullArgRegisteredOnRequest calls the tool the way the LLM flow
+// does, through what ProcessRequest registers on the request.
+func TestToolset_NullArgRegisteredOnRequest(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/my-project/datasets": {body: `{"datasets":[{"datasetReference":{"projectId":"my-project","datasetId":"a"}}]}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+	processor, ok := toolByName(t, ts, "list_dataset_ids").(toolinternal.RequestProcessor)
+	if !ok {
+		t.Fatal("list_dataset_ids is not a toolinternal.RequestProcessor")
+	}
+	req := &model.LLMRequest{}
+	if err := processor.ProcessRequest(newToolContext(t, t.Context(), nil), req); err != nil {
+		t.Fatalf("ProcessRequest() error = %v", err)
+	}
+	registered, ok := req.Tools["list_dataset_ids"].(runnable)
+	if !ok {
+		t.Fatalf("registered tool (%T) is not runnable", req.Tools["list_dataset_ids"])
+	}
+
+	got := run(t, registered, map[string]any{"project_id": nil})
+
+	want := map[string]any{"result": []any{"a"}}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestToolset_NullArgLeavesCallerArgsUnchanged(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/my-project/datasets": {body: `{}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+	args := map[string]any{"project_id": nil}
+
+	run(t, toolByName(t, ts, "list_dataset_ids"), args)
+
+	if diff := cmp.Diff(map[string]any{"project_id": nil}, args); diff != "" {
+		t.Errorf("args changed (-want +got):\n%s", diff)
+	}
+}
+
+func TestToolset_NullArgWithoutDefaultIsRejected(t *testing.T) {
+	f := newFakeBigQuery(t, nil)
+	tests := []struct {
+		name string
+		cfg  Config
+		tool string
+		args map[string]any
+	}{
+		{name: "no defaults, null project", tool: "list_dataset_ids", args: map[string]any{"project_id": nil}},
+		{name: "no defaults, null dataset", tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": nil}},
+		{name: "project default only, null dataset", cfg: Config{DefaultProjectID: "my-project"}, tool: "get_dataset_info", args: map[string]any{"project_id": nil, "dataset_id": nil}},
+		{name: "dataset default only, null project", cfg: Config{DefaultDatasetID: "my_dataset"}, tool: "get_dataset_info", args: map[string]any{"project_id": nil, "dataset_id": nil}},
+		{name: "dataset default on a tool without dataset_id", cfg: Config{DefaultProjectID: "my-project", DefaultDatasetID: "my_dataset"}, tool: "list_dataset_ids", args: map[string]any{"dataset_id": nil}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.cfg.ClientOptions = f.clientOptions()
+			ts := newTestToolset(t, tc.cfg)
+
+			_, err := toolByName(t, ts, tc.tool).Run(newToolContext(t, t.Context(), nil), tc.args)
+			if err == nil {
+				t.Fatalf("Run(%v) succeeded, want a validation error", tc.args)
+			}
+			if !strings.Contains(err.Error(), "validat") {
+				t.Errorf("Run(%v) error = %v, want a validation error", tc.args, err)
+			}
+		})
+	}
+}
+
+func TestToolset_NonMapArgsAreRejected(t *testing.T) {
+	f := newFakeBigQuery(t, nil)
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+
+	_, err := toolByName(t, ts, "list_dataset_ids").Run(newToolContext(t, t.Context(), nil), "not a map")
+	if err == nil {
+		t.Fatal("Run() with non-map args succeeded, want an error")
 	}
 }
 
@@ -574,6 +678,7 @@ func TestNewClient_Endpoint(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GOOGLE_CLOUD_UNIVERSE_DOMAIN", tc.env)
+			t.Setenv("GOOGLE_API_USE_MTLS_ENDPOINT", "never")
 			c, err := newClient(t.Context(), Config{ClientOptions: append(tc.opts, option.WithoutAuthentication())})
 			if err != nil {
 				t.Fatalf("newClient() error = %v", err)
