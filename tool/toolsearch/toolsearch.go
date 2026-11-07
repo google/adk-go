@@ -55,14 +55,24 @@ const (
 	// near-irrelevant candidates.
 	minScoreRatio = 0.1
 
-	toolDescription = "Discover tools that are not yet loaded. Describe your task in natural language, " +
+	toolDescriptionLead = "Discover tools that are not yet loaded. Describe your task in natural language, " +
 		"use select:tool_a,tool_b for exact names, or a regex over tool names such as get_.*_file. " +
 		"Natural-language results match tool names, descriptions, and argument metadata. " +
-		"After searching, finish this model response. Call discovered tools in the next model response, not alongside search_tools."
+		"Do not call search_tools in the same request as a tool it has not yet returned. "
 
-	// skillHint follows toolDescription only when SkillAnnotations is set, since
-	// no result carries a connected_skill otherwise.
-	skillHint = " Results may include an optional connected_skill hint; load the relevant skill if your application supports it."
+	toolDescription = toolDescriptionLead +
+		"Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user."
+
+	// skillToolDescription replaces toolDescription when SkillAnnotations is set,
+	// since no result carries a connected_skill otherwise. load_skill returns the
+	// skill body, so the model can read it only on the following step. Asking for
+	// the matched tools in that same response runs them before the body arrives.
+	skillToolDescription = toolDescriptionLead +
+		"This search does not answer the user. " +
+		"If a result includes a relevant connected_skill and your application supports skills, " +
+		"load that skill on the model step that receives the search result, " +
+		"and call the matched tools on the model step after load_skill returns, not in the same response. " +
+		"If none is relevant, call the discovered tools on the model step that receives the search result."
 )
 
 // Config tunes the gating toolset.
@@ -134,7 +144,7 @@ func New(base tool.Toolset, cfg Config) (tool.Toolset, error) {
 	if description == "" {
 		description = toolDescription
 		if len(cfg.SkillAnnotations) > 0 {
-			description += skillHint
+			description = skillToolDescription
 		}
 	}
 	searchTool, err := functiontool.New(
@@ -307,12 +317,17 @@ func executeSearch(
 		return searchOutput{}, fmt.Errorf("toolsearch: persist discovered tools: %w", err)
 	}
 
+	// Read on the model step after search_tools returns. Ask for the tools just
+	// found. Do not say to end or finish the response; that is read as ending the turn.
+	// A connected_skill is loaded with load_skill, whose response carries the
+	// skill body, so those matched tools wait for the following step.
 	nextStep := "The matched tools are now available. " +
-		"End this response now and call the appropriate tool in your next response."
+		"Call the appropriate tool in this model step to continue the user's request."
 	if hasConnectedSkill {
-		nextStep = "End this model response now. In the next response, if connected_skill could be relevant to your task " +
-			"and your application supports skills, load only the most relevant one unless the task requires multiple. " +
-			"Then use the matched tools."
+		nextStep = "If connected_skill could be relevant to your task " +
+			"and your application supports skills, load only the most relevant one now unless the task requires multiple. " +
+			"Call the matched tools on the model step after load_skill returns, not in the same response. " +
+			"If no skill applies, call the matched tools in this model step. This search does not answer the user."
 	}
 
 	return searchOutput{Matches: searchMatches, Note: note, NextStep: nextStep}, nil

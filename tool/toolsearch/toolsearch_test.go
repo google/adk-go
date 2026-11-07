@@ -574,6 +574,17 @@ func TestSearchTool_AdvertisesGatedToolsInDescription(t *testing.T) {
 	if strings.Contains(advertised, ToolName) {
 		t.Errorf("search_tools description advertises %q as loadable: %q", ToolName, advertised)
 	}
+	for _, want := range []string{
+		"Do not call search_tools in the same request as a tool it has not yet returned.",
+		"Once that result is in hand, call the discovered tools in that same model step; this search does not answer the user.",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("search_tools description = %q, want it to contain %q", desc, want)
+		}
+	}
+	if strings.Contains(desc, "finish this model response") || strings.Contains(desc, "End this response") {
+		t.Errorf("search_tools description tells the model to end the response: %q", desc)
+	}
 }
 
 // TestRevealTools_ReturnsStateError checks that a failed state write surfaces
@@ -620,10 +631,12 @@ func TestSearch_ReportsOptionalConnectedSkillAndRevealsTool(t *testing.T) {
 	if diff := cmp.Diff([]string{"list_recent_files"}, discoveredNames(state, testAgent)); diff != "" {
 		t.Errorf("discoveredNames() mismatch (-want +got):\n%s", diff)
 	}
-	for _, want := range []string{"could be relevant to your task", "load only the most relevant one"} {
-		if !strings.Contains(out.NextStep, want) {
-			t.Errorf("next_step = %q, want it to contain %q", out.NextStep, want)
-		}
+	const wantNext = "If connected_skill could be relevant to your task " +
+		"and your application supports skills, load only the most relevant one now unless the task requires multiple. " +
+		"Call the matched tools on the model step after load_skill returns, not in the same response. " +
+		"If no skill applies, call the matched tools in this model step. This search does not answer the user."
+	if out.NextStep != wantNext {
+		t.Errorf("next_step = %q, want %q", out.NextStep, wantNext)
 	}
 
 	checkNames(t, mustToolNames(t, gts, newCtx(state)), []string{"list_recent_files"}, nil)
@@ -645,6 +658,10 @@ func TestSearch_CappedResultsIncludeNote(t *testing.T) {
 	}
 	if out.Note == "" {
 		t.Error("executeSearch() note is empty, want a truncation note")
+	}
+	const wantNext = "The matched tools are now available. Call the appropriate tool in this model step to continue the user's request."
+	if out.NextStep != wantNext {
+		t.Errorf("next_step = %q, want %q", out.NextStep, wantNext)
 	}
 }
 
@@ -1285,19 +1302,40 @@ func TestNew_Description(t *testing.T) {
 
 // TestNew_SkillHintOnlyWithAnnotations checks that the default description
 // mentions connected_skill only when SkillAnnotations is set, since no result
-// carries one otherwise.
+// carries one otherwise. With annotations, the description loads that skill
+// first and calls the matched tools after load_skill returns.
 func TestNew_SkillHintOnlyWithAnnotations(t *testing.T) {
 	base := &staticToolset{tools: makeTools(toolDef{"list_folders", "list folders"})}
 	for _, tc := range []struct {
 		annotations map[string]string
-		want        bool
+		wantSkill   bool
 	}{
 		{nil, false},
 		{map[string]string{"list_folders": "folder-browser"}, true},
 	} {
 		gts := mustNew(t, base, Config{SkillAnnotations: tc.annotations})
-		if got := strings.Contains(gts.searchTool.Description(), "connected_skill"); got != tc.want {
-			t.Errorf("SkillAnnotations %v: description mentions connected_skill = %t, want %t", tc.annotations, got, tc.want)
+		desc := gts.searchTool.Description()
+		if got := strings.Contains(desc, "connected_skill"); got != tc.wantSkill {
+			t.Errorf("SkillAnnotations %v: description mentions connected_skill = %t, want %t", tc.annotations, got, tc.wantSkill)
+		}
+		const sameStep = "call the discovered tools in that same model step"
+		const afterLoad = "call the matched tools on the model step after load_skill returns, not in the same response"
+		if tc.wantSkill {
+			for _, want := range []string{"load that skill on the model step that receives the search result", afterLoad} {
+				if !strings.Contains(desc, want) {
+					t.Errorf("skill description = %q, want it to contain %q", desc, want)
+				}
+			}
+			if strings.Contains(desc, sameStep) {
+				t.Errorf("skill description requires discovered tools in the same model step as load_skill: %q", desc)
+			}
+			continue
+		}
+		if !strings.Contains(desc, sameStep) {
+			t.Errorf("description = %q, want it to contain %q", desc, sameStep)
+		}
+		if strings.Contains(desc, afterLoad) {
+			t.Errorf("description without skills mentions load_skill timing: %q", desc)
 		}
 	}
 }
