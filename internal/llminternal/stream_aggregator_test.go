@@ -1561,6 +1561,25 @@ func TestProcessResponseNilCandidate(t *testing.T) {
 	}
 }
 
+// TestProcessResponseNilPart is the part-level sibling of the nil-candidate
+// regression above: a chunk whose candidate carries a nil part must be dropped
+// like the empty part the filter already targets, not panic the reflect check.
+func TestProcessResponseNilPart(t *testing.T) {
+	aggregator := llminternal.NewStreamingResponseAggregator()
+	chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+		Content: &genai.Content{Parts: []*genai.Part{nil, genai.NewPartFromText("kept")}},
+	}}}
+	for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+		if err != nil {
+			t.Fatalf("ProcessResponse yielded error: %v", err)
+		}
+	}
+	response := aggregator.Close()
+	if response == nil || response.Content == nil || len(response.Content.Parts) != 1 || response.Content.Parts[0].Text != "kept" {
+		t.Fatalf("aggregated response = %+v, want the single kept text part", response)
+	}
+}
+
 // streamedTextResponses returns n responses of one 200-byte text part each,
 // the shape a long streamed reply arrives in.
 func streamedTextResponses(n int) []*genai.GenerateContentResponse {
