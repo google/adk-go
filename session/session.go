@@ -30,6 +30,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -255,6 +256,18 @@ type EventActions struct {
 	ArtifactDelta map[string]int64 `json:"artifactDelta"`
 
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
+
+	// RequestedAuthConfigs holds the credential requests that tools made in
+	// this event, keyed by function call ID, since one function response event
+	// can answer several calls.
+	//
+	// Session services persist a request and the Agent Engine server sends it
+	// to clients unredacted, so it must not carry the secrets the tool was
+	// configured with: store the output of [toolauth.Config.WithoutSecrets], as
+	// adk-python's request_credential does. The in-memory, database and Vertex
+	// AI session services refuse to append an event whose request does not
+	// decode as a [toolauth.Config], such as one with a zero AuthScheme.
+	RequestedAuthConfigs map[string]toolauth.Config `json:"requestedAuthConfigs,omitempty"`
 
 	// If true, it won't call model to summarize function response.
 	// Only valid for function response event.

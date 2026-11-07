@@ -31,18 +31,16 @@ type LiveConnection struct {
 	sdkSession *genai.Session
 
 	modelName               string
-	backend                 genai.Backend
 	inputTranscriptionText  string
 	outputTranscriptionText string
 	bufferedResponses       []*model.LLMResponse
 }
 
 // NewLiveConnection creates a new LiveConnection.
-func NewLiveConnection(session *genai.Session, modelName string, backend genai.Backend) *LiveConnection {
+func NewLiveConnection(session *genai.Session, modelName string) *LiveConnection {
 	return &LiveConnection{
 		sdkSession: session,
 		modelName:  modelName,
-		backend:    backend,
 	}
 }
 
@@ -114,9 +112,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		}
 		log.Printf("sending tool response\n") //nolint:forbidigo // pre-slog call site
 	} else {
-		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
-		isGeminiAPI := c.backend == genai.BackendGeminiAPI
-		if isGemini31 && isGeminiAPI && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+		if isGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			log.Printf("Attempting to send text via SendRealtimeInput\n") //nolint:forbidigo // pre-slog call site
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
@@ -157,14 +153,15 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			}
 		}
 
-		isGemini31 := strings.Contains(c.modelName, "gemini-3.1")
-		isGeminiAPI := c.backend == genai.BackendGeminiAPI
-		if isGemini31 && isGeminiAPI {
+		if isGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(v.MIMEType, "image/") {
 				return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 					Video: v,
 				})
 			}
+			// Everything else goes to the audio field, where genai rejects a type
+			// other than audio/*. adk-python drops such a blob with a warning; ADK has
+			// no logger for library code yet, so the error goes to the caller.
 			return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Audio: v,
 			})
