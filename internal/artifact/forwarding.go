@@ -108,7 +108,11 @@ func (s *forwardingService) parentStorage() (*Artifacts, error) {
 		case interface{ Unwrap() agent.Artifacts }:
 			parent = a.Unwrap()
 		default:
-			return nil, fmt.Errorf("parent artifacts do not expose a backing service: %w", errors.ErrUnsupported)
+			return nil, unwrapUnsupportedErr()
 		}
 	}
+}
+
+func unwrapUnsupportedErr() error {
+	return fmt.Errorf("parent artifacts do not expose a backing service: %w", errors.ErrUnsupported)
 }
