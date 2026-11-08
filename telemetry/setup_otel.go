@@ -88,11 +88,12 @@ func configure(ctx context.Context, opts ...Option) (*config, error) {
 		var reader sdkmetric.Reader
 		if m.exportOnShutdown {
 			// adk-python disables automatic meter-provider shutdown at exit.
-			// Explicit Go shutdown flushes OTLP, which has no Cloud Monitoring
-			// minimum interval. Google Cloud readers still skip the final export.
+			// Explicit Go shutdown flushes the env-configured OTLP endpoint,
+			// which is not assumed to enforce Cloud Monitoring's minimum interval.
+			// Google Cloud readers still skip the final export.
 			reader = sdkmetric.NewPeriodicReader(&guardedExporter{Exporter: m.exporter}, m.opts...)
 		} else {
-			reader = newPeriodicReader(m.exporter, m.opts...)
+			reader = newNoFinalExportReader(m.exporter, m.opts...)
 		}
 		cfg.metricReaders = append(cfg.metricReaders, reader)
 	}

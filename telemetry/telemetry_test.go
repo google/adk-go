@@ -33,6 +33,7 @@ import (
 	"regexp"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -544,6 +545,39 @@ func TestOtlpEnvMetricShutdown(t *testing.T) {
 	}
 }
 
+func TestOtlpEnvMetricShutdownReturnsRejectedExport(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", srv.URL+"/v1/metrics")
+	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
+	ctx := t.Context()
+	providers, err := New(ctx)
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := providers.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			t.Errorf("Shutdown() failed: %v", err)
+		}
+	})
+	counter, err := providers.MeterProvider.Meter("test-meter").Int64Counter("test-counter")
+	if err != nil {
+		t.Fatalf("creating counter failed: %v", err)
+	}
+	counter.Add(ctx, 1)
+	if err := providers.Shutdown(ctx); err == nil || !strings.Contains(err.Error(), "400 Bad Request") {
+		t.Errorf("Shutdown() error = %v, want the rejected export's 400 Bad Request error", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("got %d OTLP requests on Shutdown, want 1", got)
+	}
+}
+
 func TestOtlpEnvMetricShutdownReturnsExportCancellation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -757,10 +791,10 @@ func (e *recordingMetricExporter) counts() (exports, shutdowns int) {
 	return e.exports, e.shutdowns
 }
 
-func TestPeriodicReader(t *testing.T) {
+func TestNoFinalExportReader(t *testing.T) {
 	ctx := t.Context()
 	exporter := &recordingMetricExporter{}
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(newPeriodicReader(exporter, sdkmetric.WithInterval(time.Hour))))
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(newNoFinalExportReader(exporter, sdkmetric.WithInterval(time.Hour))))
 	counter, err := mp.Meter("test-meter").Int64Counter("test-counter")
 	if err != nil {
 		t.Fatalf("failed to create counter: %v", err)
