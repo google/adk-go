@@ -218,38 +218,68 @@ func TestBuildContents_UserTextWithResponseToOtherAgentCall(t *testing.T) {
 
 // TestBuildContents_ResponseInSuffixToOtherAgentCallBeforeIt checks that when
 // only a suffix of the session is built, as the compaction token estimate does,
-// a response in the suffix to another agent's call before it is shown the same
-// way as when the whole session is built.
+// a response in the suffix pairs with the call before it the same way as when
+// the whole session is built.
 func TestBuildContents_ResponseInSuffixToOtherAgentCallBeforeIt(t *testing.T) {
-	call := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "b1", Name: "adk_request_input", Args: map[string]any{"message": "approve"}}}}}
-	response := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "b1", Name: "adk_request_input", Response: map[string]any{"result": "ok"}}}}}
+	event := func(author, branch string, content *genai.Content) *session.Event {
+		return &session.Event{Author: author, Branch: branch, LLMResponse: model.LLMResponse{Content: content}}
+	}
+	callWithRole := func(role, id string) *genai.Content {
+		return &genai.Content{Role: role, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: id, Name: "adk_request_input", Args: map[string]any{"message": "approve"}}}}}
+	}
+	call := func(id string) *genai.Content { return callWithRole(genai.RoleModel, id) }
+	response := func(id string) *genai.Content {
+		return &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: id, Name: "adk_request_input", Response: map[string]any{"result": "ok"}}}}}
+	}
+	start := event("user", "", genai.NewContentFromText("start", genai.RoleUser))
+	d := event("d", "", genai.NewContentFromText("done", genai.RoleModel))
 	done := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "For context:"}, {Text: "[d] said: done"}}}
 	answered := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "For context:"}, {Text: `[user] ` + "`adk_request_input`" + ` tool returned result: {"result":"ok"}`}}}
+	calledB := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "For context:"}, {Text: `[b] called tool ` + "`adk_request_input`" + ` with parameters: {"message":"approve"}`}}}
 
 	tests := []struct {
-		name       string
-		branch     string
-		callBranch string
-		want       []*genai.Content
+		name   string
+		branch string
+		events []*session.Event
+		// from is the index in events where the built suffix starts.
+		from int
+		want []*genai.Content
 	}{
-		{name: "call visible to the agent", want: []*genai.Content{answered, done}},
+		{
+			name:   "call visible to the agent",
+			events: []*session.Event{start, event("b", "", call("b1")), event("user", "", response("b1")), d},
+			from:   2,
+			want:   []*genai.Content{answered, done},
+		},
 		{
 			// As when the whole session is built, a call the agent does not see
 			// leaves its response unmatched, and it is dropped.
-			name: "call outside the agent's branch", branch: "root.after", callBranch: "root.wf",
-			want: []*genai.Content{done},
+			name:   "call outside the agent's branch",
+			branch: "root.after",
+			events: []*session.Event{start, event("b", "root.wf", call("b1")), event("user", "", response("b1")), d},
+			from:   2,
+			want:   []*genai.Content{done},
+		},
+		{
+			// The whole build skips an event whose content has no role, so its
+			// call does not pair with the response there either.
+			name:   "call event without a role",
+			events: []*session.Event{start, event("b", "", callWithRole("", "b1")), event("user", "", response("b1")), d},
+			from:   2,
+			want:   []*genai.Content{done},
+		},
+		{
+			// Only calls before the suffix are recorded: b's later call with the
+			// same id must not turn the agent's own response into context.
+			name:   "id reused by a call after the suffix starts",
+			events: []*session.Event{start, event("after", "", call("c0")), event("after", "", response("c0")), event("b", "", call("c0"))},
+			from:   2,
+			want:   []*genai.Content{calledB},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			all := []*session.Event{
-				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("start", genai.RoleUser)}},
-				{Author: "b", Branch: tc.callBranch, LLMResponse: model.LLMResponse{Content: call}},
-				{Author: "user", LLMResponse: model.LLMResponse{Content: response}},
-				{Author: "d", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}},
-			}
-
-			got, err := buildContentsDefaultWithCallSource("after", tc.branch, "", all[2:], all, false, nil)
+			got, err := buildContentsDefaultWithCallSource("after", tc.branch, "", tc.events[tc.from:], tc.events, false, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

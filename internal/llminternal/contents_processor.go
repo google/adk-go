@@ -123,9 +123,26 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	callIDs := functionCallIDs(allEvents)
-	// visible reports whether the agent sees ev at all: its branch, not a tool
-	// sub-branch below it, its isolation scope, and not excluded.
+	// visible reports whether the agent sees ev at all: it has content (or a
+	// transcription or compaction summary), and it is on the agent's branch,
+	// not on a tool sub-branch below it, in its isolation scope, and not
+	// excluded.
 	visible := func(ev *session.Event) bool {
+		content := utils.Content(ev)
+		// Skip events without content or generated neither by user nor
+		// by model, UNLESS they have transcriptions.
+		//
+		// Compaction events are exempt: they carry their summary on
+		// Actions.Compaction rather than on Content, and compaction.Apply
+		// below expands them into content.
+		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
+			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
+			!compactioninternal.HasUsableSummary(ev) {
+			// TODO: log a bad event with content but no Role is skipped
+			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
+			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
+			return false
+		}
 		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		return eventBelongsToBranch(invocationBranch, ev) &&
 			!isToolSubBranchEvent(invocationBranch, ev, agentName, callIDs) &&
@@ -151,21 +168,6 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		}
 	}
 	for _, ev := range events {
-		content := utils.Content(ev)
-		// Skip events without content or generated neither by user nor
-		// by model, UNLESS they have transcriptions.
-		//
-		// Compaction events are exempt: they carry their summary on
-		// Actions.Compaction rather than on Content, and compaction.Apply
-		// below expands them into content.
-		if (content == nil || content.Role == "" || len(content.Parts) == 0) &&
-			ev.LLMResponse.InputTranscription == nil && ev.LLMResponse.OutputTranscription == nil &&
-			!compactioninternal.HasUsableSummary(ev) {
-			// TODO: log a bad event with content but no Role is skipped
-			// Note: python checks here if content.Parts[0] is an empty string and skip if so.
-			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
-			continue
-		}
 		if !visible(ev) {
 			continue
 		}
@@ -174,8 +176,8 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		// adk-python's _get_contents. Left as a raw response, its call is
 		// missing from this agent's history. Unlike adk-python, which keeps the
 		// last author seen for an id anywhere in the history, a response pairs
-		// with the latest call before it, so a later call that reuses the id
-		// does not turn the agent's own finished exchange into context.
+		// with the latest visible call before it, so a later call that reuses
+		// the id does not turn the agent's own finished exchange into context.
 		foreign := isOtherAgentReply(agentName, ev) || answersOtherAgentCall(agentName, ev, callAuthors)
 		recordCallAuthors(callAuthors, ev)
 		if foreign && !compactioninternal.HasUsableSummary(ev) {

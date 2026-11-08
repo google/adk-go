@@ -731,10 +731,11 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// sub-agents holding the callers (utils.GraphResumeIndexes), provided
 		// the workflow's node agents are listed in its SubAgents. Sub-agents
 		// after it in a sequence still run, and an LLM agent among them sees
-		// the user's answer as context. The workflow resumes the interrupted
-		// node only for an adk_request_input response; any other response
-		// restarts the graph. The first response in the message decides the
-		// route.
+		// the user's answer as context, unless the node's call is on a branch
+		// it cannot see, as when the workflow fans out inside a parallel agent
+		// (#2204). The workflow resumes the interrupted node only for an
+		// adk_request_input response; any other response restarts the graph.
+		// The first response in the message decides the route.
 		agentToRun, branch := r.rootAgent, ""
 		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
