@@ -95,9 +95,9 @@ func Test_inMemoryService_SearchMemory_Ranking(t *testing.T) {
 func Test_inMemoryService_SearchMemory_LimitAndSessionOrder(t *testing.T) {
 	s := memory.InMemoryService()
 	// Session IDs and timestamps run backwards so neither can define tie order.
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		var events []*session.Event
-		for j := 0; j < 2; j++ {
+		for j := range 2 {
 			e := memoryTextEvent(strconv.Itoa(2*i+j), "note about work")
 			e.Timestamp = time.Unix(int64(100-2*i-j), 0)
 			events = append(events, e)
@@ -113,7 +113,7 @@ func Test_inMemoryService_SearchMemory_LimitAndSessionOrder(t *testing.T) {
 	}
 
 	want := []string{"best", "0", "1", "2", "3", "4", "5", "6", "7", "8"}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: "work backlog note"})
 		if err != nil {
 			t.Fatal(err)
@@ -141,7 +141,7 @@ func Test_inMemoryService_SearchMemory_ReplacedSessionOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		got, err := s.SearchMemory(t.Context(), &memory.SearchRequest{AppName: "app", UserID: "user", Query: "note"})
 		if err != nil {
 			t.Fatal(err)

@@ -352,27 +352,24 @@ func Test_inMemoryService_SearchMemory_Concurrent(t *testing.T) {
 
 	const workers = 8
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(2)
-		go func(i int) {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+	for i := range workers {
+		wg.Go(func() {
+			for j := range 50 {
 				id := "s" + strconv.Itoa(i) + "-" + strconv.Itoa(j)
 				if err := s.AddSessionToMemory(ctx, makeSession(t, "app1", "user1", id, []*session.Event{memoryTextEvent(id, "x")})); err != nil {
 					t.Errorf("AddSessionToMemory() error = %v", err)
 					return
 				}
 			}
-		}(i)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 50; j++ {
+		})
+		wg.Go(func() {
+			for range 50 {
 				if _, err := s.SearchMemory(ctx, &memory.SearchRequest{AppName: "app1", UserID: "user1", Query: "x"}); err != nil {
 					t.Errorf("SearchMemory() error = %v", err)
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

@@ -59,12 +59,10 @@ func TestMarkCompactedIsSafeUnderConcurrency(t *testing.T) {
 	rt := New(&compaction.Config{CompactionInterval: 1}, nil)
 	var wg sync.WaitGroup
 	for range 16 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rt.MarkCompacted()
 			_ = rt.AlreadyCompacted()
-		}()
+		})
 	}
 	wg.Wait()
 	if !rt.AlreadyCompacted() {

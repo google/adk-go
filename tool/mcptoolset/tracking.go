@@ -40,7 +40,7 @@ func (t *trackingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	for _, name := range []string{"User-Agent", "X-Goog-Api-Client"} {
 		tokens := slices.Clone(adkTokens)
 		for _, v := range req.Header.Values(name) {
-			for _, tok := range strings.Fields(v) {
+			for tok := range strings.FieldsSeq(v) {
 				if !slices.Contains(tokens, tok) {
 					tokens = append(tokens, tok)
 				}

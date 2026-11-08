@@ -483,7 +483,7 @@ func TestRequestConfirmationResumeOrderIsStable(t *testing.T) {
 	// iteration and this same 10-iteration test would pass on the *unfixed* code
 	// about 26% of the time — so do not trim this to two calls or a single
 	// iteration.
-	for run := 0; run < 10; run++ {
+	for run := range 10 {
 		agnt, tools, err := newMockLlmAgent()
 		if err != nil {
 			t.Fatalf("error creating mock llmagent: %v", err)

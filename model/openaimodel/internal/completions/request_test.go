@@ -543,7 +543,7 @@ func TestApplyGenerationConfig_AcceptsAutomaticContinuation(t *testing.T) {
 		t.Run(fmt.Sprint(on), func(t *testing.T) {
 			_, err := buildParams("m", &model.LLMRequest{
 				Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "hi"}}}},
-				Config:   &genai.GenerateContentConfig{AutomaticContinuation: genai.Ptr(on)},
+				Config:   &genai.GenerateContentConfig{AutomaticContinuation: new(on)},
 			})
 			if err != nil {
 				t.Errorf("buildParams() error = %v, want nil", err)
@@ -572,7 +572,7 @@ func TestApplyGenerationConfig_RejectedFields(t *testing.T) {
 		{name: "speech config", cfg: &genai.GenerateContentConfig{SpeechConfig: &genai.SpeechConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "audio timestamp", cfg: &genai.GenerateContentConfig{AudioTimestamp: true}, want: shared.ErrUnsupportedConfigField},
 		{name: "image config", cfg: &genai.GenerateContentConfig{ImageConfig: &genai.ImageConfig{}}, want: shared.ErrUnsupportedConfigField},
-		{name: "enhanced civic answers", cfg: &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: genai.Ptr(true)}, want: shared.ErrUnsupportedConfigField},
+		{name: "enhanced civic answers", cfg: &genai.GenerateContentConfig{EnableEnhancedCivicAnswers: new(true)}, want: shared.ErrUnsupportedConfigField},
 		{name: "model armor config", cfg: &genai.GenerateContentConfig{ModelArmorConfig: &genai.ModelArmorConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "audio transcription config", cfg: &genai.GenerateContentConfig{AudioTranscriptionConfig: &genai.AudioTranscriptionConfig{}}, want: shared.ErrUnsupportedConfigField},
 		{name: "continuation token", cfg: &genai.GenerateContentConfig{ContinuationToken: []byte("token")}, want: shared.ErrUnsupportedConfigField},

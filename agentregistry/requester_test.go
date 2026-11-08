@@ -121,8 +121,7 @@ func TestRestRequester_Get_DecodeError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Get() error = nil, want a decode error")
 	}
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		t.Errorf("Get() returned *APIError %v, want a decode error", apiErr)
 	}
 }

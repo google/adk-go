@@ -73,8 +73,7 @@ func TestTransportConsentRequiredPropagates(t *testing.T) {
 	tr := &auth.Transport{Provider: p, Base: base}
 
 	_, err := tr.RoundTrip(newRequest(t))
-	var consent *auth.ConsentRequiredError
-	if !errors.As(err, &consent) {
+	if _, ok := errors.AsType[*auth.ConsentRequiredError](err); !ok {
 		t.Fatalf("RoundTrip() error = %v, want *auth.ConsentRequiredError", err)
 	}
 	if base.called {

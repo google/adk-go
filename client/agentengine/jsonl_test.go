@@ -231,7 +231,7 @@ func TestDecodeJSONLDurationPrecision(t *testing.T) {
 		{name: "fraction a float64 rounds to an integer", offset: "2.0000000000000001", wantErr: true},
 		{name: "exponent", offset: "1e9", wantErr: true},
 	}
-	for _, path := range leafPaths(reflect.TypeOf(genai.Content{}), isDuration, nil, map[reflect.Type]bool{}) {
+	for _, path := range leafPaths(reflect.TypeFor[genai.Content](), isDuration, nil, map[reflect.Type]bool{}) {
 		for _, tc := range cases {
 			t.Run(strings.Join(path, ".")+"/"+tc.name, func(t *testing.T) {
 				content, err := json.Marshal(nest(path, json.RawMessage(tc.offset)))
@@ -275,7 +275,7 @@ func TestDecodeJSONLDurationsLeaveToolDataAlone(t *testing.T) {
 }
 
 func TestDecodeJSONLIntegerDurationEveryField(t *testing.T) {
-	paths := leafPaths(reflect.TypeOf(genai.Content{}), isDuration, nil, map[reflect.Type]bool{})
+	paths := leafPaths(reflect.TypeFor[genai.Content](), isDuration, nil, map[reflect.Type]bool{})
 	if len(paths) < 4 {
 		t.Fatalf("found %d duration paths under genai.Content, want at least 4: %v", len(paths), paths)
 	}
@@ -342,7 +342,10 @@ func TestDecodeJSONLStopsWhenConsumerStops(t *testing.T) {
 			}
 		}
 	}
-	for range decodeJSONL(chunks) {
+	for _, err := range decodeJSONL(chunks) {
+		if err != nil {
+			t.Fatalf("decodeJSONL() error = %v", err)
+		}
 		break
 	}
 	if yielded != 1 {
@@ -465,7 +468,7 @@ func TestDecodeJSONLURLSafeBase64(t *testing.T) {
 }
 
 func TestDecodeJSONLURLSafeBase64EveryBytesField(t *testing.T) {
-	paths := leafPaths(reflect.TypeOf(genai.Content{}), isBytes, nil, map[reflect.Type]bool{})
+	paths := leafPaths(reflect.TypeFor[genai.Content](), isBytes, nil, map[reflect.Type]bool{})
 	if len(paths) < 3 {
 		t.Fatalf("found %d bytes paths under genai.Content, want at least 3: %v", len(paths), paths)
 	}
@@ -554,9 +557,8 @@ func leafPaths(t reflect.Type, leaf func(reflect.Type) bool, prefix []string, se
 	seen[t] = true
 	defer delete(seen, t)
 	var out [][]string
-	for i := range t.NumField() {
-		f := t.Field(i)
-		tag := strings.Split(f.Tag.Get("json"), ",")[0]
+	for f := range t.Fields() {
+		tag, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if tag == "" || tag == "-" {
 			continue
 		}
