@@ -953,12 +953,14 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
 		p.emitSessionEventSignals(ctx, ev)
-		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
-			taskID := evID
-			taskID.agentName = ev.Author
-			taskID.branch = ev.Branch
-			if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, functionResponseCalls(ev.Content)); ok {
-				p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
+			if calls := taskCompletedCalls(ev.Content); len(calls) > 0 {
+				taskID := evID
+				taskID.agentName = ev.Author
+				taskID.branch = ev.Branch
+				if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, calls); ok {
+					p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+				}
 			}
 		}
 	}
@@ -1008,23 +1010,37 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
-// hasTaskCompletedResponse reports whether c carries a successful
-// finish_task function response ("result": "Task completed."), which ends a
-// task-mode LLM agent in ADK without running its AfterAgentCallback.
-func hasTaskCompletedResponse(c *genai.Content) bool {
+// isTaskCompletedResult reports whether resp carries ADK's task completion
+// sentinel ("result": "Task completed.").
+func isTaskCompletedResult(resp map[string]any) bool {
+	res, ok := resp["result"].(string)
+	return ok && res == "Task completed."
+}
+
+// taskCompletedCalls returns the function call ID, or else finishTaskToolName,
+// of each successful finish_task function response ("result": "Task completed.")
+// in c.
+func taskCompletedCalls(c *genai.Content) []string {
 	if c == nil {
-		return false
+		return nil
 	}
+	var calls []string
 	for _, part := range c.Parts {
 		if part == nil || part.FunctionResponse == nil {
 			continue
 		}
-		if part.FunctionResponse.Name == finishTaskToolName {
-			result, ok := part.FunctionResponse.Response["result"].(string)
-			return ok && result == "Task completed."
+		if part.FunctionResponse.Name == finishTaskToolName && isTaskCompletedResult(part.FunctionResponse.Response) {
+			calls = append(calls, cmp.Or(part.FunctionResponse.ID, finishTaskToolName))
 		}
 	}
-	return false
+	return calls
+}
+
+// hasTaskCompletedResponse reports whether c carries a successful
+// finish_task function response ("result": "Task completed."), which ends a
+// task-mode LLM agent in ADK without running its AfterAgentCallback.
+func hasTaskCompletedResponse(c *genai.Content) bool {
+	return len(taskCompletedCalls(c)) > 0
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,
@@ -1251,10 +1267,14 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	span, purged, closedByError := p.traces.popToolCallSpan(ctx, id, callID, name, false, args)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
+	confirmationOutcome := isToolConfirmationOutcome(err)
 	if closedByError {
 		// onToolError already wrote TOOL_ERROR; even when an agent
 		// OnToolErrorCallback or a later plugin recovered or replaced the error,
 		// suppress TOOL_COMPLETED, noteTaskFinished, and AGENT_RESPONSE.
+		if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
+			p.traces.noteTaskRejected(ctx, id, callID)
+		}
 		return nil, nil
 	}
 	// A tool that waits for or is rejected by the user's confirmation fails
@@ -1262,10 +1282,12 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	// it runs. adk-python returns the confirmation outcome as the tool's
 	// result, so, as there, the call completes with the error that ADK sends
 	// the model as its result.
-	confirmationOutcome := isToolConfirmationOutcome(err)
 	if err != nil && !confirmationOutcome {
 		// When an earlier plugin short-circuited OnToolErrorCallback before
 		// onToolError ran and passed the error through, emit TOOL_ERROR here.
+		if name == finishTaskToolName && isTaskCompletedResult(result) {
+			p.traces.noteTaskRejected(ctx, id, callID)
+		}
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
 	}
@@ -1274,13 +1296,16 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 			// plugin/retryandreflect registered before this plugin short-circuits
 			// OnToolErrorCallback and returns a recovery payload with err == nil.
 			// Log it as TOOL_ERROR and suppress TOOL_COMPLETED and AGENT_RESPONSE.
+			if name == finishTaskToolName && isTaskCompletedResult(result) {
+				p.traces.noteTaskRejected(ctx, id, callID)
+			}
 			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
 			return nil, nil
 		}
 	}
 	if confirmationOutcome {
 		result = map[string]any{"error": err.Error()}
-	} else if name == finishTaskToolName {
+	} else if name == finishTaskToolName && isTaskCompletedResult(result) {
 		// The finish_task response event that follows reaches OnEventCallback
 		// without the context of the activation that made the call.
 		p.traces.noteTaskFinished(ctx, id, callID)

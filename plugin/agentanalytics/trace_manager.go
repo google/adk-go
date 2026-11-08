@@ -19,13 +19,10 @@ import (
 	"container/list"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/maphash"
 	"maps"
-	"math"
 	"reflect"
 	"runtime"
 	"slices"
@@ -293,6 +290,13 @@ type spanRecord struct {
 	// the event's node path saw a call with that ID complete, on the same one
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
+	// rejectedTasks holds the function call IDs (or finishTaskToolName when
+	// the call ID is empty) of failed or recovered finish_task calls whose
+	// result map still reported "Task completed." (see noteTaskRejected and
+	// popTaskAgentSpan), so that their FunctionResponse events do not end
+	// this or a sibling task activation when no newer matching finish_task
+	// completed cleanly.
+	rejectedTasks []string
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -504,13 +508,11 @@ type invocationTrace struct {
 	// OnToolErrorCallback alone for a call of a tool that does not exist;
 	// such records last as long as the invocation.
 	completedTools map[string]*spanRecord
-	// emptyToolCalls maps a non-retaining context fingerprint and base key to
-	// FIFO-ordered entries holding per-call sequence tokens and argument
-	// fingerprints, preventing overlapping empty-ID calls (even sharing one
-	// context or non-comparable value contexts) from colliding. Surviving live
-	// and error-ended entries are handed off across endInvocation without
-	// retaining heap references.
-	emptyToolCalls   map[emptyToolHashKey][]emptyToolCallEntry
+	// emptyToolCalls maps a slot key to per-call sequence entries and top-level
+	// callback context pointer identities for calls with an empty FunctionCallID.
+	// Surviving live and error-ended entries are handed off across endInvocation
+	// without retaining heap references.
+	emptyToolCalls   map[string][]emptyToolCallEntry
 	emptyToolCallSeq uint64
 	// unrecoveredErrors tracks unhandled errors encountered during the
 	// invocation keyed by activation / call identity (e.g. llmKey), together
@@ -1283,7 +1285,7 @@ type completedTrace struct {
 	// AfterModelCallback or AfterToolCallback that ADK may still run for them
 	// (see popLLMSpan and popToolSpan). They are nil when there are none.
 	endedModels, endedTools map[string]*spanRecord
-	endedEmptyTools         map[emptyToolHashKey][]emptyToolCallEntry
+	endedEmptyTools         map[string][]emptyToolCallEntry
 	endedEmptyToolSeq       uint64
 	position                *list.Element
 }
@@ -1622,7 +1624,7 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 		rec.handedOver = true
 	}
 	invEmptySeq := inv.emptyToolCallSeq
-	var handoffEmptyTools map[emptyToolHashKey][]emptyToolCallEntry
+	var handoffEmptyTools map[string][]emptyToolCallEntry
 	if len(inv.emptyToolCalls) > 0 && len(tools)+len(endedTools) > 0 {
 		var liveSeqs map[uint64]bool
 		for _, rec := range tools {
@@ -1651,7 +1653,7 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 				}
 				if len(kept) > 0 {
 					if handoffEmptyTools == nil {
-						handoffEmptyTools = map[emptyToolHashKey][]emptyToolCallEntry{}
+						handoffEmptyTools = map[string][]emptyToolCallEntry{}
 					}
 					handoffEmptyTools[k] = kept
 				}
@@ -1680,7 +1682,7 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 		maps.Copy(late.completedTools, endedTools)
 		if len(handoffEmptyTools) > 0 {
 			if late.emptyToolCalls == nil {
-				late.emptyToolCalls = map[emptyToolHashKey][]emptyToolCallEntry{}
+				late.emptyToolCalls = map[string][]emptyToolCallEntry{}
 			}
 			for k, entries := range handoffEmptyTools {
 				late.emptyToolCalls[k] = append(late.emptyToolCalls[k], entries...)
@@ -2569,8 +2571,68 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	i := inv.finishedTaskLocked(id, calls)
-	if i < 0 {
+
+	matchesTaskFrame := func(rec *spanRecord) bool {
+		return rec.kind == spanKindAgent && rec.taskMode && rec.name == id.agentName && rec.branch == id.branch &&
+			(id.path == "" || rec.path == "" || rec.path == id.path)
+	}
+	hasCall := func(list []string) bool {
+		return slices.ContainsFunc(calls, func(call string) bool { return slices.Contains(list, call) })
+	}
+
+	finishedCount := 0
+	singleFinishedIdx := -1
+	for j := len(inv.agentStack) - 1; j > 0; j-- {
+		rec := inv.agentStack[j]
+		if matchesTaskFrame(rec) && hasCall(rec.finishedTasks) {
+			finishedCount++
+			singleFinishedIdx = j
+		}
+	}
+
+	i := -1
+	switch {
+	case finishedCount == 1:
+		i = inv.finishedTaskLocked(id, calls)
+		if i < 0 {
+			i = singleFinishedIdx
+		}
+	case finishedCount > 1:
+		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+	default:
+		// No open task-mode activation has a matching finishedTasks entry. Scan
+		// newest-first for a matching rejectedTasks entry, skipping older
+		// activations on the same goroutine superseded by a newer open
+		// non-ancestor task-mode activation with no recorded finish_task outcome.
+		isAncestor := func(ancestor, desc *spanRecord) bool {
+			for p := desc.parent; p != nil; p = p.parent {
+				if p == ancestor {
+					return true
+				}
+			}
+			return false
+		}
+		var newerUnnoted []*spanRecord
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			rec := inv.agentStack[j]
+			if !matchesTaskFrame(rec) {
+				continue
+			}
+			superseded := rec.goroutineID != 0 && slices.ContainsFunc(newerUnnoted, func(newer *spanRecord) bool {
+				return newer.goroutineID == rec.goroutineID && !isAncestor(rec, newer)
+			})
+			if !superseded && len(rec.rejectedTasks) > 0 {
+				if idx := slices.IndexFunc(rec.rejectedTasks, func(rej string) bool {
+					return slices.Contains(calls, rej)
+				}); idx >= 0 {
+					rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
+					return rowSpan{}, false
+				}
+			}
+			if len(rec.finishedTasks) == 0 && len(rec.rejectedTasks) == 0 {
+				newerUnnoted = append(newerUnnoted, rec)
+			}
+		}
 		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
 	}
 	if i < 0 {
@@ -2579,6 +2641,11 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	rec := inv.agentStack[i]
 	if !rec.taskMode {
 		return rowSpan{}, false
+	}
+	if idx := slices.IndexFunc(rec.finishedTasks, func(fin string) bool {
+		return slices.Contains(calls, fin)
+	}); idx >= 0 {
+		rec.finishedTasks = slices.Delete(rec.finishedTasks, idx, idx+1)
 	}
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(rec.parent, now)
@@ -2633,20 +2700,39 @@ func (inv *invocationTrace) finishedTaskLocked(id identity, calls []string) int 
 
 // noteTaskFinished records that the finish_task call callID of the agent
 // activation that ctx and id identify completed, so that the function response
-// event that reports it ends that activation (see popTaskAgentSpan). The tool
-// callbacks get the context of the activation that made the call, which the
-// event callback does not.
+// event that reports it ends that activation (see popTaskAgentSpan). Any
+// unconsumed rejection for the same call on that activation is cleared so a
+// retry after a suppressed FunctionResponse event still closes the activation.
 func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callID string) {
-	if callID == "" {
-		return
-	}
+	call := cmp.Or(callID, finishTaskToolName)
 	inv := tm.invocation(ctx, id)
 	for !inv.lockLive() {
 		inv = tm.invocation(ctx, id)
 	}
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		inv.agentStack[i].finishedTasks = append(inv.agentStack[i].finishedTasks, callID)
+		rec := inv.agentStack[i]
+		rec.rejectedTasks = slices.DeleteFunc(rec.rejectedTasks, func(rej string) bool {
+			return rej == call
+		})
+		rec.finishedTasks = append(rec.finishedTasks, call)
+	}
+}
+
+// noteTaskRejected records that the finish_task call callID of the agent
+// activation that ctx and id identify failed or was recovered by an error
+// callback even though its result map still carries "Task completed.", so that
+// the subsequent FunctionResponse event does not end a task activation when no
+// newer matching finish_task succeeded cleanly (see popTaskAgentSpan).
+func (tm *traceManager) noteTaskRejected(ctx context.Context, id identity, callID string) {
+	call := cmp.Or(callID, finishTaskToolName)
+	inv := tm.invocation(ctx, id)
+	for !inv.lockLive() {
+		inv = tm.invocation(ctx, id)
+	}
+	defer inv.mu.Unlock()
+	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
+		inv.agentStack[i].rejectedTasks = append(inv.agentStack[i].rejectedTasks, call)
 	}
 }
 
@@ -4854,7 +4940,7 @@ func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, k
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key, emptySeq := inv.resolveToolCallKeyLocked(ctx, key, true, false, emptyCallID, args)
+	key, emptySeq, _ := inv.resolveToolCallKeyLocked(ctx, key, true, false, emptyCallID, args)
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
@@ -4913,7 +4999,7 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key, emptySeq := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, emptyCallID, args)
+	key, emptySeq, recordCompleted := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, emptyCallID, args)
 	open := inv.toolSpans[key]
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
@@ -4938,7 +5024,7 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 	inv.retireLateSettledLocked()
 	if open != nil {
 		open.dropContexts()
-		if fromError {
+		if fromError && recordCompleted {
 			inv.completedTools[key] = open
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
@@ -4954,7 +5040,7 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 		}
 	}
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
-	if fromError {
+	if fromError && recordCompleted {
 		rec.dropContexts()
 		rec.emptyCallSeq = emptySeq
 		inv.completedTools[key] = rec
@@ -5260,308 +5346,156 @@ func toolKey(id identity, functionCallID, toolName string) string {
 	return id.path + "\x00" + id.agentName + "\x00" + id.branch + "\x00" + toolName
 }
 
-var emptyToolHashSeed = maphash.MakeSeed()
+type emptyToolPtr struct {
+	typ reflect.Type
+	ptr uintptr
+}
 
-type emptyToolHashKey struct {
-	typ     reflect.Type
-	ctxHash uint64
-	key     string
+func emptyToolCtxPtr(ctx context.Context) emptyToolPtr {
+	if ctx == nil {
+		return emptyToolPtr{}
+	}
+	rv := reflect.ValueOf(ctx)
+	if rv.Kind() == reflect.Pointer && !rv.IsNil() {
+		return emptyToolPtr{typ: rv.Type(), ptr: rv.Pointer()}
+	}
+	return emptyToolPtr{}
 }
 
 type emptyToolCallEntry struct {
-	seq      uint64
-	argsPtr  uintptr
-	argsHash uint64
-	errored  bool
-}
-
-const (
-	maxToolFingerprintDepth    = 8
-	maxToolFingerprintSeqElems = 32
-	maxToolFingerprintMapElems = 1024
-)
-
-func mixToolHash64(x uint64) uint64 {
-	x ^= x >> 30
-	x *= 0xbf58476d1ce4e5b9
-	x ^= x >> 27
-	x *= 0x94d049bb133111eb
-	x ^= x >> 31
-	return x
-}
-
-func writeHashUint64(h *maphash.Hash, v uint64) {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], v)
-	_, _ = h.Write(buf[:])
-}
-
-func canonicalFloatBits(f float64) uint64 {
-	switch {
-	case math.IsNaN(f):
-		return 0x7ff8000000000001
-	case f == 0:
-		return 0
-	default:
-		return math.Float64bits(f)
-	}
-}
-
-func hashReflectAlone(rv reflect.Value, depth int, includeContainerPtr bool) uint64 {
-	var h maphash.Hash
-	h.SetSeed(emptyToolHashSeed)
-	hashReflectValue(&h, rv, depth, includeContainerPtr)
-	return h.Sum64()
-}
-
-func hashReflectValue(h *maphash.Hash, rv reflect.Value, depth int, includeContainerPtr bool) {
-	if !rv.IsValid() {
-		_ = h.WriteByte(0)
-		return
-	}
-	_ = h.WriteByte(byte(rv.Kind()))
-	rt := rv.Type()
-	if pkg := rt.PkgPath(); pkg != "" {
-		_, _ = h.WriteString(pkg)
-	}
-	_ = h.WriteByte(0)
-	_, _ = h.WriteString(rt.String())
-	_ = h.WriteByte(0)
-
-	if depth >= maxToolFingerprintDepth {
-		return
-	}
-
-	switch rv.Kind() {
-	case reflect.Bool:
-		if rv.Bool() {
-			_ = h.WriteByte(1)
-		} else {
-			_ = h.WriteByte(0)
-		}
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		writeHashUint64(h, uint64(rv.Int()))
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-		writeHashUint64(h, rv.Uint())
-	case reflect.Float32, reflect.Float64:
-		writeHashUint64(h, canonicalFloatBits(rv.Float()))
-	case reflect.Complex64, reflect.Complex128:
-		c := rv.Complex()
-		writeHashUint64(h, canonicalFloatBits(real(c)))
-		writeHashUint64(h, canonicalFloatBits(imag(c)))
-	case reflect.String:
-		s := rv.String()
-		writeHashUint64(h, uint64(len(s)))
-		_, _ = h.WriteString(s)
-	case reflect.Pointer, reflect.UnsafePointer, reflect.Chan, reflect.Func:
-		writeHashUint64(h, uint64(rv.Pointer()))
-	case reflect.Interface:
-		if rv.IsNil() {
-			_ = h.WriteByte(0)
-			return
-		}
-		_ = h.WriteByte(1)
-		hashReflectValue(h, rv.Elem(), depth+1, includeContainerPtr)
-	case reflect.Struct:
-		n := rv.NumField()
-		writeHashUint64(h, uint64(n))
-		for i := range n {
-			_, _ = h.WriteString(rt.Field(i).Name)
-			_ = h.WriteByte(0)
-			hashReflectValue(h, rv.Field(i), depth+1, includeContainerPtr)
-		}
-	case reflect.Array:
-		n := rv.Len()
-		writeHashUint64(h, uint64(n))
-		limit := min(n, maxToolFingerprintSeqElems)
-		for i := range limit {
-			hashReflectValue(h, rv.Index(i), depth+1, includeContainerPtr)
-		}
-	case reflect.Slice:
-		if rv.IsNil() {
-			_ = h.WriteByte(0)
-			return
-		}
-		_ = h.WriteByte(1)
-		n := rv.Len()
-		writeHashUint64(h, uint64(n))
-		if includeContainerPtr && n > 0 {
-			writeHashUint64(h, uint64(rv.Pointer()))
-		}
-		limit := min(n, maxToolFingerprintSeqElems)
-		for i := range limit {
-			hashReflectValue(h, rv.Index(i), depth+1, includeContainerPtr)
-		}
-	case reflect.Map:
-		if rv.IsNil() {
-			_ = h.WriteByte(0)
-			return
-		}
-		_ = h.WriteByte(1)
-		n := rv.Len()
-		writeHashUint64(h, uint64(n))
-		if includeContainerPtr {
-			writeHashUint64(h, uint64(rv.Pointer()))
-		}
-		if n > maxToolFingerprintMapElems {
-			return
-		}
-		var xorAcc, sumAcc uint64
-		iter := rv.MapRange()
-		for iter.Next() {
-			kh := hashReflectAlone(iter.Key(), depth+1, includeContainerPtr)
-			vh := hashReflectAlone(iter.Value(), depth+1, includeContainerPtr)
-			eh := mixToolHash64(kh ^ mixToolHash64(vh*0x9e3779b97f4a7c15))
-			xorAcc ^= eh
-			sumAcc += eh
-		}
-		writeHashUint64(h, xorAcc)
-		writeHashUint64(h, sumAcc)
-	}
-}
-
-func fingerprintToolValue(v any) (typ reflect.Type, hash uint64) {
-	if v == nil {
-		return nil, 0
-	}
-	rv := reflect.ValueOf(v)
-	typ = rv.Type()
-	defer func() {
-		if recover() != nil {
-			hash = 0
-		}
-	}()
-	var h maphash.Hash
-	h.SetSeed(emptyToolHashSeed)
-	hashReflectValue(&h, rv, 0, true)
-	return typ, h.Sum64()
-}
-
-func fingerprintToolArgs(args map[string]any) (ptr uintptr, hash uint64) {
-	if args == nil {
-		return 0, 0
-	}
-	defer func() {
-		if recover() != nil {
-			hash = 0
-		}
-	}()
-	rv := reflect.ValueOf(args)
-	ptr = rv.Pointer()
-	var h maphash.Hash
-	h.SetSeed(emptyToolHashSeed)
-	hashReflectValue(&h, rv, 0, false)
-	return ptr, h.Sum64()
+	ptr       emptyToolPtr
+	seq       uint64
+	errored   bool
+	ambiguous bool
 }
 
 func emptyToolSeqKey(baseKey string, seq uint64) string {
 	return fmt.Sprintf("tc%d\x00%s", seq, baseKey)
 }
 
-func pickOpenEmptyToolEntry(entries []emptyToolCallEntry, openIdxs []int, argsPtr uintptr, argsHash uint64) int {
-	if len(openIdxs) == 1 {
-		return openIdxs[0]
-	}
-	if argsPtr != 0 {
-		for _, idx := range openIdxs {
-			if entries[idx].argsPtr == argsPtr {
-				return idx
-			}
-		}
-	}
-	for _, idx := range openIdxs {
-		if entries[idx].argsHash == argsHash && (argsPtr != 0 || entries[idx].argsPtr == 0) {
-			return idx
-		}
-	}
-	return openIdxs[0]
-}
-
-func pickAfterEmptyToolEntry(entries []emptyToolCallEntry, argsPtr uintptr, argsHash uint64) int {
-	if len(entries) == 1 {
-		return 0
-	}
-	if argsPtr != 0 {
-		for idx, e := range entries {
-			if e.argsPtr == argsPtr {
-				return idx
-			}
-		}
-	}
-	for idx, e := range entries {
-		if e.argsHash == argsHash && (argsPtr != 0 || e.argsPtr == 0) {
-			return idx
-		}
-	}
-	return 0
-}
-
-func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKey string, push, fromError, emptyCallID bool, args map[string]any) (string, uint64) {
+func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKey string, push, fromError, emptyCallID bool, _ map[string]any) (string, uint64, bool) {
 	if !emptyCallID {
-		return callKey(ctx, baseKey), 0
+		return callKey(ctx, baseKey), 0, true
 	}
-	ctxType, ctxHash := fingerprintToolValue(ctx)
-	k := emptyToolHashKey{typ: ctxType, ctxHash: ctxHash, key: baseKey}
-	argsPtr, argsHash := fingerprintToolArgs(args)
+	slotKey := callKey(ctx, baseKey)
+	ptr := emptyToolCtxPtr(ctx)
+	entries := inv.emptyToolCalls[slotKey]
 
 	if push {
+		kept := entries[:0]
+		ambiguous := false
+		for _, e := range entries {
+			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
+			if e.errored {
+				if e.ptr == ptr || inv.completedTools[resolved] == nil {
+					delete(inv.completedTools, resolved)
+					continue
+				}
+				kept = append(kept, e)
+				continue
+			}
+			if inv.toolSpans[resolved] == nil {
+				continue
+			}
+			if e.ptr == ptr {
+				e.ambiguous = true
+				ambiguous = true
+			}
+			kept = append(kept, e)
+		}
 		inv.emptyToolCallSeq++
 		seq := inv.emptyToolCallSeq
 		if inv.emptyToolCalls == nil {
-			inv.emptyToolCalls = map[emptyToolHashKey][]emptyToolCallEntry{}
+			inv.emptyToolCalls = map[string][]emptyToolCallEntry{}
 		}
-		inv.emptyToolCalls[k] = append(inv.emptyToolCalls[k], emptyToolCallEntry{
-			seq:      seq,
-			argsPtr:  argsPtr,
-			argsHash: argsHash,
+		inv.emptyToolCalls[slotKey] = append(kept, emptyToolCallEntry{
+			ptr:       ptr,
+			seq:       seq,
+			ambiguous: ambiguous,
 		})
-		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq, false
 	}
 
-	entries := inv.emptyToolCalls[k]
 	if fromError {
-		var openIdxs []int
+		chosen := -1
 		for idx, e := range entries {
-			if e.errored {
+			if e.errored || e.ptr != ptr {
 				continue
 			}
 			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
 			if inv.toolSpans[resolved] != nil {
-				openIdxs = append(openIdxs, idx)
+				chosen = idx
 			}
 		}
-		if len(openIdxs) > 0 {
-			chosen := pickOpenEmptyToolEntry(entries, openIdxs, argsPtr, argsHash)
-			entries[chosen].errored = true
+		if chosen >= 0 {
 			seq := entries[chosen].seq
-			return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+			resolved := callKey(ctx, emptyToolSeqKey(baseKey, seq))
+			if entries[chosen].ambiguous {
+				entries = slices.Delete(entries, chosen, chosen+1)
+				if len(entries) == 0 {
+					delete(inv.emptyToolCalls, slotKey)
+				} else {
+					inv.emptyToolCalls[slotKey] = entries
+				}
+				return resolved, seq, false
+			}
+			entries[chosen].errored = true
+			inv.emptyToolCalls[slotKey] = entries
+			return resolved, seq, true
+		}
+		kept := entries[:0]
+		for _, e := range entries {
+			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
+			if e.errored && (e.ptr == ptr || inv.completedTools[resolved] == nil) {
+				delete(inv.completedTools, resolved)
+				continue
+			}
+			kept = append(kept, e)
 		}
 		inv.emptyToolCallSeq++
 		seq := inv.emptyToolCallSeq
 		if inv.emptyToolCalls == nil {
-			inv.emptyToolCalls = map[emptyToolHashKey][]emptyToolCallEntry{}
+			inv.emptyToolCalls = map[string][]emptyToolCallEntry{}
 		}
-		inv.emptyToolCalls[k] = append(entries, emptyToolCallEntry{
-			seq:      seq,
-			argsPtr:  argsPtr,
-			argsHash: argsHash,
-			errored:  true,
+		inv.emptyToolCalls[slotKey] = append(kept, emptyToolCallEntry{
+			ptr:     ptr,
+			seq:     seq,
+			errored: true,
 		})
-		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+		return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq, true
 	}
 
-	if len(entries) == 0 {
-		return callKey(ctx, baseKey), 0
+	for idx, e := range entries {
+		if e.errored && !e.ambiguous && e.ptr == ptr {
+			seq := e.seq
+			entries = slices.Delete(entries, idx, idx+1)
+			if len(entries) == 0 {
+				delete(inv.emptyToolCalls, slotKey)
+			} else {
+				inv.emptyToolCalls[slotKey] = entries
+			}
+			return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq, false
+		}
 	}
-	chosen := pickAfterEmptyToolEntry(entries, argsPtr, argsHash)
-	seq := entries[chosen].seq
-	entries = slices.Delete(entries, chosen, chosen+1)
-	if len(entries) == 0 {
-		delete(inv.emptyToolCalls, k)
-	} else {
-		inv.emptyToolCalls[k] = entries
+	for idx := len(entries) - 1; idx >= 0; idx-- {
+		e := entries[idx]
+		if !e.errored && e.ptr == ptr {
+			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
+			if inv.toolSpans[resolved] != nil {
+				seq := e.seq
+				entries = slices.Delete(entries, idx, idx+1)
+				if len(entries) == 0 {
+					delete(inv.emptyToolCalls, slotKey)
+				} else {
+					inv.emptyToolCalls[slotKey] = entries
+				}
+				return resolved, seq, false
+			}
+		}
 	}
-	return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq
+	inv.emptyToolCallSeq++
+	seq := inv.emptyToolCallSeq
+	return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq, false
 }
 
 // toolKeyCall returns the function call ID, or else the tool name, that
