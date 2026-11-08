@@ -210,7 +210,7 @@ func TestToolset_ToolNames(t *testing.T) {
 	for _, tl := range tools {
 		got = append(got, tl.Name())
 	}
-	want := []string{"get_dataset_info", "get_table_info", "list_dataset_ids", "list_table_ids"}
+	want := []string{"get_dataset_info", "get_job_info", "get_table_info", "list_dataset_ids", "list_table_ids"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("tool names mismatch (-want +got):\n%s", diff)
 	}
@@ -243,6 +243,7 @@ func TestToolset_Declarations(t *testing.T) {
 		"get_dataset_info": {"project_id", "dataset_id"},
 		"list_table_ids":   {"project_id", "dataset_id"},
 		"get_table_info":   {"project_id", "dataset_id", "table_id"},
+		"get_job_info":     {"project_id", "job_id"},
 	}
 	for name, wantRequired := range want {
 		t.Run(name, func(t *testing.T) {
@@ -278,6 +279,7 @@ var descriptionFirstLine = map[string]string{
 	"get_dataset_info": "Get metadata information about a BigQuery dataset.",
 	"list_table_ids":   "List table ids in a BigQuery dataset.",
 	"get_table_info":   "Get metadata information about a BigQuery table.",
+	"get_job_info":     "Get metadata information about a BigQuery job.",
 }
 
 func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
@@ -305,6 +307,12 @@ func TestToolset_DefaultIDsMakeArgsOptional(t *testing.T) {
 	schema = declarationSchema(t, toolByName(t, ts, "get_table_info").Declaration())
 	if diff := cmp.Diff([]string{"table_id"}, schema.Required); diff != "" {
 		t.Errorf("get_table_info required mismatch (-want +got):\n%s", diff)
+	}
+
+	// A tool that takes no dataset only loses project_id.
+	schema = declarationSchema(t, toolByName(t, ts, "get_job_info").Declaration())
+	if diff := cmp.Diff([]string{"job_id"}, schema.Required); diff != "" {
+		t.Errorf("get_job_info required mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -599,9 +607,6 @@ func TestListTableIDs(t *testing.T) {
 	}
 }
 
-// TestGetTableInfo_ReturnsRESTResource checks that the tool returns the table
-// as the BigQuery REST API represents it, like adk-python's _properties,
-// including fields this package does not model.
 func TestListTableIDs_EmptyDataset(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets/d/tables": {body: `{}`},
@@ -617,6 +622,9 @@ func TestListTableIDs_EmptyDataset(t *testing.T) {
 	}
 }
 
+// TestGetTableInfo_ReturnsRESTResource checks that the tool returns the table
+// as the BigQuery REST API represents it, like adk-python's _properties,
+// including fields this package does not model.
 func TestGetTableInfo_ReturnsRESTResource(t *testing.T) {
 	tableBody := `{"kind":"bigquery#table","id":"p:d.t","schema":{"fields":[{"name":"year","type":"INTEGER","mode":"NULLABLE"}]},"numRows":"1000","type":"TABLE"}`
 	f := newFakeBigQuery(t, map[string]fakeResponse{
@@ -628,6 +636,117 @@ func TestGetTableInfo_ReturnsRESTResource(t *testing.T) {
 
 	if diff := cmp.Diff(decodeJSON(t, tableBody), roundTrip(t, got)); diff != "" {
 		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGetJobInfo_DefaultProjectID checks that get_job_info falls back to
+// DefaultProjectID when the model leaves project_id out or sends null, and
+// uses the model's project when it names one.
+func TestGetJobInfo_DefaultProjectID(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/my-project/jobs/j": {body: `{"id":"my-project:US.j"}`},
+		"GET /bigquery/v2/projects/other/jobs/j":      {body: `{"id":"other:US.j"}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project"})
+
+	tests := []struct {
+		name     string
+		args     map[string]any
+		wantPath string
+	}{
+		{name: "omitted", args: map[string]any{"job_id": "j"}, wantPath: "/bigquery/v2/projects/my-project/jobs/j"},
+		{name: "null", args: map[string]any{"project_id": nil, "job_id": "j"}, wantPath: "/bigquery/v2/projects/my-project/jobs/j"},
+		{name: "model names another project", args: map[string]any{"project_id": "other", "job_id": "j"}, wantPath: "/bigquery/v2/projects/other/jobs/j"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := run(t, toolByName(t, ts, "get_job_info"), tc.args)
+			if got["status"] == "ERROR" {
+				t.Fatalf("Run() = %v, want a result", got)
+			}
+			if path := f.lastRequest().URL.EscapedPath(); path != tc.wantPath {
+				t.Errorf("request path = %q, want %q", path, tc.wantPath)
+			}
+		})
+	}
+}
+
+// TestGetJobInfo_ReturnsRESTResource checks that the tool returns the job as
+// the BigQuery REST API represents it, including fields this package does not
+// model. Unlike adk-python's _properties, the creationTime, startTime and
+// endTime statistics stay the strings the REST API sends.
+func TestGetJobInfo_ReturnsRESTResource(t *testing.T) {
+	jobBody := `{"kind":"bigquery#job","id":"p:US.j","jobReference":{"projectId":"p","jobId":"j","location":"US"},"statistics":{"creationTime":"1761760370152","startTime":"1761760370250","endTime":"1761760371021","totalBytesProcessed":"5597805"},"status":{"state":"DONE"},"principal_subject":"user:abc@example.com"}`
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/jobs/j": {body: jobBody},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+
+	got := run(t, toolByName(t, ts, "get_job_info"), map[string]any{"project_id": "p", "job_id": "j"})
+
+	if diff := cmp.Diff(decodeJSON(t, jobBody), roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestGetJobInfo_Location checks that get_job_info looks the job up in
+// Config.Location, as adk-python's client does with its location setting,
+// sends it URL-encoded, and sends no location when it is unset.
+func TestGetJobInfo_Location(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/jobs/j": {body: `{"id":"p:EU.j"}`},
+	})
+
+	tests := []struct {
+		name      string
+		location  string
+		wantQuery string
+	}{
+		{name: "unset", location: "", wantQuery: ""},
+		{name: "set", location: "EU", wantQuery: "location=EU"},
+		{name: "needs encoding", location: "a b&c", wantQuery: "location=a+b%26c"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), Location: tc.location})
+			run(t, toolByName(t, ts, "get_job_info"), map[string]any{"project_id": "p", "job_id": "j"})
+
+			if got := f.lastRequest().URL.RawQuery; got != tc.wantQuery {
+				t.Errorf("query = %q, want %q", got, tc.wantQuery)
+			}
+		})
+	}
+}
+
+// TestTools_LocationOnlyOnJobInfo checks that Config.Location is sent only by
+// get_job_info: the other tools address datasets and tables by path, and
+// adk-python's client only adds a location when it looks a job up.
+func TestTools_LocationOnlyOnJobInfo(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/datasets":            {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d":          {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables":   {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables/t": {body: `{}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), Location: "EU"})
+
+	tests := []struct {
+		tool string
+		args map[string]any
+	}{
+		{tool: "list_dataset_ids", args: map[string]any{"project_id": "p"}},
+		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "d"}},
+		{tool: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "d"}},
+		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "t"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			run(t, toolByName(t, ts, tc.tool), tc.args)
+
+			if query := f.lastRequest().URL.Query(); query.Has("location") {
+				t.Errorf("query = %q, want no location parameter", f.lastRequest().URL.RawQuery)
+			}
+		})
 	}
 }
 
@@ -658,6 +777,7 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 		"GET /bigquery/v2/projects/p/datasets/missing/tables":   notFound,
 		"GET /bigquery/v2/projects/p/datasets/missing/tables/t": notFound,
 		"GET /bigquery/v2/projects/missing/datasets":            notFound,
+		"GET /bigquery/v2/projects/p/jobs/missing":              notFound,
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
@@ -669,6 +789,7 @@ func TestTools_APIErrorIsReturnedToModel(t *testing.T) {
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "missing"}},
 		{tool: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "missing"}},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "missing", "table_id": "t"}},
+		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "missing"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -879,32 +1000,50 @@ func serviceAccountJSON(t *testing.T, tokenURI string) []byte {
 
 func TestTools_UserAgent(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
-		"GET /bigquery/v2/projects/p/datasets/d": {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets":            {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d":          {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables":   {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables/t": {body: `{}`},
+		"GET /bigquery/v2/projects/p/jobs/j":              {body: `{}`},
 	})
-
-	tests := []struct {
+	tools := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "list_dataset_ids", args: map[string]any{"project_id": "p"}},
+		{name: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "d"}},
+		{name: "list_table_ids", args: map[string]any{"project_id": "p", "dataset_id": "d"}},
+		{name: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "t"}},
+		{name: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "j"}},
+	}
+	apps := []struct {
 		name    string
 		appName string
-		want    []string
 	}{
-		{name: "default", want: []string{"adk-bigquery-tool", "google-adk/", "get_dataset_info"}},
-		{name: "application name", appName: "my-agent", want: []string{"adk-bigquery-tool", "google-adk/", "my-agent", "get_dataset_info"}},
+		{name: "default"},
+		{name: "application name", appName: "my-agent"},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), ApplicationName: tc.appName})
-			run(t, toolByName(t, ts, "get_dataset_info"), map[string]any{"project_id": "p", "dataset_id": "d"})
+	for _, app := range apps {
+		ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), ApplicationName: app.appName})
+		for _, tl := range tools {
+			t.Run(app.name+"/"+tl.name, func(t *testing.T) {
+				run(t, toolByName(t, ts, tl.name), tl.args)
 
-			ua := f.lastRequest().UserAgent()
-			last := -1
-			for _, part := range tc.want {
-				i := strings.Index(ua, part)
-				if i <= last {
-					t.Fatalf("User-Agent = %q, want %q in this order", ua, tc.want)
+				want := []string{"adk-bigquery-tool", "google-adk/", tl.name}
+				if app.appName != "" {
+					want = []string{"adk-bigquery-tool", "google-adk/", app.appName, tl.name}
 				}
-				last = i
-			}
-		})
+				ua := f.lastRequest().UserAgent()
+				last := -1
+				for _, part := range want {
+					i := strings.Index(ua, part)
+					if i <= last {
+						t.Fatalf("User-Agent = %q, want %q in this order", ua, want)
+					}
+					last = i
+				}
+			})
+		}
 	}
 }
 
@@ -1018,6 +1157,9 @@ func TestTools_InvalidIDsAreRejected(t *testing.T) {
 		{tool: "list_table_ids", args: map[string]any{"project_id": "..", "dataset_id": "d"}},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "..", "table_id": "t"}},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": ".."}},
+		{tool: "get_job_info", args: map[string]any{"project_id": "..", "job_id": "j"}},
+		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": ""}},
+		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": ".."}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -1043,6 +1185,7 @@ func TestTools_IDsAreEscaped(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets/a/b":          {body: `{}`},
 		"GET /bigquery/v2/projects/p/datasets/d/tables/a/b": {body: `{}`},
+		"GET /bigquery/v2/projects/p/jobs/a/b":              {body: `{}`},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
@@ -1053,6 +1196,7 @@ func TestTools_IDsAreEscaped(t *testing.T) {
 	}{
 		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/a%2Fb"},
 		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/d/tables/a%2Fb"},
+		{tool: "get_job_info", args: map[string]any{"project_id": "p", "job_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/jobs/a%2Fb"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
