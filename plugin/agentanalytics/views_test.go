@@ -3653,8 +3653,8 @@ func TestEvalViewDefinitions_ColumnsAndSQLStructure(t *testing.T) {
 		}
 	}
 
-	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24399, "2f53fa5462461f7b2095cffe35b4de0a4d99a4a4817264a9faecabf201cdfc70")
-	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 22963, "7c5694be00ea3b08c8a2a3c3477a58d9ad9a1e60962b0e8fb8a22ba369fd792c")
+	assertQuerySHA256(t, "v_eval_session", sessionDef.Query, 24501, "a54b5f63ac7a1482109421d24a877a71ff59121423d3ca919b002b78cbab2bca")
+	assertQuerySHA256(t, "v_eval_turn", turnDef.Query, 23065, "7a5663fbf316198b894497a0ceb5c817885aa8d06a2effe94290bb147b3c5cce")
 
 	if !strings.Contains(sessionDef.Query, "session_rollup AS (") {
 		t.Error("v_eval_session missing session_rollup CTE")
@@ -3786,43 +3786,43 @@ func TestEvalViewDefinitions_PayloadColumnDenylistProjection(t *testing.T) {
 	}{
 		{
 			name:              "default",
-			wantSessionLen:    24399,
-			wantSessionSHA256: "2f53fa5462461f7b2095cffe35b4de0a4d99a4a4817264a9faecabf201cdfc70",
-			wantTurnLen:       22963,
-			wantTurnSHA256:    "7c5694be00ea3b08c8a2a3c3477a58d9ad9a1e60962b0e8fb8a22ba369fd792c",
+			wantSessionLen:    24501,
+			wantSessionSHA256: "a54b5f63ac7a1482109421d24a877a71ff59121423d3ca919b002b78cbab2bca",
+			wantTurnLen:       23065,
+			wantTurnSHA256:    "7a5663fbf316198b894497a0ceb5c817885aa8d06a2effe94290bb147b3c5cce",
 		},
 		{
 			name:              "deny content_parts",
 			denylist:          []string{columnContentParts},
-			wantSessionLen:    24512,
-			wantSessionSHA256: "a377192d8cb4ad885846ab98b88af59f7e5c79b12d5abde633d109c61f328aeb",
-			wantTurnLen:       23076,
-			wantTurnSHA256:    "211155b175a845a08efee9d682c21ea31892172428d4834d34025fe162583ce5",
+			wantSessionLen:    24614,
+			wantSessionSHA256: "d95d3f6af72e1951ed98a914d9478be1ee0fab6614f0a8d224f8c2be87846383",
+			wantTurnLen:       23178,
+			wantTurnSHA256:    "d94d4535ee26a035d0e9e10287033c67b5a58364d56170445d277506cc9488f4",
 		},
 		{
 			name:              "deny attributes",
 			denylist:          []string{columnAttributes},
-			wantSessionLen:    24421,
-			wantSessionSHA256: "dca8504828dd66cc1aa550e63d317556f51412638d5675e5ccae72416f75a3f3",
-			wantTurnLen:       22985,
-			wantTurnSHA256:    "99e41cbcff72b13abc948e3fa61671080c905b45cf36d947ffd5909b29d4c1a1",
+			wantSessionLen:    24523,
+			wantSessionSHA256: "c1432d62a90543248fc1d91e728cf2e41866f9932e873fe67dbd2348439a0b88",
+			wantTurnLen:       23087,
+			wantTurnSHA256:    "439c446ad5bd8033bfa8a5a1e5282ce8e7d4545ca7ce48760f903c4244b45bab",
 		},
 		{
 			name:              "deny latency_ms",
 			denylist:          []string{columnLatencyMS},
-			wantSessionLen:    24421,
-			wantSessionSHA256: "363ec9e4840cc227addb7731582f970699098c142f2ee5e1c49e4286f8b559cd",
-			wantTurnLen:       22985,
-			wantTurnSHA256:    "976c4ee8cfd0da0cd4b6f1df8a64ff652abd39af76b0046ca5e9784454b19395",
+			wantSessionLen:    24523,
+			wantSessionSHA256: "e5f8b90c1ae64871235d7afcfb0fdf3b0539779ff3b8779e33628051e15b3d8a",
+			wantTurnLen:       23087,
+			wantTurnSHA256:    "d15050bb6203aedc43e2e8d8be75dd34642e33d36647e352f6e7d7b9963ef15a",
 		},
 		{
 			name:              "deny all three with custom ViewPrefix",
 			viewPrefix:        "custom_p",
 			denylist:          []string{columnContentParts, columnAttributes, columnLatencyMS},
-			wantSessionLen:    24563,
-			wantSessionSHA256: "ace322c1087fa35daeef1c90c8f01778ea6ce5f8c45dbda27fd6d6b3201215c4",
-			wantTurnLen:       23127,
-			wantTurnSHA256:    "b534c15037c84c41078e369c2ca386a61f5444763e7b7f4c11fc86b787e89f7d",
+			wantSessionLen:    24665,
+			wantSessionSHA256: "32791bd7c6258325fe34f1fa74e51b83ead80757e5eb27370dcab7847fa9d91f",
+			wantTurnLen:       23229,
+			wantTurnSHA256:    "c1d9fcceab14e2b241e5eee12a5446768160e32228fdc8a4e0f7e2842c48eed5",
 		},
 	}
 
@@ -3905,19 +3905,19 @@ func TestViewAndEvalViewDefinitions_TableNameUnicodeAndControlChars(t *testing.T
 			name:              "ASCII space",
 			tableName:         "table 01",
 			wantEvalSHA:       true,
-			wantSessionLen:    24406,
-			wantSessionSHA256: "a1f154f65f0ccd0d8766568b1ad4fc804d69a1a1c98ec915dcd98e38eab1864f",
-			wantTurnLen:       22970,
-			wantTurnSHA256:    "aee65535b9d6fcf2ece5b810f21394da6b88038061c7087a9303eab6863f869f",
+			wantSessionLen:    24508,
+			wantSessionSHA256: "967ac1a7bf5147ace32550601567e62bbf38fc143b5f7c02973a3c38f6d4429c",
+			wantTurnLen:       23072,
+			wantTurnSHA256:    "9a10b5456a96cd340a1f1608fa9ad8f007510c415a94ceb9311621ce02b8d29d",
 		},
 		{
 			name:              "Unicode Zs NO-BREAK SPACE",
 			tableName:         "table\u00a001",
 			wantEvalSHA:       true,
-			wantSessionLen:    24407,
-			wantSessionSHA256: "4761f26dcb9ea92cc0afac396441ab0ebc1a05f125541b1b668672366d97b057",
-			wantTurnLen:       22971,
-			wantTurnSHA256:    "b5dfb17c00cdd25119861698e45305c21d5a579ae6cd5eca36523073675bce6b",
+			wantSessionLen:    24509,
+			wantSessionSHA256: "6f8801b51d0f66c15214f3d8d3c505b4b671e47eaefe6e8dcd62e47894fdf53b",
+			wantTurnLen:       23073,
+			wantTurnSHA256:    "711f9f18c3920cbc77c4a8643b00311dae6aa0fdb5f12212008dd68c3822331f",
 		},
 		{
 			name:      "Unicode Zs EM SPACE",
@@ -6965,6 +6965,196 @@ func TestEvalViews_SemanticExecution(t *testing.T) {
 			}
 			if gotUser := extractUserTexts(gotTurn.Trace); len(gotUser) != 0 {
 				t.Errorf("%s unexpectedly emitted user text: %#v", id, gotUser)
+			}
+		}
+
+		// 3. ContentFormatter failure on USER_MESSAGE_RECEIVED vs legitimate user messages:
+		// (a) Failed ContentFormatter on USER_MESSAGE_RECEIVED emits scalar "[FORMATTER_FAILED]"
+		//     with no content_parts -> must NOT satisfy has_user_message (eval_ready=false in
+		//     both v_eval_session and v_eval_turn, and 0 user text events in trace).
+		// (b) Normal prompt control -> eval_ready=true in both v_eval_session and v_eval_turn.
+		// (c) Structured text-summary user message literally containing "[FORMATTER_FAILED]"
+		//     (both with content_parts populated and with DisableMultiModalContent=true so only
+		//     content.text_summary is written) -> preserved with eval_ready=true.
+		// (d) Normal scalar ContentFormatter output on USER_MESSAGE_RECEIVED -> preserved with
+		//     eval_ready=true.
+		// (e) Failed ContentFormatter on AGENT_STARTING emits scalar "[FORMATTER_FAILED]" ->
+		//     must NOT populate trace.agents[...].instruction with "[FORMATTER_FAILED]" and falls
+		//     back to attributes.static_instruction when present.
+		failedFmtUserRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-fmt-guard",
+			sessionID:     "sess-user-fmt-failed",
+			invocationID:  "inv-user-fmt-failed",
+			agentName:     "usr-agent",
+			agentDesc:     "User formatter guard test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "real user question lost to formatter error"}}},
+			responseParts: []*genai.Part{{Text: "Model answered anyway."}},
+			pluginModifier: func(c *Config) {
+				c.Logger = &recordingLogger{}
+				c.ContentFormatter = func(payload any, eventType string) (any, error) {
+					if eventType == EventUserMessageReceived || eventType == EventAgentStarting {
+						return nil, errors.New("formatter failed")
+					}
+					return payload, nil
+				}
+			},
+		})
+		for i := range failedFmtUserRows {
+			if failedFmtUserRows[i]["event_type"] == EventAgentStarting {
+				var attrs map[string]any
+				if rawAttrs, ok := failedFmtUserRows[i][columnAttributes].(string); ok && rawAttrs != "" {
+					if err := json.Unmarshal([]byte(rawAttrs), &attrs); err != nil {
+						t.Fatalf("json.Unmarshal(AGENT_STARTING attributes) error = %v", err)
+					}
+				} else {
+					attrs = map[string]any{}
+				}
+				attrs["static_instruction"] = "Fallback static instruction."
+				b, err := json.Marshal(attrs)
+				if err != nil {
+					t.Fatalf("json.Marshal(AGENT_STARTING attributes) error = %v", err)
+				}
+				failedFmtUserRows[i][columnAttributes] = string(b)
+			}
+		}
+		normalControlRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-fmt-guard",
+			sessionID:     "sess-user-fmt-control",
+			invocationID:  "inv-user-fmt-control",
+			agentName:     "usr-agent",
+			agentDesc:     "User formatter guard test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "normal user prompt"}}},
+			responseParts: []*genai.Part{{Text: "Normal response."}},
+		})
+		literalSummaryWithPartsRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-fmt-guard",
+			sessionID:     "sess-user-literal-parts",
+			invocationID:  "inv-user-literal-parts",
+			agentName:     "usr-agent",
+			agentDesc:     "User formatter guard test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: formattingFailedPlaceholder}}},
+			responseParts: []*genai.Part{{Text: "Explained placeholder."}},
+		})
+		literalSummaryNoPartsRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-fmt-guard",
+			sessionID:     "sess-user-literal-summary",
+			invocationID:  "inv-user-literal-summary",
+			agentName:     "usr-agent",
+			agentDesc:     "User formatter guard test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: formattingFailedPlaceholder}}},
+			responseParts: []*genai.Part{{Text: "Explained summary placeholder."}},
+			pluginModifier: func(c *Config) {
+				c.DisableMultiModalContent = true
+			},
+		})
+		scalarFmtSuccessRows := emitCallbackTurnRows(t, syntheticTurnSpec{
+			appName:       "usr-app",
+			userID:        "u-fmt-guard",
+			sessionID:     "sess-user-scalar-fmt-ok",
+			invocationID:  "inv-user-scalar-fmt-ok",
+			agentName:     "usr-agent",
+			agentDesc:     "User formatter guard test agent",
+			instruction:   "Answer user prompts.",
+			userMsg:       &genai.Content{Role: "user", Parts: []*genai.Part{{Text: "raw prompt"}}},
+			responseParts: []*genai.Part{{Text: "Scalar formatter response."}},
+			pluginModifier: func(c *Config) {
+				c.ContentFormatter = func(payload any, eventType string) (any, error) {
+					if eventType == EventUserMessageReceived {
+						return "custom scalar formatted prompt", nil
+					}
+					return payload, nil
+				}
+			},
+		})
+
+		fmtGuardRows := slices.Concat(
+			failedFmtUserRows,
+			normalControlRows,
+			literalSummaryWithPartsRows,
+			literalSummaryNoPartsRows,
+			scalarFmtSuccessRows,
+		)
+		fmtGuardTurns := executeEvalViewSQL(t, turnSQL, fmtGuardRows)
+		fmtTurnByInv := make(map[string]evalViewExecResultRow, len(fmtGuardTurns))
+		for _, tr := range fmtGuardTurns {
+			fmtTurnByInv[tr.InvocationID] = tr
+		}
+		fmtGuardSessions := executeEvalViewSQL(t, sessionSQL, fmtGuardRows)
+		fmtSessByID := make(map[string]evalViewExecResultRow, len(fmtGuardSessions))
+		for _, sr := range fmtGuardSessions {
+			fmtSessByID[sr.SessionID] = sr
+		}
+
+		if failedTurn, ok := fmtTurnByInv["inv-user-fmt-failed"]; !ok {
+			t.Fatal("missing v_eval_turn row for inv-user-fmt-failed")
+		} else {
+			if failedTurn.EvalReady {
+				t.Errorf("inv-user-fmt-failed v_eval_turn EvalReady = true, want false when USER_MESSAGE_RECEIVED ContentFormatter failed")
+			}
+			if gotUser := extractUserTexts(failedTurn.Trace); len(gotUser) != 0 {
+				t.Errorf("inv-user-fmt-failed v_eval_turn user texts = %#v, want empty", gotUser)
+			}
+			turnAgents, _ := failedTurn.Trace["agents"].(map[string]any)
+			if usrAg, ok := turnAgents["usr-agent"].(map[string]any); !ok {
+				t.Errorf("inv-user-fmt-failed v_eval_turn missing trace.agents[usr-agent]: %#v", turnAgents)
+			} else if gotInst, _ := usrAg["instruction"].(string); gotInst != "Fallback static instruction." {
+				t.Errorf("inv-user-fmt-failed v_eval_turn trace.agents[usr-agent].instruction = %q, want %q", gotInst, "Fallback static instruction.")
+			}
+		}
+		if failedSess, ok := fmtSessByID["sess-user-fmt-failed"]; !ok {
+			t.Fatal("missing v_eval_session row for sess-user-fmt-failed")
+		} else {
+			if failedSess.EvalReady {
+				t.Errorf("sess-user-fmt-failed v_eval_session EvalReady = true, want false when USER_MESSAGE_RECEIVED ContentFormatter failed")
+			}
+			if gotUser := extractUserTexts(failedSess.Trace); len(gotUser) != 0 {
+				t.Errorf("sess-user-fmt-failed v_eval_session user texts = %#v, want empty", gotUser)
+			}
+			sessAgents, _ := failedSess.Trace["agents"].(map[string]any)
+			if usrAg, ok := sessAgents["usr-agent"].(map[string]any); !ok {
+				t.Errorf("sess-user-fmt-failed v_eval_session missing trace.agents[usr-agent]: %#v", sessAgents)
+			} else if gotInst, _ := usrAg["instruction"].(string); gotInst != "Fallback static instruction." {
+				t.Errorf("sess-user-fmt-failed v_eval_session trace.agents[usr-agent].instruction = %q, want %q", gotInst, "Fallback static instruction.")
+			}
+		}
+
+		for _, tc := range []struct {
+			sessID   string
+			invID    string
+			wantUser string
+		}{
+			{sessID: "sess-user-fmt-control", invID: "inv-user-fmt-control", wantUser: "normal user prompt"},
+			{sessID: "sess-user-literal-parts", invID: "inv-user-literal-parts", wantUser: formattingFailedPlaceholder},
+			{sessID: "sess-user-literal-summary", invID: "inv-user-literal-summary", wantUser: formattingFailedPlaceholder},
+			{sessID: "sess-user-scalar-fmt-ok", invID: "inv-user-scalar-fmt-ok", wantUser: "custom scalar formatted prompt"},
+		} {
+			gotTurn, ok := fmtTurnByInv[tc.invID]
+			if !ok {
+				t.Fatalf("missing v_eval_turn row for %s", tc.invID)
+			}
+			if !gotTurn.EvalReady {
+				t.Errorf("%s v_eval_turn EvalReady = false, want true", tc.invID)
+			}
+			if gotUser := extractUserTexts(gotTurn.Trace); !cmp.Equal(gotUser, []string{tc.wantUser}) {
+				t.Errorf("%s v_eval_turn user texts = %#v, want [%q]", tc.invID, gotUser, tc.wantUser)
+			}
+			gotSess, ok := fmtSessByID[tc.sessID]
+			if !ok {
+				t.Fatalf("missing v_eval_session row for %s", tc.sessID)
+			}
+			if !gotSess.EvalReady {
+				t.Errorf("%s v_eval_session EvalReady = false, want true", tc.sessID)
+			}
+			if gotUser := extractUserTexts(gotSess.Trace); !cmp.Equal(gotUser, []string{tc.wantUser}) {
+				t.Errorf("%s v_eval_session user texts = %#v, want [%q]", tc.sessID, gotUser, tc.wantUser)
 			}
 		}
 	})

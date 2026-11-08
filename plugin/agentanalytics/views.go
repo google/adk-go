@@ -609,13 +609,14 @@ const evalViewCTEsTemplate = `WITH
         WHEN NOT REGEXP_CONTAINS(
           COALESCE(
             JSON_VALUE(content, '$.text_summary'),
-            JSON_VALUE(content, '$'),
+            NULLIF(JSON_VALUE(content, '$'), '[FORMATTER_FAILED]'),
             ''
           ),
           r'^Function response: '
         ) THEN NULLIF(
           COALESCE(
-            JSON_VALUE(content, '$.text_summary'), JSON_VALUE(content, '$')
+            JSON_VALUE(content, '$.text_summary'),
+            NULLIF(JSON_VALUE(content, '$'), '[FORMATTER_FAILED]')
           ),
           ''
         )
@@ -1061,7 +1062,7 @@ const evalViewCTEsTemplate = `WITH
               r'^(?:<(?:function|bound method) |<.+ at 0x[0-9a-fA-F]+>|functools\.partial\()'
             ),
             NULL,
-            JSON_VALUE(content, '$')
+            NULLIF(JSON_VALUE(content, '$'), '[FORMATTER_FAILED]')
           ),
           JSON_VALUE(attributes, '$.static_instruction')
         ),
