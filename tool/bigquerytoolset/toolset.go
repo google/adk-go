@@ -40,10 +40,14 @@ var (
 	listDatasetIDsDescription string
 	//go:embed descriptions/get_dataset_info.txt
 	getDatasetInfoDescription string
+	//go:embed descriptions/list_table_ids.txt
+	listTableIDsDescription string
+	//go:embed descriptions/get_table_info.txt
+	getTableInfoDescription string
 )
 
-// New returns a toolset with the BigQuery metadata tools: list_dataset_ids
-// and get_dataset_info.
+// New returns a toolset with the BigQuery metadata tools: list_dataset_ids,
+// get_dataset_info, list_table_ids and get_table_info.
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
@@ -71,7 +75,9 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	}
 	tools := []tool.Tool{
 		add(newTool(b, "get_dataset_info", getDatasetInfoDescription, b.getDatasetInfo)),
+		add(newTool(b, "get_table_info", getTableInfoDescription, b.getTableInfo)),
 		add(newTool(b, "list_dataset_ids", listDatasetIDsDescription, b.listDatasetIDs)),
+		add(newTool(b, "list_table_ids", listTableIDsDescription, b.listTableIDs)),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
