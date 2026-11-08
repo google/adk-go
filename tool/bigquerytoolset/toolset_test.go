@@ -524,6 +524,51 @@ func TestListDatasetIDs(t *testing.T) {
 	}
 }
 
+// TestTableTools_DefaultIDsFillMissingArgs checks that the table tools fall
+// back to DefaultProjectID and DefaultDatasetID when the model leaves an id out
+// or sends null, and use the model's id when it names one.
+func TestTableTools_DefaultIDsFillMissingArgs(t *testing.T) {
+	const (
+		defaultTables = "/bigquery/v2/projects/my-project/datasets/my_dataset/tables"
+		otherProject  = "/bigquery/v2/projects/other/datasets/my_dataset/tables"
+		otherDataset  = "/bigquery/v2/projects/my-project/datasets/other_dataset/tables"
+	)
+	responses := map[string]fakeResponse{}
+	for _, path := range []string{defaultTables, otherProject, otherDataset} {
+		responses["GET "+path] = fakeResponse{body: `{}`}
+		responses["GET "+path+"/t"] = fakeResponse{body: `{"id":"t"}`}
+	}
+	f := newFakeBigQuery(t, responses)
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions(), DefaultProjectID: "my-project", DefaultDatasetID: "my_dataset"})
+
+	tests := []struct {
+		name     string
+		tool     string
+		args     map[string]any
+		wantPath string
+	}{
+		{name: "omitted", tool: "list_table_ids", args: map[string]any{}, wantPath: defaultTables},
+		{name: "null", tool: "list_table_ids", args: map[string]any{"project_id": nil, "dataset_id": nil}, wantPath: defaultTables},
+		{name: "model names another project", tool: "list_table_ids", args: map[string]any{"project_id": "other"}, wantPath: otherProject},
+		{name: "model names another dataset", tool: "list_table_ids", args: map[string]any{"dataset_id": "other_dataset"}, wantPath: otherDataset},
+		{name: "omitted", tool: "get_table_info", args: map[string]any{"table_id": "t"}, wantPath: defaultTables + "/t"},
+		{name: "null", tool: "get_table_info", args: map[string]any{"project_id": nil, "dataset_id": nil, "table_id": "t"}, wantPath: defaultTables + "/t"},
+		{name: "model names another project", tool: "get_table_info", args: map[string]any{"project_id": "other", "table_id": "t"}, wantPath: otherProject + "/t"},
+		{name: "model names another dataset", tool: "get_table_info", args: map[string]any{"dataset_id": "other_dataset", "table_id": "t"}, wantPath: otherDataset + "/t"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool+"/"+tc.name, func(t *testing.T) {
+			got := run(t, toolByName(t, ts, tc.tool), tc.args)
+			if got["status"] == "ERROR" {
+				t.Fatalf("Run() = %v, want a result", got)
+			}
+			if path := f.lastRequest().URL.EscapedPath(); path != tc.wantPath {
+				t.Errorf("request path = %q, want %q", path, tc.wantPath)
+			}
+		})
+	}
+}
+
 func TestListDatasetIDs_EmptyProject(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
 		"GET /bigquery/v2/projects/p/datasets": {body: `{}`},
@@ -557,6 +602,21 @@ func TestListTableIDs(t *testing.T) {
 // TestGetTableInfo_ReturnsRESTResource checks that the tool returns the table
 // as the BigQuery REST API represents it, like adk-python's _properties,
 // including fields this package does not model.
+func TestListTableIDs_EmptyDataset(t *testing.T) {
+	f := newFakeBigQuery(t, map[string]fakeResponse{
+		"GET /bigquery/v2/projects/p/datasets/d/tables": {body: `{}`},
+	})
+	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
+
+	got := run(t, toolByName(t, ts, "list_table_ids"), map[string]any{"project_id": "p", "dataset_id": "d"})
+
+	// An empty list, not null, so the model sees there are no tables.
+	want := map[string]any{"result": []any{}}
+	if diff := cmp.Diff(want, roundTrip(t, got)); diff != "" {
+		t.Errorf("Run() mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestGetTableInfo_ReturnsRESTResource(t *testing.T) {
 	tableBody := `{"kind":"bigquery#table","id":"p:d.t","schema":{"fields":[{"name":"year","type":"INTEGER","mode":"NULLABLE"}]},"numRows":"1000","type":"TABLE"}`
 	f := newFakeBigQuery(t, map[string]fakeResponse{
@@ -981,14 +1041,27 @@ func TestTools_InvalidIDsAreRejected(t *testing.T) {
 // segment.
 func TestTools_IDsAreEscaped(t *testing.T) {
 	f := newFakeBigQuery(t, map[string]fakeResponse{
-		"GET /bigquery/v2/projects/p/datasets/a/b": {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/a/b":          {body: `{}`},
+		"GET /bigquery/v2/projects/p/datasets/d/tables/a/b": {body: `{}`},
 	})
 	ts := newTestToolset(t, Config{ClientOptions: f.clientOptions()})
 
-	run(t, toolByName(t, ts, "get_dataset_info"), map[string]any{"project_id": "p", "dataset_id": "a/b"})
+	tests := []struct {
+		tool     string
+		args     map[string]any
+		wantPath string
+	}{
+		{tool: "get_dataset_info", args: map[string]any{"project_id": "p", "dataset_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/a%2Fb"},
+		{tool: "get_table_info", args: map[string]any{"project_id": "p", "dataset_id": "d", "table_id": "a/b"}, wantPath: "/bigquery/v2/projects/p/datasets/d/tables/a%2Fb"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.tool, func(t *testing.T) {
+			run(t, toolByName(t, ts, tc.tool), tc.args)
 
-	if got := f.lastRequest().URL.EscapedPath(); got != "/bigquery/v2/projects/p/datasets/a%2Fb" {
-		t.Errorf("request path = %q, want the dataset id escaped as one segment", got)
+			if got := f.lastRequest().URL.EscapedPath(); got != tc.wantPath {
+				t.Errorf("request path = %q, want each id escaped as one segment", got)
+			}
+		})
 	}
 }
 
