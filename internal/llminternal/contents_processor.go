@@ -28,6 +28,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/compactioninternal"
+	"google.golang.org/adk/v2/internal/llminternal/googlellm"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
@@ -121,6 +122,7 @@ func buildContentsDefault(agentName, invocationBranch, isolationScope string, ev
 func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationScope string, events, allEvents []*session.Event, isSingleTurn bool, userContent *genai.Content) ([]*genai.Content, error) {
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
+	callIDs := functionCallIDs(allEvents)
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
@@ -140,6 +142,9 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		// Skip events that do not belong to the current branch.
 		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
 		if !eventBelongsToBranch(invocationBranch, ev) {
+			continue
+		}
+		if isToolSubBranchEvent(invocationBranch, ev, agentName, callIDs) {
 			continue
 		}
 		// Skip events outside the agent's isolation scope. Unlike branch
@@ -244,9 +249,15 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			continue
 		}
 
-		// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
 		content.Parts = slices.DeleteFunc(content.Parts, func(p *genai.Part) bool {
-			return p == nil || reflect.ValueOf(*p).IsZero()
+			// gemini 3 in streaming returns a last response with an empty part. We need to filter it out.
+			if p == nil || reflect.ValueOf(*p).IsZero() {
+				return true
+			}
+			// The live audio cache records its blobs as artifact:// refs that
+			// are ADK bookkeeping, not conversation content; replaying one
+			// fails the request (#1764).
+			return googlellm.IsInternalLiveArtifactPart(p)
 		})
 		if len(content.Parts) == 0 {
 			continue
@@ -787,6 +798,12 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if !eventBelongsToBranch(branch, event) {
 			continue
 		}
+		// A tool's sub-branch event is skipped in the contents, so it
+		// cannot start the turn either: it would cut off the call and
+		// the response that came before it.
+		if isToolSubBranchEvent(branch, event, agentName, callIDs) {
+			continue
+		}
 		// An out-of-scope event cannot start this agent's turn: it is
 		// invisible to the agent, so skip it as a pivot (matching
 		// adk-python's _should_include_event_in_context gate here).
@@ -850,6 +867,15 @@ func ConvertForeignEvent(ev *session.Event) *session.Event {
 		// agent's context. Matches adk-python's _present_other_agent_message,
 		// which drops thought parts as the first step of its per-part loop.
 		if p.Thought {
+			continue
+		}
+		// The live audio cache authors its blob events as the agent that
+		// spoke, so another agent sees them as foreign events. Skipping the
+		// refs here, rather than only after conversion, lets an event whose
+		// only parts are internal refs convert to nil: the default arm below
+		// would otherwise carry the ref past the header-only check and leave
+		// a bare "For context:" turn once the part filter strips it.
+		if googlellm.IsInternalLiveArtifactPart(p) {
 			continue
 		}
 		switch {
