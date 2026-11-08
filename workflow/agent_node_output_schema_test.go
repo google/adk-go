@@ -445,15 +445,13 @@ func TestAgentNode_AgentSetupKeepsItsRequest(t *testing.T) {
 		{
 			name: "GenerateContentConfig.ResponseSchema",
 			cfg: llmagent.Config{GenerateContentConfig: &genai.GenerateContentConfig{
-				ResponseMIMEType: "application/json",
-				ResponseSchema:   declared,
+				ResponseSchema: declared,
 			}},
 			newLLM: func() *requestRecorder { return &requestRecorder{name: "recorder", reply: `{"answer":"sunny"}`} },
 		},
 		{
 			name: "GenerateContentConfig.ResponseJsonSchema",
 			cfg: llmagent.Config{GenerateContentConfig: &genai.GenerateContentConfig{
-				ResponseMIMEType:   "application/json",
 				ResponseJsonSchema: map[string]any{"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}}},
 			}},
 			newLLM: func() *requestRecorder { return &requestRecorder{name: "recorder", reply: `{"answer":"sunny"}`} },
@@ -679,6 +677,45 @@ func TestAgentNode_OpenObjectSchemaKeepsModelAnswer(t *testing.T) {
 
 	out := runNode(t, node, a)
 
+	got, err := node.ValidateOutput(out)
+	if err != nil {
+		t.Fatalf("ValidateOutput(%v): %v", out, err)
+	}
+	if diff := cmp.Diff(answer, got); diff != "" {
+		t.Errorf("node output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type cityWithNote struct {
+	City string  `json:"city"`
+	Note *string `json:"note"`
+}
+
+// A pointer field goes out as nullable, so set_model_response accepts a null
+// for it, as the node's own schema does, and the null reaches the output
+// instead of the tool's error.
+func TestAgentNode_NullFieldThroughSetModelResponse(t *testing.T) {
+	answer := map[string]any{"city": "Paris", "note": nil}
+	llm := &requestRecorder{
+		name:     "gemini-2.5-flash",
+		backend:  genai.BackendGeminiAPI,
+		reply:    `{"city":"Lyon","note":"text"}`, // differs, so a pass needs the tool call
+		setReply: answer,
+	}
+	a, err := llmagent.New(llmagent.Config{Name: "weather", Model: llm, Tools: []tool.Tool{lookupTool(t)}})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	node, err := workflow.NewAgentNodeTyped[string, cityWithNote](a, workflow.NodeConfig{})
+	if err != nil {
+		t.Fatalf("NewAgentNodeTyped: %v", err)
+	}
+
+	out := runNode(t, node, a)
+
+	if !offersTool(firstRequest(t, llm), "set_model_response") {
+		t.Fatal("set_model_response was not offered to the model")
+	}
 	got, err := node.ValidateOutput(out)
 	if err != nil {
 		t.Fatalf("ValidateOutput(%v): %v", out, err)

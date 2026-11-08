@@ -49,9 +49,11 @@ func WithBoundOutputSchema(ctx context.Context, agentName string, state *State, 
 // A bound schema is a placement's request, not the agent's own, so it gives way
 // whenever applying it would change a request that works without it:
 //   - the agent does not run single_turn here. A chat or task agent talks to
-//     the user between replies, and a nested placement of the same agent (an
-//     agent tool over it, say) rebinds the mode without rebinding the schema;
-//     reading the mode per request covers both;
+//     the user between replies. Reading the mode per request also covers a
+//     nested placement that binds a mode of its own for this agent, such as
+//     an agent tool over it. A placement that binds no mode for it, such as
+//     an agent tool over a composite that contains it, inherits the outer
+//     mode and with it the schema;
 //   - the agent sets a response schema or MIME type in GenerateContentConfig,
 //     which would otherwise be replaced, or sent alongside a second schema that
 //     some models reject;

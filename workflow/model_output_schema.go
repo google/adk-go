@@ -34,10 +34,9 @@ import (
 // does: set_model_response rejects keys its schema does not list, so an open
 // object would turn an answer the node accepts into an error.
 //
-// A nullable property (a pointer or slice field) is sent as its non-null type.
-// The Anthropic and OpenAI adapters pass a response schema through as JSON
-// Schema, which has no nullable keyword, and a field the model fills in is
-// still a valid answer.
+// A nullable property (a pointer or slice field) keeps Nullable. The
+// set_model_response tool accepts a null argument only when its schema is
+// nullable, so dropping it would turn a null the node accepts into an error.
 //
 // The result is a hint, not the contract: BaseNode.ValidateOutput still checks
 // the reply against the full schema. So a schema that genai.Schema cannot
@@ -77,7 +76,7 @@ var genaiTypes = map[string]genai.Type{
 // (bounds, lengths, pattern) are dropped: ValidateOutput enforces them, and
 // some providers reject them in a response schema (#2036). Annotations such as
 // format, default and examples are dropped too; ValidateOutput does not check
-// them either. A "null" in a type list is dropped (see [modelOutputSchema]).
+// them either. A "null" in a type list becomes Nullable.
 // It reports false for anything else, such as an untyped (true) schema from an
 // `any` field, a map or other open object, a required name with no property,
 // a composition keyword, a reference, or an enum that is not on a string.
@@ -85,11 +84,14 @@ func toGenaiSchema(s *jsonschema.Schema) (*genai.Schema, bool) {
 	if s == nil || !onlyKnownKeywords(*s) {
 		return nil, false
 	}
-	typ, ok := schemaType(s)
+	typ, nullable, ok := schemaType(s)
 	if !ok || (len(s.Enum) > 0 && typ != genai.TypeString) {
 		return nil, false
 	}
 	out := &genai.Schema{Type: typ, Title: s.Title, Description: s.Description}
+	if nullable {
+		out.Nullable = genai.Ptr(true)
+	}
 	for _, v := range s.Enum {
 		str, ok := v.(string)
 		if !ok {
@@ -161,23 +163,25 @@ func isFalseSchema(s *jsonschema.Schema) bool {
 
 // schemaType maps the JSON Schema type of s to a genai type. A type list may
 // pair one type with "null", which jsonschema-go emits for pointers and
-// slices; the "null" is ignored. No type, or more than one non-null type, has
+// slices; that becomes Nullable. No type, or more than one non-null type, has
 // no genai equivalent.
-func schemaType(s *jsonschema.Schema) (genai.Type, bool) {
+func schemaType(s *jsonschema.Schema) (genai.Type, bool, bool) {
 	if s.Type != "" {
 		t, ok := genaiTypes[s.Type]
-		return t, ok
+		return t, false, ok
 	}
 	var name string
+	nullable := false
 	for _, t := range s.Types {
 		if t == "null" {
+			nullable = true
 			continue
 		}
 		if name != "" {
-			return "", false
+			return "", false, false
 		}
 		name = t
 	}
 	t, ok := genaiTypes[name]
-	return t, ok
+	return t, nullable, ok
 }
