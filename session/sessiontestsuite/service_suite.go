@@ -18,6 +18,7 @@ package sessiontestsuite
 
 import (
 	"errors"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,9 +52,7 @@ func Snapshot(s session.Session) ExpectedSession {
 
 	state := make(map[string]any)
 	if s.State() != nil {
-		for k, v := range s.State().All() {
-			state[k] = v
-		}
+		maps.Insert(state, s.State().All())
 	}
 
 	var events []*session.Event

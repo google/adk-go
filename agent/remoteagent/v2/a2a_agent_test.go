@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -981,14 +982,7 @@ func TestRemoteAgent_AfterCallbackRunsOnAggregatedArtifact(t *testing.T) {
 		t.Fatalf("agent.Run() error = %v", err)
 	}
 
-	found := false
-	for _, txt := range nonPartialSeen {
-		if txt == "Hello, world!" {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(nonPartialSeen, "Hello, world!") {
 		t.Errorf("after-callback was not invoked on the aggregated artifact event; non-partial events seen = %v, want to include %q", nonPartialSeen, "Hello, world!")
 	}
 }

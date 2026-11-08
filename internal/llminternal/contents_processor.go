@@ -809,8 +809,7 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Here a result counts only once it passes the branch and isolation-scope
 	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
-	for i := len(events) - 1; i >= 0; i-- {
-		event := events[i]
+	for i, event := range slices.Backward(events) {
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
 			delete(unanswered, call.ID)
 		}

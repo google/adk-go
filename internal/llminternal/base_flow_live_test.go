@@ -435,7 +435,7 @@ func TestRunLiveNoGoroutineLeak(t *testing.T) {
 				// acknowledgement) so the reader is parked in Recv when
 				// cleanup tears the connection down.
 				first := true
-				for range seq {
+				for range seq { //nolint:errcheck // the canceled reader's error is expected; the test asserts the connection count
 					if first {
 						first = false
 						cancel()
@@ -672,7 +672,7 @@ func TestRunLiveSkipsNilRealtimeInput(t *testing.T) {
 			// reads no sender errors, so a failed send would hang the next
 			// Send.
 			go func() {
-				for range seq {
+				for range seq { //nolint:errcheck // a background drain cannot fail the test; the frames below carry the outcome
 				}
 			}()
 
@@ -1014,7 +1014,7 @@ func TestSendAfterToolWriteFailure(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- sess.Send(agent.LiveRequest{Content: genai.NewContentFromText("hi", "user")}) }()
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // the failed write may surface here; the test only pins that Send returns
 	case <-time.After(3 * time.Second):
 		t.Error("Send blocked after the function-response write failed")
 		_ = sess.Close()
@@ -1220,7 +1220,7 @@ func TestRunLiveKeepsResumptionHandleOutOfCallerConfig(t *testing.T) {
 		t.Fatalf("RunLive failed: %v", err)
 	}
 	go func() {
-		for range seq {
+		for range seq { //nolint:errcheck // a background drain cannot fail the test; the frames below carry the outcome
 		}
 	}()
 

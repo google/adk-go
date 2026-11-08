@@ -1478,7 +1478,7 @@ func TestGCSOffloading_ManyCallersAndFlushes(t *testing.T) {
 		if !strings.HasPrefix(textPath, wantPrefix) || !strings.HasPrefix(imagePath, wantPrefix) {
 			t.Errorf("the objects of the row are %q and %q, want names that start with %q", textPath, imagePath, wantPrefix)
 		}
-		marker := strings.SplitN(parts[0]["text"].(string), ".", 2)[0]
+		marker, _, _ := strings.Cut(parts[0]["text"].(string), ".")
 		var g, i int
 		if _, err := fmt.Sscanf(marker, "g%d-i%d", &g, &i); err != nil {
 			t.Errorf("the preview %q of a row does not start with a marker", parts[0]["text"])
@@ -3958,9 +3958,7 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 
 	stopFeeder := make(chan struct{})
 	var feederWG sync.WaitGroup
-	feederWG.Add(1)
-	go func() {
-		defer feederWG.Done()
+	feederWG.Go(func() {
 		select {
 		case <-firstUploadStarted:
 		case <-stopFeeder:
@@ -3976,7 +3974,7 @@ func TestGCSOffloading_RunEndContinuousArrivalsDoNotPauseHealthyStorage(t *testi
 				bp.Append(newImageRow())
 			}
 		}
-	}()
+	})
 
 	bp.flushRunEnd()
 	close(stopFeeder)
@@ -4567,8 +4565,7 @@ func TestGCSOffloading_FailedMultiAttributeUploadTruncatedFlag(t *testing.T) {
 }
 
 func TestGCSOffloading_CloseLogsUploadFailuresUnderCallerDeadline(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	lis, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
@@ -4763,8 +4760,7 @@ func TestGCSOffloading_CloseLogsFinalFailureOfBackgroundFlushUploadItCancels(t *
 }
 
 func TestGCSOffloading_LaterRunEndBatchLogsUploadFailures(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	logger := &recordingLogger{}
 	// loggedDuringResolve records whether the failure of row 2's upload was
@@ -5107,9 +5103,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -5120,7 +5114,7 @@ func TestReleaseRowUploads_ConcurrentCallbackLogsDoNotRace(t *testing.T) {
 				bp.Append(map[string]any{eventIDField: "drop"})
 			}
 		}
-	}()
+	})
 	for range 8 {
 		runtime.Gosched()
 	}
