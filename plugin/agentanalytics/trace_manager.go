@@ -2590,7 +2590,7 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 		}
 	}
 
-	i := -1
+	var i int
 	switch {
 	case finishedCount == 1:
 		i = inv.finishedTaskLocked(id, calls)
