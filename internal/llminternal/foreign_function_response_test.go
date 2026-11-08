@@ -134,8 +134,9 @@ func TestBuildContents_UserResponseToOtherAgentCallIsContext(t *testing.T) {
 			},
 		},
 		{
-			// The call is on a branch this agent does not see, so its
-			// response is dropped as an orphan, as in adk-python.
+			// The call is on a branch this agent does not see, so the response
+			// stays a raw response, and history rearrangement drops it because
+			// no call before it matches. adk-python drops it too, as an orphan.
 			name:   "response to a call outside the agent's branch is not shown",
 			branch: "root.after",
 			events: []*session.Event{
@@ -150,6 +151,105 @@ func TestBuildContents_UserResponseToOtherAgentCallIsContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := buildContentsDefault("after", tc.branch, "", tc.events, false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestBuildContents_UserTextWithResponseToOtherAgentCall checks that text sent
+// in the same message as the answer to another agent's call arrives as context
+// with it, whether the agent gets its history or only the current turn.
+func TestBuildContents_UserTextWithResponseToOtherAgentCall(t *testing.T) {
+	call := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "b1", Name: "adk_request_input", Args: map[string]any{"message": "approve"}}}}}
+	answer := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "note"},
+		{FunctionResponse: &genai.FunctionResponse{ID: "b1", Name: "adk_request_input", Response: map[string]any{"result": "ok"}}},
+	}}
+	events := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("start", genai.RoleUser)}},
+		{Author: "b", LLMResponse: model.LLMResponse{Content: call}},
+		{Author: "user", LLMResponse: model.LLMResponse{Content: answer}},
+	}
+	calledB := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: `[b] called tool ` + "`adk_request_input`" + ` with parameters: {"message":"approve"}`},
+	}}
+	answered := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+		{Text: "For context:"},
+		{Text: "[user] said: note"},
+		{Text: `[user] ` + "`adk_request_input`" + ` tool returned result: {"result":"ok"}`},
+	}}
+
+	tests := []struct {
+		name  string
+		build func() ([]*genai.Content, error)
+		want  []*genai.Content
+	}{
+		{
+			name:  "history",
+			build: func() ([]*genai.Content, error) { return buildContentsDefault("after", "", "", events, false, nil) },
+			want:  []*genai.Content{genai.NewContentFromText("start", genai.RoleUser), calledB, answered},
+		},
+		{
+			name: "current turn only",
+			build: func() ([]*genai.Content, error) {
+				return buildContentsCurrentTurnContextOnly("after", "", "", events, false, nil)
+			},
+			want: []*genai.Content{calledB, answered},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.build()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("contents mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestBuildContents_ResponseInSuffixToOtherAgentCallBeforeIt checks that when
+// only a suffix of the session is built, as the compaction token estimate does,
+// a response in the suffix to another agent's call before it is shown the same
+// way as when the whole session is built.
+func TestBuildContents_ResponseInSuffixToOtherAgentCallBeforeIt(t *testing.T) {
+	call := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "b1", Name: "adk_request_input", Args: map[string]any{"message": "approve"}}}}}
+	response := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{ID: "b1", Name: "adk_request_input", Response: map[string]any{"result": "ok"}}}}}
+	done := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "For context:"}, {Text: "[d] said: done"}}}
+	answered := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "For context:"}, {Text: `[user] ` + "`adk_request_input`" + ` tool returned result: {"result":"ok"}`}}}
+
+	tests := []struct {
+		name       string
+		branch     string
+		callBranch string
+		want       []*genai.Content
+	}{
+		{name: "call visible to the agent", want: []*genai.Content{answered, done}},
+		{
+			// As when the whole session is built, a call the agent does not see
+			// leaves its response unmatched, and it is dropped.
+			name: "call outside the agent's branch", branch: "root.after", callBranch: "root.wf",
+			want: []*genai.Content{done},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			all := []*session.Event{
+				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("start", genai.RoleUser)}},
+				{Author: "b", Branch: tc.callBranch, LLMResponse: model.LLMResponse{Content: call}},
+				{Author: "user", LLMResponse: model.LLMResponse{Content: response}},
+				{Author: "d", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("done", genai.RoleModel)}},
+			}
+
+			got, err := buildContentsDefaultWithCallSource("after", tc.branch, "", all[2:], all, false, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -123,9 +123,33 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	callIDs := functionCallIDs(allEvents)
+	// visible reports whether the agent sees ev at all: its branch, not a tool
+	// sub-branch below it, its isolation scope, and not excluded.
+	visible := func(ev *session.Event) bool {
+		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
+		return eventBelongsToBranch(invocationBranch, ev) &&
+			!isToolSubBranchEvent(invocationBranch, ev, agentName, callIDs) &&
+			// Unlike branch (where empty is universally visible), isolation
+			// scope is an exact match: a scoped agent sees only its own scope,
+			// an unscoped agent sees only unscoped events.
+			ev.IsolationScope == isolationScope &&
+			!shouldExcludeEvent(ev)
+	}
 	// The author of the latest visible call with each id, filled in as the
-	// events are read so a response pairs with the call before it.
+	// events are read so a response pairs with the call before it. When events
+	// is a suffix of allEvents, as for the compaction token estimate, the calls
+	// before the suffix are recorded first, so a response in the suffix pairs
+	// the same way it does when the whole session is built.
 	callAuthors := make(map[string]string)
+	if len(events) > 0 {
+		if start := slices.Index(allEvents, events[0]); start > 0 {
+			for _, ev := range allEvents[:start] {
+				if visible(ev) {
+					recordCallAuthors(callAuthors, ev)
+				}
+			}
+		}
+	}
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
@@ -142,22 +166,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 			// But unlike python that distinguishes None vs empty string, two cases are indistinguishable in Go.
 			continue
 		}
-		// Skip events that do not belong to the current branch.
-		// TODO: can we use a richer type for branch (e.g. []string) instead of using string prefix test?
-		if !eventBelongsToBranch(invocationBranch, ev) {
-			continue
-		}
-		if isToolSubBranchEvent(invocationBranch, ev, agentName, callIDs) {
-			continue
-		}
-		// Skip events outside the agent's isolation scope. Unlike branch
-		// (where empty is universally visible), isolation scope is an
-		// exact match: a scoped agent sees only its own scope, an
-		// unscoped agent sees only unscoped events.
-		if ev.IsolationScope != isolationScope {
-			continue
-		}
-		if shouldExcludeEvent(ev) {
+		if !visible(ev) {
 			continue
 		}
 		// A function response to a call another agent made is that agent's
@@ -165,8 +174,8 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		// adk-python's _get_contents. Left as a raw response, its call is
 		// missing from this agent's history. Unlike adk-python, which keeps the
 		// last author seen for an id anywhere in the history, a response pairs
-		// with the latest call before it, so a reused id does not turn the
-		// agent's own exchange into context.
+		// with the latest call before it, so a later call that reuses the id
+		// does not turn the agent's own finished exchange into context.
 		foreign := isOtherAgentReply(agentName, ev) || answersOtherAgentCall(agentName, ev, callAuthors)
 		recordCallAuthors(callAuthors, ev)
 		if foreign && !compactioninternal.HasUsableSummary(ev) {
@@ -857,7 +866,9 @@ func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
 }
 
-// recordCallAuthors sets ev's author as the author of each function call in ev.
+// recordCallAuthors sets ev's author as the author of each function call with
+// an id in ev. A call without one is skipped, so a response without an id never
+// matches it.
 func recordCallAuthors(authors map[string]string, ev *session.Event) {
 	for _, call := range utils.FunctionCalls(utils.Content(ev)) {
 		if call.ID != "" {
