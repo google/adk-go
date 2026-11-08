@@ -162,7 +162,7 @@ func httpClient(base *http.Client, provider auth.CredentialProvider) *http.Clien
 func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if err := credredirect.Check(req, via); err != nil {
-			return fmt.Errorf("mcptoolset: %w: Config.Auth is set and the credential would follow", err)
+			return refuseRedirect(via, err)
 		}
 		if next == nil {
 			if len(via) >= credredirect.MaxRedirects {
@@ -171,16 +171,37 @@ func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*ht
 			return nil
 		}
 		// net/http sends req as next leaves it, and next can edit via too, so
-		// judge the hop again against copies taken before next ran.
+		// judge the hop again against copies taken before next ran. The URL
+		// decides where the request is dialed, except through a forward proxy,
+		// which takes its target from Host and from an opaque URL, so those
+		// have to stay as they were.
 		orig, prev := *via[0].URL, *via[len(via)-1].URL
+		host, opaque := req.Host, req.URL.Opaque
 		if err := next(req, via); err != nil {
 			return err
 		}
 		if err := credredirect.Check(req, []*http.Request{{URL: &orig}, {URL: &prev}}); err != nil {
-			return fmt.Errorf("mcptoolset: %w: Config.Auth is set and the credential would follow", err)
+			return refuseRedirect(via, err)
+		}
+		if req.Host != host || req.URL.Opaque != opaque {
+			return refuseRedirect(via, fmt.Errorf("refusing redirect to %s: CheckRedirect changed the request target", req.URL.Scheme+"://"+req.URL.Host))
 		}
 		return nil
 	}
+}
+
+// refuseRedirect reports a hop the policy refused. On a GET chain it hands
+// net/http the 3xx unfollowed instead of an error: the SDK's optional
+// server-to-client stream is a GET on protocol versions before 2026-07-28, an
+// error there is retried with growing delays and then fails the session,
+// while an answer that is not text/event-stream means the server offers no
+// stream. The JSON-RPC traffic is POST, where the error is the clearer
+// failure. Either way the next hop is not sent.
+func refuseRedirect(via []*http.Request, err error) error {
+	if via[0].Method == http.MethodGet {
+		return http.ErrUseLastResponse
+	}
+	return fmt.Errorf("mcptoolset: %w: Config.Auth is set and the credential would follow", err)
 }
 
 // Config provides initial configuration for the MCP ToolSet.
@@ -229,7 +250,10 @@ type Config struct {
 	// host and port and either keeps the scheme or upgrades http to https,
 	// each scheme's default port counting as the same port, because the
 	// credential is applied again on every hop. A CheckRedirect on the
-	// HTTPClient runs after that check, not instead of it.
+	// HTTPClient runs after that check, not instead of it. A refused redirect
+	// fails the call, except on the SDK's optional server-to-client stream,
+	// which the toolset then does without, as it does for a server that
+	// offers none.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
