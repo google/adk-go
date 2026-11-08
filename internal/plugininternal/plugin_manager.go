@@ -179,6 +179,17 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Conte
 	return nil, nil
 }
 
+// RunOnAgentErrorCallback notifies every plugin that an error escaped an
+// agent's run. Unlike the other callbacks it is best-effort notification: all
+// plugins run in registration order and none can suppress the error.
+func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.Context, a agent.Agent, err error) {
+	for _, plugin := range pm.plugins {
+		if callback := plugin.OnAgentErrorCallback(); callback != nil {
+			callback(cctx, a, err)
+		}
+	}
+}
+
 // RunBeforeToolCallback runs the BeforeToolCallback for all plugins.
 func (pm *PluginManager) RunBeforeToolCallback(ctx agent.Context, tool tool.Tool, args map[string]any) (map[string]any, error) {
 	for _, plugin := range pm.plugins {

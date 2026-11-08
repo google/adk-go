@@ -37,8 +37,9 @@ type Config struct {
 	BeforeRunCallback BeforeRunCallback
 	AfterRunCallback  AfterRunCallback
 
-	BeforeAgentCallback agent.BeforeAgentCallback
-	AfterAgentCallback  agent.AfterAgentCallback
+	BeforeAgentCallback  agent.BeforeAgentCallback
+	AfterAgentCallback   agent.AfterAgentCallback
+	OnAgentErrorCallback OnAgentErrorCallback
 
 	BeforeModelCallback  llmagent.BeforeModelCallback
 	AfterModelCallback   llmagent.AfterModelCallback
@@ -61,6 +62,7 @@ func New(cfg Config) (*Plugin, error) {
 		afterRunCallback:      cfg.AfterRunCallback,
 		beforeAgentCallback:   cfg.BeforeAgentCallback,
 		afterAgentCallback:    cfg.AfterAgentCallback,
+		onAgentErrorCallback:  cfg.OnAgentErrorCallback,
 		beforeModelCallback:   cfg.BeforeModelCallback,
 		afterModelCallback:    cfg.AfterModelCallback,
 		onModelErrorCallback:  cfg.OnModelErrorCallback,
@@ -93,6 +95,8 @@ type Plugin struct {
 
 	beforeAgentCallback agent.BeforeAgentCallback
 	afterAgentCallback  agent.AfterAgentCallback
+
+	onAgentErrorCallback OnAgentErrorCallback
 
 	beforeModelCallback  llmagent.BeforeModelCallback
 	afterModelCallback   llmagent.AfterModelCallback
@@ -147,6 +151,11 @@ func (p *Plugin) AfterAgentCallback() agent.AfterAgentCallback {
 	return p.afterAgentCallback
 }
 
+// OnAgentErrorCallback returns the plugin's OnAgentErrorCallback.
+func (p *Plugin) OnAgentErrorCallback() OnAgentErrorCallback {
+	return p.onAgentErrorCallback
+}
+
 // BeforeModelCallback returns the plugin's BeforeModelCallback.
 func (p *Plugin) BeforeModelCallback() llmagent.BeforeModelCallback {
 	return p.beforeModelCallback
@@ -187,6 +196,15 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 
 // AfterRunCallback is invoked after a run completes.
 type AfterRunCallback func(agent.InvocationContext)
+
+// OnAgentErrorCallback is invoked when an error escapes an agent's run. It is
+// notification-only: the error is yielded to the caller unchanged whether or
+// not the callback runs. a is the agent that failed; ctx is the callback
+// context for its invocation.
+//
+// It mirrors adk-python's on_agent_error_callback. A callback that panics
+// aborts the run; a callback that returns is ignored.
+type OnAgentErrorCallback func(ctx agent.Context, a agent.Agent, err error)
 
 // OnEventCallback is invoked for each event, and may return a replacement event.
 type OnEventCallback func(agent.InvocationContext, *session.Event) (*session.Event, error)
