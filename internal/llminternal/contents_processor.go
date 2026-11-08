@@ -123,6 +123,9 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// parse the events, leaving the contents and the function calls and responses from the current agent.
 	var filtered []*session.Event
 	callIDs := functionCallIDs(allEvents)
+	// The author of the latest visible call with each id, filled in as the
+	// events are read so a response pairs with the call before it.
+	callAuthors := make(map[string]string)
 	for _, ev := range events {
 		content := utils.Content(ev)
 		// Skip events without content or generated neither by user nor
@@ -157,7 +160,16 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 		if shouldExcludeEvent(ev) {
 			continue
 		}
-		if isOtherAgentReply(agentName, ev) && !compactioninternal.HasUsableSummary(ev) {
+		// A function response to a call another agent made is that agent's
+		// exchange, so it is presented as context like the call itself, as in
+		// adk-python's _get_contents. Left as a raw response, its call is
+		// missing from this agent's history. Unlike adk-python, which keeps the
+		// last author seen for an id anywhere in the history, a response pairs
+		// with the latest call before it, so a reused id does not turn the
+		// agent's own exchange into context.
+		foreign := isOtherAgentReply(agentName, ev) || answersOtherAgentCall(agentName, ev, callAuthors)
+		recordCallAuthors(callAuthors, ev)
+		if foreign && !compactioninternal.HasUsableSummary(ev) {
 			// ConvertForeignEvent returns nil to signal the foreign event
 			// should be dropped (e.g. a thought-only turn).
 			if converted := ConvertForeignEvent(ev); converted != nil {
@@ -843,6 +855,27 @@ func isSubmittedToolResult(ev *session.Event) bool {
 
 func isOtherAgentReply(currentAgentName string, ev *session.Event) bool {
 	return ev.Author != currentAgentName && ev.Author != "user"
+}
+
+// recordCallAuthors sets ev's author as the author of each function call in ev.
+func recordCallAuthors(authors map[string]string, ev *session.Event) {
+	for _, call := range utils.FunctionCalls(utils.Content(ev)) {
+		if call.ID != "" {
+			authors[call.ID] = ev.Author
+		}
+	}
+}
+
+// answersOtherAgentCall reports whether ev holds a function response to a call
+// that an agent other than currentAgentName made.
+func answersOtherAgentCall(currentAgentName string, ev *session.Event, callAuthors map[string]string) bool {
+	for _, response := range utils.FunctionResponses(utils.Content(ev)) {
+		author, ok := callAuthors[response.ID]
+		if ok && author != currentAgentName && author != "user" {
+			return true
+		}
+	}
+	return false
 }
 
 // ConvertForeignEvent converts an event authored by another agent as
