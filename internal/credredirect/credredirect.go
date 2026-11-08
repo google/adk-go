@@ -34,27 +34,59 @@ import (
 const MaxRedirects = 10
 
 // Check refuses a redirect that leaves the original request's host or
-// downgrades its scheme. It does not cap the number of hops.
+// downgrades its scheme, and one whose request would address another host on
+// the wire than its URL names. It does not cap the number of hops.
 func Check(req *http.Request, via []*http.Request) error {
-	// Check against the original request and against the hop just taken. The
-	// original stops a chain of individually-safe hops laundering the
-	// credential away from the original host; the previous hop stops a chain
-	// climbing to https and then dropping back to http, which the original
-	// alone would accept.
+	// Check against the hop just taken, which refuses a chain climbing to
+	// https and then dropping back to http, and against the original request
+	// as a second line: sameTarget keeps a chain on one host and port, so the
+	// original refuses nothing on its own today, and the comparison stays in
+	// case that ever changes.
 	for _, from := range []*url.URL{via[0].URL, via[len(via)-1].URL} {
 		if !sameTarget(from, req.URL) {
 			return fmt.Errorf("refusing redirect from %s to %s", origin(from), origin(req.URL))
 		}
 	}
+	if !addressesOwnHost(req) {
+		return fmt.Errorf("refusing redirect to %s: the request's Host header, opaque URL or path addresses another host", origin(req.URL))
+	}
 	return nil
 }
 
+// addressesOwnHost reports whether req reaches the host its URL names on the
+// wire. net/http sends Host from req.Host when it is set, and a forward proxy
+// takes the whole target from the request line, which an opaque URL or a path
+// without a leading slash can point at another host. A request net/http built
+// to follow a redirect passes; one a caller's CheckRedirect edited may not.
+func addressesOwnHost(req *http.Request) bool {
+	if req.URL.Opaque != "" {
+		return false
+	}
+	if path := req.URL.EscapedPath(); path != "" && !strings.HasPrefix(path, "/") {
+		return false
+	}
+	if req.Host == "" {
+		return true
+	}
+	fromHeader := *req.URL
+	fromHeader.Host = req.Host
+	return sameTarget(req.URL, &fromHeader)
+}
+
 // sameTarget reports whether it is safe to replay the credential on a
-// redirect from one URL to the other: the host must be identical, and the
-// scheme may only stay the same or be upgraded from http to https, which
-// strictly improves confidentiality.
+// redirect from one URL to the other: every name net/http derives from the
+// host must be identical, and the scheme may only stay the same or be upgraded
+// from http to https, which strictly improves confidentiality.
 func sameTarget(from, to *url.URL) bool {
 	if !strings.EqualFold(dialName(from), dialName(to)) {
+		return false
+	}
+	fromHost, ok := hostName(from)
+	if !ok {
+		return false
+	}
+	toHost, ok := hostName(to)
+	if !ok || !strings.EqualFold(fromHost, toHost) {
 		return false
 	}
 	switch {
@@ -70,17 +102,47 @@ func sameTarget(from, to *url.URL) bool {
 	}
 }
 
-// dialName returns the host name net/http dials for u: the IDNA ASCII form of
-// a Unicode name, or the name itself when it is ASCII already or cannot be
-// mapped, which is net/http's own fallback. Comparing the written names
-// instead would let two spellings that case-fold equal reach different
-// names, and would keep a Unicode name apart from its punycode form.
+// net/http derives two names from a URL's host, and a redirect is the same
+// target only when both agree. It dials the IDNA lookup form, which maps
+// characters before encoding, and it writes the Host header and a forward
+// proxy's request target from the punycode form of the name as written. So
+// a soft hyphen, a fullwidth letter, a long s or ẞ against ss share a dial
+// address and still carry another Host header, and a name the lookup profile
+// rejects is dialed as written while its Host header is still encoded. An
+// ASCII name is taken as written by both, so a Unicode name and its punycode
+// form compare equal, and an empty punycode label is not dropped.
+
+// dialName returns the address net/http dials for u, falling back to the
+// written name when the lookup mapping fails, as net/http does.
 func dialName(u *url.URL) string {
 	host := u.Hostname()
+	if isASCII(host) {
+		return host
+	}
 	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
 		return ascii
 	}
 	return host
+}
+
+// hostName returns the name net/http writes into the Host header for u, as
+// httpguts.PunycodeHostPort derives it, and false when it has none.
+func hostName(u *url.URL) (string, bool) {
+	host := u.Hostname()
+	if isASCII(host) {
+		return host, true
+	}
+	ascii, err := idna.ToASCII(host)
+	return ascii, err == nil
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultedPort returns the URL's port with the scheme's default filled in, so

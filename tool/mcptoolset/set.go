@@ -171,31 +171,29 @@ func authCheckRedirect(next func(*http.Request, []*http.Request) error) func(*ht
 			return nil
 		}
 		// net/http sends req as next leaves it, and next can edit via too, so
-		// judge the hop again against copies taken before next ran. The URL
-		// decides where the request is dialed, except through a forward proxy,
-		// which takes its target from Host and from an opaque URL, so those
-		// have to stay as they were.
+		// judge the hop again against copies taken before next ran. Check
+		// also holds the Host header, path and opaque URL to the URL's host,
+		// which a forward proxy or a front end would otherwise route by.
 		orig, prev := *via[0].URL, *via[len(via)-1].URL
-		host, opaque := req.Host, req.URL.Opaque
 		if err := next(req, via); err != nil {
 			return err
 		}
 		if err := credredirect.Check(req, []*http.Request{{URL: &orig}, {URL: &prev}}); err != nil {
 			return refuseRedirect(via, err)
 		}
-		if req.Host != host || req.URL.Opaque != opaque {
-			return refuseRedirect(via, fmt.Errorf("refusing redirect to %s: CheckRedirect changed the request target", req.URL.Scheme+"://"+req.URL.Host))
-		}
 		return nil
 	}
 }
 
 // refuseRedirect reports a hop the policy refused. On a GET chain it hands
-// net/http the 3xx unfollowed instead of an error: the SDK's optional
-// server-to-client stream is a GET on protocol versions before 2026-07-28, an
-// error there is retried with growing delays and then fails the session,
-// while an answer that is not text/event-stream means the server offers no
-// stream. The JSON-RPC traffic is POST, where the error is the clearer
+// net/http the 3xx unfollowed instead of an error. The SDK sends a GET only
+// for its optional server-to-client stream, on protocol versions before
+// 2026-07-28: an error from client.Do there is retried with growing delays
+// and then fails the session, while a 3xx that is not labeled
+// text/event-stream on the first stream request reads as a server without a
+// stream and the session goes on. A 3xx labeled text/event-stream, or any
+// 3xx on a reconnect, still fails the session, with the status text as the
+// reason. The JSON-RPC traffic is POST, where the error is the clearer
 // failure. Either way the next hop is not sent.
 func refuseRedirect(via []*http.Request, err error) error {
 	if via[0].Method == http.MethodGet {
@@ -250,10 +248,14 @@ type Config struct {
 	// host and port and either keeps the scheme or upgrades http to https,
 	// each scheme's default port counting as the same port, because the
 	// credential is applied again on every hop. A CheckRedirect on the
-	// HTTPClient runs after that check, not instead of it. A refused redirect
-	// fails the call, except on the SDK's optional server-to-client stream,
-	// which the toolset then does without, as it does for a server that
-	// offers none.
+	// HTTPClient runs after that check, not instead of it, and may not point
+	// the request at another host through its Host header, path or opaque
+	// URL either. A refused redirect fails the call. On the SDK's optional
+	// server-to-client stream the unfollowed 3xx goes back to the SDK
+	// instead: a 3xx not labeled text/event-stream on the first stream
+	// request means no stream and the session goes on, while one labeled
+	// text/event-stream, or any 3xx on a reconnect, fails the session with
+	// the status text as the reason.
 	//
 	// Don't also set OAuthHandler on a supplied *mcp.StreamableClientTransport:
 	// Auth is applied last and overwrites the Authorization header, so the two
