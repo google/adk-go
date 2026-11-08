@@ -23,7 +23,10 @@ import (
 
 // The metadata tools. Each returns what adk-python's tool of the same name
 // returns: a list of ids, or the resource exactly as the BigQuery REST API
-// sent it, including fields this package does not know about.
+// sent it, including fields this package does not know about. One difference:
+// adk-python's get_job_info returns a typed job's properties, which turn
+// statistics.creationTime, startTime and endTime into numbers, while here they
+// stay the strings the REST API sends, like every other int64 field.
 
 type listDatasetIDsArgs struct {
 	ProjectID string `json:"project_id"`

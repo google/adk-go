@@ -17,7 +17,10 @@
 // dataset, and read the metadata of a dataset, a table or a job.
 //
 // The tools have the same names, arguments and results as adk-python's
-// BigQueryToolset, so prompts and skills written for it work unchanged. When
+// BigQueryToolset, so prompts and skills written for it work unchanged. The
+// one difference in results: get_job_info returns the job's creationTime,
+// startTime and endTime statistics as the strings the REST API sends, where
+// adk-python returns numbers. When
 // BigQuery rejects a call, for example because a dataset does not exist, or
 // an id argument is empty, the tool returns
 // {"status": "ERROR", "error_details": "..."} to the model so it can correct
