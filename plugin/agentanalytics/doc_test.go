@@ -590,9 +590,9 @@ func TestDocParity_LLMRequestToolSchemaCamelCaseAndDeterministicOrder(t *testing
 		if !ok {
 			t.Fatal("llmRequestAttributes() missing tools")
 		}
-		b, _, err := SmartTruncate(tools, -1)
+		b, _, err := smartTruncate(tools, -1, true)
 		if err != nil {
-			t.Fatalf("run %d SmartTruncate() error: %v", run, err)
+			t.Fatalf("run %d smartTruncate() error: %v", run, err)
 		}
 		gotRaw := string(b)
 		if prevRaw != "" && gotRaw != prevRaw {
