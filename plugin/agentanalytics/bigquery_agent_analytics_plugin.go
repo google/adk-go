@@ -955,7 +955,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, ev.ID != "")
+			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, hasNewEventUUID(ev.ID))
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -973,6 +973,40 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 	}
 	return nil, nil
+}
+
+// hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4
+// format produced by session.NewEvent. Runner stamps ev.Timestamp on any
+// zero-timestamp event during delivery, so non-UUID or empty IDs cannot prove
+// that ev.Timestamp came from creation time rather than delayed delivery.
+func hasNewEventUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := id[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		case 14:
+			if c != '4' {
+				return false
+			}
+		case 19:
+			switch c {
+			case '8', '9', 'a', 'b', 'A', 'B':
+			default:
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // nodeCompletion reports whether ev is the event that ADK's workflow
@@ -1684,6 +1718,42 @@ func agentConfig(a agent.Agent) any {
 		a = next
 	}
 	return nil
+}
+
+// agentHasAfterAgentCallbacks reports whether a configures agent-level
+// AfterAgentCallbacks (on the base agent struct or llmagent.Config), which ADK
+// invokes after plugins' AfterAgentCallback hooks finish.
+func agentHasAfterAgentCallbacks(a agent.Agent) bool {
+	for range 4 {
+		v := reflect.ValueOf(a)
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				return false
+			}
+			v = v.Elem()
+		}
+		if v.Kind() != reflect.Struct {
+			return false
+		}
+		if f := v.FieldByName("Config"); f.IsValid() && f.CanInterface() && !f.IsZero() {
+			if cfg, ok := f.Interface().(llmagent.Config); ok && len(cfg.AfterAgentCallbacks) > 0 {
+				return true
+			}
+		}
+		if cb := v.FieldByName("afterAgentCallbacks"); cb.IsValid() && cb.Kind() == reflect.Slice && cb.Len() > 0 {
+			return true
+		}
+		inner := v.FieldByName("Agent")
+		if !inner.IsValid() || !inner.CanInterface() {
+			return false
+		}
+		next, ok := inner.Interface().(agent.Agent)
+		if !ok {
+			return false
+		}
+		a = next
+	}
+	return false
 }
 
 // identity holds the invocation fields of a row.

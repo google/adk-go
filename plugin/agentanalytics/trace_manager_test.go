@@ -23559,28 +23559,34 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 
 		retireFailingPeer(err1)
 
-		// Unambiguous single retired peer trailer clears err1 cleanly.
+		// While failing concurrent peer3 remains open on agentStack, an
+		// untimestamped worker trailer could belong to peer3 rather than peer1,
+		// so err1 must remain preserved.
 		tm.pushLLMSpan(ctx, workerID)
 		tm.recordError(ctx, workerID, llmKey(workerID), err3)
 		tm.popLLMSpan(ctx, workerID, false)
 		tm.completeResponse(ctx, rootID, "worker", "", nil)
 		inv.mu.Lock()
-		afterSingle := rootRec.openFailureCause()
+		whilePeer3Open := rootRec.openFailureCause()
 		inv.mu.Unlock()
-		if afterSingle != nil {
-			t.Fatalf("after single unambiguous peer trailer: root cause=%v, want nil", afterSingle)
+		if !errors.Is(whilePeer3Open, err1) {
+			t.Fatalf("while open failing concurrent peer3 exists: root cause=%v, want err1 (%v)", whilePeer3Open, err1)
 		}
 
-		// Once two peers have retired under open custom root, ambiguity keeps err2 preserved.
+		// Once two peers have retired under open custom root, ambiguity keeps both causes preserved.
 		retireFailingPeer(err2)
 		tm.completeResponse(ctx, rootID, "worker", "", nil)
 
 		inv.mu.Lock()
 		gotCause := rootRec.openFailureCause()
 		retiredCount := len(rootRec.retiredCauses)
+		var secondCause error
+		if retiredCount >= 2 {
+			secondCause = rootRec.retiredCauses[1].err
+		}
 		inv.mu.Unlock()
-		if !errors.Is(gotCause, err2) || retiredCount != 1 {
-			t.Fatalf("after ambiguous multi-peer trailer: root cause=%v count=%d, want err2 (%v) and count=1", gotCause, retiredCount, err2)
+		if !errors.Is(gotCause, err1) || retiredCount != 2 || !errors.Is(secondCause, err2) {
+			t.Fatalf("after ambiguous multi-peer trailer: root cause=%v second=%v count=%d, want err1+err2 and count=2", gotCause, secondCause, retiredCount)
 		}
 	})
 
@@ -24285,6 +24291,7 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			bot1.nonLLM = false
 			bot1.completed = true
 			bot1.hasResponse = true
+			bot1.ownResponse = true
 			bot1.goroutineID = 42
 			bot1.startPlatformTime = t0
 			bot1.unforwardedToolEvents = 1
@@ -24345,6 +24352,7 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			customBot1.nonLLM = true
 			customBot1.completed = true
 			customBot1.hasResponse = true
+			customBot1.ownResponse = true
 			customBot1.goroutineID = 42
 			customBot1.startPlatformTime = t0
 			invCustom.retireAgentLocked(2, true, customBot1.seq)
@@ -24513,6 +24521,7 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			concBot1 := invConc.agentStack[2]
 			concBot1.completed = true
 			concBot1.hasResponse = true
+			concBot1.ownResponse = true
 			concBot1.goroutineID = 42
 			concBot1.startPlatformTime = t0
 			invConc.retireAgentLocked(2, true, concBot1.seq)
@@ -24549,6 +24558,7 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			partialBot1 := invPartial.agentStack[2]
 			partialBot1.completed = true
 			partialBot1.hasResponse = true
+			partialBot1.ownResponse = true
 			partialBot1.goroutineID = 42
 			partialBot1.startPlatformTime = t0
 			invPartial.retireAgentLocked(2, true, partialBot1.seq)
@@ -24583,5 +24593,568 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 					partialRootResponded, candSubResponded)
 			}
 		})
+	})
+}
+
+func TestHasNewEventUUID(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		{id: "550e8400-e29b-41d4-a716-446655440000", want: true},
+		{id: "550E8400-E29B-41D4-A716-446655440000", want: true},
+		{id: "01234567-89ab-4def-8123-456789abcdef", want: true},
+		{id: "01234567-89ab-4def-b123-456789abcdef", want: true},
+		{id: "", want: false},
+		{id: "clean-run-1", want: false},
+		{id: "550e8400-e29b-11d4-a716-446655440000", want: false}, // v1, not v4
+		{id: "550e8400-e29b-41d4-7716-446655440000", want: false}, // non-RFC4122 variant
+		{id: "550e8400-e29b-41d4-c716-446655440000", want: false}, // variant 'c' outside 8/9/a/b
+		{id: "550e8400e29b41d4a716446655440000", want: false},     // missing hyphens
+		{id: "550e8400-e29b-41d4-a716-44665544000g", want: false}, // non-hex
+		{id: "550e8400-e29b-41d4-a716-4466554400001", want: false},
+	}
+	for _, tc := range cases {
+		if got := hasNewEventUUID(tc.id); got != tc.want {
+			t.Errorf("hasNewEventUUID(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	t1 := t0.Add(10 * time.Millisecond)
+	t2 := t0.Add(20 * time.Millisecond)
+	t3 := t0.Add(30 * time.Millisecond)
+
+	rootID := identity{invocationID: "inv-causal", agentName: "root"}
+	outerID := identity{invocationID: "inv-causal", agentName: "outer"}
+	innerID := identity{invocationID: "inv-causal", agentName: "inner"}
+
+	t.Run("excludedByEventTimestamp unrespondedAtPop", func(t *testing.T) {
+		ra := retiredActivation{
+			swallower:         retiredSwallower{spanID: "span-1", seq: 2, name: "bot"},
+			retiredAtSeq:      3,
+			completedOrTask:   true,
+			unrespondedAtPop:  true,
+			goroutineID:       42,
+			startPlatformTime: t0,
+		}
+		if ra.excludedByEventTimestamp("span-2", 4, 42, false, t1, t2, true) {
+			t.Fatal("excludedByEventTimestamp = true when unrespondedAtPop = true, want false")
+		}
+		ra.unrespondedAtPop = false
+		if !ra.excludedByEventTimestamp("span-2", 4, 42, false, t1, t2, true) {
+			t.Fatal("excludedByEventTimestamp = false when unrespondedAtPop = false, want true")
+		}
+	})
+
+	t.Run("canOwnEventCreatedAt boundaries", func(t *testing.T) {
+		base := retiredActivation{
+			startPlatformTime:     t1,
+			retiredAtPlatformTime: t2,
+		}
+		if !base.canOwnEventCreatedAt(time.Time{}, false) {
+			t.Fatal("zero evCreatedAt should be allowed for legacy callers")
+		}
+		if base.canOwnEventCreatedAt(t2, false) {
+			t.Fatal("non-zero evCreatedAt without valid UUIDv4 must fail closed")
+		}
+		if base.canOwnEventCreatedAt(t0, true) {
+			t.Fatal("evCreatedAt before startPlatformTime must fail closed")
+		}
+		if !base.canOwnEventCreatedAt(t2, true) {
+			t.Fatal("evCreatedAt equal to retiredAtPlatformTime should be allowed")
+		}
+		if base.canOwnEventCreatedAt(t3, true) {
+			t.Fatal("evCreatedAt after retiredAtPlatformTime without AfterAgentCallbacks must fail closed")
+		}
+		withCB := base
+		withCB.hasAfterAgentCallbacks = true
+		if !withCB.canOwnEventCreatedAt(t3, true) {
+			t.Fatal("evCreatedAt after retiredAtPlatformTime with AfterAgentCallbacks should be allowed while parent is open")
+		}
+		withCB.parentRetiredAtPlatformTime = t3
+		if !withCB.canOwnEventCreatedAt(t3, true) {
+			t.Fatal("evCreatedAt equal to parentRetiredAtPlatformTime should be allowed")
+		}
+		if withCB.canOwnEventCreatedAt(t3.Add(time.Millisecond), true) {
+			t.Fatal("evCreatedAt after parentRetiredAtPlatformTime must fail closed")
+		}
+	})
+
+	t.Run("clearRetiredCauseForEventLocked pre-failure timestamp fails closed", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		innerSpan := inv.agentStack[2]
+		innerSpan.completed = true
+		innerSpan.hasAfterAgentCallbacks = true
+		innerSpan.startPlatformTime = t0
+		innerSpan.retiredCauses = []retiredCause{{
+			err:          errors.New("child failure"),
+			name:         "child",
+			platformTime: t2,
+		}}
+		inv.retireAgentAtLocked(2, true, innerSpan.seq, t2)
+
+		// Event stamped before failure (t1 < t2) or at exact failure tick (t2 == t2) must not clear.
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t1, true)
+		if len(rootSpan.retiredCauses) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("pre-failure event at t1 cleared cause: len(retiredCauses) = %d, want 1", len(rootSpan.retiredCauses))
+		}
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t2, true)
+		if len(rootSpan.retiredCauses) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("same-tick event at t2 cleared cause: len(retiredCauses) = %d, want 1", len(rootSpan.retiredCauses))
+		}
+		// Non-UUID event must not clear either.
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t3, false)
+		if len(rootSpan.retiredCauses) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("non-UUID event at t3 cleared cause: len(retiredCauses) = %d, want 1", len(rootSpan.retiredCauses))
+		}
+		// Genuine post-failure AfterAgentCallback event clears the cause.
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t3, true)
+		got := len(rootSpan.retiredCauses)
+		inv.mu.Unlock()
+		if got != 0 {
+			t.Fatalf("post-failure event at t3 left len(retiredCauses) = %d, want 0", got)
+		}
+	})
+
+	t.Run("clearRetiredCauseForEventLocked live open activation blocks clearing retired failure", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		inner1 := inv.agentStack[2]
+		inner1.completed = true
+		inner1.startPlatformTime = t0
+		inner1.retiredCauses = []retiredCause{{
+			err:          errors.New("inner1 child failure"),
+			name:         "child",
+			platformTime: t1,
+		}}
+		inv.retireAgentAtLocked(2, true, inner1.seq, t1)
+		inv.mu.Unlock()
+
+		// Push live second activation of inner while inner1's retired cause sits on root.
+		tm.pushAgentSpan(ctx, innerID)
+		inv.mu.Lock()
+		inner2 := inv.agentStack[2]
+		inner2.startPlatformTime = t2
+
+		// With unrespondedAtPop=true on inner1, even an event at t3 must stay ambiguous
+		// against live inner2 and preserve inner1's cause.
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t3, true)
+		if len(rootSpan.retiredCauses) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("live open inner2 failed to block clearing inner1 cause: len=%d, want 1", len(rootSpan.retiredCauses))
+		}
+		// Even with an explicit timestamp at t2 (> inner1 failure, == inner2 start),
+		// both inner1 (with AfterAgentCallbacks) and open inner2 match.
+		inv.retiredActivations[0].unrespondedAtPop = false
+		inv.retiredActivations[0].hasAfterAgentCallbacks = true
+		inv.clearRetiredCauseForEventLocked("inner", "", "", t2, true)
+		got := len(rootSpan.retiredCauses)
+		inv.mu.Unlock()
+		if got != 1 {
+			t.Fatalf("t2 boundary event cleared inner1 cause while inner2 is open: len=%d, want 1", got)
+		}
+	})
+
+	t.Run("completeResponseAt open owner preserves pre-failure cause and unrecoveredError", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		rootSpan.startPlatformTime = t0
+		rootSpan.retiredCauses = []retiredCause{{
+			err:          errors.New("retired child failure"),
+			name:         "child",
+			platformTime: t2,
+		}}
+		inv.unrecoveredErrors = map[string]recordedError{"err1": {
+			err:          errors.New("direct child error"),
+			spanID:       rootSpan.spanID,
+			platformTime: t2,
+		}}
+		inv.mu.Unlock()
+
+		// Pre-failure event (t1 < t2) and non-UUID event at t3 must leave both intact.
+		tm.completeResponseAt(ctx, rootID, "root", "", nil, false, t1, true)
+		inv.mu.Lock()
+		if len(rootSpan.retiredCauses) != 1 || len(inv.unrecoveredErrors) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("pre-failure event cleared open owner failures: causes=%d unrec=%d, want 1 and 1",
+				len(rootSpan.retiredCauses), len(inv.unrecoveredErrors))
+		}
+		inv.mu.Unlock()
+
+		tm.completeResponseAt(ctx, rootID, "root", "", nil, false, t3, false)
+		inv.mu.Lock()
+		if len(rootSpan.retiredCauses) != 1 || len(inv.unrecoveredErrors) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("non-UUID event cleared open owner failures: causes=%d unrec=%d, want 1 and 1",
+				len(rootSpan.retiredCauses), len(inv.unrecoveredErrors))
+		}
+		inv.mu.Unlock()
+
+		// Genuine post-failure event (t3 > t2, valid UUID) clears both.
+		tm.completeResponseAt(ctx, rootID, "root", "", nil, false, t3, true)
+		inv.mu.Lock()
+		causesLeft := len(rootSpan.retiredCauses)
+		unrecLeft := len(inv.unrecoveredErrors)
+		inv.mu.Unlock()
+		if causesLeft != 0 || unrecLeft != 0 {
+			t.Fatalf("post-failure event left causes=%d unrec=%d, want 0 and 0", causesLeft, unrecLeft)
+		}
+	})
+
+	t.Run("retireDrainedDescendantsAtLocked preserves failurePlatformTime", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, outerID)
+		tm.pushAgentSpan(ctx, identity{invocationID: "inv-causal", agentName: "par"})
+		tm.pushAgentSpan(ctx, identity{invocationID: "inv-causal", agentName: "child", branch: "child"})
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		outerSpan := inv.agentStack[2]
+		parSpan := inv.agentStack[3]
+		childSpan := inv.agentStack[4]
+		childSpan.runDone = true
+		childSpan.canceled = func() (bool, error) { return true, errors.New("child silent err") }
+		outerSpan.completed = true
+		outerSpan.hasAfterAgentCallbacks = true
+		outerSpan.startPlatformTime = t0
+		// Retiring par and outer leaves unresponded child on stack and stamps child.failurePlatformTime = t2.
+		inv.retireAgentAtLocked(3, true, parSpan.seq, t2)
+		inv.retireAgentAtLocked(2, true, outerSpan.seq, t2.Add(time.Millisecond))
+		if childSpan.failurePlatformTime != t2 {
+			inv.mu.Unlock()
+			t.Fatalf("child.failurePlatformTime = %v, want %v", childSpan.failurePlatformTime, t2)
+		}
+		// Now suppose outer's AfterAgentCallback event arrives (created at t3 > t2) while wall time is much later.
+		childSpan.runDone = false // allow drain on recovery replay
+		inv.retireDrainedDescendantsAtLocked(t3.Add(time.Hour), func(p *spanRecord, openSet map[string]bool) bool {
+			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil && p.name == "outer"
+		})
+		if len(rootSpan.retiredCauses) != 1 || rootSpan.retiredCauses[0].platformTime != t2 {
+			inv.mu.Unlock()
+			t.Fatalf("drained cause platformTime = %v, want preserved %v", rootSpan.retiredCauses, t2)
+		}
+		inv.clearRetiredCauseForEventLocked("outer", "", "", t3, true)
+		causesLeft := len(rootSpan.retiredCauses)
+		inv.mu.Unlock()
+		if causesLeft != 0 {
+			t.Fatalf("post-failure outer recovery at t3 failed to clear drained cause: len=%d", causesLeft)
+		}
+	})
+
+	t.Run("pruneSettledRetiredActivationsLocked O(1) compaction over 2000 iterations", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		guardID := identity{invocationID: "inv-causal", agentName: "guard"}
+		tm.pushAgentSpan(ctx, guardID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		guardSpan := inv.agentStack[2]
+		for iter := range 2000 {
+			ts := t0.Add(time.Duration(iter+1) * time.Millisecond)
+			rec := &spanRecord{
+				spanID:                 fmt.Sprintf("bot-%d", iter),
+				parentSpanID:           guardSpan.spanID,
+				kind:                   spanKindAgent,
+				name:                   "bot",
+				parent:                 guardSpan,
+				seq:                    inv.nextSeqLocked(),
+				completed:              true,
+				ownResponse:            true,
+				goroutineID:            7,
+				startPlatformTime:      ts,
+				hasAfterAgentCallbacks: false,
+			}
+			openSet := inv.openSpanSetLocked()
+			inv.recordRetiredActivationsAtLocked(openSet, ts, rec)
+			inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		}
+		afterClean := len(inv.retiredActivations)
+		firstID := inv.retiredActivations[0].swallower.spanID
+		midCompacted := afterClean == 3 && inv.retiredActivations[1].compactedHull
+		lastID := inv.retiredActivations[afterClean-1].swallower.spanID
+
+		// Adding one surviving failed activation under root remains unaffected and clean entries stay bounded.
+		failTS := t0.Add(2500 * time.Millisecond)
+		failedRec := &spanRecord{
+			spanID:                 "bot-fail",
+			parentSpanID:           rootSpan.spanID,
+			kind:                   spanKindAgent,
+			name:                   "bot",
+			parent:                 rootSpan,
+			seq:                    inv.nextSeqLocked(),
+			completed:              true,
+			goroutineID:            7,
+			startPlatformTime:      failTS,
+			hasAfterAgentCallbacks: true,
+		}
+		rootSpan.retiredCauses = append(rootSpan.retiredCauses, retiredCause{
+			err:          errors.New("failed child"),
+			name:         "child",
+			platformTime: failTS,
+			swallowers:   []retiredSwallower{{spanID: failedRec.spanID, seq: failedRec.seq, name: "bot"}},
+		})
+		inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), failTS, failedRec)
+		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		withSurviving := len(inv.retiredActivations)
+
+		// Closing guardSpan and rootSpan leaves no open guard and drains all clean entries.
+		rootSpan.retiredCauses = nil
+		inv.retireAgentAtLocked(2, true, guardSpan.seq, failTS.Add(time.Millisecond))
+		inv.retireAgentAtLocked(1, true, rootSpan.seq, failTS.Add(2*time.Millisecond))
+		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		inv.pruneSettledRetiredActivationsLocked("guard", "", "")
+		inv.pruneSettledRetiredActivationsLocked("root", "", "")
+		afterAllClose := len(inv.retiredActivations)
+		inv.mu.Unlock()
+
+		if afterClean > 3 {
+			t.Fatalf("after 2000 clean iterations under open guard: len(retiredActivations) = %d, want <= 3", afterClean)
+		}
+		if !midCompacted {
+			t.Fatalf("after 2000 clean iterations: expected 3 entries with compactedHull at index 1, got len=%d", afterClean)
+		}
+		if firstID != "bot-0" || lastID != "bot-1999" {
+			t.Fatalf("boundary representatives = (%q, %q), want (%q, %q)", firstID, lastID, "bot-0", "bot-1999")
+		}
+		if withSurviving > 4 {
+			t.Fatalf("with one surviving activation: len(retiredActivations) = %d, want <= 4", withSurviving)
+		}
+		if afterAllClose != 0 {
+			t.Fatalf("after closing all guards and settling cause: len(retiredActivations) = %d, want 0", afterAllClose)
+		}
+	})
+
+	t.Run("compacted middle hull preserves candidate at t2 and blocks false clear of earlier failure", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		rootSpan.propagatesChildError = false
+
+		err0 := errors.New("bot-0 earlier failure")
+		bot0 := &spanRecord{
+			spanID:                 "bot-0",
+			parentSpanID:           rootSpan.spanID,
+			kind:                   spanKindAgent,
+			name:                   "bot",
+			parent:                 rootSpan,
+			seq:                    inv.nextSeqLocked(),
+			completed:              true,
+			ownResponse:            true,
+			goroutineID:            7,
+			startPlatformTime:      t0,
+			hasAfterAgentCallbacks: true,
+		}
+		rootSpan.retiredCauses = append(rootSpan.retiredCauses, retiredCause{
+			err:          err0,
+			name:         "child",
+			platformTime: t0,
+			swallowers:   []retiredSwallower{{spanID: bot0.spanID, seq: bot0.seq, name: "bot"}},
+		})
+		inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(time.Millisecond), bot0)
+
+		for iter := 1; iter <= 4; iter++ {
+			ts := t0.Add(time.Duration(iter*10) * time.Millisecond)
+			rec := &spanRecord{
+				spanID:                 fmt.Sprintf("bot-%d", iter),
+				parentSpanID:           rootSpan.spanID,
+				kind:                   spanKindAgent,
+				name:                   "bot",
+				parent:                 rootSpan,
+				seq:                    inv.nextSeqLocked(),
+				completed:              true,
+				ownResponse:            true,
+				goroutineID:            7,
+				startPlatformTime:      ts,
+				hasAfterAgentCallbacks: false,
+			}
+			inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), ts, rec)
+			inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		}
+
+		// A delayed buffered event at t2 = t0+20ms matches both bot-0 (open parent
+		// with callbacks) and the compacted middle hull covering [t2..t3], so err0
+		// must remain preserved.
+		t2 := t0.Add(20 * time.Millisecond)
+		inv.clearRetiredCauseForEventLocked("bot", "", "", t2, true)
+		causeAfterMiddle := rootSpan.openFailureCause()
+
+		// A genuine recovery event from bot-0 at t0+5ms (before bot-1..bot-4 started)
+		// matches only bot-0 and clears err0 cleanly.
+		inv.clearRetiredCauseForEventLocked("bot", "", "", t0.Add(5*time.Millisecond), true)
+		causeAfterBot0Recovery := rootSpan.openFailureCause()
+
+		// Additionally, a newer uncompacted clean activation bot-5 starting at
+		// t5 = t0+50ms with a post-start event at t5+1ms excludes midHull and clears
+		// bot-5's own swallowed error even when midHull covers callbacks across [t2..t3].
+		t5 := t0.Add(50 * time.Millisecond)
+		err5 := errors.New("bot-5 recoverable failure")
+		bot5 := &spanRecord{
+			spanID:                 "bot-5",
+			parentSpanID:           rootSpan.spanID,
+			kind:                   spanKindAgent,
+			name:                   "bot",
+			parent:                 rootSpan,
+			seq:                    inv.nextSeqLocked(),
+			completed:              true,
+			ownResponse:            true,
+			goroutineID:            7,
+			startPlatformTime:      t5,
+			hasAfterAgentCallbacks: false,
+		}
+		rootSpan.retiredCauses = append(rootSpan.retiredCauses, retiredCause{
+			err:          err5,
+			name:         "child",
+			platformTime: t5,
+			swallowers:   []retiredSwallower{{spanID: bot5.spanID, seq: bot5.seq, name: "bot"}},
+		})
+		inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t5.Add(2*time.Millisecond), bot5)
+		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		inv.clearRetiredCauseForEventLocked("bot", "", "", t5.Add(time.Millisecond), true)
+		causeAfterNewer := rootSpan.openFailureCause()
+		inv.mu.Unlock()
+
+		if !errors.Is(causeAfterMiddle, err0) {
+			t.Fatalf("middle candidate event at t2 cleared earlier cause: got=%v, want err0 (%v)", causeAfterMiddle, err0)
+		}
+		if causeAfterBot0Recovery != nil {
+			t.Fatalf("genuine bot-0 recovery event at t0+5ms failed to clear err0: got=%v, want nil", causeAfterBot0Recovery)
+		}
+		if causeAfterNewer != nil {
+			t.Fatalf("newer uncompacted activation bot-5 failed to clear its cause: got=%v, want nil", causeAfterNewer)
+		}
+	})
+
+	t.Run("open failing concurrent peer blocks retiredPeerCount from clearing earlier failure", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		rootRec.propagatesChildError = false
+		inv.mu.Unlock()
+
+		workerID := identity{invocationID: rootID.invocationID, agentName: "bot", branch: ""}
+		parID := identity{invocationID: rootID.invocationID, agentName: "par", branch: ""}
+		childID := identity{invocationID: rootID.invocationID, agentName: "child", branch: "c"}
+		err1 := errors.New("bot-1 recoverable")
+		err3 := errors.New("bot-3 open failure")
+
+		// Push bot-3 first so it stays open as a concurrent peer on agentStack.
+		tm.pushAgentSpan(ctx, workerID)
+		inv.mu.Lock()
+		bot3 := inv.agentStack[len(inv.agentStack)-1]
+		bot3.propagatesChildError = false
+		inv.mu.Unlock()
+
+		// Run and retire failing bot-1 concurrently while bot-3 remains open.
+		tm.pushAgentSpan(ctx, workerID)
+		tm.completeResponse(ctx, workerID, "bot", "", nil)
+		tm.pushAgentSpan(ctx, parID)
+		cCtx, cancelC := context.WithCancelCause(ctx)
+		tm.pushAgentSpan(cCtx, childID)
+		cancelC(err1)
+		inv.mu.Lock()
+		n := len(inv.agentStack)
+		inv.agentStack[n-3].propagatesChildError = false
+		inv.agentStack[n-2].propagatesChildError = true
+		inv.agentStack[n-1].runDone = true
+		inv.mu.Unlock()
+		tm.popAgentSpan(cCtx, childID)
+		tm.popAgentSpan(ctx, parID)
+		tm.popAgentSpan(ctx, workerID)
+
+		// Open concurrent peer bot-3 fails and produces an untimestamped event.
+		inv.mu.Lock()
+		beforeComplete := rootRec.openFailureCause()
+		retiredCount := len(inv.retiredActivations)
+		retiredPeer := inv.retiredPeerCount[llmKey(workerID)]
+		inv.mu.Unlock()
+		if !errors.Is(beforeComplete, err1) {
+			t.Fatalf("before completeResponse: root cause=%v retiredActivations=%d retiredPeer=%d, want err1 (%v)", beforeComplete, retiredCount, retiredPeer, err1)
+		}
+		tm.pushLLMSpan(ctx, workerID)
+		tm.recordError(ctx, workerID, llmKey(workerID), err3)
+		tm.popLLMSpan(ctx, workerID, false)
+		tm.completeResponse(ctx, rootID, "bot", "", nil)
+
+		inv.mu.Lock()
+		gotCause := rootRec.openFailureCause()
+		inv.mu.Unlock()
+		if !errors.Is(gotCause, err1) {
+			t.Fatalf("open failing concurrent peer bot-3 cleared earlier cause: got=%v, want err1 (%v)", gotCause, err1)
+		}
+	})
+
+	t.Run("unforwarded non-UUID model event after error absorbs onto parent and preserves open llmSpans", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		childID := identity{invocationID: rootID.invocationID, agentName: "child"}
+		tm.pushAgentSpan(ctx, childID)
+		tm.pushLLMSpan(ctx, childID)
+		tm.recordError(ctx, childID, llmKey(childID), errors.New("boom"))
+
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		childRec := inv.agentStack[len(inv.agentStack)-1]
+		childRec.unforwardedModelEvents = 1
+		var errTS time.Time
+		for _, e := range inv.unrecoveredErrors {
+			if !e.collateral && e.platformTime.After(errTS) {
+				errTS = e.platformTime
+			}
+		}
+		inv.mu.Unlock()
+		if errTS.IsZero() {
+			t.Fatal("expected non-zero unrecovered error timestamp")
+		}
+
+		evTS := errTS.Add(10 * time.Millisecond)
+		// Non-UUID (hasEventID == false) unforwarded event stamped after the error must absorb.
+		tm.completeResponseAt(ctx, childID, "child", "", nil, false, evTS, false)
+
+		inv.mu.Lock()
+		llmStillOpenAfterNonUUID := inv.llmSpans[llmKey(childID)] != nil
+		ownAfterNonUUID := childRec.ownResponse
+		inv.mu.Unlock()
+		if !llmStillOpenAfterNonUUID || ownAfterNonUUID {
+			t.Fatalf("non-UUID unforwarded event claimed response: llmStillOpen=%v ownResponse=%v, want true/false", llmStillOpenAfterNonUUID, ownAfterNonUUID)
+		}
+
+		// By contrast, a fresh UUID-stamped post-error event (hasEventID == true) may own response.
+		inv.mu.Lock()
+		childRec.unforwardedModelEvents = 1
+		inv.mu.Unlock()
+		tm.completeResponseAt(ctx, childID, "child", "", nil, false, evTS.Add(time.Millisecond), true)
+
+		inv.mu.Lock()
+		llmAfterUUID := inv.llmSpans[llmKey(childID)] != nil
+		ownAfterUUID := childRec.ownResponse
+		inv.mu.Unlock()
+		if llmAfterUUID || !ownAfterUUID {
+			t.Fatalf("UUID-stamped post-error event did not own response: llmStillOpen=%v ownResponse=%v, want false/true", llmAfterUUID, ownAfterUUID)
+		}
 	})
 }

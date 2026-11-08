@@ -44,6 +44,7 @@ import (
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
 	"cloud.google.com/go/bigquery/storage/apiv1/storagepb"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
@@ -7994,4 +7995,394 @@ func streamBufferedConcurrentRun(
 			return
 		}
 	}
+}
+
+func TestBufferedPreFailureContent_Runner(t *testing.T) {
+	runCase := func(t *testing.T, withOuter bool) {
+		t.Helper()
+		p, requests, _ := setupTestPlugin(t)
+		errChild := errors.New("child branch failure after progress")
+
+		child, err := agent.New(agent.Config{
+			Name: "child",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "child"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child partial")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, errChild)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(child): %v", err)
+		}
+		par := newParallelAgent(t, "inner_par", child)
+
+		inner, err := agent.New(agent.Config{
+			Name:      "inner",
+			SubAgents: []agent.Agent{par},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					progress := session.NewEvent(ctx, ctx.InvocationID())
+					progress.Author = "inner"
+					progress.Branch = ctx.Branch()
+					progress.Content = textContent("model", "starting child")
+					if !yield(progress, nil) {
+						return
+					}
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner): %v", err)
+		}
+
+		target := inner
+		if withOuter {
+			outer, err := agent.New(agent.Config{
+				Name:      "outer",
+				SubAgents: []agent.Agent{inner},
+				Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+					return func(yield func(*session.Event, error) bool) {
+						for ev, runErr := range inner.Run(ctx) {
+							if runErr != nil {
+								continue
+							}
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("agent.New(outer): %v", err)
+			}
+			target = outer
+		}
+
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{target},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered []*session.Event
+					for ev, runErr := range target.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Author == "inner" {
+							buffered = append(buffered, ev)
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					for _, ev := range buffered {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-pre-failure-progress", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errChild.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, errChild.Error())
+		}
+	}
+
+	t.Run("nested outer wrapper", func(t *testing.T) {
+		runCase(t, true)
+	})
+	t.Run("direct child of root", func(t *testing.T) {
+		runCase(t, false)
+	})
+}
+
+func TestLaterLiveResponseDoesNotClearRetiredFailure_Runner(t *testing.T) {
+	p, requests, _ := setupTestPlugin(t)
+	err1 := errors.New("run1 unrecovered parallel failure")
+
+	child1, err := agent.New(agent.Config{
+		Name: "child1",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "child1"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "child1 partial")
+				if !yield(ev, nil) {
+					return
+				}
+				yield(nil, err1)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child1): %v", err)
+	}
+	child2, err := agent.New(agent.Config{
+		Name: "child2",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "child2"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "child2 ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child2): %v", err)
+	}
+	par1 := newParallelAgent(t, "inner_par_1", child1)
+	par2 := newParallelAgent(t, "inner_par_2", child2)
+
+	var runIdx int
+	inner, err := agent.New(agent.Config{
+		Name:      "inner",
+		SubAgents: []agent.Agent{par1, par2},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			runIdx++
+			cur := runIdx
+			return func(yield func(*session.Event, error) bool) {
+				par := par1
+				if cur == 2 {
+					par = par2
+				}
+				for ev, runErr := range par.Run(ctx) {
+					if runErr != nil {
+						continue
+					}
+					if !yield(ev, nil) {
+						return
+					}
+				}
+				if cur == 2 {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "inner"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "run2 normal output")
+					yield(ev, nil)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(inner): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{inner},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				for range 2 {
+					for ev, runErr := range inner.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-later-live-response", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error = %v, want nil", err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+	}
+	invErr := onlyRowOfType(t, rows, EventInvocationError)
+	msg, _ := invErr["error_message"].(string)
+	if !strings.Contains(msg, err1.Error()) {
+		t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, err1.Error())
+	}
+}
+
+func TestZeroTimestampBufferedCleanRun_Runner(t *testing.T) {
+	runCase := func(t *testing.T, emitImmediateProgress bool, bufferedID string) {
+		t.Helper()
+		p, requests, _ := setupTestPlugin(t)
+		err2 := errors.New("run2 unrecovered after zero-timestamp clean run1")
+
+		child1, err := agent.New(agent.Config{
+			Name: "child1",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "child1"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child1 ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(child1): %v", err)
+		}
+		child2, err := agent.New(agent.Config{
+			Name: "child2",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "child2"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "child2 partial")
+					if !yield(ev, nil) {
+						return
+					}
+					yield(nil, err2)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(child2): %v", err)
+		}
+		par1 := newParallelAgent(t, "inner_par_1", child1)
+		par2 := newParallelAgent(t, "inner_par_2", child2)
+
+		var runIdx int
+		inner, err := agent.New(agent.Config{
+			Name:      "inner",
+			SubAgents: []agent.Agent{par1, par2},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				runIdx++
+				cur := runIdx
+				return func(yield func(*session.Event, error) bool) {
+					par := par1
+					if cur == 2 {
+						par = par2
+					}
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+					if cur == 1 {
+						if emitImmediateProgress {
+							prog := session.NewEvent(ctx, ctx.InvocationID())
+							prog.Author = "inner"
+							prog.Branch = ctx.Branch()
+							prog.Content = textContent("model", "run1 immediate progress")
+							if !yield(prog, nil) {
+								return
+							}
+						}
+						ev := &session.Event{
+							ID:           bufferedID,
+							InvocationID: ctx.InvocationID(),
+							Author:       "inner",
+							Branch:       ctx.Branch(),
+							LLMResponse:  model.LLMResponse{Content: textContent("model", "run1 clean summary")},
+						}
+						yield(ev, nil)
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner): %v", err)
+		}
+
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{inner},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					var buffered []*session.Event
+					for range 2 {
+						for ev, runErr := range inner.Run(ctx) {
+							if runErr != nil {
+								yield(nil, runErr)
+								return
+							}
+							if ev != nil && ev.Author == "inner" && ev.Timestamp.IsZero() {
+								buffered = append(buffered, ev)
+								continue
+							}
+							if ev != nil && !yield(ev, nil) {
+								return
+							}
+						}
+					}
+					for _, ev := range buffered {
+						if !yield(ev, nil) {
+							return
+						}
+					}
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-zero-ts-clean", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		invErr := onlyRowOfType(t, rows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, err2.Error()) {
+			t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, err2.Error())
+		}
+	}
+
+	t.Run("single zero-timestamp buffered event", func(t *testing.T) {
+		runCase(t, false, "clean-run-1")
+	})
+	t.Run("responded first run with additional buffered zero-timestamp UUIDv4 event", func(t *testing.T) {
+		runCase(t, true, uuid.NewString())
+	})
 }
