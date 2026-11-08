@@ -17,6 +17,8 @@ package runner_test
 import (
 	"context"
 	"iter"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -587,4 +589,60 @@ func TestRun_FunctionResponsesSelectEveryCaller(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRun_FunctionResponseReachesLLMAgentAfterWorkflow checks that an LLM agent
+// after a graph workflow runs on the resume turn and sees the user's answer as
+// context, whether or not the workflow's last node emits content.
+func TestRun_FunctionResponseReachesLLMAgentAfterWorkflow(t *testing.T) {
+	for _, silent := range []bool{true, false} {
+		t.Run(map[bool]string{true: "last node emits no content", false: "last node emits content"}[silent], func(t *testing.T) {
+			var runs atomic.Int32
+			last := customAgent(t, "last", &runs, func(_ agent.InvocationContext, ev *session.Event) {
+				if silent {
+					ev.Content = nil
+				}
+			})
+			b := joinResumeAgent(t, "b", "B", true)
+			bn, ln := joinResumeAgentNode(t, b), joinResumeAgentNode(t, last)
+			wf, err := workflowagent.New(workflowagent.Config{
+				Name: "wf", SubAgents: []agent.Agent{b, last},
+				Edges: []workflow.Edge{{From: workflow.Start, To: bn}, {From: bn, To: ln}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterModel := &testutil.MockModel{Responses: []*genai.Content{
+				genai.NewContentFromText("first", genai.RoleModel), genai.NewContentFromText("second", genai.RoleModel),
+			}}
+			after, err := llmagent.New(llmagent.Config{Name: "after", Model: afterModel})
+			if err != nil {
+				t.Fatal(err)
+			}
+			authors, err := runResumeTurn(t, mustSequential(t, "root", wf, after), resumeContent("b", workflow.WorkflowInputFunctionCallName, "approved"), nil)
+			if err != nil {
+				t.Fatalf("resume error: %v, authors = %v", err, authors)
+			}
+			if authors["after"] == 0 {
+				t.Fatalf("after did not run on the resume turn, authors = %v", authors)
+			}
+			req := afterModel.Requests[len(afterModel.Requests)-1]
+			texts := contentTexts(req.Contents)
+			if !slices.ContainsFunc(texts, func(s string) bool { return strings.Contains(s, "approved") }) {
+				t.Errorf("after's request does not carry the user's answer, texts = %q", texts)
+			}
+		})
+	}
+}
+
+func contentTexts(contents []*genai.Content) []string {
+	var texts []string
+	for _, c := range contents {
+		for _, p := range c.Parts {
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		}
+	}
+	return texts
 }
