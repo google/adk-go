@@ -212,6 +212,19 @@ func TestAfterModelCallback(t *testing.T) {
 			shouldHaveRationaleState: true,
 		},
 		{
+			// A nil part in a model response (a degenerate provider chunk) is
+			// skipped, not dereferenced; the function call after it is still
+			// rewritten.
+			name:                     "nil part before the function call",
+			content:                  &genai.Content{Parts: []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{ID: "fcId", Name: "test_agent", Args: map[string]any{"request": "do", "skill_id": "s1"}}}}},
+			originalDecls:            map[string]*genai.FunctionDeclaration{"test_agent": {Name: "test_agent"}},
+			wantArgs:                 map[string]any{"request": "do"},
+			wantSkillStateKey:        "fcId/skill_id",
+			wantSkillStateValue:      "s1",
+			shouldHaveSkillState:     true,
+			shouldHaveRationaleState: false,
+		},
+		{
 			name:                     "agent tool with only skill_id",
 			content:                  &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fcId", Name: "test_agent", Args: map[string]any{"request": "do", "skill_id": "s1"}}}}},
 			originalDecls:            map[string]*genai.FunctionDeclaration{"test_agent": {Name: "test_agent"}},
@@ -281,14 +294,17 @@ func TestAfterModelCallback(t *testing.T) {
 				t.Fatalf("AfterModelCallback failed: %v", err)
 			}
 
-			// Check if args are pruned
-			if len(tc.content.Parts) > 0 {
-				part := tc.content.Parts[0]
-				if part.FunctionCall != nil && tc.wantArgs != nil {
+			// Check if args are pruned, on the first function-call part.
+			for _, part := range tc.content.Parts {
+				if part == nil || part.FunctionCall == nil {
+					continue
+				}
+				if tc.wantArgs != nil {
 					if diff := cmp.Diff(tc.wantArgs, part.FunctionCall.Args); diff != "" {
 						t.Errorf("Args mismatch (-want +got):\n%s", diff)
 					}
 				}
+				break
 			}
 
 			// Check session state
