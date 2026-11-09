@@ -1,0 +1,45 @@
+Get metadata information about a BigQuery dataset.
+
+Args:
+    project_id (str): The Google Cloud project id containing the dataset.
+    dataset_id (str): The BigQuery dataset id.
+
+Returns:
+    dict: Dictionary representing the properties of the dataset.
+
+Examples:
+    >>> get_dataset_info("bigquery-public-data", "cdc_places")
+    {
+      "kind": "bigquery#dataset",
+      "etag": "fz9BaiXKgbGi53EpI2rJug==",
+      "id": "bigquery-public-data:cdc_places",
+      "selfLink": "https://content-bigquery.googleapis.com/bigquery/v2/projects/bigquery-public-data/datasets/cdc_places",
+      "datasetReference": {
+        "datasetId": "cdc_places",
+        "projectId": "bigquery-public-data"
+      },
+      "description": "Local Data for Better Health, County Data",
+      "access": [
+        {
+          "role": "WRITER",
+          "specialGroup": "projectWriters"
+        },
+        {
+          "role": "OWNER",
+          "specialGroup": "projectOwners"
+        },
+        {
+          "role": "OWNER",
+          "userByEmail": "some-redacted-email@bigquery-public-data.iam.gserviceaccount.com"
+        },
+        {
+          "role": "READER",
+          "specialGroup": "projectReaders"
+        }
+      ],
+      "creationTime": "1640891845643",
+      "lastModifiedTime": "1640891845643",
+      "location": "US",
+      "type": "DEFAULT",
+      "maxTimeTravelHours": "168"
+    }
