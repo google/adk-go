@@ -499,6 +499,15 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			SessionResumption:        runCfg.Live.SessionResumption,
 			InputAudioTranscription:  runCfg.Live.InputAudioTranscription,
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
+			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
+		}
+		// adk-python leaves affective dialog and proactivity unset for Gemini
+		// 3.x Live models; do the same.
+		if !googlellm.IsGemini3xLive(f.Model.Name()) {
+			if runCfg.Live.EnableAffectiveDialog {
+				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
+			}
+			liveConnectConfig.Proactivity = runCfg.Live.Proactivity
 		}
 
 		iCtx, isIContext := ctx.(*icontext.InvocationContext)

@@ -115,7 +115,7 @@ func (c *LiveConnection) SendContent(ctx context.Context, content *genai.Content
 		}
 		log.Printf("sending tool response\n") //nolint:forbidigo // pre-slog call site
 	} else {
-		if isGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
+		if IsGemini3xLive(c.modelName) && len(content.Parts) == 1 && content.Parts[0].Text != "" {
 			log.Printf("Attempting to send text via SendRealtimeInput\n") //nolint:forbidigo // pre-slog call site
 			err := c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 				Text: content.Parts[0].Text,
@@ -156,7 +156,7 @@ func (c *LiveConnection) SendRealtime(ctx context.Context, input any) error {
 			}
 		}
 
-		if isGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
+		if IsGemini3xLive(c.modelName) || isGemini35LiveTranslate(c.modelName) {
 			if strings.HasPrefix(v.MIMEType, "image/") {
 				return c.sdkSession.SendRealtimeInput(genai.LiveRealtimeInput{
 					Video: v,
