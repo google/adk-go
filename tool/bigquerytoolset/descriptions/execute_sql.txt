@@ -1,0 +1,75 @@
+Run a BigQuery or BigQuery ML SQL query in the project and return the result.
+
+
+Args:
+    project_id (str): The GCP project id in which the query should be
+      executed.
+    query (str): The BigQuery SQL query to be executed.
+    dry_run (bool, default False): If True, the query will not be executed.
+      Instead, the query will be validated and information about the query
+      will be returned. Defaults to False.
+
+Returns:
+    dict: If `dry_run` is False, dictionary representing the result of the
+          query. If the result contains the key "result_is_likely_truncated"
+          with value True, it means that there may be additional rows matching
+          the query not returned in the result.
+          If `dry_run` is True, dictionary with "dry_run_info" field
+          containing query information returned by BigQuery.
+
+Examples:
+    Fetch data or insights from a table:
+
+        >>> execute_sql("my_project",
+        ... "SELECT island, COUNT(*) AS population "
+        ... "FROM `bigquery-public-data`.`ml_datasets`.`penguins` GROUP BY island")
+        {
+          "status": "SUCCESS",
+          "rows": [
+              {
+                  "island": "Dream",
+                  "population": 124
+              },
+              {
+                  "island": "Biscoe",
+                  "population": 168
+              },
+              {
+                  "island": "Torgersen",
+                  "population": 52
+              }
+          ]
+        }
+
+    Validate a query and estimate costs without executing it:
+
+        >>> execute_sql(
+        ...     "my_project",
+        ...     "SELECT island FROM "
+        ...     "`bigquery-public-data`.`ml_datasets`.`penguins`",
+        ...     dry_run=True
+        ... )
+        {
+          "status": "SUCCESS",
+          "dry_run_info": {
+            "configuration": {
+              "dryRun": True,
+              "jobType": "QUERY",
+              "query": {
+                "destinationTable": {
+                  "datasetId": "_...",
+                  "projectId": "my_project",
+                  "tableId": "anon..."
+                },
+                "priority": "INTERACTIVE",
+                "query": "SELECT island FROM `bigquery-public-data`.`ml_datasets`.`penguins`",
+                "useLegacySql": False,
+                "writeDisposition": "WRITE_TRUNCATE"
+              }
+            },
+            "jobReference": {
+              "location": "US",
+              "projectId": "my_project"
+            }
+          }
+        }

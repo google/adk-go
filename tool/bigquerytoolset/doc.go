@@ -14,13 +14,18 @@
 
 // Package bigquerytoolset provides a [tool.Toolset] whose tools let an agent
 // explore BigQuery: list the datasets in a project and the tables in a
-// dataset, and read the metadata of a dataset, a table or a job.
+// dataset, read the metadata of a dataset, a table or a job, and run
+// read-only SQL queries.
 //
 // The tools have the same names, arguments and results as adk-python's
-// BigQueryToolset, so prompts and skills written for it work unchanged. The
-// one difference in results: get_job_info returns the job's creationTime,
-// startTime and endTime statistics as the strings the REST API sends, where
-// adk-python returns numbers. When
+// BigQueryToolset, so prompts and skills written for it work unchanged.
+// execute_sql runs only SELECT statements, like adk-python's with its default
+// WriteMode.BLOCKED. The differences in results: get_job_info returns the
+// job's creationTime, startTime and endTime statistics as the strings the REST
+// API sends, where adk-python returns numbers; execute_sql returns some
+// values adk-python turns into Python strings as the REST API sends them,
+// and sets result_is_likely_truncated only when rows were left out (see
+// [Config.MaxQueryResultRows]). When
 // BigQuery rejects a call, for example because a dataset does not exist, or
 // an id argument is empty, the tool returns
 // {"status": "ERROR", "error_details": "..."} to the model so it can correct
