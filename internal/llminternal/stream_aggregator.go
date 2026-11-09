@@ -105,8 +105,7 @@ func (s *streamingResponseAggregator) aggregateResponse(llmResponse *model.LLMRe
 
 	for _, part := range llmResponse.Content.Parts {
 		// gemini 3 in streaming returns a last response with an empty part. We will filter it out.
-		// A nil part is the same kind of junk chunk, and dereferencing it for
-		// the reflect check would panic the aggregator.
+		// A nil part would panic the reflect check below, so skip it the same way.
 		if part == nil || reflect.ValueOf(*part).IsZero() {
 			continue
 		}
