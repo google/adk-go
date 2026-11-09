@@ -532,6 +532,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		return nil, err
 	}
 
+	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if config.createViews() && state.runner != nil {
@@ -955,7 +956,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, hasNewEventUUID(ev.ID))
+			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, hasEventCreationProvenance(ctx, ev.ID))
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -973,6 +974,14 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 	}
 	return nil, nil
+}
+
+// hasEventCreationProvenance reports whether ev.ID carries sufficient creation
+// provenance to trust ev.Timestamp came from session.NewEvent rather than
+// runner fallback stamping on a zero-timestamp event. A canonical UUIDv4 event
+// ID or an active platform.WithUUIDProvider on ctx suffices.
+func hasEventCreationProvenance(ctx context.Context, id string) bool {
+	return id != "" && (hasNewEventUUID(id) || contextHasCustomUUIDProvider(ctx))
 }
 
 // hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4

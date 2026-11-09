@@ -31,6 +31,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"weak"
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
@@ -38,6 +39,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/platform"
+	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -1661,7 +1663,7 @@ type agentChildren struct {
 // The callback context logs a warning from Agent, so the agent is read from
 // the invocation context that WithICDelta derives from it. SubAgents and Name
 // are user code, so callers must not hold a lock.
-func runningAgentChildren(ctx context.Context, name string) agentChildren {
+func runningAgentChildren(ctx context.Context, name string, selfPlugin *baseplugin.Plugin) agentChildren {
 	return orZero(func() agentChildren {
 		c, ok := ctx.(interface {
 			WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext
@@ -1686,7 +1688,7 @@ func runningAgentChildren(ctx context.Context, name string) agentChildren {
 			isParallel:             agType == "ParallelAgent",
 			isWorkflow:             agType == "WorkflowAgent",
 			taskMode:               isLLM && cfg.Mode == llmagent.ModeTask,
-			hasAfterAgentCallbacks: agentHasAfterAgentCallbacks(a),
+			hasAfterAgentCallbacks: agentHasAfterAgentCallbacks(a) || contextHasLaterAfterAgentPlugin(ctx, selfPlugin),
 		}
 		for _, sub := range a.SubAgents() {
 			if sub == nil {
@@ -1914,6 +1916,7 @@ type traceManager struct {
 	traceSeed       string
 	inserts         int
 	logf            func(string, ...any)
+	selfPlugin      weak.Pointer[baseplugin.Plugin]
 
 	// maxTracked, ttl and now are fields so that tests can change them.
 	maxTracked int
@@ -2646,7 +2649,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	startPlatformTime := platform.Now(ctx)
 	ambient := ambientTraceID(ctx)
 	// SubAgents is user code, so it is read before mu is taken.
-	children := runningAgentChildren(ctx, id.agentName)
+	children := runningAgentChildren(ctx, id.agentName, tm.selfPlugin.Value())
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	activation := activationKey(ctx)
 	ended := endedFunc(ctx)
@@ -6255,6 +6258,203 @@ func contextParentMap(ctx context.Context) (res map[string]agent.Agent) {
 		}
 	}
 	return nil
+}
+
+var (
+	contextInterfaceType  = reflect.TypeFor[context.Context]()
+	pluginPtrType         = reflect.TypeFor[*baseplugin.Plugin]()
+	uuidProviderType      = reflect.TypeFor[platform.UUIDProvider]()
+	priorityContextFields = []string{
+		"context",
+		"Context",
+		"c",
+		"ctx",
+		"Ctx",
+		"cancelCtx",
+	}
+)
+
+func isPriorityContextField(name string) bool {
+	return name == "invocationContext" || slices.Contains(priorityContextFields, name)
+}
+
+// walkContextStructs traverses the wrapped context chain of ctx depth-first,
+// innermost wrapper first, calling visit on each unwrapped struct until visit
+// returns true. It skips cyclic references and stops after 512 structs.
+func walkContextStructs(ctx context.Context, visit func(v reflect.Value) bool) {
+	if ctx == nil {
+		return
+	}
+	stack := []reflect.Value{reflect.ValueOf(ctx)}
+	seen := map[visitedContextStruct]bool{}
+	for steps := 0; len(stack) > 0 && steps < 512; steps++ {
+		v := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		var ptr uintptr
+		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
+			if v.IsNil() {
+				v = reflect.Value{}
+				break
+			}
+			if v.Kind() == reflect.Pointer {
+				ptr = v.Pointer()
+			}
+			v = v.Elem()
+		}
+		if !v.IsValid() || v.Kind() != reflect.Struct {
+			continue
+		}
+		if ptr != 0 {
+			visitKey := visitedContextStruct{ptr: ptr, typ: v.Type()}
+			if seen[visitKey] {
+				continue
+			}
+			seen[visitKey] = true
+		}
+		if visit(v) {
+			return
+		}
+		// Push lower-priority parent fields first onto the LIFO stack so the
+		// active Value/FromContext delegation chain is popped innermost-first.
+		if invCtx := v.FieldByName("invocationContext"); invCtx.IsValid() {
+			stack = append(stack, invCtx)
+		}
+		vt := v.Type()
+		for i := v.NumField() - 1; i >= 0; i-- {
+			sf := vt.Field(i)
+			if isPriorityContextField(sf.Name) || sf.Name == "key" || sf.Name == "val" {
+				continue
+			}
+			f := v.Field(i)
+			if f.Type().Implements(contextInterfaceType) ||
+				(f.Kind() == reflect.Struct && reflect.PointerTo(f.Type()).Implements(contextInterfaceType)) {
+				stack = append(stack, f)
+			}
+		}
+		for i := len(priorityContextFields) - 1; i >= 0; i-- {
+			if f := v.FieldByName(priorityContextFields[i]); f.IsValid() {
+				stack = append(stack, f)
+			}
+		}
+	}
+}
+
+func pluginManagerSlice(v reflect.Value) (reflect.Value, bool) {
+	plugins := v.FieldByName("plugins")
+	if plugins.IsValid() && plugins.Kind() == reflect.Slice && plugins.Type().Elem() == pluginPtrType {
+		return plugins, true
+	}
+	return reflect.Value{}, false
+}
+
+// contextHasLaterAfterAgentPlugin inspects ctx innermost-first for ADK's
+// PluginManager and reports whether any plugin registered after self defines
+// an AfterAgentCallback. When self is nil or unmatched by pointer inside that
+// PluginManager, it falls back to matching pluginName once.
+func contextHasLaterAfterAgentPlugin(ctx context.Context, self *baseplugin.Plugin) (res bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+	walkContextStructs(ctx, func(v reflect.Value) bool {
+		plugins, ok := pluginManagerSlice(v)
+		if !ok {
+			if val := v.FieldByName("val"); val.IsValid() {
+				for val.Kind() == reflect.Pointer || val.Kind() == reflect.Interface {
+					if val.IsNil() {
+						// Typed nil *PluginManager explicitly shadows any outer manager.
+						if val.Kind() == reflect.Pointer && val.Type().Elem().Kind() == reflect.Struct {
+							if f, has := val.Type().Elem().FieldByName("plugins"); has && f.Type.Kind() == reflect.Slice && f.Type.Elem() == pluginPtrType {
+								return true
+							}
+						}
+						val = reflect.Value{}
+						break
+					}
+					val = val.Elem()
+				}
+				if val.IsValid() && val.Kind() == reflect.Struct {
+					plugins, ok = pluginManagerSlice(val)
+				}
+			}
+		}
+		if !ok {
+			return false
+		}
+		n := plugins.Len()
+		selfIdx := -1
+		if self != nil {
+			selfPtr := reflect.ValueOf(self).Pointer()
+			for i := 0; i < n; i++ {
+				elem := plugins.Index(i)
+				if elem.Kind() == reflect.Pointer && !elem.IsNil() && elem.Pointer() == selfPtr {
+					selfIdx = i
+					break
+				}
+			}
+		}
+		if selfIdx < 0 {
+			for i := 0; i < n; i++ {
+				elem := plugins.Index(i)
+				if elem.Kind() != reflect.Pointer || elem.IsNil() {
+					continue
+				}
+				nameField := elem.Elem().FieldByName("name")
+				if nameField.IsValid() && nameField.Kind() == reflect.String && nameField.String() == pluginName {
+					selfIdx = i
+					break
+				}
+			}
+		}
+		if selfIdx < 0 {
+			res = false
+			return true
+		}
+		for k := selfIdx + 1; k < n; k++ {
+			elem := plugins.Index(k)
+			if elem.Kind() != reflect.Pointer || elem.IsNil() {
+				continue
+			}
+			cb := elem.Elem().FieldByName("afterAgentCallback")
+			if cb.IsValid() && cb.Kind() == reflect.Func && !cb.IsNil() {
+				res = true
+				return true
+			}
+		}
+		res = false
+		return true
+	})
+	return res
+}
+
+// contextHasCustomUUIDProvider inspects ctx innermost-first for ADK's
+// platform.WithUUIDProvider context entry and reports whether the active
+// provider is non-nil without invoking it.
+func contextHasCustomUUIDProvider(ctx context.Context) (res bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			res = false
+		}
+	}()
+	walkContextStructs(ctx, func(v reflect.Value) bool {
+		key, val := v.FieldByName("key"), v.FieldByName("val")
+		if !key.IsValid() || !val.IsValid() {
+			return false
+		}
+		if key.Kind() == reflect.Interface && !key.IsNil() {
+			key = key.Elem()
+		}
+		if !key.IsValid() || key.Type().PkgPath() != uuidProviderType.PkgPath() || key.Type().Name() != "uuidProviderKey" {
+			return false
+		}
+		if val.Kind() == reflect.Interface && !val.IsNil() {
+			val = val.Elem()
+		}
+		res = val.IsValid() && val.Kind() == reflect.Func && val.Type() == uuidProviderType && !val.IsNil()
+		return true
+	})
+	return res
 }
 
 func exportContextKey(key reflect.Value) (any, bool) {

@@ -8242,60 +8242,197 @@ func TestLaterLiveResponseDoesNotClearRetiredFailure_Runner(t *testing.T) {
 	}
 }
 
-func TestZeroTimestampBufferedCleanRun_Runner(t *testing.T) {
-	runCase := func(t *testing.T, emitImmediateProgress bool, bufferedID string) {
-		t.Helper()
-		p, requests, _ := setupTestPlugin(t)
-		err2 := errors.New("run2 unrecovered after zero-timestamp clean run1")
+func runZeroTimestampBufferedCleanRun(t *testing.T, runCtx context.Context, emitImmediateProgress bool, bufferedID string) {
+	t.Helper()
+	p, requests, _ := setupTestPlugin(t)
+	err2 := errors.New("run2 unrecovered after zero-timestamp clean run1")
 
-		child1, err := agent.New(agent.Config{
-			Name: "child1",
-			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-				return func(yield func(*session.Event, error) bool) {
-					ev := session.NewEvent(ctx, ctx.InvocationID())
-					ev.Author = "child1"
-					ev.Branch = ctx.Branch()
-					ev.Content = textContent("model", "child1 ok")
-					yield(ev, nil)
+	child1, err := agent.New(agent.Config{
+		Name: "child1",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "child1"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "child1 ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child1): %v", err)
+	}
+	child2, err := agent.New(agent.Config{
+		Name: "child2",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "child2"
+				ev.Branch = ctx.Branch()
+				ev.Content = textContent("model", "child2 partial")
+				if !yield(ev, nil) {
+					return
 				}
-			},
-		})
-		if err != nil {
-			t.Fatalf("agent.New(child1): %v", err)
-		}
-		child2, err := agent.New(agent.Config{
-			Name: "child2",
-			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-				return func(yield func(*session.Event, error) bool) {
-					ev := session.NewEvent(ctx, ctx.InvocationID())
-					ev.Author = "child2"
-					ev.Branch = ctx.Branch()
-					ev.Content = textContent("model", "child2 partial")
+				yield(nil, err2)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(child2): %v", err)
+	}
+	par1 := newParallelAgent(t, "inner_par_1", child1)
+	par2 := newParallelAgent(t, "inner_par_2", child2)
+
+	var runIdx int
+	inner, err := agent.New(agent.Config{
+		Name:      "inner",
+		SubAgents: []agent.Agent{par1, par2},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			runIdx++
+			cur := runIdx
+			return func(yield func(*session.Event, error) bool) {
+				par := par1
+				if cur == 2 {
+					par = par2
+				}
+				for ev, runErr := range par.Run(ctx) {
+					if runErr != nil {
+						continue
+					}
 					if !yield(ev, nil) {
 						return
 					}
-					yield(nil, err2)
+				}
+				if cur == 1 {
+					if emitImmediateProgress {
+						prog := session.NewEvent(ctx, ctx.InvocationID())
+						prog.Author = "inner"
+						prog.Branch = ctx.Branch()
+						prog.Content = textContent("model", "run1 immediate progress")
+						if !yield(prog, nil) {
+							return
+						}
+					}
+					ev := &session.Event{
+						ID:           bufferedID,
+						InvocationID: ctx.InvocationID(),
+						Author:       "inner",
+						Branch:       ctx.Branch(),
+						LLMResponse:  model.LLMResponse{Content: textContent("model", "run1 clean summary")},
+					}
+					yield(ev, nil)
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(inner): %v", err)
+	}
+
+	root, err := agent.New(agent.Config{
+		Name:      "root",
+		SubAgents: []agent.Agent{inner},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				var buffered []*session.Event
+				for range 2 {
+					for ev, runErr := range inner.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && ev.Author == "inner" && ev.Timestamp.IsZero() {
+							buffered = append(buffered, ev)
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+				}
+				for _, ev := range buffered {
+					if !yield(ev, nil) {
+						return
+					}
+				}
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	for _, err := range newTestRunner(t, root, p).Run(runCtx, "u1", "s-zero-ts-clean", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error = %v, want nil", err)
+		}
+	}
+	rows := collectRows(t, requests, untilInvocationEnd)
+	if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
+		t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
+	}
+	invErr := onlyRowOfType(t, rows, EventInvocationError)
+	msg, _ := invErr["error_message"].(string)
+	if !strings.Contains(msg, err2.Error()) {
+		t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, err2.Error())
+	}
+}
+
+func TestZeroTimestampBufferedCleanRun_Runner(t *testing.T) {
+	t.Run("single zero-timestamp buffered event", func(t *testing.T) {
+		runZeroTimestampBufferedCleanRun(t, t.Context(), false, "clean-run-1")
+	})
+	t.Run("responded first run with additional buffered zero-timestamp UUIDv4 event", func(t *testing.T) {
+		runZeroTimestampBufferedCleanRun(t, t.Context(), true, uuid.NewString())
+	})
+}
+
+func TestLaterPluginAfterAgentRecovery_Runner(t *testing.T) {
+	newSteppedClockCtx := func(parent context.Context) (context.Context, func(time.Duration)) {
+		var nowUnixNano atomic.Int64
+		base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+		nowUnixNano.Store(base.UnixNano())
+		ctx := platform.WithTimeProvider(parent, func() time.Time {
+			return time.Unix(0, nowUnixNano.Load()).UTC()
+		})
+		step := func(d time.Duration) {
+			nowUnixNano.Add(int64(d))
+		}
+		return ctx, step
+	}
+
+	runRecoveryCase := func(t *testing.T, laterPlugin bool) {
+		t.Helper()
+		p, requests, _ := setupTestPlugin(t)
+		runCtx, stepClock := newSteppedClockCtx(t.Context())
+		errChild := errors.New("parallel branch failure")
+
+		failBranch, err := agent.New(agent.Config{
+			Name: "fail_branch",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "fail_branch"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "fail_branch answer")
+					if !yield(ev, nil) {
+						return
+					}
+					stepClock(time.Millisecond)
+					yield(nil, errChild)
 				}
 			},
 		})
 		if err != nil {
-			t.Fatalf("agent.New(child2): %v", err)
+			t.Fatalf("agent.New(fail_branch): %v", err)
 		}
-		par1 := newParallelAgent(t, "inner_par_1", child1)
-		par2 := newParallelAgent(t, "inner_par_2", child2)
+		par := newParallelAgent(t, "par", failBranch)
 
-		var runIdx int
-		inner, err := agent.New(agent.Config{
-			Name:      "inner",
-			SubAgents: []agent.Agent{par1, par2},
+		rootCfg := agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{par},
 			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-				runIdx++
-				cur := runIdx
 				return func(yield func(*session.Event, error) bool) {
-					par := par1
-					if cur == 2 {
-						par = par2
-					}
 					for ev, runErr := range par.Run(ctx) {
 						if runErr != nil {
 							continue
@@ -8304,55 +8441,345 @@ func TestZeroTimestampBufferedCleanRun_Runner(t *testing.T) {
 							return
 						}
 					}
-					if cur == 1 {
-						if emitImmediateProgress {
-							prog := session.NewEvent(ctx, ctx.InvocationID())
-							prog.Author = "inner"
-							prog.Branch = ctx.Branch()
-							prog.Content = textContent("model", "run1 immediate progress")
-							if !yield(prog, nil) {
-								return
-							}
-						}
-						ev := &session.Event{
-							ID:           bufferedID,
-							InvocationID: ctx.InvocationID(),
-							Author:       "inner",
-							Branch:       ctx.Branch(),
-							LLMResponse:  model.LLMResponse{Content: textContent("model", "run1 clean summary")},
-						}
-						yield(ev, nil)
-					}
+					stepClock(time.Millisecond)
 				}
+			},
+		}
+		plugins := []*baseplugin.Plugin{p}
+		if laterPlugin {
+			tailPlugin, err := baseplugin.New(baseplugin.Config{
+				Name: "tail_recovery_plugin",
+				AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+					if ctx.AgentName() == "root" {
+						stepClock(10 * time.Millisecond)
+						return textContent("model", "recovered-by-later-plugin"), nil
+					}
+					return nil, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("baseplugin.New(tail_recovery_plugin): %v", err)
+			}
+			plugins = append(plugins, tailPlugin)
+		} else {
+			rootCfg.AfterAgentCallbacks = []agent.AfterAgentCallback{
+				func(_ agent.Context) (*genai.Content, error) {
+					stepClock(10 * time.Millisecond)
+					return textContent("model", "recovered-by-agent-callback"), nil
+				},
+			}
+		}
+
+		root, err := agent.New(rootCfg)
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+		for _, err := range newTestRunner(t, root, plugins...).Run(runCtx, "u1", "s-later-plugin-recovery", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+		}
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationCompleted)
+	}
+
+	t.Run("laterPlugin_false", func(t *testing.T) {
+		runRecoveryCase(t, false)
+	})
+	t.Run("laterPlugin_true", func(t *testing.T) {
+		runRecoveryCase(t, true)
+	})
+
+	t.Run("subrunner shadowing control", func(t *testing.T) {
+		outerP, outerRequests, _ := setupTestPlugin(t)
+		innerP, innerRequests, _ := setupTestPlugin(t)
+		runCtx, stepClock := newSteppedClockCtx(t.Context())
+
+		errInner := errors.New("inner parallel branch failure")
+		innerFail, err := agent.New(agent.Config{
+			Name: "inner_fail",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "inner_fail"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "inner_fail answer")
+					if !yield(ev, nil) {
+						return
+					}
+					stepClock(time.Millisecond)
+					yield(nil, errInner)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner_fail): %v", err)
+		}
+		innerPar := newParallelAgent(t, "inner_par", innerFail)
+		innerBot, err := agent.New(agent.Config{
+			Name:      "inner_bot",
+			SubAgents: []agent.Agent{innerPar},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range innerPar.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					stepClock(time.Millisecond)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner_bot): %v", err)
+		}
+		innerRoot, err := agent.New(agent.Config{
+			Name:      "inner_root",
+			SubAgents: []agent.Agent{innerBot},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range innerBot.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					// Emit a post-retirement inner_bot-authored event; because innerRunner
+					// has no AfterAgentCallback on inner_bot or in its own PluginManager,
+					// outerTailPlugin must not be inherited to mark inner_bot recoverable.
+					stepClock(10 * time.Millisecond)
+					lateEv := session.NewEvent(ctx, ctx.InvocationID())
+					lateEv.Author = "inner_bot"
+					lateEv.Branch = ctx.Branch()
+					lateEv.Content = textContent("model", "late-inner-bot-event")
+					yield(lateEv, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner_root): %v", err)
+		}
+		innerRunner := newTestRunner(t, innerRoot, innerP)
+
+		outerTailPlugin, err := baseplugin.New(baseplugin.Config{
+			Name: "outer_tail_after_agent",
+			AfterAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(outer_tail_after_agent): %v", err)
+		}
+		outerRoot, err := agent.New(agent.Config{
+			Name: "outer_root",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, runErr := range innerRunner.Run(ctx, "u1", "s-shadow-inner", textContent("user", "go"), agent.RunConfig{}) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "outer_root"
+					ev.Content = textContent("model", "outer-complete")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(outer_root): %v", err)
+		}
+
+		for _, err := range newTestRunner(t, outerRoot, outerP, outerTailPlugin).Run(runCtx, "u1", "s-shadow-outer", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("outer runner.Run error = %v, want nil", err)
+			}
+		}
+
+		innerRows := collectRows(t, innerRequests, untilInvocationEnd)
+		if n := len(rowsOfType(innerRows, EventInvocationCompleted)); n != 0 {
+			t.Fatalf("inner got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(innerRows))
+		}
+		invErr := onlyRowOfType(t, innerRows, EventInvocationError)
+		msg, _ := invErr["error_message"].(string)
+		if !strings.Contains(msg, errInner.Error()) {
+			t.Errorf("inner INVOCATION_ERROR error_message = %q, want substring %q", msg, errInner.Error())
+		}
+
+		outerRows := collectRows(t, outerRequests, untilInvocationEnd)
+		_ = onlyRowOfType(t, outerRows, EventInvocationCompleted)
+	})
+}
+
+func TestCustomUUIDProviderRecovery_Runner(t *testing.T) {
+	t.Run("post-failure recovery succeeds with sequential custom UUIDs without extra provider calls", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var uuidCalls atomic.Int32
+		var nowUnixNano atomic.Int64
+		base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+		nowUnixNano.Store(base.UnixNano())
+
+		runCtx := platform.WithTimeProvider(t.Context(), func() time.Time {
+			return time.Unix(0, nowUnixNano.Load()).UTC()
+		})
+		runCtx = platform.WithUUIDProvider(runCtx, func() string {
+			return fmt.Sprintf("event-%d", uuidCalls.Add(1))
+		})
+
+		errChild := errors.New("parallel child boom")
+		failBranch, err := agent.New(agent.Config{
+			Name: "fail_branch",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "fail_branch"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "fail_branch answer")
+					if !yield(ev, nil) {
+						return
+					}
+					nowUnixNano.Add(int64(time.Millisecond))
+					yield(nil, errChild)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(fail_branch): %v", err)
+		}
+		par := newParallelAgent(t, "par", failBranch)
+		var runnerEventCount atomic.Int32
+		root, err := agent.New(agent.Config{
+			Name:      "root",
+			SubAgents: []agent.Agent{par},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if !yield(ev, nil) {
+							return
+						}
+					}
+					nowUnixNano.Add(int64(10 * time.Millisecond))
+					recovery := session.NewEvent(ctx, ctx.InvocationID())
+					recovery.Author = "root"
+					recovery.Content = textContent("model", "recovered-with-custom-uuid")
+					yield(recovery, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(root): %v", err)
+		}
+
+		for ev, err := range newTestRunner(t, root, p).Run(runCtx, "u1", "s-custom-uuid-recovery", textContent("user", "go"), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("runner.Run error = %v, want nil", err)
+			}
+			if ev != nil {
+				runnerEventCount.Add(1)
+			}
+		}
+
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		// Expected platform.NewUUID calls: 1 InvocationID + 1 user event + yielded agent events.
+		wantCalls := 2 + runnerEventCount.Load()
+		if got := uuidCalls.Load(); got != wantCalls {
+			t.Fatalf("UUIDProvider call count = %d, want %d (InvocationID + user + %d yielded events)", got, wantCalls, runnerEventCount.Load())
+		}
+		if hasEventCreationProvenance(runCtx, "event-1") != true || uuidCalls.Load() != wantCalls {
+			t.Fatalf("hasEventCreationProvenance altered provider state: calls=%d want %d", uuidCalls.Load(), wantCalls)
+		}
+	})
+
+	t.Run("retired agent AfterAgentCallback recovery succeeds with custom UUIDs", func(t *testing.T) {
+		p, requests, _ := setupTestPlugin(t)
+		var uuidCalls atomic.Int32
+		var nowUnixNano atomic.Int64
+		base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+		nowUnixNano.Store(base.UnixNano())
+
+		runCtx := platform.WithTimeProvider(t.Context(), func() time.Time {
+			return time.Unix(0, nowUnixNano.Load()).UTC()
+		})
+		runCtx = platform.WithUUIDProvider(runCtx, func() string {
+			return fmt.Sprintf("event-%d", uuidCalls.Add(1))
+		})
+
+		errChild := errors.New("parallel child boom")
+		failBranch, err := agent.New(agent.Config{
+			Name: "fail_branch",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "fail_branch"
+					ev.Branch = ctx.Branch()
+					ev.Content = textContent("model", "fail_branch answer")
+					if !yield(ev, nil) {
+						return
+					}
+					nowUnixNano.Add(int64(time.Millisecond))
+					yield(nil, errChild)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(fail_branch): %v", err)
+		}
+		par := newParallelAgent(t, "par", failBranch)
+		inner, err := agent.New(agent.Config{
+			Name:      "inner",
+			SubAgents: []agent.Agent{par},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for ev, runErr := range par.Run(ctx) {
+						if runErr != nil {
+							continue
+						}
+						if ev != nil && !yield(ev, nil) {
+							return
+						}
+					}
+					nowUnixNano.Add(int64(time.Millisecond))
+				}
+			},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(_ agent.Context) (*genai.Content, error) {
+					nowUnixNano.Add(int64(10 * time.Millisecond))
+					return textContent("model", "inner-callback-recovery"), nil
+				},
 			},
 		})
 		if err != nil {
 			t.Fatalf("agent.New(inner): %v", err)
 		}
-
 		root, err := agent.New(agent.Config{
 			Name:      "root",
 			SubAgents: []agent.Agent{inner},
 			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {
-					var buffered []*session.Event
-					for range 2 {
-						for ev, runErr := range inner.Run(ctx) {
-							if runErr != nil {
-								yield(nil, runErr)
-								return
-							}
-							if ev != nil && ev.Author == "inner" && ev.Timestamp.IsZero() {
-								buffered = append(buffered, ev)
-								continue
-							}
-							if ev != nil && !yield(ev, nil) {
-								return
-							}
+					for ev, runErr := range inner.Run(ctx) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
 						}
-					}
-					for _, ev := range buffered {
-						if !yield(ev, nil) {
+						if ev != nil && !yield(ev, nil) {
 							return
 						}
 					}
@@ -8363,26 +8790,53 @@ func TestZeroTimestampBufferedCleanRun_Runner(t *testing.T) {
 			t.Fatalf("agent.New(root): %v", err)
 		}
 
-		for _, err := range newTestRunner(t, root, p).Run(t.Context(), "u1", "s-zero-ts-clean", textContent("user", "go"), agent.RunConfig{}) {
+		var runnerEventCount atomic.Int32
+		for ev, err := range newTestRunner(t, root, p).Run(runCtx, "u1", "s-custom-uuid-retired-recovery", textContent("user", "go"), agent.RunConfig{}) {
 			if err != nil {
 				t.Fatalf("runner.Run error = %v, want nil", err)
 			}
+			if ev != nil {
+				runnerEventCount.Add(1)
+			}
 		}
-		rows := collectRows(t, requests, untilInvocationEnd)
-		if n := len(rowsOfType(rows, EventInvocationCompleted)); n != 0 {
-			t.Fatalf("got %d INVOCATION_COMPLETED rows, want 0; event types=%v", n, eventTypes(rows))
-		}
-		invErr := onlyRowOfType(t, rows, EventInvocationError)
-		msg, _ := invErr["error_message"].(string)
-		if !strings.Contains(msg, err2.Error()) {
-			t.Errorf("INVOCATION_ERROR error_message = %q, want substring %q", msg, err2.Error())
-		}
-	}
 
-	t.Run("single zero-timestamp buffered event", func(t *testing.T) {
-		runCase(t, false, "clean-run-1")
+		rows := collectRows(t, requests, untilInvocationEnd)
+		if n := len(rowsOfType(rows, EventInvocationError)); n != 0 {
+			t.Fatalf("got %d INVOCATION_ERROR rows, want 0; event types=%v", n, eventTypes(rows))
+		}
+		_ = onlyRowOfType(t, rows, EventInvocationCompleted)
+
+		wantCalls := 2 + runnerEventCount.Load()
+		if got := uuidCalls.Load(); got != wantCalls {
+			t.Fatalf("UUIDProvider call count = %d, want %d", got, wantCalls)
+		}
 	})
-	t.Run("responded first run with additional buffered zero-timestamp UUIDv4 event", func(t *testing.T) {
-		runCase(t, true, uuid.NewString())
+
+	t.Run("WithUUIDProvider(childCtx, nil) overrides outer provider", func(t *testing.T) {
+		var uuidCalls atomic.Int32
+		parentCtx := platform.WithUUIDProvider(t.Context(), func() string {
+			return fmt.Sprintf("event-%d", uuidCalls.Add(1))
+		})
+		childCtx := platform.WithUUIDProvider(parentCtx, nil)
+		runZeroTimestampBufferedCleanRun(t, childCtx, false, "clean-run-1")
+		if got := uuidCalls.Load(); got != 0 {
+			t.Fatalf("outer UUIDProvider called %d times under child nil override, want 0", got)
+		}
+	})
+
+	t.Run("zero-timestamp buffered empty ID rejected under WithUUIDProvider", func(t *testing.T) {
+		var uuidCalls atomic.Int32
+		customCtx := platform.WithUUIDProvider(t.Context(), func() string {
+			return fmt.Sprintf("event-%d", uuidCalls.Add(1))
+		})
+		runZeroTimestampBufferedCleanRun(t, customCtx, false, "")
+	})
+
+	t.Run("responded first run with zero-timestamp buffered custom ID preserves error under WithUUIDProvider", func(t *testing.T) {
+		var uuidCalls atomic.Int32
+		customCtx := platform.WithUUIDProvider(t.Context(), func() string {
+			return fmt.Sprintf("event-%d", uuidCalls.Add(1))
+		})
+		runZeroTimestampBufferedCleanRun(t, customCtx, true, "clean-run-1")
 	})
 }

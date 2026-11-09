@@ -5305,7 +5305,7 @@ func TestRunningAgentChildren(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := runningAgentChildren(tc.ctx, tc.agentName)
+			got := runningAgentChildren(tc.ctx, tc.agentName, nil)
 			if diff := cmp.Diff(tc.want, got, cmp.AllowUnexported(agentChildren{})); diff != "" {
 				t.Errorf("runningAgentChildren mismatch (-want +got):\n%s", diff)
 			}
@@ -25157,4 +25157,234 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 			t.Fatalf("UUID-stamped post-error event did not own response: llmStillOpen=%v ownResponse=%v, want false/true", llmAfterUUID, ownAfterUUID)
 		}
 	})
+}
+
+type cyclicContext struct {
+	parent context.Context
+}
+
+func (c *cyclicContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *cyclicContext) Done() <-chan struct{}       { return nil }
+func (c *cyclicContext) Err() error                  { return nil }
+func (c *cyclicContext) Value(any) any               { return nil }
+
+func newNoopAnalyticsPluginForTest(t *testing.T, name string) *baseplugin.Plugin {
+	t.Helper()
+	p, _, _ := setupTestPlugin(t)
+	if name == pluginName {
+		return p
+	}
+	alt, err := baseplugin.New(baseplugin.Config{
+		Name: name,
+		AfterAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(%s): %v", name, err)
+	}
+	return alt
+}
+
+func captureRunnerCallbackContext(t *testing.T, parentCtx context.Context, plugins ...*baseplugin.Plugin) context.Context {
+	t.Helper()
+	var captured context.Context
+	root, err := agent.New(agent.Config{
+		Name: "capture",
+		BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				captured = ctx
+				return nil, nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "capture"
+				ev.Content = textContent("model", "ok")
+				yield(ev, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(capture): %v", err)
+	}
+	for _, err := range newTestRunner(t, root, plugins...).Run(parentCtx, "u1", "s-ctx-capture", textContent("user", "go"), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("runner.Run error = %v", err)
+		}
+	}
+	if captured == nil {
+		t.Fatal("BeforeAgentCallback did not capture context")
+	}
+	return captured
+}
+
+func TestContextHasLaterAfterAgentPlugin(t *testing.T) {
+	t.Run("later plugin with AfterAgentCallback returns true", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		tail := newNoopAnalyticsPluginForTest(t, "tail_after_agent")
+		ctx := captureRunnerCallbackContext(t, t.Context(), p, tail)
+		if !contextHasLaterAfterAgentPlugin(ctx, p) {
+			t.Fatal("contextHasLaterAfterAgentPlugin = false, want true")
+		}
+		if !contextHasLaterAfterAgentPlugin(context.WithoutCancel(ctx), p) {
+			t.Fatal("contextHasLaterAfterAgentPlugin(WithoutCancel) = false, want true")
+		}
+		if !contextHasLaterAfterAgentPlugin(ctx, nil) {
+			t.Fatal("contextHasLaterAfterAgentPlugin(nil self) = false, want true via pluginName fallback")
+		}
+	})
+
+	t.Run("earlier plugin only or later plugin without AfterAgentCallback returns false", func(t *testing.T) {
+		p := newNoopAnalyticsPluginForTest(t, pluginName)
+		earlier := newNoopAnalyticsPluginForTest(t, "earlier_after_agent")
+		laterNoAfter, err := baseplugin.New(baseplugin.Config{
+			Name: "later_before_only",
+			BeforeAgentCallback: func(_ agent.Context) (*genai.Content, error) {
+				return nil, nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("baseplugin.New(later_before_only): %v", err)
+		}
+		ctx := captureRunnerCallbackContext(t, t.Context(), earlier, p, laterNoAfter)
+		if contextHasLaterAfterAgentPlugin(ctx, p) {
+			t.Fatal("contextHasLaterAfterAgentPlugin = true, want false")
+		}
+	})
+
+	t.Run("inner runner PluginManager shadows outer runner PluginManager", func(t *testing.T) {
+		outerP := newNoopAnalyticsPluginForTest(t, pluginName)
+		outerTail := newNoopAnalyticsPluginForTest(t, "outer_tail")
+		innerP := newNoopAnalyticsPluginForTest(t, pluginName)
+
+		var innerCaptured context.Context
+		innerAgent, err := agent.New(agent.Config{
+			Name: "inner",
+			BeforeAgentCallbacks: []agent.BeforeAgentCallback{
+				func(ctx agent.Context) (*genai.Content, error) {
+					innerCaptured = ctx
+					return nil, nil
+				},
+			},
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "inner"
+					ev.Content = textContent("model", "inner-ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(inner): %v", err)
+		}
+		innerRunner := newTestRunner(t, innerAgent, innerP)
+
+		outerAgent, err := agent.New(agent.Config{
+			Name: "outer",
+			Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					for _, runErr := range innerRunner.Run(ctx, "u1", "s-inner", textContent("user", "go"), agent.RunConfig{}) {
+						if runErr != nil {
+							yield(nil, runErr)
+							return
+						}
+					}
+					ev := session.NewEvent(ctx, ctx.InvocationID())
+					ev.Author = "outer"
+					ev.Content = textContent("model", "outer-ok")
+					yield(ev, nil)
+				}
+			},
+		})
+		if err != nil {
+			t.Fatalf("agent.New(outer): %v", err)
+		}
+		for _, runErr := range newTestRunner(t, outerAgent, outerP, outerTail).Run(t.Context(), "u1", "s-outer", textContent("user", "go"), agent.RunConfig{}) {
+			if runErr != nil {
+				t.Fatalf("outer runner.Run error = %v", runErr)
+			}
+		}
+		if innerCaptured == nil {
+			t.Fatal("inner BeforeAgentCallback did not capture context")
+		}
+		if contextHasLaterAfterAgentPlugin(innerCaptured, innerP) {
+			t.Fatal("inner runner leaked outer PluginManager later AfterAgentCallback")
+		}
+		if contextHasLaterAfterAgentPlugin(innerCaptured, nil) {
+			t.Fatal("inner runner leaked outer PluginManager with nil self fallback")
+		}
+	})
+
+	t.Run("cyclic context and empty context do not loop or panic", func(t *testing.T) {
+		cyc := &cyclicContext{}
+		cyc.parent = cyc
+		if contextHasLaterAfterAgentPlugin(cyc, nil) {
+			t.Fatal("contextHasLaterAfterAgentPlugin(cyclic) = true, want false")
+		}
+		if contextHasLaterAfterAgentPlugin(context.Background(), nil) {
+			t.Fatal("contextHasLaterAfterAgentPlugin(Background) = true, want false")
+		}
+		var nilCtx context.Context
+		if contextHasLaterAfterAgentPlugin(nilCtx, nil) {
+			t.Fatal("contextHasLaterAfterAgentPlugin(nil) = true, want false")
+		}
+	})
+}
+
+func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
+	var calls atomic.Int32
+	provider := func() string {
+		calls.Add(1)
+		return fmt.Sprintf("event-%d", calls.Load())
+	}
+
+	parentCtx := platform.WithUUIDProvider(t.Context(), provider)
+	if !contextHasCustomUUIDProvider(parentCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithUUIDProvider) = false, want true")
+	}
+	if !contextHasCustomUUIDProvider(context.WithoutCancel(parentCtx)) {
+		t.Fatal("contextHasCustomUUIDProvider(WithoutCancel) = false, want true")
+	}
+	// WithUUIDProvider(child, nil) overrides and disables the outer provider.
+	shadowedCtx := platform.WithUUIDProvider(parentCtx, nil)
+	if contextHasCustomUUIDProvider(shadowedCtx) {
+		t.Fatal("contextHasCustomUUIDProvider(WithUUIDProvider(child, nil)) = true, want false")
+	}
+	if contextHasCustomUUIDProvider(context.Background()) {
+		t.Fatal("contextHasCustomUUIDProvider(Background) = true, want false")
+	}
+	cyc := &cyclicContext{}
+	cyc.parent = cyc
+	if contextHasCustomUUIDProvider(cyc) {
+		t.Fatal("contextHasCustomUUIDProvider(cyclic) = true, want false")
+	}
+
+	validUUID := "550e8400-e29b-41d4-a716-446655440000"
+	cases := []struct {
+		name string
+		ctx  context.Context
+		id   string
+		want bool
+	}{
+		{name: "empty ID with default context", ctx: context.Background(), id: "", want: false},
+		{name: "empty ID rejected even with custom provider", ctx: parentCtx, id: "", want: false},
+		{name: "custom ID accepted when custom provider active", ctx: parentCtx, id: "event-1", want: true},
+		{name: "custom ID rejected on default context", ctx: context.Background(), id: "event-1", want: false},
+		{name: "custom ID rejected when nil provider shadows outer", ctx: shadowedCtx, id: "event-1", want: false},
+		{name: "UUIDv4 accepted on default context", ctx: context.Background(), id: validUUID, want: true},
+		{name: "UUIDv4 accepted when nil provider shadows outer", ctx: shadowedCtx, id: validUUID, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasEventCreationProvenance(tc.ctx, tc.id); got != tc.want {
+				t.Errorf("hasEventCreationProvenance(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("custom UUIDProvider was invoked %d times during inspection, want 0", got)
+	}
 }
