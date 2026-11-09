@@ -181,12 +181,20 @@ func (pm *PluginManager) RunAfterAgentCallback(cctx agent.Context) (*genai.Conte
 
 // RunOnAgentErrorCallback notifies every plugin that an error escaped an
 // agent's run. Unlike the other callbacks it is best-effort notification: all
-// plugins run in registration order and none can suppress the error.
+// plugins run in registration order and none can suppress the error. A panic
+// from one callback is recovered so the remaining callbacks still run.
 func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.Context, a agent.Agent, err error) {
 	for _, plugin := range pm.plugins {
-		if callback := plugin.OnAgentErrorCallback(); callback != nil {
-			callback(cctx, a, err)
+		callback := plugin.OnAgentErrorCallback()
+		if callback == nil {
+			continue
 		}
+		func() {
+			// A panicking callback must not skip later plugins or replace the
+			// original error; adk-python isolates each plugin the same way.
+			defer func() { _ = recover() }()
+			callback(cctx, a, err)
+		}()
 	}
 }
 

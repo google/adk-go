@@ -198,12 +198,22 @@ type BeforeRunCallback func(agent.InvocationContext) (*genai.Content, error)
 type AfterRunCallback func(agent.InvocationContext)
 
 // OnAgentErrorCallback is invoked when an error escapes an agent's run. It is
-// notification-only: the error is yielded to the caller unchanged whether or
-// not the callback runs. a is the agent that failed; ctx is the callback
-// context for its invocation.
+// notification-only: callbacks are called in registration order and the error
+// is yielded to the caller unchanged.
 //
-// It mirrors adk-python's on_agent_error_callback. A callback that panics
-// aborts the run; a callback that returns is ignored.
+// a is the agent that failed. It may be the embedded agent implementation
+// rather than the value returned by a constructor, so use a.Name() to identify
+// it. ctx is the callback context for the invocation; it does not expose the
+// agent (ctx.Agent() returns nil), and state or artifact changes made through
+// it are not persisted.
+//
+// A panicking callback is recovered so the remaining callbacks still run and
+// the original error is still yielded, matching adk-python's
+// on_agent_error_callback. Context cancellation and deadline errors are not
+// reported, also matching adk-python. Callbacks may be invoked concurrently by
+// parallel sub-agents and must be safe for concurrent use. An error from a
+// sub-agent is reported once for each ancestor as it propagates, matching
+// adk-python; callbacks that count failures should dedupe.
 type OnAgentErrorCallback func(ctx agent.Context, a agent.Agent, err error)
 
 // OnEventCallback is invoked for each event, and may return a replacement event.

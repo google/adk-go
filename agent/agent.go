@@ -17,6 +17,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -342,8 +343,12 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 // runOnAgentErrorCallbacks notifies plugins that an error escaped the agent's
 // run. Notification only: the caller still yields err, so a callback cannot
-// recover from or replace the failure.
+// recover from or replace the failure. Context cancellation and deadline
+// errors are not reported, matching adk-python.
 func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
 	pluginManager := pluginManagerFromContext(ctx)
 	if pluginManager == nil {
 		return
