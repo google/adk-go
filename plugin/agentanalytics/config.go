@@ -224,6 +224,23 @@ type GCSContentOffloader interface {
 // upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
+//
+// Custom agents that drain a sub-agent or branch error and recover by
+// yielding a final response event must construct that recovery event with
+// session.NewEvent (preserving its non-empty ID and initialized
+// Actions.StateDelta and Actions.ArtifactDelta maps) or return content from an
+// AfterAgentCallback. Provenance accepts events with a non-empty ID that carry
+// a UUIDv4 ID, observe a visible invocation- or activation-scoped
+// platform.WithUUIDProvider on context, or keep both Actions.StateDelta and
+// Actions.ArtifactDelta non-nil (as session.NewEvent initializes them). Bare
+// session.Event struct literals lacking these signals fail closed as
+// AGENT_ERROR / INVOCATION_ERROR; replacing ev.Actions with nil maps after
+// session.NewEvent under an event-scoped platform.WithUUIDProvider also fails
+// closed. Under a constant platform.WithTimeProvider, only AfterAgentCallback
+// content recovery succeeds on the same tick; non-callback recovery events
+// (whether live or buffered across a sub-agent's retirement) require
+// platform.WithTimeProvider to advance between the failure and the recovery
+// event.
 type Config struct {
 	Enabled        bool
 	ProjectID      string

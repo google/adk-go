@@ -139,6 +139,20 @@ var knownEventTypes = newSet(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// When a custom agent drains a sub-agent error and recovers by yielding a
+// final response event, construct that event with session.NewEvent (preserving
+// its non-empty ID and initialized Actions.StateDelta and Actions.ArtifactDelta
+// maps) or return content from an AfterAgentCallback. Bare session.Event struct
+// literals with nil action maps and non-UUIDv4 IDs outside an active custom
+// platform.WithUUIDProvider context lack event-creation provenance and fail
+// closed as AGENT_ERROR / INVOCATION_ERROR; replacing ev.Actions with nil maps
+// drops the action-map signal for events built under an event-scoped
+// platform.WithUUIDProvider. Under a constant platform.WithTimeProvider, only
+// AfterAgentCallback content recovery succeeds on the same tick; non-callback
+// recovery events (whether live or buffered across a sub-agent's retirement)
+// require platform.WithTimeProvider to advance between the failure and the
+// recovery event.
 func NewBigQueryAgentAnalyticsPlugin(
 	ctx context.Context,
 	projectID string,
@@ -165,6 +179,20 @@ func NewBigQueryAgentAnalyticsPlugin(
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// When a custom agent drains a sub-agent error and recovers by yielding a
+// final response event, construct that event with session.NewEvent (preserving
+// its non-empty ID and initialized Actions.StateDelta and Actions.ArtifactDelta
+// maps) or return content from an AfterAgentCallback. Bare session.Event struct
+// literals with nil action maps and non-UUIDv4 IDs outside an active custom
+// platform.WithUUIDProvider context lack event-creation provenance and fail
+// closed as AGENT_ERROR / INVOCATION_ERROR; replacing ev.Actions with nil maps
+// drops the action-map signal for events built under an event-scoped
+// platform.WithUUIDProvider. Under a constant platform.WithTimeProvider, only
+// AfterAgentCallback content recovery succeeds on the same tick; non-callback
+// recovery events (whether live or buffered across a sub-agent's retirement)
+// require platform.WithTimeProvider to advance between the failure and the
+// recovery event.
 func NewBigQueryAgentAnalyticsPluginWithConfig(
 	ctx context.Context,
 	config Config,
@@ -345,6 +373,20 @@ func AsBigQueryAgentAnalyticsPlugin(p *baseplugin.Plugin) (*BigQueryAgentAnalyti
 // plugin tells that a model call is streaming from the partial events that
 // its OnEventCallback sees, so if an earlier plugin replaces a partial event,
 // a caller that stops reading mid-stream is reported as a failure.
+//
+// When a custom agent drains a sub-agent error and recovers by yielding a
+// final response event, construct that event with session.NewEvent (preserving
+// its non-empty ID and initialized Actions.StateDelta and Actions.ArtifactDelta
+// maps) or return content from an AfterAgentCallback. Bare session.Event struct
+// literals with nil action maps and non-UUIDv4 IDs outside an active custom
+// platform.WithUUIDProvider context lack event-creation provenance and fail
+// closed as AGENT_ERROR / INVOCATION_ERROR; replacing ev.Actions with nil maps
+// drops the action-map signal for events built under an event-scoped
+// platform.WithUUIDProvider. Under a constant platform.WithTimeProvider, only
+// AfterAgentCallback content recovery succeeds on the same tick; non-callback
+// recovery events (whether live or buffered across a sub-agent's retirement)
+// require platform.WithTimeProvider to advance between the failure and the
+// recovery event.
 func NewBigQueryAgentAnalyticsPluginWithClients(
 	ctx context.Context,
 	config Config,
@@ -956,7 +998,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponseAt(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev.Timestamp, hasEventCreationProvenance(ctx, ev.ID))
+			p.traces.completeResponseForEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev)
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -976,12 +1018,24 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 	return nil, nil
 }
 
-// hasEventCreationProvenance reports whether ev.ID carries sufficient creation
+// hasNewEventActions reports whether ev carries the non-nil StateDelta and
+// ArtifactDelta maps initialized by session.NewEvent, distinguishing events
+// constructed via session.NewEvent (including under scoped platform.WithUUIDProvider)
+// from bare session.Event struct literals without invoking any provider.
+func hasNewEventActions(ev *session.Event) bool {
+	return ev != nil && ev.Actions.StateDelta != nil && ev.Actions.ArtifactDelta != nil
+}
+
+// hasEventCreationProvenance reports whether ev carries sufficient creation
 // provenance to trust ev.Timestamp came from session.NewEvent rather than
-// runner fallback stamping on a zero-timestamp event. A canonical UUIDv4 event
-// ID or an active platform.WithUUIDProvider on ctx suffices.
-func hasEventCreationProvenance(ctx context.Context, id string) bool {
-	return id != "" && (hasNewEventUUID(id) || contextHasCustomUUIDProvider(ctx))
+// runner fallback stamping on a zero-timestamp event. It requires a non-empty
+// ev.ID together with a canonical UUIDv4 ID, an active platform.WithUUIDProvider
+// on ctx, or initialized session.NewEvent Actions maps.
+func hasEventCreationProvenance(ctx context.Context, ev *session.Event) bool {
+	if ev == nil || ev.ID == "" {
+		return false
+	}
+	return hasNewEventUUID(ev.ID) || contextHasCustomUUIDProvider(ctx) || hasNewEventActions(ev)
 }
 
 // hasNewEventUUID reports whether id has the canonical 36-byte RFC 4122 UUIDv4

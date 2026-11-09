@@ -751,9 +751,12 @@ func (b *BatchProcessor) appendChunk(writeCtx context.Context, batch []map[strin
 }
 
 // appendChunkWithRotationBudget is appendChunk with a rotation budget shared
-// with the other chunks of the batch. It returns the count of confirmed (or
-// RowErrors-settled) prefix rows, or len(batch) with a non-nil error when
-// row-level RowErrors dropped part or all of an otherwise accepted batch.
+// with the other chunks of the batch. It returns confirmed, the count
+// (cardinality) of settled rows rather than a contiguous prefix (since RowErrors
+// isolation can interleave settled and unconfirmed rows), alongside err, except
+// when appendChunkRows reports row-level RowErrors with a nil error, in which
+// case it returns len(batch) with a non-nil error. Callers that need per-row
+// identity should use appendChunkRows directly.
 func (b *BatchProcessor) appendChunkWithRotationBudget(writeCtx context.Context, batch []map[string]any, rotatedInBatch *bool) (confirmed int, err error) {
 	unconfirmed, _, rowErrDrops, err := b.appendChunkRows(writeCtx, batch, rotatedInBatch)
 	confirmed = len(batch) - len(unconfirmed)

@@ -40,6 +40,7 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/platform"
 	baseplugin "google.golang.org/adk/v2/plugin"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/workflow"
 )
 
@@ -339,9 +340,15 @@ type spanRecord struct {
 	// hasAfterAgentCallbacks reports that the agent configures agent-level
 	// AfterAgentCallbacks, which ADK runs after popAgentSpan retires the span.
 	hasAfterAgentCallbacks bool
+	// hasCustomUUIDProvider reports that pushAgentSpan observed an active custom
+	// platform.WithUUIDProvider on the agent's context.
+	hasCustomUUIDProvider bool
 	// failurePlatformTime records the earliest platform timestamp at which this
 	// unretired span remained failed/unresponded when an enclosing span retired.
 	failurePlatformTime time.Time
+	// failureSeq records the earliest invocation sequence at which this
+	// unretired span remained failed/unresponded when an enclosing span retired.
+	failureSeq uint64
 	// callStarted reports that pushLLMSpan or pushToolSpan started the model
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
@@ -401,6 +408,7 @@ type retiredCause struct {
 	branch       string
 	path         string
 	platformTime time.Time
+	causeSeq     uint64
 	swallowers   []retiredSwallower
 }
 
@@ -470,6 +478,9 @@ type retiredActivation struct {
 	concurrentPeer              bool
 	unrespondedAtPop            bool
 	hasAfterAgentCallbacks      bool
+	hasCustomUUIDProvider       bool
+	afterAgentStateDeltaPtr     uintptr
+	afterAgentStateDeltaRef     any
 	compactedHull               bool
 	goroutineID                 uint64
 	startPlatformTime           time.Time
@@ -564,11 +575,12 @@ func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openS
 		},
 		parentSpanID:           rec.parentSpanID,
 		guardSpanIDs:           customGuardSpanIDsLocked(rec, openSet),
-		retiredAtSeq:           inv.lastSeq,
+		retiredAtSeq:           inv.nextSeqLocked(),
 		completedOrTask:        rec.completed || rec.taskMode,
 		concurrentPeer:         rec.concurrentPeer,
 		unrespondedAtPop:       !rec.ownResponse && !rec.contextEnded && !rec.taskMode,
 		hasAfterAgentCallbacks: rec.hasAfterAgentCallbacks,
+		hasCustomUUIDProvider:  rec.hasCustomUUIDProvider,
 		goroutineID:            rec.goroutineID,
 		startPlatformTime:      rec.startPlatformTime,
 		retiredAtPlatformTime:  retiredAt,
@@ -782,6 +794,9 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 				hull = m
 				hull.guardSpanIDs = slices.Clone(m.guardSpanIDs)
 				hull.compactedHull = true
+				hull.hasCustomUUIDProvider = false
+				hull.afterAgentStateDeltaPtr = 0
+				hull.afterAgentStateDeltaRef = nil
 				continue
 			}
 			if m.swallower.seq > hull.swallower.seq {
@@ -887,7 +902,7 @@ func (inv *invocationTrace) provenAfterAllRetiredLocked(rec *spanRecord, path st
 // event-creation timestamp provenance is available, failing closed whenever
 // multiple retired activations match (name, branch, path).
 func (inv *invocationTrace) clearRetiredCauseForLocked(name, branch, path string) {
-	inv.clearRetiredCauseForEventLocked(name, branch, path, time.Time{}, false)
+	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, time.Time{}, false, false, 0, false)
 }
 
 // clearRetiredCauseForEventLocked deletes swallowable retiredCauses only when
@@ -895,6 +910,10 @@ func (inv *invocationTrace) clearRetiredCauseForLocked(name, branch, path string
 // (name, branch, path) can own the delayed event; earlier non-custom
 // predecessors proven strictly older than evCreatedAt are excluded.
 func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path string, evCreatedAt time.Time, hasEventID bool) {
+	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, evCreatedAt, hasEventID, false, 0, false)
+}
+
+func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evStateDeltaPtr uintptr, requireProvenance bool) {
 	openSet := inv.openSpanSetLocked()
 	for _, rec := range inv.agentStack {
 		var recGuards []string
@@ -916,6 +935,13 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 		}
 	}
 
+	openHasID := func(r *spanRecord) bool {
+		return hasEventID || (evNonEmptyID && r.hasCustomUUIDProvider)
+	}
+	retiredHasID := func(r retiredActivation) bool {
+		return hasEventID || (evNonEmptyID && !r.compactedHull && r.hasCustomUUIDProvider)
+	}
+
 	matchedIDs := make(map[string]struct{})
 	var targetSpanID string
 	var openMatches []*spanRecord
@@ -933,7 +959,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 		if !openSw.matches(name, branch, path) {
 			continue
 		}
-		if !evCreatedAt.IsZero() && (!hasEventID || (!openRec.startPlatformTime.IsZero() && evCreatedAt.Before(openRec.startPlatformTime))) {
+		if !evCreatedAt.IsZero() && (!openHasID(openRec) || (!openRec.startPlatformTime.IsZero() && evCreatedAt.Before(openRec.startPlatformTime))) {
 			continue
 		}
 		openMatches = append(openMatches, openRec)
@@ -947,14 +973,16 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 		if !ra.swallower.matches(name, branch, path) {
 			continue
 		}
-		if !ra.canOwnEventCreatedAt(evCreatedAt, hasEventID) {
+		raHasID := retiredHasID(ra)
+		if !ra.canOwnEventCreatedAt(evCreatedAt, raHasID) {
 			continue
 		}
 		excluded := false
 		for _, later := range inv.retiredActivations {
+			laterHasID := retiredHasID(later)
 			if !later.compactedHull &&
 				later.swallower.matches(name, branch, path) &&
-				later.canOwnEventCreatedAt(evCreatedAt, hasEventID) &&
+				later.canOwnEventCreatedAt(evCreatedAt, laterHasID) &&
 				ra.excludedByEventTimestamp(
 					later.swallower.spanID,
 					later.swallower.seq,
@@ -962,7 +990,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 					later.concurrentPeer,
 					later.startPlatformTime,
 					evCreatedAt,
-					hasEventID,
+					laterHasID,
 				) {
 				excluded = true
 				break
@@ -977,7 +1005,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 					openRec.concurrentPeer,
 					openRec.startPlatformTime,
 					evCreatedAt,
-					hasEventID,
+					openHasID(openRec),
 				) {
 					excluded = true
 					break
@@ -1010,17 +1038,42 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 	if len(matchedIDs)+fallbackCount != 1 {
 		return
 	}
+	targetIdx := -1
+	if targetSpanID != "" {
+		targetIdx = inv.findRetiredActivationIndexLocked(targetSpanID)
+		if targetIdx >= 0 && !inv.retiredActivations[targetIdx].canOwnEventCreatedAt(evCreatedAt, retiredHasID(inv.retiredActivations[targetIdx])) {
+			return
+		}
+	}
+	var targetHasCustomUUID, isAfterAgentCallbackEvent bool
+	var targetRetiredAtSeq uint64
+	if targetIdx >= 0 {
+		ra := inv.retiredActivations[targetIdx]
+		targetHasCustomUUID = !ra.compactedHull && ra.hasCustomUUIDProvider
+		targetRetiredAtSeq = ra.retiredAtSeq
+		isAfterAgentCallbackEvent = !ra.compactedHull && evStateDeltaPtr != 0 && evStateDeltaPtr == ra.afterAgentStateDeltaPtr
+	}
+	effHasEventID := hasEventID || (evNonEmptyID && targetHasCustomUUID)
 	canClearCauseAt := func(c retiredCause) bool {
-		if !evCreatedAt.IsZero() && (!hasEventID || (!c.platformTime.IsZero() && !evCreatedAt.After(c.platformTime))) {
+		if requireProvenance && (!effHasEventID || evCreatedAt.IsZero()) {
 			return false
+		}
+		if !evCreatedAt.IsZero() {
+			if !effHasEventID {
+				return false
+			}
+			if !c.platformTime.IsZero() {
+				if evCreatedAt.Before(c.platformTime) {
+					return false
+				}
+				if evCreatedAt.Equal(c.platformTime) && (!isAfterAgentCallbackEvent || c.causeSeq == 0 || targetRetiredAtSeq <= c.causeSeq) {
+					return false
+				}
+			}
 		}
 		return true
 	}
 	if targetSpanID != "" {
-		targetIdx := inv.findRetiredActivationIndexLocked(targetSpanID)
-		if targetIdx >= 0 && !inv.retiredActivations[targetIdx].canOwnEventCreatedAt(evCreatedAt, hasEventID) {
-			return
-		}
 		for _, rec := range inv.agentStack {
 			rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
 				return c.hasSwallowerSpan(targetSpanID) && canClearCauseAt(c)
@@ -1028,8 +1081,13 @@ func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path s
 		}
 		if targetIdx >= 0 {
 			ra := &inv.retiredActivations[targetIdx]
+			if isAfterAgentCallbackEvent {
+				ra.afterAgentStateDeltaPtr = 0
+				ra.afterAgentStateDeltaRef = nil
+			}
 			if ra.unrespondedAtPop && ra.hasAfterAgentCallbacks && !ra.concurrentPeer &&
-				!evCreatedAt.IsZero() && !ra.retiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.retiredAtPlatformTime) {
+				!evCreatedAt.IsZero() && !ra.retiredAtPlatformTime.IsZero() &&
+				(evCreatedAt.After(ra.retiredAtPlatformTime) || (evCreatedAt.Equal(ra.retiredAtPlatformTime) && isAfterAgentCallbackEvent)) {
 				ra.unrespondedAtPop = false
 			}
 		}
@@ -1156,8 +1214,8 @@ type invocationTrace struct {
 	// calls of an agent are siblings: each is parented to the agent and
 	// never to another tool call.
 	toolSpans map[string]*spanRecord
-	// lastSeq is the seq of the agent activation or tool call that started
-	// last (see spanRecord.seq).
+	// lastSeq is the latest invocation sequence number drawn for span starts,
+	// error records, or agent retirements.
 	lastSeq uint64
 	// completedTools holds the tool calls that OnToolErrorCallback ended,
 	// so that the AfterToolCallback that ADK runs next for the same call
@@ -2270,6 +2328,10 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	inv.mu.Lock()
 	inv.finished = true
 	inv.agentStack[0].dropContexts()
+	for i := range inv.retiredActivations {
+		inv.retiredActivations[i].afterAgentStateDeltaPtr = 0
+		inv.retiredActivations[i].afterAgentStateDeltaRef = nil
+	}
 	inv.runnerAgent = nil
 	lastSeq := inv.lastSeq
 	models, endedModels := startedCalls(inv.llmSpans), startedCalls(inv.completedModels)
@@ -2851,6 +2913,7 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		concurrentPeer:         concurrentPeer,
 		taskMode:               children.taskMode,
 		hasAfterAgentCallbacks: children.hasAfterAgentCallbacks,
+		hasCustomUUIDProvider:  contextHasCustomUUIDProvider(ctx),
 		children:               children.names,
 		seq:                    inv.nextSeqLocked(),
 	}
@@ -2932,8 +2995,17 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	if rec.nonLLM && rec.parent != nil && rec.parent.kind == spanKindInvocation {
 		inv.clearLastPartialLocked()
 	}
+	if !rec.hasCustomUUIDProvider && contextHasCustomUUIDProvider(ctx) {
+		rec.hasCustomUUIDProvider = true
+	}
 	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	inv.retireAgentAtLocked(i, true, rec.seq, platform.Now(ctx))
+	if sdPtr := callbackAfterAgentStateDeltaPtr(ctx); sdPtr != 0 {
+		if idx := inv.findRetiredActivationIndexLocked(rec.spanID); idx >= 0 {
+			inv.retiredActivations[idx].afterAgentStateDeltaPtr = sdPtr
+			inv.retiredActivations[idx].afterAgentStateDeltaRef = ctx
+		}
+	}
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -3339,6 +3411,7 @@ func (inv *invocationTrace) retireAgentLocked(i int, done bool, since uint64) {
 }
 
 func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, failTime time.Time) {
+	failSeq := inv.nextSeqLocked()
 	rec := inv.agentStack[i]
 	subtree := inv.subtreeLocked(i)
 	// The activations in the subtree whose runs are known to be over are
@@ -3394,8 +3467,12 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 				}
 			}
 			dFailTime := failTime
+			dFailSeq := failSeq
 			if !d.failurePlatformTime.IsZero() {
 				dFailTime = d.failurePlatformTime
+			}
+			if d.failureSeq != 0 {
+				dFailSeq = d.failureSeq
 			}
 			if drainedParent {
 				if dCause := d.contextFailureCause(); dCause != nil {
@@ -3405,6 +3482,7 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 						branch:       d.branch,
 						path:         d.path,
 						platformTime: dFailTime,
+						causeSeq:     dFailSeq,
 					}
 					for p := d.parent; p != nil && p != rec && p.kind == spanKindAgent; p = p.parent {
 						if !p.propagatesChildError && p.contextFailureCause() == nil {
@@ -3433,6 +3511,7 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 						branch:       rec.branch,
 						path:         rec.path,
 						platformTime: dFailTime,
+						causeSeq:     dFailSeq,
 					})
 				}
 				for _, c := range d.retiredCauses {
@@ -3445,6 +3524,7 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 						branch:       rec.branch,
 						path:         rec.path,
 						platformTime: c.platformTime,
+						causeSeq:     c.causeSeq,
 					})
 				}
 				d.retiredCauses = nil
@@ -3459,13 +3539,20 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 		if subtree[d.spanID] && !failTime.IsZero() && d.failurePlatformTime.IsZero() {
 			d.failurePlatformTime = failTime
 		}
+		if subtree[d.spanID] && d.failureSeq == 0 {
+			d.failureSeq = failSeq
+		}
 		idx++
 	}
 	var moved []retiredCause
 	if ownCtxCause != nil {
 		recFailTime := failTime
+		recFailSeq := failSeq
 		if !rec.failurePlatformTime.IsZero() {
 			recFailTime = rec.failurePlatformTime
+		}
+		if rec.failureSeq != 0 {
+			recFailSeq = rec.failureSeq
 		}
 		moved = append(moved, retiredCause{
 			err:          ownCtxCause,
@@ -3473,6 +3560,7 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 			branch:       rec.branch,
 			path:         rec.path,
 			platformTime: recFailTime,
+			causeSeq:     recFailSeq,
 		})
 	}
 	canSwallow := !rec.propagatesChildError && ownCtxCause == nil && len(descendantOpenCauses) == 0
@@ -3938,7 +4026,18 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	tm.completeResponseAt(ctx, id, author, branch, calls, false, time.Time{}, false)
 }
 
+func (tm *traceManager) completeResponseForEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, ev *session.Event) {
+	if ev == nil {
+		return
+	}
+	tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "", eventStateDeltaPtr(ev), true)
+}
+
 func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, evCreatedAt time.Time, hasEventID bool) {
+	tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, evCreatedAt, hasEventID, false, 0, false)
+}
+
+func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evStateDeltaPtr uintptr, requireProvenance bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -3967,7 +4066,7 @@ func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, aut
 		// Clear only the earliest non-excluded matching retired swallower
 		// activation's swallowable causes so delayed recovery from one
 		// activation does not clear unrecovered causes belonging to another.
-		inv.clearRetiredCauseForEventLocked(author, branch, id.path, evCreatedAt, hasEventID)
+		inv.clearRetiredCauseForEventWithStateLocked(author, branch, id.path, evCreatedAt, hasEventID, evNonEmptyID, evStateDeltaPtr, requireProvenance)
 		k := llmKey(identity{path: id.path, agentName: author, branch: branch})
 		if len(calls) > 0 {
 			if inv.unrespondedRetiredTools[k] > 0 {
@@ -4003,12 +4102,13 @@ func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, aut
 		return
 	}
 	var matchedPending, absorbed bool
-	i, matchedPending, absorbed = inv.selectResponseOwnerLocked(i, id.path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID)
+	i, matchedPending, absorbed = inv.selectResponseOwnerWithIDLocked(i, id.path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, evNonEmptyID, requireProvenance)
 	if absorbed {
 		return
 	}
 	owner := inv.agentStack[i]
-	guardedPeer := inv.hasGuardedRetiredPeerForEventLocked(owner, id.path, evCreatedAt, hasEventID)
+	ownerHasEventID := hasEventID || (evNonEmptyID && owner.hasCustomUUIDProvider)
+	guardedPeer := inv.hasGuardedRetiredPeerForEventLocked(owner, id.path, evCreatedAt, ownerHasEventID)
 	inv.touchAgentActivityLocked(owner, now)
 	// An activation is created after the one that it runs under, so one pass
 	// over the later spans finds all that run under the owner.
@@ -4018,9 +4118,17 @@ func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, aut
 			under[rec.spanID] = true
 		}
 	}
-	canClearOwnerCauseAt := func(causeTime time.Time) bool {
-		if !evCreatedAt.IsZero() && (!hasEventID || (!causeTime.IsZero() && !evCreatedAt.After(causeTime))) {
+	canClearOwnerCauseAt := func(causeTime time.Time, enforceZeroTS bool) bool {
+		if requireProvenance && enforceZeroTS && (!ownerHasEventID || evCreatedAt.IsZero()) {
 			return false
+		}
+		if !evCreatedAt.IsZero() {
+			if !ownerHasEventID {
+				return false
+			}
+			if !causeTime.IsZero() && !evCreatedAt.After(causeTime) {
+				return false
+			}
 		}
 		return true
 	}
@@ -4028,14 +4136,14 @@ func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, aut
 		for _, rec := range inv.agentStack[i:] {
 			if under[rec.spanID] {
 				rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
-					return canClearOwnerCauseAt(c.platformTime)
+					return canClearOwnerCauseAt(c.platformTime, true)
 				})
 			}
 		}
 	}
 	if !guardedPeer && (!owner.concurrentPeer || matchedPending) {
 		for key, e := range inv.unrecoveredErrors {
-			if inv.activationOfLocked(e) == i && !e.collateral && canClearOwnerCauseAt(e.platformTime) {
+			if inv.activationOfLocked(e) == i && !e.collateral && canClearOwnerCauseAt(e.platformTime, e.spanID != owner.spanID) {
 				delete(inv.unrecoveredErrors, key)
 			}
 		}
@@ -4074,7 +4182,7 @@ func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, aut
 			for _, rec := range inv.agentStack[i:] {
 				if under[rec.spanID] {
 					rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
-						return canClearOwnerCauseAt(c.platformTime)
+						return canClearOwnerCauseAt(c.platformTime, true)
 					})
 				}
 			}
@@ -4136,13 +4244,18 @@ func (inv *invocationTrace) retireDrainedDescendantsAtLocked(failTime time.Time,
 		}
 		return false
 	})
+	failSeq := inv.nextSeqLocked()
 	for _, d := range retired {
 		ownCtxCause := d.contextFailureCause()
 		var moved []retiredCause
 		if ownCtxCause != nil {
 			dFailTime := failTime
+			dFailSeq := failSeq
 			if !d.failurePlatformTime.IsZero() {
 				dFailTime = d.failurePlatformTime
+			}
+			if d.failureSeq != 0 {
+				dFailSeq = d.failureSeq
 			}
 			moved = append(moved, retiredCause{
 				err:          ownCtxCause,
@@ -4150,6 +4263,7 @@ func (inv *invocationTrace) retireDrainedDescendantsAtLocked(failTime time.Time,
 				branch:       d.branch,
 				path:         d.path,
 				platformTime: dFailTime,
+				causeSeq:     dFailSeq,
 			})
 		}
 		canSwallow := !d.propagatesChildError && ownCtxCause == nil
@@ -4192,7 +4306,14 @@ func (inv *invocationTrace) retireDrainedDescendantsAtLocked(failTime time.Time,
 // whether it matched pending model/tool callback evidence, or absorbs the event
 // when its author already retired while a peer remained open.
 func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls []string, hasFuncCall, wasPartial bool, partialSpanID string, now, evCreatedAt time.Time, hasEventID bool) (int, bool, bool) {
+	return inv.selectResponseOwnerWithIDLocked(i, path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, false, false)
+}
+
+func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, calls []string, hasFuncCall, wasPartial bool, partialSpanID string, now, evCreatedAt time.Time, hasEventID, evNonEmptyID, requireProvenance bool) (int, bool, bool) {
 	base := inv.agentStack[i]
+	hasIDFor := func(rec *spanRecord) bool {
+		return hasEventID || (evNonEmptyID && rec.hasCustomUUIDProvider)
+	}
 	k := llmKey(identity{path: base.path, agentName: base.name, branch: base.branch})
 	absorbOntoParent := func() (int, bool, bool) {
 		if base.parent != nil && base.parent.kind == spanKindAgent {
@@ -4271,7 +4392,7 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls 
 			base.unforwardedModelEvents--
 			if hasUnrecErr(i) {
 				errTime, hasUntimestamped := unrecErrTiming(i)
-				if hasFuncCall || (!evCreatedAt.IsZero() && (!hasEventID || hasUntimestamped || (!errTime.IsZero() && !evCreatedAt.After(errTime)))) {
+				if hasFuncCall || (!evCreatedAt.IsZero() && (!hasIDFor(base) || hasUntimestamped || (!errTime.IsZero() && !evCreatedAt.After(errTime)))) {
 					return absorbOntoParent()
 				}
 			}
@@ -4284,14 +4405,14 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls 
 			if hasUnrecErr(j) {
 				continue
 			}
-			if inv.unrespondedRetiredTools[k] > 0 && !inv.provenAfterAllRetiredLocked(cand, path, evCreatedAt, hasEventID) {
+			if inv.unrespondedRetiredTools[k] > 0 && !inv.provenAfterAllRetiredLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 				continue
 			}
 			if cand.awaitingToolEvent > 0 {
 				cand.awaitingToolEvent = max(0, cand.awaitingToolEvent-len(calls))
 				return j, true, false
 			}
-			if !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasEventID) {
+			if !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 				for key, rec := range inv.toolSpans {
 					if rec.parentSpanID == cand.spanID && slices.Contains(calls, toolKeyCall(key)) {
 						return j, true, false
@@ -4306,7 +4427,7 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls 
 	} else {
 		for _, j := range peerIdxs {
 			cand := inv.agentStack[j]
-			if cand.awaitingModelEvent > 0 && !hasUnrecErr(j) && (inv.unrespondedRetired[k] == 0 || inv.provenAfterAllRetiredLocked(cand, path, evCreatedAt, hasEventID)) {
+			if cand.awaitingModelEvent > 0 && !hasUnrecErr(j) && (inv.unrespondedRetired[k] == 0 || inv.provenAfterAllRetiredLocked(cand, path, evCreatedAt, hasIDFor(cand))) {
 				cand.awaitingModelEvent--
 				return j, true, false
 			}
@@ -4325,22 +4446,22 @@ func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls 
 	}
 	for _, j := range peerIdxs {
 		cand := inv.agentStack[j]
-		if !cand.hasResponse && !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasEventID) {
+		if !cand.hasResponse && !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 			return j, false, false
 		}
 	}
 	for _, j := range peerIdxs {
 		cand := inv.agentStack[j]
-		if !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasEventID) {
+		if !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 			cand.extraResponses++
 			return j, false, false
 		}
 	}
 	if inv.retiredPeerCount[k] > 0 {
-		inv.clearRetiredCauseForEventLocked(base.name, base.branch, base.path, evCreatedAt, hasEventID)
+		inv.clearRetiredCauseForEventWithStateLocked(base.name, base.branch, base.path, evCreatedAt, hasEventID, evNonEmptyID, 0, requireProvenance)
 		return absorbOntoParent()
 	}
-	if inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasEventID) {
+	if inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasIDFor(base)) {
 		return absorbOntoParent()
 	}
 	for _, j := range peerIdxs {
@@ -5139,8 +5260,8 @@ func parallelBranch(a *spanRecord, childName string) string {
 	return a.branch + "." + a.name + "." + childName
 }
 
-// nextSeqLocked returns the seq of an agent activation or tool call that starts
-// now (see spanRecord.seq).
+// nextSeqLocked returns the next monotonically increasing sequence number for
+// invocation span starts, error records, and agent retirements.
 func (inv *invocationTrace) nextSeqLocked() uint64 {
 	inv.lastSeq++
 	return inv.lastSeq
@@ -6455,6 +6576,48 @@ func contextHasCustomUUIDProvider(ctx context.Context) (res bool) {
 		return true
 	})
 	return res
+}
+
+// callbackAfterAgentStateDeltaPtr inspects ADK's callback context (without
+// calling Context.Actions, which logs an unsupported warning and returns nil)
+// and returns the underlying EventActions.StateDelta map pointer so onEvent
+// can match events built by that runAfterAgentCallbacks call.
+func callbackAfterAgentStateDeltaPtr(ctx context.Context) (ptr uintptr) {
+	defer func() {
+		if r := recover(); r != nil {
+			ptr = 0
+		}
+	}()
+	walkContextStructs(ctx, func(v reflect.Value) bool {
+		actions := v.FieldByName("actions")
+		if !actions.IsValid() {
+			return false
+		}
+		for actions.Kind() == reflect.Pointer || actions.Kind() == reflect.Interface {
+			if actions.IsNil() {
+				return true
+			}
+			actions = actions.Elem()
+		}
+		if !actions.IsValid() || actions.Kind() != reflect.Struct {
+			return true
+		}
+		sd := actions.FieldByName("StateDelta")
+		if sd.IsValid() && sd.Kind() == reflect.Map && !sd.IsNil() {
+			ptr = sd.Pointer()
+		}
+		return true
+	})
+	return ptr
+}
+
+// eventStateDeltaPtr returns the underlying StateDelta map pointer of ev, or 0
+// when ev or ev.Actions.StateDelta is nil.
+func eventStateDeltaPtr(ev *session.Event) uintptr {
+	if ev == nil || ev.Actions.StateDelta == nil {
+		return 0
+	}
+	return reflect.ValueOf(ev.Actions.StateDelta).Pointer()
 }
 
 func exportContextKey(key reflect.Value) (any, bool) {

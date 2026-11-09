@@ -24996,10 +24996,12 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 
 		// A delayed buffered event at t2 = t0+20ms matches both bot-0 (open parent
 		// with callbacks) and the compacted middle hull covering [t2..t3], so err0
-		// must remain preserved.
+		// must remain preserved, including at t0+30ms (merged retiredAtPlatformTime).
 		t2 := t0.Add(20 * time.Millisecond)
 		inv.clearRetiredCauseForEventLocked("bot", "", "", t2, true)
 		causeAfterMiddle := rootSpan.openFailureCause()
+		inv.clearRetiredCauseForEventLocked("bot", "", "", t0.Add(30*time.Millisecond), true)
+		causeAfterMiddleMaxRetired := rootSpan.openFailureCause()
 
 		// A genuine recovery event from bot-0 at t0+5ms (before bot-1..bot-4 started)
 		// matches only bot-0 and clears err0 cleanly.
@@ -25039,12 +25041,159 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		if !errors.Is(causeAfterMiddle, err0) {
 			t.Fatalf("middle candidate event at t2 cleared earlier cause: got=%v, want err0 (%v)", causeAfterMiddle, err0)
 		}
+		if !errors.Is(causeAfterMiddleMaxRetired, err0) {
+			t.Fatalf("middle candidate event at t0+30ms cleared earlier cause: got=%v, want err0 (%v)", causeAfterMiddleMaxRetired, err0)
+		}
 		if causeAfterBot0Recovery != nil {
 			t.Fatalf("genuine bot-0 recovery event at t0+5ms failed to clear err0: got=%v, want nil", causeAfterBot0Recovery)
 		}
 		if causeAfterNewer != nil {
 			t.Fatalf("newer uncompacted activation bot-5 failed to clear its cause: got=%v, want nil", causeAfterNewer)
 		}
+	})
+
+	t.Run("compacted middle hull merges min startPlatformTime and max parentRetiredAtPlatformTime", func(t *testing.T) {
+		t.Run("min startPlatformTime", func(t *testing.T) {
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			rootSpan := inv.agentStack[1]
+			rootSpan.propagatesChildError = false
+
+			err0 := errors.New("bot-0 earlier failure")
+			bot0 := &spanRecord{
+				spanID:                 "bot-0",
+				parentSpanID:           rootSpan.spanID,
+				kind:                   spanKindAgent,
+				name:                   "bot",
+				parent:                 rootSpan,
+				seq:                    inv.nextSeqLocked(),
+				completed:              true,
+				ownResponse:            true,
+				goroutineID:            7,
+				startPlatformTime:      t0,
+				hasAfterAgentCallbacks: true,
+			}
+			rootSpan.retiredCauses = append(rootSpan.retiredCauses, retiredCause{
+				err:          err0,
+				name:         "child",
+				platformTime: t0,
+				swallowers:   []retiredSwallower{{spanID: bot0.spanID, seq: bot0.seq, name: "bot"}},
+			})
+			inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(time.Millisecond), bot0)
+
+			specs := []struct {
+				startOffset, retireOffset time.Duration
+			}{
+				{10 * time.Millisecond, 10 * time.Millisecond},
+				{25 * time.Millisecond, 25 * time.Millisecond},
+				{15 * time.Millisecond, 30 * time.Millisecond},
+				{40 * time.Millisecond, 40 * time.Millisecond},
+			}
+			for iter, sp := range specs {
+				rec := &spanRecord{
+					spanID:                 fmt.Sprintf("bot-min-%d", iter+1),
+					parentSpanID:           rootSpan.spanID,
+					kind:                   spanKindAgent,
+					name:                   "bot",
+					parent:                 rootSpan,
+					seq:                    inv.nextSeqLocked(),
+					completed:              true,
+					ownResponse:            true,
+					goroutineID:            7,
+					startPlatformTime:      t0.Add(sp.startOffset),
+					hasAfterAgentCallbacks: false,
+				}
+				inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(sp.retireOffset), rec)
+				inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+			}
+
+			inv.clearRetiredCauseForEventLocked("bot", "", "", t0.Add(20*time.Millisecond), true)
+			causeAfterStartWindow := rootSpan.openFailureCause()
+			inv.mu.Unlock()
+
+			if !errors.Is(causeAfterStartWindow, err0) {
+				t.Fatalf("event at t0+20ms in merged min startPlatformTime window cleared earlier cause: got=%v, want err0 (%v)", causeAfterStartWindow, err0)
+			}
+		})
+
+		t.Run("max parentRetiredAtPlatformTime", func(t *testing.T) {
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			rootSpan := inv.agentStack[1]
+			rootSpan.propagatesChildError = false
+
+			err0 := errors.New("bot-0 earlier failure")
+			bot0 := &spanRecord{
+				spanID:                 "bot-0",
+				parentSpanID:           rootSpan.spanID,
+				kind:                   spanKindAgent,
+				name:                   "bot",
+				parent:                 rootSpan,
+				seq:                    inv.nextSeqLocked(),
+				completed:              true,
+				ownResponse:            true,
+				goroutineID:            7,
+				startPlatformTime:      t0,
+				hasAfterAgentCallbacks: true,
+			}
+			rootSpan.retiredCauses = append(rootSpan.retiredCauses, retiredCause{
+				err:          err0,
+				name:         "child",
+				platformTime: t0,
+				swallowers:   []retiredSwallower{{spanID: bot0.spanID, seq: bot0.seq, name: "bot"}},
+			})
+			inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(time.Millisecond), bot0)
+
+			parentSpecs := []struct {
+				startOffset, retireOffset, parentRetireOffset time.Duration
+			}{
+				{10 * time.Millisecond, 12 * time.Millisecond, 15 * time.Millisecond},
+				{20 * time.Millisecond, 22 * time.Millisecond, 25 * time.Millisecond},
+				{15 * time.Millisecond, 28 * time.Millisecond, 35 * time.Millisecond},
+				{40 * time.Millisecond, 42 * time.Millisecond, 45 * time.Millisecond},
+			}
+			for iter, sp := range parentSpecs {
+				parentRec := &spanRecord{
+					spanID:            fmt.Sprintf("parent-%d", iter+1),
+					parentSpanID:      rootSpan.spanID,
+					kind:              spanKindAgent,
+					name:              "outer",
+					parent:            rootSpan,
+					seq:               inv.nextSeqLocked(),
+					completed:         true,
+					ownResponse:       true,
+					startPlatformTime: t0.Add(sp.startOffset),
+				}
+				rec := &spanRecord{
+					spanID:                 fmt.Sprintf("bot-parent-%d", iter+1),
+					parentSpanID:           parentRec.spanID,
+					kind:                   spanKindAgent,
+					name:                   "bot",
+					parent:                 parentRec,
+					seq:                    inv.nextSeqLocked(),
+					completed:              true,
+					ownResponse:            true,
+					goroutineID:            7,
+					startPlatformTime:      t0.Add(sp.startOffset),
+					hasAfterAgentCallbacks: true,
+				}
+				inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(sp.retireOffset), rec)
+				inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0.Add(sp.parentRetireOffset), parentRec)
+				inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+			}
+
+			inv.clearRetiredCauseForEventLocked("bot", "", "", t0.Add(30*time.Millisecond), true)
+			causeAfterParentWindow := rootSpan.openFailureCause()
+			inv.mu.Unlock()
+
+			if !errors.Is(causeAfterParentWindow, err0) {
+				t.Fatalf("event at t0+30ms in merged max parentRetiredAtPlatformTime window cleared earlier cause: got=%v, want err0 (%v)", causeAfterParentWindow, err0)
+			}
+		})
 	})
 
 	t.Run("open failing concurrent peer blocks retiredPeerCount from clearing earlier failure", func(t *testing.T) {
@@ -25155,6 +25304,221 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		inv.mu.Unlock()
 		if llmAfterUUID || !ownAfterUUID {
 			t.Fatalf("UUID-stamped post-error event did not own response: llmStillOpen=%v ownResponse=%v, want false/true", llmAfterUUID, ownAfterUUID)
+		}
+	})
+
+	t.Run("retired AfterAgentCallback same-tick fails closed when cause recorded after retirement", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		sdMap := map[string]any{}
+		sdPtr := reflect.ValueOf(sdMap).Pointer()
+		innerSpanID := newSpanID()
+
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		rootRec.startPlatformTime = t0
+		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+			swallower:               retiredSwallower{spanID: innerSpanID, seq: 2, name: "inner"},
+			parentSpanID:            rootRec.spanID,
+			guardSpanIDs:            []string{rootRec.spanID},
+			retiredAtSeq:            10,
+			completedOrTask:         true,
+			unrespondedAtPop:        true,
+			hasAfterAgentCallbacks:  true,
+			afterAgentStateDeltaPtr: sdPtr,
+			afterAgentStateDeltaRef: sdMap,
+			startPlatformTime:       t0,
+			retiredAtPlatformTime:   t0,
+		})
+		rootRec.retiredCauses = []retiredCause{{
+			err:          errors.New("post-retirement descendant boom"),
+			name:         "bg_child",
+			swallowers:   []retiredSwallower{{spanID: innerSpanID, seq: 2, name: "inner"}},
+			platformTime: t0,
+			causeSeq:     15,
+		}}
+
+		// Even with an authentic AfterAgentCallback StateDelta pointer at matching timestamp t0,
+		// a cause recorded at or after retirement (causeSeq 15 >= retiredAtSeq 10) must fail closed.
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdPtr, true)
+		if len(rootRec.retiredCauses) != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("stale callback cleared later same-tick cause (retiredAtSeq=10 <= causeSeq=15); retiredCauses=%d, want 1", len(rootRec.retiredCauses))
+		}
+
+		// Control: a pre-retirement cause (causeSeq 5 < retiredAtSeq 10) on the same tick clears,
+		// releases the StateDelta keep-alive, and marks unrespondedAtPop = false.
+		inv.retiredActivations[0].afterAgentStateDeltaPtr = sdPtr
+		inv.retiredActivations[0].afterAgentStateDeltaRef = sdMap
+		rootRec.retiredCauses[0].causeSeq = 5
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdPtr, true)
+		causesLeft := len(rootRec.retiredCauses)
+		raAfter := inv.retiredActivations[0]
+		inv.mu.Unlock()
+		if causesLeft != 0 {
+			t.Fatalf("authentic callback failed to clear pre-retirement same-tick cause: retiredCauses=%d, want 0", causesLeft)
+		}
+		if raAfter.afterAgentStateDeltaPtr != 0 || raAfter.afterAgentStateDeltaRef != nil {
+			t.Fatalf("matched callback did not clear afterAgentStateDelta keep-alive: ptr=%#x ref=%v", raAfter.afterAgentStateDeltaPtr, raAfter.afterAgentStateDeltaRef)
+		}
+		if raAfter.unrespondedAtPop {
+			t.Fatal("matched same-tick AfterAgentCallback left unrespondedAtPop=true, want false")
+		}
+	})
+
+	t.Run("live open activation same-tick cause is not cleared", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		rootSpan := inv.agentStack[1]
+		rootSpan.startPlatformTime = t0
+		rootSpan.retiredCauses = []retiredCause{{
+			err:          errors.New("same-tick retired child failure"),
+			name:         "child",
+			platformTime: t2,
+			causeSeq:     inv.nextSeqLocked(),
+		}}
+		inv.unrecoveredErrors = map[string]recordedError{"err1": {
+			err:          errors.New("same-tick direct child error"),
+			spanID:       rootSpan.spanID,
+			platformTime: t2,
+			seq:          inv.nextSeqLocked(),
+		}}
+		inv.mu.Unlock()
+
+		tm.completeResponseAt(ctx, rootID, "root", "", nil, false, t2, true)
+		inv.mu.Lock()
+		causesLeft := len(rootSpan.retiredCauses)
+		unrecLeft := len(inv.unrecoveredErrors)
+		inv.mu.Unlock()
+		if causesLeft != 1 || unrecLeft != 1 {
+			t.Fatalf("same-tick live event cleared failures: causes=%d unrec=%d, want 1 and 1", causesLeft, unrecLeft)
+		}
+	})
+
+	t.Run("pointer-match does not bypass later retired activation ambiguity", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		sdMap := map[string]any{}
+		sdPtr := reflect.ValueOf(sdMap).Pointer()
+		inner1Span := newSpanID()
+		inner2Span := newSpanID()
+
+		inv.mu.Lock()
+		rootRec := inv.agentStack[1]
+		rootRec.startPlatformTime = t0
+		inv.retiredActivations = append(inv.retiredActivations,
+			retiredActivation{
+				swallower:               retiredSwallower{spanID: inner1Span, seq: 2, name: "inner"},
+				parentSpanID:            rootRec.spanID,
+				guardSpanIDs:            []string{rootRec.spanID},
+				retiredAtSeq:            10,
+				completedOrTask:         true,
+				unrespondedAtPop:        true,
+				hasAfterAgentCallbacks:  true,
+				afterAgentStateDeltaPtr: sdPtr,
+				afterAgentStateDeltaRef: sdMap,
+				startPlatformTime:       t0,
+				retiredAtPlatformTime:   t0,
+			},
+			retiredActivation{
+				swallower:             retiredSwallower{spanID: inner2Span, seq: 11, name: "inner"},
+				parentSpanID:          rootRec.spanID,
+				guardSpanIDs:          []string{rootRec.spanID},
+				retiredAtSeq:          12,
+				completedOrTask:       true,
+				unrespondedAtPop:      true,
+				startPlatformTime:     t1,
+				retiredAtPlatformTime: t1,
+			},
+		)
+		rootRec.retiredCauses = []retiredCause{{
+			err:          errors.New("inner1 failure"),
+			name:         "child",
+			swallowers:   []retiredSwallower{{spanID: inner1Span, seq: 2, name: "inner"}},
+			platformTime: t0,
+			causeSeq:     5,
+		}}
+
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t1, true, true, sdPtr, true)
+		causesLeft := len(rootRec.retiredCauses)
+		inv.mu.Unlock()
+		if causesLeft != 1 {
+			t.Fatalf("pointer match bypassed later ambiguous activation: retiredCauses=%d, want 1", causesLeft)
+		}
+	})
+
+	t.Run("afterAgentStateDeltaRef cleared on compaction and endInvocation", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+
+		type sentinel struct{ _ [64]byte }
+		var hullWeak, endWeak weak.Pointer[sentinel]
+		func() {
+			s1, s2 := &sentinel{}, &sentinel{}
+			m1 := map[string]any{"k": s1}
+			m2 := map[string]any{"k": s2}
+			m3 := map[string]any{}
+			m4 := map[string]any{}
+			endWeak = weak.Make(s1)
+			hullWeak = weak.Make(s2)
+			inv.mu.Lock()
+			rootRec := inv.agentStack[1]
+			rootRec.startPlatformTime = t0
+			for idx, mp := range []map[string]any{m1, m2, m3, m4} {
+				inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+					swallower:               retiredSwallower{spanID: newSpanID(), seq: inv.nextSeqLocked(), name: "bot"},
+					parentSpanID:            rootRec.spanID,
+					guardSpanIDs:            []string{rootRec.spanID},
+					retiredAtSeq:            inv.nextSeqLocked(),
+					completedOrTask:         true,
+					unrespondedAtPop:        true,
+					afterAgentStateDeltaPtr: reflect.ValueOf(mp).Pointer(),
+					afterAgentStateDeltaRef: mp,
+					startPlatformTime:       t0.Add(time.Duration(idx) * time.Millisecond),
+					retiredAtPlatformTime:   t1.Add(time.Duration(idx) * time.Millisecond),
+				})
+			}
+			inv.mu.Unlock()
+		}()
+
+		runtime.GC()
+		runtime.GC()
+		if hullWeak.Value() == nil || endWeak.Value() == nil {
+			t.Fatal("retired StateDelta ref was collected before compaction or endInvocation")
+		}
+
+		inv.mu.Lock()
+		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		if len(inv.retiredActivations) != 3 || !inv.retiredActivations[1].compactedHull {
+			gotLen := len(inv.retiredActivations)
+			inv.mu.Unlock()
+			t.Fatalf("expected 3 entries with compactedHull at index 1, got len=%d", gotLen)
+		}
+		hull := inv.retiredActivations[1]
+		inv.mu.Unlock()
+		if hull.afterAgentStateDeltaPtr != 0 || hull.afterAgentStateDeltaRef != nil {
+			t.Fatalf("compacted hull retained StateDelta ref: ptr=%#x ref=%v", hull.afterAgentStateDeltaPtr, hull.afterAgentStateDeltaRef)
+		}
+
+		runtime.GC()
+		runtime.GC()
+		if hullWeak.Value() != nil {
+			t.Fatal("compacted entry callback StateDelta ref remained reachable after compaction and GC")
+		}
+		if endWeak.Value() == nil {
+			t.Fatal("surviving firstIdx StateDelta ref was unexpectedly collected before endInvocation")
+		}
+
+		tm.endInvocation(ctx, rootID)
+		runtime.GC()
+		runtime.GC()
+		if endWeak.Value() != nil {
+			t.Fatal("retired callback StateDelta ref remained reachable after endInvocation and GC")
 		}
 	})
 }
@@ -25363,28 +25727,100 @@ func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
 	}
 
 	validUUID := "550e8400-e29b-41d4-a716-446655440000"
+	newEventActions := session.EventActions{
+		StateDelta:    map[string]any{},
+		ArtifactDelta: map[string]int64{},
+	}
 	cases := []struct {
 		name string
 		ctx  context.Context
-		id   string
+		ev   *session.Event
 		want bool
 	}{
-		{name: "empty ID with default context", ctx: context.Background(), id: "", want: false},
-		{name: "empty ID rejected even with custom provider", ctx: parentCtx, id: "", want: false},
-		{name: "custom ID accepted when custom provider active", ctx: parentCtx, id: "event-1", want: true},
-		{name: "custom ID rejected on default context", ctx: context.Background(), id: "event-1", want: false},
-		{name: "custom ID rejected when nil provider shadows outer", ctx: shadowedCtx, id: "event-1", want: false},
-		{name: "UUIDv4 accepted on default context", ctx: context.Background(), id: validUUID, want: true},
-		{name: "UUIDv4 accepted when nil provider shadows outer", ctx: shadowedCtx, id: validUUID, want: true},
+		{name: "nil event rejected", ctx: parentCtx, ev: nil, want: false},
+		{name: "empty ID with default context", ctx: context.Background(), ev: &session.Event{}, want: false},
+		{name: "empty ID rejected even with custom provider", ctx: parentCtx, ev: &session.Event{}, want: false},
+		{name: "empty ID rejected even with NewEvent actions", ctx: context.Background(), ev: &session.Event{Actions: newEventActions}, want: false},
+		{name: "custom ID accepted when custom provider active", ctx: parentCtx, ev: &session.Event{ID: "event-1"}, want: true},
+		{name: "custom ID rejected on default context without NewEvent actions", ctx: context.Background(), ev: &session.Event{ID: "event-1"}, want: false},
+		{name: "custom ID accepted when NewEvent actions initialized", ctx: context.Background(), ev: &session.Event{ID: "event-1", Actions: newEventActions}, want: true},
+		{name: "custom ID accepted when NewEvent actions initialized under shadowed nil provider", ctx: shadowedCtx, ev: &session.Event{ID: "event-1", Actions: newEventActions}, want: true},
+		{name: "custom ID rejected when nil provider shadows outer without actions", ctx: shadowedCtx, ev: &session.Event{ID: "event-1"}, want: false},
+		{name: "UUIDv4 accepted on default context", ctx: context.Background(), ev: &session.Event{ID: validUUID}, want: true},
+		{name: "UUIDv4 accepted when nil provider shadows outer", ctx: shadowedCtx, ev: &session.Event{ID: validUUID}, want: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hasEventCreationProvenance(tc.ctx, tc.id); got != tc.want {
-				t.Errorf("hasEventCreationProvenance(%q) = %v, want %v", tc.id, got, tc.want)
+			if got := hasEventCreationProvenance(tc.ctx, tc.ev); got != tc.want {
+				t.Errorf("hasEventCreationProvenance(%+v) = %v, want %v", tc.ev, got, tc.want)
 			}
 		})
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("custom UUIDProvider was invoked %d times during inspection, want 0", got)
+	}
+}
+
+func TestCallbackAfterAgentStateDeltaPtr(t *testing.T) {
+	if got := callbackAfterAgentStateDeltaPtr(context.Background()); got != 0 {
+		t.Fatalf("callbackAfterAgentStateDeltaPtr(Background) = %#x, want 0", got)
+	}
+	if got := eventStateDeltaPtr(nil); got != 0 {
+		t.Fatalf("eventStateDeltaPtr(nil) = %#x, want 0", got)
+	}
+	if got := eventStateDeltaPtr(&session.Event{}); got != 0 {
+		t.Fatalf("eventStateDeltaPtr(zero Event) = %#x, want 0", got)
+	}
+
+	var observedCallbackPtr uintptr
+	var events []*session.Event
+	var errLogs bytes.Buffer
+
+	root, err := agent.New(agent.Config{
+		Name: "root",
+		AfterAgentCallbacks: []agent.AfterAgentCallback{
+			func(ctx agent.Context) (*genai.Content, error) {
+				return textContent("model", "recovered"), nil
+			},
+		},
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New(root): %v", err)
+	}
+
+	probePlugin, err := baseplugin.New(baseplugin.Config{
+		Name: "probe-state-delta-ptr",
+		AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
+			observedCallbackPtr = callbackAfterAgentStateDeltaPtr(ctx)
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New: %v", err)
+	}
+
+	prevOut := log.Writer()
+	log.SetOutput(&errLogs)
+	defer log.SetOutput(prevOut)
+
+	for ev, runErr := range newTestRunner(t, root, probePlugin).Run(t.Context(), "u1", "s-state-delta-ptr", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run error = %v", runErr)
+		}
+		if ev != nil {
+			events = append(events, ev)
+		}
+	}
+	if strings.Contains(errLogs.String(), "not supported for callback context") {
+		t.Fatalf("callbackAfterAgentStateDeltaPtr triggered callback-context warning log: %q", errLogs.String())
+	}
+	if observedCallbackPtr == 0 {
+		t.Fatal("callbackAfterAgentStateDeltaPtr = 0 during AfterAgentCallback, want non-zero")
+	}
+	if len(events) != 1 || eventStateDeltaPtr(events[0]) != observedCallbackPtr {
+		t.Fatalf("eventStateDeltaPtr = %#x (events=%d), want %#x", eventStateDeltaPtr(events[0]), len(events), observedCallbackPtr)
 	}
 }
