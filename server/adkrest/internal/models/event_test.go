@@ -402,21 +402,47 @@ func TestToSessionEventTimestampBoundsMatchSessionDecoder(t *testing.T) {
 	}
 }
 
-// TestMarshalEventWithNilPartDoesNotPanic: a nil entry in Content.Parts (a
-// null part in a stored create-session body reaches storage verbatim) must
-// serialize, not panic every endpoint that returns the session.
-func TestMarshalEventWithNilPartDoesNotPanic(t *testing.T) {
+// TestMarshalEventDropsNilParts: a nil entry in Content.Parts (a null part in
+// a stored create-session body reaches storage verbatim) must serialize, not
+// panic every endpoint that returns the session — and the serialized output
+// must not contain a null part: REST clients, including the bundled web UI,
+// read fields off every part they render. This pins the exact output shape:
+// the nil slot is dropped, the real parts keep their order and content.
+func TestMarshalEventDropsNilParts(t *testing.T) {
 	ev := session.Event{
 		ID: "e1",
 		LLMResponse: model.LLMResponse{
-			Content: &genai.Content{Parts: []*genai.Part{nil, genai.NewPartFromText("kept")}},
+			Content: &genai.Content{Parts: []*genai.Part{
+				genai.NewPartFromText("kept"),
+				nil,
+				{FunctionCall: &genai.FunctionCall{Name: "f"}},
+			}},
 		},
 	}
 	rawJSON, err := json.Marshal(models.FromSessionEvent(ev))
 	if err != nil {
 		t.Fatalf("json.Marshal(event with nil part) failed: %v", err)
 	}
-	if !bytes.Contains(rawJSON, []byte("kept")) {
-		t.Errorf("marshaled event lost the real part: %s", rawJSON)
+	var got struct {
+		Content struct {
+			Parts []json.RawMessage `json:"parts"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(rawJSON, &got); err != nil {
+		t.Fatalf("unmarshal marshaled event: %v", err)
+	}
+	if len(got.Content.Parts) != 2 {
+		t.Fatalf("parts count = %d, want 2 (nil slot dropped): %s", len(got.Content.Parts), rawJSON)
+	}
+	for i, p := range got.Content.Parts {
+		if string(p) == "null" {
+			t.Errorf("parts[%d] is null; output must never carry a null part: %s", i, rawJSON)
+		}
+	}
+	if !bytes.Contains(got.Content.Parts[0], []byte(`"kept"`)) {
+		t.Errorf("parts[0] = %s, want the kept text part first", got.Content.Parts[0])
+	}
+	if !bytes.Contains(got.Content.Parts[1], []byte(`"name":"f"`)) || !bytes.Contains(got.Content.Parts[1], []byte(`"args":{}`)) {
+		t.Errorf("parts[1] = %s, want the function call with empty args object", got.Content.Parts[1])
 	}
 }
