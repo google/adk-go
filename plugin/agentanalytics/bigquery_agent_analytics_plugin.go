@@ -69,8 +69,17 @@ const (
 	EventToolStarting = "TOOL_STARTING"
 	// EventToolCompleted is written when a tool call finishes without an error
 	// (or with a tool confirmation request/rejection), except when the call was
-	// already recorded as TOOL_ERROR by OnToolErrorCallback or answered by
-	// plugin/retryandreflect.
+	// answered by plugin/retryandreflect or when OnToolErrorCallback already
+	// recorded TOOL_ERROR for the same attempt and the callback carries a
+	// per-attempt context identity (pointer context or agent.NewToolContext)
+	// with matching arguments and turn epoch, unless an earlier plugin can
+	// short-circuit both BeforeToolCallback and AfterToolCallback while the
+	// callback either lacks a per-attempt EventActions pointer or reuses one
+	// that already completed an earlier tool call in the same invocation. Custom
+	// non-pointer callback contexts without agent.NewToolContext still
+	// deduplicate unrecovered TOOL_ERROR rows, but cannot distinguish a
+	// recovered first attempt from a retry that skipped BeforeToolCallback and
+	// therefore still emit EventToolCompleted.
 	EventToolCompleted = "TOOL_COMPLETED"
 	// EventToolError is written when a tool call fails, including when the
 	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
@@ -554,6 +563,7 @@ func newBigQueryAgentAnalyticsPlugin(
 		return nil, err
 	}
 
+	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if config.createViews() && state.runner != nil {
@@ -954,11 +964,17 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		}
 		p.emitSessionEventSignals(ctx, ev)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor {
+			if finishCalls := finishTaskFunctionCalls(ev.Content); len(finishCalls) > 0 {
+				taskID := evID
+				taskID.agentName = ev.Author
+				taskID.branch = ev.Branch
+				p.traces.noteTaskFinishCalls(ctx, taskID, finishCalls, true)
+			}
 			if calls := taskCompletedCalls(ev.Content); len(calls) > 0 {
 				taskID := evID
 				taskID.agentName = ev.Author
 				taskID.branch = ev.Branch
-				if span, ok := p.traces.popTaskAgentSpan(ctx, taskID, calls); ok {
+				if span, ok := p.traces.popTaskAgentSpanWithDelta(ctx, taskID, calls, eventStateDelta(ev)); ok {
 					p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
 				}
 			}
@@ -1041,6 +1057,32 @@ func taskCompletedCalls(c *genai.Content) []string {
 // task-mode LLM agent in ADK without running its AfterAgentCallback.
 func hasTaskCompletedResponse(c *genai.Content) bool {
 	return len(taskCompletedCalls(c)) > 0
+}
+
+// finishTaskFunctionCalls returns the function call ID, or else
+// finishTaskToolName, of each finish_task FunctionCall part in c.
+func finishTaskFunctionCalls(c *genai.Content) []string {
+	if c == nil {
+		return nil
+	}
+	var calls []string
+	for _, part := range c.Parts {
+		if part == nil || part.FunctionCall == nil {
+			continue
+		}
+		if part.FunctionCall.Name == finishTaskToolName {
+			calls = append(calls, cmp.Or(part.FunctionCall.ID, finishTaskToolName))
+		}
+	}
+	return calls
+}
+
+// eventStateDelta returns ev.Actions.StateDelta, or nil if ev carries none.
+func eventStateDelta(ev *session.Event) map[string]any {
+	if ev == nil {
+		return nil
+	}
+	return ev.Actions.StateDelta
 }
 
 // functionResponseCalls returns the function call ID, or else the tool name,
@@ -1134,6 +1176,9 @@ func (p *analyticsPlugin) afterModel(ctx agent.Context, res *model.LLMResponse, 
 		p.traces.recordError(ctx, id, key, err)
 	} else if res != nil {
 		p.traces.clearError(ctx, id, key)
+		if finishCalls := finishTaskFunctionCalls(res.Content); len(finishCalls) > 0 {
+			p.traces.noteTaskFinishCalls(ctx, id, finishCalls, false)
+		}
 	}
 	p.logEvent(ctx, id, EventLLMResponse, func() rowSpan {
 		return p.traces.popLLMSpan(ctx, id, res != nil)
@@ -1264,10 +1309,10 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	id := identityOf(ctx)
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
-	span, purged, closedByError := p.traces.popToolCallSpan(ctx, id, callID, name, false, args)
+	confirmationOutcome := isToolConfirmationOutcome(err)
+	span, purged, closedByError := p.traces.popToolAfterCallSpan(ctx, id, callID, name, args, err != nil && !confirmationOutcome)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
-	confirmationOutcome := isToolConfirmationOutcome(err)
 	if closedByError {
 		// onToolError already wrote TOOL_ERROR; even when an agent
 		// OnToolErrorCallback or a later plugin recovered or replaced the error,

@@ -22633,3 +22633,323 @@ func TestTraceManager_EmptyToolCallContextCleanup(t *testing.T) {
 		t.Error("error-ended empty-ID tool args are still reachable after endInvocation + GC")
 	}
 }
+
+func TestTraceManager_TurnEpochsLateHandoffAndCleanup(t *testing.T) {
+	tm := newTraceManager()
+	id := identity{invocationID: "inv-turn-handoff", agentName: "agent"}
+	baseCtx := &mockInvocationContext{ctx: context.Background(), invocationID: id.invocationID, agentName: id.agentName}
+	callCtx := withFunctionCall(baseCtx, "call-1")
+	args := map[string]any{"q": "hello"}
+
+	tm.invocationSpan(baseCtx, id, nil)
+	tm.pushAgentSpan(baseCtx, id)
+	tm.pushLLMSpan(baseCtx, id)
+	tm.popLLMSpan(baseCtx, id, true)
+	tm.pushToolCallSpan(callCtx, id, "call-1", "echo", args)
+	tm.popToolCallSpan(callCtx, id, "call-1", "echo", true, args)
+	tm.popAgentSpan(baseCtx, id)
+	tm.endInvocation(baseCtx, id)
+
+	tm.mu.Lock()
+	completed := tm.completed[id.invocationID]
+	tm.mu.Unlock()
+	if completed == nil {
+		t.Fatal("expected completedTrace entry after endInvocation")
+	}
+
+	// Late LLM step bumps turnEpoch in late state, so a subsequent late AfterTool
+	// with the exact same context and args emits TOOL_COMPLETED instead of suppressing.
+	tm.pushLLMSpan(baseCtx, id)
+	tm.popLLMSpan(baseCtx, id, true)
+	_, _, closedByError := tm.popToolAfterCallSpan(callCtx, id, "call-1", "echo", args, false)
+	if closedByError {
+		t.Error("expected late AfterTool after post-run turn epoch bump not to suppress")
+	}
+
+	tm.mu.Lock()
+	late := completed.late
+	tm.mu.Unlock()
+	if late == nil {
+		t.Fatal("expected late state")
+	}
+	late.mu.Lock()
+	ep := late.turnEpochs[llmKey(id)]
+	remTools := len(late.completedTools)
+	late.mu.Unlock()
+	if ep < 3 {
+		t.Errorf("late turnEpoch = %d, want >= 3", ep)
+	}
+	if remTools != 0 {
+		t.Errorf("remaining completedTools = %d, want 0", remTools)
+	}
+}
+
+func TestBoundedArgsDigest(t *testing.T) {
+	cyclic1 := map[string]any{"k": 1}
+	cyclic1["self"] = cyclic1
+	cyclic2 := map[string]any{"k": 2}
+	cyclic2["self"] = cyclic2
+
+	d1a, ok1a := boundedArgsDigest(cyclic1)
+	d1b, ok1b := boundedArgsDigest(cyclic1)
+	d2, ok2 := boundedArgsDigest(cyclic2)
+	if !ok1a || !ok1b || !ok2 {
+		t.Fatalf("expected valid digests for cyclic maps: %v %v %v", ok1a, ok1b, ok2)
+	}
+	if d1a != d1b {
+		t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
+	}
+	if d1a == d2 {
+		t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+	}
+
+	if dNil, okNil := boundedArgsDigest(nil); okNil || dNil != 0 {
+		t.Errorf("nil args = (%d, %v), want (0, false)", dNil, okNil)
+	}
+
+	// Order independence for small maps.
+	mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
+	mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
+	dA, _ := boundedArgsDigest(mA)
+	dB, _ := boundedArgsDigest(mB)
+	if dA != dB {
+		t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
+	}
+
+	// Oversized cyclic maps (>32 keys) fall back to map-pointer identity so
+	// structurally identical large maps still distinguish distinct allocations
+	// in O(1) without hanging on cycles.
+	huge1 := make(map[string]any, 128)
+	huge2 := make(map[string]any, 128)
+	for i := range 128 {
+		huge1[fmt.Sprintf("k%d", i)] = i
+		huge2[fmt.Sprintf("k%d", i)] = i
+	}
+	huge1["self"] = huge1
+	huge2["self"] = huge2
+	dHuge1, okHuge1 := boundedArgsDigest(huge1)
+	dHuge1Again, okHuge1Again := boundedArgsDigest(huge1)
+	dHuge2, okHuge2 := boundedArgsDigest(huge2)
+	runtime.KeepAlive(huge1)
+	runtime.KeepAlive(huge2)
+	if !okHuge1 || !okHuge1Again || !okHuge2 || dHuge1 == 0 || dHuge2 == 0 {
+		t.Fatalf("oversized map digests = (%d,%v) (%d,%v) (%d,%v), want non-zero ok",
+			dHuge1, okHuge1, dHuge1Again, okHuge1Again, dHuge2, okHuge2)
+	}
+	if dHuge1 != dHuge1Again {
+		t.Errorf("oversized map digest not deterministic for same pointer: %d != %d", dHuge1, dHuge1Again)
+	}
+	if dHuge1 == dHuge2 {
+		t.Errorf("oversized maps with identical entries took structural branch instead of pointer branch: %d == %d", dHuge1, dHuge2)
+	}
+
+	// Strings over 256 bytes sample only prefix, suffix, and total length.
+	head := strings.Repeat("a", 128)
+	tail := strings.Repeat("z", 128)
+	mid1 := strings.Repeat("m", 64)
+	mid2 := strings.Repeat("n", 64)
+	dLong1, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + tail})
+	dLong2, _ := boundedArgsDigest(map[string]any{"s": head + mid2 + tail})
+	dLongHeadDiff, _ := boundedArgsDigest(map[string]any{"s": "X" + head[1:] + mid1 + tail})
+	dLongTailDiff, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + tail[:127] + "Y"})
+	dLongLenDiff, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + "q" + tail})
+	if dLong1 != dLong2 {
+		t.Errorf("long string middle difference should stay within prefix/suffix sampling: %d != %d", dLong1, dLong2)
+	}
+	if dLongHeadDiff == dLong1 || dLongTailDiff == dLong1 || dLongLenDiff == dLong1 {
+		t.Errorf("long string head/tail/length change must alter digest: base=%d head=%d tail=%d len=%d",
+			dLong1, dLongHeadDiff, dLongTailDiff, dLongLenDiff)
+	}
+}
+
+type unwrapTestInvocationCtx struct {
+	agent.InvocationContext
+	context.Context
+	ag agent.Agent
+}
+
+func (c unwrapTestInvocationCtx) Deadline() (time.Time, bool) { return c.Context.Deadline() }
+func (c unwrapTestInvocationCtx) Done() <-chan struct{}       { return c.Context.Done() }
+func (c unwrapTestInvocationCtx) Err() error                  { return c.Context.Err() }
+func (c unwrapTestInvocationCtx) Value(key any) any           { return c.Context.Value(key) }
+func (c unwrapTestInvocationCtx) Agent() agent.Agent          { return c.ag }
+func (c unwrapTestInvocationCtx) Artifacts() agent.Artifacts  { return nil }
+func (c unwrapTestInvocationCtx) Memory() agent.Memory        { return nil }
+func (c unwrapTestInvocationCtx) Session() session.Session    { return nil }
+func (c unwrapTestInvocationCtx) InvocationID() string        { return "inv-unwrap" }
+func (c unwrapTestInvocationCtx) Branch() string              { return "" }
+func (c unwrapTestInvocationCtx) WithContext(ctx context.Context) agent.InvocationContext {
+	c.Context = ctx
+	return c
+}
+
+func (c unwrapTestInvocationCtx) WithICDelta(*agent.InvocationContextDelta) agent.InvocationContext {
+	return c
+}
+
+func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
+	ic := unwrapTestInvocationCtx{Context: context.Background()}
+	acts := &session.EventActions{StateDelta: map[string]any{"k": "v"}}
+	toolCtx := agent.NewToolContext(ic, "call-wc", acts, nil)
+	cbCtx := agent.NewCallbackContext(ic, acts)
+
+	var logBuf bytes.Buffer
+	origOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origOut)
+
+	// Unwrapping callbackContextWrapper must never call .Actions() (which logs
+	// a warning in adk/v2), even across WithoutCancel and WithTimeout wrappers.
+	for _, c := range []context.Context{cbCtx, context.WithoutCancel(cbCtx)} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("callback unwrap returned (%d, %+v), want non-zero actionsPtr and non-empty delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("callback unwrap returned non-nil *session.EventActions %p, want nil", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("callback unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping callback contexts: %q", logBuf.String())
+	}
+
+	// Wrapping a ToolContext in context.WithoutCancel and context.WithTimeout
+	// exercises both the unexported "c" (withoutCancelCtx) and "cancelCtx"
+	// (timerCtx) fields in unwrapToolContextActions.
+	timedCtx, cancel := context.WithTimeout(context.WithoutCancel(toolCtx), time.Minute)
+	defer cancel()
+	for _, c := range []context.Context{context.WithoutCancel(toolCtx), timedCtx} {
+		ap, gotActs, delta, pinned := unwrapToolContextActions(c)
+		if ap == 0 || delta.empty() {
+			t.Errorf("withoutCancel tool unwrap returned (%d, %+v), want non-zero actionsPtr and delta", ap, delta)
+		}
+		if gotActs != nil {
+			t.Errorf("withoutCancel wrapper returned direct Actions pointer %p despite hiding Actions()", gotActs)
+		}
+		if pinned == nil {
+			t.Errorf("withoutCancel tool unwrap returned nil pinnedCtx")
+		}
+	}
+	if logBuf.Len() != 0 {
+		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
+	}
+
+	// Earlier plugin inspection must also traverse "c" (withoutCancelCtx) and
+	// "cancelCtx" (timerCtx) inside a real runner invocation.
+	probeTool, err := functiontool.New(functiontool.Config{
+		Name:        "probe",
+		Description: "probe",
+	}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New: %v", err)
+	}
+	a, err := llmagent.New(llmagent.Config{
+		Name: "probe_agent",
+		Model: &scriptedLLM{responses: []*model.LLMResponse{
+			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				FunctionCall: &genai.FunctionCall{ID: "call-wc-pm", Name: "probe"},
+			}}}},
+			{Content: textContent("model", "done")},
+		}},
+		Tools: []tool.Tool{probeTool},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	p, _, _ := setupTestPlugin(t)
+	tm := newTraceManager()
+	tm.selfPlugin = weak.Make(p)
+	var sawEarlier atomic.Bool
+	earlier, err := baseplugin.New(baseplugin.Config{
+		Name: "earlier_plugin",
+		BeforeToolCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
+			return nil, nil
+		},
+		AfterToolCallback: func(_ agent.Context, _ tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(earlier): %v", err)
+	}
+	observer, err := baseplugin.New(baseplugin.Config{
+		Name: "observer_plugin",
+		BeforeToolCallback: func(ctx agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
+			tc, tcCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+			defer tcCancel()
+			if tm.hasEarlierShortCircuitPlugin(tc) {
+				sawEarlier.Store(true)
+			}
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("baseplugin.New(observer): %v", err)
+	}
+	for _, runErr := range newTestRunner(t, a, earlier, observer, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
+		if runErr != nil {
+			t.Fatalf("runner.Run: %v", runErr)
+		}
+	}
+	if !sawEarlier.Load() {
+		t.Error("hasEarlierShortCircuitPlugin failed to unwrap context.WithTimeout(context.WithoutCancel(ctx)) to PluginManager")
+	}
+}
+
+func TestTraceManager_TaskDeltaRetentionAndCleanup(t *testing.T) {
+	type deltaMarker struct{ _ [64]byte }
+	for _, mode := range []string{"retire_on_pop", "abandon_on_end"} {
+		t.Run(mode, func(t *testing.T) {
+			taskAgent, err := llmagent.New(llmagent.Config{
+				Name:  "task",
+				Mode:  llmagent.ModeTask,
+				Model: &scriptedLLM{},
+			})
+			if err != nil {
+				t.Fatalf("llmagent.New: %v", err)
+			}
+			tm := newTraceManager()
+			rootCtx := unwrapTestInvocationCtx{Context: context.Background(), ag: taskAgent}
+			id := identity{invocationID: "inv-task-delta-" + mode, agentName: "task"}
+			tm.invocationSpan(rootCtx, id, taskAgent)
+			tm.pushAgentSpan(rootCtx, id)
+
+			markerWeak := func() weak.Pointer[deltaMarker] {
+				marker := &deltaMarker{}
+				acts := &session.EventActions{StateDelta: map[string]any{"marker": marker}}
+				toolCtx := agent.NewToolContext(rootCtx, "c1", acts, nil)
+				tm.noteTaskRejected(toolCtx, id, "c1")
+				return weak.Make(marker)
+			}()
+
+			for range 3 {
+				runtime.GC()
+			}
+			if markerWeak.Value() == nil {
+				t.Fatal("open rejected task activation failed to retain StateDelta map across GC")
+			}
+
+			switch mode {
+			case "retire_on_pop":
+				tm.noteTaskFinished(rootCtx, id, "c1")
+				if _, ok := tm.popTaskAgentSpan(rootCtx, id, []string{"c1"}); !ok {
+					t.Fatal("popTaskAgentSpan() = false after noteTaskFinished, want true")
+				}
+			case "abandon_on_end":
+				tm.endInvocation(rootCtx, id)
+			}
+
+			for range 3 {
+				runtime.GC()
+			}
+			if markerWeak.Value() != nil {
+				t.Errorf("%s: StateDelta map is still reachable after activation cleared + GC", mode)
+			}
+		})
+	}
+}
