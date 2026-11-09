@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"reflect"
 	"testing"
 
 	"google.golang.org/genai"
@@ -82,7 +83,7 @@ func TestRunner_OnRunError(t *testing.T) {
 							if afterCalls != 0 {
 								t.Error("error callback ran after cleanup")
 							}
-							if kind != "live" && tc.userMessageErr == nil && ctx.UserContent() != replacement {
+							if kind != "live" && tc.userMessageErr == nil && !reflect.DeepEqual(ctx.UserContent(), replacement) {
 								t.Error("error callback did not receive rewritten user content")
 							}
 							if ctx.InvocationID() == "" {
