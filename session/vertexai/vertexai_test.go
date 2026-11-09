@@ -16,6 +16,7 @@ package vertexai
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net"
@@ -27,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/util/vertexai"
 
 	"google.golang.org/api/option"
@@ -365,7 +367,7 @@ func TestRawEventNumericContract(t *testing.T) {
 
 // TestEventNeedsRawEvent guards the invariant that plain events keep
 // their legacy wire format (no raw_event) while events carrying state
-// without a dedicated SessionEvent column opt into raw_event. Changing
+// that only raw_event preserves opt into raw_event. Changing
 // this for plain events would invalidate the recorded replay fixtures.
 func TestEventNeedsRawEvent(t *testing.T) {
 	tests := []struct {
@@ -383,6 +385,12 @@ func TestEventNeedsRawEvent(t *testing.T) {
 		{name: "with routes", event: &session.Event{Routes: []string{"approve"}}, want: true},
 		{name: "with requested input", event: &session.Event{
 			RequestedInput: &session.RequestInput{InterruptID: "i"},
+		}, want: true},
+		{name: "with input transcription", event: &session.Event{
+			LLMResponse: model.LLMResponse{InputTranscription: &genai.Transcription{Text: "hi"}},
+		}, want: true},
+		{name: "with output transcription", event: &session.Event{
+			LLMResponse: model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "hi"}},
 		}, want: true},
 	}
 	for _, tc := range tests {
@@ -794,10 +802,13 @@ func TestEventActionsConverters(t *testing.T) {
 					t.Fatalf("structpb.NewStruct() failed: %v", err)
 				}
 
-				actions := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
+				actions, err := aiplatformToSessionEventActions(&aiplatformpb.EventActions{
 					StateDelta:    stateDelta,
 					ArtifactDelta: map[string]int32{"chart.html": 3, "table.csv": 7},
 				})
+				if err != nil {
+					t.Fatalf("aiplatformToSessionEventActions() failed: %v", err)
+				}
 
 				if diff := cmp.Diff(want, actions); diff != "" {
 					t.Errorf("actions mismatch (-want +got):\n%s", diff)
@@ -807,7 +818,11 @@ func TestEventActionsConverters(t *testing.T) {
 		{
 			name: "aiplatform to session nil actions",
 			run: func(t *testing.T) {
-				if diff := cmp.Diff(session.EventActions{}, aiplatformToSessionEventActions(nil)); diff != "" {
+				actions, err := aiplatformToSessionEventActions(nil)
+				if err != nil {
+					t.Fatalf("aiplatformToSessionEventActions() failed: %v", err)
+				}
+				if diff := cmp.Diff(session.EventActions{}, actions); diff != "" {
 					t.Errorf("actions mismatch (-want +got):\n%s", diff)
 				}
 			},
@@ -901,6 +916,310 @@ func TestVertexAiClientEventActionsRoundTrip(t *testing.T) {
 	}
 }
 
+// testAuthConfig is a credential request as a tool records it. The token
+// endpoint auth method and the scopes are set, so it reads back unchanged.
+func testAuthConfig() toolauth.Config {
+	return toolauth.Config{
+		AuthScheme: toolauth.Scheme{
+			Type: toolauth.SchemeTypeOAuth2,
+			Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+				AuthorizationURL: "https://example.com/authorize",
+				TokenURL:         "https://example.com/token",
+				Scopes:           map[string]string{"read": "Read"},
+			}},
+		},
+		RawAuthCredential: &toolauth.Credential{
+			AuthType: toolauth.CredentialTypeOAuth2,
+			OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", TokenEndpointAuthMethod: "client_secret_basic"},
+		},
+		CredentialKey: "my_tool_tokens",
+	}
+}
+
+// pythonRequestedAuthConfigs is the actions.requested_auth_configs value that
+// adk-python 2.12.0 writes for testAuthConfig under call-1
+// (vertex_ai_session_service.py).
+const pythonRequestedAuthConfigs = `{"call-1":{"authScheme":{"flows":{"authorizationCode":{"authorizationUrl":"https://example.com/authorize","scopes":{"read":"Read"},"tokenUrl":"https://example.com/token"}},"type":"oauth2"},` +
+	`"credentialKey":"my_tool_tokens","rawAuthCredential":{"authType":"oauth2","oauth2":{"clientId":"cid","tokenEndpointAuthMethod":"client_secret_basic"}}}}`
+
+func TestVertexAiClientRequestedAuthConfigsMatchPython(t *testing.T) {
+	t.Run("written_as_adk-python_writes_them", func(t *testing.T) {
+		ctx := t.Context()
+		service := &fakeVertexAiSessionService{}
+		client := newFakeVertexAiClient(t, service)
+
+		event := session.NewEvent(ctx, "invocation-1")
+		event.Author = "agent"
+		event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": testAuthConfig()}
+		if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+			t.Fatalf("appendEvent() failed: %v", err)
+		}
+
+		want := &structpb.Struct{}
+		if err := want.UnmarshalJSON([]byte(pythonRequestedAuthConfigs)); err != nil {
+			t.Fatalf("UnmarshalJSON() failed: %v", err)
+		}
+		got := service.events[0].GetActions().GetRequestedAuthConfigs()
+		if diff := cmp.Diff(want.AsMap(), got.AsMap()); diff != "" {
+			t.Errorf("requested_auth_configs differs from adk-python (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("read_as_adk-python_writes_them", func(t *testing.T) {
+		configs := &structpb.Struct{}
+		if err := configs.UnmarshalJSON([]byte(pythonRequestedAuthConfigs)); err != nil {
+			t.Fatalf("UnmarshalJSON() failed: %v", err)
+		}
+		service := &fakeVertexAiSessionService{events: []*aiplatformpb.SessionEvent{{
+			Name:    "sessions/session-1/events/event-1",
+			Author:  "agent",
+			Actions: &aiplatformpb.EventActions{RequestedAuthConfigs: configs},
+		}}}
+		client := newFakeVertexAiClient(t, service)
+
+		got, err := client.listSessionEvents(t.Context(), "test-app", "session-1", time.Time{}, 0)
+		if err != nil {
+			t.Fatalf("listSessionEvents() failed: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want 1", len(got))
+		}
+		want := map[string]toolauth.Config{"call-1": testAuthConfig()}
+		if diff := cmp.Diff(want, got[0].Actions.RequestedAuthConfigs); diff != "" {
+			t.Errorf("RequestedAuthConfigs mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	// adk-python writes raw_event on every event, and Go reads raw_event in
+	// preference to the actions column, so this is the path a request written
+	// by adk-python takes.
+	t.Run("read_from_raw_event_as_adk-python_writes_it", func(t *testing.T) {
+		raw := &structpb.Struct{}
+		if err := raw.UnmarshalJSON([]byte(pythonRawEventWithAuthRequest)); err != nil {
+			t.Fatalf("UnmarshalJSON() failed: %v", err)
+		}
+		service := &fakeVertexAiSessionService{events: []*aiplatformpb.SessionEvent{{
+			Name:     "sessions/session-1/events/e1",
+			Author:   "agent",
+			RawEvent: raw,
+		}}}
+		client := newFakeVertexAiClient(t, service)
+
+		got, err := client.listSessionEvents(t.Context(), "test-app", "session-1", time.Time{}, 0)
+		if err != nil {
+			t.Fatalf("listSessionEvents() failed: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want 1", len(got))
+		}
+		want := map[string]toolauth.Config{"call-1": {
+			AuthScheme: toolauth.Scheme{
+				Type: toolauth.SchemeTypeOAuth2,
+				Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{
+					AuthorizationURL: "https://example.com/authorize",
+					TokenURL:         "https://example.com/token",
+					Scopes:           map[string]string{"read": "Read"},
+				}},
+			},
+			RawAuthCredential: &toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2: &toolauth.OAuth2Auth{
+					ClientID:                "cid",
+					RedirectURI:             "https://app.example/cb",
+					TokenEndpointAuthMethod: "client_secret_basic",
+				},
+			},
+			ExchangedAuthCredential: &toolauth.Credential{
+				AuthType: toolauth.CredentialTypeOAuth2,
+				OAuth2: &toolauth.OAuth2Auth{
+					ClientID:                "cid",
+					AuthURI:                 pythonAuthURI,
+					State:                   "jSeMibpnQgvDzbS8Mm6d3NL2u1iv9G",
+					RedirectURI:             "https://app.example/cb",
+					TokenEndpointAuthMethod: "client_secret_basic",
+				},
+			},
+			CredentialKey: "my_tool_tokens",
+		}}
+		if diff := cmp.Diff(want, got[0].Actions.RequestedAuthConfigs); diff != "" {
+			t.Errorf("RequestedAuthConfigs mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// pythonAuthURI is the authorization URI adk-python 2.12.0 generated for the
+// request in pythonRawEventWithAuthRequest.
+const pythonAuthURI = "https://example.com/authorize?response_type=code&client_id=cid&redirect_uri=https%3A%2F%2Fapp.example%2Fcb" +
+	"&scope=read&state=jSeMibpnQgvDzbS8Mm6d3NL2u1iv9G&access_type=offline&prompt=consent"
+
+// pythonRawEventWithAuthRequest is the raw_event adk-python 2.12.0 writes
+// (vertex_ai_session_service.py) for an event whose tool called
+// request_credential with an OAuth2 authorization code config, client secret
+// included. The stored request is AuthHandler.generate_auth_request output:
+// the secret is gone, and the exchanged credential carries the auth URI and
+// state.
+const pythonRawEventWithAuthRequest = `{"invocationId":"inv-1","author":"agent","actions":{"stateDelta":{},"artifactDelta":{},` +
+	`"requestedAuthConfigs":{"call-1":{"authScheme":{"type":"oauth2","flows":{"authorizationCode":{"scopes":{"read":"Read"},` +
+	`"authorizationUrl":"https://example.com/authorize","tokenUrl":"https://example.com/token"}}},` +
+	`"rawAuthCredential":{"authType":"oauth2","oauth2":{"clientId":"cid","redirectUri":"https://app.example/cb","tokenEndpointAuthMethod":"client_secret_basic"}},` +
+	`"exchangedAuthCredential":{"authType":"oauth2","oauth2":{"clientId":"cid","authUri":"` + pythonAuthURI + `",` +
+	`"state":"jSeMibpnQgvDzbS8Mm6d3NL2u1iv9G","redirectUri":"https://app.example/cb","tokenEndpointAuthMethod":"client_secret_basic"}},` +
+	`"credentialKey":"my_tool_tokens"}},"requestedToolConfirmations":{}},"nodeInfo":{"path":""},"id":"e1","timestamp":1700000000.0}`
+
+func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotDecode(t *testing.T) {
+	// Dropping a request Go cannot read would lose the pending sign-in without
+	// a trace, so the read fails. adk-python fails the read the same way for a
+	// request it cannot validate (Event.model_validate in _from_api_event).
+	for _, tc := range []struct {
+		name  string
+		event func(t *testing.T) *aiplatformpb.SessionEvent
+	}{
+		{
+			// A scheme with no type, and no field to infer one from.
+			name: "actions column",
+			event: func(t *testing.T) *aiplatformpb.SessionEvent {
+				configs, err := structpb.NewStruct(map[string]any{"call-1": map[string]any{"authScheme": map[string]any{}}})
+				if err != nil {
+					t.Fatalf("structpb.NewStruct() failed: %v", err)
+				}
+				return &aiplatformpb.SessionEvent{
+					Name:    "sessions/session-1/events/event-1",
+					Author:  "agent",
+					Actions: &aiplatformpb.EventActions{RequestedAuthConfigs: configs},
+				}
+			},
+		},
+		{
+			// An implicit flow without authorizationUrl, as adk-python 2.12.0
+			// writes it. adk-python reads this scheme back as a
+			// CustomAuthScheme; toolauth rejects the flow.
+			name: "raw_event",
+			event: func(t *testing.T) *aiplatformpb.SessionEvent {
+				raw := &structpb.Struct{}
+				if err := raw.UnmarshalJSON([]byte(`{"invocationId":"inv-1","author":"agent","actions":{"stateDelta":{},"artifactDelta":{},` +
+					`"requestedAuthConfigs":{"call-1":{"authScheme":{"type":"oauth2","flows":{"implicit":{"tokenUrl":"https://t"}}},"credentialKey":"k"}},` +
+					`"requestedToolConfirmations":{}},"nodeInfo":{"path":""},"id":"e2","timestamp":1700000000.0}`)); err != nil {
+					t.Fatalf("UnmarshalJSON() failed: %v", err)
+				}
+				return &aiplatformpb.SessionEvent{
+					Name:     "sessions/session-1/events/e2",
+					Author:   "agent",
+					RawEvent: raw,
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeVertexAiSessionService{events: []*aiplatformpb.SessionEvent{tc.event(t)}}
+			client := newFakeVertexAiClient(t, service)
+
+			if _, err := client.listSessionEvents(t.Context(), "test-app", "session-1", time.Time{}, 0); err == nil {
+				t.Error("listSessionEvents() succeeded, want an error for a requested auth config that does not decode")
+			}
+		})
+	}
+}
+
+func TestVertexAiClientRejectsRequestedAuthConfigThatDoesNotEncode(t *testing.T) {
+	// Writing an event whose request cannot be encoded or decoded back would
+	// either lose the request or make every later read of the session fail, so
+	// the append fails.
+	withNaN := testAuthConfig()
+	withNaN.Extra = map[string]any{"ratio": math.NaN()}
+
+	for _, tc := range []struct {
+		name   string
+		config toolauth.Config
+	}{
+		{
+			name:   "NaN in extra",
+			config: withNaN,
+		},
+		{
+			name:   "zero scheme",
+			config: toolauth.Config{CredentialKey: "k"},
+		},
+		{
+			name: "oauth2 flow without URLs",
+			config: toolauth.Config{
+				AuthScheme: toolauth.Scheme{
+					Type:  toolauth.SchemeTypeOAuth2,
+					Flows: &toolauth.OAuthFlows{AuthorizationCode: &toolauth.OAuthFlow{}},
+				},
+			},
+		},
+		{
+			name: "credential without authType",
+			config: toolauth.Config{
+				AuthScheme:        toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+				RawAuthCredential: &toolauth.Credential{APIKey: "k"},
+			},
+		},
+		{
+			// structpb keeps numbers as float64, and as a float64 this is
+			// 2^63, which does not fit expiresAt on the way back.
+			name: "expiresAt that float64 rounds out of range",
+			config: toolauth.Config{
+				AuthScheme: toolauth.Scheme{
+					Type:  toolauth.SchemeTypeOAuth2,
+					Flows: &toolauth.OAuthFlows{ClientCredentials: &toolauth.OAuthFlow{TokenURL: "https://example.com/token"}},
+				},
+				RawAuthCredential: &toolauth.Credential{
+					AuthType: toolauth.CredentialTypeOAuth2,
+					OAuth2:   &toolauth.OAuth2Auth{ClientID: "cid", ExpiresAt: math.MaxInt64},
+				},
+			},
+		},
+		{
+			name: "number in extra beyond float64",
+			config: toolauth.Config{
+				AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+				Extra:      map[string]any{"big": json.Number("1e400")},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := newFakeVertexAiClient(t, &fakeVertexAiSessionService{})
+
+			event := session.NewEvent(ctx, "invocation-1")
+			event.Author = "agent"
+			event.Actions.RequestedAuthConfigs = map[string]toolauth.Config{"call-1": tc.config}
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err == nil {
+				t.Errorf("appendEvent() succeeded, want an error")
+			}
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() after rejected appendEvent failed: %v", err)
+			}
+			if len(got) != 0 {
+				t.Errorf("listSessionEvents() returned %d events, want 0", len(got))
+			}
+		})
+	}
+}
+
+// The service half of the suite case that casesWithoutReplay skips: a refused
+// event reaches neither the backend nor the caller's session.
+func TestAppendEvent_requestedAuthConfigThatDoesNotDecode_leavesSessionUntouched(t *testing.T) {
+	s, fake := newFakeService(t)
+	sess := &localSession{appName: "123", userID: "user1", sessionID: "owned"}
+	event := &session.Event{ID: "e1", Author: "agent", InvocationID: "inv1", Actions: session.EventActions{
+		RequestedAuthConfigs: map[string]toolauth.Config{"call-1": {CredentialKey: "k"}},
+	}}
+
+	if err := s.AppendEvent(t.Context(), sess, event); err == nil {
+		t.Fatal("AppendEvent() succeeded, want an error for a request that does not decode")
+	}
+	if got := fake.appends.Load(); got != 0 {
+		t.Errorf("AppendEvent RPCs = %d, want 0", got)
+	}
+	if n := sess.Events().Len(); n != 0 {
+		t.Errorf("the caller's session holds %d events after the refused append, want 0", n)
+	}
+}
+
 type fakeVertexAiSessionService struct {
 	aiplatformpb.UnimplementedSessionServiceServer
 	events []*aiplatformpb.SessionEvent
@@ -972,6 +1291,56 @@ func newFakeVertexAiClient(t *testing.T, service aiplatformpb.SessionServiceServ
 		}
 	})
 	return client
+}
+
+// TestVertexAiClientTranscriptionRoundTrip pins that live audio
+// transcriptions survive storage. RunLive appends a finished transcription as
+// an event with no Content, and the contents processor turns it back into a
+// user or model turn for later requests, so an event stored without it loses
+// that turn from the model's history after a reload.
+func TestVertexAiClientTranscriptionRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		in   model.LLMResponse
+	}{
+		{
+			name: "input transcription",
+			in:   model.LLMResponse{InputTranscription: &genai.Transcription{Text: "what time is it", Finished: true}},
+		},
+		{
+			name: "output transcription",
+			in:   model.LLMResponse{OutputTranscription: &genai.Transcription{Text: "it is noon", Finished: true}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			service := &fakeVertexAiSessionService{}
+			client := newFakeVertexAiClient(t, service)
+
+			event := session.NewEvent(ctx, "invocation-1")
+			event.Author = "agent"
+			event.LLMResponse = tc.in
+
+			if err := client.appendEvent(ctx, "test-app", "session-1", event); err != nil {
+				t.Fatalf("appendEvent() failed: %v", err)
+			}
+			got, err := client.listSessionEvents(ctx, "test-app", "session-1", time.Time{}, 0)
+			if err != nil {
+				t.Fatalf("listSessionEvents() failed: %v", err)
+			}
+			if gotLen := len(got); gotLen != 1 {
+				t.Fatalf("len(got) = %d, want 1", gotLen)
+			}
+			if diff := cmp.Diff(tc.in.InputTranscription, got[0].InputTranscription); diff != "" {
+				t.Errorf("InputTranscription mismatch (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(tc.in.OutputTranscription, got[0].OutputTranscription); diff != "" {
+				t.Errorf("OutputTranscription mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 func TestAiplatformToGenaiContent_OtherParts(t *testing.T) {

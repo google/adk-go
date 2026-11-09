@@ -15,12 +15,15 @@
 package vertexai
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +36,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"google.golang.org/adk/v2/internal/sessionutils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
 	vertexaiutil "google.golang.org/adk/v2/util/vertexai"
@@ -70,9 +74,16 @@ func (c *vertexAiClient) createSession(ctx context.Context, req *session.CreateR
 	pbSession := &aiplatformpb.Session{
 		UserId: req.UserID,
 	}
+	// temp: keys belong to a single invocation and are never stored, so they
+	// are dropped here as AppendEvent trims them from every state delta.
+	// adk-python's create_session does the same (vertex_ai_session_service.py).
+	state := maps.Clone(req.State)
+	maps.DeleteFunc(state, func(key string, _ any) bool {
+		return strings.HasPrefix(key, session.KeyPrefixTemp)
+	})
 	// Convert and set the initial state if provided
-	if len(req.State) > 0 {
-		stateStruct, err := toStructPB(req.State)
+	if len(state) > 0 {
+		stateStruct, err := toStructPB(state)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert state to structpb: %w", err)
 		}
@@ -244,7 +255,21 @@ func (c *vertexAiClient) listSessions(ctx context.Context, req *session.ListRequ
 		}
 		sessions = append(sessions, session)
 	}
+	sortSessionsByLastUpdate(sessions)
 	return sessions, nil
+}
+
+// sortSessionsByLastUpdate orders sessions by last update time ascending, ties
+// by user ID then session ID, as [session.Service.List] documents. The
+// ListSessions RPC has no ordering guarantee of its own.
+func sortSessionsByLastUpdate(sessions []session.Session) {
+	slices.SortStableFunc(sessions, func(a, b session.Session) int {
+		return cmp.Or(
+			a.LastUpdateTime().Compare(b.LastUpdateTime()),
+			strings.Compare(a.UserID(), b.UserID()),
+			strings.Compare(a.ID(), b.ID()),
+		)
+	})
 }
 
 func filterNilValues(originalMap map[string]any) map[string]any {
@@ -293,6 +318,11 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	// ignore partial events
 	if event.Partial {
 		return nil
+	}
+	// A stored request that does not decode would fail every later read of
+	// the session.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("error appending event: %w", err)
 	}
 
 	reasoningEngine, err := c.getReasoningEngineID(appName)
@@ -356,8 +386,9 @@ func (c *vertexAiClient) appendEvent(ctx context.Context, appName, sessionID str
 	return nil
 }
 
-// eventNeedsRawEvent reports whether the event carries state that has no
-// dedicated SessionEvent column and would be lost without raw_event.
+// eventNeedsRawEvent reports whether the event carries state that would be
+// lost without raw_event, because no SessionEvent column holds it or ADK does
+// not read back the one that does.
 // Gating raw_event on this keeps plain events on their legacy wire format,
 // so the recorded replay fixtures stay valid.
 func eventNeedsRawEvent(event *session.Event) bool {
@@ -366,6 +397,12 @@ func eventNeedsRawEvent(event *session.Event) bool {
 		event.IsolationScope != "" ||
 		event.RequestedInput != nil ||
 		len(event.Routes) > 0 ||
+		// A finished live transcription is appended as an event with no
+		// Content, so the transcription is all it carries. EventMetadata has
+		// transcription fields, but adk-python neither writes nor reads them
+		// and keeps transcriptions in raw_event only, so this does the same.
+		event.InputTranscription != nil ||
+		event.OutputTranscription != nil ||
 		// A context-compaction summary lives entirely on Actions.Compaction:
 		// its Content is nil and it has no state or artifact delta, so without
 		// raw_event nothing about it reaches the backend. On reload the session
@@ -462,12 +499,16 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 		}
 
 		content := aiplatformToGenaiContent(rpcResp)
+		actions, err := aiplatformToSessionEventActions(rpcResp.Actions)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching session events: %w", err)
+		}
 		event := &session.Event{
 			ID:           id,
 			Timestamp:    rpcResp.Timestamp.AsTime(),
 			InvocationID: rpcResp.InvocationId,
 			Author:       rpcResp.Author,
-			Actions:      aiplatformToSessionEventActions(rpcResp.Actions),
+			Actions:      actions,
 			LLMResponse: model.LLMResponse{
 				Content:      content,
 				ErrorCode:    rpcResp.ErrorCode,
@@ -497,7 +538,7 @@ func (c *vertexAiClient) listSessionEvents(ctx context.Context, appName, session
 }
 
 func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventActions, error) {
-	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 {
+	if len(event.Actions.StateDelta) == 0 && len(event.Actions.ArtifactDelta) == 0 && len(event.Actions.RequestedAuthConfigs) == 0 {
 		return nil, nil
 	}
 
@@ -518,12 +559,19 @@ func createAiplatformpbEventActions(event *session.Event) (*aiplatformpb.EventAc
 			actions.ArtifactDelta[name] = int32(version)
 		}
 	}
+	if len(event.Actions.RequestedAuthConfigs) > 0 {
+		configs, err := toStructPB(event.Actions.RequestedAuthConfigs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert requested auth configs to structpb: %w", err)
+		}
+		actions.RequestedAuthConfigs = configs
+	}
 	return actions, nil
 }
 
-func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session.EventActions {
+func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) (session.EventActions, error) {
 	if actions == nil {
-		return session.EventActions{}
+		return session.EventActions{}, nil
 	}
 
 	eventActions := session.EventActions{
@@ -535,7 +583,16 @@ func aiplatformToSessionEventActions(actions *aiplatformpb.EventActions) session
 			eventActions.ArtifactDelta[name] = int64(version)
 		}
 	}
-	return eventActions
+	if len(actions.RequestedAuthConfigs.GetFields()) > 0 {
+		b, err := json.Marshal(actions.RequestedAuthConfigs.AsMap())
+		if err != nil {
+			return session.EventActions{}, fmt.Errorf("marshaling requested auth configs: %w", err)
+		}
+		if err := json.Unmarshal(b, &eventActions.RequestedAuthConfigs); err != nil {
+			return session.EventActions{}, fmt.Errorf("unmarshaling requested auth configs: %w", err)
+		}
+	}
+	return eventActions, nil
 }
 
 func sessionIdBySessionName(sn string) (string, error) {

@@ -37,6 +37,7 @@ const (
 	defaultTableName               = "agent_events"
 	defaultMaxInlineTextSize       = 32 * 1024
 	defaultGCSMaxConcurrentUploads = 8
+	defaultViewPrefix              = "v"
 )
 
 // Logger interface to use standard log operations natively.
@@ -50,13 +51,29 @@ type Logger interface {
 // InitialDelay: 100ms, MaxDelay: 10s, Multiplier: 2.0); to disable retries,
 // set MaxRetries: 0 alongside a non-zero InitialDelay, MaxDelay, or Multiplier.
 //
+// MaxRetries applies to each AppendRows request. A batch that is too large for
+// one request is split into several that are sent in order (see [Config]); a
+// request that fails is resent on its own, up to MaxRetries times (plus at most
+// one resend after a stream rotation when [Config.ExactlyOnceDelivery] is
+// enabled), and the requests that BigQuery already confirmed are not resent. A
+// status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
+// ends the write of the batch without further retries when opening the stream
+// fails with it or BigQuery reports it in an AppendRowsResponse. When it
+// instead ends the stream, the server may not have read the request, so while
+// retries remain the request is resent on a fresh stream: always if an earlier
+// request opened that stream, and once per request if it was opened for the
+// request, after which the status ends the write. Each such resend uses up one
+// retry and its backoff.
+//
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
 // between them, ends when ShutdownTimeout expires, while the writes made by a
 // run-end flush, and those made while Close drains the queue, share a single
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
-// in-flight batch is deferred for at most one retry in the next flush
-// (background, run-end, or Close). This provides at-least-once delivery; if
+// rows of the in-flight batch that BigQuery has not confirmed are deferred for
+// at most one retry in the next flush (background, run-end, or Close); the
+// rows of the split requests that it confirmed before then are not resent.
+// This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
 // succeed on retry; queries deduplicating by event_id should prefer rows where
@@ -145,13 +162,24 @@ type GCSContentOffloader interface {
 // GCSUploadTimeout, GCSMaxPendingUploadBytes, and GCSOffloader have no
 // counterpart in BigQueryLoggerConfig. adk-python declares
 // exactly_once_delivery and creates a COMMITTED write stream when enabled, but
-// differs in handling: after OutOfRange or an unexpected AlreadyExists, Go
-// replaces the stream and resends the batch within the same append, whereas
-// adk-python drops the batch and replaces the stream before the next one.
-// After a successful Send, Go treats only ambiguous transport errors
-// (Unavailable, DeadlineExceeded, Canceled, Aborted, Internal, Unknown) as an
-// unknown outcome, whereas adk-python treats stream-level errors as
-// rejections. DropStats has four counters, whereas adk-python's get_drop_stats()
+// differs in handling. After OutOfRange, NotFound, or an unexpected
+// AlreadyExists, Go replaces the stream (at most once per batch) and resends
+// the request that failed within the same append (the whole batch, unless it
+// was split into several requests; see below), with two exceptions: if the
+// stream was rotated by an earlier batch and has not committed yet, Go drops
+// the batch and pauses rotation; if an earlier attempt of the request had an
+// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
+// duplicate delivery, and replace the stream before the next batch (pausing
+// rotation if the stream had not committed yet). adk-python drops the batch
+// after any of the three and replaces the stream before the next one. On an
+// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
+// carrying one of these codes is a server rejection), Go treats Unavailable,
+// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
+// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
+// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
+// replaces the stream only if an earlier attempt of the request had an unknown
+// outcome, whereas adk-python also replaces it when the error is not a schema
+// mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
 // returns ten per-reason counts. adk-python uploads while it parses an event,
 // before the row is queued, with a Cloud Storage client built from the
 // credentials of the plugin, a fixed 32 KiB inline text limit and the
@@ -164,17 +192,31 @@ type GCSContentOffloader interface {
 // attempts) and distinguishes ambiguous transport errors from definite server
 // rejections.
 //
+// Go splits a batch whose rows are estimated at more than 8 MiB into several
+// AppendRows requests, and halves a multi-row request that serializes to more
+// than 9 MiB, so that a multi-row request stays under the Write API's size
+// limit; adk-python sends every batch as one request. The requests of a batch
+// are sent in order, each with its own retries (see [RetryConfig]). The first
+// request that fails ends the batch: the requests that BigQuery confirmed
+// before it are written and are not resent, and only the rows that BigQuery
+// did not confirm count as dropped or, when a run-end flush times out, are
+// deferred. After an AppendRowsResponse.Error, Go resends the request while
+// retries remain if the code is Unavailable, ResourceExhausted, Internal,
+// DeadlineExceeded, or Aborted, whereas adk-python resends it only for
+// DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
+// other code.
+//
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
 // [DefaultConfig] when a plugin or batch processor is constructed.
 //
 // Use [DefaultConfig] or set LogMultiModalContent: true to enable
 // content_parts (DisableMultiModalContent overrides it). Session metadata
-// logging, redaction of sensitive keys and credentials, run-end flushing, and
-// additive schema upgrades are enabled by default; DisableSessionMetadata,
-// DisableSensitiveKeyRedaction, DisableFlushOnRunEnd, and DisableSchemaUpgrade
-// opt out of each. Created and upgraded tables carry label
-// adk_schema_version="2" ([SchemaVersion]), while
+// logging, redaction of sensitive keys and credentials, run-end flushing,
+// additive schema upgrades, and per-event view creation are enabled by default;
+// DisableSessionMetadata, DisableSensitiveKeyRedaction, DisableFlushOnRunEnd,
+// DisableSchemaUpgrade, and DisableCreateViews opt out of each. Created and
+// upgraded tables carry label adk_schema_version="2" ([SchemaVersion]), while
 // attributes.adk.schema_version on each row is "1". Recursive payload
 // sanitization is bounded by maxSanitizeDepth=50 and maxSanitizeNodes=100000.
 type Config struct {
@@ -203,10 +245,13 @@ type Config struct {
 	// [RetryConfig]), and separately bounds a whole run-end flush (see
 	// DisableFlushOnRunEnd) and the BigQuery writes of the drain of queued
 	// rows during Close. The drain starts once a background write that is
-	// already in flight has finished. In a run-end flush, an in-flight batch
-	// that times out is deferred for at most one retry in the next flush
-	// (background, run-end, or Close); rows whose write remains unfinished
-	// after retrying or when the timeout expires during Close are dropped.
+	// already in flight has finished. In a run-end flush, the rows of an
+	// in-flight batch that BigQuery has not confirmed when the timeout expires
+	// are deferred for at most one retry in the next flush (background,
+	// run-end, or Close); the rows of the batch's requests that BigQuery
+	// confirmed first are written, not retried. Rows whose write remains
+	// unfinished after retrying or when the timeout expires during Close are
+	// dropped.
 	// (Duplicates under the same event_id can occur and may differ if cut-short
 	// uploads succeed on retry; prefer rows with GCS_REFERENCE storage_mode).
 	// Close logs each batch it drops.
@@ -216,8 +261,14 @@ type Config struct {
 	// half a ShutdownTimeout, after which the parts that are not uploaded fall
 	// back (see GCSUploadTimeout). Close can therefore block for up to about
 	// two and a half times ShutdownTimeout. In a run-end flush, the uploads of
-	// each batch get at most half of what is left of the ShutdownTimeout of
-	// the flush.
+	// each fresh batch get at most half of what is left of the ShutdownTimeout
+	// of the flush, and those of a deferred batch that it retries get at most
+	// a quarter of what is left (leaving three quarters for the BigQuery
+	// write, which cannot be deferred again). If this limit, or Close
+	// canceling the uploads, has ended the uploads of a fresh batch that is
+	// then deferred, the next flush retries the uploads of the batch that
+	// returned an error, unless the batch paused the uploads (see
+	// GCSUploadTimeout).
 	ShutdownTimeout time.Duration
 
 	// Injected logger.
@@ -352,16 +403,36 @@ type Config struct {
 	// succeeding, or when an in-flight upload times out during the batch timeout
 	// (partial outage backoff), the plugin stops calling the offloader for
 	// another GCSUploadTimeout: every batch in that time falls back at once, so
-	// that an outage does not make each batch wait in turn. The deadline
-	// of the first upload batch of a run-end flush (see ShutdownTimeout) pauses
-	// the uploads when it is still fresh (at least three quarters of
-	// ShutdownTimeout left) and ends the batch's uploads before GCSUploadTimeout
-	// without any upload in the batch succeeding (a run-end flush allocates half
-	// of its remaining budget to storage uploads, so a ShutdownTimeout smaller
-	// than twice the typical upload latency may pause uploads if storage does
-	// not finish within that slice), whereas a batch where at least one upload
-	// succeeded, an already-depleted budget (less than three quarters
-	// remaining), or a budget during Close does not pause.
+	// that an outage does not make each batch wait in turn. In a run-end flush
+	// (see ShutdownTimeout), which gives the uploads of each fresh batch half of
+	// its remaining budget (and those of a deferred batch that it retries at
+	// most a quarter), that deadline pauses the uploads too on a fresh batch
+	// when it ends them before GCSUploadTimeout, provided that the batch
+	// started with at least a quarter of ShutdownTimeout left, and either no
+	// upload in the batch succeeded or the deadline cut short an upload that
+	// had been running for at least three quarters of the batch's upload time,
+	// even if other uploads in the batch succeeded. An upload that a custom
+	// offloader fails with a deadline error of its own, such as a per-request
+	// timeout, before that deadline passes is not cut short by it, however
+	// long it ran. A fresh batch's upload time
+	// can thus be as short as an eighth of ShutdownTimeout, so a single upload
+	// that is still running after three thirty-seconds of ShutdownTimeout
+	// (about 0.94s by default) can pause the uploads, even if storage is
+	// healthy and only that upload is slow: a ShutdownTimeout smaller than
+	// eight times the latency of an upload (about eleven times if it waited a
+	// quarter of the batch's upload time for a free slot) may pause them.
+	// An upload cut short after running for less than three
+	// quarters of the batch's upload time (for example after waiting for a
+	// free slot behind other uploads) does not pause the uploads when another
+	// upload in the batch succeeded, and neither does a budget during Close.
+	// Caller cancellation and an already-expired deadline do not pause the
+	// uploads either. The run-end deadline of a retried deferred batch, or of
+	// a batch that started with less than a quarter of ShutdownTimeout left,
+	// does not pause them either, though the batch's own GCSUploadTimeout still
+	// does when that ends its uploads first. A pause that a run-end flush starts
+	// lasts GCSUploadTimeout as well, so it can outlast the flush: until it ends,
+	// background flushes, later run-end flushes and Close also fall back
+	// without calling the offloader.
 	// Values <= 0 mean 10s.
 	GCSUploadTimeout time.Duration
 	// GCSMaxPendingUploadBytes bounds the total bytes held in memory by
@@ -378,6 +449,28 @@ type Config struct {
 	// plugin does not close an offloader that the caller supplies.
 	GCSOffloader GCSContentOffloader
 
+	// DisableCreateViews stops the plugin from creating or replacing the 25
+	// pre-built per-event BigQuery views (see [Config.ViewDefinitions]), named
+	// "<ViewPrefix>_<lower-case event type>" (for example v_tool_starting), in
+	// the dataset of the events table. When false (the default) and the
+	// plugin has a BigQuery client, the views are created in the background
+	// once the table is ready, with one CREATE OR REPLACE VIEW job per view;
+	// this needs bigquery.jobs.create and bigquery.tables.create/update, and
+	// replaces existing views of the same names, while a table of the same
+	// name that is not a view is left alone and its view reported as failed.
+	// Closing the plugin stops starting further view jobs and cancels the
+	// client wait on an in-flight request, though a job already submitted to
+	// BigQuery may still finish on the server. Background failures are
+	// reported only when a non-default Logger is set;
+	// [BigQueryAgentAnalyticsPlugin.SyncViews] creates the views synchronously
+	// and returns the error, even when DisableCreateViews is true. Deployments
+	// that start many instances may set DisableCreateViews and call SyncViews
+	// once at deploy time.
+	DisableCreateViews bool
+	// ViewPrefix is the name prefix of the created views. Empty means "v".
+	// It may contain only letters, digits, '_' and '-'. Give each events
+	// table that shares a dataset its own prefix.
+	ViewPrefix string
 	// ExactlyOnceDelivery writes through a COMMITTED write stream with
 	// explicit offsets instead of the default stream (for which event_id
 	// remains the row-level deduplication key), so that retrying an append
@@ -386,13 +479,23 @@ type Config struct {
 	// ambiguous; definite server rejections (e.g. InvalidArgument) leave
 	// the offset in sync. When an offset desynchronization occurs (e.g.
 	// OutOfRange, NotFound), the plugin rotates to a fresh COMMITTED stream
-	// at offset 0 without burning an append retry attempt; rotation
-	// frequency across batches is bounded by a cooldown window. Replacing a
-	// desynchronized stream consumes CreateWriteStream quota and finalizes the
-	// retired stream in the background. Close waits for any in-flight
-	// retired-stream finalizations and finalizes the active stream within the
-	// remaining ShutdownTimeout write budget, skipping finalization if
-	// draining queued rows already exhausted ShutdownTimeout.
+	// at offset 0 without burning an append retry attempt. When a rotation
+	// fails, or a freshly rotated stream is desynchronized again before it
+	// commits a batch, rotation pauses for 30 seconds: batches flushed
+	// during the pause are dropped without calling CreateWriteStream and
+	// counted in DropStats.AppendFailureDrops, or in DropStats.ShutdownDrops
+	// during Close once its write budget is used up. A
+	// failed rotation does not pause rotation if the batch write reached it
+	// with less than half of ShutdownTimeout (and less than 30 seconds) left
+	// and the write's deadline ended the CreateWriteStream call; the next
+	// batch retries the rotation instead.
+	// Replacing a desynchronized stream consumes CreateWriteStream quota and
+	// finalizes the retired stream in the background. Close waits for
+	// retired-stream finalizations that are still running and finalizes the
+	// active stream only within the remaining ShutdownTimeout write budget: it
+	// cancels the finalizations still running when the budget runs out, and
+	// skips the active stream's if draining queued rows already exhausted
+	// ShutdownTimeout.
 	ExactlyOnceDelivery bool
 }
 
@@ -415,6 +518,7 @@ func DefaultConfig() Config {
 		GCSMaxConcurrentUploads:  defaultGCSMaxConcurrentUploads,
 		GCSUploadTimeout:         gcsUploadTimeout,
 		GCSMaxPendingUploadBytes: defaultMaxPendingUploadBytes,
+		ViewPrefix:               defaultViewPrefix,
 		RetryConfig: RetryConfig{
 			MaxRetries:   3,
 			InitialDelay: 100 * time.Millisecond,
@@ -473,6 +577,9 @@ func applyDefaults(c Config) Config {
 	if c.GCSMaxPendingUploadBytes <= 0 {
 		c.GCSMaxPendingUploadBytes = defaultMaxPendingUploadBytes
 	}
+	if c.ViewPrefix == "" {
+		c.ViewPrefix = defaultViewPrefix
+	}
 	return c
 }
 
@@ -492,6 +599,10 @@ func (c Config) flushOnRunEnd() bool {
 	return !c.DisableFlushOnRunEnd
 }
 
+func (c Config) createViews() bool {
+	return !c.DisableCreateViews
+}
+
 // maxContentLength returns the text truncation limit; -1 means no limit.
 func (c Config) maxContentLength() int {
 	if c.CaptureFullMessageContent {
@@ -505,4 +616,14 @@ func (c Config) logf(format string, args ...any) {
 	if c.Logger != nil {
 		c.Logger.Printf(format, args...)
 	}
+}
+
+// viewLogf returns c.Logger.Printf when the caller set a non-default Logger, or
+// nil when Logger is nil or DefaultConfig's log.Default(), so background view
+// creation never writes diagnostics to the process-wide standard logger.
+func (c Config) viewLogf() func(format string, args ...any) {
+	if c.Logger == nil || c.Logger == log.Default() { //nolint:forbidigo // comparing against DefaultConfig's pre-slog Logger value
+		return nil
+	}
+	return c.Logger.Printf
 }

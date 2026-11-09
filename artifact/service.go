@@ -71,8 +71,8 @@ type SaveRequest struct {
 	// when saving it and return the value as a string.
 	CustomMetadata map[string]any
 
-	// If set, the artifact will be saved with this version.
-	// If unset, a new version will be created.
+	// Deprecated: Save ignores Version. Every Save creates a new version and
+	// returns it in SaveResponse.Version.
 	Version int64
 }
 
@@ -90,6 +90,15 @@ func validateRequiredStrings(fields []requiredField) []string {
 
 // Validate checks if the struct is valid or if it is missing fields.
 func (req *SaveRequest) Validate() error {
+	return req.validate(false)
+}
+
+// validate is the shared request validation, with allowRef tolerating an
+// artifact reference part. Every Service calls Validate() (allowRef false),
+// which rejects a part that is neither text nor inline data; this is a shared
+// contract that backends such as GCS rely on. Only the in-memory service
+// understands references, so it is the sole caller that sets allowRef.
+func (req *SaveRequest) validate(allowRef bool) error {
 	// Define the fields to check in the desired order
 	fieldsToCheck := []requiredField{
 		{Name: "AppName", Value: req.AppName},
@@ -111,7 +120,10 @@ func (req *SaveRequest) Validate() error {
 		return fmt.Errorf("invalid save request: missing required fields: %s", strings.Join(missingFields, ", "))
 	}
 
-	if req.Part.Text == "" && req.Part.InlineData == nil {
+	// A reference part carries neither Part.Text nor Part.InlineData; only the
+	// in-memory service accepts one, so the content rule tolerates it there and
+	// stays strict for every other caller.
+	if req.Part.Text == "" && req.Part.InlineData == nil && !(allowRef && isArtifactRef(req.Part)) {
 		return fmt.Errorf("invalid save request: Part.InlineData or Part.Text has to be set")
 	}
 
@@ -292,7 +304,9 @@ type ArtifactVersion struct {
 	CreateTime time.Time
 
 	// MimeType is the media type associated with the stored part. It may be empty
-	// when the part was saved without a media type.
+	// when the part was saved without a media type, or when the stored part is a
+	// reference to another artifact, whose media type is only known once the
+	// reference is loaded.
 	MimeType string
 }
 
