@@ -41,19 +41,47 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			return // In python, no error is yielded.
 		}
 
-		toolsmap := make(map[string]tool.Tool)
-		for _, tool := range f.Tools {
-			toolsmap[tool.Name()] = tool
+		sess := ctx.Session()
+		if sess == nil || sess.Events() == nil || sess.Events().Len() == 0 {
+			return
 		}
+		sessEvents := sess.Events()
+		nEvents := sessEvents.Len()
 
-		var events []*session.Event
-		if ctx.Session() != nil {
-			for e := range ctx.Session().Events().All() {
-				events = append(events, e)
+		// Quick check: find the latest user-authored event and inspect whether it
+		// contains any function response for tool confirmation.
+		var lastUserIdx int = -1
+		var userEv *session.Event
+		for k := nEvents - 1; k >= 0; k-- {
+			ev := sessEvents.At(k)
+			if ev != nil && ev.Author == "user" {
+				lastUserIdx = k
+				userEv = ev
+				break
 			}
 		}
+		if userEv == nil || userEv.Content == nil {
+			return
+		}
+
+		var hasConfirmationResp bool
+		for _, p := range userEv.Content.Parts {
+			if p != nil && p.FunctionResponse != nil && p.FunctionResponse.Name == toolconfirmation.FunctionCallName {
+				hasConfirmationResp = true
+				break
+			}
+		}
+		if !hasConfirmationResp {
+			return
+		}
+
+		events := make([]*session.Event, nEvents)
+		for i := 0; i < nEvents; i++ {
+			events[i] = sessEvents.At(i)
+		}
+
 		confirmationResponses := make(map[string]toolconfirmation.ToolConfirmation)
-		for k := len(events) - 1; k >= 0; k-- {
+		for k := lastUserIdx; k >= 0; k-- {
 			event := events[k]
 			// Find the first event authored by user
 			if event.Author != "user" {
@@ -114,6 +142,11 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 
 		if len(confirmationResponses) == 0 {
 			return
+		}
+
+		toolsmap := make(map[string]tool.Tool, len(f.Tools))
+		for _, tool := range f.Tools {
+			toolsmap[tool.Name()] = tool
 		}
 
 		responseLatestIndex := make(map[string]int)
