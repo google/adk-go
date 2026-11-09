@@ -1561,6 +1561,41 @@ func TestProcessResponseNilCandidate(t *testing.T) {
 	}
 }
 
+// TestProcessResponseNilPart is the part-level sibling of the nil-candidate
+// regression above: a nil part in a chunk must be skipped like the empty part
+// the filter already targets, not panic the reflect check — and skipping it
+// must leave the aggregation of the surrounding text parts undisturbed (a
+// guard that also flushed the text buffer would split "a", nil, "b" into two
+// parts instead of one).
+func TestProcessResponseNilPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		parts    []*genai.Part
+		wantText string
+	}{
+		{"nil first", []*genai.Part{nil, genai.NewPartFromText("kept")}, "kept"},
+		{"nil last", []*genai.Part{genai.NewPartFromText("kept"), nil}, "kept"},
+		{"text on both sides aggregates across the nil", []*genai.Part{genai.NewPartFromText("a"), nil, genai.NewPartFromText("b")}, "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			aggregator := llminternal.NewStreamingResponseAggregator()
+			chunk := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+				Content: &genai.Content{Parts: tt.parts},
+			}}}
+			for _, err := range aggregator.ProcessResponse(t.Context(), chunk) {
+				if err != nil {
+					t.Fatalf("ProcessResponse yielded error: %v", err)
+				}
+			}
+			response := aggregator.Close()
+			if response == nil || response.Content == nil || len(response.Content.Parts) != 1 || response.Content.Parts[0].Text != tt.wantText {
+				t.Fatalf("aggregated response = %+v, want the single text part %q", response, tt.wantText)
+			}
+		})
+	}
+}
+
 // streamedTextResponses returns n responses of one 200-byte text part each,
 // the shape a long streamed reply arrives in.
 func streamedTextResponses(n int) []*genai.GenerateContentResponse {
