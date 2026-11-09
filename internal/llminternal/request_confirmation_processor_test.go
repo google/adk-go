@@ -1154,3 +1154,82 @@ func TestRequestConfirmationFirstApprovalPlaceholderAfterRequest(t *testing.T) {
 		t.Errorf("first approval did not dispatch %q when the placeholder response follows the request", callID)
 	}
 }
+
+type chainedConfirmationTool struct {
+	name string
+}
+
+func (t *chainedConfirmationTool) Name() string        { return t.name }
+func (t *chainedConfirmationTool) Description() string { return "chained confirmation tool" }
+func (t *chainedConfirmationTool) IsLongRunning() bool { return false }
+func (t *chainedConfirmationTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name}
+}
+func (t *chainedConfirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
+		ctx.RequestConfirmation("Confirm step 1", nil)
+		return map[string]any{"status": "awaiting step 1 confirmation"}, nil
+	}
+	ctx.RequestConfirmation("Confirm step 2", nil)
+	return map[string]any{"status": "step 1 completed, awaiting step 2 confirmation"}, nil
+}
+
+// TestRequestConfirmationResumedToolEmitsFollowUpConfirmation verifies that when a resumed
+// tool call requests another confirmation, an adk_request_confirmation function call event
+// is emitted so the client receives a callable ID to approve or reject.
+func TestRequestConfirmationResumedToolEmitsFollowUpConfirmation(t *testing.T) {
+	const (
+		toolName = "chained_tool"
+		callID   = "call-chained-1"
+		confID   = "conf-chained-1"
+	)
+	agentEvent := func(p *genai.Part) *session.Event {
+		return &session.Event{Author: "testAgent", LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{p}}}}
+	}
+	events := []*session.Event{
+		agentEvent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: toolName, ID: callID, Args: map[string]any{}}}),
+		agentEvent(&genai.Part{FunctionCall: &genai.FunctionCall{Name: toolconfirmation.FunctionCallName, ID: confID, Args: map[string]any{
+			"originalFunctionCall": map[string]any{"name": toolName, "args": map[string]any{}, "id": callID},
+			"toolConfirmation":     toolconfirmation.ToolConfirmation{Hint: "Confirm step 1"},
+		}}}),
+		agentEvent(&genai.Part{FunctionResponse: &genai.FunctionResponse{Name: toolName, ID: callID, Response: map[string]any{"status": "awaiting step 1 confirmation"}}}),
+		{Author: "user", LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: []*genai.Part{{FunctionResponse: &genai.FunctionResponse{
+			Name: toolconfirmation.FunctionCallName, ID: confID, Response: map[string]any{"confirmed": true},
+		}}}}}},
+	}
+	tools := []tool.Tool{&chainedConfirmationTool{name: toolName}}
+	agnt, err := llmagent.New(llmagent.Config{
+		Name:  "testAgent",
+		Model: &testModel{},
+		Tools: tools,
+	})
+	if err != nil {
+		t.Fatalf("error creating mock llmagent: %v", err)
+	}
+	ictx := createInvocationContext(t, agnt, &fakeSession{events: events})
+
+	var emittedConfirmation *genai.FunctionCall
+	for ev, err := range llminternal.RequestConfirmationRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{Tools: tools}) {
+		if err != nil {
+			t.Fatalf("RequestConfirmationRequestProcessor() unexpected error: %v", err)
+		}
+		if ev != nil && ev.Content != nil {
+			for _, p := range ev.Content.Parts {
+				if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+					emittedConfirmation = p.FunctionCall
+				}
+			}
+		}
+	}
+
+	if emittedConfirmation == nil {
+		t.Fatalf("expected an adk_request_confirmation call to be emitted for the follow-up confirmation request, but none was emitted")
+	}
+	origCall, ok := emittedConfirmation.Args["originalFunctionCall"].(*genai.FunctionCall)
+	if !ok {
+		t.Fatalf("expected originalFunctionCall in confirmation args, got: %#v", emittedConfirmation.Args)
+	}
+	if origCall.ID != callID {
+		t.Errorf("expected originalFunctionCall.ID %q, got %q", callID, origCall.ID)
+	}
+}

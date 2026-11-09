@@ -271,6 +271,14 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			if !yield(ev, err) {
 				return
 			}
+			if err == nil && ev != nil && len(ev.Actions.RequestedToolConfirmations) > 0 {
+				callEvent := &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Parts: parts}}}
+				if toolConfirmationEvent := generateRequestConfirmationEvent(ctx, callEvent, ev); toolConfirmationEvent != nil {
+					if !yield(toolConfirmationEvent, nil) {
+						return
+					}
+				}
+			}
 		}
 	}
 }
