@@ -15,13 +15,13 @@
 package controllers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -237,8 +237,8 @@ func (c *SessionsAPIController) UpdateSessionHandler(rw http.ResponseWriter, req
 	// app sees.
 	//
 	// What the client echoes back is not a write, so drop that first. See
-	// dropEchoedScopedKeys.
-	stateDelta := dropEchoedScopedKeys(updateRequest.StateDelta, storedSession.Session.State())
+	// dropEchoedKeys.
+	stateDelta := dropEchoedKeys(updateRequest.StateDelta, storedSession.Session.State())
 	if scoped := scopedStateKeys(stateDelta); len(scoped) > 0 {
 		http.Error(rw, fmt.Sprintf(
 			"stateDelta may only contain session-scoped keys; remove %v (the %q, %q and %q prefixes write outside this session)",
@@ -345,8 +345,9 @@ func isScopedStateKey(key string) bool {
 		strings.HasPrefix(key, session.KeyPrefixTemp)
 }
 
-// dropEchoedScopedKeys returns delta without the keys whose submitted value
-// already matches what the session holds.
+// dropEchoedKeys returns delta without the keys a client sent back as a read
+// returned them: scoped keys, and keys whose value a read returns with
+// credential secrets stripped.
 //
 // The web UI's session list renames a session by posting back the whole state
 // map it read, with one metadata key changed. A read merges app- and
@@ -356,19 +357,15 @@ func isScopedStateKey(key string) bool {
 // state, and writing the redacted credentials back overwrites the stored
 // secrets.
 //
-// A key echoed back unchanged would write the value that is already there, so
-// dropping it leaves the session as it stands. A scoped key carrying a
-// different value is still a write outside this session, and is still refused.
-//
-// Values are compared as JSON rather than with reflect.DeepEqual, because the
-// submitted value has been through a JSON round-trip and the stored one has
-// not. An agent that wrote int64(5) gets float64(5) back from the client, and
-// those are not equal in Go.
-func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
-	redacted := models.RedactedState(stored)
+// Dropping such a key leaves the session as it stands. A scoped key carrying a
+// different value is still a write outside this session, and is still
+// refused. Every other key is written as submitted, changed or not.
+func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+	read := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
 	for key, value := range delta {
-		if matchesStoredValue(redacted, key, value) {
+		readValue, ok := read[key]
+		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
 			continue
 		}
 		kept[key] = value
@@ -376,18 +373,27 @@ func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) ma
 	return kept
 }
 
-// matchesStoredValue reports whether stored, encoded with credential secrets
-// stripped the way a read returns it, already holds value under key. A key the
-// session does not have, or a value that will not marshal, counts as a change:
-// the caller then treats it as a write.
-func matchesStoredValue(stored map[string]json.RawMessage, key string, value any) bool {
-	encodedCurrent, ok := stored[key]
-	if !ok {
-		return false
-	}
-	encodedValue, err := json.Marshal(value)
+// strippedOnRead reports whether readValue, the value a read returns for key,
+// lacks credential secrets that the stored value holds.
+func strippedOnRead(stored session.ReadonlyState, key string, readValue json.RawMessage) bool {
+	value, err := stored.Get(key)
+	return err == nil && !sameJSON(readValue, value)
+}
+
+// sameJSON reports whether encoded and value are the same JSON value once both
+// are decoded the way a request body is. A number then compares as the float64
+// a client sends back: an echo matches a stored 1.0, 1e3 or 9007199254740993,
+// which a read writes as it was stored, and an agent's int64(5) matches the
+// float64(5) the client returns. A value that will not encode or decode counts
+// as different, so the caller treats it as a write.
+func sameJSON(encoded json.RawMessage, value any) bool {
+	b, err := json.Marshal(value)
 	if err != nil {
 		return false
 	}
-	return bytes.Equal(encodedCurrent, encodedValue)
+	var want, got any
+	if json.Unmarshal(encoded, &want) != nil || json.Unmarshal(b, &got) != nil {
+		return false
+	}
+	return reflect.DeepEqual(want, got)
 }

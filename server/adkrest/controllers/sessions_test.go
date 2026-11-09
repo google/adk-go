@@ -686,6 +686,38 @@ func TestUpdateSessionAppliesDeltaThroughAnEvent(t *testing.T) {
 	}
 }
 
+// TestUpdateSessionWritesAnUnchangedPlainKey pins the edge of the echo
+// exception: a session-scoped key holding no credential is written even when
+// its value matches the stored one, so the PATCH records an event carrying it.
+func TestUpdateSessionWritesAnUnchangedPlainKey(t *testing.T) {
+	id := fakes.SessionKey{AppName: "testApp", UserID: "testUser", SessionID: "testSession"}
+	sessionService := newServiceWithSession(t, id, map[string]any{"theme": "dark"})
+	apiController := controllers.NewSessionsAPIController(sessionService)
+	rr := httptest.NewRecorder()
+
+	body := strings.NewReader(`{"stateDelta":{"theme":"dark"}}`)
+	apiController.UpdateSessionHandler(rr, newSessionRequest(t, http.MethodPatch, id, body, id.UserID))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("UpdateSessionHandler() status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	stored, err := sessionService.Get(t.Context(), &session.GetRequest{
+		AppName:   id.AppName,
+		UserID:    id.UserID,
+		SessionID: id.SessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	events := stored.Session.Events()
+	if events.Len() != 1 {
+		t.Fatalf("session has %d events, want 1 carrying the unchanged key", events.Len())
+	}
+	if diff := cmp.Diff(map[string]any{"theme": "dark"}, events.At(0).Actions.StateDelta); diff != "" {
+		t.Errorf("appended event StateDelta mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // TestUpdateSessionResponseMatchesGetSession pins the response shape: the UI
 // reuses the PATCH response as if it came from GET.
 func TestUpdateSessionResponseMatchesGetSession(t *testing.T) {
@@ -1105,6 +1137,58 @@ func TestUpdateSessionEchoedRedactedCredentials(t *testing.T) {
 			t.Errorf("stored session credential after rename mismatch (-want +got):\n%s", diff)
 		}
 	})
+
+	// A read writes these numbers as they were stored, and the client sends
+	// back the float64 it decoded them to.
+	numbers := []struct {
+		name  string
+		value any
+	}{
+		{name: "a trailing zero", value: json.Number("1.0")},
+		{name: "an exponent", value: json.Number("1e3")},
+		{name: "an integer past float64 precision", value: int64(9007199254740993)},
+	}
+	for _, n := range numbers {
+		t.Run("session credential holding "+n.name+" keeps its stored secrets", func(t *testing.T) {
+			cred := map[string]any{
+				"authType": "oauth2",
+				"oauth2": map[string]any{
+					"clientId":     "app",
+					"accessToken":  "session-at",
+					"refreshToken": "session-rt",
+					"ratio":        n.value,
+				},
+			}
+			service := session.InMemoryService()
+			created, err := service.Create(t.Context(), &session.CreateRequest{
+				AppName: "app",
+				UserID:  "user",
+				State:   map[string]any{"drive": cred},
+			})
+			if err != nil {
+				t.Fatalf("Create() failed: %v", err)
+			}
+
+			patchRec := renameFromGET(t, service, created.Session.ID())
+			if patchRec.Code != http.StatusOK {
+				t.Fatalf("UpdateSessionHandler() status = %d, want %d", patchRec.Code, http.StatusOK)
+			}
+
+			reread, err := service.Get(t.Context(), &session.GetRequest{
+				AppName: "app", UserID: "user", SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() failed: %v", err)
+			}
+			gotDrive, err := reread.Session.State().Get("drive")
+			if err != nil {
+				t.Fatalf("State().Get(drive) failed: %v", err)
+			}
+			if diff := cmp.Diff(cred, gotDrive); diff != "" {
+				t.Errorf("stored session credential after rename mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
 
 	t.Run("user and app scoped credentials do not turn the rename into a 400", func(t *testing.T) {
 		service := session.InMemoryService()
