@@ -63,7 +63,7 @@ func convertSnakeValue(path, indent string, v reflect.Value) (any, error) {
 				return nil, fmt.Errorf("cannot convert unexported time field")
 			}
 			t := v.Interface().(time.Time)
-			return t.UnixMilli() / 1000.0, nil // returns a number of seconds "Unix-way"
+			return float64(t.UnixMicro()) / 1e6, nil // returns a number of seconds "Unix-way"
 		}
 
 		m := make(map[string]any)

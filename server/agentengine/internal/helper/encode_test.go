@@ -364,8 +364,8 @@ func TestEmbeddedValues(t *testing.T) {
 	}{
 		{
 			name:  "time",
-			value: struct{ time.Time }{time.Unix(1, 0)},
-			want:  map[string]any{"time": int64(1)},
+			value: struct{ time.Time }{time.UnixMicro(1_234_567)},
+			want:  map[string]any{"time": 1.234567},
 		},
 		{
 			name:  "unexported_struct",
@@ -481,5 +481,57 @@ func TestOmitEmpty(t *testing.T) {
 			t.Errorf("convertSnake() = %v, want %v, diff: \n%v", got, tc.want, diff)
 		}
 
+	}
+}
+
+func TestTimeFractionalSeconds(t *testing.T) {
+	// Verify microsecond resolution is preserved (e.g., matching adkrest UnixMicro / 1e6)
+	tm := time.UnixMicro(1733040000123456) // 1733040000.123456
+	got, err := convertSnake("", "", tm)
+	if err != nil {
+		t.Fatalf("convertSnake() failed: %v", err)
+	}
+
+	gotFloat, ok := got.(float64)
+	if !ok {
+		t.Fatalf("convertSnake(time.Time) returned %T (%v), want float64", got, got)
+	}
+
+	want := 1733040000.123456
+	if gotFloat != want {
+		t.Errorf("convertSnake(time.Time) = %v, want %v", gotFloat, want)
+	}
+
+	// Verify whole-second timestamps
+	tmWhole := time.Unix(1700000000, 0)
+	gotWhole, err := convertSnake("", "", tmWhole)
+	if err != nil {
+		t.Fatalf("convertSnake() failed for whole second: %v", err)
+	}
+	if gotFloatWhole, ok := gotWhole.(float64); !ok || gotFloatWhole != 1700000000.0 {
+		t.Errorf("convertSnake(whole second) = %v, want 1700000000.0", gotWhole)
+	}
+
+	// Verify EmitJSON serialization output
+	event := session.Event{
+		ID:        "event-1",
+		Timestamp: time.UnixMicro(1733040000123456),
+	}
+	rw := httptest.NewRecorder()
+	if err := EmitJSON(rw, event); err != nil {
+		t.Fatalf("EmitJSON() failed: %v", err)
+	}
+
+	var jsonMap map[string]any
+	if err := json.Unmarshal(rw.Body.Bytes(), &jsonMap); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", rw.Body.String(), err)
+	}
+
+	ts, ok := jsonMap["timestamp"].(float64)
+	if !ok {
+		t.Fatalf("timestamp missing or not float64 in JSON: %v", jsonMap)
+	}
+	if ts != want {
+		t.Errorf("EmitJSON timestamp = %v, want %v", ts, want)
 	}
 }

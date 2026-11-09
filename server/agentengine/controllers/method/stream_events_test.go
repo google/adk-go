@@ -93,8 +93,8 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 					event: session.Event{Output: struct {
 						time.Time
 						DisplayName string
-					}{time.Unix(1, 0), "synthetic output"}},
-					wantOutput: map[string]any{"time": float64(1), "display_name": "synthetic output"},
+					}{time.UnixMicro(1_234_567), "synthetic output"}},
+					wantOutput: map[string]any{"time": 1.234567, "display_name": "synthetic output"},
 				},
 				{
 					name:       "output_unexported_embed",
