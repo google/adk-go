@@ -345,28 +345,30 @@ func isScopedStateKey(key string) bool {
 		strings.HasPrefix(key, session.KeyPrefixTemp)
 }
 
-// dropEchoedScopedKeys returns delta without the scoped keys whose submitted
-// value already matches what the session holds.
+// dropEchoedScopedKeys returns delta without the keys whose submitted value
+// already matches what the session holds.
 //
 // The web UI's session list renames a session by posting back the whole state
 // map it read, with one metadata key changed. A read merges app- and
-// user-scoped state in, so that payload carries scoped keys the user never
-// touched. Refusing it breaks rename for every agent that uses scoped state,
-// and the UI discards the error, so the name silently does not change.
+// user-scoped state in and strips credential secrets, so that payload carries
+// scoped keys the user never touched and credentials without their secrets.
+// Refusing the scoped keys breaks rename for every agent that uses scoped
+// state, and writing the redacted credentials back overwrites the stored
+// secrets.
 //
 // A key echoed back unchanged would write the value that is already there, so
-// dropping it leaves the session exactly as accepting it would. That is the
-// whole exception: a scoped key carrying a different value is still a write
-// outside this session, and is still refused.
+// dropping it leaves the session as it stands. A scoped key carrying a
+// different value is still a write outside this session, and is still refused.
 //
 // Values are compared as JSON rather than with reflect.DeepEqual, because the
 // submitted value has been through a JSON round-trip and the stored one has
 // not. An agent that wrote int64(5) gets float64(5) back from the client, and
 // those are not equal in Go.
 func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) map[string]any {
+	redacted := models.RedactedState(stored)
 	kept := make(map[string]any, len(delta))
 	for key, value := range delta {
-		if isScopedStateKey(key) && matchesStoredValue(stored, key, value) {
+		if matchesStoredValue(redacted, key, value) {
 			continue
 		}
 		kept[key] = value
@@ -374,19 +376,13 @@ func dropEchoedScopedKeys(delta map[string]any, stored session.ReadonlyState) ma
 	return kept
 }
 
-// matchesStoredValue reports whether stored already holds value under key. A
-// key the session does not have, or a value that will not marshal, counts as a
-// change: the caller then treats it as a write and refuses it.
-func matchesStoredValue(stored session.ReadonlyState, key string, value any) bool {
-	if stored == nil {
-		return false
-	}
-	current, err := stored.Get(key)
-	if err != nil {
-		return false
-	}
-	encodedCurrent, err := json.Marshal(current)
-	if err != nil {
+// matchesStoredValue reports whether stored, encoded with credential secrets
+// stripped the way a read returns it, already holds value under key. A key the
+// session does not have, or a value that will not marshal, counts as a change:
+// the caller then treats it as a write.
+func matchesStoredValue(stored map[string]json.RawMessage, key string, value any) bool {
+	encodedCurrent, ok := stored[key]
+	if !ok {
 		return false
 	}
 	encodedValue, err := json.Marshal(value)

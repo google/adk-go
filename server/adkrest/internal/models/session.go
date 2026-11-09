@@ -15,6 +15,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 
@@ -115,4 +116,24 @@ func (s Session) Validate() error {
 		return fmt.Errorf("events is nil")
 	}
 	return nil
+}
+
+// RedactedState encodes stored with the credential redaction [Session] applies
+// to State, returning one raw JSON value per key, or nil if stored is nil or
+// cannot be encoded.
+func RedactedState(stored session.ReadonlyState) map[string]json.RawMessage {
+	if stored == nil {
+		return nil
+	}
+	state := stateValues{}
+	maps.Insert(state, stored.All())
+	b, err := json.Marshal(state)
+	if err != nil {
+		return nil
+	}
+	var redacted map[string]json.RawMessage
+	if err := json.Unmarshal(b, &redacted); err != nil {
+		return nil
+	}
+	return redacted
 }
