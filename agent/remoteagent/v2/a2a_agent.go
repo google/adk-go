@@ -717,6 +717,7 @@ func newMessage(ctx agent.InvocationContext, cfg A2AConfig) (*a2a.Message, error
 			return nil, fmt.Errorf("event part conversion failed: %w", err)
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, parts...)
+		msg.ID = platform.NewUUID(ctx)
 		msg.TaskID = a2a.TaskID(userFnCall.taskID)
 		msg.ContextID = userFnCall.contextID
 		return msg, nil

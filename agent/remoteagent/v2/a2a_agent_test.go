@@ -1147,15 +1147,16 @@ func TestRemoteAgent_RequestPayload(t *testing.T) {
 				t.Fatalf("remoteagent.NewA2A() error = %v", err)
 			}
 
-			ictx := newInvocationContext(t, tc.sessionEvents)
+			ctx := platform.WithUUIDProvider(t.Context(), func() string { return "11111111-1111-4111-8111-111111111111" })
+			ictx := newInvocationContext(t, tc.sessionEvents).WithContext(ctx)
+			if tc.wantRequest.Message != nil {
+				tc.wantRequest.Message.ID = "11111111-1111-4111-8111-111111111111"
+			}
 			if _, err := runAndCollect(ictx, remoteAgent); !errors.Is(err, errRejected) {
 				t.Fatalf("agent.Run() error = %v, want %v", err, errRejected)
 			}
 
-			ignoreFields := []cmp.Option{
-				cmpopts.IgnoreFields(a2a.Message{}, "ID"),
-			}
-			if diff := cmp.Diff(tc.wantRequest, gotRequest, ignoreFields...); diff != "" {
+			if diff := cmp.Diff(tc.wantRequest, gotRequest); diff != "" {
 				t.Fatalf("agent.Run() sent unexpected request (+got,-want):\ngot = %+v\nwant = %+v\ndiff = %s", gotRequest, tc.wantRequest, diff)
 			}
 		})
