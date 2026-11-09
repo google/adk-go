@@ -23,9 +23,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"google.golang.org/genai"
@@ -334,10 +336,11 @@ func (c *partsCollector) addText(entry map[string]any, text string, contentOrd, 
 // needs a content type for the object, records defaultBinaryMIMEType for a
 // blob that has none.
 func (c *partsCollector) addInlineData(entry map[string]any, blob *genai.Blob, contentOrd, index int) {
-	entry["mime_type"] = blob.MIMEType
+	mimeType := strings.ToValidUTF8(blob.MIMEType, "\uFFFD")
+	entry["mime_type"] = mimeType
 	entry["text"] = inlineDataText
 	if c.opts.offload {
-		mimeType := cmp.Or(blob.MIMEType, defaultBinaryMIMEType)
+		mimeType = cmp.Or(mimeType, defaultBinaryMIMEType)
 		entry["mime_type"] = mimeType
 		if reserved, ok := c.reserve(len(blob.Data)); ok {
 			c.queue(pendingUpload{
@@ -365,7 +368,8 @@ func (c *partsCollector) addFileData(entry map[string]any, file *genai.FileData)
 	if c.opts.redact {
 		uri, changed = sanitizeURI(uri)
 	}
-	entry["mime_type"] = file.MIMEType
+	uri = strings.ToValidUTF8(uri, "\uFFFD")
+	entry["mime_type"] = strings.ToValidUTF8(file.MIMEType, "\uFFFD")
 	entry["uri"] = uri
 	entry["storage_mode"] = storageModeExternalURI
 	c.truncated = c.truncated || changed
@@ -499,7 +503,7 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 	}
 	joined := strings.Join(active, " | ")
 	if m.isResponse {
-		return joined, truncated
+		return strings.ToValidUTF8(joined, "\uFFFD"), truncated
 	}
 	summary, t := truncateString(joined, maxLength)
 	return summary, truncated || t
@@ -720,6 +724,12 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 			}
 			return nil, false
 		}
+		// A value of a defined interface type is read by its type name
+		// before the value that it holds, which has a name of its own, as
+		// for a pointer below.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
+		}
 		v = v.Elem()
 	}
 	if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
@@ -730,7 +740,17 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	}
 	if v.Kind() == reflect.Pointer {
 		if depth >= maxSanitizeDepth {
+			if !s.budget.take() {
+				return sanitizeBudgetPlaceholder, true
+			}
 			return maxDepthPlaceholder, true
+		}
+		// A defined pointer type, such as type APIKey *string, may be the
+		// only part of a value that is named for a credential: what it
+		// points to, here a plain string, is not. Its name is read before
+		// the pointer is followed, which loses it.
+		if s.redact && hasSensitiveTypeName(v) {
+			return s.redacted()
 		}
 		key := visitKey{ptr: v.Pointer(), typ: v.Type()}
 		if !s.enter(key) {
@@ -748,8 +768,12 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	if v.Type() == jsonNumberType {
 		return s.number(v.String())
 	}
-	if out, truncated, ok := s.marshaled(v, depth); ok {
-		return out, truncated
+	// The node budget for v was charged above.
+	if s.redact && redactsWhole(v) {
+		return redactedValue, true
+	}
+	if res := s.marshaled(v, depth); res.handled {
+		return res.value, res.truncated
 	}
 
 	switch v.Kind() {
@@ -797,6 +821,180 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 		// JSON form.
 		return unsupportedObjPlaceholder, true
 	}
+}
+
+// hasSensitiveTypeName reports whether v is of a defined type that is named
+// for a credential, such as Token, APIKey or Password (see isSensitiveKey),
+// whose values are redacted whole. Whatever its kind, a value of such a type
+// may hold a credential in a form that nothing else would tell, such as the
+// digits of an int or the bytes of a slice, so a value of such a type that is
+// not a struct (a map, slice, array, pointer, interface or scalar, zero or
+// not, with or without a MarshalJSON or MarshalText method) is redacted from
+// its type alone, without reading v: another goroutine may update the value
+// atomically or under a lock. A struct is redacted whole only if it has a
+// MarshalJSON or MarshalText method, which is looked up on the types only
+// (see hasMarshalerMethod); a struct without one is shown by its exported
+// fields, which are redacted by name without reading the unexported ones,
+// and omitzero does not read it either (see readsRedactedToCheckZero).
+func hasSensitiveTypeName(v reflect.Value) bool {
+	name := v.Type().Name()
+	if name == "" || !isSensitiveKey(name) {
+		return false
+	}
+	if v.Kind() == reflect.Struct {
+		return hasMarshalerMethod(v)
+	}
+	return true
+}
+
+// redactsWhole reports whether v is redacted whole from its type alone,
+// without reading it: its type is named for a credential (see
+// hasSensitiveTypeName), or it is a struct that may write itself with a
+// method promoted from such a type (see promotesSensitiveMarshaler).
+func redactsWhole(v reflect.Value) bool {
+	return hasSensitiveTypeName(v) || promotesSensitiveMarshaler(v)
+}
+
+// promotesSensitiveMarshaler reports whether v is a struct that
+// encoding/json would write with a MarshalJSON or MarshalText method (see
+// hasMarshalerMethod) while it embeds, directly or through embedded structs,
+// a field of a type named for a credential that has such a method. The
+// method may be the one promoted from that field, which writes what a value
+// of the credential type writes, whatever the outer type is named; and
+// reflection cannot tell a promoted method from one that the outer type
+// declares, so such a value is redacted whole, as a value of the embedded
+// type is. Only the types are read, not v.
+func promotesSensitiveMarshaler(v reflect.Value) bool {
+	return v.Kind() == reflect.Struct && hasMarshalerMethod(v) && embedsSensitiveMarshaler(v.Type(), nil)
+}
+
+// embedsSensitiveMarshaler reports whether the struct type t embeds,
+// directly or through embedded structs, a field of a type named for a
+// credential whose value or pointer type has a MarshalJSON or MarshalText
+// method, or a field of an interface type that has such a method, as
+// json.Marshaler and encoding.TextMarshaler do: the method of such an
+// interface field is promoted from whatever value the field holds, which may
+// be a credential, and only the types are read, so that it is looked at
+// whether the field is nil or not. Methods are promoted whatever the json tag
+// of the field, so every embedded field is looked at. seen holds the embedded
+// struct types already looked at, so that a type that embeds a pointer to
+// itself is looked at once; it is made when the first embedded struct is
+// found.
+func embedsSensitiveMarshaler(t reflect.Type, seen map[reflect.Type]bool) bool {
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if !f.Anonymous {
+			continue
+		}
+		ft := f.Type
+		if ft.Kind() == reflect.Interface && (ft.Implements(jsonMarshalerType) || ft.Implements(textMarshalerType)) {
+			return true
+		}
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if name := ft.Name(); name != "" && isSensitiveKey(name) && typeHasMarshalerMethod(ft) {
+			return true
+		}
+		if ft.Kind() != reflect.Struct || seen[ft] {
+			continue
+		}
+		if seen == nil {
+			seen = map[reflect.Type]bool{t: true}
+		}
+		seen[ft] = true
+		if embedsSensitiveMarshaler(ft, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeHasMarshalerMethod reports whether t or its pointer type has a
+// MarshalJSON or MarshalText method.
+func typeHasMarshalerMethod(t reflect.Type) bool {
+	pt := reflect.PointerTo(t)
+	return t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
+		pt.Implements(jsonMarshalerType) || pt.Implements(textMarshalerType)
+}
+
+// zeroReadsRedacted caches readsRedactedToCheckZero by reflect.Type.
+var zeroReadsRedacted sync.Map
+
+// readsRedactedToCheckZero reports whether reflect.Value.IsZero, which
+// omitzero calls, would read a redacted value to tell whether a value of
+// type t is zero. IsZero reads every array element and every struct field,
+// exported or not, at any depth, and of a pointer, map, slice, interface,
+// channel or function only whether it is nil, not what it refers to. A value
+// is redacted if its type is named for a credential, of any kind (see
+// hasSensitiveTypeName), if it is a struct that may write itself with a
+// method promoted from such a type (see embedsSensitiveMarshaler), or if it
+// is held by a struct field named for a credential (see
+// fieldNamedForCredential), including a string field: calling IsZero on an
+// enclosing struct reads all of its fields (such as a mutex alongside the
+// string) without holding any lock. It looks into array elements and struct
+// fields only, as IsZero does; a type holds itself only through a pointer,
+// map, slice, interface, channel or function, which it does not look into,
+// so it never meets t again. It reads only types, not values.
+func readsRedactedToCheckZero(t reflect.Type) bool {
+	if r, ok := zeroReadsRedacted.Load(t); ok {
+		return r.(bool)
+	}
+	r := t.Name() != "" && isSensitiveKey(t.Name())
+	switch t.Kind() {
+	case reflect.Array:
+		r = r || t.Len() > 0 && readsRedactedToCheckZero(t.Elem())
+	case reflect.Struct:
+		r = r || typeHasMarshalerMethod(t) && embedsSensitiveMarshaler(t, nil)
+		for i := 0; !r && i < t.NumField(); i++ {
+			f := t.Field(i)
+			r = fieldNamedForCredential(f) || readsRedactedToCheckZero(f.Type)
+		}
+	}
+	zeroReadsRedacted.Store(t, r)
+	return r
+}
+
+// fieldNamedForCredential reports whether the struct field f is named for a
+// credential, by its Go name or by the name in its json tag, which is the
+// name that walkStruct redacts it by: a field that is not written, as an
+// unexported field or one tagged "-" is not, is told by its Go name.
+func fieldNamedForCredential(f reflect.StructField) bool {
+	if isSensitiveKey(f.Name) {
+		return true
+	}
+	name, _, skip := parseJSONTag(f)
+	return !skip && name != "" && isSensitiveKey(name)
+}
+
+// hasMarshalerMethod reports whether encoding/json would write v with a
+// MarshalJSON or MarshalText method: the type of v has one, or v is
+// addressable and its pointer type has one. Only the method sets of the
+// types are read, not v (see hasMethod).
+func hasMarshalerMethod(v reflect.Value) bool {
+	return hasMethod(v, jsonMarshalerType) || hasMethod(v, textMarshalerType)
+}
+
+// hasMethod reports whether v has the methods of iface as implementer finds
+// them: the type of v has them, or v is addressable and its pointer type
+// has them. Only the method sets of the types are read, not v: unlike
+// implementer, it boxes nothing into an interface value, and a value that
+// is boxed without its address is copied, and so read.
+func hasMethod(v reflect.Value, iface reflect.Type) bool {
+	if v.Type().Implements(iface) {
+		return true
+	}
+	return v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface)
+}
+
+// redacted stands in for an interface or pointer value that is redacted whole
+// before walk reaches its general node-budget check, charging one node of the
+// budget.
+func (s *sanitizer) redacted() (any, bool) {
+	if !s.budget.take() {
+		return sanitizeBudgetPlaceholder, true
+	}
+	return redactedValue, true
 }
 
 func (s *sanitizer) enter(key visitKey) bool {
@@ -874,43 +1072,84 @@ func (s *sanitizer) bytes(b []byte, depth int) (any, bool) {
 	return s.stringValue(string(b), depth)
 }
 
+// marshalResult is the outcome of trying to convert a value through a custom
+// marshaler or special-cased type before falling back to kind-based walking.
+type marshalResult struct {
+	value     any
+	truncated bool
+	handled   bool
+}
+
 // marshaled converts a value that implements json.Marshaler or
 // encoding.TextMarshaler through that method, as encoding/json would, and
-// then sanitizes the result. ok is false if v implements neither.
-func (s *sanitizer) marshaled(v reflect.Value, depth int) (out any, truncated, ok bool) {
+// then sanitizes the result. Under redaction, it also redacts a url.Userinfo
+// that holds a user name or password (see redactUserinfo). The zero
+// marshalResult (handled == false) is returned if v is written in none of
+// these ways.
+func (s *sanitizer) marshaled(v reflect.Value, depth int) marshalResult {
 	if m, found := implementer(v, jsonMarshalerType); found {
 		b, err := safeCall(m.(json.Marshaler).MarshalJSON)
 		if err != nil {
-			return unsupportedObjPlaceholder, true, true
+			return marshalResult{value: unsupportedObjPlaceholder, truncated: true, handled: true}
 		}
 		var decoded any
 		if err := unmarshalJSONPreserveNumbers(b, &decoded); err != nil {
-			return unsupportedObjPlaceholder, true, true
+			return marshalResult{value: unsupportedObjPlaceholder, truncated: true, handled: true}
 		}
-		out, truncated = s.walk(reflect.ValueOf(decoded), depth)
-		return out, truncated, true
+		out, truncated := s.walk(reflect.ValueOf(decoded), depth)
+		return marshalResult{value: out, truncated: truncated, handled: true}
 	}
 	if m, found := implementer(v, textMarshalerType); found {
 		b, err := safeCall(m.(encoding.TextMarshaler).MarshalText)
 		if err != nil {
-			return unsupportedObjPlaceholder, true, true
+			return marshalResult{value: unsupportedObjPlaceholder, truncated: true, handled: true}
 		}
-		out, truncated = s.stringValue(string(b), depth)
-		return out, truncated, true
+		out, truncated := s.stringValue(string(b), depth)
+		return marshalResult{value: out, truncated: truncated, handled: true}
 	}
-	return nil, false, false
+	if s.redact && v.Kind() == reflect.Struct && v.Type() == userinfoType {
+		return redactUserinfo(v)
+	}
+	return marshalResult{}
 }
 
-// implementer returns v, or its address when only the pointer type has the
-// method, as an interface value implementing iface.
-func implementer(v reflect.Value, iface reflect.Type) (any, bool) {
-	if v.Type().Implements(iface) && v.CanInterface() {
-		return v.Interface(), true
+// userinfoType is the type of the password-bearing URL userinfo.
+var userinfoType = reflect.TypeFor[url.Userinfo]()
+
+// redactUserinfo redacts a url.Userinfo when it holds a user name or a
+// password, matching sanitizeURI: the user name may be the credential itself,
+// as in a git remote that authenticates with a token
+// (https://TOKEN@github.com/o/r). An empty url.Userinfo returns
+// marshalResult{handled: false} so it falls through to walkStruct and renders
+// as {}. Callers reach redactUserinfo through walk after v has already been
+// charged to the node budget.
+func redactUserinfo(v reflect.Value) marshalResult {
+	if !v.CanInterface() {
+		return marshalResult{value: redactedValue, truncated: true, handled: true}
 	}
+	u := v.Interface().(url.Userinfo)
+	if _, hasPassword := u.Password(); hasPassword || u.Username() != "" {
+		return marshalResult{value: redactedValue, truncated: true, handled: true}
+	}
+	return marshalResult{}
+}
+
+// implementer returns v as an interface value implementing iface: the
+// address of v, when v is addressable and the pointer type has the methods,
+// or else v itself. The address is tried first because boxing v itself
+// copies it, which reads all of its fields, the unexported ones included,
+// while another goroutine may write them under a lock or atomically; boxing
+// the address reads none of them, and the method set of the pointer type
+// holds the methods of the value type too. A method with a value receiver
+// still copies the value when it is called, as any call of it does.
+func implementer(v reflect.Value, iface reflect.Type) (any, bool) {
 	if v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface) {
 		if a := v.Addr(); a.CanInterface() {
 			return a.Interface(), true
 		}
+	}
+	if v.Type().Implements(iface) && v.CanInterface() {
+		return v.Interface(), true
 	}
 	return nil, false
 }
@@ -950,22 +1189,29 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		k, ok := mapKeyString(iter.Key())
-		if !ok {
-			unsupportedKeys++
-			k = unsupportedKeyPlaceholder
-			if unsupportedKeys > 1 {
-				k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
-			}
+		var k string
+		var ok bool
+		if s.redact && mapKeyRedactsWhole(iter.Key()) {
+			k = redactedValue
 			truncated = true
-		} else if s.redact && isSensitiveKey(k) {
-			if !s.budget.take() {
-				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+		} else {
+			k, ok = mapKeyString(iter.Key())
+			if !ok {
+				unsupportedKeys++
+				k = unsupportedKeyPlaceholder
+				if unsupportedKeys > 1 {
+					k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
+				}
 				truncated = true
-				break
+			} else if s.redact && isSensitiveKey(k) {
+				if !s.budget.take() {
+					out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+					truncated = true
+					break
+				}
+				out[k] = redactedValue
+				continue
 			}
-			out[k] = redactedValue
-			continue
 		}
 		val, t := s.walk(iter.Value(), depth+1)
 		if str, ok := val.(string); ok && str == sanitizeBudgetPlaceholder && s.budget.remaining <= 0 {
@@ -973,10 +1219,46 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		out[k] = val
+		// Keys that are written alike, as all the keys redacted whole are,
+		// keep their value only if they agree on it, so that which one is
+		// written does not depend on the order of the map.
+		if existing, exists := out[k]; exists {
+			if !reflect.DeepEqual(existing, val) {
+				out[k] = redactedValue
+				truncated = true
+			}
+		} else {
+			out[k] = val
+		}
 		truncated = truncated || t
 	}
 	return out, truncated
+}
+
+// mapKeyRedactsWhole reports whether the map key k is redacted whole from
+// its type alone, without reading it or calling its MarshalText method: k,
+// the value that k holds if it is an interface, or the value that k points
+// to if it is a pointer, is redacted whole (see redactsWhole), or k is a
+// struct named for a credential whose pointer type has a MarshalJSON or
+// MarshalText method, which a map key, never addressable, is not written
+// with.
+func mapKeyRedactsWhole(k reflect.Value) bool {
+	for k.Kind() == reflect.Interface {
+		if redactsWhole(k) {
+			return true
+		}
+		if k.IsNil() {
+			return false
+		}
+		k = k.Elem()
+	}
+	if redactsWhole(k) {
+		return true
+	}
+	if k.Kind() == reflect.Pointer && !k.IsNil() && redactsWhole(k.Elem()) {
+		return true
+	}
+	return k.Kind() == reflect.Struct && isSensitiveKey(k.Type().Name()) && typeHasMarshalerMethod(k.Type())
 }
 
 // mapKeyString returns the JSON object key for a map key: strings, text
@@ -990,14 +1272,17 @@ func mapKeyString(k reflect.Value) (string, bool) {
 		k = k.Elem()
 	}
 	if k.Kind() == reflect.String {
-		return k.String(), true
+		return strings.ToValidUTF8(k.String(), "\uFFFD"), true
 	}
 	if m, found := implementer(k, textMarshalerType); found {
 		if k.Kind() == reflect.Pointer && k.IsNil() {
 			return "", true
 		}
 		b, err := safeCall(m.(encoding.TextMarshaler).MarshalText)
-		return string(b), err == nil
+		if err != nil {
+			return "", false
+		}
+		return strings.ToValidUTF8(string(b), "\uFFFD"), true
 	}
 	switch k.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -1036,7 +1321,11 @@ func (s *sanitizer) walkList(v reflect.Value, depth int) (any, bool) {
 // walkStruct converts a struct to a map the way encoding/json encodes it:
 // exported fields under their json tag names, "-" and omitempty honored, and
 // the fields of untagged embedded structs promoted, with shallower fields
-// winning name conflicts.
+// winning name conflicts. Under redaction, omitempty and omitzero read no
+// credential to tell whether a field is empty, so a field that holds one is
+// written, as [REDACTED] or by its exported fields, empty or not; only a
+// direct empty string field named for a credential is still omitted, as its
+// length alone tells.
 func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 	out := make(map[string]any)
 	truncated := false
@@ -1080,10 +1369,14 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 					continue
 				}
 				seenNames[name] = true
-				if (opts.omitEmpty && isEmptyValue(fv)) || (opts.omitZero && fv.IsZero()) {
-					continue
-				}
-				if s.redact && isSensitiveKey(name) {
+				// A field that is redacted whole from its type is checked
+				// before fieldNamedForCredential and omit options so that
+				// its value is never read for omitempty/omitzero and
+				// truncated is reported consistently with walk(fv). Nil
+				// pointers and nil interfaces without omit options fall
+				// through to walk, which writes them as null unless the
+				// field name itself is credential-named.
+				if s.redact && redactsWhole(fv) && (opts.omitEmpty || opts.omitZero || (fv.Kind() != reflect.Pointer && fv.Kind() != reflect.Interface) || !fv.IsNil()) {
 					if !s.budget.take() {
 						out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 						truncated = true
@@ -1091,6 +1384,52 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 						break
 					}
 					out[name] = redactedValue
+					truncated = true
+					continue
+				}
+				// A field redacted by its name is not read either: it is
+				// written as [REDACTED], empty or not, before omitempty or
+				// omitzero would read it, as another goroutine may update a
+				// Token uint64 atomically. Only a direct string field keeps
+				// its omit options, as in encoding/json: an empty one, whose
+				// length alone is read, is omitted. The field is named for a
+				// credential by its Go name or by its json name (see
+				// fieldNamedForCredential), so a tag that names a counter or
+				// a cursor, as Password `json:"next_page_token"` and
+				// Token uint64 `json:"token_count,omitempty"` have, does not
+				// hide the credential.
+				if s.redact && fieldNamedForCredential(f) {
+					if (opts.omitEmpty || opts.omitZero) && fv.Kind() == reflect.String && fv.Len() == 0 {
+						continue
+					}
+					if !s.budget.take() {
+						out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+						truncated = true
+						budgetStopped = true
+						break
+					}
+					out[name] = redactedValue
+					continue
+				}
+				if opts.omitEmpty && isEmptyValue(fv) {
+					continue
+				}
+				// omitzero reads the whole field, as reflect.Value.IsZero
+				// does, so it does not apply either to a field that holds,
+				// in an array element or a struct field at any depth, a
+				// value that is redacted (see readsRedactedToCheckZero): of
+				// a credential-named type, as [2]Token and
+				// struct{ T Token } do, whether that value is redacted
+				// whole or written by its exported fields, as a
+				// credential-named struct without a marshaler is, a struct
+				// that may write itself with a marshaler promoted from a
+				// credential, or any field named for a credential (including
+				// a string field, since IsZero reads all fields of the
+				// enclosing struct, including any mutex alongside it). Such a
+				// field is written, zero or not. Any other omitzero field is
+				// read by IsZero, unexported fields too, as encoding/json
+				// reads it.
+				if opts.omitZero && !(s.redact && readsRedactedToCheckZero(f.Type)) && fv.IsZero() {
 					continue
 				}
 				val, tr := s.walk(fv, depth+1)
@@ -1144,6 +1483,7 @@ func parseJSONTag(f reflect.StructField) (name string, opts tagOptions, skip boo
 		return "", opts, true
 	}
 	name, rest, _ := strings.Cut(tag, ",")
+	name = strings.ToValidUTF8(name, "\uFFFD")
 	for rest != "" {
 		var opt string
 		opt, rest, _ = strings.Cut(rest, ",")
@@ -1175,8 +1515,12 @@ func isEmptyValue(v reflect.Value) bool {
 }
 
 // truncateString shortens s to maxLength runes followed by truncationSuffix.
-// A negative maxLength means no limit.
+// A negative maxLength means no limit. A run of bytes that is not valid UTF-8
+// is replaced with one U+FFFD.
 func truncateString(s string, maxLength int) (string, bool) {
+	// Invalid UTF-8 is replaced whatever the length of s, so that it never
+	// reaches a BigQuery string column or a JSON document.
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if maxLength < 0 {
 		return s, false
 	}
