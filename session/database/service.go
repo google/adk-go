@@ -23,10 +23,12 @@
 package database
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 
@@ -331,6 +333,17 @@ func (s *databaseService) List(ctx context.Context, req *session.ListRequest) (*
 		}
 	}
 
+	// Sort here rather than with ORDER BY. SQLite stores update_time as RFC 3339
+	// text with the value's own offset, so it would compare text, not instants,
+	// for rows written in different zones.
+	slices.SortStableFunc(foundSessions, func(a, b storageSession) int {
+		return cmp.Or(
+			a.UpdateTime.Compare(b.UpdateTime),
+			strings.Compare(a.UserID, b.UserID),
+			strings.Compare(a.ID, b.ID),
+		)
+	})
+
 	// Create response sessions, transform the storageSessions into
 	responseSessions := make([]session.Session, 0, len(foundSessions))
 	for _, storage := range foundSessions {
@@ -362,6 +375,18 @@ func (s *databaseService) Delete(ctx context.Context, req *session.DeleteRequest
 	}
 
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Delete the events explicitly instead of relying on the ON DELETE
+		// CASCADE foreign key: SQLite enforces foreign keys only when the
+		// connection enables them, and without it the session row goes and its
+		// events stay behind.
+		if err := tx.Where(&storageEvent{
+			AppName:   req.AppName,
+			UserID:    req.UserID,
+			SessionID: req.SessionID,
+		}).Delete(&storageEvent{}).Error; err != nil {
+			return fmt.Errorf("database error during session events deletion: %w", err)
+		}
+
 		target := &storageSession{}
 
 		result := tx.Where(&storageSession{

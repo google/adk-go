@@ -14,6 +14,8 @@
 
 package controllers
 
+import "net/http"
+
 type statusError struct {
 	Err  error
 	Code int
@@ -31,4 +33,12 @@ func (se statusError) Error() string {
 // Status returns an associated status code
 func (se statusError) Status() int {
 	return se.Code
+}
+
+// statusOf returns the HTTP status err carries, or 500 when it carries none.
+func statusOf(err error) int {
+	if statusErr, ok := err.(statusError); ok {
+		return statusErr.Status()
+	}
+	return http.StatusInternalServerError
 }
