@@ -1036,9 +1036,11 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 		}
 		if earlyExitEvent != nil {
 			earlyExitIter := func(yield func(*session.Event, error) bool) {
+				defer span.End()
 				defer r.pluginManager.RunAfterRunCallback(iCtx)
 				yield(earlyExitEvent, nil)
 			}
+			ownedByIterator = true
 			return &closedLiveSession{}, earlyExitIter, nil
 		}
 	}

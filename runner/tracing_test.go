@@ -385,7 +385,7 @@ func TestRunInvocationSpanOnRepeatedIteration(t *testing.T) {
 func TestRunLiveInvocationTrace(t *testing.T) {
 	forEachTraceSchema(t, func(t *testing.T) {
 		for _, parentTrace := range []bool{false, true} {
-			for _, outcome := range []string{"complete", "consumer_stop", "stream_error", "multiple_errors", "event_error", "append_error", "before_error", "short_circuit", "setup_error", "close_before_iteration", "cancel"} {
+			for _, outcome := range []string{"complete", "consumer_stop", "stream_error", "multiple_errors", "event_error", "append_error", "before_error", "short_circuit", "short_circuit_stop", "setup_error", "close_before_iteration", "cancel"} {
 				name := outcome + "/root"
 				if parentTrace {
 					name = outcome + "/parent"
@@ -415,7 +415,7 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 							if outcome == "before_error" {
 								return nil, firstError
 							}
-							if outcome == "short_circuit" {
+							if outcome == "short_circuit" || outcome == "short_circuit_stop" {
 								return genai.NewContentFromText("done", genai.RoleModel), nil
 							}
 							return nil, nil
@@ -477,7 +477,7 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 						t.Fatalf("RunLive error = %t, want %t", err != nil, wantErr)
 					}
 					if err == nil {
-						if outcome != "short_circuit" && !invocation.IsRecording() {
+						if !invocation.IsRecording() {
 							t.Error("span ended when RunLive returned")
 						}
 						if outcome == "cancel" {
@@ -497,14 +497,14 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 							if observedError == nil && err != nil {
 								observedError = err
 							}
-							if outcome == "consumer_stop" {
+							if outcome == "consumer_stop" || outcome == "short_circuit_stop" {
 								break
 							}
 						}
 						if streamErr != (outcome == "stream_error" || outcome == "multiple_errors" || outcome == "event_error" || outcome == "append_error" || outcome == "cancel") {
 							t.Error("unexpected stream error outcome")
 						}
-						if outcome != "short_circuit" && !afterRun {
+						if !afterRun {
 							t.Error("AfterRunCallback was not called")
 						}
 						if err := live.Close(); err != nil {
