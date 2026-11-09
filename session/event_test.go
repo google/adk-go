@@ -114,6 +114,8 @@ func TestIsFinalResponseNilParts(t *testing.T) {
 		{"nil before a function call", []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{Name: "f"}}}, false},
 		{"nil before a function response", []*genai.Part{nil, {FunctionResponse: &genai.FunctionResponse{Name: "f"}}}, false},
 		{"nil trailing part after text", []*genai.Part{{Text: "done"}, nil}, true},
+		{"nil after a code execution result", []*genai.Part{{CodeExecutionResult: &genai.CodeExecutionResult{}}, nil}, false},
+		{"nil before a code execution result", []*genai.Part{nil, {CodeExecutionResult: &genai.CodeExecutionResult{}}}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
