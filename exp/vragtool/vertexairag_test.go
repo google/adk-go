@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package vertexairag_test
+package vragtool_test
 
 import (
 	"strings"
@@ -21,7 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
-	"google.golang.org/adk/v2/exp/vertexairag"
+	"google.golang.org/adk/v2/exp/vragtool"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
@@ -32,39 +32,39 @@ const testCorpus = "projects/test-project/locations/us-central1/ragCorpora/test-
 func TestNew(t *testing.T) {
 	testCases := []struct {
 		name        string
-		cfg         vertexairag.Config
+		cfg         vragtool.Config
 		wantErrText string // substring; empty means no error expected
 	}{
 		{
 			name:        "missing description",
-			cfg:         vertexairag.Config{RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}}},
+			cfg:         vragtool.Config{RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}}},
 			wantErrText: "Config.Description is required",
 		},
 		{
 			name:        "nil resources",
-			cfg:         vertexairag.Config{Description: "d"},
+			cfg:         vragtool.Config{Description: "d"},
 			wantErrText: "Config.RAGResources is required",
 		},
 		{
 			name:        "empty resources",
-			cfg:         vertexairag.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{}},
+			cfg:         vragtool.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{}},
 			wantErrText: "Config.RAGResources is required",
 		},
 		{
 			name:        "nil resource element",
-			cfg:         vertexairag.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}, nil}},
+			cfg:         vragtool.Config{Description: "d", RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}, nil}},
 			wantErrText: "Config.RAGResources cannot be nil",
 		},
 		{
 			name: "minimal config",
-			cfg: vertexairag.Config{
+			cfg: vragtool.Config{
 				Description:  "Retrieves documentation.",
 				RAGResources: []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus}},
 			},
 		},
 		{
 			name: "full config",
-			cfg: vertexairag.Config{
+			cfg: vragtool.Config{
 				Description:             "Retrieves documentation.",
 				RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 				SimilarityTopK:          genai.Ptr[int32](5),
@@ -75,7 +75,7 @@ func TestNew(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := vertexairag.New(tt.cfg)
+			got, err := vragtool.New(tt.cfg)
 			if tt.wantErrText != "" {
 				if err == nil {
 					t.Fatalf("New() error = nil, want error containing %q", tt.wantErrText)
@@ -110,7 +110,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestProcessRequest(t *testing.T) {
-	cfg := vertexairag.Config{
+	cfg := vragtool.Config{
 		Description:             "Retrieves documentation.",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),
@@ -172,7 +172,7 @@ func TestProcessRequest(t *testing.T) {
 
 	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
-			tl, err := vertexairag.New(cfg)
+			tl, err := vragtool.New(cfg)
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
@@ -231,7 +231,7 @@ func TestNew_CopiesConfig(t *testing.T) {
 	resources := []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: fileIDs}}
 	topK := int32(3)
 	threshold := 0.5
-	tl, err := vertexairag.New(vertexairag.Config{
+	tl, err := vragtool.New(vragtool.Config{
 		Description:             "d",
 		RAGResources:            resources,
 		SimilarityTopK:          &topK,
@@ -255,7 +255,7 @@ func TestNew_CopiesConfig(t *testing.T) {
 // TestProcessRequest_CopiesStorePerRequest verifies that modifying the store
 // added to one request does not change what later requests send.
 func TestProcessRequest_CopiesStorePerRequest(t *testing.T) {
-	tl, err := vertexairag.New(vertexairag.Config{
+	tl, err := vragtool.New(vragtool.Config{
 		Description:             "d",
 		RAGResources:            []*genai.VertexRAGStoreRAGResource{{RAGCorpus: testCorpus, RAGFileIDs: []string{"file-1"}}},
 		SimilarityTopK:          genai.Ptr[int32](3),

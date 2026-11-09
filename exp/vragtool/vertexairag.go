@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package vertexairag provides a tool that grounds an agent's responses on a
+// Package vragtool provides a tool that grounds an agent's responses on a
 // Vertex AI RAG (Retrieval-Augmented Generation) corpus.
 //
 // The tool is a model-side built-in: before each model call it adds a Vertex RAG
@@ -23,7 +23,7 @@
 //
 // EXPERIMENTAL: this package is not yet stable API. Anything here may change or
 // be removed in a later version without notice.
-package vertexairag
+package vragtool
 
 import (
 	"errors"
@@ -41,6 +41,8 @@ import (
 // Config configures a Vertex AI RAG retrieval tool. Description and at least one
 // RAGResources entry are required.
 type Config struct {
+	// Name for the tool
+	Name string
 	// Description tells the model what the corpus holds and when to consult it.
 	Description string
 
@@ -51,6 +53,7 @@ type Config struct {
 	// SimilarityTopK caps how many results retrieval returns. Nil leaves the
 	// backend default in place.
 	SimilarityTopK *int32
+
 	// VectorDistanceThreshold drops results whose vector distance exceeds it.
 	// Nil leaves the backend default in place.
 	VectorDistanceThreshold *float64
@@ -82,6 +85,7 @@ func New(cfg Config) (tool.Tool, error) {
 
 	return &ragRetrieval{
 		description: cfg.Description,
+		name:        cfg.Name,
 		store:       store,
 	}, nil
 }
@@ -90,11 +94,12 @@ func New(cfg Config) (tool.Tool, error) {
 // never handed out directly, so the value is safe for concurrent use.
 type ragRetrieval struct {
 	description string
+	name        string
 	store       *genai.VertexRAGStore
 }
 
 // Name implements tool.Tool.
-func (r *ragRetrieval) Name() string { return "ragtool" }
+func (r *ragRetrieval) Name() string { return r.name }
 
 // Description implements tool.Tool.
 func (r *ragRetrieval) Description() string { return r.description }
