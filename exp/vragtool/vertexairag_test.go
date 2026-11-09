@@ -88,8 +88,8 @@ func TestNew(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() unexpected error = %v", err)
 			}
-			if got.Name() != "ragtool" {
-				t.Errorf("Name() = %q, want %q", got.Name(), "ragtool")
+			if got.Name() != tt.cfg.Name {
+				t.Errorf("Name() = %q, want %q", got.Name(), tt.cfg.Name)
 			}
 			if got.Description() != tt.cfg.Description {
 				t.Errorf("Description() = %q, want %q", got.Description(), tt.cfg.Description)

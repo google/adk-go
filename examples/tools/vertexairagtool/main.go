@@ -95,5 +95,4 @@ func main() {
 	if err = l.Execute(ctx, config, os.Args[1:]); err != nil {
 		log.Fatalf("Run failed: %v\n\n%s", err, l.CommandLineSyntax())
 	}
-
 }
