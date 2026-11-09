@@ -160,6 +160,14 @@ func TestGetSession(t *testing.T) {
 	}
 }
 
+// maxBodySessionIDPathBytes mirrors the limit in sessions.go: the longest
+// percent-encoded sessionId the create endpoint accepts in its request body.
+const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
+
+// errNotAddressable is the 400 for a body sessionId that contains "/" or is "."
+// or "..". It names no ID, so the client's value is never echoed back.
+var errNotAddressable = errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
+
 func TestCreateSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",
@@ -172,9 +180,12 @@ func TestCreateSession(t *testing.T) {
 		storedSessions   map[fakes.SessionKey]fakes.TestSession
 		sessionID        fakes.SessionKey
 		createRequestObj models.CreateSessionRequest
-		wantSession      models.Session
-		wantErr          error
-		wantStatus       int
+		// rawBody, when set, is sent as the request body verbatim instead of
+		// createRequestObj, so a case can pin the JSON wire names.
+		rawBody     string
+		wantSession models.Session
+		wantErr     error
+		wantStatus  int
 	}{
 		{
 			name: "session exists",
@@ -222,6 +233,174 @@ func TestCreateSession(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			name:           "session id from request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "bodySession",
+				State:     map[string]any{"foo": "bar"},
+			},
+			wantSession: models.Session{
+				ID:      "bodySession",
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{"foo": "bar"},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// A literal body rather than a marshaled CreateSessionRequest, so
+			// a struct tag that stops decoding "sessionId", the wire name
+			// adk-python clients send, fails this case. encoding/json matches
+			// keys case-insensitively, so a change of case alone still passes.
+			name:           "session id from literal request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			rawBody: `{"sessionId":"bodySession"}`,
+			wantSession: models.Session{
+				ID:      "bodySession",
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:           "same session id in path and request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      id,
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "testSession",
+			},
+			wantSession: models.Session{
+				ID:      "testSession",
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:           "mismatched session id in path and request body",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID:      id,
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "otherSession",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    fmt.Errorf("sessionId in request body does not match session_id in URL path"),
+		},
+		{
+			name:           "request body session id x/y is not addressable",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "x/y",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
+		},
+		{
+			name:           "request body session id a/ is not addressable",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "a/",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
+		},
+		{
+			name:           "request body session id . is not addressable",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: ".",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
+		},
+		{
+			name:           "request body session id .. is not addressable",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "..",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
+		},
+		{
+			// The "/" check runs first, so this pins that its message does not
+			// echo an ID too long to send back.
+			name:           "request body session id too long and containing a slash",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "x/" + strings.Repeat("a", maxBodySessionIDPathBytes),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
+		},
+		{
+			name:           "request body session id at the length limit",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("a", maxBodySessionIDPathBytes),
+			},
+			wantSession: models.Session{
+				ID:      strings.Repeat("a", maxBodySessionIDPathBytes),
+				AppName: "testApp",
+				UserID:  "testUser",
+				State:   map[string]any{},
+				Events:  []models.Event{},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			// Each "ü" is two bytes in the body and six once percent-encoded,
+			// so the limit applies to the encoded form, not the body.
+			name:           "request body session id too long once percent-encoded",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: strings.Repeat("ü", maxBodySessionIDPathBytes/6+1),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", (maxBodySessionIDPathBytes/6+1)*6, maxBodySessionIDPathBytes),
+		},
+		{
 			name:           "user id is missing",
 			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
 			sessionID: fakes.SessionKey{
@@ -237,10 +416,17 @@ func TestCreateSession(t *testing.T) {
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
 			sessionService := fakes.FakeSessionService{Sessions: tt.storedSessions}
+			// Taken before the call, because the fake writes into the very
+			// map the table holds.
+			storedBefore := len(tt.storedSessions)
 			apiController := controllers.NewSessionsAPIController(&sessionService)
-			reqBytes, err := json.Marshal(tt.createRequestObj)
-			if err != nil {
-				t.Fatalf("marshal request: %v", err)
+			reqBytes := []byte(tt.rawBody)
+			if tt.rawBody == "" {
+				var err error
+				reqBytes, err = json.Marshal(tt.createRequestObj)
+				if err != nil {
+					t.Fatalf("marshal request: %v", err)
+				}
 			}
 			req, err := http.NewRequest(http.MethodPost, "/apps/testApp/users/testUser/sessions/testSession", bytes.NewBuffer(reqBytes))
 			if err != nil {
@@ -261,6 +447,11 @@ func TestCreateSession(t *testing.T) {
 				respErr := strings.Trim(rr.Body.String(), "\n")
 				if tt.wantErr.Error() != respErr {
 					t.Errorf("CreateSession() mismatch (-want +got):\n%v, %v", tt.wantErr.Error(), respErr)
+				}
+				// A handler that created the session and only then wrote the
+				// error would otherwise pass.
+				if got := len(sessionService.Sessions); got != storedBefore {
+					t.Errorf("CreateSession() failed but the service holds %d sessions, want %d", got, storedBefore)
 				}
 				return
 			}

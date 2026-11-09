@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -195,6 +196,195 @@ func newChunkedSessionServer(t *testing.T, authenticatedUserID string) *httptest
 	}))
 	t.Cleanup(testServer.Close)
 	return testServer
+}
+
+// TestCreateSessionBodyIDRoundTrip pins that every session ID the create
+// endpoint accepts in its request body can afterwards be read, updated and
+// deleted through /sessions/{session_id} with the ID percent-encoded, by a
+// server with net/http's default header limit. An ID the session routes cannot
+// address must be refused with a 400 and not stored, because a session created
+// under it could only ever be listed. An ID they can address must be accepted,
+// so a check stricter than needed fails too.
+func TestCreateSessionBodyIDRoundTrip(t *testing.T) {
+	// The longest percent-encoded body sessionId the server accepts, which
+	// controllers.validateBodySessionID sets to half of net/http's default.
+	const maxPathBytes = http.DefaultMaxHeaderBytes / 2
+	tests := []struct {
+		name   string
+		id     string
+		wantOK bool
+	}{
+		{name: "plain", id: "plain", wantOK: true},
+		{name: "dash underscore dot", id: "with-dash_and.dot", wantOK: true},
+		{name: "three dots", id: "...", wantOK: true},
+		{name: "leading dot", id: ".hidden", wantOK: true},
+		{name: "trailing dot", id: "trailing.", wantOK: true},
+		{name: "space", id: "a b", wantOK: true},
+		{name: "plus", id: "a+b", wantOK: true},
+		{name: "percent", id: "a%b", wantOK: true},
+		{name: "literal %2F", id: "%2F", wantOK: true},
+		{name: "question mark", id: "a?b", wantOK: true},
+		{name: "hash", id: "a#b", wantOK: true},
+		{name: "semicolon", id: "a;b", wantOK: true},
+		{name: "backslash", id: "a\\b", wantOK: true},
+		{name: "non-ASCII", id: "ünïcødé", wantOK: true},
+		{name: "tab", id: "a\tb", wantOK: true},
+		{name: "newline", id: "a\nb", wantOK: true},
+		{name: "NUL", id: "a\x00b", wantOK: true},
+		// The router cannot match these: "/" spans segments, and "." and
+		// ".." are redirected away.
+		{name: "slash", id: "/", wantOK: false},
+		{name: "inner slash", id: "x/y", wantOK: false},
+		{name: "trailing slash", id: "a/", wantOK: false},
+		{name: "leading slash", id: "/a", wantOK: false},
+		{name: "dot", id: ".", wantOK: false},
+		{name: "dot dot", id: "..", wantOK: false},
+		// Long IDs: GET, PATCH and DELETE carry the ID in the request line,
+		// which net/http answers with 431 past its header limit. "ü" and "%"
+		// take three times their body bytes once percent-encoded.
+		{name: "ASCII at the length limit", id: strings.Repeat("a", maxPathBytes), wantOK: true},
+		{name: "ASCII one byte over the length limit", id: strings.Repeat("a", maxPathBytes+1), wantOK: false},
+		{name: "non-ASCII at the length limit", id: strings.Repeat("ü", maxPathBytes/6), wantOK: true},
+		{name: "non-ASCII over the length limit", id: strings.Repeat("ü", maxPathBytes/6+1), wantOK: false},
+		{name: "ASCII past the header limit", id: strings.Repeat("a", 1_100_000), wantOK: false},
+		{name: "non-ASCII past the header limit", id: strings.Repeat("ü", 180_000), wantOK: false},
+		{name: "percent signs past the header limit", id: strings.Repeat("%", 360_000), wantOK: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id := tt.id
+			base := newSessionIDServer(t) + "/apps/app/users/u/sessions"
+			body, err := json.Marshal(map[string]string{"sessionId": id})
+			if err != nil {
+				t.Fatalf("json.Marshal() failed: %v", err)
+			}
+			status, respBody := doSessionRequest(t, http.MethodPost, base, string(body))
+			if !tt.wantOK {
+				if status != http.StatusBadRequest {
+					t.Fatalf("POST %s with sessionId %s = %d, want 400; body: %.200s", base, shortID(id), status, respBody)
+				}
+				if listed := listSessionIDs(t, base); len(listed) != 0 {
+					t.Errorf("sessionId %s was refused with 400 but the list holds %d sessions", shortID(id), len(listed))
+				}
+				return
+			}
+			if status != http.StatusOK {
+				t.Fatalf("POST %s with sessionId %s = %d, want 200; body: %.200s", base, shortID(id), status, respBody)
+			}
+			if got := decodeSessionID(t, respBody); got != id {
+				t.Fatalf("POST returned session ID %s, want %s", shortID(got), shortID(id))
+			}
+
+			sessionURL := base + "/" + url.PathEscape(id)
+			for _, step := range []struct {
+				method string
+				body   string
+			}{
+				{http.MethodGet, ""},
+				{http.MethodPatch, `{"stateDelta":{"k":"v"}}`},
+				{http.MethodGet, ""},
+			} {
+				status, respBody := doSessionRequest(t, step.method, sessionURL, step.body)
+				if status != http.StatusOK {
+					t.Fatalf("%s /sessions/{id} after creating sessionId %s = %d, want 200; body: %.200s", step.method, shortID(id), status, respBody)
+				}
+				if got := decodeSessionID(t, respBody); got != id {
+					t.Fatalf("%s /sessions/{id} returned session ID %s, want %s", step.method, shortID(got), shortID(id))
+				}
+			}
+			if status, respBody := doSessionRequest(t, http.MethodDelete, sessionURL, ""); status != http.StatusOK {
+				t.Fatalf("DELETE /sessions/{id} after creating sessionId %s = %d, want 200; body: %.200s", shortID(id), status, respBody)
+			}
+			if listed := listSessionIDs(t, base); len(listed) != 0 {
+				t.Errorf("DELETE /sessions/{id} for sessionId %s left %d sessions, want none", shortID(id), len(listed))
+			}
+		})
+	}
+}
+
+// shortID quotes a session ID for a failure message, cut short so that a
+// test ID of half a megabyte does not flood the log.
+func shortID(id string) string {
+	if len(id) <= 40 {
+		return fmt.Sprintf("%q", id)
+	}
+	return fmt.Sprintf("%q... (%d bytes)", id[:40], len(id))
+}
+
+func newSessionIDServer(t *testing.T) string {
+	t.Helper()
+	server, err := adkrest.NewServer(adkrest.ServerConfig{
+		SessionService: session.InMemoryService(),
+		Authenticator: authn.NewCustom(func(r *http.Request) (*authn.Caller, error) {
+			return &authn.Caller{UserID: "u"}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatalf("adkrest.NewServer() failed: %v", err)
+	}
+	testServer := httptest.NewServer(server)
+	t.Cleanup(testServer.Close)
+	return testServer.URL
+}
+
+// doSessionRequest sends one request without following redirects, so a path
+// the router rewrites shows up as the redirect it is rather than as whatever
+// the rewritten path happens to serve.
+func doSessionRequest(t *testing.T, method, target, body string) (int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("http.NewRequestWithContext(%s, %s) failed: %v", method, target, err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, target, err)
+	}
+	respBody, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("io.ReadAll(response body) failed: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("response body Close() failed: %v", closeErr)
+	}
+	return resp.StatusCode, respBody
+}
+
+func decodeSessionID(t *testing.T, body []byte) string {
+	t.Helper()
+	var got struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+	}
+	return got.ID
+}
+
+func listSessionIDs(t *testing.T, listURL string) []string {
+	t.Helper()
+	status, body := doSessionRequest(t, http.MethodGet, listURL, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET %s = %d, want 200; body: %s", listURL, status, body)
+	}
+	var sessions []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &sessions); err != nil {
+		t.Fatalf("json.Unmarshal(%s) failed: %v", body, err)
+	}
+	ids := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		ids = append(ids, s.ID)
+	}
+	return ids
 }
 
 // TestCreateSessionEventTimestamps pins that whatever number a client sends as

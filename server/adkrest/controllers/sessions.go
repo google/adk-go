@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -75,6 +76,16 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 			return
 		}
 	}
+	if sessionID.ID == "" {
+		if err := validateBodySessionID(createSessionRequest.SessionID); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sessionID.ID = createSessionRequest.SessionID
+	} else if createSessionRequest.SessionID != "" && createSessionRequest.SessionID != sessionID.ID {
+		http.Error(rw, "sessionId in request body does not match session_id in URL path", http.StatusBadRequest)
+		return
+	}
 	// Convert every event before creating anything, so an event the request
 	// cannot carry is a 400 with no session left behind, rather than a 500
 	// after the session is already stored.
@@ -94,6 +105,43 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 	}
 	EncodeJSONResponse(respSession, http.StatusOK, rw)
 }
+
+// validateBodySessionID refuses a sessionId from the create request body that
+// the /sessions/{session_id} routes could not address afterwards.
+//
+// Those routes match {session_id} as one segment of the decoded, cleaned path.
+// An ID containing "/" spans several segments however it is encoded, and the
+// router redirects a "." or ".." segment to the path with it resolved away, so
+// a session created under any of them could be listed but never read, updated
+// or deleted; an ID ending in "/" even made DELETE remove the session without
+// the slash. A {session_id} taken from the URL cannot take these values, so only
+// the body needs the check. An empty ID is allowed and means "generate one".
+//
+// The routes also carry the ID in the request line, which net/http refuses with
+// 431 Request Header Fields Too Large once the request line and headers exceed
+// the server's MaxHeaderBytes. The ID's percent-encoded form is therefore capped
+// at maxBodySessionIDPathBytes. The body itself may be far larger, and one byte
+// of the ID can take three in the URL.
+//
+// Neither error echoes the ID back: it is client data, and the body limit lets
+// it run to megabytes.
+func validateBodySessionID(id string) error {
+	if strings.Contains(id, "/") || id == "." || id == ".." {
+		return errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
+	}
+	if n := len(url.PathEscape(id)); n > maxBodySessionIDPathBytes {
+		return fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", n, maxBodySessionIDPathBytes)
+	}
+	return nil
+}
+
+// maxBodySessionIDPathBytes is the longest percent-encoded sessionId the create
+// session endpoint accepts in its request body.
+//
+// It is half of http.DefaultMaxHeaderBytes, the limit the web launcher's server
+// runs with. That leaves the other half for the method, the app name, the user
+// ID and the request headers of a later GET, PATCH or DELETE on the session.
+const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
 
 func (c *SessionsAPIController) createSession(ctx context.Context, sessionID models.SessionID, state map[string]any, events []*session.Event) (models.Session, error) {
 	session, err := c.service.Create(ctx, &session.CreateRequest{

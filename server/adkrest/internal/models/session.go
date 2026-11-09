@@ -34,8 +34,9 @@ type Session struct {
 }
 
 type CreateSessionRequest struct {
-	State  map[string]any `json:"state"`
-	Events []Event        `json:"events"`
+	SessionID string         `json:"sessionId,omitempty"`
+	State     map[string]any `json:"state"`
+	Events    []Event        `json:"events"`
 }
 
 // UpdateSessionRequest is the body of a PATCH session request.
