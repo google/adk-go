@@ -17,8 +17,10 @@ package vertexai
 import (
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/session"
 )
@@ -84,5 +86,30 @@ func TestLocalSessionEventsConcurrentAppend(t *testing.T) {
 	wg.Wait()
 	if got := s.Events().Len(); got != count {
 		t.Errorf("final event count = %d, want %d", got, count)
+	}
+}
+
+func TestSortSessionsByLastUpdate(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(user, id string, d time.Duration) session.Session {
+		return &localSession{userID: user, sessionID: id, updatedAt: base.Add(d)}
+	}
+	// At time 0, u2/a ties with u1/a and u1/b. Its session ID sorts before
+	// u1/b's but its user ID after, so only user ID then session ID gives the
+	// want.
+	sessions := []session.Session{
+		mk("u2", "x", time.Minute),
+		mk("u2", "a", 0),
+		mk("u1", "b", 0),
+		mk("u1", "c", time.Hour),
+		mk("u1", "a", 0),
+	}
+	sortSessionsByLastUpdate(sessions)
+	var got []string
+	for _, s := range sessions {
+		got = append(got, s.UserID()+"/"+s.ID())
+	}
+	if want := []string{"u1/a", "u1/b", "u2/a", "u2/x", "u1/c"}; !slices.Equal(got, want) {
+		t.Errorf("sortSessionsByLastUpdate() = %v, want %v", got, want)
 	}
 }
