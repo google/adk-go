@@ -604,7 +604,7 @@ func TestUpdateSession(t *testing.T) {
 			if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantState, got.State); diff != "" {
+			if diff := cmp.Diff(tt.wantState, map[string]any(got.State)); diff != "" {
 				t.Errorf("UpdateSession() response state mismatch (-want +got):\n%s", diff)
 			}
 
@@ -619,7 +619,7 @@ func TestUpdateSession(t *testing.T) {
 			if err := json.NewDecoder(getRR.Body).Decode(&reread); err != nil {
 				t.Fatalf("decode get response: %v", err)
 			}
-			if diff := cmp.Diff(tt.wantState, reread.State); diff != "" {
+			if diff := cmp.Diff(tt.wantState, map[string]any(reread.State)); diff != "" {
 				t.Errorf("state after re-read mismatch (-want +got):\n%s", diff)
 			}
 		})

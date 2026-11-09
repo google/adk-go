@@ -15,12 +15,16 @@
 package llminternal
 
 import (
+	"fmt"
+
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/converters"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -92,4 +96,53 @@ func generateRequestConfirmationEvent(
 	}
 	ev.LongRunningToolIDs = longRunningToolIDs
 	return ev
+}
+
+// generateAuthEvent returns the event that asks the client for the credentials
+// the tools in functionResponseEvent requested, or nil if they requested none.
+// It makes one adk_request_credential call per credential key, for the first
+// tool in the model's call order that asked for it.
+func generateAuthEvent(
+	ctx agent.InvocationContext,
+	functionCallEvent *session.Event,
+	functionResponseEvent *session.Event,
+) (*session.Event, error) {
+	requests := functionResponseEvent.Actions.RequestedAuthConfigs
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	var parts []*genai.Part
+	var longRunningToolIDs []string
+	seenKeys := map[string]bool{}
+	for _, fc := range utils.FunctionCalls(functionCallEvent.Content) {
+		cfg, ok := requests[fc.ID]
+		if !ok || seenKeys[cfg.CredentialKey] {
+			continue
+		}
+		// A request with no key is never merged with another, as in adk-python.
+		if cfg.CredentialKey != "" {
+			seenKeys[cfg.CredentialKey] = true
+		}
+		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: fc.ID, AuthConfig: cfg})
+		if err != nil {
+			return nil, fmt.Errorf("encode %s args: %w", toolauth.RequestCredentialFunctionCallName, err)
+		}
+		call := &genai.FunctionCall{
+			ID:   utils.GenerateFunctionCallID(ctx),
+			Name: toolauth.RequestCredentialFunctionCallName,
+			Args: args,
+		}
+		parts = append(parts, &genai.Part{FunctionCall: call})
+		longRunningToolIDs = append(longRunningToolIDs, call.ID)
+	}
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	ev := session.NewEvent(ctx, ctx.InvocationID())
+	ev.Author = ctx.Agent().Name()
+	ev.Branch = ctx.Branch()
+	// adk-python gives the request the role of the tool responses, which is user.
+	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Parts: parts, Role: genai.RoleUser}}
+	ev.LongRunningToolIDs = longRunningToolIDs
+	return ev, nil
 }

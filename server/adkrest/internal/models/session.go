@@ -25,12 +25,12 @@ import (
 
 // Session represents an agent's session.
 type Session struct {
-	ID        string         `json:"id"`
-	AppName   string         `json:"appName"`
-	UserID    string         `json:"userId"`
-	UpdatedAt int64          `json:"lastUpdateTime"`
-	Events    []Event        `json:"events"`
-	State     map[string]any `json:"state"`
+	ID        string      `json:"id"`
+	AppName   string      `json:"appName"`
+	UserID    string      `json:"userId"`
+	UpdatedAt int64       `json:"lastUpdateTime"`
+	Events    []Event     `json:"events"`
+	State     stateValues `json:"state"`
 }
 
 type CreateSessionRequest struct {
@@ -75,7 +75,7 @@ func SessionIDFromHTTPParameters(vars map[string]string) (SessionID, error) {
 }
 
 func FromSession(session session.Session) (Session, error) {
-	state := map[string]any{}
+	state := stateValues{}
 	maps.Insert(state, session.State().All())
 	events := []Event{}
 	for event := range session.Events().All() {

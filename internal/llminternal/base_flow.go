@@ -874,7 +874,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			// TODO: generate and yield an auth event if needed.
 
 			if resp.Partial {
 				continue
@@ -892,11 +891,26 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
+			authEvent, err := generateAuthEvent(ctx, modelResponseEvent, ev)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 
-			// Yield function responses before confirmation requests so consumers that
-			// pause for user approval still persist completed tool results.
+			// Yield function responses before confirmation and credential requests
+			// so consumers that pause for the user still persist completed tool
+			// results.
 			if !yield(ev, nil) {
 				return
+			}
+
+			if authEvent != nil {
+				// As in adk-python, nothing else runs in this invocation once the
+				// user is asked to sign in.
+				ctx.EndInvocation()
+				if !yield(authEvent, nil) {
+					return
+				}
 			}
 
 			if toolConfirmationEvent != nil {

@@ -15,6 +15,7 @@
 package llminternal
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -23,8 +24,10 @@ import (
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool/toolauth"
 	"google.golang.org/adk/v2/tool/toolconfirmation"
 )
 
@@ -430,5 +433,135 @@ func TestGenerateRequestConfirmationEventNoThoughtSignature(t *testing.T) {
 	}
 	if len(got.Content.Parts[0].ThoughtSignature) != 0 {
 		t.Errorf("ThoughtSignature = %q, want empty", got.Content.Parts[0].ThoughtSignature)
+	}
+}
+
+// modelCalls returns a model response event that calls a tool once per ID.
+func modelCalls(ids ...string) *session.Event {
+	parts := make([]*genai.Part, len(ids))
+	for i, id := range ids {
+		parts[i] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: id, Name: "calendar"}}
+	}
+	return &session.Event{LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: parts}}}
+}
+
+// apiKeyRequest returns a credential request for an API key stored under key.
+func apiKeyRequest(key string) toolauth.Config {
+	return toolauth.Config{
+		AuthScheme:    toolauth.Scheme{Type: toolauth.SchemeTypeAPIKey, In: "header", Name: "X-Key"},
+		CredentialKey: key,
+	}
+}
+
+func TestGenerateAuthEvent(t *testing.T) {
+	ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1", branch: "main"}
+	responses := &session.Event{Actions: session.EventActions{RequestedAuthConfigs: map[string]toolauth.Config{
+		"fc-3": apiKeyRequest("key-3"),
+		"fc-1": apiKeyRequest("key-1"),
+	}}}
+
+	got, err := generateAuthEvent(ctx, modelCalls("fc-1", "fc-2", "fc-3"), responses)
+	if err != nil {
+		t.Fatalf("generateAuthEvent() failed: %v", err)
+	}
+
+	scheme := map[string]any{"type": "apiKey", "in": "header", "name": "X-Key"}
+	want := &session.Event{
+		InvocationID: "inv_1",
+		Author:       "agent_1",
+		Branch:       "main",
+		Actions:      session.EventActions{StateDelta: map[string]any{}, ArtifactDelta: map[string]int64{}},
+		LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "adk_request_credential", Args: map[string]any{
+				"functionCallId": "fc-1",
+				"authConfig":     map[string]any{"authScheme": scheme, "credentialKey": "key-1"},
+			}}},
+			{FunctionCall: &genai.FunctionCall{Name: "adk_request_credential", Args: map[string]any{
+				"functionCallId": "fc-3",
+				"authConfig":     map[string]any{"authScheme": scheme, "credentialKey": "key-3"},
+			}}},
+		}}},
+	}
+	if diff := cmp.Diff(want, got,
+		cmpopts.IgnoreFields(session.Event{}, "ID", "Timestamp", "LongRunningToolIDs"),
+		cmpopts.IgnoreFields(genai.FunctionCall{}, "ID"),
+	); diff != "" {
+		t.Errorf("generateAuthEvent() mismatch (-want +got):\n%s", diff)
+	}
+	if got.ID == "" {
+		t.Error("event ID is empty, want one from session.NewEvent")
+	}
+	callIDs := []string{got.Content.Parts[0].FunctionCall.ID, got.Content.Parts[1].FunctionCall.ID}
+	if callIDs[0] == "" || callIDs[0] == callIDs[1] {
+		t.Errorf("request call IDs = %q, want two distinct non-empty IDs", callIDs)
+	}
+	if diff := cmp.Diff(callIDs, got.LongRunningToolIDs); diff != "" {
+		t.Errorf("LongRunningToolIDs mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestGenerateAuthEventOneCallPerCredentialKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		requests map[string]toolauth.Config
+		want     []any // functionCallId of each request, in order
+	}{
+		{
+			name:     "same key",
+			requests: map[string]toolauth.Config{"fc-1": apiKeyRequest("k"), "fc-2": apiKeyRequest("k")},
+			want:     []any{"fc-1"},
+		},
+		{
+			name:     "different keys",
+			requests: map[string]toolauth.Config{"fc-1": apiKeyRequest("a"), "fc-2": apiKeyRequest("b")},
+			want:     []any{"fc-1", "fc-2"},
+		},
+		{
+			name:     "no keys",
+			requests: map[string]toolauth.Config{"fc-1": apiKeyRequest(""), "fc-2": apiKeyRequest("")},
+			want:     []any{"fc-1", "fc-2"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
+			responses := &session.Event{Actions: session.EventActions{RequestedAuthConfigs: tc.requests}}
+
+			got, err := generateAuthEvent(ctx, modelCalls("fc-1", "fc-2"), responses)
+			if err != nil {
+				t.Fatalf("generateAuthEvent() failed: %v", err)
+			}
+
+			var gotIDs []any
+			for _, call := range utils.FunctionCalls(got.Content) {
+				gotIDs = append(gotIDs, call.Args["functionCallId"])
+			}
+			if diff := cmp.Diff(tc.want, gotIDs); diff != "" {
+				t.Errorf("requested function call IDs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestGenerateAuthEventWithoutRequests(t *testing.T) {
+	ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
+
+	got, err := generateAuthEvent(ctx, modelCalls("fc-1"), &session.Event{})
+
+	if got != nil || err != nil {
+		t.Errorf("generateAuthEvent() = %v, %v, want nil, nil", got, err)
+	}
+}
+
+func TestGenerateAuthEventRequestThatDoesNotEncode(t *testing.T) {
+	ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
+	req := apiKeyRequest("k")
+	req.Extra = map[string]any{"ratio": math.NaN()}
+	responses := &session.Event{Actions: session.EventActions{RequestedAuthConfigs: map[string]toolauth.Config{"fc-1": req}}}
+
+	got, err := generateAuthEvent(ctx, modelCalls("fc-1"), responses)
+
+	if err == nil {
+		t.Errorf("generateAuthEvent() = %v, nil, want an error for a request that cannot be encoded", got)
 	}
 }
