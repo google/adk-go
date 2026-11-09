@@ -28,10 +28,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -1456,29 +1459,77 @@ func TestScheduler_Finalize_SingleTerminalOutput(t *testing.T) {
 }
 
 // A node's own panic must not put the panic value into the completion error
-// the run reports; the value and the stack belong on the span only (#2153).
-func TestRunNodePanicValueStaysOutOfCompletionError(t *testing.T) {
-	node := NewFunctionNode("boom", func(agent.Context, map[string]any) (map[string]any, error) {
-		panic("secret-user-data-123")
-	}, defaultNodeConfig)
+// the run reports; the value and the stack belong on a span (#2153) — the
+// node's invoke_node span for a plain node, or the enclosing span for a
+// node that emits its own span, whose invoke_node stand-in is a no-op that
+// would discard the record. Both halves are pinned against an exported
+// span, so deleting the recordPanic call fails this test.
+func TestScheduler_RunNodePanicDetailOnSpanOnly(t *testing.T) {
+	tests := []struct {
+		name   string
+		config NodeConfig
+	}{
+		{"plain node records on its invoke_node span", defaultNodeConfig},
+		{"EmitsOwnSpan node records on the enclosing span", NodeConfig{EmitsOwnSpan: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spanExp := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+			telemetry.OverrideTracerForTesting(t, tp)
 
-	out := make(chan queueItem, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	runNode(out, &wg, "boom", node, agent.NewContext(newMockCtx(t)), map[string]any{})
-	wg.Wait()
+			node := NewFunctionNode("boom", func(agent.Context, map[string]any) (map[string]any, error) {
+				panic("secret-user-data-123")
+			}, tc.config)
 
-	completion, ok := (<-out).(completionItem)
-	if !ok {
-		t.Fatal("expected a completionItem")
-	}
-	if completion.err == nil {
-		t.Fatal("expected the panicking node to fail its completion")
-	}
-	if strings.Contains(completion.err.Error(), "secret-user-data-123") {
-		t.Errorf("completion error carries the panic value: %.200q", completion.err.Error())
-	}
-	if want := `node "boom" panicked`; completion.err.Error() != want {
-		t.Errorf("completion error = %q, want %q", completion.err.Error(), want)
+			// runNode runs under the workflow agent's span in production;
+			// recreate that enclosing span so the EmitsOwnSpan fallback has
+			// a real span to land on.
+			ctx := agent.NewContext(newMockCtx(t))
+			spanCtx, enclosing := tp.Tracer("test").Start(ctx, "invoke_workflow")
+			ctx = ctx.WithAgentContext(spanCtx)
+
+			out := make(chan queueItem, 1)
+			var wg sync.WaitGroup
+			wg.Add(1)
+			runNode(out, &wg, "boom", node, ctx, map[string]any{})
+			wg.Wait()
+			enclosing.End()
+
+			completion, ok := (<-out).(completionItem)
+			if !ok {
+				t.Fatal("expected a completionItem")
+			}
+			if completion.err == nil {
+				t.Fatal("expected the panicking node to fail its completion")
+			}
+			if strings.Contains(completion.err.Error(), "secret-user-data-123") {
+				t.Errorf("completion error carries the panic value: %.200q", completion.err.Error())
+			}
+			if want := `node "boom" panicked`; completion.err.Error() != want {
+				t.Errorf("completion error = %q, want %q", completion.err.Error(), want)
+			}
+
+			valueOnSpan, stackOnSpan := false, false
+			for _, s := range spanExp.GetSpans() {
+				if strings.Contains(s.Status.Description, "secret-user-data-123") {
+					valueOnSpan = true
+				}
+				for _, ev := range s.Events {
+					for _, at := range ev.Attributes {
+						v := at.Value.Emit()
+						if strings.Contains(v, "secret-user-data-123") {
+							valueOnSpan = true
+						}
+						if strings.Contains(v, "goroutine") {
+							stackOnSpan = true
+						}
+					}
+				}
+			}
+			if !valueOnSpan || !stackOnSpan {
+				t.Errorf("panic value on an exported span = %v, stack = %v; both must be recorded", valueOnSpan, stackOnSpan)
+			}
+		})
 	}
 }

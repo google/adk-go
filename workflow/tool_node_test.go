@@ -24,9 +24,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/jsonschema-go/jsonschema"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/internal/telemetry"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -494,35 +498,104 @@ func TestToolNode_DropsToolSuppliedCompaction(t *testing.T) {
 	}
 }
 
+// wrappedPanicTool returns a *toolinternal.PanicError buried under two
+// fmt.Errorf %w layers, the shape an error has after passing through tool
+// middleware: only errors.As can still see it, a direct type assertion
+// cannot.
+type wrappedPanicTool struct{}
+
+func (wrappedPanicTool) Name() string        { return "wrapped_panic" }
+func (wrappedPanicTool) Description() string { return "returns a deeply wrapped PanicError" }
+func (wrappedPanicTool) IsLongRunning() bool { return false }
+func (wrappedPanicTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	panicErr := toolinternal.NewPanicError("wrapped_panic", "secret-user-data-123", []byte("goroutine 7 [running]:\nexample.com/pkg.fn()"))
+	return nil, fmt.Errorf("middleware: %w", fmt.Errorf("inner: %w", panicErr))
+}
+
 // A recovered tool panic must not reach the run error: the panic text carries
 // the panic value and the goroutine stack, and a workflow run error travels to
-// REST clients and models (#2153).
+// REST clients and models (#2153). The detail must instead land on the active
+// span, which this test pins against an exported span — deleting the
+// RecordError call in runTool fails it.
 func TestToolNode_PanicTextStaysOutOfRunError(t *testing.T) {
-	pt, err := functiontool.New(functiontool.Config{Name: "lookup_order"}, func(agent.Context, struct{}) (struct{}, error) {
+	directPanicTool, err := functiontool.New(functiontool.Config{Name: "lookup_order"}, func(agent.Context, struct{}) (struct{}, error) {
 		panic("secret-user-data-123")
 	})
 	if err != nil {
 		t.Fatalf("functiontool.New: %v", err)
 	}
-	node, err := NewToolNode(pt, defaultNodeConfig)
-	if err != nil {
-		t.Fatalf("NewToolNode: %v", err)
+
+	tests := []struct {
+		name    string
+		tool    tool.Tool
+		wantErr string
+	}{
+		{
+			"functiontool returns the PanicError unwrapped",
+			directPanicTool,
+			`tool "lookup_order" execution failed with an internal error`,
+		},
+		{
+			"PanicError wrapped by middleware is still caught via errors.As",
+			wrappedPanicTool{},
+			`tool "wrapped_panic" execution failed with an internal error`,
+		},
 	}
-	var gotErr error
-	for _, err := range node.Run(agent.NewContext(newMockCtx(t)), map[string]any{}) {
-		if err != nil {
-			gotErr = err
-		}
-	}
-	if gotErr == nil {
-		t.Fatal("expected the panicking tool to fail the run")
-	}
-	for _, leak := range []string{"secret-user-data-123", "goroutine"} {
-		if strings.Contains(gotErr.Error(), leak) {
-			t.Errorf("run error carries %q: %.200q", leak, gotErr.Error())
-		}
-	}
-	if want := `tool "lookup_order" execution failed with an internal error`; gotErr.Error() != want {
-		t.Errorf("run error = %q, want %q", gotErr.Error(), want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spanExp := tracetest.NewInMemoryExporter()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spanExp))
+			telemetry.OverrideTracerForTesting(t, tp)
+
+			node, err := NewToolNode(tc.tool, defaultNodeConfig)
+			if err != nil {
+				t.Fatalf("NewToolNode: %v", err)
+			}
+
+			// In production the node runs under an invoke_node span;
+			// recreate one so the detail recorded on the active span is
+			// exported where an operator can read it.
+			ctx := agent.NewContext(newMockCtx(t))
+			spanCtx, active := tp.Tracer("test").Start(ctx, "invoke_node")
+			ctx = ctx.WithAgentContext(spanCtx)
+
+			var gotErr error
+			for _, err := range node.Run(ctx, map[string]any{}) {
+				if err != nil {
+					gotErr = err
+				}
+			}
+			active.End()
+
+			if gotErr == nil {
+				t.Fatal("expected the panicking tool to fail the run")
+			}
+			for _, leak := range []string{"secret-user-data-123", "goroutine"} {
+				if strings.Contains(gotErr.Error(), leak) {
+					t.Errorf("run error carries %q: %.200q", leak, gotErr.Error())
+				}
+			}
+			if gotErr.Error() != tc.wantErr {
+				t.Errorf("run error = %q, want %q", gotErr.Error(), tc.wantErr)
+			}
+
+			valueOnSpan, stackOnSpan := false, false
+			for _, s := range spanExp.GetSpans() {
+				for _, ev := range s.Events {
+					for _, at := range ev.Attributes {
+						v := at.Value.Emit()
+						if strings.Contains(v, "secret-user-data-123") {
+							valueOnSpan = true
+						}
+						if strings.Contains(v, "goroutine") {
+							stackOnSpan = true
+						}
+					}
+				}
+			}
+			if !valueOnSpan || !stackOnSpan {
+				t.Errorf("panic value on an exported span = %v, stack = %v; both must be recorded", valueOnSpan, stackOnSpan)
+			}
+		})
 	}
 }

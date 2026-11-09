@@ -455,8 +455,9 @@ func runNode(
 		if r := recover(); r != nil {
 			// The panic value can carry anything the node held, and the run
 			// error can reach REST clients and models: keep the value and the
-			// stack on the span, send a generic error out.
-			span.recordError(fmt.Errorf("node %q panicked: %v\nstack: %s", name, r, debug.Stack()), nil)
+			// stack on a span (the node's own, or the enclosing one when the
+			// node's span is a no-op), send a generic error out.
+			span.recordPanic(fmt.Errorf("node %q panicked: %v\nstack: %s", name, r, debug.Stack()))
 			completion.err = fmt.Errorf("node %q panicked", name)
 			completion.inventory = failureInventory{}
 			out <- completion
