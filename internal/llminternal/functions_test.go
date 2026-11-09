@@ -464,7 +464,7 @@ func TestGenerateAuthEvent(t *testing.T) {
 		"fc-1": apiKeyRequest("key-1"),
 	}, "fc-1", "fc-2", "fc-3")
 
-	got, err := generateAuthEvent(ctx, responses)
+	got, err := generateAuthEvent(ctx, nil, responses)
 	if err != nil {
 		t.Fatalf("generateAuthEvent() failed: %v", err)
 	}
@@ -523,13 +523,13 @@ func TestGenerateAuthEventOneCallPerCredentialKey(t *testing.T) {
 		{
 			name:     "no keys",
 			requests: map[string]toolauth.Config{"fc-1": apiKeyRequest(""), "fc-2": apiKeyRequest("")},
-			want:     []any{"fc-1", "fc-2"},
+			want:     []any{"fc-1"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
-			got, err := generateAuthEvent(ctx, toolResponses(tc.requests, "fc-1", "fc-2"))
+			got, err := generateAuthEvent(ctx, nil, toolResponses(tc.requests, "fc-1", "fc-2"))
 			if err != nil {
 				t.Fatalf("generateAuthEvent() failed: %v", err)
 			}
@@ -548,7 +548,7 @@ func TestGenerateAuthEventOneCallPerCredentialKey(t *testing.T) {
 func TestGenerateAuthEventWithoutRequests(t *testing.T) {
 	ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
 
-	got, err := generateAuthEvent(ctx, toolResponses(nil, "fc-1"))
+	got, err := generateAuthEvent(ctx, nil, toolResponses(nil, "fc-1"))
 
 	if got != nil || err != nil {
 		t.Errorf("generateAuthEvent() = %v, %v, want nil, nil", got, err)
@@ -559,7 +559,7 @@ func TestGenerateAuthEventRequestThatDoesNotEncode(t *testing.T) {
 	ctx := &mockInvocationContext{invocationID: "inv_1", agentName: "agent_1"}
 	req := apiKeyRequest("k")
 	req.Extra = map[string]any{"ratio": math.NaN()}
-	got, err := generateAuthEvent(ctx, toolResponses(map[string]toolauth.Config{"fc-1": req}, "fc-1"))
+	got, err := generateAuthEvent(ctx, nil, toolResponses(map[string]toolauth.Config{"fc-1": req}, "fc-1"))
 
 	if err == nil {
 		t.Errorf("generateAuthEvent() = %v, nil, want an error for a request that cannot be encoded", got)
