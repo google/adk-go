@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"google.golang.org/genai"
@@ -30,7 +31,11 @@ import (
 )
 
 type artifactAggregation struct {
-	parts      []*genai.Part
+	parts []*genai.Part
+	// text holds the accumulated text of textPart, the part streamed chunks
+	// are being appended to, so appending does not recopy it on every chunk.
+	text       strings.Builder
+	textPart   *genai.Part
 	citations  *genai.CitationMetadata
 	grounding  *genai.GroundingMetadata
 	customMeta map[string]any
@@ -135,7 +140,13 @@ func (p *a2aAgentRunProcessor) updateAggregation(aid a2a.ArtifactID, agg *artifa
 					lastPart := agg.parts[len(agg.parts)-1]
 					// check if last part is a text block of the same 'Thought' type
 					if lastPart.Text != "" && lastPart.Thought == part.Thought {
-						lastPart.Text += part.Text
+						if agg.textPart != lastPart {
+							agg.text.Reset()
+							agg.text.WriteString(lastPart.Text)
+							agg.textPart = lastPart
+						}
+						agg.text.WriteString(part.Text)
+						lastPart.Text = agg.text.String()
 						continue
 					}
 				}
@@ -186,16 +197,12 @@ func (p *a2aAgentRunProcessor) buildNonPartialAggregation(ctx agent.InvocationCo
 // convertToSessionEvent converts A2A client SendStreamingMessage result to a session event. Returns nil if nothing should be emitted.
 func (p *a2aAgentRunProcessor) convertToSessionEvent(ctx agent.InvocationContext, a2aEvent a2a.Event, err error) (*session.Event, error) {
 	if err != nil {
-		event := toErrorEvent(ctx, err)
-		p.updateCustomMetadata(event, nil)
-		return event, nil
+		return nil, err
 	}
 
 	event, err := adka2a.ToSessionEventWithParts(ctx, a2aEvent, p.partConverter)
 	if err != nil {
-		event := toErrorEvent(ctx, fmt.Errorf("failed to convert a2aEvent: %w", err))
-		p.updateCustomMetadata(event, nil)
-		return event, nil
+		return nil, fmt.Errorf("failed to convert a2aEvent: %w", err)
 	}
 
 	if event != nil {

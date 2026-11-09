@@ -15,12 +15,12 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"iter"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -121,17 +121,24 @@ func (s *inMemoryService) Get(ctx context.Context, req *GetRequest) (*GetRespons
 		// create a new slice header pointing to the same array
 		filteredEvents = filteredEvents[start:]
 	}
-	// apply timestamp filter, assuming list is sorted
-	if !req.After.IsZero() && len(filteredEvents) > 0 {
-		firstIndexToKeep := sort.Search(len(filteredEvents), func(i int) bool {
-			// Find the first event that is not before the timestamp
-			return !filteredEvents[i].Timestamp.Before(req.After)
-		})
-		filteredEvents = filteredEvents[firstIndexToKeep:]
-	}
 
 	copiedSession.events = make([]*Event, 0, len(filteredEvents))
-	copiedSession.events = append(copiedSession.events, filteredEvents...)
+	for _, event := range filteredEvents {
+		// Test every event rather than searching for a cut point: events are
+		// kept in append order, which need not be timestamp order, so a
+		// binary search over it could keep events from before req.After and
+		// drop ones at or after it. With NumRecentEvents unset, this returns
+		// every event at or after req.After, as the database and Vertex AI
+		// backends do. With it set, the trim above runs first, in append
+		// order, as in adk-python, while those backends filter first and
+		// then take the newest N. adk-python's in-memory filter scans back
+		// from the newest event to the first one before After, so it also
+		// drops a qualifying event appended ahead of that one.
+		if !req.After.IsZero() && event.Timestamp.Before(req.After) {
+			continue
+		}
+		copiedSession.events = append(copiedSession.events, event)
+	}
 
 	return &GetResponse{
 		Session: copiedSession,
@@ -170,9 +177,20 @@ func (s *inMemoryService) List(ctx context.Context, req *ListRequest) (*ListResp
 		copiedSession.state = s.mergeStates(storedSession.state, appName, storedSession.UserID())
 		sessions = append(sessions, copiedSession)
 	}
+	slices.SortStableFunc(sessions, compareByLastUpdate)
 	return &ListResponse{
 		Sessions: sessions,
 	}, nil
+}
+
+// compareByLastUpdate orders sessions by last update time ascending, ties by
+// user ID then session ID, as [Service.List] documents.
+func compareByLastUpdate(a, b Session) int {
+	return cmp.Or(
+		a.LastUpdateTime().Compare(b.LastUpdateTime()),
+		strings.Compare(a.UserID(), b.UserID()),
+		strings.Compare(a.ID(), b.ID()),
+	)
 }
 
 func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error {
@@ -203,6 +221,11 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 	}
 	if event.Partial {
 		return nil
+	}
+	// A backend that persists events could not read this request back, so
+	// this one refuses it too.
+	if err := sessionutils.CheckRequestedAuthConfigs(event.Actions.RequestedAuthConfigs); err != nil {
+		return fmt.Errorf("cannot append event: %w", err)
 	}
 	// Give the event an identity if it arrived without one, the same way a
 	// missing session ID is filled in on Create. [NewEvent] assigns one, but an
@@ -244,8 +267,9 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 
 	// Only StateDelta comes from the trim above; every other field below is
 	// read off event. The canonical record is not a mirror of the one
-	// appendEvent stored locally — it clones Compaction, ArtifactDelta and
-	// RequestedToolConfirmations where the local record aliases them.
+	// appendEvent stored locally — it clones Compaction, ArtifactDelta,
+	// RequestedToolConfirmations and RequestedAuthConfigs where the local record
+	// aliases them.
 	eventCopy := &Event{
 		ID:             event.ID,
 		InvocationID:   event.InvocationID,
@@ -257,6 +281,7 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			StateDelta:                 trimmedDelta,
 			ArtifactDelta:              maps.Clone(event.Actions.ArtifactDelta),
 			RequestedToolConfirmations: maps.Clone(event.Actions.RequestedToolConfirmations),
+			RequestedAuthConfigs:       maps.Clone(event.Actions.RequestedAuthConfigs),
 			TransferToAgent:            event.Actions.TransferToAgent,
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,

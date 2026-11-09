@@ -15,25 +15,34 @@
 package functioncallmodifier_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/agent/llmagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/toolinternal"
+	"google.golang.org/adk/v2/internal/workflowinternal"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/plugin/functioncallmodifier"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolutils"
 )
 
 type SimpleArgs struct {
@@ -203,6 +212,19 @@ func TestAfterModelCallback(t *testing.T) {
 			shouldHaveRationaleState: true,
 		},
 		{
+			// A nil part in a model response (a degenerate provider chunk) is
+			// skipped, not dereferenced; the function call after it is still
+			// rewritten.
+			name:                     "nil part before the function call",
+			content:                  &genai.Content{Parts: []*genai.Part{nil, {FunctionCall: &genai.FunctionCall{ID: "fcId", Name: "test_agent", Args: map[string]any{"request": "do", "skill_id": "s1"}}}}},
+			originalDecls:            map[string]*genai.FunctionDeclaration{"test_agent": {Name: "test_agent"}},
+			wantArgs:                 map[string]any{"request": "do"},
+			wantSkillStateKey:        "fcId/skill_id",
+			wantSkillStateValue:      "s1",
+			shouldHaveSkillState:     true,
+			shouldHaveRationaleState: false,
+		},
+		{
 			name:                     "agent tool with only skill_id",
 			content:                  &genai.Content{Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "fcId", Name: "test_agent", Args: map[string]any{"request": "do", "skill_id": "s1"}}}}},
 			originalDecls:            map[string]*genai.FunctionDeclaration{"test_agent": {Name: "test_agent"}},
@@ -272,14 +294,17 @@ func TestAfterModelCallback(t *testing.T) {
 				t.Fatalf("AfterModelCallback failed: %v", err)
 			}
 
-			// Check if args are pruned
-			if len(tc.content.Parts) > 0 {
-				part := tc.content.Parts[0]
-				if part.FunctionCall != nil && tc.wantArgs != nil {
+			// Check if args are pruned, on the first function-call part.
+			for _, part := range tc.content.Parts {
+				if part == nil || part.FunctionCall == nil {
+					continue
+				}
+				if tc.wantArgs != nil {
 					if diff := cmp.Diff(tc.wantArgs, part.FunctionCall.Args); diff != "" {
 						t.Errorf("Args mismatch (-want +got):\n%s", diff)
 					}
 				}
+				break
 			}
 
 			// Check session state
@@ -332,6 +357,237 @@ func TestAfterModelCallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// contentlessModel answers every request with a response that carries no
+// content, as a model does when it stops on MAX_TOKENS or SAFETY.
+type contentlessModel struct{}
+
+func (contentlessModel) Name() string { return "contentless" }
+
+func (contentlessModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			FinishReason: genai.FinishReasonMaxTokens,
+			ErrorCode:    string(genai.FinishReasonMaxTokens),
+		}, nil)
+	}
+}
+
+// TestAfterModelCallback_ContentlessResponseKeepsChain pins that the plugin
+// leaves a response with nothing to rewrite to the rest of the after-model
+// chain, so an agent's own AfterModelCallbacks still see it.
+func TestAfterModelCallback_ContentlessResponseKeepsChain(t *testing.T) {
+	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+		Predicate: func(string) bool { return true },
+		Args:      map[string]*genai.Schema{"skill_id": {Type: genai.TypeString}},
+	})
+	if err != nil {
+		t.Fatalf("NewPlugin() error = %v", err)
+	}
+
+	const recovered = "recovered from an empty response"
+	agentCallbackCalls := 0
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "agent",
+		Model: contentlessModel{},
+		AfterModelCallbacks: []llmagent.AfterModelCallback{
+			func(_ agent.Context, resp *model.LLMResponse, _ error) (*model.LLMResponse, error) {
+				agentCallbackCalls++
+				if resp != nil && resp.Content == nil {
+					return &model.LLMResponse{Content: genai.NewContentFromText(recovered, genai.RoleModel)}, nil
+				}
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+
+	sessionService := session.InMemoryService()
+	if _, err := sessionService.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "s"}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:        "app",
+		Agent:          a,
+		SessionService: sessionService,
+		PluginConfig:   runner.PluginConfig{Plugins: []*plugin.Plugin{p}},
+	})
+	if err != nil {
+		t.Fatalf("runner.New() error = %v", err)
+	}
+
+	var texts []string
+	for ev, err := range r.Run(t.Context(), "user", "s", genai.NewContentFromText("hi", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+		if ev.Content == nil {
+			continue
+		}
+		for _, part := range ev.Content.Parts {
+			if part.Text != "" {
+				texts = append(texts, part.Text)
+			}
+		}
+	}
+
+	if agentCallbackCalls != 1 {
+		t.Errorf("agent AfterModelCallback ran %d times, want 1", agentCallbackCalls)
+	}
+	if want := []string{recovered}; !slices.Equal(texts, want) {
+		t.Errorf("event texts = %q, want %q", texts, want)
+	}
+}
+
+// TestBeforeModelCallback_LeavesToolDeclarationUnchanged pins that the plugin
+// edits only the request. A task agent tool hands out the same declaration on
+// every call, and an agent tool reuses its agent's InputSchema, so editing
+// them in place would wrap the description once more on every request and add
+// the arguments to the agent's own schema. It also pins that the request's
+// copy keeps every other field of the tool's declaration.
+func TestBeforeModelCallback_LeavesToolDeclarationUnchanged(t *testing.T) {
+	const prefix = "Accepts skill_id. "
+	p, err := functioncallmodifier.NewPlugin(functioncallmodifier.FunctionCallModifierConfig{
+		Predicate: func(string) bool { return true },
+		Args:      map[string]*genai.Schema{"skill_id": {Type: genai.TypeString}},
+		OverrideDescription: func(original string) string {
+			return prefix + original
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewPlugin() error = %v", err)
+	}
+
+	inputSchema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: map[string]*genai.Schema{"query": {Type: genai.TypeString}},
+	}
+	schemaAgent, err := llmagent.New(llmagent.Config{
+		Name:        "schema_agent",
+		Description: "answers queries",
+		InputSchema: inputSchema,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:        "task_agent",
+		Description: "runs a task",
+		Mode:        llmagent.ModeTask,
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() error = %v", err)
+	}
+	taskTool, err := workflowinternal.NewTaskAgentTool(taskAgent)
+	if err != nil {
+		t.Fatalf("NewTaskAgentTool() error = %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		tool tool.Tool
+	}{
+		{name: "task agent tool", tool: taskTool},
+		{name: "agent tool with input schema", tool: agenttool.New(schemaAgent, nil)},
+		{
+			name: "cached declaration without parameters",
+			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{Name: "no_params", Description: "takes nothing"}},
+		},
+		{
+			name: "cached declaration with response schema and behavior",
+			tool: &cachedDeclarationTool{decl: &genai.FunctionDeclaration{
+				Name:        "full",
+				Description: "has a response schema and a behavior",
+				Behavior:    genai.BehaviorNonBlocking,
+				Parameters: &genai.Schema{
+					Type:        genai.TypeObject,
+					Description: "a query",
+					Required:    []string{"query"},
+					Properties:  map[string]*genai.Schema{"query": {Type: genai.TypeString}},
+				},
+				ResponseJsonSchema: map[string]any{"type": "string"},
+			}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fnTool := tc.tool.(toolinternal.FunctionTool)
+			original := fnTool.Declaration()
+			originalDescription := original.Description
+			originalProperties := propertyNames(original)
+			// The request's copy may differ from the tool's declaration only in its
+			// description and the added skill_id, plus the object schema that holds
+			// skill_id when the declaration has no parameters.
+			wantDecl := *original
+			wantParams := genai.Schema{Type: genai.TypeObject}
+			if original.Parameters != nil {
+				wantParams = *original.Parameters
+			}
+			wantParams.Properties = maps.Clone(wantParams.Properties)
+			if wantParams.Properties == nil {
+				wantParams.Properties = map[string]*genai.Schema{}
+			}
+			wantDecl.Parameters = &wantParams
+			ignoreModified := cmp.Options{
+				cmpopts.IgnoreFields(genai.FunctionDeclaration{}, "Description"),
+				cmpopts.IgnoreMapEntries(func(name string, _ *genai.Schema) bool { return name == "skill_id" }),
+			}
+
+			invCtx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{})
+			ctx := icontext.NewCallbackContextWithDelta(invCtx, nil, nil)
+			for request := range 2 {
+				req := &model.LLMRequest{}
+				if err := toolutils.PackTool(req, fnTool); err != nil {
+					t.Fatalf("PackTool() error = %v", err)
+				}
+				if _, err := p.BeforeModelCallback()(ctx, req); err != nil {
+					t.Fatalf("BeforeModelCallback() error = %v", err)
+				}
+				decl := findDeclaration(req, tc.tool.Name())
+				if want := prefix + originalDescription; decl.Description != want {
+					t.Errorf("request %d: description = %q, want %q", request, decl.Description, want)
+				}
+				if !slices.Contains(propertyNames(decl), "skill_id") {
+					t.Errorf("request %d: declaration lacks skill_id", request)
+				}
+				if diff := cmp.Diff(&wantDecl, decl, ignoreModified); diff != "" {
+					t.Errorf("request %d: declaration differs beyond the description and skill_id (-tool +request):\n%s", request, diff)
+				}
+			}
+
+			after := fnTool.Declaration()
+			if after.Description != originalDescription {
+				t.Errorf("tool description = %q, want %q", after.Description, originalDescription)
+			}
+			if got := propertyNames(after); !slices.Equal(got, originalProperties) {
+				t.Errorf("tool parameters = %q, want %q", got, originalProperties)
+			}
+		})
+	}
+	if _, ok := inputSchema.Properties["skill_id"]; ok {
+		t.Error("agent InputSchema gained skill_id")
+	}
+}
+
+// cachedDeclarationTool hands out one declaration on every call, as the task
+// and single_turn tools do.
+type cachedDeclarationTool struct {
+	decl *genai.FunctionDeclaration
+}
+
+func (c *cachedDeclarationTool) Name() string                                   { return c.decl.Name }
+func (c *cachedDeclarationTool) Description() string                            { return c.decl.Description }
+func (c *cachedDeclarationTool) IsLongRunning() bool                            { return false }
+func (c *cachedDeclarationTool) Declaration() *genai.FunctionDeclaration        { return c.decl }
+func (c *cachedDeclarationTool) Run(agent.Context, any) (map[string]any, error) { return nil, nil }
+
+func propertyNames(decl *genai.FunctionDeclaration) []string {
+	if decl.Parameters == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(decl.Parameters.Properties))
 }
 
 // Mock agent for testing agenttool

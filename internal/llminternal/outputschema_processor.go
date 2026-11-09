@@ -47,15 +47,18 @@ func outputSchemaRequestProcessor(ctx agent.InvocationContext, req *model.LLMReq
 
 		state := llmAgent.internal()
 		// Check if we need the processor in the first place.
-		if state.OutputSchema == nil || !needOutputSchemaProcessor(state) {
+		if !needOutputSchemaProcessor(state) {
 			return
 		}
-
-		schema, err := CloneSchema(state.OutputSchema)
+		schema, err := outputSchemaFor(ctx, state)
 		if err != nil {
 			yield(nil, fmt.Errorf("clone output schema: %w", err))
 			return
 		}
+		if schema == nil {
+			return
+		}
+
 		setResponseTool := &setModelResponseTool{schema: schema}
 		if err := toolutils.PackTool(req, setResponseTool); err != nil {
 			yield(nil, fmt.Errorf("failed to pack set_model_response tool: %w", err))

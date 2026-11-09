@@ -22,6 +22,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
 )
 
@@ -86,6 +87,11 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 		if len(ctx.Agent().SubAgents()) == 0 {
 			return
 		}
+		subAgents := ctx.Agent().SubAgents()
+		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			subAgents = subAgents[indexes[0]:]
+		}
+		passCtx := ctx
 		for {
 			// A pass can yield no events (for example when every sub-agent is
 			// empty), so the consumer never gets a chance to stop the loop.
@@ -96,8 +102,8 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 			}
 
 			shouldExit := false
-			for _, subAgent := range ctx.Agent().SubAgents() {
-				for event, err := range subAgent.Run(ctx) {
+			for _, subAgent := range subAgents {
+				for event, err := range subAgent.Run(passCtx) {
 					// A failed sub-agent ends the loop, as in adk-python. Retrying
 					// it would repeat the same failure, forever when there is no
 					// MaxIterations.
@@ -113,6 +119,8 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 					return
 				}
 			}
+			subAgents = ctx.Agent().SubAgents()
+			passCtx = utils.WithGraphResumeDone(ctx)
 
 			if count > 0 {
 				count--
