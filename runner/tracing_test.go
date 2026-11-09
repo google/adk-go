@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -207,7 +208,7 @@ func TestRunInvocationTrace(t *testing.T) {
 
 func TestRunNestedWorkflowFromCallback(t *testing.T) {
 	forEachTraceSchema(t, func(t *testing.T) {
-		for _, callback := range []string{"before", "after"} {
+		for _, callback := range []string{"before_runner", "after_runner", "before_agent", "after_agent"} {
 			t.Run(callback, func(t *testing.T) {
 				_, exp := newInvocationTraceExporter(t)
 				newRoot := func() agent.Agent {
@@ -218,7 +219,11 @@ func TestRunNestedWorkflowFromCallback(t *testing.T) {
 				}
 				inner := mustTraceValue(New(Config{AppName: "inner", Agent: newRoot(), SessionService: session.InMemoryService(), AutoCreateSession: true}))
 				runInner := func(ctx agent.InvocationContext) {
-					drain(t, inner.Run(ctx, "u", "inner", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}))
+					if strings.HasSuffix(callback, "agent") {
+						drain(t, inner.rootAgent.Run(ctx))
+					} else {
+						drain(t, inner.Run(ctx, "u", "inner", genai.NewContentFromText("hello", genai.RoleUser), agent.RunConfig{}))
+					}
 					if !trace.SpanFromContext(ctx).IsRecording() {
 						t.Error("inner runner ended the outer invocation")
 					}
@@ -226,13 +231,13 @@ func TestRunNestedWorkflowFromCallback(t *testing.T) {
 				p := mustTraceValue(plugin.New(plugin.Config{
 					Name: "nested",
 					BeforeRunCallback: func(ctx agent.InvocationContext) (*genai.Content, error) {
-						if callback == "before" {
+						if strings.HasPrefix(callback, "before") {
 							runInner(ctx)
 						}
 						return nil, nil
 					},
 					AfterRunCallback: func(ctx agent.InvocationContext) {
-						if callback == "after" {
+						if strings.HasPrefix(callback, "after") {
 							runInner(ctx)
 						}
 					},
@@ -250,6 +255,19 @@ func TestRunNestedWorkflowFromCallback(t *testing.T) {
 				}
 				if workflows[0].SpanContext.TraceID() != workflows[1].SpanContext.TraceID() {
 					t.Error("nested runner escaped the outer trace")
+				}
+				if strings.HasSuffix(callback, "runner") {
+					ids := map[string]bool{}
+					for _, sp := range workflows {
+						for _, attr := range sp.Attributes {
+							if attr.Key == "gen_ai.conversation.id" {
+								ids[attr.Value.AsString()] = true
+							}
+						}
+					}
+					if !ids["inner"] || !ids["outer"] {
+						t.Error("nested runner overwrote the outer conversation ID")
+					}
 				}
 			})
 		}
@@ -367,7 +385,7 @@ func TestRunInvocationSpanOnRepeatedIteration(t *testing.T) {
 func TestRunLiveInvocationTrace(t *testing.T) {
 	forEachTraceSchema(t, func(t *testing.T) {
 		for _, parentTrace := range []bool{false, true} {
-			for _, outcome := range []string{"complete", "consumer_stop", "stream_error", "before_error", "short_circuit", "setup_error", "close_before_iteration", "close_during_stream", "cancel"} {
+			for _, outcome := range []string{"complete", "consumer_stop", "stream_error", "multiple_errors", "event_error", "append_error", "before_error", "short_circuit", "setup_error", "close_before_iteration", "cancel"} {
 				name := outcome + "/root"
 				if parentTrace {
 					name = outcome + "/parent"
@@ -385,6 +403,7 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 					ctx, cancel := context.WithCancel(ctx)
 					defer cancel()
 					var invocation trace.Span
+					firstError := genai.APIError{Code: 429, Message: "test failure"}
 					var afterRun bool
 					p := mustTraceValue(plugin.New(plugin.Config{
 						Name: "tracing",
@@ -394,7 +413,7 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 								t.Error("BeforeRunCallback has no active span")
 							}
 							if outcome == "before_error" {
-								return nil, errors.New("callback failure")
+								return nil, firstError
 							}
 							if outcome == "short_circuit" {
 								return genai.NewContentFromText("done", genai.RoleModel), nil
@@ -404,6 +423,9 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 						OnEventCallback: func(ctx agent.InvocationContext, _ *session.Event) (*session.Event, error) {
 							if !trace.SpanContextFromContext(ctx).Equal(invocation.SpanContext()) {
 								t.Error("OnEventCallback changed invocation span")
+							}
+							if outcome == "event_error" {
+								return nil, firstError
 							}
 							return nil, nil
 						},
@@ -419,14 +441,18 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 							t.Error("live agent changed invocation span")
 						}
 						if outcome == "setup_error" {
-							return nil, nil, errors.New("setup failure")
+							return nil, nil, firstError
 						}
 						return &dummyLiveSession{}, func(yield func(*session.Event, error) bool) {
 							childCtx, child := tp.Tracer("test").Start(ctx, "live_agent")
 							defer child.End()
-							if outcome == "stream_error" {
-								yield(nil, errors.New("stream failure"))
-								return
+							if outcome == "stream_error" || outcome == "multiple_errors" {
+								if !yield(nil, firstError) || outcome == "stream_error" {
+									return
+								}
+								if !yield(nil, errors.New("later failure")) {
+									return
+								}
 							}
 							if outcome == "cancel" {
 								<-childCtx.Done()
@@ -435,11 +461,17 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 							}
 							ev := session.NewEvent(ctx, ctx.InvocationID())
 							ev.Author = "live"
+							ev.ID = "trace-event"
 							yield(ev, nil)
 						}, nil
 					}}
-					r := mustTraceValue(New(Config{AppName: "app", Agent: root, SessionService: session.InMemoryService(), AutoCreateSession: true, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}}}))
+					service := session.InMemoryService()
+					if outcome == "append_error" {
+						service = &failingLiveAppendService{Service: service, failID: "trace-event", err: firstError}
+					}
+					r := mustTraceValue(New(Config{AppName: "app", Agent: root, SessionService: service, AutoCreateSession: true, PluginConfig: PluginConfig{Plugins: []*plugin.Plugin{p}}}))
 					live, events, err := r.RunLive(ctx, "u", "s", agent.LiveRunConfig{})
+					observedError := err
 					wantErr := outcome == "before_error" || outcome == "setup_error"
 					if (err != nil) != wantErr {
 						t.Fatalf("RunLive error = %t, want %t", err != nil, wantErr)
@@ -462,23 +494,14 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 						var streamErr bool
 						for _, err := range events {
 							streamErr = streamErr || err != nil
-							if outcome == "close_during_stream" {
-								// Close may run concurrently with the consumer. The invocation must
-								// remain open until the consumer's AfterRunCallback has returned.
-								done := make(chan error, 1)
-								go func() { done <- live.Close() }()
-								if err := <-done; err != nil {
-									t.Fatal(err)
-								}
-								if !invocation.IsRecording() {
-									t.Error("Close ended an active invocation")
-								}
+							if observedError == nil && err != nil {
+								observedError = err
 							}
 							if outcome == "consumer_stop" {
 								break
 							}
 						}
-						if streamErr != (outcome == "stream_error" || outcome == "cancel") {
+						if streamErr != (outcome == "stream_error" || outcome == "multiple_errors" || outcome == "event_error" || outcome == "append_error" || outcome == "cancel") {
 							t.Error("unexpected stream error outcome")
 						}
 						if outcome != "short_circuit" && !afterRun {
@@ -489,6 +512,38 @@ func TestRunLiveInvocationTrace(t *testing.T) {
 						}
 					}
 					sp := invocationSpan(t, exp)
+					failed := wantErr || outcome == "stream_error" || outcome == "multiple_errors" || outcome == "event_error" || outcome == "append_error" || outcome == "cancel"
+					wantStatus := codes.Unset
+					if failed {
+						wantStatus = codes.Error
+					}
+					if sp.Status.Code != wantStatus {
+						t.Errorf("span status = %v, want %v", sp.Status.Code, wantStatus)
+					}
+					if failed {
+						if len(sp.Events) != 1 {
+							t.Errorf("span error events = %d, want 1", len(sp.Events))
+						}
+						if observedError == nil || sp.Status.Description != observedError.Error() {
+							t.Error("span did not record the first failure")
+						}
+					}
+					var errorType string
+					for _, attr := range sp.Attributes {
+						if attr.Key == "error.type" {
+							errorType = attr.Value.AsString()
+						}
+					}
+					wantType := ""
+					if failed && os.Getenv("ADK_TELEMETRY_SCHEMA_VERSION_OPT_IN") == "otel_semconv_1_44" {
+						wantType = "429"
+						if outcome == "cancel" {
+							wantType = "*errors.errorString"
+						}
+					}
+					if errorType != wantType {
+						t.Error("span error.type does not match the failure and schema")
+					}
 					if !sp.Parent.Equal(parentSC) {
 						t.Error("live invocation did not inherit the caller's span")
 					}

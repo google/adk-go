@@ -18,6 +18,7 @@ import (
 	"context"
 	"iter"
 
+	semconv "go.opentelemetry.io/otel/semconv/v1.36.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
@@ -31,21 +32,27 @@ import (
 // Nested invocations in the default schema reuse their enclosing workflow
 // context and return a no-op span, so ending it cannot end the enclosing span.
 func StartInvocationSpan(ctx context.Context, root AgentLike, sessionID string) (context.Context, trace.Span) {
+	// A nested runner must not update or claim its caller's invocation span.
+	ctx = context.WithValue(ctx, invocationScopeKey{}, nil)
 	if useLegacySchema() {
 		return StartTrace(ctx, "invocation")
 	}
 	// Unlike ADK Python, nested invocations add no span, preserving the
 	// existing Go convention of omitting implementation details.
 	if ctx.Value(workflowScopeKey{}) != nil {
-		// A runner called by a callback may have the same root name, but it
-		// does not own the enclosing runner's workflow span.
-		return context.WithValue(ctx, invocationWorkflowKey{}, nil), noop.Span{}
+		return ctx, noop.Span{}
 	}
 	ctx, span := startInvokeWorkflowSpan(ctx, root.Name(), sessionID)
-	if isWorkflowAgent(root) {
-		ctx = context.WithValue(ctx, invocationWorkflowKey{}, root.Name())
-	}
+	ctx = context.WithValue(ctx, invocationScopeKey{}, &invocationScope{span: span, workflow: workflowState(root)})
 	return ctx, span
+}
+
+// SetInvocationSessionID records the resolved session ID on the span owned by
+// this runner. It leaves legacy spans and enclosing invocations unchanged.
+func SetInvocationSessionID(ctx context.Context, sessionID string) {
+	if scope, ok := ctx.Value(invocationScopeKey{}).(*invocationScope); ok {
+		scope.span.SetAttributes(semconv.GenAIConversationID(sessionID))
+	}
 }
 
 // InstrumentInvocation keeps the runner's span open through event iteration,

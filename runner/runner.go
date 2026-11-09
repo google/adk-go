@@ -573,6 +573,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 			yield(nil, err)
 			return
 		}
+		telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 		// Node path: an LlmAgent runs through the ADK 2.0 node runtime
 		// (the Go equivalent of adk-python's _run_node_async, reached for
@@ -899,13 +900,15 @@ func (s *closedLiveSession) Close() error {
 // and a stream of events from the agents.
 // Consume the event stream to finish the invocation and its plugin callbacks,
 // including after closing the live session.
-func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+// Closing the session alone does not end or export the invocation span.
+func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agent.LiveRunConfig, opts ...RunOption) (_ agent.LiveSession, _ iter.Seq2[*session.Event, error], err error) {
 	// Unlike Python's live generator, Go starts callbacks before returning
 	// the session and iterator, so the span must start here too.
 	ctx, span := telemetry.StartInvocationSpan(ctx, r.rootAgent, sessionID)
 	ownedByIterator := false
 	defer func() {
 		if !ownedByIterator {
+			telemetry.RecordError(span, err)
 			span.End()
 		}
 	}()
@@ -919,6 +922,7 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	if err != nil {
 		return nil, nil, err
 	}
+	telemetry.SetInvocationSessionID(ctx, storedSession.ID())
 
 	// msg is nil for Live run as it's streaming
 	agentToRun, err := r.findAgentToRun(storedSession, nil)
@@ -1000,7 +1004,18 @@ func (r *Runner) RunLive(ctx context.Context, userID, sessionID string, cfg agen
 	wrappedIter := func(yield func(*session.Event, error) bool) {
 		// Close can precede iteration; keep the span open through the
 		// remaining events and AfterRunCallback.
-		defer span.End()
+		var firstErr error
+		defer func() {
+			telemetry.RecordError(span, firstErr)
+			span.End()
+		}()
+		emit := yield
+		yield = func(ev *session.Event, err error) bool {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			return emit(ev, err)
+		}
 
 		if r.pluginManager != nil {
 			defer r.pluginManager.RunAfterRunCallback(iCtx)
