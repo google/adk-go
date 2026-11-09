@@ -124,8 +124,26 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			},
 			wantInstruction: true,
 			wantTextContains: []string{
-				"user: valid memory",
+				"user: valid memory\n", // The newline catches a trailing separator.
 			},
+		},
+		{
+			name:        "empty text between text parts adds no extra separator",
+			userContent: genai.NewContentFromText("test query", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "user",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "valid"},
+							{Text: ""},
+							{Text: "memory"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"user: valid memory"},
 		},
 		{
 			name:        "single memory entry",
