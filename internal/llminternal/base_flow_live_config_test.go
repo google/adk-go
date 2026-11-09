@@ -184,6 +184,45 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 			want:  map[string]any{"realtimeInputConfig": wantRealtime},
 		},
 		{
+			name:  "gemini 3.x live by resource name",
+			model: "projects/p/locations/us-central1/publishers/google/models/gemini-3.1-flash-live-preview",
+			live:  live(),
+			want:  map[string]any{"realtimeInputConfig": wantRealtime},
+		},
+		{
+			// Live Translate is not treated as a 3.x Live model.
+			name:  "gemini 3.5 live translate",
+			model: "gemini-3.5-live-translate-preview",
+			live:  live(),
+			want: map[string]any{
+				"realtimeInputConfig":   wantRealtime,
+				"enableAffectiveDialog": true,
+				"proactivity":           map[string]any{"proactiveAudio": true},
+			},
+		},
+		// Each field is set on its own as well, so that dropping one of them
+		// cannot hide behind another being set.
+		{
+			name:  "realtime input config only",
+			model: "gemini-live-2.5-flash-preview",
+			live:  &agent.LiveRunConfig{RealtimeInputConfig: live().RealtimeInputConfig},
+			want:  map[string]any{"realtimeInputConfig": wantRealtime},
+		},
+		{
+			name:  "affective dialog only",
+			model: "gemini-live-2.5-flash-preview",
+			live:  &agent.LiveRunConfig{EnableAffectiveDialog: true},
+			want:  map[string]any{"enableAffectiveDialog": true},
+		},
+		{
+			name:  "proactivity only",
+			model: "gemini-live-2.5-flash-preview",
+			live: &agent.LiveRunConfig{
+				Proactivity: &genai.ProactivityConfig{ProactiveAudio: genai.Ptr(true)},
+			},
+			want: map[string]any{"proactivity": map[string]any{"proactiveAudio": true}},
+		},
+		{
 			name:  "unset",
 			model: "gemini-live-2.5-flash-preview",
 			live:  &agent.LiveRunConfig{},
