@@ -17,6 +17,7 @@ package controllers_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -162,6 +163,10 @@ func TestGetSession(t *testing.T) {
 // percent-encoded sessionId the create endpoint accepts in its request body.
 const maxBodySessionIDPathBytes = http.DefaultMaxHeaderBytes / 2
 
+// errNotAddressable is the 400 for a body sessionId that contains "/" or is "."
+// or "..". It names no ID, so the client's value is never echoed back.
+var errNotAddressable = errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
+
 func TestCreateSession(t *testing.T) {
 	id := fakes.SessionKey{
 		AppName:   "testApp",
@@ -304,7 +309,7 @@ func TestCreateSession(t *testing.T) {
 				SessionID: "x/y",
 			},
 			wantStatus: http.StatusBadRequest,
-			wantErr:    fmt.Errorf(`sessionId "x/y" in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`),
+			wantErr:    errNotAddressable,
 		},
 		{
 			name:           "request body session id a/ is not addressable",
@@ -317,7 +322,7 @@ func TestCreateSession(t *testing.T) {
 				SessionID: "a/",
 			},
 			wantStatus: http.StatusBadRequest,
-			wantErr:    fmt.Errorf(`sessionId "a/" in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`),
+			wantErr:    errNotAddressable,
 		},
 		{
 			name:           "request body session id . is not addressable",
@@ -330,7 +335,7 @@ func TestCreateSession(t *testing.T) {
 				SessionID: ".",
 			},
 			wantStatus: http.StatusBadRequest,
-			wantErr:    fmt.Errorf(`sessionId "." in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`),
+			wantErr:    errNotAddressable,
 		},
 		{
 			name:           "request body session id .. is not addressable",
@@ -343,7 +348,22 @@ func TestCreateSession(t *testing.T) {
 				SessionID: "..",
 			},
 			wantStatus: http.StatusBadRequest,
-			wantErr:    fmt.Errorf(`sessionId ".." in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`),
+			wantErr:    errNotAddressable,
+		},
+		{
+			// The "/" check runs first, so this pins that its message does not
+			// echo an ID too long to send back.
+			name:           "request body session id too long and containing a slash",
+			storedSessions: map[fakes.SessionKey]fakes.TestSession{},
+			sessionID: fakes.SessionKey{
+				AppName: "testApp",
+				UserID:  "testUser",
+			},
+			createRequestObj: models.CreateSessionRequest{
+				SessionID: "x/" + strings.Repeat("a", maxBodySessionIDPathBytes),
+			},
+			wantStatus: http.StatusBadRequest,
+			wantErr:    errNotAddressable,
 		},
 		{
 			name:           "request body session id at the length limit",

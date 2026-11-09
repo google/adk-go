@@ -122,12 +122,14 @@ func (c *SessionsAPIController) CreateSessionHandler(rw http.ResponseWriter, req
 // the server's MaxHeaderBytes. The ID's percent-encoded form is therefore capped
 // at maxBodySessionIDPathBytes. The body itself may be far larger, and one byte
 // of the ID can take three in the URL.
+//
+// Neither error echoes the ID back: it is client data, and the body limit lets
+// it run to megabytes.
 func validateBodySessionID(id string) error {
 	if strings.Contains(id, "/") || id == "." || id == ".." {
-		return fmt.Errorf(`sessionId %q in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`, id)
+		return errors.New(`sessionId in request body cannot be used in a URL path: it must not contain "/" or be "." or ".."`)
 	}
 	if n := len(url.PathEscape(id)); n > maxBodySessionIDPathBytes {
-		// The ID is not echoed back: it can be most of a megabyte.
 		return fmt.Errorf("sessionId in request body cannot be used in a URL path: it is %d bytes percent-encoded, more than the limit of %d", n, maxBodySessionIDPathBytes)
 	}
 	return nil
