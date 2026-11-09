@@ -226,6 +226,43 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 			wantTextOmits:    []string{"private reasoning"},
 		},
 		{
+			name:        "thought between text parts adds no separator",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "visible"},
+							{Text: "private reasoning", Thought: true},
+							{Text: "answer"},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"\nmodel: visible answer\n"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
+			name:        "thought after text adds no trailing separator",
+			userContent: genai.NewContentFromText("test", genai.RoleUser),
+			memories: []memory.Entry{
+				{
+					Author: "model",
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "visible answer"},
+							{Text: "private reasoning", Thought: true},
+						},
+					},
+				},
+			},
+			wantInstruction:  true,
+			wantTextContains: []string{"\nmodel: visible answer\n"},
+			wantTextOmits:    []string{"private reasoning"},
+		},
+		{
 			name:        "thought-only memory entry",
 			userContent: genai.NewContentFromText("test", genai.RoleUser),
 			memories: []memory.Entry{
@@ -289,14 +326,14 @@ func TestPreloadMemoryTool_ProcessRequest(t *testing.T) {
 
 			if tt.wantInstruction && hasInstruction {
 				instruction := llmRequest.Config.SystemInstruction.Parts[0].Text
-				for _, want := range tt.wantTextContains {
+				for i, want := range tt.wantTextContains {
 					if !strings.Contains(instruction, want) {
-						t.Errorf("Instruction should contain %q, got: %v", want, instruction)
+						t.Errorf("instruction is missing expected text at index %d", i)
 					}
 				}
-				for _, omit := range tt.wantTextOmits {
+				for i, omit := range tt.wantTextOmits {
 					if strings.Contains(instruction, omit) {
-						t.Errorf("Instruction should not contain %q, got: %v", omit, instruction)
+						t.Errorf("instruction contains omitted text at index %d", i)
 					}
 				}
 			}
