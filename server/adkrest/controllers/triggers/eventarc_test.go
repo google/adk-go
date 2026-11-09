@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -240,19 +242,11 @@ func TestEventarcBinaryModeRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-// TestEventarcTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited mirrors the
-// Pub/Sub guard for the same edge: MaxConcurrentRuns<=0 must mean "no limit"
-// (nil semaphore), not a zero-capacity channel that would block every request
-// forever.
-func TestEventarcTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
-	runCount := 0
-	testAgent := createMockAgent(t, nil, &runCount, nil)
-	cfg := defaultTriggerConfig
-	cfg.MaxConcurrentRuns = 0
-	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
-	ctrl := triggers.NewEventarcController(sessionService, agent.NewSingleLoader(testAgent), nil, nil, runner.PluginConfig{}, cfg)
-
-	payload := `{"message": {"data": "` + base64.StdEncoding.EncodeToString([]byte("hello")) + `"}}`
+// buildEventarcRequest returns a CloudEvent POST request carrying a Pub/Sub
+// messagePublished payload, ready for EventarcTriggerHandler.
+func buildEventarcRequest(t *testing.T, data string) *http.Request {
+	t.Helper()
+	payload := `{"message": {"data": "` + base64.StdEncoding.EncodeToString([]byte(data)) + `"}}`
 	ce := map[string]any{
 		"specversion": "1.0",
 		"type":        "google.cloud.pubsub.topic.v1.messagePublished",
@@ -269,20 +263,110 @@ func TestEventarcTriggerHandler_ZeroMaxConcurrentRunsIsUnlimited(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/cloudevents+json")
-	req = mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+	return mux.SetURLVars(req, map[string]string{"app_name": "test-agent"})
+}
 
-	rr := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		ctrl.EventarcTriggerHandler(rr, req)
-		close(done)
-	}()
+// blockingEventarcAgent returns an agent whose runs signal started and then
+// hold until release is closed, so a test can count runs in flight.
+func blockingEventarcAgent(t *testing.T, started, release chan struct{}) agent.Agent {
+	t.Helper()
+	blockingAgent, err := agent.New(agent.Config{
+		Name: "test-agent",
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				started <- struct{}{}
+				<-release
+				yield(&session.Event{ID: "success-event"}, nil)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	return blockingAgent
+}
+
+// TestEventarcTriggerHandler_NonPositiveMaxConcurrentRunsIsUnlimited mirrors
+// the Pub/Sub guard for the same edge: MaxConcurrentRuns of zero or below must
+// mean "no limit" (nil semaphore) — not a zero-capacity channel that blocks
+// every request forever (zero), and not a constructor panic
+// (negative: makechan size out of range). Requiring three concurrent requests
+// in flight at once distinguishes "unlimited" from any small cap a wrong
+// constructor might build.
+func TestEventarcTriggerHandler_NonPositiveMaxConcurrentRunsIsUnlimited(t *testing.T) {
+	for _, maxRuns := range []int{0, -1} {
+		t.Run(fmt.Sprintf("MaxConcurrentRuns=%d", maxRuns), func(t *testing.T) {
+			const requests = 3
+			started := make(chan struct{}, requests)
+			release := make(chan struct{})
+			cfg := defaultTriggerConfig
+			cfg.MaxConcurrentRuns = maxRuns
+			sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+			ctrl := triggers.NewEventarcController(sessionService, agent.NewSingleLoader(blockingEventarcAgent(t, started, release)), nil, nil, runner.PluginConfig{}, cfg)
+
+			recorders := make([]*httptest.ResponseRecorder, requests)
+			var wg sync.WaitGroup
+			for i := range requests {
+				recorders[i] = httptest.NewRecorder()
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					ctrl.EventarcTriggerHandler(recorders[i], buildEventarcRequest(t, "hello"))
+				}()
+			}
+			for i := range requests {
+				select {
+				case <-started:
+				case <-time.After(2 * time.Second):
+					t.Fatalf("only %d of %d runs in flight; MaxConcurrentRuns=%d must mean no limit", i, requests, maxRuns)
+				}
+			}
+			close(release)
+			wg.Wait()
+			for i, rr := range recorders {
+				if rr.Code != http.StatusOK {
+					t.Errorf("request %d: status = %d, want 200. Body: %s", i, rr.Code, rr.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// TestEventarcTriggerHandler_EnforcesMaxConcurrentRuns is the positive-limit
+// sibling, mirroring TestPubSubTriggerHandler_EnforcesMaxConcurrentRuns: with
+// MaxConcurrentRuns=N, firing N+1 concurrent requests at a blocking agent must
+// leave exactly N runs in flight (the extra request waits on the semaphore).
+func TestEventarcTriggerHandler_EnforcesMaxConcurrentRuns(t *testing.T) {
+	const limit = 2
+	started := make(chan struct{}, limit+1)
+	release := make(chan struct{})
+	cfg := defaultTriggerConfig
+	cfg.MaxConcurrentRuns = limit
+	sessionService := &fakes.FakeSessionService{Sessions: make(map[fakes.SessionKey]fakes.TestSession)}
+	ctrl := triggers.NewEventarcController(sessionService, agent.NewSingleLoader(blockingEventarcAgent(t, started, release)), nil, nil, runner.PluginConfig{}, cfg)
+
+	var wg sync.WaitGroup
+	for range limit + 1 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctrl.EventarcTriggerHandler(httptest.NewRecorder(), buildEventarcRequest(t, "hello"))
+		}()
+	}
+
+	for i := range limit {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d runs started", i, limit)
+		}
+	}
+	// The (limit+1)th request must be blocked on the semaphore, not running.
 	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler blocked with MaxConcurrentRuns=0; must be treated as no limit")
+	case <-started:
+		t.Fatalf("a run beyond MaxConcurrentRuns=%d started; limit not enforced", limit)
+	case <-time.After(250 * time.Millisecond):
 	}
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200. Body: %s", rr.Code, rr.Body.String())
-	}
+	close(release)
+	wg.Wait()
 }
