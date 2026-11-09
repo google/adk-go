@@ -15,6 +15,7 @@
 package session_test
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
@@ -796,6 +797,40 @@ func TestInMemoryService_AppendEvent_CanonicalRecordDoesNotAliasLiveDelta(t *tes
 				t.Errorf("canonical StateDelta = %v, want the non-temp key preserved", canonical)
 			}
 		})
+	}
+}
+
+func TestInMemoryService_ListOrderedByLastUpdateTime(t *testing.T) {
+	s := session.InMemoryService()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) context.Context {
+		return platform.WithTimeProvider(t.Context(), func() time.Time { return base.Add(d) })
+	}
+	created := map[string]session.Session{}
+	for i, id := range []string{"a", "b", "c"} {
+		resp, err := s.Create(at(time.Duration(i)*time.Second), &session.CreateRequest{AppName: "app", UserID: "u", SessionID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		created[id] = resp.Session
+	}
+	// Make the oldest session the most recently active one.
+	ev := session.NewEvent(t.Context(), "inv")
+	ev.Timestamp = base.Add(time.Minute)
+	if err := s.AppendEvent(t.Context(), created["a"], ev); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := s.List(t.Context(), &session.ListRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, sess := range resp.Sessions {
+		got = append(got, sess.ID())
+	}
+	if want := []string{"b", "c", "a"}; !slices.Equal(got, want) {
+		t.Errorf("List() session order = %v, want %v (oldest update first)", got, want)
 	}
 }
 

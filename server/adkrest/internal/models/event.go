@@ -235,10 +235,17 @@ func (e Event) MarshalJSON() ([]byte, error) {
 	if e.Content != nil {
 		aux.Content = &ProxyContent{
 			Content: e.Content,
-			Parts:   make([]*ProxyPart, len(e.Content.Parts)),
+			Parts:   make([]*ProxyPart, 0, len(e.Content.Parts)),
 		}
 
-		for i, part := range e.Content.Parts {
+		for _, part := range e.Content.Parts {
+			// A nil part (e.g. a null in a stored request body) has nothing to
+			// wrap; drop it from the output so REST clients — including the
+			// bundled web UI, which reads fields off every part it renders —
+			// never see a null part.
+			if part == nil {
+				continue
+			}
 			// Wrap the original part
 			proxyPart := &ProxyPart{Part: part}
 
@@ -255,7 +262,7 @@ func (e Event) MarshalJSON() ([]byte, error) {
 					Args:         args,
 				}
 			}
-			aux.Content.Parts[i] = proxyPart
+			aux.Content.Parts = append(aux.Content.Parts, proxyPart)
 		}
 	}
 
