@@ -50,7 +50,7 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 
 		// Quick check: find the latest user-authored event and inspect whether it
 		// contains any function response for tool confirmation.
-		var lastUserIdx int = -1
+		lastUserIdx := -1
 		var userEv *session.Event
 		for k := nEvents - 1; k >= 0; k-- {
 			ev := sessEvents.At(k)
