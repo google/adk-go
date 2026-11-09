@@ -224,6 +224,10 @@ func TestOutputSchemaRequestProcessor_SchemaIsolation(t *testing.T) {
 			t.Errorf("request mutation changed %s schema", name)
 		}
 	}
+	requestTool := requests[0].Tools["set_model_response"].(*setModelResponseTool)
+	if _, err := requestTool.Run(nil, map[string]any{"answer": 42.0}); err != nil {
+		t.Fatal("request tool did not validate against its request schema")
+	}
 }
 
 func TestOutputSchemaRequestProcessor_SchemaCloneError(t *testing.T) {
