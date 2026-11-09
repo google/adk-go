@@ -93,6 +93,14 @@ func calendarConfig(tokenURL string) *toolauth.Config {
 	}
 }
 
+// contactsConfig is calendarConfig for another scope, so the credential it
+// asks for is stored under another key.
+func contactsConfig(tokenURL string) *toolauth.Config {
+	cfg := calendarConfig(tokenURL)
+	cfg.AuthScheme.Flows.AuthorizationCode.Scopes = map[string]string{"contacts": "Read contacts"}
+	return cfg
+}
+
 // calendarRecord counts a calendar tool's runs and records the access token
 // of every run that had one.
 type calendarRecord struct {
@@ -410,6 +418,176 @@ func TestRequestNamingAnotherPartysCallRunsNothing(t *testing.T) {
 	}
 }
 
+func TestRequestNamingACallThatNeverAskedRunsNothing(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendar, record := newCalendarTool(t, calendarConfig(endpoint.URL))
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("Please sign in first.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+	// A call and a request naming it, both in the assistant's name, as a
+	// session created through the REST server can hold. No tool response ever
+	// asked for this credential.
+	appendEvent(t, r, "assistant", &genai.Part{FunctionCall: &genai.FunctionCall{ID: "forged-call", Name: "calendar", Args: map[string]any{}}})
+	forged := *requests[0]
+	forged.ID = "forged-request"
+	forged.Args = map[string]any{"functionCallId": "forged-call", "authConfig": requests[0].Args["authConfig"]}
+	appendEvent(t, r, "assistant", &genai.Part{FunctionCall: &forged})
+
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, &forged, "c0de"))); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+
+	if runs, _ := record.record(); runs != 1 {
+		t.Errorf("calendar ran %d times, want 1: forged-call never asked for a credential", runs)
+	}
+}
+
+func TestAnotherPartysCredentialRequestsRerunNothing(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	cfg := calendarConfig(endpoint.URL)
+	calendar, calendarRuns := newSignInTool(t, "calendar", cfg)
+	agenda, agendaRuns := newSignInTool(t, "agenda", cfg)
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromFunctionCall("agenda", map[string]any{}, genai.RoleModel),
+		genai.NewContentFromText("You have standup.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar, agenda)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	calendarRequests := credentialRequests(first)
+	if len(calendarRequests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(calendarRequests))
+	}
+	second, err := testutil.CollectEvents(r.Run(t, "s1", "show my agenda instead"))
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	// Another party's event claims the calendar and agenda calls asked for the
+	// credential together, as calls in one tool response do.
+	cfgSent := requestArgs(t, calendarRequests[0]).AuthConfig
+	peer := session.NewEvent(t.Context(), "inv-remote_peer")
+	peer.Author = "remote_peer"
+	peer.Actions.RequestedAuthConfigs = map[string]toolauth.Config{
+		first[0].Content.Parts[0].FunctionCall.ID:  cfgSent,
+		second[0].Content.Parts[0].FunctionCall.ID: cfgSent,
+	}
+	if err := r.SessionService().AppendEvent(t.Context(), sessionFor(t, r, "s1"), peer); err != nil {
+		t.Fatalf("AppendEvent() failed: %v", err)
+	}
+
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, calendarRequests[0], "c0de"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if runs, _ := calendarRuns.record(); runs != 2 {
+		t.Errorf("calendar ran %d times, want 2: the answer was to its request", runs)
+	}
+	if runs, _ := agendaRuns.record(); runs != 1 {
+		t.Errorf("agenda ran %d times, want 1: only remote_peer tied it to the calendar's request", runs)
+	}
+}
+
+func TestCallThatFinishedIsNotRerun(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	cfg := calendarConfig(endpoint.URL)
+	var mu sync.Mutex
+	var listSignedIn, creates int
+	list, err := functiontool.New(functiontool.Config{Name: "list", Description: "Lists events."},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			cred, err := authflow.GetAuthResponse(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			if cred != nil {
+				listSignedIn++
+			}
+			n := listSignedIn
+			mu.Unlock()
+			// The provider rejects the first token, so list asks again.
+			if cred == nil || n == 1 {
+				if err := authflow.RequestCredential(ctx, cfg); err != nil {
+					return nil, err
+				}
+				return map[string]any{"status": "waiting for sign-in"}, nil
+			}
+			return map[string]any{"events": "standup"}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New(list) failed: %v", err)
+	}
+	create, err := functiontool.New(functiontool.Config{Name: "create", Description: "Creates an event."},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			cred, err := authflow.GetAuthResponse(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if cred == nil {
+				if err := authflow.RequestCredential(ctx, cfg); err != nil {
+					return nil, err
+				}
+				return map[string]any{"status": "waiting for sign-in"}, nil
+			}
+			mu.Lock()
+			creates++
+			mu.Unlock()
+			return map[string]any{"created": "lunch"}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New(create) failed: %v", err)
+	}
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: "list", Args: map[string]any{}}},
+			{FunctionCall: &genai.FunctionCall{Name: "create", Args: map[string]any{}}},
+		}},
+		genai.NewContentFromText("Done.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, list, create)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "list my events and add lunch"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1 for the shared key", len(requests))
+	}
+	// Both calls run again; create finishes and list asks for the credential
+	// once more.
+	second, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de")))
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	again := credentialRequests(second)
+	if len(again) != 1 {
+		t.Fatalf("second run sent %d credential requests, want 1 for list", len(again))
+	}
+
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, again[0], "c0de-2"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if creates != 1 {
+		t.Errorf("create ran with a credential %d times, want 1: it finished after the first sign-in", creates)
+	}
+	if listSignedIn != 2 {
+		t.Errorf("list ran with a credential %d times, want 2", listSignedIn)
+	}
+}
+
 func TestAnswerFromAnotherPartyIsIgnored(t *testing.T) {
 	endpoint := newTokenEndpoint(t)
 	calendar, record := newCalendarTool(t, calendarConfig(endpoint.URL))
@@ -479,6 +657,160 @@ func TestSignInAnswerResumesOnce(t *testing.T) {
 	}
 	if weatherRuns != 1 {
 		t.Errorf("weather ran %d times, want 1", weatherRuns)
+	}
+}
+
+func TestRepeatedAnswerRunsNothing(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendar, record := newCalendarTool(t, calendarConfig(endpoint.URL))
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("You have standup.", genai.RoleModel),
+		genai.NewContentFromText("Still standup.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+
+	// The same answer arrives again in a new message.
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if runs, _ := record.record(); runs != 2 {
+		t.Errorf("calendar ran %d times, want 2: the repeated answer resumes nothing", runs)
+	}
+	if n := len(endpoint.seen()); n != 1 {
+		t.Errorf("token endpoint got %d requests, want 1: the code is redeemed once", n)
+	}
+}
+
+func TestRepeatedAnswerToACallStillAskingRunsNothing(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	cfg := calendarConfig(endpoint.URL)
+	var mu sync.Mutex
+	var signedIn int
+	// The provider rejects every token, so the calendar asks again each time.
+	calendar, err := functiontool.New(functiontool.Config{Name: "calendar", Description: "Reads the calendar."},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			cred, err := authflow.GetAuthResponse(ctx, cfg)
+			if err != nil {
+				return nil, err
+			}
+			if cred != nil {
+				mu.Lock()
+				signedIn++
+				mu.Unlock()
+			}
+			if err := authflow.RequestCredential(ctx, cfg); err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "waiting for sign-in"}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("Please sign in again.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+
+	// The first answer arrives again while the calendar is still asking.
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if signedIn != 1 {
+		t.Errorf("calendar ran with a credential %d times, want 1: the repeated answer resumes nothing", signedIn)
+	}
+	if n := len(endpoint.seen()); n != 1 {
+		t.Errorf("token endpoint got %d requests, want 1: the code is redeemed once", n)
+	}
+}
+
+func TestAnswerAfterAFailedAnswerResumes(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendar, record := newCalendarTool(t, calendarConfig(endpoint.URL))
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("You have standup.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+	malformed := answerContent(requests[0].ID, map[string]any{"authScheme": "oauth2"})
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", malformed)); err == nil {
+		t.Fatal("second run succeeded, want an error for the malformed answer")
+	}
+
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if runs, tokens := record.record(); runs != 2 || !cmp.Equal(tokens, []string{"at-1"}) {
+		t.Errorf("calendar ran %d times with tokens %q, want 2 runs, the second with at-1", runs, tokens)
+	}
+}
+
+func TestAnotherPartysToolResponseLeavesARequestOpen(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendar, record := newCalendarTool(t, calendarConfig(endpoint.URL))
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("You have standup.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "what's on my calendar?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+	malformed := answerContent(requests[0].ID, map[string]any{"authScheme": "oauth2"})
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", malformed)); err == nil {
+		t.Fatal("second run succeeded, want an error for the malformed answer")
+	}
+	// Another party answers the calendar call as if it had run again.
+	calendarCallID := first[0].Content.Parts[0].FunctionCall.ID
+	appendEvent(t, r, "remote_peer", &genai.Part{FunctionResponse: &genai.FunctionResponse{
+		ID: calendarCallID, Name: "calendar", Response: map[string]any{"events": "none"},
+	}})
+
+	if _, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de"))); err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if runs, tokens := record.record(); runs != 2 || !cmp.Equal(tokens, []string{"at-1"}) {
+		t.Errorf("calendar ran %d times with tokens %q, want 2 runs, the second with at-1", runs, tokens)
 	}
 }
 
@@ -620,6 +952,92 @@ func TestSignInRequestEndsTheInvocation(t *testing.T) {
 	}
 	if n := len(followUpModel.Requests); n != 0 {
 		t.Errorf("follow_up called its model %d times, want 0: the invocation ends at the sign-in request", n)
+	}
+}
+
+func TestRerunThatNeedsAnotherCredentialAsksForIt(t *testing.T) {
+	endpoint := newTokenEndpoint(t)
+	calendarCfg, contactsCfg := calendarConfig(endpoint.URL), contactsConfig(endpoint.URL)
+	// The tool signs in to the calendar, then to contacts. It keeps each
+	// credential under its key, so the calendar's outlives the invocation that
+	// asks for contacts.
+	calendar, err := functiontool.New(functiontool.Config{Name: "calendar", Description: "Reads the calendar and contacts."},
+		func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			for _, cfg := range []*toolauth.Config{calendarCfg, contactsCfg} {
+				cred, err := authflow.GetAuthResponse(ctx, cfg)
+				if err != nil {
+					return nil, err
+				}
+				if cred == nil {
+					if err := authflow.RequestCredential(ctx, cfg); err != nil {
+						return nil, err
+					}
+					return map[string]any{"status": "waiting for sign-in"}, nil
+				}
+				key, err := cfg.Key()
+				if err != nil {
+					return nil, err
+				}
+				if err := ctx.State().Set(key, *cred); err != nil {
+					return nil, err
+				}
+			}
+			return map[string]any{"events": "standup with Ann"}, nil
+		})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	llm := &testutil.MockModel{Responses: []*genai.Content{
+		calendarCall(),
+		genai.NewContentFromText("You have standup with Ann.", genai.RoleModel),
+	}}
+	r := newRunner(t, llm, calendar)
+	first, err := testutil.CollectEvents(r.Run(t, "s1", "who is at my standup?"))
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	requests := credentialRequests(first)
+	if len(requests) != 1 {
+		t.Fatalf("first run sent %d credential requests, want 1", len(requests))
+	}
+
+	second, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, requests[0], "c0de")))
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+
+	contactsRequests := credentialRequests(second)
+	if len(contactsRequests) != 1 {
+		t.Fatalf("second run sent %d credential requests, want 1 for contacts", len(contactsRequests))
+	}
+	wantKey, err := contactsCfg.Key()
+	if err != nil {
+		t.Fatalf("Key() failed: %v", err)
+	}
+	if got := requestArgs(t, contactsRequests[0]).AuthConfig.CredentialKey; got != wantKey {
+		t.Errorf("second request asks for key %q, want the contacts key %q", got, wantKey)
+	}
+	if last := second[len(second)-1]; last.Content.Parts[0].FunctionCall != contactsRequests[0] {
+		t.Errorf("second run ended on %+v, want the contacts request", last.Content)
+	}
+	if n := len(llm.Requests); n != 1 {
+		t.Errorf("model called %d times by the second run's end, want 1: it stops at the contacts request", n)
+	}
+
+	third, err := testutil.CollectEvents(r.RunContent(t, "s1", answer(t, contactsRequests[0], "c0ntacts")))
+	if err != nil {
+		t.Fatalf("third run failed: %v", err)
+	}
+
+	if got := third[len(third)-1].Content.Parts[0].Text; got != "You have standup with Ann." {
+		t.Errorf("third run ended with %q, want the model's answer", got)
+	}
+	var codes []string
+	for _, form := range endpoint.seen() {
+		codes = append(codes, form.Get("code"))
+	}
+	if diff := cmp.Diff([]string{"c0de", "c0ntacts"}, codes); diff != "" {
+		t.Errorf("codes redeemed mismatch, want each once (-want +got):\n%s", diff)
 	}
 }
 

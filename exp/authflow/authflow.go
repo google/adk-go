@@ -74,6 +74,17 @@ func RequestCredential(ctx agent.Context, cfg *toolauth.Config) error {
 // [RequestCredential] produced for cfg, or nil when there is none yet. An
 // OAuth2 authorization code is exchanged for tokens here, with cfg's client
 // secret, and the tokens replace the code in session state.
+//
+// ADK keeps the answer under a "temp:" key, so it lasts for the rest of the
+// invocation. A tool that needs the credential in a later invocation, such as
+// one that goes on to ask for a second credential, stores it in state under
+// cfg's key ([toolauth.Config.Key]), where GetAuthResponse looks next.
+//
+// The exchanged tokens are written through ctx's state, so they also appear
+// in the state delta of the tool call's response event, where plugins and code
+// reading the runner's events see them. No session service persists "temp:"
+// keys, and the REST server strips credential secrets from the events it
+// returns.
 func GetAuthResponse(ctx agent.Context, cfg *toolauth.Config) (*toolauth.Credential, error) {
 	return authhandler.GetAuthResponse(ctx, ctx.State(), cfg)
 }

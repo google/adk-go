@@ -56,6 +56,7 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 			yield(nil, err)
 			return
 		}
+		dropResumedRequests(events, agentName, requests)
 		// Like adk-python, the answer goes into the session's state directly
 		// rather than through an event, so it is never persisted or streamed.
 		authorized, err := storeCredentialAnswers(ctx.Session().State(), requests, answers)
@@ -63,7 +64,7 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 			yield(nil, err)
 			return
 		}
-		calls := callsToRerun(events, agentName, toolCallsToResume(events, requests, authorized))
+		calls := callsToRerun(events, agentName, toolCallsToResume(events, agentName, requests, authorized))
 		if len(calls) == 0 {
 			return
 		}
@@ -73,14 +74,19 @@ func authPreprocessor(ctx agent.InvocationContext, req *model.LLMRequest, f *Flo
 		}
 		parts := make([]*genai.Part, len(calls))
 		for i, call := range calls {
-			// A copy, so running the tool cannot change the stored event.
-			call := *call
-			parts[i] = &genai.Part{FunctionCall: &call}
+			parts[i] = &genai.Part{FunctionCall: call}
 		}
 		ev, err := f.handleFunctionCalls(ctx, tools, &model.LLMResponse{
 			Content: &genai.Content{Parts: parts, Role: genai.RoleModel},
 		}, nil, nil)
-		yield(ev, err)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if ev != nil {
+			// A tool that runs again can ask for another credential.
+			yieldWithAuthRequest(ctx, ev, yield)
+		}
 	}
 }
 
@@ -130,6 +136,32 @@ func issuedCredentialRequests(events []*session.Event, agentName string, answers
 	return requests, nil
 }
 
+// dropResumedRequests deletes from requests the ones an earlier answer already
+// resumed: agentName responded to the call a request names after the first
+// answer to the request. Answering such a request again then neither stores a
+// credential nor runs the tool. adk-python resumes the call again, which
+// redeems a code twice and repeats the tool's side effects. A request whose
+// first answer failed before the tool ran stays open, and so does one whose
+// call only another party answered.
+func dropResumedRequests(events []*session.Event, agentName string, requests map[string]*toolauth.ToolArguments) {
+	firstAnswer := map[string]int{}
+	for i, ev := range events {
+		for _, resp := range utils.FunctionResponses(ev.Content) {
+			if _, seen := firstAnswer[resp.ID]; !seen {
+				firstAnswer[resp.ID] = i
+			}
+		}
+	}
+	for id, req := range requests {
+		for _, ev := range events[firstAnswer[id]+1:] {
+			if ev.Author == agentName && slices.ContainsFunc(utils.FunctionResponses(ev.Content), func(r *genai.FunctionResponse) bool { return r.ID == req.FunctionCallID }) {
+				delete(requests, id)
+				break
+			}
+		}
+	}
+}
+
 // storeCredentialAnswers stores each answer to a request in requests and
 // returns the credential keys it stored.
 func storeCredentialAnswers(state session.State, requests map[string]*toolauth.ToolArguments, answers map[string]map[string]any) (map[string]bool, error) {
@@ -150,15 +182,32 @@ func storeCredentialAnswers(state session.State, requests map[string]*toolauth.T
 
 // toolCallsToResume returns the IDs of the tool calls to run again: the ones
 // the answered requests name, and the ones that asked for a credential the
-// answers provided, since only the first call per credential key was named.
-func toolCallsToResume(events []*session.Event, requests map[string]*toolauth.ToolArguments, authorized map[string]bool) map[string]bool {
+// answers provided in the same tool response as a named call, since only the
+// first call per credential key was named.
+//
+// Only agentName's tool responses count, and a call is resumed only while its
+// latest response still asks for a credential: a call that never asked, or ran
+// to an answer after it asked, has nothing to resume. adk-python resumes every
+// call that shared an answered key in such a response, so a call that already
+// finished runs again and repeats its side effects. The REST server accepts a
+// new session's events from the client, calls and requests in this agent's
+// name included, but never the credential requests a tool records.
+func toolCallsToResume(events []*session.Event, agentName string, requests map[string]*toolauth.ToolArguments, authorized map[string]bool) map[string]bool {
 	named := map[string]bool{}
 	for _, req := range requests {
 		named[req.FunctionCallID] = true
 	}
 	resume := maps.Clone(named)
+	asking := map[string]bool{}
 	for _, ev := range events {
+		if ev.Author != agentName {
+			continue
+		}
 		pending := ev.Actions.RequestedAuthConfigs
+		for _, resp := range utils.FunctionResponses(ev.Content) {
+			_, asked := pending[resp.ID]
+			asking[resp.ID] = asked
+		}
 		if !slices.ContainsFunc(slices.Collect(maps.Keys(pending)), func(id string) bool { return named[id] }) {
 			continue
 		}
@@ -168,6 +217,7 @@ func toolCallsToResume(events []*session.Event, requests map[string]*toolauth.To
 			}
 		}
 	}
+	maps.DeleteFunc(resume, func(id string, _ bool) bool { return !asking[id] })
 	return resume
 }
 

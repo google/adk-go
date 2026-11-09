@@ -101,12 +101,9 @@ func generateRequestConfirmationEvent(
 // generateAuthEvent returns the event that asks the client for the credentials
 // the tools in functionResponseEvent requested, or nil if they requested none.
 // It makes one adk_request_credential call per credential key, for the first
-// tool in the model's call order that asked for it.
-func generateAuthEvent(
-	ctx agent.InvocationContext,
-	functionCallEvent *session.Event,
-	functionResponseEvent *session.Event,
-) (*session.Event, error) {
+// tool that asked for it in the order of the responses, which is the order the
+// calls were made in.
+func generateAuthEvent(ctx agent.InvocationContext, functionResponseEvent *session.Event) (*session.Event, error) {
 	requests := functionResponseEvent.Actions.RequestedAuthConfigs
 	if len(requests) == 0 {
 		return nil, nil
@@ -114,8 +111,8 @@ func generateAuthEvent(
 	var parts []*genai.Part
 	var longRunningToolIDs []string
 	seenKeys := map[string]bool{}
-	for _, fc := range utils.FunctionCalls(functionCallEvent.Content) {
-		cfg, ok := requests[fc.ID]
+	for _, fr := range utils.FunctionResponses(functionResponseEvent.Content) {
+		cfg, ok := requests[fr.ID]
 		if !ok || seenKeys[cfg.CredentialKey] {
 			continue
 		}
@@ -123,7 +120,7 @@ func generateAuthEvent(
 		if cfg.CredentialKey != "" {
 			seenKeys[cfg.CredentialKey] = true
 		}
-		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: fc.ID, AuthConfig: cfg})
+		args, err := converters.ToMapStructure(toolauth.ToolArguments{FunctionCallID: fr.ID, AuthConfig: cfg})
 		if err != nil {
 			return nil, fmt.Errorf("encode %s args: %w", toolauth.RequestCredentialFunctionCallName, err)
 		}
@@ -145,4 +142,26 @@ func generateAuthEvent(
 	ev.LLMResponse = model.LLMResponse{Content: &genai.Content{Parts: parts, Role: genai.RoleUser}}
 	ev.LongRunningToolIDs = longRunningToolIDs
 	return ev, nil
+}
+
+// yieldWithAuthRequest yields ev and then, when tools in ev asked for
+// credentials, the adk_request_credential call for them. It reports whether the
+// caller should go on.
+//
+// As in adk-python, asking the user to sign in ends the invocation, so the flow
+// calls neither its model nor a transfer target again.
+func yieldWithAuthRequest(ctx agent.InvocationContext, ev *session.Event, yield func(*session.Event, error) bool) bool {
+	authEvent, err := generateAuthEvent(ctx, ev)
+	if err != nil {
+		yield(nil, err)
+		return false
+	}
+	if !yield(ev, nil) {
+		return false
+	}
+	if authEvent == nil {
+		return true
+	}
+	ctx.EndInvocation()
+	return yield(authEvent, nil)
 }

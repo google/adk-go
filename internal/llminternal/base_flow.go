@@ -949,26 +949,12 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			}
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
-			authEvent, err := generateAuthEvent(ctx, modelResponseEvent, ev)
-			if err != nil {
-				yield(nil, err)
-				return
-			}
 
 			// Yield function responses before confirmation and credential requests
 			// so consumers that pause for the user still persist completed tool
 			// results.
-			if !yield(ev, nil) {
+			if !yieldWithAuthRequest(ctx, ev, yield) {
 				return
-			}
-
-			if authEvent != nil {
-				// As in adk-python, nothing else runs in this invocation once the
-				// user is asked to sign in.
-				ctx.EndInvocation()
-				if !yield(authEvent, nil) {
-					return
-				}
 			}
 
 			if toolConfirmationEvent != nil {
@@ -1028,8 +1014,8 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 					yield(nil, err)
 					return
 				}
-				if ev != nil {
-					yield(ev, nil)
+				if ev != nil && !yield(ev, nil) {
+					return
 				}
 			}
 		}
