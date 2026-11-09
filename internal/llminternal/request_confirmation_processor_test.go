@@ -1165,12 +1165,17 @@ func (t *chainedConfirmationTool) IsLongRunning() bool { return false }
 func (t *chainedConfirmationTool) Declaration() *genai.FunctionDeclaration {
 	return &genai.FunctionDeclaration{Name: t.name}
 }
+
 func (t *chainedConfirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
 	if ctx.ToolConfirmation() == nil || !ctx.ToolConfirmation().Confirmed {
-		ctx.RequestConfirmation("Confirm step 1", nil)
+		if err := ctx.RequestConfirmation("Confirm step 1", nil); err != nil {
+			return nil, err
+		}
 		return map[string]any{"status": "awaiting step 1 confirmation"}, nil
 	}
-	ctx.RequestConfirmation("Confirm step 2", nil)
+	if err := ctx.RequestConfirmation("Confirm step 2", nil); err != nil {
+		return nil, err
+	}
 	return map[string]any{"status": "step 1 completed, awaiting step 2 confirmation"}, nil
 }
 
