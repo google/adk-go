@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"io"
 	"iter"
+	"maps"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -32,13 +34,23 @@ import (
 )
 
 func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
+	type details struct {
+		DisplayName string
+	}
+	type Details struct {
+		DisplayName string
+	}
 	// Decode the wire names independently of the session types' camelCase tags.
 	type inputRequest struct {
 		InterruptID string `json:"interrupt_id"`
 		Message     string `json:"message"`
 	}
 	type wireEvent struct {
+		ID           string         `json:"id"`
+		Author       string         `json:"author"`
 		Content      *genai.Content `json:"content"`
+		Output       map[string]any `json:"output"`
+		TurnComplete bool           `json:"turn_complete"`
 		ErrorCode    string         `json:"error_code"`
 		ErrorMessage string         `json:"error_message"`
 		Actions      struct {
@@ -49,9 +61,11 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 	for _, methodName := range []string{"async_stream_query", "streaming_agent_run_with_events"} {
 		t.Run(methodName, func(t *testing.T) {
 			for _, tc := range []struct {
-				name  string
-				event session.Event
+				name       string
+				event      session.Event
+				wantOutput map[string]any
 			}{
+				{name: "metadata_only"},
 				{
 					name: "model_error",
 					event: session.Event{LLMResponse: model.LLMResponse{
@@ -70,6 +84,31 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 						InterruptID: "approval-1", Message: "Review the synthetic result",
 					}},
 				},
+				{
+					name:  "turn_complete",
+					event: session.Event{LLMResponse: model.LLMResponse{TurnComplete: true}},
+				},
+				{
+					name: "output_embedded_time",
+					event: session.Event{Output: struct {
+						time.Time
+						DisplayName string
+					}{time.Unix(1, 0), "synthetic output"}},
+					wantOutput: map[string]any{"time": float64(1), "display_name": "synthetic output"},
+				},
+				{
+					name:       "output_unexported_embed",
+					event:      session.Event{Output: struct{ details }{details{"synthetic output"}}},
+					wantOutput: map[string]any{"display_name": "synthetic output"},
+				},
+				{
+					name: "output_nil_embed",
+					event: session.Event{Output: struct {
+						*Details
+						Note string
+					}{Note: "synthetic output"}},
+					wantOutput: map[string]any{"note": "synthetic output"},
+				},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					a, err := agent.New(agent.Config{
@@ -85,7 +124,13 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 									case 1:
 										event.LLMResponse = tc.event.LLMResponse
 										event.Actions = tc.event.Actions
-										event.RequestedInput = tc.event.RequestedInput
+										event.Actions.StateDelta = maps.Clone(tc.event.Actions.StateDelta)
+										if tc.event.RequestedInput != nil {
+											request := *tc.event.RequestedInput
+											event.RequestedInput = &request
+										}
+										event.Output = tc.event.Output
+										event.ID = "contentless-event"
 									case 2:
 										event.Content = genai.NewContentFromText("after", genai.RoleModel)
 									}
@@ -158,6 +203,15 @@ func TestAgentEngineStreamsEventsWithoutContent(t *testing.T) {
 						}
 						if got.Content != nil {
 							t.Fatal("event 1 has content; want the contentless event between the text events")
+						}
+						if got.ID != "contentless-event" || got.Author != "test_agent" {
+							t.Error("contentless event identity was not preserved")
+						}
+						if !cmp.Equal(got.Output, tc.wantOutput) {
+							t.Error("event output was not preserved")
+						}
+						if got.TurnComplete != tc.event.TurnComplete {
+							t.Error("event completion flag was not preserved")
 						}
 						if got.ErrorCode != tc.event.ErrorCode || got.ErrorMessage != tc.event.ErrorMessage {
 							t.Error("event error fields were not preserved")
