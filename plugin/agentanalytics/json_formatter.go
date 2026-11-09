@@ -55,6 +55,14 @@ const (
 	maxContainerAlloc = 1024
 )
 
+// maxFunctionNameSummaryLength bounds, in runes, the function name that a
+// response summary shows for a function call or response part.
+const maxFunctionNameSummaryLength = 256
+
+// responseSummarySlack is the number of runes by which a response summary may
+// exceed the maximum content length, which bounds each of its pieces.
+const responseSummarySlack = 4096
+
 type nodeBudget struct {
 	remaining int
 }
@@ -461,9 +469,13 @@ func newResponseMessageSummary(content *genai.Content, contentOrd, maxLength int
 			piece = "text: '" + text + "'"
 			isText = true
 		case part.FunctionCall != nil:
-			piece = "call: " + part.FunctionCall.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionCall.Name, maxFunctionNameSummaryLength, redact)
+			piece = "call: " + name
 		case part.FunctionResponse != nil:
-			piece = "resp: " + part.FunctionResponse.Name
+			var name string
+			name, t = sanitizeAndTruncateText(part.FunctionResponse.Name, maxFunctionNameSummaryLength, redact)
+			piece = "resp: " + name
 		case part.ExecutableCode != nil:
 			var code string
 			code, t = sanitizeAndTruncateText(part.ExecutableCode.Code, maxLength, redact)
@@ -498,8 +510,12 @@ func (m *messageSummary) render(maxLength int) (string, bool) {
 		truncated = truncated || p.truncated
 	}
 	joined := strings.Join(active, " | ")
-	if m.isResponse {
-		return joined, truncated
+	if m.isResponse && maxLength >= 0 {
+		// Each piece is already bounded by maxLength, so the slack only
+		// leaves room for the "text: '...'" wrapper and the separators of a
+		// few short pieces. It keeps a response with many large parts from
+		// growing to a multiple of maxLength.
+		maxLength += responseSummarySlack
 	}
 	summary, t := truncateString(joined, maxLength)
 	return summary, truncated || t

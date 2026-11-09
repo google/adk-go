@@ -25,11 +25,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 )
 
 func TestFormatContentParts(t *testing.T) {
@@ -3280,6 +3282,262 @@ func TestContentSummaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+// responseTextParts returns n text parts whose text is r repeated size times.
+func responseTextParts(n, size int, r string) []*genai.Part {
+	parts := make([]*genai.Part, 0, n)
+	for range n {
+		parts = append(parts, &genai.Part{Text: strings.Repeat(r, size)})
+	}
+	return parts
+}
+
+// responseTextPiece is how a response summary shows a text part.
+func responseTextPiece(text string) string { return "text: '" + text + "'" }
+
+// joinedResponsePieces joins n copies of piece as a response summary does.
+func joinedResponsePieces(piece string, n int) string {
+	pieces := make([]string, n)
+	for i := range pieces {
+		pieces[i] = piece
+	}
+	return strings.Join(pieces, " | ")
+}
+
+// responseRowsOf writes content as an LLM_RESPONSE and as an AGENT_RESPONSE
+// through a plugin whose MaxContentLen is maxLength, and returns the two
+// rows by event type.
+func responseRowsOf(t *testing.T, content *genai.Content, maxLength int) map[string]map[string]any {
+	t.Helper()
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = maxLength })
+	var errs callbackErrors
+	errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil))
+	errs.add(p.OnEventCallback()(mCtx, &session.Event{
+		Author:      "test-agent",
+		LLMResponse: model.LLMResponse{Content: content},
+	}))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	return map[string]map[string]any{
+		EventLLMResponse:   onlyRowOfType(t, rows, EventLLMResponse),
+		EventAgentResponse: onlyRowOfType(t, rows, EventAgentResponse),
+	}
+}
+
+func TestResponseMessageSummaryLengthCap(t *testing.T) {
+	// Two text parts of fullLength runes, neither cut by the per-part limit
+	// when it is fullLength, join to a summary of exactly
+	// fullLength + responseSummarySlack runes.
+	const fullLength = responseSummarySlack - 2*len("text: ''") - len(" | ")
+	fullPiece := responseTextPiece(strings.Repeat("a", fullLength))
+	twoFull := joinedResponsePieces(fullPiece, 2)
+	fullParts := responseTextParts(2, fullLength, "a")
+
+	smallPiece := responseTextPiece(strings.Repeat("a", 100))
+	fortySmall := joinedResponsePieces(smallPiece, 40)
+
+	hugePiece := responseTextPiece(strings.Repeat("a", 5000))
+
+	const wideLength = 4000
+	widePiece := responseTextPiece(strings.Repeat("é", wideLength))
+	threeWide := joinedResponsePieces(widePiece, 3)
+
+	tests := []struct {
+		name      string
+		parts     []*genai.Part
+		maxLength int
+		want      string
+		wantTrunc bool
+	}{
+		{
+			name:      "a part cut by the part limit is not cut again",
+			parts:     responseTextParts(1, 30, "a"),
+			maxLength: 10,
+			want:      responseTextPiece(strings.Repeat("a", 10) + truncationSuffix),
+			wantTrunc: true,
+		},
+		{
+			name:      "parts that fill the cap exactly are kept whole",
+			parts:     fullParts,
+			maxLength: fullLength,
+			want:      twoFull,
+		},
+		{
+			name:      "a part beyond the cap is cut away",
+			parts:     append(responseTextParts(2, fullLength, "a"), &genai.Part{FunctionCall: &genai.FunctionCall{Name: "f"}}),
+			maxLength: fullLength,
+			want:      twoFull + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "many small parts are cut at the cap",
+			parts:     responseTextParts(40, 100, "a"),
+			maxLength: 100,
+			want:      string([]rune(fortySmall)[:100+responseSummarySlack]) + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "multi-byte runes are cut on a rune boundary",
+			parts:     responseTextParts(3, wideLength, "é"),
+			maxLength: wideLength,
+			want:      string([]rune(threeWide)[:wideLength+responseSummarySlack]) + truncationSuffix,
+			wantTrunc: true,
+		},
+		{
+			name:      "a negative maxLength leaves the summary uncapped",
+			parts:     responseTextParts(2, 5000, "a"),
+			maxLength: -1,
+			want:      joinedResponsePieces(hugePiece, 2),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := formatResponseContent(&genai.Content{Parts: tt.parts}, tt.maxLength, true)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("formatResponseContent(%d parts, %d) = (%d runes, %v), want (%d runes, %v)\ngot:  %.80q...\nwant: %.80q...",
+					len(tt.parts), tt.maxLength, utf8.RuneCountInString(got), truncated, utf8.RuneCountInString(tt.want), tt.wantTrunc, got, tt.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("formatResponseContent returned invalid UTF-8")
+			}
+		})
+	}
+
+	t.Run("a summary never exceeds maxLength plus the slack", func(t *testing.T) {
+		for _, maxLength := range []int{0, 1, 7, 100, responseSummarySlack, 5000} {
+			for _, n := range []int{1, 2, 3, 10, 50} {
+				for _, size := range []int{max(1, maxLength/2), max(1, maxLength), 3*maxLength + 1} {
+					got, truncated := formatResponseContent(&genai.Content{Parts: responseTextParts(n, size, "a")}, maxLength, true)
+					pieceRunes := len("text: ''") + min(size, maxLength)
+					if size > maxLength {
+						pieceRunes += len(truncationSuffix)
+					}
+					wantRunes := n*pieceRunes + (n-1)*len(" | ")
+					wantTrunc := size > maxLength
+					if limit := maxLength + responseSummarySlack; wantRunes > limit {
+						wantRunes = limit + len(truncationSuffix)
+						wantTrunc = true
+					}
+					if gotRunes := utf8.RuneCountInString(got); gotRunes != wantRunes || truncated != wantTrunc {
+						t.Errorf("maxLength %d, %d parts of %d runes: got (%d runes, %v), want (%d runes, %v)",
+							maxLength, n, size, gotRunes, truncated, wantRunes, wantTrunc)
+					}
+				}
+			}
+		}
+	})
+
+	// The LLM_RESPONSE row writes the rendered summary as it is, so the cap
+	// is what bounds it. The AGENT_RESPONSE row carries the same summary
+	// inside a content map that the content column's sanitizer cuts to
+	// maxLength, as it cuts every string, which is tighter than the cap.
+	t.Run("LLM_RESPONSE and AGENT_RESPONSE rows beyond the cap are cut", func(t *testing.T) {
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(40, 100, "a")}, 100)
+		wants := map[string]string{
+			EventLLMResponse:   string([]rune(fortySmall)[:100+responseSummarySlack]) + truncationSuffix,
+			EventAgentResponse: string([]rune(fortySmall)[:100]) + truncationSuffix,
+		}
+		for eventType, want := range wants {
+			row := rows[eventType]
+			if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+				t.Errorf("%s content.response has %d runes, want %d:\n%.80q...", eventType, utf8.RuneCountInString(got), utf8.RuneCountInString(want), got)
+			}
+			if got := row["is_truncated"]; got != true {
+				t.Errorf("%s is_truncated = %v, want true", eventType, got)
+			}
+		}
+	})
+
+	t.Run("LLM_RESPONSE row within the cap is kept whole", func(t *testing.T) {
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(3, 100, "a")}, 100)
+		row := rows[EventLLMResponse]
+		want := joinedResponsePieces(smallPiece, 3)
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", got)
+		}
+		row = rows[EventAgentResponse]
+		want = string([]rune(want)[:100]) + truncationSuffix
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+}
+
+func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
+	atCap := strings.Repeat("n", maxFunctionNameSummaryLength)
+	overCap := strings.Repeat("n", maxFunctionNameSummaryLength+1)
+	wideAtCap := strings.Repeat("ñ", maxFunctionNameSummaryLength)
+	const secret = "SYNTHETIC_SECRET_0123456789"
+	credential := "lookup api_key=" + secret
+	call := func(name string) []*genai.Part {
+		return []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name}}}
+	}
+	resp := func(name string) []*genai.Part {
+		return []*genai.Part{{FunctionResponse: &genai.FunctionResponse{Name: name}}}
+	}
+
+	tests := []struct {
+		name      string
+		parts     []*genai.Part
+		maxLength int
+		noRedact  bool
+		want      string
+		wantTrunc bool
+	}{
+		{name: "call name at the cap is kept", parts: call(atCap), maxLength: 100000, want: "call: " + atCap},
+		{name: "response name at the cap is kept", parts: resp(atCap), maxLength: 100000, want: "resp: " + atCap},
+		{name: "call name over the cap is cut", parts: call(overCap), maxLength: 100000, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name over the cap is cut", parts: resp(overCap), maxLength: 100000, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "multi-byte call name is cut by runes", parts: call(wideAtCap + "ñ"), maxLength: 100000, want: "call: " + wideAtCap + truncationSuffix, wantTrunc: true},
+		{name: "name cap does not follow a smaller maxLength", parts: call(overCap), maxLength: 10, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "name cap holds under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "credential in a call name is redacted", parts: call(credential), maxLength: 100000, want: "call: lookup api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a response name is redacted", parts: resp(credential), maxLength: 100000, want: "resp: lookup api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a call name is kept when redaction is off", parts: call(credential), maxLength: 100000, noRedact: true, want: "call: " + credential},
+		{
+			name:      "cut names keep their place among the other parts",
+			parts:     []*genai.Part{{Text: "hi"}, {FunctionCall: &genai.FunctionCall{Name: overCap}}, {FunctionResponse: &genai.FunctionResponse{Name: overCap}}},
+			maxLength: 100000,
+			want:      "text: 'hi' | call: " + atCap + truncationSuffix + " | resp: " + atCap + truncationSuffix,
+			wantTrunc: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, truncated := formatResponseContent(&genai.Content{Parts: tt.parts}, tt.maxLength, !tt.noRedact)
+			if got != tt.want || truncated != tt.wantTrunc {
+				t.Errorf("got (%q, %v), want (%q, %v)", got, truncated, tt.want, tt.wantTrunc)
+			}
+			if !tt.noRedact && strings.Contains(got, secret) {
+				t.Errorf("summary %q leaked the secret", got)
+			}
+		})
+	}
+
+	t.Run("LLM_RESPONSE row cuts a long call name", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.MaxContentLen = 100000 })
+		content := &genai.Content{Role: "model", Parts: append(call(overCap), &genai.Part{Text: "done"})}
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: content}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		want := "call: " + atCap + truncationSuffix + " | text: 'done'"
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, want)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
 }
 
 func TestFormatContentParts_RedactionAndPreservation(t *testing.T) {
