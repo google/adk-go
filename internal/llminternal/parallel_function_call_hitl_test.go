@@ -550,3 +550,167 @@ func TestConfirmedToolWithSkipSummarizationEndsTheTurn(t *testing.T) {
 		t.Errorf("turn 2 event IsFinalResponse() = false, want true")
 	}
 }
+
+// TestResumedToolRequestsSecondConfirmation verifies that when a resumed tool
+// calls ctx.RequestConfirmation a second time, ADK emits a new
+// adk_request_confirmation call (preserving the original ThoughtSignature) and
+// pauses until the client answers that second confirmation.
+func TestResumedToolRequestsSecondConfirmation(t *testing.T) {
+	wantSig := []byte("sig-book-room")
+	step := 0
+	bookRoom, err := functiontool.New(functiontool.Config{
+		Name:        "book_room",
+		Description: "Books a room and notifies the team.",
+	}, func(ctx agent.Context, _ map[string]any) (map[string]any, error) {
+		c := ctx.ToolConfirmation()
+		if c == nil {
+			return map[string]any{"status": "waiting for approval"}, ctx.RequestConfirmation("Book room A?", nil)
+		}
+		if !c.Confirmed {
+			return map[string]any{"status": "rejected"}, nil
+		}
+		step++
+		if step == 1 {
+			return map[string]any{"booking": "done", "notify": "waiting for approval"}, ctx.RequestConfirmation("Notify the team?", nil)
+		}
+		return map[string]any{"booking": "done", "notify": "sent"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	modelCalls := 0
+	m := &stepByStepModel{
+		generate: func(_ context.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			modelCalls++
+			if modelCalls == 1 {
+				return &model.LLMResponse{
+					Content: &genai.Content{
+						Role: genai.RoleModel,
+						Parts: []*genai.Part{{
+							ThoughtSignature: wantSig,
+							FunctionCall: &genai.FunctionCall{
+								ID:   "call-1",
+								Name: "book_room",
+								Args: map[string]any{"room": "A"},
+							},
+						}},
+					},
+				}, nil
+			}
+			return &model.LLMResponse{
+				Content: genai.NewContentFromText("Done.", genai.RoleModel),
+			}, nil
+		},
+	}
+
+	a, err := llmagent.New(llmagent.Config{
+		Name:  "assistant",
+		Model: m,
+		Tools: []tool.Tool{bookRoom},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.InMemoryService()
+	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "testApp", UserID: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{AppName: "testApp", Agent: a, SessionService: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runTurn := func(msg *genai.Content) []*session.Event {
+		t.Helper()
+		var events []*session.Event
+		for ev, err := range r.Run(t.Context(), "user", created.Session.ID(), msg, agent.RunConfig{}) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, ev)
+		}
+		return events
+	}
+
+	findConfirmationPart := func(events []*session.Event) *genai.Part {
+		for _, ev := range events {
+			if ev.Content == nil {
+				continue
+			}
+			for _, p := range ev.Content.Parts {
+				if p.FunctionCall != nil && p.FunctionCall.Name == toolconfirmation.FunctionCallName {
+					return p
+				}
+			}
+		}
+		return nil
+	}
+
+	// Turn 1: initial call asks for "Book room A?".
+	firstPart := findConfirmationPart(runTurn(genai.NewContentFromText("Book room A", genai.RoleUser)))
+	if firstPart == nil {
+		t.Fatal("turn 1: no confirmation request emitted for booking")
+	}
+
+	// Turn 2: approving the first confirmation resumes book_room, which asks
+	// for "Notify the team?". A second adk_request_confirmation call must be
+	// emitted and the model must not be called yet.
+	turn2Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       firstPart.FunctionCall.ID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			},
+		}},
+	})
+	secondPart := findConfirmationPart(turn2Events)
+	if secondPart == nil {
+		t.Fatal("turn 2: resumed tool asked for a second confirmation, but no adk_request_confirmation call was emitted")
+	}
+	if diff := cmp.Diff(wantSig, secondPart.ThoughtSignature); diff != "" {
+		t.Errorf("turn 2 confirmation ThoughtSignature diff (-want +got):\n%s", diff)
+	}
+	if modelCalls != 1 {
+		t.Errorf("modelCalls after turn 2 = %d, want 1", modelCalls)
+	}
+
+	// Turn 3: approving the second confirmation finishes the tool and lets the
+	// model summarize.
+	turn3Events := runTurn(&genai.Content{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{{
+			FunctionResponse: &genai.FunctionResponse{
+				ID:       secondPart.FunctionCall.ID,
+				Name:     toolconfirmation.FunctionCallName,
+				Response: map[string]any{"confirmed": true},
+			},
+		}},
+	})
+	if modelCalls != 2 {
+		t.Errorf("modelCalls after turn 3 = %d, want 2", modelCalls)
+	}
+	if len(turn3Events) != 2 {
+		t.Fatalf("turn 3 yielded %d events, want 2 (tool response + final model answer)", len(turn3Events))
+	}
+	if got := turn3Events[1].Content.Parts[0].Text; got != "Done." {
+		t.Errorf("turn 3 final text = %q, want %q", got, "Done.")
+	}
+}
+
+type stepByStepModel struct {
+	model.LLM
+	generate func(context.Context, *model.LLMRequest) (*model.LLMResponse, error)
+}
+
+func (m *stepByStepModel) Name() string { return "step-by-step-model" }
+
+func (m *stepByStepModel) GenerateContent(ctx context.Context, req *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		resp, err := m.generate(ctx, req)
+		yield(resp, err)
+	}
+}

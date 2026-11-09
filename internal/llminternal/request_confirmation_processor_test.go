@@ -1154,3 +1154,120 @@ func TestRequestConfirmationFirstApprovalPlaceholderAfterRequest(t *testing.T) {
 		t.Errorf("first approval did not dispatch %q when the placeholder response follows the request", callID)
 	}
 }
+
+type chainedConfirmationTool struct {
+	name string
+}
+
+func (t *chainedConfirmationTool) Name() string { return t.name }
+func (t *chainedConfirmationTool) Description() string {
+	return "requests a second confirmation on resume"
+}
+func (t *chainedConfirmationTool) IsLongRunning() bool { return false }
+func (t *chainedConfirmationTool) Declaration() *genai.FunctionDeclaration {
+	return &genai.FunctionDeclaration{Name: t.name}
+}
+
+func (t *chainedConfirmationTool) Run(ctx agent.Context, args any) (map[string]any, error) {
+	if err := ctx.RequestConfirmation("Notify the team?", map[string]any{"step": 2}); err != nil {
+		return nil, err
+	}
+	return map[string]any{"booking": "done", "notify": "waiting for approval"}, nil
+}
+
+func TestRequestConfirmationResumedToolRequestsSecondConfirmation(t *testing.T) {
+	const (
+		callID         = "call-1"
+		confirmationID = "conf-1"
+	)
+	wantSig := []byte("sig-from-model")
+
+	tools := []tool.Tool{&chainedConfirmationTool{name: mockToolName}}
+	agnt, err := llmagent.New(llmagent.Config{
+		Name:  "testAgent",
+		Model: &testModel{},
+		Tools: tools,
+	})
+	if err != nil {
+		t.Fatalf("error creating llmagent: %v", err)
+	}
+
+	events := []*session.Event{
+		{
+			Author: "testAgent",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{
+						ThoughtSignature: wantSig,
+						FunctionCall: &genai.FunctionCall{
+							Name: toolconfirmation.FunctionCallName,
+							ID:   confirmationID,
+							Args: map[string]any{
+								"originalFunctionCall": map[string]any{
+									"name": mockToolName,
+									"args": map[string]any{"room": "A"},
+									"id":   callID,
+								},
+								"toolConfirmation": toolconfirmation.ToolConfirmation{
+									Hint: "Book room A?",
+								},
+							},
+						},
+					}},
+				},
+			},
+		},
+		{
+			Author: "user",
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: genai.RoleUser,
+					Parts: []*genai.Part{{
+						FunctionResponse: &genai.FunctionResponse{
+							Name:     toolconfirmation.FunctionCallName,
+							ID:       confirmationID,
+							Response: map[string]any{"confirmed": true},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	ictx := createInvocationContext(t, agnt, &fakeSession{events: events})
+	var gotEvents []*session.Event
+	for ev, err := range llminternal.RequestConfirmationRequestProcessor(ictx, &model.LLMRequest{}, &llminternal.Flow{Tools: tools}) {
+		if err != nil {
+			t.Fatalf("RequestConfirmationRequestProcessor() unexpected error: %v", err)
+		}
+		gotEvents = append(gotEvents, ev)
+	}
+
+	if len(gotEvents) != 2 {
+		t.Fatalf("RequestConfirmationRequestProcessor() got %d events, want 2 (function response and second confirmation request)", len(gotEvents))
+	}
+
+	respEv := gotEvents[0]
+	if !respEv.Actions.SkipSummarization {
+		t.Errorf("function response SkipSummarization = false, want true")
+	}
+	if got := respEv.Actions.RequestedToolConfirmations[callID].Hint; got != "Notify the team?" {
+		t.Errorf("RequestedToolConfirmations[%q].Hint = %q, want %q", callID, got, "Notify the team?")
+	}
+
+	confEv := gotEvents[1]
+	if confEv.Content == nil || len(confEv.Content.Parts) != 1 || confEv.Content.Parts[0].FunctionCall == nil {
+		t.Fatalf("second confirmation event missing function call part: %+v", confEv)
+	}
+	part := confEv.Content.Parts[0]
+	if part.FunctionCall.Name != toolconfirmation.FunctionCallName {
+		t.Errorf("confirmation call name = %q, want %q", part.FunctionCall.Name, toolconfirmation.FunctionCallName)
+	}
+	if diff := cmp.Diff(wantSig, part.ThoughtSignature); diff != "" {
+		t.Errorf("confirmation call ThoughtSignature diff (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{part.FunctionCall.ID}, confEv.LongRunningToolIDs); diff != "" {
+		t.Errorf("LongRunningToolIDs diff (-want +got):\n%s", diff)
+	}
+}
