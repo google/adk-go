@@ -291,12 +291,17 @@ type spanRecord struct {
 	// (see finishedTaskLocked and popTaskAgentSpan).
 	finishedTasks []string
 	// rejectedTasks holds the function call IDs (or finishTaskToolName when
-	// the call ID is empty) of failed or recovered finish_task calls whose
-	// result map still reported "Task completed." (see noteTaskRejected and
-	// popTaskAgentSpan), so that their FunctionResponse events do not end
-	// this or a sibling task activation when no newer matching finish_task
-	// completed cleanly.
-	rejectedTasks []string
+	// the call ID is empty) and sequence numbers of failed or recovered
+	// finish_task calls whose result map still reported "Task completed."
+	// (see noteTaskRejected and popTaskAgentSpan), so that their
+	// FunctionResponse events do not end this or a sibling task activation when
+	// no newer matching finish_task completed cleanly.
+	rejectedTasks []rejectedTaskCall
+	// settledTaskCalls holds tool call IDs (or tool names when empty) of open
+	// task-mode tool calls whose AfterToolCallback was skipped and whose
+	// FunctionResponse completeResponse just cleared from inv.toolSpans, so
+	// popTaskAgentSpan still recognizes the activation's finish_task call.
+	settledTaskCalls []string
 	// nonLLM reports that the agent is a workflow agent, such as a sequential
 	// or loop agent, rather than an llmagent whose sub-agents can transfer to
 	// peers.
@@ -334,6 +339,11 @@ type spanRecord struct {
 	// tool call with an empty FunctionCallID so late handoff preserves only
 	// pointer identities whose spans remain active or error-ended.
 	emptyCallSeq uint64
+	// toolCtxPtr records the callback context pointer identity for tool spans
+	// and error-ended markers so a reused call ID cannot consume a different
+	// callback's completion marker when callbacks are skipped. Left intact by
+	// dropContexts because it holds only a uintptr and reflect.Type.
+	toolCtxPtr emptyToolPtr
 	// handedOver reports, for a model or tool call, that the run left it open
 	// at AfterRun, which handed it over to the late state of its completed
 	// entry (see rememberCompletedLocked), rather than a callback starting it
@@ -2563,6 +2573,11 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 // it runs on another goroutine and wait for that goroutine later. So the span
 // is retired without the activation's InvocationContext being read and
 // without its run being taken to be over (see retireAgentLocked).
+type rejectedTaskCall struct {
+	call string
+	seq  uint64
+}
+
 func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls []string) (span rowSpan, ok bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
@@ -2602,8 +2617,9 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	default:
 		// No open task-mode activation has a matching finishedTasks entry. Scan
 		// newest-first for a matching rejectedTasks entry, skipping older
-		// activations on the same goroutine superseded by a newer open
-		// non-ancestor task-mode activation with no recorded finish_task outcome.
+		// activations superseded by a newer open non-ancestor task-mode
+		// activation with no recorded finish_task outcome that started after the
+		// rejection or currently holds an open finish_task call.
 		isAncestor := func(ancestor, desc *spanRecord) bool {
 			for p := desc.parent; p != nil; p = p.parent {
 				if p == ancestor {
@@ -2612,28 +2628,62 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 			}
 			return false
 		}
-		var newerUnnoted []*spanRecord
-		for j := len(inv.agentStack) - 1; j > 0; j-- {
-			rec := inv.agentStack[j]
-			if !matchesTaskFrame(rec) {
-				continue
-			}
-			superseded := rec.goroutineID != 0 && slices.ContainsFunc(newerUnnoted, func(newer *spanRecord) bool {
-				return newer.goroutineID == rec.goroutineID && !isAncestor(rec, newer)
-			})
-			if !superseded && len(rec.rejectedTasks) > 0 {
-				if idx := slices.IndexFunc(rec.rejectedTasks, func(rej string) bool {
-					return slices.Contains(calls, rej)
-				}); idx >= 0 {
-					rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
-					return rowSpan{}, false
+		hasOpenFinishCall := func(owner *spanRecord) bool {
+			for key, open := range inv.toolSpans {
+				if open.parentSpanID == owner.spanID && (slices.Contains(calls, toolKeyCall(key)) || toolKeyCall(key) == finishTaskToolName) {
+					return true
 				}
 			}
-			if len(rec.finishedTasks) == 0 && len(rec.rejectedTasks) == 0 {
-				newerUnnoted = append(newerUnnoted, rec)
+			return slices.ContainsFunc(owner.settledTaskCalls, func(call string) bool {
+				return slices.Contains(calls, call) || call == finishTaskToolName
+			})
+		}
+		var unnoted []*spanRecord
+		openFinishIdx := -1
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			rec := inv.agentStack[j]
+			if matchesTaskFrame(rec) && len(rec.finishedTasks) == 0 && len(rec.rejectedTasks) == 0 {
+				unnoted = append(unnoted, rec)
+				if openFinishIdx < 0 && hasOpenFinishCall(rec) {
+					openFinishIdx = j
+				}
 			}
 		}
-		i = inv.findAgentForContext(ctx, id.path, id.agentName, id.branch)
+		for j := len(inv.agentStack) - 1; j > 0; j-- {
+			rec := inv.agentStack[j]
+			if !matchesTaskFrame(rec) || len(rec.rejectedTasks) == 0 {
+				continue
+			}
+			if idx := slices.IndexFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
+				if !slices.Contains(calls, rej.call) {
+					return false
+				}
+				superseded := slices.ContainsFunc(unnoted, func(other *spanRecord) bool {
+					return other != rec && !isAncestor(rec, other) && (other.seq > rej.seq || hasOpenFinishCall(other))
+				})
+				return !superseded
+			}); idx >= 0 {
+				rec.rejectedTasks = slices.Delete(rec.rejectedTasks, idx, idx+1)
+				return rowSpan{}, false
+			}
+		}
+		i = -1
+		if act := activationKey(ctx); act != nil {
+			for j := len(inv.agentStack) - 1; j > 0; j-- {
+				r := inv.agentStack[j]
+				if r.kind == spanKindAgent && r.activation == act && r.name == id.agentName && r.branch == id.branch {
+					i = j
+					break
+				}
+			}
+		}
+		if i < 0 {
+			if openFinishIdx >= 0 {
+				i = openFinishIdx
+			} else {
+				i = inv.findAgent(id.path, id.agentName, id.branch)
+			}
+		}
 	}
 	if i < 0 {
 		return rowSpan{}, false
@@ -2647,6 +2697,9 @@ func (tm *traceManager) popTaskAgentSpan(ctx context.Context, id identity, calls
 	}); idx >= 0 {
 		rec.finishedTasks = slices.Delete(rec.finishedTasks, idx, idx+1)
 	}
+	rec.settledTaskCalls = slices.DeleteFunc(rec.settledTaskCalls, func(settled string) bool {
+		return slices.Contains(calls, settled)
+	})
 	if rec.parent != nil && rec.parent.kind == spanKindAgent {
 		inv.touchAgentActivityLocked(rec.parent, now)
 	}
@@ -2712,8 +2765,11 @@ func (tm *traceManager) noteTaskFinished(ctx context.Context, id identity, callI
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
 		rec := inv.agentStack[i]
-		rec.rejectedTasks = slices.DeleteFunc(rec.rejectedTasks, func(rej string) bool {
-			return rej == call
+		rec.rejectedTasks = slices.DeleteFunc(rec.rejectedTasks, func(rej rejectedTaskCall) bool {
+			return rej.call == call
+		})
+		rec.settledTaskCalls = slices.DeleteFunc(rec.settledTaskCalls, func(settled string) bool {
+			return settled == call
 		})
 		rec.finishedTasks = append(rec.finishedTasks, call)
 	}
@@ -2732,7 +2788,14 @@ func (tm *traceManager) noteTaskRejected(ctx context.Context, id identity, callI
 	}
 	defer inv.mu.Unlock()
 	if i := inv.findAgentForContext(ctx, id.path, id.agentName, id.branch); i > 0 {
-		inv.agentStack[i].rejectedTasks = append(inv.agentStack[i].rejectedTasks, call)
+		rec := inv.agentStack[i]
+		rec.settledTaskCalls = slices.DeleteFunc(rec.settledTaskCalls, func(settled string) bool {
+			return settled == call
+		})
+		rec.rejectedTasks = append(rec.rejectedTasks, rejectedTaskCall{
+			call: call,
+			seq:  inv.nextSeqLocked(),
+		})
 	}
 }
 
@@ -3355,6 +3418,11 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	for key, rec := range inv.toolSpans {
 		if rec.parentSpanID == owner.spanID && slices.Contains(calls, toolKeyCall(key)) {
 			delete(inv.toolSpans, key)
+			if owner.taskMode {
+				if call := toolKeyCall(key); call != "" && !slices.Contains(owner.settledTaskCalls, call) {
+					owner.settledTaskCalls = append(owner.settledTaskCalls, call)
+				}
+			}
 		}
 	}
 	inv.syncOpenCallsLocked()
@@ -4919,28 +4987,28 @@ func (tm *traceManager) popLLMSpan(ctx context.Context, id identity, responded b
 // name, disambiguating overlapping empty-ID calls by their callback context and
 // arguments.
 func (tm *traceManager) pushToolCallSpan(ctx context.Context, id identity, callID, toolName string, args map[string]any) rowSpan {
-	return tm.pushToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), callID == "", args)
+	return tm.pushToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), callID == "", true, args)
 }
 
 // pushToolSpan starts the span of a tool call and returns the place of its
 // TOOL_STARTING row.
 func (tm *traceManager) pushToolSpan(ctx context.Context, id identity, key string) rowSpan {
-	return tm.pushToolSpanWithKind(ctx, id, key, false, nil)
+	return tm.pushToolSpanWithKind(ctx, id, key, false, false, nil)
 }
 
-func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, key string, emptyCallID bool, args map[string]any) rowSpan {
+func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, key string, emptyCallID, requireCtxPtr bool, args map[string]any) rowSpan {
 	inv := tm.lookupInvocation(ctx, id, false, true)
 	defer inv.pendingSpans.Add(-1)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
-		return tm.pushToolSpanWithKind(ctx, id, key, emptyCallID, args)
+		return tm.pushToolSpanWithKind(ctx, id, key, emptyCallID, requireCtxPtr, args)
 	}
 	defer inv.mu.Unlock()
 	inv.started = true
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key, emptySeq, _ := inv.resolveToolCallKeyLocked(ctx, key, true, false, emptyCallID, args)
+	key, emptySeq, _ := inv.resolveToolCallKeyLocked(ctx, key, true, false, emptyCallID, requireCtxPtr, args)
 	owner := inv.ownerOf(ctx, id)
 	inv.clearLastPartialUnderLocked(owner)
 	if owner.kind == spanKindAgent {
@@ -4953,11 +5021,19 @@ func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, k
 		// response may already have ended, and the merged function-response
 		// event of the response still needs that call's credit.
 		owner.awaitingModelEvent = 0
+		if owner.taskMode {
+			if call := toolKeyCall(key); call != "" {
+				owner.settledTaskCalls = slices.DeleteFunc(owner.settledTaskCalls, func(settled string) bool {
+					return settled == call
+				})
+			}
+		}
 	}
 	rec := inv.newChild(owner, spanKindTool, now)
 	rec.canceled = canceledFunc(ctx)
 	rec.seq = inv.nextSeqLocked()
 	rec.emptyCallSeq = emptySeq
+	rec.toolCtxPtr = emptyToolCtxPtr(ctx)
 	rec.callStarted = true
 	rec.ownActivation = owner.isActivationOf(ctx)
 	inv.toolSpans[key] = rec
@@ -4971,7 +5047,7 @@ func (tm *traceManager) pushToolSpanWithKind(ctx context.Context, id identity, k
 // popToolCallSpan ends the span of a tool call identified by callID and tool
 // name, preserving per-call identity when callID is empty.
 func (tm *traceManager) popToolCallSpan(ctx context.Context, id identity, callID, toolName string, fromError bool, args map[string]any) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
-	return tm.popToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), fromError, callID == "", args)
+	return tm.popToolSpanWithKind(ctx, id, toolKey(id, callID, toolName), fromError, callID == "", true, args)
 }
 
 // popToolSpan ends the span of a tool call and returns the place of its
@@ -4986,20 +5062,21 @@ func (tm *traceManager) popToolCallSpan(ctx context.Context, id identity, callID
 // activations that its tool calls ran and that never ended are ended—purged
 // if they failed, or retired quietly otherwise (see endToolRunsLocked).
 func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string, fromError bool) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
-	return tm.popToolSpanWithKind(ctx, id, key, fromError, false, nil)
+	return tm.popToolSpanWithKind(ctx, id, key, fromError, false, false, nil)
 }
 
-func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, key string, fromError, emptyCallID bool, args map[string]any) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
+func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, key string, fromError, emptyCallID, requireCtxPtr bool, args map[string]any) (span rowSpan, purged []unclosedAgentSpan, closedByError bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
 	rootIn := prepareRootAgentInput(ctx, inv, id, nil, nil)
 	if !inv.lockLive() {
-		return tm.popToolSpanWithKind(ctx, id, key, fromError, emptyCallID, args)
+		return tm.popToolSpanWithKind(ctx, id, key, fromError, emptyCallID, requireCtxPtr, args)
 	}
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, true)
-	key, emptySeq, recordCompleted := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, emptyCallID, args)
+	key, emptySeq, recordCompleted := inv.resolveToolCallKeyLocked(ctx, key, false, fromError, emptyCallID, requireCtxPtr, args)
+	curPtr := emptyToolCtxPtr(ctx)
 	open := inv.toolSpans[key]
 	delete(inv.toolSpans, key)
 	inv.syncOpenCallsLocked()
@@ -5024,7 +5101,8 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 	inv.retireLateSettledLocked()
 	if open != nil {
 		open.dropContexts()
-		if fromError && recordCompleted {
+		if fromError && recordCompleted && (!requireCtxPtr || curPtr.valid()) {
+			open.toolCtxPtr = curPtr
 			inv.completedTools[key] = open
 		}
 		span = inv.rowSpan(open, latencyOf(open, now), ambient)
@@ -5034,15 +5112,18 @@ func (tm *traceManager) popToolSpanWithKind(ctx context.Context, id identity, ke
 	if !fromError {
 		if rec := inv.completedTools[key]; rec != nil {
 			delete(inv.completedTools, key)
-			span = inv.rowSpan(rec, nil, ambient)
-			span.timestamp = now
-			return span, purged, true
+			if (!requireCtxPtr || curPtr.valid()) && rec.toolCtxPtr == curPtr {
+				span = inv.rowSpan(rec, nil, ambient)
+				span.timestamp = now
+				return span, purged, true
+			}
 		}
 	}
 	rec := inv.newChild(inv.ownerOf(ctx, id), spanKindTool, now)
-	if fromError && recordCompleted {
+	if fromError && recordCompleted && (!requireCtxPtr || curPtr.valid()) {
 		rec.dropContexts()
 		rec.emptyCallSeq = emptySeq
+		rec.toolCtxPtr = curPtr
 		inv.completedTools[key] = rec
 	}
 	span = inv.rowSpan(rec, nil, ambient)
@@ -5351,6 +5432,10 @@ type emptyToolPtr struct {
 	ptr uintptr
 }
 
+func (p emptyToolPtr) valid() bool {
+	return p.ptr != 0
+}
+
 func emptyToolCtxPtr(ctx context.Context) emptyToolPtr {
 	if ctx == nil {
 		return emptyToolPtr{}
@@ -5373,12 +5458,12 @@ func emptyToolSeqKey(baseKey string, seq uint64) string {
 	return fmt.Sprintf("tc%d\x00%s", seq, baseKey)
 }
 
-func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKey string, push, fromError, emptyCallID bool, _ map[string]any) (string, uint64, bool) {
+func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKey string, push, fromError, emptyCallID, requireCtxPtr bool, _ map[string]any) (string, uint64, bool) {
+	ptr := emptyToolCtxPtr(ctx)
 	if !emptyCallID {
-		return callKey(ctx, baseKey), 0, true
+		return callKey(ctx, baseKey), 0, !requireCtxPtr || ptr.valid()
 	}
 	slotKey := callKey(ctx, baseKey)
-	ptr := emptyToolCtxPtr(ctx)
 	entries := inv.emptyToolCalls[slotKey]
 
 	if push {
@@ -5387,7 +5472,7 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKe
 		for _, e := range entries {
 			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
 			if e.errored {
-				if e.ptr == ptr || inv.completedTools[resolved] == nil {
+				if (ptr.valid() && e.ptr == ptr) || !e.ptr.valid() || inv.completedTools[resolved] == nil {
 					delete(inv.completedTools, resolved)
 					continue
 				}
@@ -5431,6 +5516,13 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKe
 			seq := entries[chosen].seq
 			resolved := callKey(ctx, emptyToolSeqKey(baseKey, seq))
 			if entries[chosen].ambiguous {
+				// Leave overlapping open entries intact so healthy and recovered
+				// completions keep their own starting spans and latencies.
+				inv.emptyToolCallSeq++
+				errSeq := inv.emptyToolCallSeq
+				return callKey(ctx, emptyToolSeqKey(baseKey, errSeq)), errSeq, false
+			}
+			if !ptr.valid() {
 				entries = slices.Delete(entries, chosen, chosen+1)
 				if len(entries) == 0 {
 					delete(inv.emptyToolCalls, slotKey)
@@ -5446,7 +5538,7 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKe
 		kept := entries[:0]
 		for _, e := range entries {
 			resolved := callKey(ctx, emptyToolSeqKey(baseKey, e.seq))
-			if e.errored && (e.ptr == ptr || inv.completedTools[resolved] == nil) {
+			if e.errored && ((ptr.valid() && e.ptr == ptr) || !e.ptr.valid() || inv.completedTools[resolved] == nil) {
 				delete(inv.completedTools, resolved)
 				continue
 			}
@@ -5454,6 +5546,14 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKe
 		}
 		inv.emptyToolCallSeq++
 		seq := inv.emptyToolCallSeq
+		if !ptr.valid() {
+			if len(kept) == 0 {
+				delete(inv.emptyToolCalls, slotKey)
+			} else {
+				inv.emptyToolCalls[slotKey] = kept
+			}
+			return callKey(ctx, emptyToolSeqKey(baseKey, seq)), seq, false
+		}
 		if inv.emptyToolCalls == nil {
 			inv.emptyToolCalls = map[string][]emptyToolCallEntry{}
 		}
@@ -5466,7 +5566,7 @@ func (inv *invocationTrace) resolveToolCallKeyLocked(ctx context.Context, baseKe
 	}
 
 	for idx, e := range entries {
-		if e.errored && !e.ambiguous && e.ptr == ptr {
+		if e.errored && !e.ambiguous && ptr.valid() && e.ptr == ptr {
 			seq := e.seq
 			entries = slices.Delete(entries, idx, idx+1)
 			if len(entries) == 0 {
