@@ -21,33 +21,34 @@ import (
 
 func TestConsolePipedPromptWithoutTrailingNewline(t *testing.T) {
 	tests := []struct {
-		name       string
-		input      string
-		wantSubstr []string
+		name        string
+		input       string
+		wantTurns   int
+		wantPrompts []string
 	}{
 		{
-			name:  "single line without newline",
-			input: "hello",
-			wantSubstr: []string{
-				"Agent -> hello",
-				"EOF detected, exiting...",
-			},
+			name:        "newline terminated input",
+			input:       "hello\n",
+			wantTurns:   1,
+			wantPrompts: []string{"Agent -> hello"},
 		},
 		{
-			name:  "multiple lines ending without newline",
-			input: "first\nlast",
-			wantSubstr: []string{
-				"Agent -> first",
-				"Agent -> last",
-				"EOF detected, exiting...",
-			},
+			name:        "single line without newline",
+			input:       "hello",
+			wantTurns:   1,
+			wantPrompts: []string{"Agent -> hello"},
 		},
 		{
-			name:  "empty input",
-			input: "",
-			wantSubstr: []string{
-				"EOF detected, exiting...",
-			},
+			name:        "multiple lines ending without newline",
+			input:       "first\nlast",
+			wantTurns:   2,
+			wantPrompts: []string{"Agent -> first", "Agent -> last"},
+		},
+		{
+			name:        "empty input",
+			input:       "",
+			wantTurns:   0,
+			wantPrompts: nil,
 		},
 	}
 
@@ -56,10 +57,22 @@ func TestConsolePipedPromptWithoutTrailingNewline(t *testing.T) {
 			config := testConfig(t, nil)
 			out := runConsole(t, config, tc.input)
 
-			for _, substr := range tc.wantSubstr {
-				if !strings.Contains(out, substr) {
-					t.Errorf("expected output to contain %q, but got:\n%s", substr, out)
+			if !strings.Contains(out, "EOF detected, exiting...") {
+				t.Errorf("expected output to contain EOF exit message, but got:\n%s", out)
+			}
+
+			if gotTurns := strings.Count(out, "Agent -> "); gotTurns != tc.wantTurns {
+				t.Errorf("got %d agent turns, want %d. Output:\n%s", gotTurns, tc.wantTurns, out)
+			}
+
+			lastIdx := 0
+			for _, prompt := range tc.wantPrompts {
+				idx := strings.Index(out[lastIdx:], prompt)
+				if idx == -1 {
+					t.Errorf("expected prompt %q not found in order after index %d. Output:\n%s", prompt, lastIdx, out)
+					break
 				}
+				lastIdx += idx + len(prompt)
 			}
 		})
 	}
