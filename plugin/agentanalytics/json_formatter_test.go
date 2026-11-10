@@ -3758,6 +3758,10 @@ func TestPartsCollector_FileDataObjectRefs(t *testing.T) {
 			name: "Cloud Storage file with user information", offload: true, connectionID: "us.conn",
 			uri: "gs://user:pw@bucket/doc.pdf", wantURI: redactedURIPlaceholder, wantTruncated: true,
 		},
+		{
+			name: "Cloud Storage file with invalid UTF-8 in the URI", offload: true, connectionID: "us.conn",
+			uri: "gs://bucket/a\xff\xfeb", wantURI: "gs://bucket/a\uFFFDb",
+		},
 		{name: "no URI", offload: true, connectionID: "us.conn"},
 	}
 	for _, tt := range tests {
@@ -4222,7 +4226,7 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 	})
 
 	t.Run("map keys", func(t *testing.T) {
-		checkCredentialNamed(t, false, reflect.TypeFor[labelText]())
+		checkCredentialNamed(t, false, reflect.TypeFor[labelText](), reflect.TypeFor[labelTextStruct]())
 		for _, redact := range []bool{true, false} {
 			got, truncated, err := smartTruncate(map[string]any{"bad\xff\xfekey": in}, 100, redact)
 			if wantMap := `{"bad` + "\uFFFD" + `key":"` + want + `"}`; err != nil || string(got) != wantMap || truncated {
@@ -4231,7 +4235,31 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 
 			got, truncated, err = smartTruncate(map[labelText]string{labelText("bad\xff\xfekey"): "v"}, 100, redact)
 			if wantMap := `{"bad` + "\uFFFD" + `key":"v"}`; err != nil || string(got) != wantMap || truncated {
-				t.Errorf("smartTruncate(TextMarshaler bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+				t.Errorf("smartTruncate(labelText bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+			}
+
+			var textCalled atomic.Bool
+			got, truncated, err = smartTruncate(map[labelTextStruct]string{{called: &textCalled, raw: "bad\xff\xfekey"}: "v"}, 100, redact)
+			if !textCalled.Load() {
+				t.Errorf("smartTruncate(TextMarshaler struct bad map key, redact=%v) did not call MarshalText", redact)
+			}
+			if wantMap := `{"bad` + "\uFFFD" + `key":"v"}`; err != nil || !utf8.Valid(got) || string(got) != wantMap || truncated {
+				t.Errorf("smartTruncate(TextMarshaler struct bad map key, redact=%v) = (%q, %v, %v), want (%q, false, nil)", redact, got, truncated, err, wantMap)
+			}
+
+			textCalled.Store(false)
+			sanitizedTextKey, truncated := sanitizeValue(map[labelTextStruct]string{{called: &textCalled, raw: "bad\xff\xfekey"}: "v"}, 100, redact)
+			if !textCalled.Load() {
+				t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) did not call MarshalText", redact)
+			}
+			sanitizedTextMap, _ := sanitizedTextKey.(map[string]any)
+			for k := range sanitizedTextMap {
+				if !utf8.ValidString(k) {
+					t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) key %q is not valid UTF-8", redact, k)
+				}
+			}
+			if v, ok := sanitizedTextMap["bad\uFFFDkey"]; !ok || v != "v" || len(sanitizedTextMap) != 1 || truncated {
+				t.Errorf("sanitizeValue(TextMarshaler struct bad map key, redact=%v) = (%#v, %v), want single key %q -> %q and truncated=false", redact, sanitizedTextKey, truncated, "bad\uFFFDkey", "v")
 			}
 
 			sanitized, truncated := sanitizeValue(map[string]any{"bad\xff\xfekey": "v"}, 100, redact)
@@ -4304,7 +4332,8 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 			t.Errorf("formatResponseContent(invalid UTF-8 names) = %q, want %q", got, "call: find\uFFFD | resp: resp\uFFFD")
 		}
 
-		// Offloading preserves normalized MIME types and GCS URIs on queued uploads and object refs.
+		// Offloading preserves normalized MIME types and GCS URIs on queued uploads,
+		// while omitting object_ref on GCS URIs whose invalid UTF-8 had to be replaced.
 		offloaded := collectParts(partsOptions{
 			maxLen:  100,
 			redact:  true,
@@ -4324,6 +4353,9 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 		}
 		if got := offloaded.parts[1]["uri"]; got != "gs://bucket/a\uFFFDb" {
 			t.Errorf("offloaded file uri = %q, want %q", got, "gs://bucket/a\uFFFDb")
+		}
+		if _, hasRef := offloaded.parts[1]["object_ref"]; hasRef {
+			t.Errorf("offloaded file with invalid UTF-8 URI got object_ref = %v, want none", offloaded.parts[1]["object_ref"])
 		}
 	})
 }
@@ -4448,6 +4480,19 @@ type neutralGeneric[T any] string
 type labelText string
 
 func (l labelText) MarshalText() ([]byte, error) { return []byte(l), nil }
+
+// labelTextStruct is a comparable struct key with a non-credential type name
+// whose MarshalText returns raw bytes so mapKeyString exercises its
+// encoding.TextMarshaler path rather than its reflect.String path.
+type labelTextStruct struct {
+	called *atomic.Bool
+	raw    string
+}
+
+func (l labelTextStruct) MarshalText() ([]byte, error) {
+	l.called.Store(true)
+	return []byte(l.raw), nil
+}
 
 // labelStruct embeds labelText alongside an exported field so its promoted
 // MarshalText sits at the same depth as RefreshToken's credentialTextKey,
@@ -4783,7 +4828,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 
 		t.Run("map[Token]*self/over_budget", func(t *testing.T) {
 			// Values are circular pointers back to the holder, which charge no
-			// node budget themselves; only charging each whole-redacted key
+			// node budget themselves; only charging each whole-redacted entry
 			// stops the loop at maxSanitizeNodes.
 			type selfHolder struct {
 				M map[Token]*selfHolder
@@ -4811,7 +4856,8 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			type selfHolder struct {
 				M map[Token]*selfHolder
 			}
-			const wantKeys = maxSanitizeNodes - 2
+			// 1 node for selfHolder + 1 node for M + 2 nodes per whole-redacted entry (key + skipped value).
+			const wantKeys = (maxSanitizeNodes - 2) / 2
 			h := &selfHolder{M: make(map[Token]*selfHolder, wantKeys)}
 			for i := range wantKeys {
 				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
@@ -4828,6 +4874,50 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}
 			if len(parsed.M) != 1 || parsed.M[redactedValue] != redactedValue {
 				t.Errorf("SmartTruncate(self-referential map exact budget) M = %v, want only %s", parsed.M, redactedValue)
+			}
+
+			// One extra entry pushes the walk past maxSanitizeNodes.
+			h.M[Token(fmt.Sprintf("%s_%d", secret, wantKeys))] = h
+			gotOver, truncatedOver, err := SmartTruncate(h, 100)
+			if err != nil || !truncatedOver {
+				t.Fatalf("SmartTruncate(self-referential map exact+1 budget) = (truncated %v, %v), want truncated", truncatedOver, err)
+			}
+			parsed.M = nil
+			if err := json.Unmarshal(gotOver, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map exact+1 budget) error: %v", err)
+			}
+			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map exact+1 budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("map[Token]string/two_node_budget", func(t *testing.T) {
+			// With 2 nodes total, node 1 is the map and node 2 is the whole-redacted
+			// key, so the skipped value exhausts the budget and writes the budget
+			// placeholder instead of [REDACTED].
+			s2 := sanitizer{
+				maxLength: 100,
+				redact:    true,
+				budget:    &nodeBudget{remaining: 2},
+				visiting:  make(map[visitKey]struct{}),
+			}
+			out2, truncated2 := s2.walk(reflect.ValueOf(map[Token]string{"key": "value"}), 0)
+			got2, err := json.Marshal(out2)
+			if want2 := `{"` + sanitizeBudgetPlaceholder + `":"` + sanitizeBudgetPlaceholder + `"}`; err != nil || string(got2) != want2 || !truncated2 || s2.budget.remaining != 0 {
+				t.Errorf("walk(map[Token]string, budget=2) = (%s, truncated=%v, remaining=%d, err=%v), want (%s, true, 0, nil)", got2, truncated2, s2.budget.remaining, err, want2)
+			}
+
+			// With 3 nodes total, the map, key and skipped value fit exactly.
+			s3 := sanitizer{
+				maxLength: 100,
+				redact:    true,
+				budget:    &nodeBudget{remaining: 3},
+				visiting:  make(map[visitKey]struct{}),
+			}
+			out3, truncated3 := s3.walk(reflect.ValueOf(map[Token]string{"key": "value"}), 0)
+			got3, err := json.Marshal(out3)
+			if want3 := `{"[REDACTED]":"[REDACTED]"}`; err != nil || string(got3) != want3 || !truncated3 || s3.budget.remaining != 0 {
+				t.Errorf("walk(map[Token]string, budget=3) = (%s, truncated=%v, remaining=%d, err=%v), want (%s, true, 0, nil)", got3, truncated3, s3.budget.remaining, err, want3)
 			}
 		})
 
@@ -4933,6 +5023,9 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		}{
 			{"string key", map[Token]string{secret: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
 			{"credential-named key holding sensitive key text", map[Token]string{"password": secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"defined credential interface key holding neutral string", map[Credential]string{"kept": secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"defined credential interface key holding neutral defined string", map[Credential]string{Label("kept"): secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil defined credential interface key", map[Credential]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
 			{"key in an interface", map[any]string{Token("access_token"): secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
 			{"pointer key", map[*SessionToken]string{{ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
 			{"nil pointer key", map[*SessionToken]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
@@ -4977,10 +5070,80 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				}
 			})
 		}
-		// Redaction off writes a key with its method.
+		// Redaction off writes a key with its method or dynamic interface value.
 		got, _, err := smartTruncate(map[*SessionToken]string{{ptrKey}: "v"}, 1000, false)
 		if want := `{"` + secret + `":"v"}`; err != nil || string(got) != want {
 			t.Errorf("smartTruncate(map[*SessionToken]string, redact off) = (%s, %v), want %s", got, err, want)
+		}
+		got, _, err = smartTruncate(map[Credential]string{"kept": "v"}, 1000, false)
+		if want := `{"kept":"v"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(map[Credential]string, redact off) = (%s, %v), want %s", got, err, want)
+		}
+		got, _, err = smartTruncate(map[Credential]string{nil: "v"}, 1000, false)
+		if want := `{"null":"v"}`; err != nil || string(got) != want {
+			t.Errorf("smartTruncate(map[Credential]string nil key, redact off) = (%s, %v), want %s", got, err, want)
+		}
+	})
+
+	t.Run("plain credential struct without marshaler", func(t *testing.T) {
+		// A credential-named struct without a MarshalJSON or MarshalText method is
+		// walked field by field rather than redacted whole: an exported field with
+		// a neutral name and type is emitted unless its own field name, static
+		// type, or string content pattern triggers redaction.
+		type outerToken = Token
+		type (
+			Token struct {
+				Value     string
+				ExpiresIn int
+			}
+			PrivateKey struct {
+				AccessToken string
+				ExpiresIn   int
+			}
+			Signature struct {
+				Value     outerToken
+				ExpiresIn int
+			}
+		)
+		checkCredentialNamed(t, true,
+			reflect.TypeFor[Token](), reflect.TypeFor[PrivateKey](), reflect.TypeFor[Signature]())
+		for _, tt := range []struct {
+			name      string
+			in        any
+			want      string
+			wantTrunc bool
+		}{
+			{
+				name:      "neutral exported field with neutral value is emitted",
+				in:        Token{Value: "opaque-handle", ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"opaque-handle"}`,
+				wantTrunc: false,
+			},
+			{
+				name:      "neutral exported field matching content pattern is scrubbed",
+				in:        Token{Value: "Bearer " + secret, ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"Bearer [REDACTED]"}`,
+				wantTrunc: true,
+			},
+			{
+				name:      "sensitively named exported field is redacted by name",
+				in:        PrivateKey{AccessToken: secret, ExpiresIn: 3600},
+				want:      `{"AccessToken":"[REDACTED]","ExpiresIn":3600}`,
+				wantTrunc: false,
+			},
+			{
+				name:      "credential-typed exported field is redacted by static type",
+				in:        Signature{Value: outerToken(secret), ExpiresIn: 3600},
+				want:      `{"ExpiresIn":3600,"Value":"[REDACTED]"}`,
+				wantTrunc: true,
+			},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				got, truncated, err := SmartTruncate(tt.in, 1000)
+				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
+					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
+				}
+			})
 		}
 	})
 

@@ -361,20 +361,23 @@ func (c *partsCollector) addInlineData(entry map[string]any, blob *genai.Blob, c
 // (with details "{}" and ConnectionID as authorizer) so BigQuery ObjectRef
 // functions can inspect existing GCS URIs alongside offloaded ones; note that
 // adk-python leaves object_ref NULL on EXTERNAL_URI parts. A URI that had to
-// be redacted names no real object, so it gets none.
+// be redacted or had invalid UTF-8 replaced names no real object, so it gets
+// none.
 func (c *partsCollector) addFileData(entry map[string]any, file *genai.FileData) {
 	uri := file.FileURI
 	var changed bool
 	if c.opts.redact {
 		uri, changed = sanitizeURI(uri)
 	}
-	uri = strings.ToValidUTF8(uri, "\uFFFD")
+	cleanURI := strings.ToValidUTF8(uri, "\uFFFD")
+	invalidUTF8 := cleanURI != uri
+	uri = cleanURI
 	entry["mime_type"] = strings.ToValidUTF8(file.MIMEType, "\uFFFD")
 	entry["uri"] = uri
 	entry["storage_mode"] = storageModeExternalURI
 	c.truncated = c.truncated || changed
 	c.nonUploadTruncated = c.nonUploadTruncated || changed
-	if c.opts.offload && !changed && strings.HasPrefix(uri, "gs://") {
+	if c.opts.offload && !changed && !invalidUTF8 && strings.HasPrefix(uri, "gs://") {
 		entry["object_ref"] = objectRef(uri, "{}", c.opts.connectionID)
 	}
 }
@@ -1207,7 +1210,8 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			break
 		}
 		if s.redact && mapKeyRedactsWhole(iter.Key()) {
-			if !s.budget.take() {
+			// Charge one node for the key and one for the skipped value.
+			if keyOK := s.budget.take(); !keyOK || !s.budget.take() {
 				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 				truncated = true
 				break
