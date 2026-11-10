@@ -279,6 +279,9 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			if !yield(ev, err) {
 				return
 			}
+			// Stop scanning older events once tool execution fails: Flow.preprocess
+			// halts on the first processor error, and a failed call has no
+			// follow-up confirmation event to emit.
 			if err != nil {
 				return
 			}
