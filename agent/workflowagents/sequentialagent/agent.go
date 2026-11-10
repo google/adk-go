@@ -89,12 +89,19 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 			subAgents = subAgents[indexes[0]:]
 		}
 		for _, subAgent := range subAgents {
+			pauseInvocation := false
 			for event, err := range subAgent.Run(ctx) {
 				// A failed sub-agent ends the sequence, as in adk-python: later
 				// sub-agents would run without the output they depend on.
 				if !yield(event, err) || err != nil {
 					return
 				}
+				if utils.ShouldPauseInvocation(event) {
+					pauseInvocation = true
+				}
+			}
+			if pauseInvocation {
+				return
 			}
 		}
 	}

@@ -29,11 +29,15 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	"google.golang.org/adk/v2/exp/authflow"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/adk/v2/tool/toolauth"
 )
 
 func TestNewSequentialAgent(t *testing.T) {
@@ -993,4 +997,136 @@ func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
 	if !ran {
 		t.Error("sub-agent did not run")
 	}
+}
+
+type singleCallLLM struct {
+	model.LLM
+	call  *genai.FunctionCall
+	calls int
+}
+
+func (m *singleCallLLM) Name() string { return "single-call-llm" }
+
+func (m *singleCallLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: m.call}},
+			},
+		}, nil)
+	}
+}
+
+func TestSequentialAgentStopsOnSubAgentPause(t *testing.T) {
+	t.Run("tool confirmation pauses sequence", func(t *testing.T) {
+		askTool, err := functiontool.New(functiontool.Config{
+			Name:                "ask_approval",
+			Description:         "requires approval",
+			RequireConfirmation: true,
+		}, func(agent.Context, struct{}) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstLLM := &singleCallLLM{call: &genai.FunctionCall{ID: "call-1", Name: "ask_approval", Args: map[string]any{}}}
+		first, err := llmagent.New(llmagent.Config{
+			Name:  "first",
+			Model: firstLLM,
+			Tools: []tool.Tool{askTool},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondLLM := &FakeLLM{id: 1}
+		second, err := llmagent.New(llmagent.Config{Name: "second", Model: secondLLM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{
+			AppName:           "test_app",
+			Agent:             newSequentialAgent(t, []agent.Agent{first, second}, "pipeline"),
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() unexpected error: %v", err)
+			}
+		}
+
+		if firstLLM.calls != 1 {
+			t.Errorf("first agent's model called %d times, want 1", firstLLM.calls)
+		}
+		if secondLLM.callCounter != 0 {
+			t.Errorf("second agent's model called %d times after first paused for confirmation, want 0", secondLLM.callCounter)
+		}
+	})
+
+	t.Run("credential request stops sequence and skips after-agent callbacks", func(t *testing.T) {
+		authCfg := &toolauth.Config{
+			AuthScheme: toolauth.Scheme{Type: toolauth.SchemeTypeHTTP, Scheme: "bearer"},
+		}
+		authTool, err := functiontool.New(functiontool.Config{
+			Name:        "need_auth",
+			Description: "requests a credential",
+		}, func(ctx agent.Context, _ struct{}) (map[string]any, error) {
+			if err := authflow.RequestCredential(ctx, authCfg); err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "pending"}, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		afterAgentRan := false
+		firstLLM := &singleCallLLM{call: &genai.FunctionCall{ID: "call-auth", Name: "need_auth", Args: map[string]any{}}}
+		first, err := llmagent.New(llmagent.Config{
+			Name:  "first",
+			Model: firstLLM,
+			Tools: []tool.Tool{authTool},
+			AfterAgentCallbacks: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					afterAgentRan = true
+					return nil, nil
+				},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondLLM := &FakeLLM{id: 1}
+		second, err := llmagent.New(llmagent.Config{Name: "second", Model: secondLLM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := runner.New(runner.Config{
+			AppName:           "test_app",
+			Agent:             newSequentialAgent(t, []agent.Agent{first, second}, "pipeline"),
+			SessionService:    session.InMemoryService(),
+			AutoCreateSession: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+			if err != nil {
+				t.Fatalf("Run() unexpected error: %v", err)
+			}
+		}
+
+		if afterAgentRan {
+			t.Error("first agent's AfterAgentCallback ran after EndInvocation")
+		}
+		if secondLLM.callCounter != 0 {
+			t.Errorf("second agent's model called %d times after first paused for sign-in, want 0", secondLLM.callCounter)
+		}
+	})
 }

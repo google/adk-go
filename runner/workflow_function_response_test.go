@@ -74,7 +74,7 @@ func TestRun_FunctionResponseResumesWorkflowSubAgent(t *testing.T) {
 				return sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{caller, other}}})
 			},
 			wantBranch:     "",
-			wantOtherCalls: 1,
+			wantOtherCalls: 0,
 		},
 	}
 	for _, tc := range tests {
@@ -528,19 +528,19 @@ func TestRun_FunctionResponsesSelectEveryCaller(t *testing.T) {
 		},
 		{
 			name: "sequential starts from the lowest index",
-			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
-				return mustSequential(t, "root", other, wfA, wfB)
+			newRoot: func(t *testing.T, wfA, _, other, caller agent.Agent) agent.Agent {
+				return mustSequential(t, "root", other, caller, wfA)
 			},
-			parts:   []*genai.Part{askB, askA},
-			wantRan: []string{"c", "d"},
+			parts:   []*genai.Part{askA, answerExternal},
+			wantRan: []string{"caller", "c"},
 		},
 		{
 			name: "loop starts from the lowest index",
-			newRoot: func(t *testing.T, wfA, wfB, other, _ agent.Agent) agent.Agent {
-				return mustLoop(t, "root", 1, other, wfA, wfB)
+			newRoot: func(t *testing.T, wfA, _, other, caller agent.Agent) agent.Agent {
+				return mustLoop(t, "root", 1, other, caller, wfA)
 			},
-			parts:   []*genai.Part{askB, askA},
-			wantRan: []string{"c", "d"},
+			parts:   []*genai.Part{askA, answerExternal},
+			wantRan: []string{"caller", "c"},
 		},
 		{
 			name: "parallel of sequences narrows inside each",

@@ -601,3 +601,84 @@ func withCancelAfterDelay(t *testing.T) context.Context {
 	})
 	return ctx
 }
+
+type pauseCallLLM struct {
+	model.LLM
+	calls int
+}
+
+func (m *pauseCallLLM) Name() string { return "pause-call-llm" }
+
+func (m *pauseCallLLM) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		yield(&model.LLMResponse{
+			Content: &genai.Content{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{
+					FunctionCall: &genai.FunctionCall{
+						ID:   "call-1",
+						Name: "wait_for_user",
+						Args: map[string]any{},
+					},
+				}},
+			},
+		}, nil)
+	}
+}
+
+func TestLoopAgentStopsOnSubAgentPause(t *testing.T) {
+	waitTool, err := functiontool.New(functiontool.Config{
+		Name:          "wait_for_user",
+		Description:   "long-running tool",
+		IsLongRunning: true,
+	}, func(agent.Context, struct{}) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLLM := &pauseCallLLM{}
+	first, err := llmagent.New(llmagent.Config{
+		Name:  "first",
+		Model: firstLLM,
+		Tools: []tool.Tool{waitTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondLLM := &FakeLLM{id: 1}
+	second, err := llmagent.New(llmagent.Config{Name: "second", Model: secondLLM})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop, err := loopagent.New(loopagent.Config{
+		AgentConfig:   agent.Config{Name: "loop", SubAgents: []agent.Agent{first, second}},
+		MaxIterations: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := runner.New(runner.Config{
+		AppName:           "test_app",
+		Agent:             loop,
+		SessionService:    session.InMemoryService(),
+		AutoCreateSession: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, err := range r.Run(t.Context(), "user_id", "session_id", genai.NewContentFromText("go", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() unexpected error: %v", err)
+		}
+	}
+
+	if firstLLM.calls != 1 {
+		t.Errorf("first agent's model called %d times, want 1", firstLLM.calls)
+	}
+	if secondLLM.callCounter != 0 {
+		t.Errorf("second agent's model called %d times after first paused, want 0", secondLLM.callCounter)
+	}
+}

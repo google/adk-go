@@ -53,6 +53,22 @@ func findCallEvent(events session.Events, callID string) *session.Event {
 	return nil
 }
 
+// ShouldPauseInvocation reports whether event pauses the invocation to wait for
+// a long-running tool response (such as adk_request_confirmation,
+// adk_request_credential, or adk_request_input), matching adk-python's
+// InvocationContext.should_pause_invocation.
+func ShouldPauseInvocation(event *session.Event) bool {
+	if event == nil || len(event.LongRunningToolIDs) == 0 {
+		return false
+	}
+	for _, call := range FunctionCalls(event.Content) {
+		if slices.Contains(event.LongRunningToolIDs, call.ID) {
+			return true
+		}
+	}
+	return false
+}
+
 type graphResumeDoneKey struct{}
 
 // WithGraphResumeDone returns ctx with resuming marked as done, so

@@ -111,7 +111,7 @@ func (a *loopAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, e
 						return
 					}
 
-					if event != nil && event.Actions.Escalate {
+					if event != nil && (event.Actions.Escalate || utils.ShouldPauseInvocation(event)) {
 						shouldExit = true
 					}
 				}
