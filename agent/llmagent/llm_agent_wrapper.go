@@ -688,7 +688,9 @@ func runTask(a agent.Agent, ic agent.InvocationContext, yield func(*session.Even
 		// transfer_to_agent runs the target inside this agent's flow and
 		// forwards its events, so a finish_task call or response may belong
 		// to another (nested) task agent. Only this agent's own finish_task
-		// completes this task.
+		// completes this task. Ownership is decided by Author, which is the
+		// agent's name, so a same-named task agent nested under a transfer
+		// target is not told apart from this one.
 		ownEvent := ev != nil && ev.Author == a.Name()
 		if fc := extractFinishTaskFC(ev); fc != nil && ownEvent {
 			// Remember the latest FC's args; wait for FinishTaskTool's
