@@ -718,39 +718,45 @@ type visitKey struct {
 
 func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	for v.IsValid() && v.Kind() == reflect.Interface {
+		// A value of a defined interface type is read by its type name
+		// before checking whether it is nil or reading the value that it
+		// holds, which has a name of its own, as for a pointer below.
+		if s.redact && hasSensitiveTypeName(v.Type()) {
+			return s.redacted()
+		}
 		if v.IsNil() {
 			if !s.budget.take() {
 				return sanitizeBudgetPlaceholder, true
 			}
 			return nil, false
 		}
-		// A value of a defined interface type is read by its type name
-		// before the value that it holds, which has a name of its own, as
-		// for a pointer below.
-		if s.redact && hasSensitiveTypeName(v) {
-			return s.redacted()
-		}
 		v = v.Elem()
 	}
-	if !v.IsValid() || (v.Kind() == reflect.Pointer && v.IsNil()) {
+	if !v.IsValid() {
 		if !s.budget.take() {
 			return sanitizeBudgetPlaceholder, true
 		}
 		return nil, false
 	}
 	if v.Kind() == reflect.Pointer {
+		// A pointer whose type, or pointed-to type chain, is redacted whole
+		// (such as type APIKey *string or *Token) is redacted from its static
+		// type before checking whether it is nil or following it, which would
+		// read the pointer value and lose any defined pointer type's name.
+		if s.redact && redactsWhole(v.Type()) {
+			return s.redacted()
+		}
+		if v.IsNil() {
+			if !s.budget.take() {
+				return sanitizeBudgetPlaceholder, true
+			}
+			return nil, false
+		}
 		if depth >= maxSanitizeDepth {
 			if !s.budget.take() {
 				return sanitizeBudgetPlaceholder, true
 			}
 			return maxDepthPlaceholder, true
-		}
-		// A defined pointer type, such as type APIKey *string, may be the
-		// only part of a value that is named for a credential: what it
-		// points to, here a plain string, is not. Its name is read before
-		// the pointer is followed, which loses it.
-		if s.redact && hasSensitiveTypeName(v) {
-			return s.redacted()
 		}
 		key := visitKey{ptr: v.Pointer(), typ: v.Type()}
 		if !s.enter(key) {
@@ -769,7 +775,7 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 		return s.number(v.String())
 	}
 	// The node budget for v was charged above.
-	if s.redact && redactsWhole(v) {
+	if s.redact && redactsWhole(v.Type()) {
 		return redactedValue, true
 	}
 	if res := s.marshaled(v, depth); res.handled {
@@ -823,49 +829,81 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	}
 }
 
-// hasSensitiveTypeName reports whether v is of a defined type that is named
-// for a credential, such as Token, APIKey or Password (see isSensitiveKey),
-// whose values are redacted whole. Whatever its kind, a value of such a type
-// may hold a credential in a form that nothing else would tell, such as the
-// digits of an int or the bytes of a slice, so a value of such a type that is
-// not a struct (a map, slice, array, pointer, interface or scalar, zero or
-// not, with or without a MarshalJSON or MarshalText method) is redacted from
-// its type alone, without reading v: another goroutine may update the value
-// atomically or under a lock. A struct is redacted whole only if it has a
-// MarshalJSON or MarshalText method, which is looked up on the types only
-// (see hasMarshalerMethod); a struct without one is shown by its exported
-// fields, which are redacted by name without reading the unexported ones,
-// and omitzero does not read it either (see readsRedactedToCheckZero).
-func hasSensitiveTypeName(v reflect.Value) bool {
-	name := v.Type().Name()
-	if name == "" || !isSensitiveKey(name) {
+// typeSensitiveName reports whether t is a defined type whose name, without
+// any generic type-argument list, is named for a credential.
+func typeSensitiveName(t reflect.Type) bool {
+	name := t.Name()
+	if i := strings.IndexByte(name, '['); i >= 0 {
+		name = name[:i]
+	}
+	return name != "" && isSensitiveKey(name)
+}
+
+// hasSensitiveTypeName reports whether t is a defined type, generic or not,
+// that is named for a credential, such as Token, APIKey or Password (see
+// typeSensitiveName), whose values are redacted whole. Whatever its kind, a
+// value of such a type may hold a credential in a form that nothing else would
+// tell, such as the digits of an int or the bytes of a slice, so a value of
+// such a type that is not a struct (a map, slice, array, pointer, interface or
+// scalar, zero, nil or not, with or without a MarshalJSON or MarshalText
+// method) is redacted from t alone, without reading the value: another
+// goroutine may update it atomically or under a lock. A struct is redacted
+// whole only if its value or pointer type has a MarshalJSON or MarshalText
+// method, whether the value itself is addressable or not (see
+// typeHasMarshalerMethod); a struct without one is shown by its exported
+// fields, which are redacted by name without reading the unexported ones, and
+// omitzero does not read it either (see readsRedactedToCheckZero).
+func hasSensitiveTypeName(t reflect.Type) bool {
+	if !typeSensitiveName(t) {
 		return false
 	}
-	if v.Kind() == reflect.Struct {
-		return hasMarshalerMethod(v)
+	if t.Kind() == reflect.Struct {
+		return typeHasMarshalerMethod(t)
 	}
 	return true
 }
 
-// redactsWhole reports whether v is redacted whole from its type alone,
-// without reading it: its type is named for a credential (see
-// hasSensitiveTypeName), or it is a struct that may write itself with a
-// method promoted from such a type (see promotesSensitiveMarshaler).
-func redactsWhole(v reflect.Value) bool {
-	return hasSensitiveTypeName(v) || promotesSensitiveMarshaler(v)
+// redactsWhole reports whether values of type t are redacted whole from t
+// alone, without reading them: t (or any type along a pointer chain from t) is
+// named for a credential (see hasSensitiveTypeName), or is a struct that may
+// write itself with a method promoted from such a type (see
+// promotesSensitiveMarshaler). A seen set stops on recursive pointer types
+// such as type P *P.
+func redactsWhole(t reflect.Type) bool {
+	var seen map[reflect.Type]bool
+	for {
+		if hasSensitiveTypeName(t) || promotesSensitiveMarshaler(t) {
+			return true
+		}
+		if t.Kind() != reflect.Pointer {
+			return false
+		}
+		elem := t.Elem()
+		if elem == t || seen[elem] {
+			return false
+		}
+		if elem.Kind() == reflect.Pointer {
+			if seen == nil {
+				seen = map[reflect.Type]bool{t: true}
+			}
+			seen[elem] = true
+		}
+		t = elem
+	}
 }
 
-// promotesSensitiveMarshaler reports whether v is a struct that
-// encoding/json would write with a MarshalJSON or MarshalText method (see
-// hasMarshalerMethod) while it embeds, directly or through embedded structs,
-// a field of a type named for a credential that has such a method. The
-// method may be the one promoted from that field, which writes what a value
-// of the credential type writes, whatever the outer type is named; and
-// reflection cannot tell a promoted method from one that the outer type
-// declares, so such a value is redacted whole, as a value of the embedded
-// type is. Only the types are read, not v.
-func promotesSensitiveMarshaler(v reflect.Value) bool {
-	return v.Kind() == reflect.Struct && hasMarshalerMethod(v) && embedsSensitiveMarshaler(v.Type(), nil)
+// promotesSensitiveMarshaler reports whether t is a struct whose value or
+// pointer type has a MarshalJSON or MarshalText method (see
+// typeHasMarshalerMethod) while it embeds, directly or through embedded
+// structs, a field of a type named for a credential that has such a method, or
+// an interface type with such a method. The method may be the one promoted
+// from that field, which writes what a value of the credential type writes,
+// whatever the outer type is named and whether the value is addressable or
+// not; and reflection cannot tell a promoted method from one that the outer
+// type declares, so such a value is redacted whole, as a value of the embedded
+// type is.
+func promotesSensitiveMarshaler(t reflect.Type) bool {
+	return t.Kind() == reflect.Struct && typeHasMarshalerMethod(t) && embedsSensitiveMarshaler(t, nil)
 }
 
 // embedsSensitiveMarshaler reports whether the struct type t embeds,
@@ -893,7 +931,7 @@ func embedsSensitiveMarshaler(t reflect.Type, seen map[reflect.Type]bool) bool {
 		if ft.Kind() == reflect.Pointer {
 			ft = ft.Elem()
 		}
-		if name := ft.Name(); name != "" && isSensitiveKey(name) && typeHasMarshalerMethod(ft) {
+		if typeSensitiveName(ft) && typeHasMarshalerMethod(ft) {
 			return true
 		}
 		if ft.Kind() != reflect.Struct || seen[ft] {
@@ -940,12 +978,11 @@ func readsRedactedToCheckZero(t reflect.Type) bool {
 	if r, ok := zeroReadsRedacted.Load(t); ok {
 		return r.(bool)
 	}
-	r := t.Name() != "" && isSensitiveKey(t.Name())
+	r := typeSensitiveName(t) || redactsWhole(t)
 	switch t.Kind() {
 	case reflect.Array:
 		r = r || t.Len() > 0 && readsRedactedToCheckZero(t.Elem())
 	case reflect.Struct:
-		r = r || typeHasMarshalerMethod(t) && embedsSensitiveMarshaler(t, nil)
 		for i := 0; !r && i < t.NumField(); i++ {
 			f := t.Field(i)
 			r = fieldNamedForCredential(f) || readsRedactedToCheckZero(f.Type)
@@ -965,26 +1002,6 @@ func fieldNamedForCredential(f reflect.StructField) bool {
 	}
 	name, _, skip := parseJSONTag(f)
 	return !skip && name != "" && isSensitiveKey(name)
-}
-
-// hasMarshalerMethod reports whether encoding/json would write v with a
-// MarshalJSON or MarshalText method: the type of v has one, or v is
-// addressable and its pointer type has one. Only the method sets of the
-// types are read, not v (see hasMethod).
-func hasMarshalerMethod(v reflect.Value) bool {
-	return hasMethod(v, jsonMarshalerType) || hasMethod(v, textMarshalerType)
-}
-
-// hasMethod reports whether v has the methods of iface as implementer finds
-// them: the type of v has them, or v is addressable and its pointer type
-// has them. Only the method sets of the types are read, not v: unlike
-// implementer, it boxes nothing into an interface value, and a value that
-// is boxed without its address is copied, and so read.
-func hasMethod(v reflect.Value, iface reflect.Type) bool {
-	if v.Type().Implements(iface) {
-		return true
-	}
-	return v.Kind() != reflect.Pointer && v.CanAddr() && reflect.PointerTo(v.Type()).Implements(iface)
 }
 
 // redacted stands in for an interface or pointer value that is redacted whole
@@ -1189,29 +1206,32 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		var k string
-		var ok bool
 		if s.redact && mapKeyRedactsWhole(iter.Key()) {
-			k = redactedValue
-			truncated = true
-		} else {
-			k, ok = mapKeyString(iter.Key())
-			if !ok {
-				unsupportedKeys++
-				k = unsupportedKeyPlaceholder
-				if unsupportedKeys > 1 {
-					k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
-				}
+			if !s.budget.take() {
+				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 				truncated = true
-			} else if s.redact && isSensitiveKey(k) {
-				if !s.budget.take() {
-					out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
-					truncated = true
-					break
-				}
-				out[k] = redactedValue
-				continue
+				break
 			}
+			out[redactedValue] = redactedValue
+			truncated = true
+			continue
+		}
+		k, ok := mapKeyString(iter.Key())
+		if !ok {
+			unsupportedKeys++
+			k = unsupportedKeyPlaceholder
+			if unsupportedKeys > 1 {
+				k = fmt.Sprintf("[UNSUPPORTED_KEY_%d]", unsupportedKeys)
+			}
+			truncated = true
+		} else if s.redact && isSensitiveKey(k) {
+			if !s.budget.take() {
+				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+				truncated = true
+				break
+			}
+			out[k] = redactedValue
+			continue
 		}
 		val, t := s.walk(iter.Value(), depth+1)
 		if str, ok := val.(string); ok && str == sanitizeBudgetPlaceholder && s.budget.remaining <= 0 {
@@ -1219,9 +1239,10 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 			truncated = true
 			break
 		}
-		// Keys that are written alike, as all the keys redacted whole are,
-		// keep their value only if they agree on it, so that which one is
-		// written does not depend on the order of the map.
+		// Keys that format to the same string (such as `"1"` and 1, or two
+		// keys whose invalid UTF-8 is replaced alike) keep their value only if
+		// they agree on it, so that which one is written does not depend on
+		// the order of the map.
 		if existing, exists := out[k]; exists {
 			if !reflect.DeepEqual(existing, val) {
 				out[k] = redactedValue
@@ -1236,15 +1257,12 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 }
 
 // mapKeyRedactsWhole reports whether the map key k is redacted whole from
-// its type alone, without reading it or calling its MarshalText method: k,
-// the value that k holds if it is an interface, or the value that k points
-// to if it is a pointer, is redacted whole (see redactsWhole), or k is a
-// struct named for a credential whose pointer type has a MarshalJSON or
-// MarshalText method, which a map key, never addressable, is not written
-// with.
+// its type alone, without reading its value or calling its MarshalText
+// method: k, or the value that k holds if it is an interface, has a type
+// (including through pointers) that is redacted whole (see redactsWhole).
 func mapKeyRedactsWhole(k reflect.Value) bool {
 	for k.Kind() == reflect.Interface {
-		if redactsWhole(k) {
+		if redactsWhole(k.Type()) {
 			return true
 		}
 		if k.IsNil() {
@@ -1252,13 +1270,7 @@ func mapKeyRedactsWhole(k reflect.Value) bool {
 		}
 		k = k.Elem()
 	}
-	if redactsWhole(k) {
-		return true
-	}
-	if k.Kind() == reflect.Pointer && !k.IsNil() && redactsWhole(k.Elem()) {
-		return true
-	}
-	return k.Kind() == reflect.Struct && isSensitiveKey(k.Type().Name()) && typeHasMarshalerMethod(k.Type())
+	return redactsWhole(k.Type())
 }
 
 // mapKeyString returns the JSON object key for a map key: strings, text
@@ -1354,6 +1366,24 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 				}
 				fv := sv.Field(i)
 				if f.Anonymous && name == "" && isStructOrStructPointer(f.Type) {
+					// An embedded struct that would redact whole on its own
+					// (when its marshaler is shadowed by a field or ambiguous
+					// with a sibling marshaler on the outer struct) must not
+					// promote its exported fields.
+					if s.redact && redactsWhole(f.Type) {
+						if !s.budget.take() {
+							out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
+							truncated = true
+							budgetStopped = true
+							break
+						}
+						if f.IsExported() && !seenNames[f.Name] {
+							seenNames[f.Name] = true
+							out[f.Name] = redactedValue
+						}
+						truncated = true
+						continue
+					}
 					if embedded, ok := embeddedStruct(f, fv, seen); ok {
 						next = append(next, embedded)
 					}
@@ -1371,12 +1401,10 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 				seenNames[name] = true
 				// A field that is redacted whole from its type is checked
 				// before fieldNamedForCredential and omit options so that
-				// its value is never read for omitempty/omitzero and
-				// truncated is reported consistently with walk(fv). Nil
-				// pointers and nil interfaces without omit options fall
-				// through to walk, which writes them as null unless the
-				// field name itself is credential-named.
-				if s.redact && redactsWhole(fv) && (opts.omitEmpty || opts.omitZero || (fv.Kind() != reflect.Pointer && fv.Kind() != reflect.Interface) || !fv.IsNil()) {
+				// its value (including whether a pointer or interface is nil)
+				// is never read and truncated is reported consistently with
+				// walk(fv).
+				if s.redact && redactsWhole(f.Type) {
 					if !s.budget.take() {
 						out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 						truncated = true

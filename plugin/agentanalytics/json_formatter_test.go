@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -4328,13 +4329,14 @@ func TestJSONFormatter_InvalidUTF8(t *testing.T) {
 }
 
 // checkCredentialNamed fails the test unless isSensitiveKey reports want for
-// the name of each of the types: the tests need types that are named for
-// credentials and types that are not.
+// the base name (without any generic type-argument list) of each of the types:
+// the tests need types that are named for credentials and types that are not.
 func checkCredentialNamed(t *testing.T, want bool, types ...reflect.Type) {
 	t.Helper()
 	for _, typ := range types {
-		if got := isSensitiveKey(typ.Name()); got != want {
-			t.Fatalf("isSensitiveKey(%q) = %v, want %v", typ.Name(), got, want)
+		name, _, _ := strings.Cut(typ.Name(), "[")
+		if got := name != "" && isSensitiveKey(name); got != want {
+			t.Fatalf("isSensitiveKey(%q) for %s = %v, want %v", name, typ, got, want)
 		}
 	}
 }
@@ -4396,10 +4398,72 @@ func (c credentialTextValueKey) MarshalText() ([]byte, error) {
 	return []byte(c.secret), nil
 }
 
+// credentialPtrJSON writes secret with a MarshalJSON method on its pointer
+// type, and records that the method was called.
+type credentialPtrJSON struct {
+	called *atomic.Bool
+	secret string
+}
+
+func (c *credentialPtrJSON) MarshalJSON() ([]byte, error) {
+	c.called.Store(true)
+	return json.Marshal(c.secret)
+}
+
+// labelValueProbe is a neutral-named type that records whether its MarshalJSON
+// method was called while formatting a map value.
+type labelValueProbe struct {
+	called *atomic.Bool
+	raw    string
+}
+
+func (p labelValueProbe) MarshalJSON() ([]byte, error) {
+	p.called.Store(true)
+	return json.Marshal(p.raw)
+}
+
+// Generic test types whose base names are credential-named (api_key_string,
+// api_key_secret, auth_code, code_verifier) or neutral (neutralGeneric); Go
+// requires parameterized type declarations at package scope.
+type apiKeyString[T any] string
+
+type apiKeySecret[T any] struct {
+	Raw T
+	credentialTextValueKey
+}
+
+type authCode[T any] struct {
+	Raw T
+	credentialTextKey
+}
+
+type codeVerifier[T any] struct {
+	ID  string `json:"id"`
+	raw T
+}
+
+type neutralGeneric[T any] string
+
 // labelText implements encoding.TextMarshaler with a non-credential type name.
 type labelText string
 
 func (l labelText) MarshalText() ([]byte, error) { return []byte(l), nil }
+
+// labelStruct embeds labelText alongside an exported field so its promoted
+// MarshalText sits at the same depth as RefreshToken's credentialTextKey,
+// making MarshalText ambiguous when both are embedded in an outer struct.
+type labelStruct struct {
+	Label string
+	labelText
+}
+
+// Recursive pointer test types (mutually recursive forward references require
+// package scope in Go).
+type (
+	selfPtr *selfPtr
+	mutPtrA *mutPtrB
+	mutPtrB *mutPtrA
+)
 
 // countingMarshaler has a count that another goroutine may update atomically,
 // and a MarshalJSON method on its value, so that boxing the value itself
@@ -4426,7 +4490,14 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		APIKey       *string
 		Credential   any
 		AccessToken  struct{ credentialJSON }
-		RefreshToken struct{ credentialText }
+		RefreshToken struct {
+			Raw string
+			credentialTextKey
+		}
+		Bearer struct {
+			Raw string
+			credentialPtrJSON
+		}
 		ClientSecret struct {
 			ID  string `json:"id"`
 			raw string
@@ -4439,12 +4510,21 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		reflect.TypeFor[Token](), reflect.TypeFor[Secret](), reflect.TypeFor[Passphrase](),
 		reflect.TypeFor[Signature](), reflect.TypeFor[Credentials](), reflect.TypeFor[APIKey](),
 		reflect.TypeFor[Credential](), reflect.TypeFor[AccessToken](), reflect.TypeFor[RefreshToken](),
-		reflect.TypeFor[ClientSecret]())
-	checkCredentialNamed(t, false, reflect.TypeFor[Label](), reflect.TypeFor[Pointer](), reflect.TypeFor[Value]())
+		reflect.TypeFor[Bearer](), reflect.TypeFor[ClientSecret](),
+		reflect.TypeFor[apiKeyString[int]](), reflect.TypeFor[apiKeySecret[string]](),
+		reflect.TypeFor[authCode[string]](), reflect.TypeFor[codeVerifier[string]]())
+	checkCredentialNamed(t, false,
+		reflect.TypeFor[Label](), reflect.TypeFor[Pointer](), reflect.TypeFor[Value](),
+		reflect.TypeFor[neutralGeneric[int]]())
 	s, label := secret, "kept"
+	tok := Token(secret)
 	key := APIKey(&s)
 
 	t.Run("values", func(t *testing.T) {
+		var marshalerCalled atomic.Bool
+		ptrTextCred := credentialTextKey{&marshalerCalled, secret}
+		valTextCred := credentialTextValueKey{&marshalerCalled, secret}
+		ptrJSONCred := credentialPtrJSON{&marshalerCalled, secret}
 		for _, tt := range []struct {
 			name      string
 			in        any
@@ -4461,12 +4541,28 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"map", Credentials{"user": secret}, `"[REDACTED]"`, true},
 			{"pointer", key, `"[REDACTED]"`, true},
 			{"pointer to the pointer", &key, `"[REDACTED]"`, true},
-			{"nil pointer", APIKey(nil), `null`, false},
-			{"interface", struct{ C Credential }{secret}, `{"C":"[REDACTED]"}`, true},
-			{"nil interface", struct{ C Credential }{}, `{"C":null}`, false},
+			{"nil pointer", APIKey(nil), `"[REDACTED]"`, true},
+			{"nil pointer field", struct{ K APIKey }{}, `{"K":"[REDACTED]"}`, true},
+			{"nil pointer slice element", []APIKey{nil}, `["[REDACTED]"]`, true},
+			{"unnamed pointer to credential", &tok, `"[REDACTED]"`, true},
+			{"nil unnamed pointer to credential", (*Token)(nil), `"[REDACTED]"`, true},
+			{"nil unnamed pointer to credential field", struct{ P *Token }{}, `{"P":"[REDACTED]"}`, true},
+			{"nil unnamed pointer to credential slice element", []*Token{nil}, `["[REDACTED]"]`, true},
+			{"interface field", struct{ C Credential }{secret}, `{"C":"[REDACTED]"}`, true},
+			{"nil interface field", struct{ C Credential }{}, `{"C":"[REDACTED]"}`, true},
+			{"interface slice", []Credential{secret}, `["[REDACTED]"]`, true},
+			{"nil interface slice element", []Credential{nil}, `["[REDACTED]"]`, true},
+			{"interface array", [1]Credential{secret}, `["[REDACTED]"]`, true},
+			{"interface map value", map[string]Credential{"c": secret}, `{"c":"[REDACTED]"}`, true},
+			{"nil interface map value", map[string]Credential{"c": nil}, `{"c":"[REDACTED]"}`, true},
 			{"struct with MarshalJSON", AccessToken{credentialJSON{secret}}, `"[REDACTED]"`, true},
 			{"zero struct with MarshalJSON", AccessToken{}, `"[REDACTED]"`, true},
-			{"struct with MarshalText", &RefreshToken{credentialText{secret}}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText by pointer", &RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText by value", RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"struct with pointer MarshalText as map value", map[string]RefreshToken{"r": {Raw: secret, credentialTextKey: ptrTextCred}}, `{"r":"[REDACTED]"}`, true},
+			{"struct with pointer MarshalText as field of value struct", struct{ R RefreshToken }{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, `{"R":"[REDACTED]"}`, true},
+			{"struct with pointer MarshalText as array element", [1]RefreshToken{{Raw: secret, credentialTextKey: ptrTextCred}}, `["[REDACTED]"]`, true},
+			{"struct with pointer MarshalJSON by value", Bearer{Raw: secret, credentialPtrJSON: ptrJSONCred}, `"[REDACTED]"`, true},
 			{"field", struct{ T Token }{secret}, `{"T":"[REDACTED]"}`, true},
 			{"field with credential name and credential type", struct{ Token Token }{secret}, `{"Token":"[REDACTED]"}`, true},
 			{"field with credential name and credential type omitempty", struct {
@@ -4484,20 +4580,66 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"field named for credential of neutral type", struct{ Token string }{secret}, `{"Token":"[REDACTED]"}`, false},
 			{"slice element", []Token{secret}, `["[REDACTED]"]`, true},
 			{"map value", map[string]any{"t": Token(secret)}, `{"t":"[REDACTED]"}`, true},
+			// Instantiated generic credential types are redacted from their
+			// base type name, whatever their type arguments.
+			{"generic string", apiKeyString[int](secret), `"[REDACTED]"`, true},
+			{"generic field", struct{ K apiKeyString[int] }{secret}, `{"K":"[REDACTED]"}`, true},
+			{"generic slice element", []apiKeyString[int]{secret}, `["[REDACTED]"]`, true},
+			{"generic struct with value MarshalText", apiKeySecret[string]{Raw: secret, credentialTextValueKey: valTextCred}, `"[REDACTED]"`, true},
+			{"generic struct with pointer MarshalText by value", authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
+			{"generic struct with pointer MarshalText by pointer", &authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, `"[REDACTED]"`, true},
 			// A struct without a marshaler is written by its exported
 			// fields, each redacted by its own name.
 			{"struct without a marshaler", ClientSecret{ID: "id-1", raw: secret}, `{"id":"id-1"}`, false},
+			{"generic struct without a marshaler", codeVerifier[string]{ID: "id-1", raw: secret}, `{"id":"id-1"}`, false},
 			// A struct that promotes the marshaler of an embedded credential
-			// writes the credential, whatever the struct is named.
+			// writes the credential, whatever the struct is named and whether
+			// the outer struct is addressable or not.
 			{"promoted MarshalJSON", struct {
 				AccessToken
 				Note string
 			}{AccessToken{credentialJSON{secret}}, "n"}, `"[REDACTED]"`, true},
-			{"promoted MarshalText through a pointer", struct{ *RefreshToken }{&RefreshToken{credentialText{secret}}}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalText by value", struct {
+				RefreshToken
+				Note string
+			}{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalJSON by value", struct {
+				Bearer
+				Note string
+			}{Bearer{Raw: secret, credentialPtrJSON: ptrJSONCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted MarshalText through a pointer", struct{ *RefreshToken }{&RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, `"[REDACTED]"`, true},
+			{"promoted generic value MarshalText", struct {
+				apiKeySecret[string]
+				Note string
+			}{apiKeySecret[string]{Raw: secret, credentialTextValueKey: valTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted generic pointer MarshalText by value", struct {
+				authCode[string]
+				Note string
+			}{authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
 			{"embedded json.Marshaler", struct{ json.Marshaler }{AccessToken{credentialJSON{secret}}}, `"[REDACTED]"`, true},
 			{"nil embedded encoding.TextMarshaler", struct{ encoding.TextMarshaler }{}, `"[REDACTED]"`, true},
+			// An embedded credential struct whose marshaler is shadowed or
+			// ambiguous on the outer struct must not promote its exported
+			// fields when walkStruct falls back to field walking.
+			{"embedded credential marshaler shadowed by field", struct {
+				RefreshToken
+				MarshalText int
+			}{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, 1}, `{"MarshalText":1,"RefreshToken":"[REDACTED]"}`, true},
+			{"embedded pointer credential marshaler ambiguous with sibling", struct {
+				*RefreshToken
+				labelStruct
+			}{&RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, labelStruct{Label: "kept"}}, `{"Label":"kept","RefreshToken":"[REDACTED]"}`, true},
+			{"nil embedded pointer credential marshaler ambiguous with sibling", struct {
+				*RefreshToken
+				labelStruct
+			}{nil, labelStruct{Label: "kept"}}, `{"Label":"kept","RefreshToken":"[REDACTED]"}`, true},
+			{"unexported embedded credential marshaler shadowed by field", struct {
+				authCode[string]
+				MarshalText int
+			}{authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, 1}, `{"MarshalText":1}`, true},
 			// Values of types with neutral names are written as before.
 			{"neutral string", Label("kept"), `"kept"`, false},
+			{"neutral generic string", neutralGeneric[int]("kept"), `"kept"`, false},
 			{"neutral pointer", Pointer(&label), `"kept"`, false},
 			{"neutral interface", struct{ V Value }{"kept"}, `{"V":"kept"}`, false},
 			{"embedded neutral marshaler", struct{ time.Time }{time.Unix(0, 0).UTC()}, `"1970-01-01T00:00:00Z"`, false},
@@ -4507,20 +4649,46 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
 					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
+				if marshalerCalled.Load() {
+					t.Errorf("SmartTruncate(%T) called a credential marshaler", tt.in)
+				}
 			})
 		}
 	})
 
 	t.Run("values with redaction off", func(t *testing.T) {
+		var offCalled atomic.Bool
 		for _, in := range []any{
 			Token(secret),
+			apiKeyString[int](secret),
 			key,
 			struct{ C Credential }{secret},
+			[]Credential{secret},
 			AccessToken{credentialJSON{secret}},
+			&RefreshToken{Raw: "id", credentialTextKey: credentialTextKey{&offCalled, secret}},
+			apiKeySecret[string]{Raw: "id", credentialTextValueKey: credentialTextValueKey{&offCalled, secret}},
 			struct{ AccessToken }{AccessToken{credentialJSON{secret}}},
+			struct {
+				RefreshToken
+				MarshalText int
+			}{RefreshToken{Raw: secret, credentialTextKey: credentialTextKey{&offCalled, secret}}, 1},
 		} {
 			if got, _, err := smartTruncate(in, 1000, false); err != nil || !strings.Contains(string(got), secret) {
 				t.Errorf("smartTruncate(%T, redact off) = (%s, %v), want it to hold %q", in, got, err, secret)
+			}
+		}
+		for _, tt := range []struct {
+			in   any
+			want string
+		}{
+			{APIKey(nil), `null`},
+			{(*Token)(nil), `null`},
+			{struct{ P *Token }{}, `{"P":null}`},
+			{struct{ C Credential }{}, `{"C":null}`},
+			{[]Credential{nil}, `[null]`},
+		} {
+			if got, truncated, err := smartTruncate(tt.in, 1000, false); err != nil || string(got) != tt.want || truncated {
+				t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, false, nil)", tt.in, got, truncated, err, tt.want)
 			}
 		}
 	})
@@ -4613,6 +4781,56 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}
 		})
 
+		t.Run("map[Token]*self/over_budget", func(t *testing.T) {
+			// Values are circular pointers back to the holder, which charge no
+			// node budget themselves; only charging each whole-redacted key
+			// stops the loop at maxSanitizeNodes.
+			type selfHolder struct {
+				M map[Token]*selfHolder
+			}
+			h := &selfHolder{M: make(map[Token]*selfHolder, maxSanitizeNodes+10)}
+			for i := range maxSanitizeNodes + 10 {
+				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
+			}
+			got, truncated, err := SmartTruncate(h, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(self-referential map over budget) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var parsed struct {
+				M map[string]any
+			}
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map over budget) error: %v", err)
+			}
+			if parsed.M[sanitizeBudgetPlaceholder] != sanitizeBudgetPlaceholder || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map over budget) M = %v, want %s and %s entries", parsed.M, redactedValue, sanitizeBudgetPlaceholder)
+			}
+		})
+
+		t.Run("map[Token]*self/exact_budget", func(t *testing.T) {
+			type selfHolder struct {
+				M map[Token]*selfHolder
+			}
+			const wantKeys = maxSanitizeNodes - 2
+			h := &selfHolder{M: make(map[Token]*selfHolder, wantKeys)}
+			for i := range wantKeys {
+				h.M[Token(fmt.Sprintf("%s_%d", secret, i))] = h
+			}
+			got, truncated, err := SmartTruncate(h, 100)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(self-referential map exact budget) = (truncated %v, %v), want truncated", truncated, err)
+			}
+			var parsed struct {
+				M map[string]any
+			}
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(self-referential map exact budget) error: %v", err)
+			}
+			if len(parsed.M) != 1 || parsed.M[redactedValue] != redactedValue {
+				t.Errorf("SmartTruncate(self-referential map exact budget) M = %v, want only %s", parsed.M, redactedValue)
+			}
+		})
+
 		t.Run("pointers_at_max_depth/over_budget", func(t *testing.T) {
 			n := 1
 			ptrs := make([]*int, maxSanitizeNodes+10)
@@ -4647,6 +4865,51 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				t.Errorf("SmartTruncate(pointers at max depth) wrote %d items ending in %v, want %d ending in %s", len(inner), inner[len(inner)-1], wantInnerLen, sanitizeBudgetPlaceholder)
 			}
 		})
+
+		t.Run("nil_pointer_at_max_depth", func(t *testing.T) {
+			nestAtMaxDepth := func(leaf any) any {
+				cur := leaf
+				for range maxSanitizeDepth {
+					cur = []any{cur}
+				}
+				return cur
+			}
+			unwrap := func(t *testing.T, raw []byte) any {
+				t.Helper()
+				var cur any
+				if err := json.Unmarshal(raw, &cur); err != nil {
+					t.Fatalf("json.Unmarshal error: %v", err)
+				}
+				for range maxSanitizeDepth {
+					wrapper, ok := cur.([]any)
+					if !ok || len(wrapper) != 1 {
+						t.Fatalf("unexpected wrapper shape: %T", cur)
+					}
+					cur = wrapper[0]
+				}
+				return cur
+			}
+			// A nil neutral pointer at max depth writes null without marking
+			// the row truncated, matching a nil interface at the same depth.
+			got, truncated, err := SmartTruncate(nestAtMaxDepth((*int)(nil)), 100)
+			if err != nil || truncated {
+				t.Fatalf("SmartTruncate(nil *int at max depth) = (truncated %v, %v), want (false, nil)", truncated, err)
+			}
+			if leaf := unwrap(t, got); leaf != nil {
+				t.Errorf("SmartTruncate(nil *int at max depth) leaf = %v, want nil", leaf)
+			}
+			// Credential pointers at max depth still redact from their static
+			// type without calling IsNil.
+			for _, credNil := range []any{APIKey(nil), (*Token)(nil)} {
+				got, truncated, err = SmartTruncate(nestAtMaxDepth(credNil), 100)
+				if err != nil || !truncated {
+					t.Fatalf("SmartTruncate(%T at max depth) = (truncated %v, %v), want (true, nil)", credNil, truncated, err)
+				}
+				if leaf := unwrap(t, got); leaf != redactedValue {
+					t.Errorf("SmartTruncate(%T at max depth) leaf = %v, want %s", credNil, leaf, redactedValue)
+				}
+			}
+		})
 	})
 
 	t.Run("map keys", func(t *testing.T) {
@@ -4655,27 +4918,50 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			IDToken      struct{ credentialTextValueKey }
 		)
 		checkCredentialNamed(t, true, reflect.TypeFor[SessionToken](), reflect.TypeFor[IDToken]())
-		var called atomic.Bool
-		ptrKey := credentialTextKey{&called, secret}
-		valueKey := credentialTextValueKey{&called, secret}
+		checkCredentialNamed(t, false, reflect.TypeFor[selfPtr](), reflect.TypeFor[mutPtrA](), reflect.TypeFor[mutPtrB]())
+		var keyCalled, valCalled atomic.Bool
+		ptrKey := credentialTextKey{&keyCalled, secret}
+		valueKey := credentialTextValueKey{&keyCalled, secret}
+		pwdValueKey := credentialTextValueKey{&keyCalled, "password"}
+		valProbe := labelValueProbe{&valCalled, secret}
+		tokPtr := &tok
 		for _, tt := range []struct {
 			name      string
 			in        any
 			want      string
 			wantTrunc bool
 		}{
-			{"string key", map[Token]string{secret: "v"}, `{"[REDACTED]":"v"}`, true},
-			{"key in an interface", map[any]string{Token(secret): "v"}, `{"[REDACTED]":"v"}`, true},
-			{"pointer key", map[*SessionToken]string{{ptrKey}: "v"}, `{"[REDACTED]":"v"}`, true},
-			{"struct key", map[IDToken]string{{valueKey}: "v"}, `{"[REDACTED]":"v"}`, true},
-			{"struct key in an interface", map[any]string{IDToken{valueKey}: "v"}, `{"[REDACTED]":"v"}`, true},
+			{"string key", map[Token]string{secret: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"credential-named key holding sensitive key text", map[Token]string{"password": secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"key in an interface", map[any]string{Token("access_token"): secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"pointer key", map[*SessionToken]string{{ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil pointer key", map[*SessionToken]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"double pointer to credential key", map[**Token]string{&tokPtr: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"nil double pointer to credential key", map[**Token]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key", map[IDToken]string{{valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key whose MarshalText returns sensitive key text", map[IDToken]string{{pwdValueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key in an interface", map[any]string{IDToken{valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
 			// A key whose method is on its pointer type, which a map key is
 			// not written with, is redacted rather than left unsupported.
-			{"struct key with a pointer method", map[SessionToken]string{{ptrKey}: "v"}, `{"[REDACTED]":"v"}`, true},
-			// Keys redacted alike keep a value only if they agree on it,
-			// whatever the order of the map.
-			{"keys that agree", map[Token]string{"a": "v", "b": "v"}, `{"[REDACTED]":"v"}`, true},
-			{"keys that disagree", map[Token]string{"a": "v1", "b": "v2"}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key with a pointer method", map[SessionToken]string{{ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			// Neither the key's nor the value's marshaler is invoked when the
+			// key is redacted whole from its type.
+			{"string key with marshaler value", map[Token]labelValueProbe{"password": valProbe}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"struct key with marshaler value", map[IDToken]labelValueProbe{{valueKey}: valProbe}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic string key", map[apiKeyString[int]]string{secret: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic struct key", map[apiKeySecret[int]]string{{Raw: 1, credentialTextValueKey: valueKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"generic struct key with a pointer method", map[authCode[int]]string{{Raw: 1, credentialTextKey: ptrKey}: secret}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			{"multiple credential keys", map[Token]string{"a": "v1", "b": "v2"}, `{"[REDACTED]":"[REDACTED]"}`, true},
+			// Recursive pointer map-key types terminate and format as
+			// unsupported keys rather than spinning in static pointer peeling.
+			{"recursive pointer key", map[selfPtr]string{nil: "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"recursive pointer key in an interface", map[any]string{selfPtr(nil): "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"mutually recursive pointer key", map[mutPtrA]string{nil: "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			{"mutually recursive pointer key in an interface", map[any]string{mutPtrA(nil): "v"}, `{"[UNSUPPORTED_KEY]":"v"}`, true},
+			// Neutral keys that format to the same string keep their value
+			// only if they agree on it, whatever the order of the map.
+			{"colliding neutral keys that agree", map[Label]string{"a\xff": "v", "a\xfe": "v"}, "{\"a\uFFFD\":\"v\"}", false},
+			{"colliding neutral keys that disagree", map[Label]string{"a\xff": "v1", "a\xfe": "v2"}, "{\"a\uFFFD\":\"[REDACTED]\"}", true},
 			{"neutral key", map[Label]string{"kept": "v"}, `{"kept":"v"}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
@@ -4683,8 +4969,11 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				if err != nil || string(got) != tt.want || truncated != tt.wantTrunc {
 					t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.want, tt.wantTrunc)
 				}
-				if called.Load() {
+				if keyCalled.Load() {
 					t.Errorf("SmartTruncate(%T) called the MarshalText method of a key", tt.in)
+				}
+				if valCalled.Load() {
+					t.Errorf("SmartTruncate(%T) called the MarshalJSON method of a redacted key's value", tt.in)
 				}
 			})
 		}
@@ -4777,26 +5066,41 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 	s := secret
 
 	t.Run("types named for credentials", func(t *testing.T) {
+		var called atomic.Bool
 		type tagged struct {
-			T Token                            `json:"t,omitempty"`
-			K APIKey                           `json:"k,omitempty"`
-			M Credentials                      `json:"m,omitzero"`
-			C Credential                       `json:"c,omitempty,omitzero"`
-			A AccessToken                      `json:"a,omitzero"`
-			E struct{ encoding.TextMarshaler } `json:"e,omitzero"`
+			T  Token                            `json:"t,omitempty"`
+			K  APIKey                           `json:"k,omitempty"`
+			M  Credentials                      `json:"m,omitzero"`
+			C  Credential                       `json:"c,omitempty,omitzero"`
+			A  AccessToken                      `json:"a,omitzero"`
+			G  apiKeyString[int]                `json:"g,omitzero"`
+			GA authCode[int]                    `json:"ga,omitzero"`
+			E  struct{ encoding.TextMarshaler } `json:"e,omitzero"`
 			// Fields that hold no credential keep their omit options.
 			N uint64 `json:"n,omitempty"`
 			S string `json:"s,omitzero"`
 		}
-		const want = `{"a":"[REDACTED]","c":"[REDACTED]","e":"[REDACTED]","k":"[REDACTED]","m":"[REDACTED]","t":"[REDACTED]"}`
+		const want = `{"a":"[REDACTED]","c":"[REDACTED]","e":"[REDACTED]","g":"[REDACTED]","ga":"[REDACTED]","k":"[REDACTED]","m":"[REDACTED]","t":"[REDACTED]"}`
 		for _, in := range []any{
 			tagged{},
 			&tagged{},
-			tagged{T: 7, K: &s, M: Credentials{"user": secret}, C: secret, A: AccessToken{credentialJSON{secret}}, E: struct{ encoding.TextMarshaler }{credentialText{secret}}},
+			tagged{
+				T:  7,
+				K:  &s,
+				M:  Credentials{"user": secret},
+				C:  secret,
+				A:  AccessToken{credentialJSON{secret}},
+				G:  apiKeyString[int](secret),
+				GA: authCode[int]{Raw: 1, credentialTextKey: credentialTextKey{&called, secret}},
+				E:  struct{ encoding.TextMarshaler }{credentialText{secret}},
+			},
 		} {
 			got, truncated, err := SmartTruncate(in, 1000)
 			if err != nil || string(got) != want || !truncated {
 				t.Errorf("SmartTruncate(%T) = (%s, %v, %v), want (%s, true, nil)", in, got, truncated, err, want)
+			}
+			if called.Load() {
+				t.Errorf("SmartTruncate(%T) called generic credential marshaler", in)
 			}
 		}
 		// Redaction off omits the empty fields as encoding/json does.
@@ -4861,6 +5165,8 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 				Secret string
 				Note   string
 			} `json:"guarded,omitzero"`
+			GenKeys   [2]apiKeyString[int] `json:"gen_keys,omitzero"`
+			GenLocked codeVerifier[uint64] `json:"gen_locked,omitzero"`
 			// Fields that hold no credential keep omitzero.
 			Meta struct{ N uint64 } `json:"meta,omitzero"`
 			When time.Time          `json:"when,omitzero"`
@@ -4870,7 +5176,13 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 		if size := reflect.TypeFor[holder]().Field(2).Type.Size(); size <= 1024 {
 			t.Fatalf("size of holder.Big = %d, want more than 1024", size)
 		}
-		set := &holder{Keys: [2]Token{1, 2}, Locked: ClientSecret{ID: "id-1", raw: 1}, When: time.Unix(0, 0).UTC()}
+		set := &holder{
+			Keys:      [2]Token{1, 2},
+			Locked:    ClientSecret{ID: "id-1", raw: 1},
+			GenKeys:   [2]apiKeyString[int]{secret, secret},
+			GenLocked: codeVerifier[uint64]{ID: "id-2", raw: 1},
+			When:      time.Unix(0, 0).UTC(),
+		}
 		set.Inner.T = 1
 		set.Big.Password[0] = 1
 		set.Nested[0].Token = 1
@@ -4882,8 +5194,8 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 			in   *holder
 			want string
 		}{
-			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}]}`},
-			{"set", set, `{"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"when":"1970-01-01T00:00:00Z"}`},
+			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":""},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}]}`},
+			{"set", set, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":"id-2"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"when":"1970-01-01T00:00:00Z"}`},
 		} {
 			if got, _, err := SmartTruncate(tt.in, 10000); err != nil || string(got) != tt.want {
 				t.Errorf("%s: SmartTruncate(*holder) = (%s, %v), want %s", tt.name, got, err, tt.want)
@@ -4903,15 +5215,19 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 // TestJSONFormatter_ConcurrentCredentialStructNoRace checks that, under
 // redaction, SmartTruncate reads none of the credentials of a struct while
 // another goroutine updates them atomically or under a lock: neither a field
-// of a type named for a credential nor a field named for one, whatever its
-// omit option, nor what an omitzero field holds in an array over 1024 bytes,
-// in a credential-named struct guarded by a mutex, or in a credential-named
-// string field inside an omitzero composite struct guarded by a mutex. Run it
-// with -race, which reports such a read; the values are never zero, so that
-// the output is the same whether or not they are read.
+// of a type named for a credential (including untagged named or unnamed
+// pointer fields and pointer slice elements rotated via atomic.StorePointer)
+// nor a field named for one, whatever its omit option, nor what an omitzero
+// field holds in an array over 1024 bytes, in a credential-named struct
+// guarded by a mutex, or in a credential-named string field inside an omitzero
+// composite struct guarded by a mutex. Run it with -race, which reports such a
+// read; the values are never zero or nil, so that the output is the same
+// whether or not they are read.
 func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 	type (
 		Token        uint64
+		APIKey       *string
+		Passphrase   string
 		SessionToken struct {
 			// IsZero reads raw first. The slice makes the struct
 			// incomparable, so that IsZero reads the fields one by one,
@@ -4923,29 +5239,60 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 			ID     string `json:"id"`
 		}
 	)
-	checkCredentialNamed(t, true, reflect.TypeFor[Token](), reflect.TypeFor[SessionToken]())
+	checkCredentialNamed(t, true,
+		reflect.TypeFor[Token](), reflect.TypeFor[APIKey](),
+		reflect.TypeFor[Passphrase](), reflect.TypeFor[SessionToken]())
 	// The fields that are updated atomically come first, so that they are
 	// aligned to 64 bits on every platform.
 	type holder struct {
-		T       Token                         `json:"t,omitempty"`
-		Secret  uint64                        `json:"secret_count,omitzero"`
-		Big     struct{ Password [2048]byte } `json:"big,omitzero"`
-		Locked  SessionToken                  `json:"locked,omitzero"`
-		Guarded struct {
+		T        Token  `json:"t,omitempty"`
+		Secret   uint64 `json:"secret_count,omitzero"`
+		K        APIKey
+		P        *Passphrase
+		Keys     []APIKey
+		Ptrs     []*Passphrase
+		InnerPtr struct{ P *Passphrase }       `json:"inner_ptr,omitzero"`
+		Big      struct{ Password [2048]byte } `json:"big,omitzero"`
+		Locked   SessionToken                  `json:"locked,omitzero"`
+		Guarded  struct {
 			mu     sync.Mutex
 			Secret string
 			Note   string
 		} `json:"guarded,omitzero"`
 	}
-	h := &holder{T: 1, Secret: 1, Locked: SessionToken{raw: 1, scopes: []string{"read"}, ID: "id-1"}}
+	k1, k2 := "k1", "k2"
+	p1, p2 := Passphrase("p1"), Passphrase("p2")
+	h := &holder{
+		T:      1,
+		Secret: 1,
+		K:      APIKey(&k1),
+		P:      &p1,
+		Keys:   []APIKey{APIKey(&k1)},
+		Ptrs:   []*Passphrase{&p1},
+		Locked: SessionToken{raw: 1, scopes: []string{"read"}, ID: "id-1"},
+	}
+	h.InnerPtr.P = &p1
 	h.Big.Password[0] = 1
 	h.Guarded.Secret = "s1"
 	h.Guarded.Note = "n"
 	var bigMu sync.Mutex
-	const want = `{"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"locked":{"id":"id-1"},"secret_count":"[REDACTED]","t":"[REDACTED]"}`
+	var flip bool
+	const want = `{"K":"[REDACTED]","Keys":["[REDACTED]"],"P":"[REDACTED]","Ptrs":["[REDACTED]"],"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"inner_ptr":{"P":"[REDACTED]"},"locked":{"id":"id-1"},"secret_count":"[REDACTED]","t":"[REDACTED]"}`
 	runWhileUpdating(func() {
 		atomic.AddUint64((*uint64)(&h.T), 1)
 		atomic.AddUint64(&h.Secret, 1)
+		flip = !flip
+		next := &k1
+		nextPass := &p1
+		if flip {
+			next = &k2
+			nextPass = &p2
+		}
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.K)), unsafe.Pointer(next))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.P)), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Keys[0])), unsafe.Pointer(next))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Ptrs[0])), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.InnerPtr.P)), unsafe.Pointer(nextPass))
 		bigMu.Lock()
 		h.Big.Password[0] = h.Big.Password[0]%255 + 1
 		bigMu.Unlock()
