@@ -18,27 +18,24 @@
 //
 // ADK does not expose everything that tells apart the attempts of a tool call
 // or the activations of a task-mode agent, so the plugin reads some
-// unexported fields of the google.golang.org/adk/v2 contexts and plugin
-// manager by reflection. These reads are best effort: if a version of ADK or
-// a custom context wrapper changes or hides those fields, the reads fail
-// quietly, without a build error or a log, and the plugin falls back as
-// follows.
+// unexported fields of the google.golang.org/adk/v2 contexts by reflection.
+// These reads are best effort: if a version of ADK or a custom context wrapper
+// changes or hides those fields, the reads fail quietly, without a build error
+// or a log, and the plugin falls back as follows.
 //
 //   - The EventActions of a tool context (see agent.NewToolContext): tool
-//     callbacks are told apart by their context pointer alone, so a custom
-//     context that is not a pointer no longer suppresses the TOOL_COMPLETED
-//     row of a recovered tool error. A finish_task function response event
-//     of a task-mode agent no longer shows which activation wrote it: a
-//     delayed response of a finish_task call that failed or was recovered
-//     ends no activation unless an open or settled finish_task call shows a
-//     newer completion, so the AGENT_COMPLETED row of a task-mode agent can
-//     move to the end of the run.
-//   - The plugin order of the runner's plugin manager: a recovered tool error
-//     suppresses TOOL_COMPLETED, and the AGENT_RESPONSE row of a final
-//     response tool, only when the arguments that AfterToolCallback sees
-//     match those of the failed attempt in full (see EventToolCompleted). A
-//     callback that changed the arguments in place, or arguments past the
-//     bounds of the comparison, then keep the TOOL_COMPLETED row.
+//     callbacks are told apart by their context pointer and JSON-shaped
+//     arguments instead (see EventToolCompleted). A custom context that is not
+//     a pointer no longer suppresses the TOOL_COMPLETED row of a recovered
+//     tool error, and a pointer context without EventActions suppresses it
+//     only when AfterToolCallback sees unchanged JSON-shaped arguments within
+//     the comparison bounds. A finish_task function response event of a
+//     task-mode agent no longer shows which activation wrote it: a delayed
+//     response of a finish_task call that failed or was recovered ends no
+//     activation unless an open or settled finish_task call shows a newer
+//     completion (or a hidden-callback peer's deferred completion settles once
+//     the activation ends), so the AGENT_COMPLETED row of a task-mode agent
+//     can move to the end of its parent or run.
 package agentanalytics
 
 import (
@@ -98,34 +95,40 @@ const (
 	// a call that plugin/retryandreflect answered, nor for a call whose failure
 	// OnToolErrorCallback already recorded as TOOL_ERROR before an agent
 	// OnToolErrorCallback or a later plugin recovered it, when the
-	// AfterToolCallback belongs to the failed attempt: the same per-attempt
-	// tool context (a pointer context, or the EventActions of
-	// agent.NewToolContext) in the same model turn of the same agent
-	// activation.
+	// AfterToolCallback belongs to the failed attempt in the same model turn
+	// of the same agent activation.
 	//
-	// A recovered call still gets TOOL_COMPLETED when it cannot be told apart
-	// from a retry that reuses the failed attempt's tool context:
-	//   - when a plugin registered before this one registers a
-	//     BeforeToolCallback and a plugin registered before this one registers
-	//     an AfterToolCallback, as loggingplugin does: such plugins can answer
-	//     this plugin's AfterToolCallback of the failed attempt and its
-	//     BeforeToolCallback of a retry;
-	//   - when the callback context does not show the runner's plugins, as for
-	//     a custom executor that runs the callbacks itself, unless the
-	//     arguments match those of the failed attempt in full: each string up
-	//     to 64 KiB and 1 MiB of strings in all, each map, slice or struct up
-	//     to 256 entries, and up to 1024 values in all;
-	//   - when a custom callback context is not a pointer and does not come
-	//     from agent.NewToolContext.
+	// Standard ADK tool dispatch (agent.NewToolContext) gives each attempt its
+	// own tool.Context and session.EventActions, so recovered attempts are
+	// suppressed regardless of plugin registration order (such as
+	// loggingplugin registered before this plugin) and even when an earlier
+	// callback mutates the arguments map in place. Reusing a single
+	// tool.Context or session.EventActions across separate tool dispatches in
+	// the same model turn is not supported: when EventActions is present, any
+	// AfterToolCallback sharing that EventActions in the same turn is treated
+	// as the recovered callback of the failed attempt and suppressed.
+	//
+	// When a custom callback context does not carry EventActions:
+	//   - on a pointer context, suppression requires unchanged JSON-shaped
+	//     arguments within the digest bounds (each string or byte slice up to
+	//     64 KiB and 1 MiB in all, each map, slice, or array of JSON-shaped
+	//     values up to 256 entries, and up to 1024 values in all; pointers,
+	//     structs, functions, and channels are treated as opaque incomplete
+	//     evidence, and reusing the same pointer context with identical
+	//     JSON-shaped arguments in the same turn without observing the retry's
+	//     BeforeToolCallback suppresses the completion);
+	//   - on a non-pointer value context, recovered attempts keep
+	//     TOOL_COMPLETED.
 	//
 	// Overlapping calls with an empty function call ID on one callback context
-	// are told apart by their arguments when those differ. Otherwise the
-	// failure of one of them suppresses the TOOL_COMPLETED row of one of them,
-	// so that the overlap ends with one TOOL_ERROR row per failed call and one
-	// TOOL_COMPLETED row per other call. Rows are written as the callbacks run,
-	// though: when a recovered call ends before another call of the overlap
-	// fails, its TOOL_COMPLETED row is already written, and that overlap ends
-	// with one TOOL_COMPLETED row more.
+	// are told apart by their arguments when those are distinct JSON-shaped
+	// values within bounds. Otherwise the failure of one of them suppresses
+	// the TOOL_COMPLETED row of one of them, so that the overlap ends with one
+	// TOOL_ERROR row per failed call and one TOOL_COMPLETED row per other
+	// call. Rows are written as the callbacks run, though: when a recovered
+	// call ends before another call of the overlap fails, its TOOL_COMPLETED
+	// row is already written, and that overlap ends with one TOOL_COMPLETED
+	// row more.
 	EventToolCompleted = "TOOL_COMPLETED"
 	// EventToolError is written when a tool call fails, including when the
 	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
@@ -133,7 +136,9 @@ const (
 	// that still sees the error of an attempt whose TOOL_ERROR row
 	// OnToolErrorCallback wrote, or a plugin/retryandreflect payload that
 	// reports it, adds no second row, even when an earlier callback changed
-	// the arguments in place.
+	// the arguments in place (matched by attempt identity when present, or by
+	// an outstanding OnToolErrorCallback marker in the same turn for custom
+	// value contexts).
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -613,7 +618,6 @@ func newBigQueryAgentAnalyticsPlugin(
 		return nil, err
 	}
 
-	traces.selfPlugin = weak.Make(adkPlugin)
 	registerPlugin(adkPlugin, state)
 
 	if config.createViews() && state.runner != nil {
@@ -908,6 +912,7 @@ func (p *analyticsPlugin) beforeRun(ctx agent.InvocationContext) (*genai.Content
 func (p *analyticsPlugin) afterRun(ctx agent.InvocationContext) {
 	defer p.recoverCallback(EventInvocationCompleted)
 	id := identityOf(ctx)
+	p.logDeferredTaskCompletions(ctx, id, p.traces.popDeferredTaskCompletionsAll(ctx, id))
 	unclosed, unrecErr := p.traces.popUnclosedAgentSpans(ctx, id)
 	if unrecErr == nil && ctx != nil {
 		// A canceled invocation failed even when no span is left open, for
@@ -976,6 +981,22 @@ func (p *analyticsPlugin) logPurgedAgents(ctx context.Context, id identity, purg
 	p.logAgentErrors(ctx, id, purged, nil)
 }
 
+// logDeferredTaskCompletions writes the AGENT_COMPLETED rows of task-mode
+// activations whose ambiguous finish_task FunctionResponse events settled once
+// their enclosing parent or invocation ended without further activity on them.
+func (p *analyticsPlugin) logDeferredTaskCompletions(ctx context.Context, baseID identity, completed []deferredAgentCompletion) {
+	for _, c := range completed {
+		taskID := baseID
+		if c.agentName != "" {
+			taskID.agentName = c.agentName
+		}
+		taskID.branch = c.branch
+		taskID.path = c.path
+		span := c.span
+		p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
+	}
+}
+
 // onEvent writes the rows of a session event. The event callback gets the
 // agent that the runner runs, so the event is placed by its author, branch
 // and node path. A non-partial event with content or a typed output also
@@ -1005,7 +1026,7 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.Partial {
 			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponse(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content))
+			p.traces.completeResponseEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCallSpecs(ev.Content), eventStateDelta(ev))
 		} else {
 			p.traces.clearLastPartial(ctx, evID)
 		}
@@ -1162,6 +1183,27 @@ func functionResponseCalls(c *genai.Content) []string {
 	return calls
 }
 
+// functionResponseCallSpecs returns each function response in c paired with
+// its tool name so open tool spans are matched by both call ID and tool name.
+func functionResponseCallSpecs(c *genai.Content) []functionResponseCall {
+	if c == nil {
+		return nil
+	}
+	var calls []functionResponseCall
+	for _, part := range c.Parts {
+		if part == nil || part.FunctionResponse == nil {
+			continue
+		}
+		if call := cmp.Or(part.FunctionResponse.ID, part.FunctionResponse.Name); call != "" {
+			calls = append(calls, functionResponseCall{
+				call: call,
+				name: part.FunctionResponse.Name,
+			})
+		}
+	}
+	return calls
+}
+
 // beforeAgent writes the AGENT_STARTING row of an agent. When a coordinator
 // starts again after the task-mode sub-agent that it delegated to completed,
 // it first writes the AGENT_COMPLETED row of the activation that the
@@ -1169,6 +1211,7 @@ func functionResponseCalls(c *genai.Content) []string {
 func (p *analyticsPlugin) beforeAgent(ctx agent.Context) (*genai.Content, error) {
 	defer p.recoverCallback(EventAgentStarting)
 	id := identityOf(ctx)
+	p.logDeferredTaskCompletions(ctx, id, p.traces.popDeferredTaskCompletionsForDelegator(ctx, id))
 	if span, ok := p.traces.popDelegatingAgentSpan(ctx, id); ok {
 		p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan { return span }, nil)
 	}
@@ -1194,6 +1237,7 @@ func (p *analyticsPlugin) afterAgent(ctx agent.Context) (*genai.Content, error) 
 	// A workflow agent ends only after every node run that its scheduler
 	// started, so the failed attempts of nodes that it started again are
 	// purged here, before its AGENT_COMPLETED row (see endRestartedNodeRuns).
+	p.logDeferredTaskCompletions(ctx, id, p.traces.popDeferredTaskCompletionsUnder(ctx, id))
 	p.logPurgedAgents(ctx, id, p.traces.endRestartedNodeRuns(ctx, id))
 	p.logEvent(ctx, id, EventAgentCompleted, func() rowSpan {
 		return p.traces.popAgentSpan(ctx, id)

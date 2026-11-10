@@ -22832,12 +22832,76 @@ func TestBoundedArgsDigest(t *testing.T) {
 		if a.sameArgs(b) {
 			t.Error("sameArgs() = true for truncated digests, want false")
 		}
-		if !a.sameArgsDigest(b) {
-			t.Error("sameArgsDigest() = false for equal truncated digests, want true")
+		map300A := make(map[string]any, 300)
+		map300B := make(map[string]any, 300)
+		for i := range 300 {
+			map300A[fmt.Sprintf("k%03d", i)] = i
+			map300B[fmt.Sprintf("k%03d", i)] = i + 1000
+		}
+		idA, _ := toolCallIdentityOf(context.Background(), map300A)
+		idB, _ := toolCallIdentityOf(context.Background(), map300B)
+		if !idA.argsTruncated || !idB.argsTruncated || idA.sameArgs(idB) {
+			t.Errorf("300-key maps: truncated=(%v,%v) sameArgs=%v, want (true,true) and false", idA.argsTruncated, idB.argsTruncated, idA.sameArgs(idB))
 		}
 		full, _ := toolCallIdentityOf(context.Background(), map[string]any{"s": "x"})
 		if !full.sameArgs(full) {
 			t.Error("sameArgs() = false for equal full digests, want true")
+		}
+	})
+
+	t.Run("opaque structs pointers and functions set truncated without reading fields", func(t *testing.T) {
+		type opaqueState struct {
+			Public  string
+			counter atomic.Int64
+			mu      sync.Mutex
+			private map[string]int
+		}
+		st := &opaqueState{
+			Public:  "immutable",
+			private: map[string]int{"seed": 1},
+		}
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				st.counter.Add(1)
+				st.mu.Lock()
+				st.private[fmt.Sprintf("k%d", i%8)] = i
+				st.mu.Unlock()
+			}
+		}()
+		defer func() {
+			close(stop)
+			wg.Wait()
+		}()
+
+		type plainStruct struct{ X int }
+		var nilPtr *opaqueState
+		for i := range 64 {
+			for name, args := range map[string]map[string]any{
+				"live_struct_ptr": {"p": st},
+				"nil_struct_ptr":  {"p": nilPtr},
+				"struct_value":    {"s": plainStruct{X: i}},
+				"struct_array":    {"a": [2]plainStruct{{X: 1}, {X: 2}}},
+				"closure":         {"fn": func() int { return i }},
+			} {
+				_, ok, truncated := boundedArgsDigest(args)
+				if !ok || !truncated {
+					t.Fatalf("%s: boundedArgsDigest = (ok=%v, truncated=%v), want (true, true)", name, ok, truncated)
+				}
+				id1, _ := toolCallIdentityOf(context.Background(), args)
+				id2, _ := toolCallIdentityOf(context.Background(), args)
+				if id1.sameArgs(id2) {
+					t.Fatalf("%s: sameArgs() = true on opaque argument, want false", name)
+				}
+			}
 		}
 	})
 }
@@ -22915,69 +22979,6 @@ func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
 	}
 	if logBuf.Len() != 0 {
 		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
-	}
-
-	// Earlier plugin inspection must also traverse "c" (withoutCancelCtx) and
-	// "cancelCtx" (timerCtx) inside a real runner invocation.
-	probeTool, err := functiontool.New(functiontool.Config{
-		Name:        "probe",
-		Description: "probe",
-	}, func(_ agent.Context, _ map[string]any) (map[string]any, error) {
-		return map[string]any{"ok": true}, nil
-	})
-	if err != nil {
-		t.Fatalf("functiontool.New: %v", err)
-	}
-	a, err := llmagent.New(llmagent.Config{
-		Name: "probe_agent",
-		Model: &scriptedLLM{responses: []*model.LLMResponse{
-			{Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
-				FunctionCall: &genai.FunctionCall{ID: "call-wc-pm", Name: "probe"},
-			}}}},
-			{Content: textContent("model", "done")},
-		}},
-		Tools: []tool.Tool{probeTool},
-	})
-	if err != nil {
-		t.Fatalf("llmagent.New: %v", err)
-	}
-	p, _, _ := setupTestPlugin(t)
-	tm := newTraceManager()
-	tm.selfPlugin = weak.Make(p)
-	var sawEarlier atomic.Bool
-	earlier, err := baseplugin.New(baseplugin.Config{
-		Name: "earlier_plugin",
-		BeforeToolCallback: func(_ agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
-			return nil, nil
-		},
-		AfterToolCallback: func(_ agent.Context, _ tool.Tool, _, _ map[string]any, _ error) (map[string]any, error) {
-			return nil, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("baseplugin.New(earlier): %v", err)
-	}
-	observer, err := baseplugin.New(baseplugin.Config{
-		Name: "observer_plugin",
-		BeforeToolCallback: func(ctx agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
-			tc, tcCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-			defer tcCancel()
-			if found, beforeAndAfter := tm.earlierToolPlugins(tc); found && beforeAndAfter {
-				sawEarlier.Store(true)
-			}
-			return nil, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("baseplugin.New(observer): %v", err)
-	}
-	for _, runErr := range newTestRunner(t, a, earlier, observer, p).Run(t.Context(), "u1", "s1", textContent("user", "go"), agent.RunConfig{}) {
-		if runErr != nil {
-			t.Fatalf("runner.Run: %v", runErr)
-		}
-	}
-	if !sawEarlier.Load() {
-		t.Error("earlierToolPlugins failed to unwrap context.WithTimeout(context.WithoutCancel(ctx)) to PluginManager")
 	}
 }
 
