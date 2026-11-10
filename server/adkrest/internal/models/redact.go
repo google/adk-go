@@ -207,3 +207,110 @@ func dropSecretKeys(v any) {
 		}
 	}
 }
+
+// MergeRedactedValue returns submitted with the credential secrets that a read
+// strips from storedValue restored. A client that edits a field next to a
+// credential sends the credential back as the read returned it, without the
+// secrets; writing that value back unchanged would erase them.
+//
+// Only omitted credential secret keys are restored. submitted stays
+// authoritative for every other field, including a secret the client did send.
+// It reports whether submitted was changed.
+func MergeRedactedValue(storedValue, submitted any) (any, bool, error) {
+	stored, err := asJSONValue(storedValue)
+	if err != nil {
+		return submitted, false, err
+	}
+	merged, restored := restoreCredentialSecrets(stored, submitted, false)
+	return merged, restored, nil
+}
+
+// asJSONValue encodes v and decodes it into generic JSON values, keeping
+// numbers as json.Number so a stored value compares and round-trips exactly.
+func asJSONValue(v any) (any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var out any
+	if err := dec.Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return out, nil
+}
+
+// restoreCredentialSecrets walks submitted next to the stored value and fills
+// in the credential secret keys the submitted value omits. A key is treated as
+// a secret once the walk is inside a credential, and for the values of an auth
+// config's credential fields. A credential that carries any secret of its own
+// is treated as an intentional replacement, so nothing is restored into it.
+// Other omitted fields are left out, so the submitted value remains a full
+// replacement of the value outside credentials.
+func restoreCredentialSecrets(stored, submitted any, restoreSecrets bool) (any, bool) {
+	switch s := submitted.(type) {
+	case map[string]any:
+		st, ok := stored.(map[string]any)
+		if !ok {
+			return submitted, false
+		}
+		if isCredential(st) {
+			restoreSecrets = !hasSecretKey(s)
+		}
+		restored := false
+		if restoreSecrets {
+			for k, v := range st {
+				if _, ok := s[k]; !ok && credentialSecretKeys[k] {
+					s[k] = v
+					restored = true
+				}
+			}
+		}
+		for k, sub := range s {
+			sv, ok := st[k]
+			if !ok {
+				continue
+			}
+			if merged, changed := restoreCredentialSecrets(sv, sub, restoreSecrets); changed {
+				s[k] = merged
+				restored = true
+			}
+		}
+		return s, restored
+	case []any:
+		st, ok := stored.([]any)
+		if !ok || len(st) != len(s) {
+			return submitted, false
+		}
+		restored := false
+		for i := range s {
+			if merged, changed := restoreCredentialSecrets(st[i], s[i], restoreSecrets); changed {
+				s[i] = merged
+				restored = true
+			}
+		}
+		return s, restored
+	default:
+		return submitted, false
+	}
+}
+
+// hasSecretKey reports whether v carries a credential secret key at any depth.
+func hasSecretKey(v any) bool {
+	switch v := v.(type) {
+	case map[string]any:
+		for k, val := range v {
+			if credentialSecretKeys[k] || hasSecretKey(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if hasSecretKey(item) {
+				return true
+			}
+		}
+	}
+	return false
+}

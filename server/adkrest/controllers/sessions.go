@@ -368,6 +368,16 @@ func dropEchoedKeys(delta map[string]any, stored session.ReadonlyState) map[stri
 		if ok && sameJSON(readValue, value) && (isScopedStateKey(key) || strippedOnRead(stored, key, readValue)) {
 			continue
 		}
+		// A value that a read returned with credential secrets stripped is not
+		// an echo: the client edited something in it and sent it back without
+		// the secrets it never saw. Restore those before writing it.
+		if ok && !isScopedStateKey(key) && strippedOnRead(stored, key, readValue) {
+			if storedValue, err := stored.Get(key); err == nil {
+				if merged, restored, err := models.MergeRedactedValue(storedValue, value); err == nil && restored {
+					value = merged
+				}
+			}
+		}
 		kept[key] = value
 	}
 	return kept
