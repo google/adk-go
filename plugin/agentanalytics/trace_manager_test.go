@@ -1008,67 +1008,6 @@ func TestTraceManager_FailedToolCallBookkeeping(t *testing.T) {
 	}
 }
 
-// TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse replays a
-// failed tool call that a subsequent OnToolErrorCallback recovers (err == nil
-// in AfterToolCallback). TOOL_STARTING, TOOL_ERROR, and TOOL_COMPLETED share
-// the tool call's span under the agent span (with latency_ms reported once on
-// TOOL_ERROR), while AGENT_RESPONSE (when in FinalResponseToolNames) is placed
-// on the enclosing agent span.
-func TestTraceManager_RecoveredToolErrorEmitsCompletedAndAgentResponse(t *testing.T) {
-	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
-	toolCtx := withFunctionCall(mCtx, "call-recovered")
-	final := &fakeTool{name: "final_answer"}
-	args := map[string]any{"answer": "draft"}
-	recoveredResult := map[string]any{"answer": "fallback-42"}
-	var errs callbackErrors
-	errs.add(p.BeforeAgentCallback()(mCtx))
-	errs.add(p.BeforeToolCallback()(toolCtx, final, args))
-	errs.add(p.OnToolErrorCallback()(toolCtx, final, args, errors.New("transient error")))
-	errs.add(p.AfterToolCallback()(toolCtx, final, args, recoveredResult, nil))
-	errs.add(p.AfterAgentCallback()(mCtx))
-	errs.check(t)
-	p.AfterRunCallback()(mCtx)
-
-	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	want := []string{
-		EventAgentStarting,
-		EventToolStarting,
-		EventToolError,
-		EventToolCompleted,
-		EventAgentResponse,
-		EventAgentCompleted,
-		EventInvocationCompleted,
-	}
-	if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
-		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
-	}
-	agentStart := placeOf(rows[0])
-	toolStart := placeOf(rows[1])
-	if toolStart.parent != agentStart.span {
-		t.Errorf("TOOL_STARTING parent_span_id = %q, want agent span %q", toolStart.parent, agentStart.span)
-	}
-	for _, evType := range []string{EventToolError, EventToolCompleted} {
-		row := onlyRowOfType(t, rows, evType)
-		if got := placeOf(row); got != toolStart {
-			t.Errorf("%s is at %+v, want %+v", evType, got, toolStart)
-		}
-	}
-	if got := placeOf(onlyRowOfType(t, rows, EventAgentResponse)); got != agentStart {
-		t.Errorf("AGENT_RESPONSE is at %+v, want agent span %+v", got, agentStart)
-	}
-	mustLatency(t, onlyRowOfType(t, rows, EventToolError))
-	for _, evType := range []string{EventToolCompleted, EventAgentResponse} {
-		if latency, ok := rowLatency(t, onlyRowOfType(t, rows, evType)); ok {
-			t.Errorf("%s after OnToolErrorCallback has latency_ms %v, want none", evType, latency)
-		}
-	}
-	checkJSON(t, "TOOL_COMPLETED content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventToolCompleted), "content"),
-		`{"tool":"final_answer","result":{"answer":"fallback-42"},"tool_origin":"UNKNOWN"}`)
-	if got := placeOf(onlyRowOfType(t, rows, EventAgentCompleted)); got != agentStart {
-		t.Errorf("AGENT_COMPLETED is at %+v, want %+v", got, agentStart)
-	}
-}
-
 // TestTraceManager_FinalResponseToolRow ends a call of a final response
 // tool. TOOL_COMPLETED closes the tool call's span with latency_ms, while
 // AGENT_RESPONSE is placed on the enclosing agent span without latency_ms.
@@ -22554,5 +22493,70 @@ func TestLateFailureCauseKeepsActivation(t *testing.T) {
 	defer late.mu.Unlock()
 	if got := late.agentStack[0].firstRetiredCause(); !errors.Is(got, siblingErr) {
 		t.Errorf("failure cause that reached the invocation span = %v, want %v", got, siblingErr)
+	}
+}
+
+// TestTraceManager_RecoveredToolErrorEmitsOnlyToolError replays a failed tool
+// call that a later OnToolErrorCallback recovers (err == nil in
+// AfterToolCallback). The call has one terminal row, TOOL_ERROR, and no
+// TOOL_COMPLETED or AGENT_RESPONSE, as in adk-python.
+func TestTraceManager_RecoveredToolErrorEmitsOnlyToolError(t *testing.T) {
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
+	toolCtx := withFunctionCall(mCtx, "call-recovered-only")
+	final := &fakeTool{name: "final_answer"}
+	args := map[string]any{"answer": "draft"}
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(mCtx))
+	errs.add(p.BeforeToolCallback()(toolCtx, final, args))
+	errs.add(p.OnToolErrorCallback()(toolCtx, final, args, errors.New("transient error")))
+	errs.add(p.AfterToolCallback()(toolCtx, final, args, map[string]any{"answer": "fallback"}, nil))
+	errs.add(p.AfterAgentCallback()(mCtx))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	want := []string{
+		EventAgentStarting,
+		EventToolStarting,
+		EventToolError,
+		EventAgentCompleted,
+		EventInvocationCompleted,
+	}
+	if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestTraceManager_ReflectAndRetryAnswerEmitsToolError replays a failed call
+// that retryandreflect, registered before this plugin, recovered before
+// OnToolErrorCallback reached it. The call ends with TOOL_ERROR only.
+func TestTraceManager_ReflectAndRetryAnswerEmitsToolError(t *testing.T) {
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"final_answer"} })
+	toolCtx := withFunctionCall(mCtx, "call-reflect")
+	final := &fakeTool{name: "final_answer"}
+	args := map[string]any{"answer": "draft"}
+	recovered := map[string]any{
+		"response_type":       reflectAndRetryResponseType,
+		"error_details":       "transient error",
+		"reflection_guidance": "retry",
+	}
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(mCtx))
+	errs.add(p.BeforeToolCallback()(toolCtx, final, args))
+	errs.add(p.AfterToolCallback()(toolCtx, final, args, recovered, nil))
+	errs.add(p.AfterAgentCallback()(mCtx))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	want := []string{
+		EventAgentStarting,
+		EventToolStarting,
+		EventToolError,
+		EventAgentCompleted,
+		EventInvocationCompleted,
+	}
+	if diff := cmp.Diff(want, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
 	}
 }

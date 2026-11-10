@@ -986,6 +986,10 @@ func nodeCompletion(ev *session.Event) (workflowName string, failed, ok bool) {
 // completes its task.
 const finishTaskToolName = "finish_task"
 
+// reflectAndRetryResponseType is the response_type of the answers that
+// plugin/retryandreflect returns in place of a tool error.
+const reflectAndRetryResponseType = "ERROR_HANDLED_BY_REFLECT_AND_RETRY_PLUGIN"
+
 // hasTaskCompletedResponse reports whether c carries a successful
 // finish_task function response ("result": "Task completed."), which ends a
 // task-mode LLM agent in ADK without running its AfterAgentCallback.
@@ -1216,6 +1220,18 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		if !closedByError {
 			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		}
+		return nil, nil
+	}
+	if err == nil && closedByError {
+		// An OnToolErrorCallback recovered a failure that onToolError already
+		// logged as TOOL_ERROR. The call has no further terminal row.
+		return nil, nil
+	}
+	if err == nil && result["response_type"] == reflectAndRetryResponseType {
+		// retryandreflect registered before this plugin recovered the failure
+		// before onToolError ran, so the TOOL_ERROR row is written here.
+		details, _ := result["error_details"].(string)
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(details))
 		return nil, nil
 	}
 	if confirmationOutcome {
