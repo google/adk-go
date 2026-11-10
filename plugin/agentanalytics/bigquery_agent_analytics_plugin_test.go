@@ -10471,18 +10471,446 @@ func TestPlugin_RecoveredToolError_UnfinishedFinishTaskClearsPendingCall(t *test
 
 	rows := collectRows(t, requests, untilInvocationEnd)
 	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
-	ends := agentRowsOfType(rows, EventAgentCompleted, "test-agent")
 	if len(starts) != 2 {
 		t.Fatalf("got %d AGENT_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
 	}
-	var endsOld int
-	for _, end := range ends {
-		if end["span_id"] == starts[0]["span_id"] {
-			endsOld++
+	endsOld, endsNew := agentEndIndexes(rows, "test-agent", starts[0]["span_id"]), agentEndIndexes(rows, "test-agent", starts[1]["span_id"])
+	// The response ends the older activation when it arrives, before the
+	// newer activation's AfterAgentCallback ends that one.
+	if len(endsOld) != 1 || len(endsNew) != 1 || endsOld[0] > endsNew[0] {
+		t.Errorf("AGENT_COMPLETED rows of the older activation at %v and of the newer one at %v, want one each with the older first; events=%v",
+			endsOld, endsNew, eventTypes(rows))
+	}
+}
+
+// agentEndIndexes returns the indexes in rows of the AGENT_COMPLETED rows of
+// the activation of agentName whose span is spanID.
+func agentEndIndexes(rows []map[string]any, agentName string, spanID any) []int {
+	var ends []int
+	for i, r := range rows {
+		if r["event_type"] == EventAgentCompleted && r["agent"] == agentName && r["span_id"] == spanID {
+			ends = append(ends, i)
 		}
 	}
-	if endsOld != 1 {
-		t.Errorf("got %d AGENT_COMPLETED rows of the older activation %v, want 1; ends=%v events=%v",
-			endsOld, starts[0]["span_id"], ends, eventTypes(rows))
+	return ends
+}
+
+// TestPlugin_RecoveredToolError_DelayedRejectionConsumedBeforeHiddenPeerFinish
+// runs two activations of a task-mode agent that call finish_task with the
+// same call ID. The older activation's call fails and is answered with a
+// retry-and-reflect payload, and its function response arrives late: after
+// the newer activation's model made its own call, but before that call ran.
+// The late response consumes the rejection and ends nothing. The newer
+// activation's call then completes while an earlier plugin answers both of
+// its tool callbacks, so the model's function call is the only evidence that
+// the newer activation made it: its response must still end the newer
+// activation when it arrives.
+func TestPlugin_RecoveredToolError_DelayedRejectionConsumedBeforeHiddenPeerFinish(t *testing.T) {
+	const callID = "call-finish-shared"
+	finishCall := genai.NewContentFromParts([]*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: callID, Name: finishTaskToolName, Args: map[string]any{"summary": "done"}},
+	}}, genai.RoleModel)
+	finishResponse := func() *session.Event {
+		return &session.Event{
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{{
+				FunctionResponse: &genai.FunctionResponse{ID: callID, Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}},
+			}}, genai.RoleUser)},
+		}
+	}
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	icOld := &runningInvocation{running: taskAgent}
+	icNew := &runningInvocation{running: taskAgent}
+	actOld := &taskActivationContext{mockInvocationContext: mCtx, ic: icOld}
+	actNew := &taskActivationContext{mockInvocationContext: mCtx, ic: icNew}
+	toolOld := &taskActivationContext{mockInvocationContext: withFunctionCall(mCtx, callID), ic: icOld}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	finish := &fakeTool{name: finishTaskToolName}
+	args := map[string]any{"summary": "done"}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(actOld))
+	errs.add(p.BeforeAgentCallback()(actNew))
+	errs.add(p.BeforeModelCallback()(actOld, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actOld, &model.LLMResponse{Content: finishCall}, nil))
+	errs.add(p.BeforeToolCallback()(toolOld, finish, args))
+	errs.add(p.AfterToolCallback()(toolOld, finish, args, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "finish rejected",
+	}, nil))
+	errs.add(p.BeforeModelCallback()(actNew, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(actNew, &model.LLMResponse{Content: finishCall}, nil))
+	// The older activation's response arrives before the newer activation's
+	// call runs.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse()))
+	// An earlier plugin answers both tool callbacks of the newer activation's
+	// call, which completes its task.
+	errs.add(p.OnEventCallback()(runnerCtx, finishResponse()))
+	errs.add(p.AfterAgentCallback()(actOld))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 2 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+	}
+	endsOld, endsNew := agentEndIndexes(rows, "test-agent", starts[0]["span_id"]), agentEndIndexes(rows, "test-agent", starts[1]["span_id"])
+	if len(endsOld) != 1 || len(endsNew) != 1 || endsNew[0] > endsOld[0] {
+		t.Errorf("AGENT_COMPLETED rows of the newer activation at %v and of the older one at %v, want one each with the newer first; events=%v",
+			endsNew, endsOld, eventTypes(rows))
+	}
+}
+
+// TestPlugin_RecoveredToolError_RetryAndReflectAfterThisPlugin fails a tool
+// call that plugin/retryandreflect, registered after this plugin, answers with
+// a payload that reports the failure. This plugin's OnToolErrorCallback already
+// wrote the TOOL_ERROR row, so the AfterToolCallback that sees the payload adds
+// no second one: with loggingplugin registered first, whose callbacks make a
+// recovered call keep its TOOL_COMPLETED row, on a custom context with
+// arguments past the digest bounds, on a custom context that is not a pointer,
+// and in an overlap of calls with an empty function call ID.
+func TestPlugin_RecoveredToolError_RetryAndReflectAfterThisPlugin(t *testing.T) {
+	retryPayload := func() map[string]any {
+		return map[string]any{"response_type": reflectAndRetryResponseType, "error_details": "boom"}
+	}
+	requireCounts := func(t *testing.T, rows []map[string]any, wantErrors, wantCompleted int) {
+		t.Helper()
+		if n, m := len(rowsOfType(rows, EventToolError)), len(rowsOfType(rows, EventToolCompleted)); n != wantErrors || m != wantCompleted {
+			t.Errorf("got TOOL_ERROR=%d TOOL_COMPLETED=%d, want %d and %d; events=%v", n, m, wantErrors, wantCompleted, eventTypes(rows))
+		}
+	}
+	for _, order := range []string{"logging_plugin_first", "this_plugin_first"} {
+		t.Run("runner/"+order, func(t *testing.T) {
+			retry, err := retryandreflect.New()
+			if err != nil {
+				t.Fatalf("retryandreflect.New: %v", err)
+			}
+			rows := runFailingToolWithPlugins(t, "lookup", nil, nil, func(p *baseplugin.Plugin) []*baseplugin.Plugin {
+				if order == "logging_plugin_first" {
+					return []*baseplugin.Plugin{loggingplugin.MustNew("log"), p, retry}
+				}
+				return []*baseplugin.Plugin{p, retry}
+			})
+			requireCounts(t, rows, 1, 0)
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		ctx  func(*mockInvocationContext) agent.Context
+		args map[string]any
+	}{
+		{
+			name: "args_past_digest_bounds",
+			ctx:  func(m *mockInvocationContext) agent.Context { return withFunctionCall(m, "call-big") },
+			args: map[string]any{"big": strings.Repeat("x", maxDigestStringBytes+10)},
+		},
+		{
+			name: "value_context",
+			ctx: func(m *mockInvocationContext) agent.Context {
+				return comparableValueToolCtx{mockInvocationContext: withFunctionCall(m, "call-val"), tag: "v1"}
+			},
+			args: map[string]any{"x": "1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			ctx := tc.ctx(mCtx)
+			lookup := &fakeTool{name: "lookup"}
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			errs.add(p.BeforeToolCallback()(ctx, lookup, tc.args))
+			errs.add(p.OnToolErrorCallback()(ctx, lookup, tc.args, errors.New("boom")))
+			errs.add(p.AfterToolCallback()(ctx, lookup, tc.args, retryPayload(), nil))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+			requireCounts(t, collectRows(t, requests, untilInvocationEnd), 1, 0)
+		})
+	}
+	t.Run("empty_id_overlap_payload_first", func(t *testing.T) {
+		p, requests, mCtx := setupTestPlugin(t)
+		shared := withFunctionCall(mCtx, "")
+		echo := &fakeTool{name: "echo"}
+		args := map[string]any{"x": "same"}
+		var errs callbackErrors
+		errs.add(p.BeforeAgentCallback()(mCtx))
+		errs.add(p.BeforeToolCallback()(shared, echo, args))
+		errs.add(p.BeforeToolCallback()(shared, echo, args))
+		errs.add(p.OnToolErrorCallback()(shared, echo, args, errors.New("boom")))
+		errs.add(p.AfterToolCallback()(shared, echo, args, retryPayload(), nil))
+		errs.add(p.AfterToolCallback()(shared, echo, args, map[string]any{"status": "healthy"}, nil))
+		errs.add(p.AfterAgentCallback()(mCtx))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+		requireCounts(t, collectRows(t, requests, untilInvocationEnd), 1, 1)
+	})
+}
+
+// TestPlugin_RecoveredToolError_AmbiguousOverlapBothFail overlaps two calls
+// with an empty function call ID on one callback context that both fail: the
+// first is recovered and ends before the second fails without recovery. Each
+// failure writes one TOOL_ERROR row, and no span of the overlap stays open
+// after the run. With distinct arguments the recovered call is told apart and
+// gets no TOOL_COMPLETED row; with equal arguments its TOOL_COMPLETED row is
+// written before the second failure shows that both calls failed.
+func TestPlugin_RecoveredToolError_AmbiguousOverlapBothFail(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		first, second map[string]any
+		wantCompleted int
+	}{
+		{name: "equal_args", first: map[string]any{"x": "same"}, second: map[string]any{"x": "same"}, wantCompleted: 1},
+		{name: "distinct_args", first: map[string]any{"x": "first"}, second: map[string]any{"x": "second"}, wantCompleted: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			shared := withFunctionCall(mCtx, "")
+			echo := &fakeTool{name: "echo"}
+			run := func(pl *baseplugin.Plugin) {
+				var errs callbackErrors
+				errs.add(pl.BeforeAgentCallback()(mCtx))
+				errs.add(pl.BeforeToolCallback()(shared, echo, tc.first))
+				errs.add(pl.BeforeToolCallback()(shared, echo, tc.second))
+				errs.add(pl.OnToolErrorCallback()(shared, echo, tc.first, errors.New("boom1")))
+				errs.add(pl.AfterToolCallback()(shared, echo, tc.first, map[string]any{"status": "recovered"}, nil))
+				errs.add(pl.OnToolErrorCallback()(shared, echo, tc.second, errors.New("boom2")))
+				errs.add(pl.AfterToolCallback()(shared, echo, tc.second, nil, errors.New("boom2")))
+				errs.add(pl.AfterAgentCallback()(mCtx))
+				errs.check(t)
+				pl.AfterRunCallback()(mCtx)
+			}
+			run(p)
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n, m := len(rowsOfType(rows, EventToolError)), len(rowsOfType(rows, EventToolCompleted)); n != 2 || m != tc.wantCompleted {
+				t.Errorf("got TOOL_ERROR=%d TOOL_COMPLETED=%d, want 2 and %d; events=%v", n, m, tc.wantCompleted, eventTypes(rows))
+			}
+
+			tm := newTraceManager()
+			run(newTraceOnlyPlugin(t, tm))
+			tm.mu.Lock()
+			completed := tm.completed[mCtx.InvocationID()]
+			waits := completed != nil && completed.waitsForLateCalls()
+			open := completed != nil && completed.hasPendingOrOpenLateSpans()
+			tm.mu.Unlock()
+			if waits || open {
+				t.Errorf("the run left a tool span of the overlap open: waitsForLateCalls=%v hasPendingOrOpenLateSpans=%v", waits, open)
+			}
+		})
+	}
+}
+
+// TestPlugin_RecoveredToolError_AmbiguousOverlapDistinctArgs overlaps two
+// calls with an empty function call ID and distinct arguments on one callback
+// context, started in either order. One call fails and is recovered, while the
+// other fails without its OnToolErrorCallback reaching this plugin, as when an
+// earlier plugin answers it: the arguments tell the calls apart, so the call
+// whose failure this plugin did not see writes its own TOOL_ERROR row instead
+// of settling the other call's failure, and the recovered call writes no
+// TOOL_COMPLETED row.
+func TestPlugin_RecoveredToolError_AmbiguousOverlapDistinctArgs(t *testing.T) {
+	for _, hiddenFirst := range []bool{true, false} {
+		name := "recovered_call_starts_first"
+		if hiddenFirst {
+			name = "hidden_call_starts_first"
+		}
+		t.Run(name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			shared := withFunctionCall(mCtx, "")
+			echo := &fakeTool{name: "echo"}
+			hidden := map[string]any{"x": "hidden"}
+			recovered := map[string]any{"x": "recovered"}
+			starts := []map[string]any{recovered, hidden}
+			if hiddenFirst {
+				starts = []map[string]any{hidden, recovered}
+			}
+			var errs callbackErrors
+			errs.add(p.BeforeAgentCallback()(mCtx))
+			for _, args := range starts {
+				errs.add(p.BeforeToolCallback()(shared, echo, args))
+			}
+			errs.add(p.OnToolErrorCallback()(shared, echo, recovered, errors.New("boom")))
+			errs.add(p.AfterToolCallback()(shared, echo, hidden, nil, errors.New("hidden boom")))
+			errs.add(p.AfterToolCallback()(shared, echo, recovered, map[string]any{"status": "recovered"}, nil))
+			errs.add(p.AfterAgentCallback()(mCtx))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilInvocationEnd)
+			if n, m := len(rowsOfType(rows, EventToolError)), len(rowsOfType(rows, EventToolCompleted)); n != 2 || m != 0 {
+				t.Fatalf("got TOOL_ERROR=%d TOOL_COMPLETED=%d, want 2 and 0; events=%v", n, m, eventTypes(rows))
+			}
+			var messages []any
+			for _, r := range rowsOfType(rows, EventToolError) {
+				messages = append(messages, r["error_message"])
+			}
+			if !slices.Contains(messages, any("hidden boom")) || !slices.Contains(messages, any("boom")) {
+				t.Errorf("TOOL_ERROR error_message values = %v, want boom and hidden boom", messages)
+			}
+		})
+	}
+}
+
+// taskToolContext is the context of a tool call of a task-mode activation
+// (see taskActivationContext) with EventActions of its own, as
+// agent.NewToolContext gives each tool call of an activation.
+type taskToolContext struct {
+	*taskActivationContext
+	actions *session.EventActions
+}
+
+func (c *taskToolContext) Actions() *session.EventActions { return c.actions }
+
+// newTaskToolContext returns the context of a tool call with an empty
+// function call ID of the activation ic, whose StateDelta is delta.
+func newTaskToolContext(m *mockInvocationContext, ic *runningInvocation, delta map[string]any) *taskToolContext {
+	return &taskToolContext{
+		taskActivationContext: &taskActivationContext{mockInvocationContext: withFunctionCall(m, ""), ic: ic},
+		actions:               &session.EventActions{StateDelta: delta},
+	}
+}
+
+// TestPlugin_RecoveredToolError_TaskToolDeltasKeepLaterCalls delivers the
+// function response event of a task-mode activation's first echo call, with
+// an empty call ID, only after the activation's next batch [echo, finish_task]
+// ran and its finish_task call was rejected, and after a peer activation's
+// finish_task call completed. The late event releases the StateDelta of its
+// own call only, so the batch's merged event, which carries the second echo
+// call's map, is still tied to the activation that made it: it ends neither
+// activation, and the peer ends with its own event.
+func TestPlugin_RecoveredToolError_TaskToolDeltasKeepLaterCalls(t *testing.T) {
+	p, requests, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	echo := &fakeTool{name: "echo"}
+	finish := &fakeTool{name: finishTaskToolName}
+	icA := &runningInvocation{running: taskAgent}
+	icB := &runningInvocation{running: taskAgent}
+	actA := &taskActivationContext{mockInvocationContext: mCtx, ic: icA}
+	actB := &taskActivationContext{mockInvocationContext: mCtx, ic: icB}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	toolA1 := newTaskToolContext(mCtx, icA, map[string]any{"b": 1})
+	toolA2Echo := newTaskToolContext(mCtx, icA, map[string]any{"b": 2})
+	toolA2Finish := newTaskToolContext(mCtx, icA, map[string]any{"f": 2})
+	toolBFinish := newTaskToolContext(mCtx, icB, map[string]any{"b_fin": 1})
+	responseEvent := func(actions *session.EventActions, parts ...*genai.Part) *session.Event {
+		return &session.Event{
+			Author:      "test-agent",
+			Actions:     *actions,
+			LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts(parts, genai.RoleUser)},
+		}
+	}
+	echoResponse := func(v string) *genai.Part {
+		return &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: "echo", Response: map[string]any{"echo": v}}}
+	}
+	finishResponse := &genai.Part{FunctionResponse: &genai.FunctionResponse{Name: finishTaskToolName, Response: map[string]any{"result": "Task completed."}}}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(actA))
+	errs.add(p.BeforeAgentCallback()(actB))
+	errs.add(p.BeforeToolCallback()(toolA1, echo, map[string]any{"m": "1"}))
+	errs.add(p.AfterToolCallback()(toolA1, echo, map[string]any{"m": "1"}, map[string]any{"echo": "1"}, nil))
+	errs.add(p.BeforeToolCallback()(toolA2Echo, echo, map[string]any{"m": "2"}))
+	errs.add(p.AfterToolCallback()(toolA2Echo, echo, map[string]any{"m": "2"}, map[string]any{"echo": "2"}, nil))
+	errs.add(p.BeforeToolCallback()(toolA2Finish, finish, map[string]any{"result": "done"}))
+	errs.add(p.AfterToolCallback()(toolA2Finish, finish, map[string]any{"result": "done"}, map[string]any{
+		"result":        "Task completed.",
+		"response_type": reflectAndRetryResponseType,
+		"error_details": "rejected",
+	}, nil))
+	// The first echo call's response arrives late.
+	errs.add(p.OnEventCallback()(runnerCtx, responseEvent(toolA1.actions, echoResponse("1"))))
+	errs.add(p.BeforeToolCallback()(toolBFinish, finish, map[string]any{"result": "B done"}))
+	errs.add(p.AfterToolCallback()(toolBFinish, finish, map[string]any{"result": "B done"}, map[string]any{"result": "Task completed."}, nil))
+	// The rejected batch's merged response carries the second echo call's map.
+	errs.add(p.OnEventCallback()(runnerCtx, responseEvent(toolA2Echo.actions, echoResponse("2"), finishResponse)))
+	errs.add(p.OnUserMessageCallback()(runnerCtx, textContent("user", "between the two responses")))
+	errs.add(p.OnEventCallback()(runnerCtx, responseEvent(toolBFinish.actions, finishResponse)))
+	errs.add(p.AfterAgentCallback()(actA))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilInvocationEnd)
+	starts := agentRowsOfType(rows, EventAgentStarting, "test-agent")
+	if len(starts) != 2 {
+		t.Fatalf("got %d AGENT_STARTING rows, want 2; events=%v", len(starts), eventTypes(rows))
+	}
+	endsA, endsB := agentEndIndexes(rows, "test-agent", starts[0]["span_id"]), agentEndIndexes(rows, "test-agent", starts[1]["span_id"])
+	marker := slices.IndexFunc(rows, func(r map[string]any) bool { return r["event_type"] == EventUserMessageReceived })
+	if len(endsA) != 1 || len(endsB) != 1 || endsB[0] < marker || endsA[0] < endsB[0] {
+		t.Errorf("AGENT_COMPLETED rows of the first activation at %v and of the peer at %v, marker at %d; want one each, the peer's after the marker and before the first's; events=%v",
+			endsA, endsB, marker, eventTypes(rows))
+	}
+}
+
+// TestPlugin_RecoveredToolError_TaskToolDeltasKeepLaterTurns delivers the
+// merged function response event of a task-mode activation's first batch,
+// whose second call an earlier plugin answered, after the activation's next
+// model turn made a call of the same tool. The late event releases the
+// StateDelta maps of its own turn only, so the later call keeps its map until
+// its own event arrives.
+func TestPlugin_RecoveredToolError_TaskToolDeltasKeepLaterTurns(t *testing.T) {
+	tm := newTraceManager()
+	p := newTraceOnlyPlugin(t, tm)
+	_, _, mCtx := setupTestPlugin(t)
+	taskAgent, err := llmagent.New(llmagent.Config{
+		Name:  "test-agent",
+		Mode:  llmagent.ModeTask,
+		Model: &scriptedLLM{},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New: %v", err)
+	}
+	echo := &fakeTool{name: "echo"}
+	lookup := &fakeTool{name: "lookup"}
+	ic := &runningInvocation{running: taskAgent}
+	act := &taskActivationContext{mockInvocationContext: mCtx, ic: ic}
+	runnerCtx := &taskActivationContext{mockInvocationContext: mCtx, ic: &runningInvocation{}}
+	firstEcho := newTaskToolContext(mCtx, ic, map[string]any{"echo": 1})
+	laterLookup := newTaskToolContext(mCtx, ic, map[string]any{"lookup": 2})
+	call := func(name string) *genai.Part {
+		return &genai.Part{FunctionCall: &genai.FunctionCall{Name: name}}
+	}
+
+	var errs callbackErrors
+	errs.add(p.BeforeAgentCallback()(act))
+	errs.add(p.BeforeModelCallback()(act, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(act, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{call("echo"), call("lookup")}, genai.RoleModel)}, nil))
+	errs.add(p.BeforeToolCallback()(firstEcho, echo, map[string]any{"m": "1"}))
+	errs.add(p.AfterToolCallback()(firstEcho, echo, map[string]any{"m": "1"}, map[string]any{"echo": "1"}, nil))
+	// An earlier plugin answers both tool callbacks of the first lookup call.
+	errs.add(p.BeforeModelCallback()(act, &model.LLMRequest{}))
+	errs.add(p.AfterModelCallback()(act, &model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{call("lookup")}, genai.RoleModel)}, nil))
+	errs.add(p.BeforeToolCallback()(laterLookup, lookup, map[string]any{"q": "2"}))
+	errs.add(p.AfterToolCallback()(laterLookup, lookup, map[string]any{"q": "2"}, map[string]any{"found": true}, nil))
+	if n := taskToolDeltas(tm, mCtx.InvocationID(), "test-agent"); n != 2 {
+		t.Fatalf("task activation keeps %d StateDelta references before the first batch's response, want 2", n)
+	}
+	errs.add(p.OnEventCallback()(runnerCtx, &session.Event{
+		Author:  "test-agent",
+		Actions: *firstEcho.actions,
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromParts([]*genai.Part{
+			{FunctionResponse: &genai.FunctionResponse{Name: "echo", Response: map[string]any{"echo": "1"}}},
+			{FunctionResponse: &genai.FunctionResponse{Name: "lookup", Response: map[string]any{"found": false}}},
+		}, genai.RoleUser)},
+	}))
+	errs.check(t)
+	if n := taskToolDeltas(tm, mCtx.InvocationID(), "test-agent"); n != 1 {
+		t.Errorf("task activation keeps %d StateDelta references after the first batch's response, want 1 (the later lookup call's)", n)
 	}
 }
