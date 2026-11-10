@@ -3470,6 +3470,35 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 		}
 	})
 
+	t.Run("small MaxContentLen still gets the full 4096-rune slack", func(t *testing.T) {
+		const smallMaxLen = 50
+		tinyPiece := responseTextPiece(strings.Repeat("a", smallMaxLen))
+		eightyTiny := joinedResponsePieces(tinyPiece, 80)
+
+		rows := responseRowsOf(t, &genai.Content{Role: "model", Parts: responseTextParts(80, smallMaxLen, "a")}, smallMaxLen)
+		llmRow := rows[EventLLMResponse]
+		gotLLM, _ := jsonObjectColumn(t, llmRow, columnContent)["response"].(string)
+		wantLLM := string([]rune(eightyTiny)[:smallMaxLen+4096]) + truncationSuffix
+		const wantLLMRunes = smallMaxLen + 4096 + len(truncationSuffix) // 50 + 4096 + 14 = 4160
+		if utf8.RuneCountInString(gotLLM) != wantLLMRunes || gotLLM != wantLLM {
+			t.Errorf("LLM_RESPONSE content.response = %d runes, want %d runes ending in %q",
+				utf8.RuneCountInString(gotLLM), wantLLMRunes, truncationSuffix)
+		}
+		if got := llmRow["is_truncated"]; got != true {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want true", got)
+		}
+
+		agentRow := rows[EventAgentResponse]
+		gotAgent, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string)
+		wantAgent := string([]rune(eightyTiny)[:smallMaxLen]) + truncationSuffix
+		if gotAgent != wantAgent {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", gotAgent, wantAgent)
+		}
+		if got := agentRow["is_truncated"]; got != true {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+
 	t.Run("rebuilt LLM_RESPONSE summary after failed upload is capped", func(t *testing.T) {
 		const maxLen = 100
 		parts := responseTextParts(40, maxLen, "a")
@@ -3506,9 +3535,12 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 	atCap := strings.Repeat("n", 256)
 	overCap := strings.Repeat("n", 257)
+	overCapCall := strings.Repeat("c", 257)
+	overCapResp := strings.Repeat("r", 257)
 	wideAtCap := strings.Repeat("ñ", 256)
 	const secret = "SYNTHETIC_SECRET_0123456789"
 	credential := "lookup api_key=" + secret
+	overCapCredential := overCap + " api_key=" + secret
 	boundaryCredential := strings.Repeat("n", 245) + " api_key=" + secret
 	call := func(name string) []*genai.Part {
 		return []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name}}}
@@ -3532,8 +3564,14 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 		{name: "multi-byte call name is cut by runes", parts: call(wideAtCap + "ñ"), maxLength: 100000, want: "call: " + wideAtCap + truncationSuffix, wantTrunc: true},
 		{name: "call name cap does not follow a smaller maxLength", parts: call(overCap), maxLength: 10, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
 		{name: "response name cap does not follow a smaller maxLength", parts: resp(overCap), maxLength: 10, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
-		{name: "call name cap holds under an unlimited maxLength", parts: call(overCap), maxLength: -1, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
-		{name: "response name cap holds under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name cap holds at zero maxLength", parts: call(overCap), maxLength: 0, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name cap holds at zero maxLength", parts: resp(overCap), maxLength: 0, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name is kept whole under an unlimited maxLength", parts: call(overCap), maxLength: -1, want: "call: " + overCap},
+		{name: "response name is kept whole under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + overCap},
+		{name: "credential in a long call name is redacted under an unlimited maxLength", parts: call(overCapCredential), maxLength: -1, want: "call: " + overCap + " api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a long response name is redacted under an unlimited maxLength", parts: resp(overCapCredential), maxLength: -1, want: "resp: " + overCap + " api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential in a long call name is kept under an unlimited maxLength when redaction is off", parts: call(overCapCredential), maxLength: -1, noRedact: true, want: "call: " + overCapCredential},
+		{name: "credential in a long response name is kept under an unlimited maxLength when redaction is off", parts: resp(overCapCredential), maxLength: -1, noRedact: true, want: "resp: " + overCapCredential},
 		{name: "credential in a call name is redacted", parts: call(credential), maxLength: 100000, want: "call: lookup api_key=" + redactedValue, wantTrunc: true},
 		{name: "credential in a response name is redacted", parts: resp(credential), maxLength: 100000, want: "resp: lookup api_key=" + redactedValue, wantTrunc: true},
 		{name: "credential crossing the call name cap is redacted before cutting", parts: call(boundaryCredential), maxLength: 100000, want: "call: " + (strings.Repeat("n", 245) + " api_key=" + redactedValue)[:256] + truncationSuffix, wantTrunc: true},
@@ -3556,6 +3594,9 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 			if !tt.noRedact && strings.Contains(got, "SYNTHETIC") {
 				t.Errorf("summary %q leaked the secret", got)
 			}
+			if tt.maxLength < 0 && strings.Contains(got, truncationSuffix) {
+				t.Errorf("unlimited summary %q unexpectedly contains %q", got, truncationSuffix)
+			}
 		})
 	}
 
@@ -3573,6 +3614,70 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 		}
 		if got := row["is_truncated"]; got != true {
 			t.Errorf("LLM_RESPONSE is_truncated = %v, want true", got)
+		}
+	})
+
+	t.Run("CaptureFullMessageContent keeps long function names and summaries whole", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = 1
+			c.CaptureFullMessageContent = true
+		})
+		var errs callbackErrors
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+					{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+				},
+			},
+		}, nil))
+		// OnEventCallback skips events carrying FunctionCall and filters
+		// AGENT_RESPONSE to visible Text parts (e.g. a SkipSummarization answer
+		// paired with a FunctionResponse), so CaptureFullMessageContent keeps
+		// the full text summary untruncated despite MaxContentLen: 1.
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:      "ev-full-agent-resp",
+			Author:  "test-agent",
+			Actions: session.EventActions{SkipSummarization: true},
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{FunctionResponse: &genai.FunctionResponse{Name: overCapResp, Response: map[string]any{"ok": true}}},
+						{Text: overCap},
+					},
+				},
+			},
+		}))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		llmRow := onlyRowOfType(t, rows, EventLLMResponse)
+		gotLLM, _ := jsonObjectColumn(t, llmRow, columnContent)["response"].(string)
+		wantLLM := "call: " + overCapCall + " | resp: " + overCapResp
+		if gotLLM != wantLLM {
+			t.Errorf("LLM_RESPONSE content.response = %q, want %q", gotLLM, wantLLM)
+		}
+		if strings.Contains(gotLLM, truncationSuffix) {
+			t.Errorf("LLM_RESPONSE content.response unexpectedly truncated: %q", gotLLM)
+		}
+		if got := llmRow["is_truncated"]; got != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", got)
+		}
+
+		agentRow := onlyRowOfType(t, rows, EventAgentResponse)
+		gotAgent, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string)
+		wantAgent := "text: '" + overCap + "'"
+		if gotAgent != wantAgent {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", gotAgent, wantAgent)
+		}
+		if strings.Contains(gotAgent, truncationSuffix) {
+			t.Errorf("AGENT_RESPONSE content.response unexpectedly truncated: %q", gotAgent)
+		}
+		if got := agentRow["is_truncated"]; got != false {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", got)
 		}
 	})
 }

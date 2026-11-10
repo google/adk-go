@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
@@ -100,7 +101,7 @@ func TestDocGo_ParityBulletsReferenceExistingTests(t *testing.T) {
 	}
 	flush()
 
-	const wantBulletCount = 23
+	const wantBulletCount = 24
 	if len(bullets) != wantBulletCount {
 		t.Fatalf("parsed %d behavioral-differences bullets in doc.go, want %d", len(bullets), wantBulletCount)
 	}
@@ -755,4 +756,141 @@ func TestDocParity_DefaultConfigBatchSizeAndRetryDelay(t *testing.T) {
 	if applied.RetryConfig.InitialDelay != 100*time.Millisecond {
 		t.Errorf("applyDefaults(Config{}).RetryConfig.InitialDelay = %v, want 100ms", applied.RetryConfig.InitialDelay)
 	}
+}
+
+func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
+	atCallCap := strings.Repeat("c", 256)
+	atRespCap := strings.Repeat("r", 256)
+	overCapCall := strings.Repeat("c", 257)
+	overCapResp := strings.Repeat("r", 257)
+	manyParts := responseTextParts(40, 100, "a")
+	fortySmall := joinedResponsePieces(responseTextPiece(strings.Repeat("a", 100)), 40)
+
+	t.Run("finite MaxContentLen caps function names at 256 runes and joined summaries at MaxContentLen plus 4096", func(t *testing.T) {
+		const maxLen = 100
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = maxLen
+		})
+		var errs callbackErrors
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+					{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+				},
+			},
+		}, nil))
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: manyParts},
+		}, nil))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:          "ev-bounded-agent-resp",
+			Author:      "test-agent",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: manyParts}},
+		}))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		llmRows := rowsOfType(rows, EventLLMResponse)
+		if len(llmRows) != 2 {
+			t.Fatalf("got %d LLM_RESPONSE rows, want 2", len(llmRows))
+		}
+
+		wantNames := "call: " + atCallCap + truncationSuffix + " | resp: " + atRespCap + truncationSuffix
+		if got, _ := jsonObjectColumn(t, llmRows[0], columnContent)["response"].(string); got != wantNames {
+			t.Errorf("LLM_RESPONSE[0] content.response = %q, want %q", got, wantNames)
+		}
+		if llmRows[0]["is_truncated"] != true {
+			t.Errorf("LLM_RESPONSE[0] is_truncated = %v, want true", llmRows[0]["is_truncated"])
+		}
+
+		wantJoined := string([]rune(fortySmall)[:maxLen+4096]) + truncationSuffix
+		gotJoined, _ := jsonObjectColumn(t, llmRows[1], columnContent)["response"].(string)
+		if gotJoined != wantJoined || utf8.RuneCountInString(gotJoined) != maxLen+4096+len(truncationSuffix) {
+			t.Errorf("LLM_RESPONSE[1] content.response = %d runes, want %d runes",
+				utf8.RuneCountInString(gotJoined), maxLen+4096+len(truncationSuffix))
+		}
+		if llmRows[1]["is_truncated"] != true {
+			t.Errorf("LLM_RESPONSE[1] is_truncated = %v, want true", llmRows[1]["is_truncated"])
+		}
+
+		agentRow := onlyRowOfType(t, rows, EventAgentResponse)
+		wantAgent := string([]rune(fortySmall)[:maxLen]) + truncationSuffix
+		if got, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string); got != wantAgent {
+			t.Errorf("AGENT_RESPONSE content.response = %q, want %q", got, wantAgent)
+		}
+		if agentRow["is_truncated"] != true {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", agentRow["is_truncated"])
+		}
+	})
+
+	t.Run("CaptureFullMessageContent preserves long function names and multi-part summaries while redacting credentials", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = 1
+			c.CaptureFullMessageContent = true
+		})
+		fullParts := append([]*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+			{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+		}, manyParts...)
+		const secret = "SYNTHETIC_DOC_SECRET_0123456789"
+
+		var errs callbackErrors
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: fullParts},
+		}, nil))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:          "ev-full-doc-agent-resp",
+			Author:      "test-agent",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: manyParts}},
+		}))
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall + " api_key=" + secret}},
+				},
+			},
+		}, nil))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		llmRows := rowsOfType(rows, EventLLMResponse)
+		if len(llmRows) != 2 {
+			t.Fatalf("got %d LLM_RESPONSE rows, want 2", len(llmRows))
+		}
+
+		wantFull := "call: " + overCapCall + " | resp: " + overCapResp + " | " + fortySmall
+		if got, _ := jsonObjectColumn(t, llmRows[0], columnContent)["response"].(string); got != wantFull {
+			t.Errorf("LLM_RESPONSE[0] content.response = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(wantFull))
+		}
+		if llmRows[0]["is_truncated"] != false {
+			t.Errorf("LLM_RESPONSE[0] is_truncated = %v, want false", llmRows[0]["is_truncated"])
+		}
+
+		agentRow := onlyRowOfType(t, rows, EventAgentResponse)
+		if got, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string); got != fortySmall {
+			t.Errorf("AGENT_RESPONSE content.response = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(fortySmall))
+		}
+		if agentRow["is_truncated"] != false {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", agentRow["is_truncated"])
+		}
+
+		gotRedacted, _ := jsonObjectColumn(t, llmRows[1], columnContent)["response"].(string)
+		wantRedacted := "call: " + overCapCall + " api_key=" + redactedValue
+		if gotRedacted != wantRedacted {
+			t.Errorf("LLM_RESPONSE[1] content.response = %q, want %q", gotRedacted, wantRedacted)
+		}
+		if strings.Contains(gotRedacted, secret) || strings.Contains(gotRedacted, truncationSuffix) {
+			t.Errorf("LLM_RESPONSE[1] content.response = %q, want secret redacted without length truncation", gotRedacted)
+		}
+		if llmRows[1]["is_truncated"] != true {
+			t.Errorf("LLM_RESPONSE[1] is_truncated = %v, want true when redaction scrubs a credential", llmRows[1]["is_truncated"])
+		}
+	})
 }
