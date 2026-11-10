@@ -83,8 +83,10 @@ type baseAgentConfig struct {
 	// Optional. Callbacks to run after execution.
 	AfterAgentCallbacks []codeConfig `yaml:"after_agent_callbacks,omitempty"`
 
-	// Path to the config file.
-	ConfigPath string `yaml:"-"`
+	// Directory of the config file this agent was loaded from. Every config
+	// reference in the file (sub_agents, AgentTool, workflow edges) must stay
+	// inside it; see resolveConfigReference.
+	ConfigDir string `yaml:"-"`
 
 	// Handle extra fields (extra='allow'):
 	// If you use this struct standalone, this map catches unknown fields.
@@ -125,12 +127,12 @@ func (c *llmAgentYAMLConfig) toLLMAgentConfig(ctx context.Context) (*llmagent.Co
 		return nil, fmt.Errorf("failed to create model: %w", err)
 	}
 
-	subAgents, err := resolveSubAgents(ctx, c.ConfigPath, c.SubAgents)
+	subAgents, err := resolveSubAgents(ctx, c.ConfigDir, c.SubAgents)
 	if err != nil {
 		return nil, err
 	}
 
-	tools, toolsets, err := resolveTools(ctx, c.ConfigPath, c.Tools)
+	tools, toolsets, err := resolveTools(ctx, c.ConfigDir, c.Tools)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +169,7 @@ type loopAgentYAMLConfig struct {
 }
 
 func (c *loopAgentYAMLConfig) toLoopAgentConfig(ctx context.Context) (*loopagent.Config, error) {
-	subAgents, err := resolveSubAgents(ctx, c.ConfigPath, c.SubAgents)
+	subAgents, err := resolveSubAgents(ctx, c.ConfigDir, c.SubAgents)
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +190,7 @@ type parallelAgentYAMLConfig struct {
 }
 
 func (c *parallelAgentYAMLConfig) toParallelAgentConfig(ctx context.Context) (*parallelagent.Config, error) {
-	subAgents, err := resolveSubAgents(ctx, c.ConfigPath, c.SubAgents)
+	subAgents, err := resolveSubAgents(ctx, c.ConfigDir, c.SubAgents)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +210,7 @@ type sequentialAgentYAMLConfig struct {
 }
 
 func (c *sequentialAgentYAMLConfig) toSequentialAgentConfig(ctx context.Context) (*sequentialagent.Config, error) {
-	subAgents, err := resolveSubAgents(ctx, c.ConfigPath, c.SubAgents)
+	subAgents, err := resolveSubAgents(ctx, c.ConfigDir, c.SubAgents)
 	if err != nil {
 		return nil, err
 	}
@@ -222,11 +224,11 @@ func (c *sequentialAgentYAMLConfig) toSequentialAgentConfig(ctx context.Context)
 	}, nil
 }
 
-func resolveSubAgents(ctx context.Context, parentPath string, refs []agentRefConfig) ([]agent.Agent, error) {
+func resolveSubAgents(ctx context.Context, configDir string, refs []agentRefConfig) ([]agent.Agent, error) {
 	var agents []agent.Agent
 	for _, ref := range refs {
 		if ref.ConfigPath != "" {
-			a, err := ResolveAgentReference(ctx, parentPath, ref.ConfigPath)
+			a, err := ResolveAgentReference(ctx, configDir, ref.ConfigPath)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve agent reference %s: %w", ref.ConfigPath, err)
 			}
@@ -242,13 +244,13 @@ type contextKey string
 
 const parentPathKey contextKey = "parentPath"
 
-func resolveTools(ctx context.Context, parentPath string, toolConfigs []ToolConfig) ([]tool.Tool, []tool.Toolset, error) {
+func resolveTools(ctx context.Context, configDir string, toolConfigs []ToolConfig) ([]tool.Tool, []tool.Toolset, error) {
 	var tools []tool.Tool
 	var toolsets []tool.Toolset
 	for _, tc := range toolConfigs {
 		if tc.Name != "" {
 			// TODO(kdroste): move to invocationContext?
-			ctx = context.WithValue(ctx, parentPathKey, parentPath)
+			ctx = context.WithValue(ctx, parentPathKey, configDir)
 			a, ts, err := ResolveToolReference(ctx, tc.Name, tc.Args)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to resolve tool reference %s: %w", tc.Name, err)
