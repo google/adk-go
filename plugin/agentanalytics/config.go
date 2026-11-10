@@ -227,20 +227,32 @@ type GCSContentOffloader interface {
 //
 // Custom agents that drain a sub-agent or branch error and recover by
 // yielding a final response event must construct that recovery event with
-// session.NewEvent (preserving its non-empty ID and initialized
-// Actions.StateDelta and Actions.ArtifactDelta maps) or return content from an
-// AfterAgentCallback. Provenance accepts events with a non-empty ID that carry
-// a UUIDv4 ID, observe a visible invocation- or activation-scoped
-// platform.WithUUIDProvider on context, or keep both Actions.StateDelta and
-// Actions.ArtifactDelta non-nil (as session.NewEvent initializes them). Bare
-// session.Event struct literals lacking these signals fail closed as
-// AGENT_ERROR / INVOCATION_ERROR; replacing ev.Actions with nil maps after
-// session.NewEvent under an event-scoped platform.WithUUIDProvider also fails
-// closed. Under a constant platform.WithTimeProvider, only AfterAgentCallback
-// content recovery succeeds on the same tick; non-callback recovery events
-// (whether live or buffered across a sub-agent's retirement) require
-// platform.WithTimeProvider to advance between the failure and the recovery
-// event.
+// session.NewEvent or return content from an AfterAgentCallback. Recovery
+// provenance accepts events with a non-empty ID that carry a canonical UUIDv4
+// ID or observe an active custom platform.WithUUIDProvider installed on the
+// invocation context or on an agent/child context
+// (ctx.WithContext(platform.WithUUIDProvider(ctx, p))) so agent lifecycle
+// callbacks can observe it. Bare session.Event struct literals lacking a
+// UUIDv4 ID under the default provider fail closed as AGENT_ERROR /
+// INVOCATION_ERROR even when Timestamp is zero or Actions maps are
+// initialized, because runner delivery stamps zero timestamps at delivery
+// time and struct literals can allocate Actions maps. A non-UUID
+// platform.WithUUIDProvider passed only to an isolated session.NewEvent call
+// context (session.NewEvent(platform.WithUUIDProvider(ctx, p), invID)) without
+// being attached to the invocation or agent context has no callback-observable
+// provenance and fails closed just like a bare struct literal. As a stated
+// fail-closed divergence from unconditional timestamp clearing, under a
+// constant platform.WithTimeProvider, single-activation AfterAgentCallback
+// content recovery succeeds on the same tick, whereas repeated sequential
+// activations of the same sub-agent or parallel branch under an open custom
+// ancestor require platform.WithTimeProvider to advance between iterations;
+// non-callback recovery events (whether live or buffered across a sub-agent's
+// retirement) likewise require platform.WithTimeProvider to advance strictly
+// past the failure timestamp before the recovery event is created. After the
+// tick in which a sub-agent's activation retired, only its
+// AfterAgentCallback events count as its own, so a non-callback recovery
+// event that an ancestor buffers past that retirement must be created no
+// later than the retirement tick.
 type Config struct {
 	Enabled        bool
 	ProjectID      string

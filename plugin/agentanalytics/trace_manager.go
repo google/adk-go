@@ -469,12 +469,30 @@ func (rec *spanRecord) firstRetiredCause() error {
 // agentStack at retirement and might buffer its events across later runs, plus
 // the sequence and platform-clock metadata used to prove later session events
 // did not originate from it.
+type agentIdentityKey struct {
+	name   string
+	branch string
+	path   string
+}
+
 type retiredActivation struct {
-	swallower                   retiredSwallower
-	parentSpanID                string
-	guardSpanIDs                []string
-	retiredAtSeq                uint64
-	completedOrTask             bool
+	swallower    retiredSwallower
+	parentSpanID string
+	guardSpanIDs []string
+	// ancestorSpanIDs holds the span IDs along the enclosing agent chain from
+	// rec's immediate parent up to the top-level agent at retirement, keeping
+	// settlement scoped to descendants of the recovering ancestor.
+	ancestorSpanIDs []string
+	retiredAtSeq    uint64
+	completedOrTask bool
+	// joinedAtRetire reports that the activation's run synchronized and exited
+	// at retirement (completed || runDone), excluding finish_task retirements
+	// whose goroutine is not guaranteed to have returned.
+	joinedAtRetire bool
+	// settledByParent reports that this activation retired cleanly or had every
+	// cause cleared by an ancestor with no surviving failures along the chain;
+	// exclusion still requires event ID and post-start/post-retirement ordering.
+	settledByParent             bool
 	concurrentPeer              bool
 	unrespondedAtPop            bool
 	hasAfterAgentCallbacks      bool
@@ -533,11 +551,33 @@ func (inv *invocationTrace) recordRetiredActivationEntryLocked(entry retiredActi
 					inv.retiredActivations[i].guardSpanIDs = append(inv.retiredActivations[i].guardSpanIDs, g)
 				}
 			}
+			for _, a := range entry.ancestorSpanIDs {
+				if !slices.Contains(inv.retiredActivations[i].ancestorSpanIDs, a) {
+					inv.retiredActivations[i].ancestorSpanIDs = append(inv.retiredActivations[i].ancestorSpanIDs, a)
+				}
+			}
+			inv.retiredActivations[i].joinedAtRetire = inv.retiredActivations[i].joinedAtRetire || entry.joinedAtRetire
+			inv.retiredActivations[i].settledByParent = inv.retiredActivations[i].settledByParent || entry.settledByParent
 			return
 		}
 	}
 	entry.guardSpanIDs = slices.Clone(entry.guardSpanIDs)
+	entry.ancestorSpanIDs = slices.Clone(entry.ancestorSpanIDs)
 	inv.retiredActivations = append(inv.retiredActivations, entry)
+}
+
+func (inv *invocationTrace) isActiveSwallowerLocked(spanID string) bool {
+	if spanID == "" {
+		return false
+	}
+	for _, rec := range inv.agentStack {
+		for _, c := range rec.retiredCauses {
+			if c.hasSwallowerSpan(spanID) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]bool, retiredAt time.Time, recs ...*spanRecord) {
@@ -545,25 +585,57 @@ func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]
 		return
 	}
 	retiredParents := make(map[string]bool, len(recs))
+	var pruneKeys []agentIdentityKey
+	addPruneKey := func(name, branch, path string) {
+		k := agentIdentityKey{name: name, branch: branch, path: path}
+		if !slices.Contains(pruneKeys, k) {
+			pruneKeys = append(pruneKeys, k)
+		}
+	}
 	for _, rec := range recs {
 		inv.recordRetiredActivationLocked(rec, openSet, retiredAt)
 		if rec != nil && rec.kind == spanKindAgent && rec.spanID != "" {
 			retiredParents[rec.spanID] = true
+			addPruneKey(rec.name, rec.branch, rec.path)
 		}
 	}
-	if retiredAt.IsZero() || len(retiredParents) == 0 {
-		return
-	}
-	for i := range inv.retiredActivations {
-		if retiredParents[inv.retiredActivations[i].parentSpanID] && inv.retiredActivations[i].parentRetiredAtPlatformTime.IsZero() {
-			inv.retiredActivations[i].parentRetiredAtPlatformTime = retiredAt
+	if len(retiredParents) > 0 {
+		for i := range inv.retiredActivations {
+			ra := &inv.retiredActivations[i]
+			if !retiredParents[ra.parentSpanID] {
+				continue
+			}
+			if !retiredAt.IsZero() && ra.parentRetiredAtPlatformTime.IsZero() {
+				ra.parentRetiredAtPlatformTime = retiredAt
+			}
+			hasOpenGuard := slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
+				return openSet[g]
+			})
+			if !inv.isActiveSwallowerLocked(ra.swallower.spanID) && (!ra.unrespondedAtPop || !hasOpenGuard) {
+				ra.afterAgentStateDeltaPtr = 0
+				ra.afterAgentStateDeltaRef = nil
+			}
+			addPruneKey(
+				ra.swallower.name,
+				ra.swallower.branch,
+				ra.swallower.path,
+			)
 		}
+	}
+	for _, k := range pruneKeys {
+		inv.pruneSettledRetiredActivationsLocked(k.name, k.branch, k.path)
 	}
 }
 
 func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openSet map[string]bool, retiredAt time.Time) {
 	if rec == nil || rec.kind != spanKindAgent || rec.spanID == "" {
 		return
+	}
+	var ancestorSpanIDs []string
+	for p := rec.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+		if p.spanID != "" {
+			ancestorSpanIDs = append(ancestorSpanIDs, p.spanID)
+		}
 	}
 	inv.recordRetiredActivationEntryLocked(retiredActivation{
 		swallower: retiredSwallower{
@@ -575,8 +647,10 @@ func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openS
 		},
 		parentSpanID:           rec.parentSpanID,
 		guardSpanIDs:           customGuardSpanIDsLocked(rec, openSet),
+		ancestorSpanIDs:        ancestorSpanIDs,
 		retiredAtSeq:           inv.nextSeqLocked(),
 		completedOrTask:        rec.completed || rec.taskMode,
+		joinedAtRetire:         rec.completed || rec.runDone,
 		concurrentPeer:         rec.concurrentPeer,
 		unrespondedAtPop:       !rec.ownResponse && !rec.contextEnded && !rec.taskMode,
 		hasAfterAgentCallbacks: rec.hasAfterAgentCallbacks,
@@ -585,6 +659,83 @@ func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openS
 		startPlatformTime:      rec.startPlatformTime,
 		retiredAtPlatformTime:  retiredAt,
 	})
+}
+
+func (inv *invocationTrace) markSettledRetiredActivationsLocked(recoveringSpanID string, includeSelf bool) {
+	if recoveringSpanID == "" || len(inv.retiredActivations) == 0 {
+		return
+	}
+	openBySpan := make(map[string]*spanRecord, len(inv.agentStack))
+	survivingSwallowers := make(map[string]bool)
+	for _, rec := range inv.agentStack {
+		if rec.kind == spanKindAgent && rec.spanID != "" {
+			openBySpan[rec.spanID] = rec
+		}
+		for _, c := range rec.retiredCauses {
+			for _, s := range c.swallowers {
+				if s.spanID != "" {
+					survivingSwallowers[s.spanID] = true
+				}
+			}
+		}
+	}
+	openCalls := inv.openCallOwnersLocked(nil)
+	unrecBySpan := make(map[string]bool)
+	for _, e := range inv.unrecoveredErrors {
+		if !e.collateral && e.spanID != "" {
+			unrecBySpan[e.spanID] = true
+		}
+	}
+	spanHasSurvivingFailure := func(spanID string, allowOpen bool) bool {
+		if spanID == "" || survivingSwallowers[spanID] || unrecBySpan[spanID] || openCalls[spanID] {
+			return true
+		}
+		if rec := openBySpan[spanID]; rec != nil {
+			if !allowOpen || len(rec.retiredCauses) > 0 || rec.contextFailureCause() != nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	var pruneKeys []agentIdentityKey
+	for i := range inv.retiredActivations {
+		ra := &inv.retiredActivations[i]
+		if !ra.joinedAtRetire || ra.settledByParent {
+			continue
+		}
+		isSelf := ra.swallower.spanID == recoveringSpanID
+		if !((includeSelf && isSelf) || slices.Contains(ra.ancestorSpanIDs, recoveringSpanID)) {
+			continue
+		}
+		if spanHasSurvivingFailure(ra.swallower.spanID, false) {
+			continue
+		}
+		blocked := false
+		if !isSelf {
+			for _, ancID := range ra.ancestorSpanIDs {
+				isRecovering := ancID == recoveringSpanID
+				if spanHasSurvivingFailure(ancID, isRecovering) {
+					blocked = true
+					break
+				}
+				if isRecovering {
+					break
+				}
+			}
+		}
+		if blocked {
+			continue
+		}
+		ra.settledByParent = true
+		k := agentIdentityKey{name: ra.swallower.name, branch: ra.swallower.branch, path: ra.swallower.path}
+		if !slices.Contains(pruneKeys, k) {
+			pruneKeys = append(pruneKeys, k)
+		}
+	}
+	for _, k := range pruneKeys {
+		inv.pruneSettledRetiredActivationsLocked(k.name, k.branch, k.path)
+	}
 }
 
 func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEventID bool) bool {
@@ -607,13 +758,14 @@ func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEvent
 }
 
 func (ra retiredActivation) excludedByEventTimestamp(laterSpanID string, laterSeq, laterGoroutineID uint64, laterConcurrentPeer bool, laterStartPlatformTime, evCreatedAt time.Time, hasEventID bool) bool {
+	settledMatch := ra.joinedAtRetire && ra.settledByParent
+	joinedResponded := ra.joinedAtRetire && !ra.unrespondedAtPop
 	if ra.swallower.spanID == laterSpanID ||
-		!ra.completedOrTask ||
+		!(ra.completedOrTask || settledMatch || joinedResponded) ||
 		ra.concurrentPeer ||
 		laterConcurrentPeer ||
-		ra.unrespondedAtPop ||
-		laterGoroutineID == 0 ||
-		ra.goroutineID != laterGoroutineID ||
+		(ra.unrespondedAtPop && !settledMatch) ||
+		(!(settledMatch || joinedResponded) && (laterGoroutineID == 0 || ra.goroutineID != laterGoroutineID)) ||
 		ra.swallower.seq >= laterSeq ||
 		ra.retiredAtSeq >= laterSeq ||
 		!hasEventID ||
@@ -621,7 +773,16 @@ func (ra retiredActivation) excludedByEventTimestamp(laterSpanID string, laterSe
 		laterStartPlatformTime.IsZero() {
 		return false
 	}
-	return evCreatedAt.After(laterStartPlatformTime)
+	if evCreatedAt.After(laterStartPlatformTime) {
+		return true
+	}
+	// On a coarse clock the event can share the tick in which the later
+	// activation started. A joined activation's run returned before it
+	// retired, so an event that ra could not have created by then (see
+	// canOwnEventCreatedAt) is the later activation's.
+	return (settledMatch || joinedResponded) &&
+		!evCreatedAt.Before(laterStartPlatformTime) &&
+		!ra.canOwnEventCreatedAt(evCreatedAt, hasEventID)
 }
 
 func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, path string) {
@@ -654,8 +815,9 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 		path                   string
 		guards                 string
 		openParentSpanID       string
-		goroutineID            uint64
 		completedOrTask        bool
+		joinedAtRetire         bool
+		settledByParent        bool
 		concurrentPeer         bool
 		unrespondedAtPop       bool
 		hasAfterAgentCallbacks bool
@@ -703,8 +865,9 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 			path:                   ra.swallower.path,
 			guards:                 strings.Join(openGuards, "\x00"),
 			openParentSpanID:       openParent,
-			goroutineID:            ra.goroutineID,
 			completedOrTask:        ra.completedOrTask,
+			joinedAtRetire:         ra.joinedAtRetire,
+			settledByParent:        ra.settledByParent,
 			concurrentPeer:         ra.concurrentPeer,
 			unrespondedAtPop:       ra.unrespondedAtPop,
 			hasAfterAgentCallbacks: ra.hasAfterAgentCallbacks,
@@ -793,6 +956,7 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 				firstMidIdx = idx
 				hull = m
 				hull.guardSpanIDs = slices.Clone(m.guardSpanIDs)
+				hull.ancestorSpanIDs = slices.Clone(m.ancestorSpanIDs)
 				hull.compactedHull = true
 				hull.hasCustomUUIDProvider = false
 				hull.afterAgentStateDeltaPtr = 0
@@ -811,6 +975,14 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 					hull.parentSpanID = m.parentSpanID
 				}
 			}
+			if hull.goroutineID != m.goroutineID {
+				hull.goroutineID = 0
+			}
+			hull.joinedAtRetire = hull.joinedAtRetire && m.joinedAtRetire
+			hull.settledByParent = hull.settledByParent && m.settledByParent
+			hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
+				return !slices.Contains(m.ancestorSpanIDs, id)
+			})
 			hull.startPlatformTime = mergeMinTime(hull.startPlatformTime, m.startPlatformTime)
 			hull.retiredAtPlatformTime = mergeMaxTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
 			hull.parentRetiredAtPlatformTime = mergeMaxTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
@@ -941,6 +1113,25 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 	retiredHasID := func(r retiredActivation) bool {
 		return hasEventID || (evNonEmptyID && !r.compactedHull && r.hasCustomUUIDProvider)
 	}
+	// retiredCanOwn reports whether the retired activation r can have created
+	// the event. r's run returned before popAgentSpan retired r, so the only
+	// events of r that ADK creates after r.retiredAtPlatformTime are those of
+	// its after-agent callbacks, which carry the StateDelta map that r's
+	// AfterAgentCallback saw. Any other event created later, such as a
+	// zero-timestamp event that an ancestor held and the runner stamped when
+	// it was delivered, is not r's, even though r has after-agent callbacks.
+	// An event of the tick in which r retired may still be one that r's run
+	// created in that tick and an ancestor delivered later, so a coarse clock
+	// keeps such events r's (see Config).
+	retiredCanOwn := func(r retiredActivation) bool {
+		if !r.canOwnEventCreatedAt(evCreatedAt, retiredHasID(r)) {
+			return false
+		}
+		if requireProvenance && !evCreatedAt.IsZero() && !r.retiredAtPlatformTime.IsZero() && evCreatedAt.After(r.retiredAtPlatformTime) {
+			return !r.compactedHull && evStateDeltaPtr != 0 && evStateDeltaPtr == r.afterAgentStateDeltaPtr
+		}
+		return true
+	}
 
 	matchedIDs := make(map[string]struct{})
 	var targetSpanID string
@@ -973,8 +1164,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 		if !ra.swallower.matches(name, branch, path) {
 			continue
 		}
-		raHasID := retiredHasID(ra)
-		if !ra.canOwnEventCreatedAt(evCreatedAt, raHasID) {
+		if !retiredCanOwn(ra) {
 			continue
 		}
 		excluded := false
@@ -982,7 +1172,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 			laterHasID := retiredHasID(later)
 			if !later.compactedHull &&
 				later.swallower.matches(name, branch, path) &&
-				later.canOwnEventCreatedAt(evCreatedAt, laterHasID) &&
+				retiredCanOwn(later) &&
 				ra.excludedByEventTimestamp(
 					later.swallower.spanID,
 					later.swallower.seq,
@@ -1041,7 +1231,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 	targetIdx := -1
 	if targetSpanID != "" {
 		targetIdx = inv.findRetiredActivationIndexLocked(targetSpanID)
-		if targetIdx >= 0 && !inv.retiredActivations[targetIdx].canOwnEventCreatedAt(evCreatedAt, retiredHasID(inv.retiredActivations[targetIdx])) {
+		if targetIdx >= 0 && !retiredCanOwn(inv.retiredActivations[targetIdx]) {
 			return
 		}
 	}
@@ -1074,10 +1264,15 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 		return true
 	}
 	if targetSpanID != "" {
+		clearedAny := false
 		for _, rec := range inv.agentStack {
+			prevLen := len(rec.retiredCauses)
 			rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
 				return c.hasSwallowerSpan(targetSpanID) && canClearCauseAt(c)
 			})
+			if len(rec.retiredCauses) != prevLen {
+				clearedAny = true
+			}
 		}
 		if targetIdx >= 0 {
 			ra := &inv.retiredActivations[targetIdx]
@@ -1090,6 +1285,9 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 				(evCreatedAt.After(ra.retiredAtPlatformTime) || (evCreatedAt.Equal(ra.retiredAtPlatformTime) && isAfterAgentCallbackEvent)) {
 				ra.unrespondedAtPop = false
 			}
+		}
+		if clearedAny {
+			inv.markSettledRetiredActivationsLocked(targetSpanID, true)
 		}
 		return
 	}
@@ -3000,10 +3198,15 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	}
 	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
 	inv.retireAgentAtLocked(i, true, rec.seq, platform.Now(ctx))
-	if sdPtr := callbackAfterAgentStateDeltaPtr(ctx); sdPtr != 0 {
-		if idx := inv.findRetiredActivationIndexLocked(rec.spanID); idx >= 0 {
-			inv.retiredActivations[idx].afterAgentStateDeltaPtr = sdPtr
-			inv.retiredActivations[idx].afterAgentStateDeltaRef = ctx
+	if rec.hasAfterAgentCallbacks {
+		if sdPtr := callbackAfterAgentStateDeltaPtr(ctx); sdPtr != 0 {
+			if idx := inv.findRetiredActivationIndexLocked(rec.spanID); idx >= 0 {
+				ra := &inv.retiredActivations[idx]
+				if ra.unrespondedAtPop || inv.isActiveSwallowerLocked(rec.spanID) {
+					ra.afterAgentStateDeltaPtr = sdPtr
+					ra.afterAgentStateDeltaRef = ctx
+				}
+			}
 		}
 	}
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
@@ -3590,6 +3793,18 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 	retiredAll = append(retiredAll, rec)
 	openAfter := inv.openSpanSetLocked()
 	inv.recordRetiredActivationsAtLocked(openAfter, failTime, retiredAll...)
+	if done && rec.completed && len(moved) == 0 && ownCtxCause == nil && len(inherited) == 0 && len(descendantOpenCauses) == 0 {
+		hasFailedInSubtree := false
+		for spanID := range subtree {
+			if failed[spanID] {
+				hasFailedInSubtree = true
+				break
+			}
+		}
+		if !hasFailedInSubtree {
+			inv.markSettledRetiredActivationsLocked(rec.spanID, true)
+		}
+	}
 	if inv.isLate {
 		// Nothing can end a retired late activation anymore, so once its
 		// cause moved up, its record keeps no callback context (see
@@ -4132,12 +4347,22 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 		}
 		return true
 	}
+	var clearedSpanIDs []string
+	addClearedSpanID := func(spanID string) {
+		if spanID != "" && !slices.Contains(clearedSpanIDs, spanID) {
+			clearedSpanIDs = append(clearedSpanIDs, spanID)
+		}
+	}
 	if !guardedPeer {
 		for _, rec := range inv.agentStack[i:] {
 			if under[rec.spanID] {
+				prevLen := len(rec.retiredCauses)
 				rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
 					return canClearOwnerCauseAt(c.platformTime, true)
 				})
+				if len(rec.retiredCauses) != prevLen {
+					addClearedSpanID(rec.spanID)
+				}
 			}
 		}
 	}
@@ -4145,6 +4370,7 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 		for key, e := range inv.unrecoveredErrors {
 			if inv.activationOfLocked(e) == i && !e.collateral && canClearOwnerCauseAt(e.platformTime, e.spanID != owner.spanID) {
 				delete(inv.unrecoveredErrors, key)
+				addClearedSpanID(owner.spanID)
 			}
 		}
 	}
@@ -4181,12 +4407,19 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 		if i = slices.Index(inv.agentStack, owner); i > 0 {
 			for _, rec := range inv.agentStack[i:] {
 				if under[rec.spanID] {
+					prevLen := len(rec.retiredCauses)
 					rec.retiredCauses = slices.DeleteFunc(rec.retiredCauses, func(c retiredCause) bool {
 						return canClearOwnerCauseAt(c.platformTime, true)
 					})
+					if len(rec.retiredCauses) != prevLen {
+						addClearedSpanID(rec.spanID)
+					}
 				}
 			}
 		}
+	}
+	for _, spanID := range clearedSpanIDs {
+		inv.markSettledRetiredActivationsLocked(spanID, true)
 	}
 	// Removing the matched tool calls may leave no launcher open for an
 	// activation whose run was already known to be over (see
@@ -4365,7 +4598,7 @@ func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, 
 		}
 		return latest, hasUntimestamped
 	}
-	if len(peerIdxs) <= 1 && !base.concurrentPeer && inv.retiredPeerCount[k] == 0 && !inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasEventID) && ((inv.unrespondedRetired[k] == 0 && inv.unrespondedRetiredTools[k] == 0) || inv.provenAfterAllRetiredLocked(base, path, evCreatedAt, hasEventID)) {
+	if len(peerIdxs) <= 1 && !base.concurrentPeer && inv.retiredPeerCount[k] == 0 && !inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasIDFor(base)) && ((inv.unrespondedRetired[k] == 0 && inv.unrespondedRetiredTools[k] == 0) || inv.provenAfterAllRetiredLocked(base, path, evCreatedAt, hasIDFor(base))) {
 		matchedPending := false
 		if len(calls) > 0 {
 			if base.awaitingToolEvent > 0 {
