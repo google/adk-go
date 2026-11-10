@@ -90,7 +90,8 @@ func (f *fileSystemSource) LoadFrontmatter(ctx context.Context, name string) (*F
 }
 
 // LoadInstructions parses the SKILL.md file and returns the markdown content
-// immediately following the frontmatter delimiter.
+// following the frontmatter delimiter, with leading and trailing whitespace
+// removed.
 func (f *fileSystemSource) LoadInstructions(ctx context.Context, name string) (string, error) {
 	_, reader, closer, err := f.readSkill(name)
 	if err != nil {
@@ -104,7 +105,7 @@ func (f *fileSystemSource) LoadInstructions(ctx context.Context, name string) (s
 	if err != nil {
 		return "", fmt.Errorf("read instructions: %w", err)
 	}
-	return string(instructions), nil
+	return strings.TrimSpace(string(instructions)), nil
 }
 
 // LoadResource reads a specific file from the skill's directory.
