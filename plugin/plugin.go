@@ -204,16 +204,20 @@ type AfterRunCallback func(agent.InvocationContext)
 // a is the agent that failed. It may be the embedded agent implementation
 // rather than the value returned by a constructor, so use a.Name() to identify
 // it. ctx is the callback context for the invocation; it does not expose the
-// agent (ctx.Agent() returns nil), and state or artifact changes made through
-// it are not persisted.
+// agent (ctx.Agent() returns nil). State changes made through ctx are not
+// persisted. Artifact saves through ctx.Artifacts() are written to the artifact
+// service, but no ArtifactDelta records them.
 //
 // A panicking callback is recovered so the remaining callbacks still run and
 // the original error is still yielded, matching adk-python's
-// on_agent_error_callback. Context cancellation and deadline errors are not
-// reported, also matching adk-python. Callbacks may be invoked concurrently by
-// parallel sub-agents and must be safe for concurrent use. An error from a
-// sub-agent is reported once for each ancestor as it propagates, matching
-// adk-python; callbacks that count failures should dedupe.
+// on_agent_error_callback. A cancellation or deadline error is not reported
+// when the invocation's own context is done, matching adk-python's handling of
+// task cancellation; timeouts raised inside the run are reported. Callbacks may
+// be invoked concurrently by parallel sub-agents and must be safe for
+// concurrent use. An error from a sub-agent is reported once for each ancestor
+// as it propagates, matching adk-python; callbacks that count failures should
+// dedupe with errors.Is because ancestors wrap the child's error. RunLive
+// bypasses the non-live run loop, so it does not invoke this callback.
 type OnAgentErrorCallback func(ctx agent.Context, a agent.Agent, err error)
 
 // OnEventCallback is invoked for each event, and may return a replacement event.

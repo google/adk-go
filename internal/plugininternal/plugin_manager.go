@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -192,7 +193,11 @@ func (pm *PluginManager) RunOnAgentErrorCallback(cctx agent.Context, a agent.Age
 		func() {
 			// A panicking callback must not skip later plugins or replace the
 			// original error; adk-python isolates each plugin the same way.
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					trace.SpanFromContext(cctx).RecordError(fmt.Errorf("plugin %q OnAgentErrorCallback panicked: %v", plugin.Name(), r))
+				}
+			}()
 			callback(cctx, a, err)
 		}()
 	}

@@ -17,14 +17,20 @@ package agent_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
+	"strings"
 	"testing"
+	"time"
 
+	"go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/plugininternal"
+	"google.golang.org/adk/v2/internal/telemetry"
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 )
@@ -38,6 +44,7 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 		name                string
 		before              []agent.BeforeAgentCallback
 		after               []agent.AfterAgentCallback
+		invocationCtx       func(context.Context) context.Context
 		run                 func(agent.InvocationContext) iter.Seq2[*session.Event, error]
 		wantCalls           int
 		wantRunErr          bool
@@ -115,24 +122,69 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 			wantRunEvent: true,
 		},
 		{
-			name: "context cancellation is not reported",
+			name: "successful after agent callback event is not reported",
+			after: []agent.AfterAgentCallback{
+				func(agent.Context) (*genai.Content, error) {
+					return genai.NewContentFromText("after callback", genai.RoleModel), nil
+				},
+			},
+			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(func(*session.Event, error) bool) {}
+			},
+			wantCalls:    0,
+			wantRunEvent: true,
+		},
+		{
+			name: "caller cancellation is not reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				ctx, cancel := context.WithCancel(ctx)
+				cancel()
+				return ctx
+			},
 			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {
-					yield(nil, context.Canceled)
+					yield(nil, fmt.Errorf("wrapped: %w", context.Canceled))
 				}
 			},
 			wantCalls:  0,
 			wantRunErr: true,
 		},
 		{
-			name: "context deadline is not reported",
+			name: "caller deadline is not reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				ctx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				return ctx
+			},
 			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {
-					yield(nil, context.DeadlineExceeded)
+					yield(nil, fmt.Errorf("wrapped: %w", context.DeadlineExceeded))
 				}
 			},
 			wantCalls:  0,
 			wantRunErr: true,
+		},
+		{
+			name: "live invocation deadline is reported",
+			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", context.DeadlineExceeded))
+				}
+			},
+			wantCalls:       1,
+			wantRunErr:      true,
+			wantCallbackErr: context.DeadlineExceeded,
+		},
+		{
+			name: "live invocation wrapped cancellation is reported",
+			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", context.Canceled))
+				}
+			},
+			wantCalls:       1,
+			wantRunErr:      true,
+			wantCallbackErr: context.Canceled,
 		},
 		{
 			name:                "missing run function is reported",
@@ -177,6 +229,9 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 			}
 
 			ctx := plugininternal.ToContext(t.Context(), pm)
+			if test.invocationCtx != nil {
+				ctx = test.invocationCtx(ctx)
+			}
 			ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{
 				Agent:        a,
 				InvocationID: "inv-1",
@@ -224,6 +279,9 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 }
 
 func TestAgentRunOnAgentErrorCallbackRecoversPanic(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	telemetry.OverrideTracerForTesting(t, trace.NewTracerProvider(trace.WithSyncer(exporter)))
+
 	runErr := errors.New("run failed")
 	var firstCalled bool
 	var notified []string
@@ -282,6 +340,65 @@ func TestAgentRunOnAgentErrorCallbackRecoversPanic(t *testing.T) {
 	if gotErr != runErr {
 		t.Errorf("Run() error = %v, want original error %v", gotErr, runErr)
 	}
+	recorded := false
+	for _, span := range exporter.GetSpans() {
+		for _, event := range span.Events {
+			if event.Name != "exception" {
+				continue
+			}
+			for _, attr := range event.Attributes {
+				if attr.Key == "exception.message" && strings.Contains(attr.Value.AsString(), "OnAgentErrorCallback panicked") {
+					recorded = true
+				}
+			}
+		}
+	}
+	if !recorded {
+		t.Error("panic was not recorded on the span")
+	}
+}
+
+func TestAgentRunOnAgentErrorCallbackRunsBeforeYield(t *testing.T) {
+	runErr := errors.New("run failed")
+	var order []string
+	p, err := plugin.New(plugin.Config{
+		Name: "observer",
+		OnAgentErrorCallback: func(agent.Context, agent.Agent, error) {
+			order = append(order, "callback")
+		},
+	})
+	if err != nil {
+		t.Fatalf("plugin.New() error = %v", err)
+	}
+	pm, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
+		Plugins: []*plugin.Plugin{p},
+	})
+	if err != nil {
+		t.Fatalf("NewPluginManager() error = %v", err)
+	}
+	a, err := agent.New(agent.Config{
+		Name: "failing",
+		Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				yield(nil, runErr)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("agent.New() error = %v", err)
+	}
+
+	ctx := plugininternal.ToContext(t.Context(), pm)
+	ic := icontext.NewInvocationContext(ctx, icontext.InvocationContextParams{Agent: a})
+	for _, err := range a.Run(ic) {
+		if err != nil {
+			order = append(order, "yield")
+		}
+	}
+
+	if len(order) != 2 || order[0] != "callback" || order[1] != "yield" {
+		t.Errorf("order = %v, want [callback yield]", order)
+	}
 }
 
 func TestAgentRunOnAgentErrorCallbackNotifiesEveryPlugin(t *testing.T) {
@@ -298,8 +415,12 @@ func TestAgentRunOnAgentErrorCallbackNotifiesEveryPlugin(t *testing.T) {
 		}
 		return p
 	}
+	noCallback, err := plugin.New(plugin.Config{Name: "no-callback"})
+	if err != nil {
+		t.Fatalf("plugin.New(%q) error = %v", "no-callback", err)
+	}
 	pm, err := plugininternal.NewPluginManager(plugininternal.PluginConfig{
-		Plugins: []*plugin.Plugin{newPlugin("first"), newPlugin("second")},
+		Plugins: []*plugin.Plugin{newPlugin("first"), noCallback, newPlugin("second")},
 	})
 	if err != nil {
 		t.Fatalf("NewPluginManager() error = %v", err)
