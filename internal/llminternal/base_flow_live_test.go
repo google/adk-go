@@ -1186,3 +1186,54 @@ gotResponse:
 		t.Errorf("connection count = %d, want 1 (scenario needs no reconnect)", got)
 	}
 }
+
+// TestRunLiveEventsCarryUsageMetadata checks that the token usage the Live API
+// reports reaches the event RunLive yields, with the Live API's response token
+// count mapped to CandidatesTokenCount.
+func TestRunLiveEventsCarryUsageMetadata(t *testing.T) {
+	const turnWithUsage = `{"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":174,"responseTokenCount":146,"totalTokenCount":320}}`
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(turnWithUsage)); err != nil {
+			t.Errorf("writing usage message failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the turn-complete event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || !ev.LLMResponse.TurnComplete {
+			continue
+		}
+		want := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     174,
+			CandidatesTokenCount: 146,
+			TotalTokenCount:      320,
+		}
+		if diff := cmp.Diff(want, ev.LLMResponse.UsageMetadata); diff != "" {
+			t.Errorf("UsageMetadata mismatch (-want +got):\n%s", diff)
+		}
+		return
+	}
+}
