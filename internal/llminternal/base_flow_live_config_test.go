@@ -47,8 +47,9 @@ func (m *namedFakeLiveModel) Name() string { return m.name }
 // liveSetupFields runs RunLive for modelName with live, captures the setup
 // frame the client sends to a fake Live server, and returns every
 // realtimeInputConfig, proactivity and enableAffectiveDialog value in it,
-// wherever the backend nests them.
-func liveSetupFields(t *testing.T, modelName string, live *agent.LiveRunConfig) map[string]any {
+// wherever the backend nests them. If requestModel is set, a request
+// processor writes it to the request's Model before the live config is built.
+func liveSetupFields(t *testing.T, modelName, requestModel string, live *agent.LiveRunConfig) map[string]any {
 	t.Helper()
 	setup := make(chan []byte, 1)
 	var upgrader websocket.Upgrader
@@ -94,9 +95,16 @@ func liveSetupFields(t *testing.T, modelName string, live *agent.LiveRunConfig) 
 		}),
 		icontext.InvocationContextParams{Agent: testAgent},
 	)
+	processors := []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor}
+	if requestModel != "" {
+		processors = append(processors, func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error] {
+			req.Model = requestModel
+			return func(yield func(*session.Event, error) bool) {}
+		})
+	}
 	f := &Flow{
 		Model:             &namedFakeLiveModel{fakeLiveModel: fakeLiveModel{client: client}, name: modelName},
-		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+		RequestProcessors: processors,
 	}
 	sess, _, err := f.RunLive(ctx)
 	if err != nil {
@@ -138,8 +146,8 @@ func collectLiveSetupFields(v any, out map[string]any) {
 
 // TestRunLiveSendsLiveRunConfigFields checks that RealtimeInputConfig,
 // EnableAffectiveDialog and Proactivity from LiveRunConfig reach the setup
-// message, and that the last two are left out for Gemini 3.x Live models, as
-// in adk-python.
+// message, and that the last two are left out for the models IsGemini3xLive
+// matches.
 func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 	live := func() *agent.LiveRunConfig {
 		return &agent.LiveRunConfig{
@@ -162,10 +170,11 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 		},
 	}
 	tests := []struct {
-		name  string
-		model string
-		live  *agent.LiveRunConfig
-		want  map[string]any
+		name         string
+		model        string
+		requestModel string
+		live         *agent.LiveRunConfig
+		want         map[string]any
 	}{
 		{
 			name:  "gemini 2.5 live",
@@ -200,6 +209,26 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 				"proactivity":           map[string]any{"proactiveAudio": true},
 			},
 		},
+		{
+			// The connection is opened for the Flow's model, so the guard
+			// follows it even when a request processor rewrites req.Model.
+			name:         "request model rewritten to gemini 3.x live",
+			model:        "gemini-live-2.5-flash-preview",
+			requestModel: "gemini-3.1-flash-live-preview",
+			live:         live(),
+			want: map[string]any{
+				"realtimeInputConfig":   wantRealtime,
+				"enableAffectiveDialog": true,
+				"proactivity":           map[string]any{"proactiveAudio": true},
+			},
+		},
+		{
+			name:         "request model rewritten away from gemini 3.x live",
+			model:        "gemini-3.1-flash-live-preview",
+			requestModel: "gemini-live-2.5-flash-preview",
+			live:         live(),
+			want:         map[string]any{"realtimeInputConfig": wantRealtime},
+		},
 		// Each field is set on its own as well, so that dropping one of them
 		// cannot hide behind another being set.
 		{
@@ -231,10 +260,12 @@ func TestRunLiveSendsLiveRunConfigFields(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := liveSetupFields(t, tc.model, tc.live)
+			baseline, _ := runLiveStacks()
+			got := liveSetupFields(t, tc.model, tc.requestModel, tc.live)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("setup fields mismatch (-want +got):\n%s", diff)
 			}
+			assertNoRunLiveLeak(t, baseline)
 		})
 	}
 }

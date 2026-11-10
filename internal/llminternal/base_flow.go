@@ -501,10 +501,12 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 			OutputAudioTranscription: runCfg.Live.OutputAudioTranscription,
 			RealtimeInputConfig:      runCfg.Live.RealtimeInputConfig,
 		}
-		// Gemini 3.x Live models do not take affective dialog or proactivity
-		// in setup: affective dialog is not part of their API and proactive
-		// audio is built in. Leave both unset for them (adk-python does the
-		// same in flows/llm_flows/basic.py).
+		// Leave affective dialog and proactivity unset for the models
+		// IsGemini3xLive matches. Affective dialog is not supported on them,
+		// and proactive audio is either always on (Gemini 3.8 Live, where
+		// sending proactive_audio: false is an error) or not supported
+		// (Gemini 3.1 Flash Live). Live Translate is excluded by
+		// IsGemini3xLive and still gets both.
 		if !googlellm.IsGemini3xLive(f.Model.Name()) {
 			if runCfg.Live.EnableAffectiveDialog {
 				liveConnectConfig.EnableAffectiveDialog = genai.Ptr(true)
