@@ -15,7 +15,12 @@
 package agentanalytics
 
 import (
+	"encoding/base64"
 	"fmt"
+	"maps"
+	"math/rand/v2"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +42,7 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			"my_api_key", "OPENAI_API_KEY", "myAPIKey", "OpenAIAPIKey", "githubAccessToken", "GITHUB_TOKEN",
 			"proxyAuthToken", "webhookSecret", "encryptionPassphrase", "sshPrivateKey", "awsSecretAccessKey",
 			"HTTP_AUTHORIZATION", "X-Amz-Security-Token", "secret_key", "SECRET_KEY", "signing_key", "fb_page_token",
+			"resync_token", "async_token", "app_sync_token",
 			"temp:access_token", "temp:anything", "user:api_key", "app:client_secret", "USER:API_KEY",
 			"user:temp:refresh_token", "app:temp:scratch", " user: temp:x ", "user:db_password", "app:dbPassword",
 		}
@@ -45,12 +51,23 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 				t.Errorf("isSensitiveKey(%q) = false, want true", k)
 			}
 		}
+		for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
+			dotted := strings.ReplaceAll(k, "_", ".")
+			for _, candidate := range []string{dotted, "user:" + dotted, "app:" + dotted} {
+				if !isSensitiveKey(candidate) {
+					t.Errorf("isSensitiveKey(%q) = false, want true", candidate)
+				}
+			}
+		}
 		notSensitive := []string{
 			"token_count", "prompt_tokens", "completion_tokens", "total_tokens", "max_tokens", "input_tokens",
 			"output_tokens", "cached_tokens", "reasoning_tokens", "tool_tokens", "token_limit", "token_budget",
 			"token_usage", "token_id", "token_type", "tokenCount", "author", "authority", "authorized",
 			"cookie_jar", "secret_manager_project", "secretName", "api_key_id", "password_hash",
 			"page_token", "next_page_token", "prev_page_token", "previous_page_token", "nextPageToken",
+			"sync_token", "continuation_token", "syncToken", "continuationToken",
+			"next_sync_token", "nextSyncToken", "next_continuation_token", "nextContinuationToken",
+			"NextToken", "next_token", "nextToken", "prev_token", "PrevToken", "previous_token", "pad_token", "padToken",
 			"exchangedAuthCredential", "rawAuthCredential", "method_signature", "request_sig", "Sec-WebSocket-Key",
 			"dbpassword", "xtoken", "user:name", "app:theme", "db/password", "db password", "",
 		}
@@ -67,6 +84,8 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			GithubAccessToken string
 			TokenCount        int
 			NextPageToken     string
+			SyncToken         string
+			ContinuationToken string
 		}
 		tests := []struct {
 			name string
@@ -77,15 +96,19 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 				name: "map",
 				obj: map[string]any{
 					"DB_PASSWORD": "pw", "dbPassword": "pw", "my_api_key": "k", "user:temp:refresh_token": "r",
-					"token_count": 3, "next_page_token": "p2", "nested": map[string]any{"GITHUB_TOKEN": "ghp"},
+					"continuationToken": "c2", "continuation_token": "c1", "fb_page_token": "fb",
+					"NextToken": "nt1", "next_token": "nt2", "nextSyncToken": "ns1", "pad_token": "pt1",
+					"token_count": 3, "next_page_token": "p2", "syncToken": "s2", "sync_token": "s1",
+					"nested": map[string]any{"GITHUB_TOKEN": "ghp"},
 				},
-				want: `{"DB_PASSWORD":"[REDACTED]","dbPassword":"[REDACTED]","my_api_key":"[REDACTED]",` +
-					`"nested":{"GITHUB_TOKEN":"[REDACTED]"},"next_page_token":"p2","token_count":3,"user:temp:refresh_token":"[REDACTED]"}`,
+				want: `{"DB_PASSWORD":"[REDACTED]","NextToken":"nt1","continuationToken":"c2","continuation_token":"c1","dbPassword":"[REDACTED]",` +
+					`"fb_page_token":"[REDACTED]","my_api_key":"[REDACTED]","nested":{"GITHUB_TOKEN":"[REDACTED]"},` +
+					`"nextSyncToken":"ns1","next_page_token":"p2","next_token":"nt2","pad_token":"pt1","syncToken":"s2","sync_token":"s1","token_count":3,"user:temp:refresh_token":"[REDACTED]"}`,
 			},
 			{
 				name: "struct",
-				obj:  creds{DBPassword: "pw", GithubAccessToken: "t", TokenCount: 3, NextPageToken: "p2"},
-				want: `{"DBPassword":"[REDACTED]","GithubAccessToken":"[REDACTED]","NextPageToken":"p2","TokenCount":3}`,
+				obj:  creds{DBPassword: "pw", GithubAccessToken: "t", TokenCount: 3, NextPageToken: "p2", SyncToken: "s1", ContinuationToken: "c1"},
+				want: `{"ContinuationToken":"c1","DBPassword":"[REDACTED]","GithubAccessToken":"[REDACTED]","NextPageToken":"p2","SyncToken":"s1","TokenCount":3}`,
 			},
 		}
 		for _, tt := range tests {
@@ -144,7 +167,8 @@ func TestCompoundAndStatePrefixedSensitiveKeys(t *testing.T) {
 			{"quoted compound key", `'dbPassword': 'hunter2'`, `'dbPassword':'[REDACTED]'`},
 			{"Go struct print", "log: {DBPassword:hunter2 Count:1} done", "log: {DBPassword:[REDACTED] Count:1} done"},
 			{"struct print fails closed", "{DBPassword:hunter2 Count:1}", unparseableJSONPlaceholder},
-			{"page token kept", "next_page_token=abc nextPageToken=def", "next_page_token=abc nextPageToken=def"},
+			{"page token kept", "next_page_token=abc nextPageToken=def sync_token=ghi syncToken=jkl continuation_token=mno continuationToken=pqr NextToken=stu nextSyncToken=vwx next_token=yz1 pad_token=pad0", "next_page_token=abc nextPageToken=def sync_token=ghi syncToken=jkl continuation_token=mno continuationToken=pqr NextToken=stu nextSyncToken=vwx next_token=yz1 pad_token=pad0"},
+			{"cursor URL query kept and fb_page_token redacted", "GET https://h/p?sync_token=s1&continuation_token=c1&syncToken=s2&continuationToken=c2&NextToken=n1&nextSyncToken=ns1&next_token=n2&pad_token=pd1&fb_page_token=fbsec", "GET https://h/p?sync_token=s1&continuation_token=c1&syncToken=s2&continuationToken=c2&NextToken=n1&nextSyncToken=ns1&next_token=n2&pad_token=pd1&fb_page_token=%5BREDACTED%5D"},
 			{"usage kept", "prompt_tokens=5 token_count=5 max_tokens=1024 author=bob", "prompt_tokens=5 token_count=5 max_tokens=1024 author=bob"},
 			{"no word boundary kept", "xtoken=5 dbpassword=plain", "xtoken=5 dbpassword=plain"},
 			{"resource names kept", "tokenCount=5 api_key_id=abc secretName=projects/p/secrets/s", "tokenCount=5 api_key_id=abc secretName=projects/p/secrets/s"},
@@ -177,7 +201,7 @@ func TestSensitiveKeyProperties_MonotonicNonConsumingLinear(t *testing.T) {
 		// Inputs and the exact outputs of sanitizeRawText before compound
 		// keys were matched, including keys that only match at a word
 		// boundary inside a compound name (next-page-token, foo-credentials)
-		// and an "api_key:" line, which authHeaderRe redacts to its end.
+		// and an "api_key:" line, which redactAuthHeaders redacts to its end.
 		corpus := []struct{ in, want string }{
 			{"temp:access_token=sec1 x=1", "temp:access_token=[REDACTED] x=1"},
 			{"user:temp:api_key=sec1 x=1", "user:temp:api_key=[REDACTED] x=1"},
@@ -251,6 +275,7 @@ func TestSensitiveKeyProperties_MonotonicNonConsumingLinear(t *testing.T) {
 			"kept pairs":             func(n int) string { return strings.Repeat("xtoken=5 next_page_token=abc ", n/29) },
 			"kept spaced json pairs": func(n int) string { return `err ` + strings.Repeat(`" next_page_token ": "p2", `, n/28) },
 			"redacted pairs":         func(n int) string { return strings.Repeat("DB_PASSWORD=sec dbPassword=sec ", n/31) },
+			"nested open containers": func(n int) string { return strings.Repeat(`"my_api_key": token:[ `, n/22) },
 		}
 		const small, large = 1 << 10, 16 << 10
 		for name, shape := range shapes {
@@ -342,12 +367,15 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 	})
 
 	t.Run("unicode folded compound and state keys", func(t *testing.T) {
-		for _, k := range []string{"db_pa\u017f\u017fword", "api_\u212aey", "u\u017fer:temp:foo", "app:pa\u017f\u017fword"} {
+		for _, k := range []string{
+			"db_pa\u017f\u017fword", "api_\u212aey", "u\u017fer:temp:foo", "app:pa\u017f\u017fword",
+			"AP\u0130_KEY", "CL\u0130ENT_SECRET", "DB_CL\u0130ENT_SECRET",
+		} {
 			if !isSensitiveKey(k) {
 				t.Errorf("isSensitiveKey(%q) = false, want true", k)
 			}
 		}
-		for _, k := range []string{"pas\u017fwordless", "mon\u212aey", "u\u017fer:theme"} {
+		for _, k := range []string{"pas\u017fwordless", "mon\u212aey", "u\u017fer:theme", "AP\u0130_KEY_ID"} {
 			if isSensitiveKey(k) {
 				t.Errorf("isSensitiveKey(%q) = true, want false", k)
 			}
@@ -358,18 +386,31 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			{"u\u017fer:temp:foo=SECRET123", "u\u017fer:temp:foo=[REDACTED]"},
 			{"db_pa\u017f\u017fword=SECRET123", "db_pa\u017f\u017fword=[REDACTED]"},
 			{"x-goog-api_\u212aey: SECRET123", "x-goog-api_\u212aey: [REDACTED]"},
+			{"x\u017fecret=SECRET123", "x\u017fecret=[REDACTED]"},
+			{"AP\u0130_KEY=SECRET123 CL\u0130ENT_SECRET=SECRET456", "AP\u0130_KEY=[REDACTED] CL\u0130ENT_SECRET=[REDACTED]"},
 		}
 		for _, tc := range cases {
 			if got := redactErrorMessage(tc.in); got != tc.want {
 				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, got, tc.want)
 			}
+			if got, lost := sanitizeRawText(tc.in); !lost || got != tc.want {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, got, lost, tc.want)
+			}
+		}
+		truncBytes, _, err := SmartTruncate(map[string]any{"AP\u0130_KEY": "SECRET123", "CL\u0130ENT_SECRET": "SECRET456"}, 1<<20)
+		if err != nil {
+			t.Fatalf("SmartTruncate error: %v", err)
+		}
+		wantTrunc := `{"AP` + "\u0130" + `_KEY":"[REDACTED]","CL` + "\u0130" + `ENT_SECRET":"[REDACTED]"}`
+		if string(truncBytes) != wantTrunc {
+			t.Errorf("SmartTruncate = %s, want %s", truncBytes, wantTrunc)
 		}
 	})
 
 	t.Run("false positive exclusions stay untouched across formats", func(t *testing.T) {
 		benignInputs := []string{
-			"monkey=ok donkey=ok turkey=ok turnkey=ok keyboard=ok passkey_enabled=true passwordless=true token_count=42 next_page_token=p2 method_signature=foo request_sig=bar app:theme=dark my_xtoken=ok prod_dbpassword=ok reauthorization: ok my_xauthorization: ok benign=1",
-			`{"monkey":"a","donkey":"b","turkey":"c","turnkey":"d","keyboard":"e","passkey_enabled":true,"passwordless":true,"token_count":42,"next_page_token":"p2","method_signature":"foo","request_sig":"bar","app:theme":"dark","my_xtoken":"ok","prod_dbpassword":"ok","my_xauthorization":"ok"}`,
+			"monkey=ok donkey=ok turkey=ok turnkey=ok keyboard=ok passkey_enabled=true passwordless=true token_count=42 next_page_token=p2 sync_token=s1 continuation_token=c1 syncToken=s2 continuationToken=c2 method_signature=foo request_sig=bar app:theme=dark my_xtoken=ok prod_dbpassword=ok reauthorization: ok my_xauthorization: ok benign=1",
+			`{"monkey":"a","donkey":"b","turkey":"c","turnkey":"d","keyboard":"e","passkey_enabled":true,"passwordless":true,"token_count":42,"next_page_token":"p2","sync_token":"s1","continuation_token":"c1","syncToken":"s2","continuationToken":"c2","method_signature":"foo","request_sig":"bar","app:theme":"dark","my_xtoken":"ok","prod_dbpassword":"ok","my_xauthorization":"ok"}`,
 		}
 		for _, in := range benignInputs {
 			if got := redactErrorMessage(in); got != in {
@@ -380,14 +421,14 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			}
 		}
 
-		uriIn := "https://example.com?monkey=1&turnkey=2&next_page_token=p2&token_count=3&my_api_key=SECRET1&auth_token=SECRET2&client-secret=SECRET3&user:temp:foo=SECRET4&app:client_secret=SECRET5"
+		uriIn := "https://example.com?monkey=1&turnkey=2&next_page_token=p2&sync_token=s1&continuation_token=c1&syncToken=s2&continuationToken=c2&token_count=3&my_api_key=SECRET1&auth_token=SECRET2&client-secret=SECRET3&user:temp:foo=SECRET4&app:client_secret=SECRET5&fb_page_token=SECRET6"
 		uriGot := redactErrorMessage(uriIn)
-		for _, keep := range []string{"monkey=1", "turnkey=2", "next_page_token=p2", "token_count=3"} {
+		for _, keep := range []string{"monkey=1", "turnkey=2", "next_page_token=p2", "sync_token=s1", "continuation_token=c1", "syncToken=s2", "continuationToken=c2", "token_count=3"} {
 			if !strings.Contains(uriGot, keep) {
 				t.Errorf("redactErrorMessage(%q) dropped benign param %q: %q", uriIn, keep, uriGot)
 			}
 		}
-		for _, secret := range []string{"SECRET1", "SECRET2", "SECRET3", "SECRET4", "SECRET5"} {
+		for _, secret := range []string{"SECRET1", "SECRET2", "SECRET3", "SECRET4", "SECRET5", "SECRET6"} {
 			if strings.Contains(uriGot, secret) {
 				t.Errorf("redactErrorMessage(%q) leaked %q: %q", uriIn, secret, uriGot)
 			}
@@ -437,27 +478,203 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 		}
 	})
 
-	t.Run("dotted multi-word compound keys do not bypass prefilter", func(t *testing.T) {
+	t.Run("dotted exact and multi-word sensitive keys are redacted across formats", func(t *testing.T) {
+		for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
+			dotted := strings.ReplaceAll(k, "_", ".")
+			for _, prefix := range []string{"", "user:", "app:"} {
+				key := prefix + dotted
+				kvIn := key + "=VAL987654"
+				wantKV := key + "=[REDACTED]"
+				if got := redactErrorMessage(kvIn); got != wantKV {
+					t.Errorf("redactErrorMessage(%q) = %q, want %q", kvIn, got, wantKV)
+				}
+				if got, lost := sanitizeRawText(kvIn); !lost || got != wantKV {
+					t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", kvIn, got, lost, wantKV)
+				}
+				jsonIn := fmt.Sprintf(`{%q:"VAL987654"}`, key)
+				wantJSON := fmt.Sprintf(`{%q:"[REDACTED]"}`, key)
+				if got := redactErrorMessage(jsonIn); got != wantJSON {
+					t.Errorf("redactErrorMessage(%q) = %q, want %q", jsonIn, got, wantJSON)
+				}
+				if got, lost := sanitizeRawText(jsonIn); got != wantJSON || lost {
+					t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", jsonIn, got, lost, wantJSON)
+				}
+			}
+		}
+
 		cases := []struct {
 			in, want string
 		}{
+			{"api.key=VAL987654", "api.key=[REDACTED]"},
 			{"ssh.private.key=VAL987654", "ssh.private.key=[REDACTED]"},
 			{"oauth.auth.code: VAL987654", "oauth.auth.code:[REDACTED]"},
 			{"pkce.code.verifier=VAL987654", "pkce.code.verifier=[REDACTED]"},
 			{`err: {"app.api.key": "VAL987654"}`, `err: {"app.api.key":"[REDACTED]"}`},
+			{`err: {"api.key": "VAL987654", "private.key": "VAL987654"}`, `err: {"api.key":"[REDACTED]", "private.key":"[REDACTED]"}`},
+			{"credentials:\n  api.key: VAL987654\n  region: us", "credentials:\n  api.key:[REDACTED]\n  region: us"},
+			{"credentials: user:private.key: VAL987654", "credentials: user:private.key:[REDACTED]"},
 		}
 		for _, tc := range cases {
 			if got := redactErrorMessage(tc.in); got != tc.want {
 				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, got, tc.want)
 			}
-			if got, lost := sanitizeRawText(tc.in); !lost || strings.Contains(got, "VAL987654") {
-				t.Errorf("sanitizeRawText(%q) = (%q, %v), leaked secret", tc.in, got, lost)
+			if got, lost := sanitizeRawText(tc.in); !lost || got != tc.want || strings.Contains(got, "VAL987654") {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, got, lost, tc.want)
 			}
+		}
+
+		jsonDoc := `{"api.key":"VAL987654","private.key":"VAL987654"}`
+		wantJSONDoc := `{"api.key":"[REDACTED]","private.key":"[REDACTED]"}`
+		if got := redactErrorMessage(jsonDoc); got != wantJSONDoc {
+			t.Errorf("redactErrorMessage(%q) = %q, want %q", jsonDoc, got, wantJSONDoc)
+		}
+		if got, lost := sanitizeRawText(jsonDoc); got != wantJSONDoc || lost {
+			t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, false)", jsonDoc, got, lost, wantJSONDoc)
 		}
 
 		unparseable := "{\\u0022app.api.key\\u0022\u00a0: \\u0022VAL987654\\u0022}"
 		if got, lost := sanitizeRawText(unparseable); !lost || got != unparseableJSONPlaceholder || strings.Contains(got, "VAL987654") {
 			t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", unparseable, got, lost, unparseableJSONPlaceholder)
+		}
+	})
+
+	t.Run("quoted compound and state outer keys redact nested keys without leaking", func(t *testing.T) {
+		const secret = "SYNTHETIC_NESTED_99"
+		outerKeys := []string{
+			`"app:temp:connection"`,
+			`"temp:conn"`,
+			`"user:api_key"`,
+			`"user:temp:conn"`,
+			`"my_api_key"`,
+			`"DB_PASSWORD"`,
+			`'app:temp:connection'`,
+			`'my_api_key'`,
+		}
+		innerLines := []struct {
+			name, line, wantLine string
+		}{
+			{"bare fixed", "password: " + secret, "password:[REDACTED]"},
+			{"bare dotted", "api.key: " + secret, "api.key:[REDACTED]"},
+			{"bare auth header", "api_key: " + secret, "api_key: [REDACTED]"},
+			{"quoted fixed", `"password": "` + secret + `"`, `"password":"[REDACTED]"`},
+			{"single-quoted fixed", `'password': '` + secret + `'`, `'password':'[REDACTED]'`},
+			{"bare compound", "db_password: " + secret, "db_password:[REDACTED]"},
+			{"bare camelCase", "dbPassword: " + secret, "dbPassword:[REDACTED]"},
+			{"bare unicode folded", "db_pa\u017f\u017fword: " + secret, "db_pa\u017f\u017fword:[REDACTED]"},
+			{"quoted compound", `"db_password": "` + secret + `"`, `"db_password":"[REDACTED]"`},
+			{"spaced quoted compound", `" db_password ": "` + secret + `"`, `"db_password":"[REDACTED]"`},
+			{"bare temp", "temp:secret: " + secret, "temp:secret:[REDACTED]"},
+			{"bare user compound", "user:dbPassword: " + secret, "user:dbPassword:[REDACTED]"},
+			{"quoted temp with slash", `"temp:cache/val": "` + secret + `"`, `"temp:cache/val":"[REDACTED]"`},
+			{"quoted temp with colon", `"temp:a:b": "` + secret + `"`, `"temp:a:[REDACTED]`},
+			{"spaced quoted state temp", `" user:temp:secret ": "` + secret + `"`, `"user:temp:secret":"[REDACTED]"`},
+			{"container without space", `password:{"k": "` + secret + `"}`, "password:[REDACTED]"},
+		}
+		for _, outer := range outerKeys {
+			for _, inner := range innerLines {
+				in := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.line)
+				want := fmt.Sprintf("config:\n  %s:\n    %s\n    region: us", outer, inner.wantLine)
+				gotRaw, lost := sanitizeRawText(in)
+				if !lost || gotRaw != want || strings.Contains(gotRaw, secret) {
+					t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", in, gotRaw, lost, want)
+				}
+				if gotRaw2, lost2 := sanitizeRawText(gotRaw); gotRaw2 != gotRaw || lost2 {
+					t.Errorf("sanitizeRawText second pass(%q) = (%q, %v), want unchanged and lost=false", gotRaw, gotRaw2, lost2)
+				}
+				gotErr := redactErrorMessage(in)
+				if gotErr != want || strings.Contains(gotErr, secret) {
+					t.Errorf("redactErrorMessage(%q) = %q, want %q", in, gotErr, want)
+				}
+				if gotErr2 := redactErrorMessage(gotErr); gotErr2 != gotErr {
+					t.Errorf("redactErrorMessage second pass(%q) = %q, want unchanged", gotErr, gotErr2)
+				}
+				truncBytes, truncated, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+				if err != nil {
+					t.Fatalf("SmartTruncate error: %v", err)
+				}
+				if !truncated || strings.Contains(string(truncBytes), secret) || !strings.Contains(string(truncBytes), "region: us") {
+					t.Errorf("SmartTruncate(%q) = (%s, %v), want truncated=true without secret and keeping region: us", in, truncBytes, truncated)
+				}
+			}
+		}
+
+		sameLineCases := []struct {
+			in, want string
+		}{
+			{`log: "my_api_key": "dev-` + secret + `-password": "` + secret + `_tail" region=us`, `log: "my_api_key":"[REDACTED]" region=us`},
+			{`log: "app:temp:connection": "temp:` + secret + `:b": "` + secret + `_tail" region=us`, `log: "app:temp:connection":"[REDACTED]" region=us`},
+			{`log: "user:api_key": password: ` + secret + ` region=us`, `log: "user:api_key": password:[REDACTED] region=us`},
+		}
+		for _, tc := range sameLineCases {
+			if got, lost := sanitizeRawText(tc.in); !lost || got != tc.want || strings.Contains(got, secret) {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, got, lost, tc.want)
+			}
+			if got := redactErrorMessage(tc.in); got != tc.want || strings.Contains(got, secret) {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("quoted compound and state key redaction is idempotent on second pass", func(t *testing.T) {
+		alreadyRedacted := []string{
+			`"X-Amz-Security-Token":"[REDACTED]" other=ok`,
+			`"X-Amz-Security-Token": "[REDACTED]" other=ok`,
+			`"X-Amz-Security-Token": '[REDACTED]' other=ok`,
+			`"X-Amz-Security-Token"=[REDACTED] other=ok`,
+			`"user:temp:api_key":"[REDACTED]" other=ok`,
+			"\"X-Amz-Security-Token\":\"[REDACTED]\"\nother: ok",
+			`"api.key":"[REDACTED]" other=ok`,
+		}
+		for _, in := range alreadyRedacted {
+			if got := redactErrorMessage(in); got != in {
+				t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
+			}
+			if got, lost := sanitizeRawText(in); got != in || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
+			}
+		}
+
+		twoPassCases := []struct {
+			in, want string
+		}{
+			{"\"X-Amz-Security-Token\": \"a b\"\nother: ok", "\"X-Amz-Security-Token\":\"[REDACTED]\"\nother: ok"},
+			{`"dbPassword": "secret val" other=ok`, `"dbPassword":"[REDACTED]" other=ok`},
+			{"\"user:temp:api_key\": \"secret val\"\nother: ok", "\"user:temp:api_key\":\"[REDACTED]\"\nother: ok"},
+			{"\"api.key\": \"secret val\"\nother: ok", "\"api.key\":\"[REDACTED]\"\nother: ok"},
+		}
+		for _, tc := range twoPassCases {
+			gotErr := redactErrorMessage(tc.in)
+			if gotErr != tc.want {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", tc.in, gotErr, tc.want)
+			}
+			if twice := redactErrorMessage(gotErr); twice != gotErr {
+				t.Errorf("redactErrorMessage second pass(%q) = %q, want %q", gotErr, twice, gotErr)
+			}
+			gotRaw, lost := sanitizeRawText(tc.in)
+			if !lost || gotRaw != tc.want {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", tc.in, gotRaw, lost, tc.want)
+			}
+			if twiceRaw, lost2 := sanitizeRawText(gotRaw); twiceRaw != gotRaw || lost2 {
+				t.Errorf("sanitizeRawText second pass(%q) = (%q, %v), want (%q, false)", gotRaw, twiceRaw, lost2, gotRaw)
+			}
+		}
+
+		failClosedInputs := []string{
+			`{"X-Amz-Security-Token": "SECRET123"`,
+			`{"X-Amz-Security-Token": "[REDACTED]SECRET"`,
+			`{"X-Amz-Security-Token": "[REDACTED]"SECRET`,
+			`{"X-Amz-Security-Token": [REDACTED]SECRET`,
+			`{" my_api_key " = [REDACTED]SECRET`,
+			`{"X-Amz-Security-Token":`,
+			`"X-Amz-Security-Token":"[REDACTED]" dbPassword=SECRET123`,
+		}
+		for _, in := range failClosedInputs {
+			if got := redactErrorMessage(in); got != unparseableJSONPlaceholder || strings.Contains(got, "SECRET123") {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, unparseableJSONPlaceholder)
+			}
+			if got, lost := sanitizeRawText(in); !lost || got != unparseableJSONPlaceholder || strings.Contains(got, "SECRET123") {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, true)", in, got, lost, unparseableJSONPlaceholder)
+			}
 		}
 	})
 
@@ -525,4 +742,288 @@ func TestCompoundKeyEdgeCasesAndLinearBackslashRegression(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("padded nested keys with unterminated or multiline-escaped values and quote rewinds", func(t *testing.T) {
+		const secret = "S3CR3T_hunter2"
+		assertAllRedactors := func(t *testing.T, in, want string, wantLost bool) {
+			t.Helper()
+			if got := redactErrorMessage(in); got != want || strings.Contains(got, secret) {
+				t.Errorf("redactErrorMessage(%q) = %q, want %q", in, got, want)
+			}
+			if got, lost := sanitizeRawText(in); got != want || lost != wantLost || strings.Contains(got, secret) {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want (%q, %v)", in, got, lost, want, wantLost)
+			}
+			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%q): %v", in, err)
+			}
+			if strings.Contains(string(truncBytes), secret) {
+				t.Errorf("SmartTruncate(%q) leaked secret: %s", in, truncBytes)
+			}
+		}
+
+		assertAllRedactors(t,
+			"config:\n  \"DB_PASSWORD\":\n    password: "+secret+"\n",
+			"config:\n  \"DB_PASSWORD\":\n    password:[REDACTED]\n",
+			true,
+		)
+		assertAllRedactors(t,
+			"config:\n  \"app:temp:connection\":\n    password: "+secret+"\n",
+			"config:\n  \"app:temp:connection\":\n    password:[REDACTED]\n",
+			true,
+		)
+		assertAllRedactors(t,
+			`log: "my_api_key": " password ": "`+secret,
+			`log: "my_api_key":"[REDACTED]"`,
+			true,
+		)
+		assertAllRedactors(t,
+			`msg="DB_PASSWORD": "password ": "`+secret+` more`,
+			`msg="DB_PASSWORD":"[REDACTED]" more`,
+			true,
+		)
+		assertAllRedactors(t,
+			"log: \"my_api_key\": \" password \": \""+secret+"\\\n\"",
+			"log: \"my_api_key\":\"[REDACTED]\"\n\"",
+			true,
+		)
+		assertAllRedactors(t,
+			`log: "app:temp:connection": "app: temp:conn": "`+secret,
+			`log: "app:temp:connection":"[REDACTED]"`,
+			true,
+		)
+		assertAllRedactors(t,
+			`log: "user:temp:conn": "user: temp:x": '`+secret,
+			`log: "user:temp:conn":"[REDACTED]"`,
+			true,
+		)
+		assertAllRedactors(t,
+			"config error: \"password\n\": \""+secret+`"`,
+			`config error: "password":"[REDACTED]"`,
+			true,
+		)
+		assertAllRedactors(t,
+			`config error: "password\n": "`+secret+`"`,
+			redactedSensitiveTextPlaceholder,
+			true,
+		)
+		assertAllRedactors(t,
+			`err: {"temp:a:b{c": "`+secret+`"}`,
+			`err: {"temp:a:[REDACTED]`,
+			true,
+		)
+		assertAllRedactors(t,
+			"password:\n'token=\n\""+secret+"-token :token' : \"x y",
+			`password:'[REDACTED]' : "x y`,
+			true,
+		)
+		assertAllRedactors(t,
+			"password:\n  "+secret+"/dbPassword: x",
+			"password:[REDACTED]",
+			true,
+		)
+		if !hasQuotedSensitiveKey("{\"temp:a:b{c\": \"x\"}") {
+			t.Errorf("hasQuotedSensitiveKey rejected temp: key containing '{'")
+		}
+		if !hasQuotedSensitiveKey("\"password\n\": \"x\"") {
+			t.Errorf("hasQuotedSensitiveKey rejected quoted key with newline padding")
+		}
+	})
+
+	t.Run("punctuation-joined pairs do not consume following sensitive keys", func(t *testing.T) {
+		const secret = "S3CR3T_JOIN_99"
+		cases := []string{
+			`log: "api.key": abc&"token": ` + secret,
+			`log: "private.key": [abc];"client_secret" : "` + secret + `"`,
+			`log: "my_api_key": abc/'password': '` + secret + `'`,
+			`log: "dbPassword": [abc]&token: ` + secret,
+			`log: "secret.key": abc+\"user:api_key\": \"` + secret + `\"`,
+			`log: "X-Amz-Security-Token": abc|"api_key":"` + secret + ` more"`,
+			"log: \"api.key\": [abc];\"\u00a0api_key\r\n\": \"" + secret + `"`,
+		}
+		for _, in := range cases {
+			if got := redactErrorMessage(in); strings.Contains(got, secret) {
+				t.Errorf("redactErrorMessage(%q) leaked secret: %q", in, got)
+			}
+			if got, lost := sanitizeRawText(in); !lost || strings.Contains(got, secret) {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without secret", in, got, lost)
+			}
+			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%q): %v", in, err)
+			}
+			if strings.Contains(string(truncBytes), secret) {
+				t.Errorf("SmartTruncate(%q) leaked secret: %s", in, truncBytes)
+			}
+		}
+	})
+
+	t.Run("path errors and URL route slugs stay intact while real credentials redact", func(t *testing.T) {
+		preserved := []string{
+			"open /etc/ssl/private.key: no such file or directory",
+			`open C:\ssl\secret.key: access denied`,
+			"tls: failed to load /etc/ssl/api.key: open /etc/ssl/signing.key: permission denied",
+			"err: https://example.com/account/reset-password/confirm failed",
+			"err: https://example.com/certs/private.key/download failed",
+		}
+		for _, in := range preserved {
+			if got := redactErrorMessage(in); got != in {
+				t.Errorf("redactErrorMessage(%q) = %q, want unchanged", in, got)
+			}
+			if got, lost := sanitizeRawText(in); got != in || lost {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want unchanged and lost=false", in, got, lost)
+			}
+			truncBytes, _, err := SmartTruncate(map[string]any{"message": in}, 1<<20)
+			if err != nil {
+				t.Fatalf("SmartTruncate(%q): %v", in, err)
+			}
+			if !strings.Contains(string(truncBytes), "no such file") &&
+				!strings.Contains(string(truncBytes), "access denied") &&
+				!strings.Contains(string(truncBytes), "permission denied") &&
+				!strings.Contains(string(truncBytes), "reset-password/confirm") &&
+				!strings.Contains(string(truncBytes), "private.key/download") {
+				t.Errorf("SmartTruncate(%q) over-redacted diagnostic text: %s", in, truncBytes)
+			}
+		}
+
+		const secret = "S3CR3T_PATH_88"
+		mustRedact := []string{
+			"private.key: " + secret,
+			"user:private.key: " + secret,
+			`"/etc/ssl/private.key": "` + secret + `"`,
+			"/etc/ssl/private.key=" + secret,
+			"https://example.com/p?private.key=" + secret,
+			"https://example.com/token/" + secret,
+			"https://example.com/account/reset-password?reset_password=" + secret,
+			"config:\n  \"app:temp:connection\":\n    /etc/ssl/private.key: " + secret,
+		}
+		for _, in := range mustRedact {
+			if got := redactErrorMessage(in); strings.Contains(got, secret) {
+				t.Errorf("redactErrorMessage(%q) leaked secret: %q", in, got)
+			}
+			if got, lost := sanitizeRawText(in); !lost || strings.Contains(got, secret) {
+				t.Errorf("sanitizeRawText(%q) = (%q, %v), want lost=true without secret", in, got, lost)
+			}
+		}
+	})
+}
+
+// TestLegacyRegexScannerDifferential compares the hand-written scanners against
+// the reference regular-expression pipeline they replaced over generated
+// multi-pair inputs, verifying that quoted-key detection and secret redaction
+// never miss an input that the reference expressions matched.
+func TestLegacyRegexScannerDifferential(t *testing.T) {
+	fixedParts := make([]string, 0, len(sensitiveKeys))
+	for _, k := range slices.Sorted(maps.Keys(sensitiveKeys)) {
+		if k == "secret_key" || k == "signing_key" {
+			continue
+		}
+		fixedParts = append(fixedParts, strings.ReplaceAll(regexp.QuoteMeta(k), "_", "[_-]?"))
+	}
+	fixedAlt := strings.Join(fixedParts, "|")
+	refSensKey := `temp:[^"'\s\r\n,}]+|` + fixedAlt
+	refBareKey := `temp:[^=:"'\s\r\n,}]+|` + fixedAlt
+	escQuote := func(q string) string {
+		return `\\` + q + `(?:\\\\(?:\\\\|\\` + q + `|[^\\` + q + `])|\\[^\\` + q + `]|[^\\` + q + `])*\\` + q
+	}
+	refQuotedVal := `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` + escQuote(`"`) + `|` + escQuote(`'`)
+	refAuthRe := regexp.MustCompile(`(?im)\b((?:proxy[-_])?authorization|x[-_]api[-_]key|api[-_]key)[ \t]*:[ \t]*[^\r\n]*`)
+	refBearerRe := regexp.MustCompile(`(?i)\b(bearer)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\[[^\]\r\n\s]+\][^\s,;)"']*|[^\s,;)"'\]]+)`)
+	refBasicRe := regexp.MustCompile(`(?i)\b(basic)\s+([A-Za-z0-9+/]+={0,2})`)
+	refJSONRe := regexp.MustCompile(`(?i)"[\s\p{Z}]*(` + refSensKey + `)[\s\p{Z}]*"\s*:\s*(` + refQuotedVal + `|[^\s,}]+)`)
+	refTextRe := regexp.MustCompile(`(?i)\b(` + refBareKey + `)((?:\\?["'])?)[\s[:cntrl:]]*([=:])[\s[:cntrl:]]*(` + refQuotedVal + `|[^\s,;&]+)`)
+	refQuotedKeyRe := regexp.MustCompile(`(?i)["'][\s\p{Z}]*(` + refSensKey + `)[\s\p{Z}]*["'][\s\p{Z}]*[:=]`)
+
+	refScrub := func(s string) string {
+		s = refAuthRe.ReplaceAllString(s, "$1: "+redactedValue)
+		s = refBearerRe.ReplaceAllStringFunc(s, func(m string) string {
+			sub := refBearerRe.FindStringSubmatch(m)
+			if strings.EqualFold(sub[2], "of") {
+				return m
+			}
+			return sub[1] + " " + redactedValue
+		})
+		s = refBasicRe.ReplaceAllStringFunc(s, func(m string) string {
+			sub := refBasicRe.FindStringSubmatch(m)
+			dec, err := base64.StdEncoding.DecodeString(sub[2])
+			if err != nil || (!strings.Contains(sub[2], "=") && !strings.Contains(string(dec), ":")) {
+				return m
+			}
+			return sub[1] + " " + redactedValue
+		})
+		s = refJSONRe.ReplaceAllString(s, `"$1":"`+redactedValue+`"`)
+		s = refTextRe.ReplaceAllString(s, "$1$2$3"+redactedValue)
+		return s
+	}
+
+	rng := rand.New(rand.NewPCG(20261110, 2250))
+	keys := []string{
+		"password", "api_key", "api-key", "apiKey", "API_KEY",
+		"pa\u017f\u017fword", "api_\u212aey", "x\u017fecret",
+		"token", "access_token", "client_secret", "Authorization", "x-api-key",
+		"temp:abc", "temp:a:b{c", "temp:cache/val=1",
+		"AP\u0130_KEY", "CL\u0130ENT_SECRET", "DB_PASSWORD", "dbPassword",
+		"user:api_key", "app:temp:conn", "private.key",
+	}
+	pads := []string{"", " ", "  ", "\t", "\n", "\r\n", "\u00a0"}
+	quotes := []string{"", `"`, `'`, `\"`, `\'`}
+	delims := []string{":", "=", " : ", " = ", ":\n  ", ":\t"}
+	joins := []string{" ", ", ", "; ", "&", ";", "\n  ", " | ", "/"}
+	prefixes := []string{"log: ", "config:\n  ", "err: {", ""}
+
+	for i := range 1500 {
+		nParts := 1 + rng.IntN(3)
+		var sb strings.Builder
+		sb.WriteString(prefixes[rng.IntN(len(prefixes))])
+		var secrets []string
+		for p := range nParts {
+			if p > 0 {
+				sb.WriteString(joins[rng.IntN(len(joins))])
+			}
+			k := keys[rng.IntN(len(keys))]
+			q := quotes[rng.IntN(len(quotes))]
+			padL := pads[rng.IntN(len(pads))]
+			padR := pads[rng.IntN(len(pads))]
+			d := delims[rng.IntN(len(delims))]
+			sec := fmt.Sprintf("S3CR3T_%d_%d_END", i, p)
+			var val string
+			switch rng.IntN(6) {
+			case 0:
+				val = sec
+			case 1:
+				val = `"` + sec + `"`
+			case 2:
+				val = `'` + sec + `'`
+			case 3:
+				val = `\"` + sec + `\"`
+			case 4:
+				val = "[" + sec + "]"
+			case 5:
+				val = "Bearer " + sec
+			}
+			if q == "" {
+				sb.WriteString(k + d + val)
+			} else {
+				sb.WriteString(q + padL + k + padR + q + d + val)
+			}
+			secrets = append(secrets, sec)
+		}
+		text := sb.String()
+		if refQuotedKeyRe.MatchString(text) && !hasQuotedSensitiveKey(text) {
+			t.Fatalf("case %d: hasQuotedSensitiveKey(%q) = false while refQuotedKeyRe matched", i, text)
+		}
+		refOut := refScrub(text)
+		gotErr := redactErrorMessage(text)
+		gotSan, _ := sanitizeRawText(text)
+		for _, sec := range secrets {
+			if !strings.Contains(refOut, sec) {
+				if strings.Contains(gotErr, sec) {
+					t.Fatalf("case %d: redactErrorMessage(%q) = %q kept %s removed by refScrub", i, text, gotErr, sec)
+				}
+				if strings.Contains(gotSan, sec) {
+					t.Fatalf("case %d: sanitizeRawText(%q) = %q kept %s removed by refScrub", i, text, gotSan, sec)
+				}
+			}
+		}
+	}
 }
