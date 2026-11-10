@@ -479,7 +479,8 @@ func TestContentsRequestProcessor_IncludeContentsNone_SubmittedToolResult(t *tes
 // that the parent's transfer_to_agent call and response do not start the
 // current turn of the agent it hands over to. Anchoring there would leave the
 // user's request out of that agent's prompt. Mirrors adk-python's
-// _is_direct_transfer in _get_current_turn_contents.
+// _is_direct_transfer in _get_current_turn_contents. With nothing earlier to
+// start the turn, the latest hand-over still starts it.
 func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *testing.T) {
 	t.Parallel()
 	const (
@@ -504,11 +505,37 @@ func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *t
 	}}}
 
 	userEvent := &session.Event{Author: "user", LLMResponse: model.LLMResponse{Content: question}}
+	transferCallEvent := &session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}}
 	transferResponseEvent := &session.Event{
 		Author:      parentName,
 		LLMResponse: model.LLMResponse{Content: transferResponse},
 		Actions:     session.EventActions{TransferToAgent: agentName},
 	}
+	// An earlier turn ahead of the request. It stays out of the prompt, so a
+	// test passes only if the turn starts at the request, not at the first
+	// event of the session.
+	earlierAnswerEvent := &session.Event{
+		Author:      agentName,
+		LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Madrid.", genai.RoleModel)},
+	}
+	earlierTurn := []*session.Event{
+		{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("What is the capital of Spain?", genai.RoleUser)}},
+		earlierAnswerEvent,
+	}
+	ownTransferCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-4", Name: "transfer_to_agent", Args: map[string]any{"agent_name": "history"}},
+	}}}
+	ownTransferError := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-4", Name: "transfer_to_agent", Response: map[string]any{"error": "agent history not found"}},
+	}}}
+	// A custom tool that hands over by setting Actions.TransferToAgent, with
+	// a call and response named something other than transfer_to_agent.
+	handoffCall := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{
+		FunctionCall: &genai.FunctionCall{ID: "call-3", Name: "handoff", Args: map[string]any{"to": agentName}},
+	}}}
+	handoffResponse := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{{
+		FunctionResponse: &genai.FunctionResponse{ID: "call-3", Name: "handoff", Response: map[string]any{}},
+	}}}
 	// The transfer itself stays in the prompt, as context from another agent.
 	transferCallContext := &genai.Content{Role: genai.RoleUser, Parts: []*genai.Part{
 		{Text: "For context:"},
@@ -519,28 +546,32 @@ func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *t
 		{Text: "[coordinator] `transfer_to_agent` tool returned result: {}"},
 	}}
 
+	withEarlierTurn := func(events ...*session.Event) []*session.Event {
+		return append(slices.Clone(earlierTurn), events...)
+	}
+
 	tests := []struct {
 		name   string
 		events []*session.Event
-		want   []*genai.Content
+		// placedSingleTurn runs the agent with IncludeContents unset at a
+		// placement bound to single_turn, as a graph node binds an LlmAgent
+		// that declares no mode. It builds the turn the same way as none.
+		placedSingleTurn bool
+		want             []*genai.Content
 	}{
 		{
-			name: "transfer is the latest event",
-			events: []*session.Event{
-				userEvent,
-				{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}},
-				transferResponseEvent,
-			},
-			want: []*genai.Content{question, transferCallContext, transferResponseContext},
+			name:   "transfer is the latest event",
+			events: withEarlierTurn(userEvent, transferCallEvent, transferResponseEvent),
+			want:   []*genai.Content{question, transferCallContext, transferResponseContext},
 		},
 		{
 			// The call is not the event's first part.
 			name: "parent writes text before the transfer call",
-			events: []*session.Event{
+			events: withEarlierTurn(
 				userEvent,
-				{Author: parentName, LLMResponse: model.LLMResponse{Content: textThenTransferCall}},
+				&session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: textThenTransferCall}},
 				transferResponseEvent,
-			},
+			),
 			want: []*genai.Content{
 				question,
 				{Role: genai.RoleUser, Parts: []*genai.Part{
@@ -555,25 +586,101 @@ func TestContentsRequestProcessor_IncludeContentsNone_TransferredFromParent(t *t
 			// The transfer is no longer the latest event on the agent's next
 			// model call, after its own tool call.
 			name: "agent's own tool call after the transfer",
-			events: []*session.Event{
+			events: withEarlierTurn(
 				userEvent,
-				{Author: parentName, LLMResponse: model.LLMResponse{Content: transferCall}},
+				transferCallEvent,
 				transferResponseEvent,
-				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownCall}},
-				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownResponse}},
-			},
+				&session.Event{Author: agentName, LLMResponse: model.LLMResponse{Content: ownCall}},
+				&session.Event{Author: agentName, LLMResponse: model.LLMResponse{Content: ownResponse}},
+			),
 			want: []*genai.Content{question, transferCallContext, transferResponseContext, ownCall, ownResponse},
+		},
+		{
+			// The session has no user event, so nothing ahead of the
+			// hand-over starts a turn. The turn starts at the latest
+			// hand-over, as before hand-overs were skipped, so the agent's
+			// own earlier answer stays out.
+			name:   "no user event in the session",
+			events: []*session.Event{earlierAnswerEvent, transferCallEvent, transferResponseEvent},
+			want:   []*genai.Content{transferResponseContext},
+		},
+		{
+			// A later hand-over the agent cannot see, here one whose only
+			// part is a thought that foreign conversion drops, is not the
+			// hand-over the turn falls back to. The checks that hide an
+			// event from the agent run before the skip.
+			name: "hand-over the agent cannot see after the hand-over",
+			events: []*session.Event{
+				earlierAnswerEvent, transferCallEvent, transferResponseEvent,
+				{
+					Author:      "router",
+					LLMResponse: model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{Text: "Routing elsewhere.", Thought: true}}}},
+					Actions:     session.EventActions{TransferToAgent: "history"},
+				},
+			},
+			want: []*genai.Content{transferResponseContext},
+		},
+		{
+			// The agent's own transfer_to_agent call never starts its turn,
+			// so the turn does not fall back to it either. Here the agent
+			// named an unknown agent and is called again with the error.
+			name: "agent's own failed transfer after the hand-over",
+			events: []*session.Event{
+				earlierAnswerEvent, transferCallEvent, transferResponseEvent,
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownTransferCall}},
+				{Author: agentName, LLMResponse: model.LLMResponse{Content: ownTransferError}},
+			},
+			want: []*genai.Content{transferResponseContext, ownTransferCall, ownTransferError},
+		},
+		{
+			// The response is skipped through Actions.TransferToAgent alone.
+			// The call is not named transfer_to_agent, so it starts the turn,
+			// as in adk-python.
+			name: "custom tool hands over through Actions.TransferToAgent",
+			events: withEarlierTurn(
+				userEvent,
+				&session.Event{Author: parentName, LLMResponse: model.LLMResponse{Content: handoffCall}},
+				&session.Event{
+					Author:      parentName,
+					LLMResponse: model.LLMResponse{Content: handoffResponse},
+					Actions:     session.EventActions{TransferToAgent: agentName},
+				},
+			),
+			want: []*genai.Content{
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: `[coordinator] called tool ` + "`handoff`" + ` with parameters: {"to":"geography"}`},
+				}},
+				{Role: genai.RoleUser, Parts: []*genai.Part{
+					{Text: "For context:"},
+					{Text: "[coordinator] `handoff` tool returned result: {}"},
+				}},
+			},
+		},
+		{
+			name:             "single_turn placement with IncludeContents unset",
+			events:           withEarlierTurn(userEvent, transferCallEvent, transferResponseEvent),
+			placedSingleTurn: true,
+			want:             []*genai.Content{question, transferCallContext, transferResponseContext},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			includeContents := llmagent.IncludeContentsNone
+			if tc.placedSingleTurn {
+				includeContents = ""
+			}
 			a := utils.Must(llmagent.New(llmagent.Config{
 				Name:            agentName,
 				Model:           &testModel{},
-				IncludeContents: llmagent.IncludeContentsNone,
+				IncludeContents: includeContents,
 			}))
-			ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{
+			stdCtx := t.Context()
+			if tc.placedSingleTurn {
+				stdCtx = llminternal.WithBoundMode(stdCtx, agentName, stateOf(t, a), llminternal.ModeSingleTurn)
+			}
+			ctx := icontext.NewInvocationContext(stdCtx, icontext.InvocationContextParams{
 				Agent:   a,
 				Session: &fakeSession{events: tc.events},
 			})

@@ -809,6 +809,8 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 	// Here a result counts only once it passes the branch and isolation-scope
 	// checks below, and call IDs come from every event.
 	unanswered := make(map[string]struct{})
+	// The latest hand-over skipped as a turn start below, if any.
+	handover := -1
 	for i := len(events) - 1; i >= 0; i-- {
 		event := events[i]
 		for _, call := range utils.FunctionCalls(utils.Content(event)) {
@@ -849,16 +851,27 @@ func buildContentsCurrentTurnContextOnly(agentName, branch, isolationScope strin
 		if isOtherAgentReply(agentName, event) && !compactioninternal.HasUsableSummary(event) && ConvertForeignEvent(event) == nil {
 			continue
 		}
+		if event.Author != "user" && !isOtherAgentReply(agentName, event) {
+			continue
+		}
 		// A transfer_to_agent hand-over continues the turn of the request it
 		// hands over, so it stays in the prompt as context rather than
 		// starting the turn and slicing that request out. As in adk-python's
 		// _is_direct_transfer.
 		if isDirectTransfer(event) {
+			if handover < 0 {
+				handover = i
+			}
 			continue
 		}
-		if event.Author == "user" || isOtherAgentReply(agentName, event) {
-			return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
-		}
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[i:], events, isSingleTurn, userContent)
+	}
+	// With no earlier turn start, the turn starts at the latest hand-over, the
+	// event it started at before hand-overs were skipped. Falling back to the
+	// whole session instead would show the agent its own earlier turns.
+	// adk-python returns [] here.
+	if handover >= 0 {
+		return buildContentsDefaultWithCallSource(agentName, branch, isolationScope, events[handover:], events, isSingleTurn, userContent)
 	}
 	// NOTE: in Python, it returns [] if there is no event authored by a user or another agent,
 	// but that may be a bug.
