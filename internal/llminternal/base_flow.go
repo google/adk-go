@@ -932,7 +932,6 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 			if !yield(modelResponseEvent, nil) {
 				return
 			}
-			// TODO: generate and yield an auth event if needed.
 
 			if resp.Partial {
 				continue
@@ -951,9 +950,10 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 
 			toolConfirmationEvent := generateRequestConfirmationEvent(ctx, modelResponseEvent, ev)
 
-			// Yield function responses before confirmation requests so consumers that
-			// pause for user approval still persist completed tool results.
-			if !yield(ev, nil) {
+			// Yield function responses before confirmation and credential requests
+			// so consumers that pause for the user still persist completed tool
+			// results.
+			if !yieldWithAuthRequest(ctx, ev, yield) {
 				return
 			}
 
@@ -1014,8 +1014,8 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 					yield(nil, err)
 					return
 				}
-				if ev != nil {
-					yield(ev, nil)
+				if ev != nil && !yield(ev, nil) {
+					return
 				}
 			}
 		}
