@@ -612,6 +612,39 @@ func TestProcessLLMAgentOutput(t *testing.T) {
 		}
 	})
 
+	t.Run("OutputSchema valid JSON: parsed Output is not marked MessageAsOutput", func(t *testing.T) {
+		t.Parallel()
+		schema := &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"title": {Type: genai.TypeString},
+			},
+		}
+		const key = "story"
+		a := makeLLMAgent(t, "x", withOutputSchema(schema), withOutputKey(key))
+		ev := &session.Event{
+			LLMResponse: model.LLMResponse{
+				Content: &genai.Content{
+					Role:  "model",
+					Parts: []*genai.Part{{Text: `{"title":"T"}`}},
+				},
+			},
+		}
+		if err := llmagent.ProcessLLMAgentOutput(a, ev); err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		want := map[string]any{"title": "T"}
+		if diff := cmp.Diff(want, ev.Output); diff != "" {
+			t.Errorf("Output mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff(want, ev.Actions.StateDelta[key]); diff != "" {
+			t.Errorf("StateDelta[%q] mismatch (-want +got):\n%s", key, diff)
+		}
+		if ev.NodeInfo != nil && ev.NodeInfo.MessageAsOutput {
+			t.Errorf("MessageAsOutput = true, want unset (the parsed Output is the node output)")
+		}
+	})
+
 	t.Run("OutputSchema invalid JSON: returns validation error", func(t *testing.T) {
 		t.Parallel()
 		schema := &genai.Schema{

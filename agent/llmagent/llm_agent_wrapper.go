@@ -246,7 +246,10 @@ func PrepareLLMAgentInput(a agent.Agent, ctx agent.InvocationContext, nodeInput 
 //     per-event delta into session state on AppendEvent, so the two
 //     paths converge);
 //   - stash the parsed value on event.Output for the node's terminal
-//     output.
+//     output;
+//   - mark the message as the node's output (NodeInfo.MessageAsOutput),
+//     except when the OutputSchema produced a parsed value, which is the
+//     output in its own right.
 //
 // Returns an error iff OutputSchema validation fails on a non-empty
 // model reply; the caller (runSingleTurn) propagates it.
@@ -304,6 +307,11 @@ func ProcessLLMAgentOutput(a agent.Agent, ev *session.Event) error {
 
 	ev.Output = output
 
+	// The runner drops Output from events flagged MessageAsOutput, which
+	// would discard the parsed value.
+	if state.OutputSchema != nil && output != nil {
+		return nil
+	}
 	if ev.NodeInfo == nil {
 		ev.NodeInfo = &session.NodeInfo{}
 	}
