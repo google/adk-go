@@ -3330,7 +3330,7 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 	// Two text parts of fullLength runes, neither cut by the per-part limit
 	// when it is fullLength, join to a summary of exactly
 	// fullLength + responseSummarySlack runes.
-	const fullLength = responseSummarySlack - 2*len("text: ''") - len(" | ")
+	const fullLength = 4096 - 2*len("text: ''") - len(" | ")
 	fullPiece := responseTextPiece(strings.Repeat("a", fullLength))
 	twoFull := joinedResponsePieces(fullPiece, 2)
 	fullParts := responseTextParts(2, fullLength, "a")
@@ -3375,7 +3375,7 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 			name:      "many small parts are cut at the cap",
 			parts:     responseTextParts(40, 100, "a"),
 			maxLength: 100,
-			want:      string([]rune(fortySmall)[:100+responseSummarySlack]) + truncationSuffix,
+			want:      string([]rune(fortySmall)[:100+4096]) + truncationSuffix,
 			wantTrunc: true,
 		},
 		{
@@ -3469,14 +3469,47 @@ func TestResponseMessageSummaryLengthCap(t *testing.T) {
 			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", got)
 		}
 	})
+
+	t.Run("rebuilt LLM_RESPONSE summary after failed upload is capped", func(t *testing.T) {
+		const maxLen = 100
+		parts := responseTextParts(40, maxLen, "a")
+		b := &contentSummaryBuilder{
+			isLLMResponse: true,
+			maxLen:        maxLen,
+			redact:        true,
+			messages:      []*messageSummary{newResponseMessageSummary(&genai.Content{Parts: parts}, 0, maxLen, true)},
+		}
+		for i := range 39 {
+			b.omitTextFromSummary(0, i)
+		}
+		initial, initialTrunc := b.buildContent()
+		b.needsRebuild = false
+		if got, _ := initial["response"].(string); got != smallPiece || initialTrunc {
+			t.Fatalf("initial buildContent() = (%q, %v), want (%q, false)", got, initialTrunc, smallPiece)
+		}
+		fallback := strings.Repeat("a", maxLen)
+		for i := range 39 {
+			b.retainInlineSummary(0, i, fallback, false)
+		}
+		row := map[string]any{"is_truncated": false}
+		b.applyToRow(row)
+		want := string([]rune(fortySmall)[:maxLen+4096]) + truncationSuffix
+		if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != want {
+			t.Errorf("rebuilt content.response has %d runes, want %d:\n%.80q...", utf8.RuneCountInString(got), utf8.RuneCountInString(want), got)
+		}
+		if got := row["is_truncated"]; got != true {
+			t.Errorf("rebuilt is_truncated = %v, want true", got)
+		}
+	})
 }
 
 func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
-	atCap := strings.Repeat("n", maxFunctionNameSummaryLength)
-	overCap := strings.Repeat("n", maxFunctionNameSummaryLength+1)
-	wideAtCap := strings.Repeat("ñ", maxFunctionNameSummaryLength)
+	atCap := strings.Repeat("n", 256)
+	overCap := strings.Repeat("n", 257)
+	wideAtCap := strings.Repeat("ñ", 256)
 	const secret = "SYNTHETIC_SECRET_0123456789"
 	credential := "lookup api_key=" + secret
+	boundaryCredential := strings.Repeat("n", 245) + " api_key=" + secret
 	call := func(name string) []*genai.Part {
 		return []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name}}}
 	}
@@ -3497,11 +3530,15 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 		{name: "call name over the cap is cut", parts: call(overCap), maxLength: 100000, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
 		{name: "response name over the cap is cut", parts: resp(overCap), maxLength: 100000, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
 		{name: "multi-byte call name is cut by runes", parts: call(wideAtCap + "ñ"), maxLength: 100000, want: "call: " + wideAtCap + truncationSuffix, wantTrunc: true},
-		{name: "name cap does not follow a smaller maxLength", parts: call(overCap), maxLength: 10, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
-		{name: "name cap holds under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name cap does not follow a smaller maxLength", parts: call(overCap), maxLength: 10, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name cap does not follow a smaller maxLength", parts: resp(overCap), maxLength: 10, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "call name cap holds under an unlimited maxLength", parts: call(overCap), maxLength: -1, want: "call: " + atCap + truncationSuffix, wantTrunc: true},
+		{name: "response name cap holds under an unlimited maxLength", parts: resp(overCap), maxLength: -1, want: "resp: " + atCap + truncationSuffix, wantTrunc: true},
 		{name: "credential in a call name is redacted", parts: call(credential), maxLength: 100000, want: "call: lookup api_key=" + redactedValue, wantTrunc: true},
 		{name: "credential in a response name is redacted", parts: resp(credential), maxLength: 100000, want: "resp: lookup api_key=" + redactedValue, wantTrunc: true},
+		{name: "credential crossing the call name cap is redacted before cutting", parts: call(boundaryCredential), maxLength: 100000, want: "call: " + (strings.Repeat("n", 245) + " api_key=" + redactedValue)[:256] + truncationSuffix, wantTrunc: true},
 		{name: "credential in a call name is kept when redaction is off", parts: call(credential), maxLength: 100000, noRedact: true, want: "call: " + credential},
+		{name: "credential in a response name is kept when redaction is off", parts: resp(credential), maxLength: 100000, noRedact: true, want: "resp: " + credential},
 		{
 			name:      "cut names keep their place among the other parts",
 			parts:     []*genai.Part{{Text: "hi"}, {FunctionCall: &genai.FunctionCall{Name: overCap}}, {FunctionResponse: &genai.FunctionResponse{Name: overCap}}},
@@ -3516,7 +3553,7 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 			if got != tt.want || truncated != tt.wantTrunc {
 				t.Errorf("got (%q, %v), want (%q, %v)", got, truncated, tt.want, tt.wantTrunc)
 			}
-			if !tt.noRedact && strings.Contains(got, secret) {
+			if !tt.noRedact && strings.Contains(got, "SYNTHETIC") {
 				t.Errorf("summary %q leaked the secret", got)
 			}
 		})
