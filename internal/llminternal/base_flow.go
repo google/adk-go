@@ -454,6 +454,15 @@ func hasRealtimeInput(v any) bool {
 	return true
 }
 
+// isEmptyLiveResponse reports whether r carries nothing worth an event, as
+// the response built from the Live API's setupComplete does. adk-python's live
+// flow skips the same responses.
+func isEmptyLiveResponse(r *model.LLMResponse) bool {
+	return r.Content == nil && r.ErrorCode == "" && !r.Interrupted && !r.TurnComplete &&
+		r.InputTranscription == nil && r.OutputTranscription == nil && r.UsageMetadata == nil &&
+		r.SessionResumptionHandle == "" && r.GroundingMetadata == nil
+}
+
 func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
 	clientProvider, ok := f.Model.(interface {
 		Client() *genai.Client
@@ -668,6 +677,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 									sess.audioMgr.CacheOutput(ctx, part.InlineData.Data, part.InlineData.MIMEType)
 								}
 							}
+						}
+						if isEmptyLiveResponse(resp) {
+							continue
 						}
 						ev := session.NewEvent(ctx, ctx.InvocationID())
 						ev.Author = ctx.Agent().Name()
