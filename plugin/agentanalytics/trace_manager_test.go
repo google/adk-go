@@ -28,6 +28,7 @@ import (
 	"iter"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22685,81 +22686,160 @@ func TestTraceManager_TurnEpochsLateHandoffAndCleanup(t *testing.T) {
 }
 
 func TestBoundedArgsDigest(t *testing.T) {
-	cyclic1 := map[string]any{"k": 1}
-	cyclic1["self"] = cyclic1
-	cyclic2 := map[string]any{"k": 2}
-	cyclic2["self"] = cyclic2
-
-	d1a, ok1a := boundedArgsDigest(cyclic1)
-	d1b, ok1b := boundedArgsDigest(cyclic1)
-	d2, ok2 := boundedArgsDigest(cyclic2)
-	if !ok1a || !ok1b || !ok2 {
-		t.Fatalf("expected valid digests for cyclic maps: %v %v %v", ok1a, ok1b, ok2)
-	}
-	if d1a != d1b {
-		t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
-	}
-	if d1a == d2 {
-		t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+	digest := func(args map[string]any) (uint64, bool) {
+		t.Helper()
+		d, ok, truncated := boundedArgsDigest(args)
+		if !ok {
+			t.Fatal("boundedArgsDigest() ok = false for non-nil args, want true")
+		}
+		return d, truncated
 	}
 
-	if dNil, okNil := boundedArgsDigest(nil); okNil || dNil != 0 {
-		t.Errorf("nil args = (%d, %v), want (0, false)", dNil, okNil)
-	}
+	t.Run("nil args", func(t *testing.T) {
+		if d, ok, truncated := boundedArgsDigest(nil); ok || d != 0 || truncated {
+			t.Errorf("boundedArgsDigest(nil) = (%d, %v, %v), want (0, false, false)", d, ok, truncated)
+		}
+	})
 
-	// Order independence for small maps.
-	mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
-	mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
-	dA, _ := boundedArgsDigest(mA)
-	dB, _ := boundedArgsDigest(mB)
-	if dA != dB {
-		t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
-	}
+	t.Run("cyclic maps are deterministic and distinct", func(t *testing.T) {
+		cyclic1 := map[string]any{"k": 1}
+		cyclic1["self"] = cyclic1
+		cyclic2 := map[string]any{"k": 2}
+		cyclic2["self"] = cyclic2
+		d1a, truncated := digest(cyclic1)
+		d1b, _ := digest(cyclic1)
+		d2, _ := digest(cyclic2)
+		if truncated {
+			t.Error("cyclic map digest is truncated, want full")
+		}
+		if d1a != d1b {
+			t.Errorf("cyclic map digest not deterministic: %d != %d", d1a, d1b)
+		}
+		if d1a == d2 {
+			t.Errorf("distinct cyclic maps produced identical digest %d", d1a)
+		}
+	})
 
-	// Oversized cyclic maps (>32 keys) fall back to map-pointer identity so
-	// structurally identical large maps still distinguish distinct allocations
-	// in O(1) without hanging on cycles.
-	huge1 := make(map[string]any, 128)
-	huge2 := make(map[string]any, 128)
-	for i := range 128 {
-		huge1[fmt.Sprintf("k%d", i)] = i
-		huge2[fmt.Sprintf("k%d", i)] = i
-	}
-	huge1["self"] = huge1
-	huge2["self"] = huge2
-	dHuge1, okHuge1 := boundedArgsDigest(huge1)
-	dHuge1Again, okHuge1Again := boundedArgsDigest(huge1)
-	dHuge2, okHuge2 := boundedArgsDigest(huge2)
-	runtime.KeepAlive(huge1)
-	runtime.KeepAlive(huge2)
-	if !okHuge1 || !okHuge1Again || !okHuge2 || dHuge1 == 0 || dHuge2 == 0 {
-		t.Fatalf("oversized map digests = (%d,%v) (%d,%v) (%d,%v), want non-zero ok",
-			dHuge1, okHuge1, dHuge1Again, okHuge1Again, dHuge2, okHuge2)
-	}
-	if dHuge1 != dHuge1Again {
-		t.Errorf("oversized map digest not deterministic for same pointer: %d != %d", dHuge1, dHuge1Again)
-	}
-	if dHuge1 == dHuge2 {
-		t.Errorf("oversized maps with identical entries took structural branch instead of pointer branch: %d == %d", dHuge1, dHuge2)
-	}
+	t.Run("map order does not matter", func(t *testing.T) {
+		mA := map[string]any{"a": "x", "b": 42, "nested": map[string]any{"p": true, "q": 3.5}}
+		mB := map[string]any{"nested": map[string]any{"q": 3.5, "p": true}, "b": 42, "a": "x"}
+		dA, _ := digest(mA)
+		dB, _ := digest(mB)
+		if dA != dB {
+			t.Errorf("equivalent maps produced different digests: %d != %d", dA, dB)
+		}
+	})
 
-	// Strings over 256 bytes sample only prefix, suffix, and total length.
-	head := strings.Repeat("a", 128)
-	tail := strings.Repeat("z", 128)
-	mid1 := strings.Repeat("m", 64)
-	mid2 := strings.Repeat("n", 64)
-	dLong1, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + tail})
-	dLong2, _ := boundedArgsDigest(map[string]any{"s": head + mid2 + tail})
-	dLongHeadDiff, _ := boundedArgsDigest(map[string]any{"s": "X" + head[1:] + mid1 + tail})
-	dLongTailDiff, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + tail[:127] + "Y"})
-	dLongLenDiff, _ := boundedArgsDigest(map[string]any{"s": head + mid1 + "q" + tail})
-	if dLong1 != dLong2 {
-		t.Errorf("long string middle difference should stay within prefix/suffix sampling: %d != %d", dLong1, dLong2)
-	}
-	if dLongHeadDiff == dLong1 || dLongTailDiff == dLong1 || dLongLenDiff == dLong1 {
-		t.Errorf("long string head/tail/length change must alter digest: base=%d head=%d tail=%d len=%d",
-			dLong1, dLongHeadDiff, dLongTailDiff, dLongLenDiff)
-	}
+	t.Run("shared values in non-string-keyed maps", func(t *testing.T) {
+		// A value shared by two entries hashes as itself in both, whatever
+		// order the map iterates in, rather than as a cycle the second time.
+		shared := []any{"x", map[string]any{"y": 1}}
+		sharedMap := map[string]any{"z": []int{1, 2}}
+		args := func() map[string]any {
+			m := map[int]any{}
+			for i := range 16 {
+				if i%2 == 0 {
+					m[i] = shared
+				} else {
+					m[i] = sharedMap
+				}
+			}
+			return map[string]any{"nested": m, "yaml": map[any]any{"a": shared, 2: shared, true: sharedMap}}
+		}
+		want, truncated := digest(args())
+		if truncated {
+			t.Fatal("digest of shared values is truncated, want full")
+		}
+		for i := range 64 {
+			if got, _ := digest(args()); got != want {
+				t.Fatalf("digest #%d = %d, want %d: shared values hash by iteration order", i, got, want)
+			}
+		}
+		other := args()
+		other["nested"].(map[int]any)[3] = shared
+		if got, _ := digest(other); got == want {
+			t.Error("digest unchanged after an entry of a non-string-keyed map changed")
+		}
+	})
+
+	t.Run("maps over 32 keys hash their contents", func(t *testing.T) {
+		big := make(map[string]any, 200)
+		for i := range 200 {
+			big[fmt.Sprintf("k%03d", i)] = i
+		}
+		twin := maps.Clone(big)
+		before, truncated := digest(big)
+		if truncated {
+			t.Fatal("digest of a 200-key map is truncated, want full")
+		}
+		if d, _ := digest(twin); d != before {
+			t.Errorf("equal maps in two allocations: digests %d and %d, want equal", d, before)
+		}
+		big["k150"] = "changed"
+		if after, _ := digest(big); after == before {
+			t.Error("digest unchanged after a 200-key map was changed in place")
+		}
+	})
+
+	t.Run("long strings hash their middle", func(t *testing.T) {
+		head, tail := strings.Repeat("a", 128), strings.Repeat("z", 128)
+		d1, truncated := digest(map[string]any{"s": head + strings.Repeat("m", 64) + tail})
+		d2, _ := digest(map[string]any{"s": head + strings.Repeat("n", 64) + tail})
+		if truncated {
+			t.Error("digest of a 320-byte string is truncated, want full")
+		}
+		if d1 == d2 {
+			t.Error("strings that differ only in the middle produced identical digests")
+		}
+		b1, _ := digest(map[string]any{"b": []byte("same bytes")})
+		b2, _ := digest(map[string]any{"b": []byte("same bytes")})
+		if b1 != b2 {
+			t.Errorf("equal byte slices in two allocations: digests %d and %d, want equal", b1, b2)
+		}
+	})
+
+	t.Run("past the bounds the digest is truncated", func(t *testing.T) {
+		huge := make(map[string]any, maxDigestEntries+1)
+		for i := range maxDigestEntries + 1 {
+			huge[fmt.Sprintf("k%d", i)] = i
+		}
+		dag := map[string]any{"leaf": 1}
+		for range 40 {
+			dag = map[string]any{"a": dag, "b": dag}
+		}
+		for name, args := range map[string]map[string]any{
+			"long string":    {"s": strings.Repeat("x", maxDigestStringBytes+1)},
+			"large map":      huge,
+			"long slice":     {"s": make([]int, maxDigestEntries+1)},
+			"NaN key":        {"m": map[float64]any{math.NaN(): 1}},
+			"pointer key":    {"m": map[*int]any{new(int): 1}},
+			"shared subtree": dag,
+		} {
+			d1, truncated := digest(args)
+			if !truncated {
+				t.Errorf("%s: digest is not truncated, want truncated", name)
+			}
+			if d2, _ := digest(args); d2 != d1 {
+				t.Errorf("%s: truncated digest not deterministic: %d != %d", name, d1, d2)
+			}
+		}
+	})
+
+	t.Run("truncated digests prove nothing", func(t *testing.T) {
+		args := map[string]any{"s": strings.Repeat("x", maxDigestStringBytes+1)}
+		a, _ := toolCallIdentityOf(context.Background(), args)
+		b, _ := toolCallIdentityOf(context.Background(), args)
+		if a.sameArgs(b) {
+			t.Error("sameArgs() = true for truncated digests, want false")
+		}
+		if !a.sameArgsDigest(b) {
+			t.Error("sameArgsDigest() = false for equal truncated digests, want true")
+		}
+		full, _ := toolCallIdentityOf(context.Background(), map[string]any{"s": "x"})
+		if !full.sameArgs(full) {
+			t.Error("sameArgs() = false for equal full digests, want true")
+		}
+	})
 }
 
 type unwrapTestInvocationCtx struct {
@@ -22882,7 +22962,7 @@ func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
 		BeforeToolCallback: func(ctx agent.Context, _ tool.Tool, _ map[string]any) (map[string]any, error) {
 			tc, tcCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 			defer tcCancel()
-			if tm.hasEarlierShortCircuitPlugin(tc) {
+			if found, beforeAndAfter := tm.earlierToolPlugins(tc); found && beforeAndAfter {
 				sawEarlier.Store(true)
 			}
 			return nil, nil
@@ -22897,7 +22977,7 @@ func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
 		}
 	}
 	if !sawEarlier.Load() {
-		t.Error("hasEarlierShortCircuitPlugin failed to unwrap context.WithTimeout(context.WithoutCancel(ctx)) to PluginManager")
+		t.Error("earlierToolPlugins failed to unwrap context.WithTimeout(context.WithoutCancel(ctx)) to PluginManager")
 	}
 }
 

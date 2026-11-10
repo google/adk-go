@@ -13,6 +13,32 @@
 // limitations under the License.
 
 // Package agentanalytics implements the BigQuery Agent Analytics Plugin.
+//
+// # Best-effort inspection of ADK internals
+//
+// ADK does not expose everything that tells apart the attempts of a tool call
+// or the activations of a task-mode agent, so the plugin reads some
+// unexported fields of the google.golang.org/adk/v2 contexts and plugin
+// manager by reflection. These reads are best effort: if a version of ADK or
+// a custom context wrapper changes or hides those fields, the reads fail
+// quietly, without a build error or a log, and the plugin falls back as
+// follows.
+//
+//   - The EventActions of a tool context (see agent.NewToolContext): tool
+//     callbacks are told apart by their context pointer alone, so a custom
+//     context that is not a pointer no longer suppresses the TOOL_COMPLETED
+//     row of a recovered tool error. A finish_task function response event
+//     of a task-mode agent no longer shows which activation wrote it: a
+//     delayed response of a finish_task call that failed or was recovered
+//     ends no activation unless an open or settled finish_task call shows a
+//     newer completion, so the AGENT_COMPLETED row of a task-mode agent can
+//     move to the end of the run.
+//   - The plugin order of the runner's plugin manager: a recovered tool error
+//     suppresses TOOL_COMPLETED, and the AGENT_RESPONSE row of a final
+//     response tool, only when the arguments that AfterToolCallback sees
+//     match those of the failed attempt in full (see EventToolCompleted). A
+//     callback that changed the arguments in place, or arguments past the
+//     bounds of the comparison, then keep the TOOL_COMPLETED row.
 package agentanalytics
 
 import (
@@ -68,22 +94,46 @@ const (
 	EventLLMError     = "LLM_ERROR"
 	EventToolStarting = "TOOL_STARTING"
 	// EventToolCompleted is written when a tool call finishes without an error
-	// (or with a tool confirmation request/rejection), except when the call was
-	// answered by plugin/retryandreflect or when OnToolErrorCallback already
-	// recorded TOOL_ERROR for the same attempt and the callback carries a
-	// per-attempt context identity (pointer context or agent.NewToolContext)
-	// with matching arguments and turn epoch, unless an earlier plugin can
-	// short-circuit both BeforeToolCallback and AfterToolCallback while the
-	// callback either lacks a per-attempt EventActions pointer or reuses one
-	// that already completed an earlier tool call in the same invocation. Custom
-	// non-pointer callback contexts without agent.NewToolContext still
-	// deduplicate unrecovered TOOL_ERROR rows, but cannot distinguish a
-	// recovered first attempt from a retry that skipped BeforeToolCallback and
-	// therefore still emit EventToolCompleted.
+	// (or with a tool confirmation request/rejection). It is not written for
+	// a call that plugin/retryandreflect answered, nor for a call whose failure
+	// OnToolErrorCallback already recorded as TOOL_ERROR before an agent
+	// OnToolErrorCallback or a later plugin recovered it, when the
+	// AfterToolCallback belongs to the failed attempt: the same per-attempt
+	// tool context (a pointer context, or the EventActions of
+	// agent.NewToolContext) in the same model turn of the same agent
+	// activation.
+	//
+	// A recovered call still gets TOOL_COMPLETED when it cannot be told apart
+	// from a retry that reuses the failed attempt's tool context:
+	//   - when a plugin registered before this one registers a
+	//     BeforeToolCallback and a plugin registered before this one registers
+	//     an AfterToolCallback, as loggingplugin does: such plugins can answer
+	//     this plugin's AfterToolCallback of the failed attempt and its
+	//     BeforeToolCallback of a retry;
+	//   - when the callback context does not show the runner's plugins, as for
+	//     a custom executor that runs the callbacks itself, unless the
+	//     arguments match those of the failed attempt in full: each string up
+	//     to 64 KiB and 1 MiB of strings in all, each map, slice or struct up
+	//     to 256 entries, and up to 1024 values in all;
+	//   - when a custom callback context is not a pointer and does not come
+	//     from agent.NewToolContext.
+	//
+	// Overlapping calls with an empty function call ID on one callback context
+	// are told apart by their arguments when those differ. Otherwise the
+	// failure of one of them suppresses the TOOL_COMPLETED row of one of them,
+	// so that the overlap ends with one TOOL_ERROR row per failed call and one
+	// TOOL_COMPLETED row per other call. Rows are written as the callbacks run,
+	// though: when a recovered call ends before another call of the overlap
+	// fails, its TOOL_COMPLETED row is already written, and that overlap ends
+	// with one TOOL_COMPLETED row more.
 	EventToolCompleted = "TOOL_COMPLETED"
 	// EventToolError is written when a tool call fails, including when the
 	// failure is recovered by an agent OnToolErrorCallback, a later plugin, or
-	// plugin/retryandreflect in either registration order.
+	// plugin/retryandreflect in either registration order. An AfterToolCallback
+	// that still sees the error of an attempt whose TOOL_ERROR row
+	// OnToolErrorCallback wrote, or a plugin/retryandreflect payload that
+	// reports it, adds no second row, even when an earlier callback changed
+	// the arguments in place.
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -978,6 +1028,14 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 					p.logEvent(ctx, taskID, EventAgentCompleted, func() rowSpan { return span }, nil)
 				}
 			}
+			// The event has delivered the responses of its calls, so the task
+			// activation that made them needs their StateDelta maps no more.
+			if calls := functionResponseCalls(ev.Content); len(calls) > 0 {
+				taskID := evID
+				taskID.agentName = ev.Author
+				taskID.branch = ev.Branch
+				p.traces.releaseTaskToolDeltas(ctx, taskID, eventStateDelta(ev), calls)
+			}
 		}
 	}
 	return nil, nil
@@ -1310,16 +1368,22 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	callID := orZero(ctx.FunctionCallID)
 	name := toolName(t)
 	confirmationOutcome := isToolConfirmationOutcome(err)
-	span, purged, closedByError := p.traces.popToolAfterCallSpan(ctx, id, callID, name, args, err != nil && !confirmationOutcome)
+	// plugin/retryandreflect answers a failed attempt with a payload that
+	// reports the failure as the call's result, so the call ends with an
+	// error just as when the error itself reaches this callback.
+	retryMsg, retryErr := "", false
+	if !confirmationOutcome {
+		retryMsg, retryErr = retryAnswerError(result)
+	}
+	errorOutcome := !confirmationOutcome && (err != nil || retryErr)
+	span, purged, closedByError := p.traces.popToolAfterCallSpan(ctx, id, callID, name, args, errorOutcome)
 	// An agent that the call ran as a tool and that failed ends with it.
 	p.logPurgedAgents(ctx, id, purged)
 	if closedByError {
 		// onToolError already wrote TOOL_ERROR; even when an agent
 		// OnToolErrorCallback or a later plugin recovered or replaced the error,
 		// suppress TOOL_COMPLETED, noteTaskFinished, and AGENT_RESPONSE.
-		if !confirmationOutcome && name == finishTaskToolName && isTaskCompletedResult(result) {
-			p.traces.noteTaskRejected(ctx, id, callID)
-		}
+		p.endUnfinishedFinishTask(ctx, id, name, callID, result, confirmationOutcome)
 		return nil, nil
 	}
 	// A tool that waits for or is rejected by the user's confirmation fails
@@ -1330,30 +1394,29 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 	if err != nil && !confirmationOutcome {
 		// When an earlier plugin short-circuited OnToolErrorCallback before
 		// onToolError ran and passed the error through, emit TOOL_ERROR here.
-		if name == finishTaskToolName && isTaskCompletedResult(result) {
-			p.traces.noteTaskRejected(ctx, id, callID)
-		}
+		p.endUnfinishedFinishTask(ctx, id, name, callID, result, false)
 		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, err)
 		return nil, nil
 	}
-	if !confirmationOutcome {
-		if msg, ok := retryAnswerError(result); ok {
-			// plugin/retryandreflect registered before this plugin short-circuits
-			// OnToolErrorCallback and returns a recovery payload with err == nil.
-			// Log it as TOOL_ERROR and suppress TOOL_COMPLETED and AGENT_RESPONSE.
-			if name == finishTaskToolName && isTaskCompletedResult(result) {
-				p.traces.noteTaskRejected(ctx, id, callID)
-			}
-			p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(msg))
-			return nil, nil
-		}
+	if retryErr {
+		// plugin/retryandreflect registered before this plugin short-circuits
+		// OnToolErrorCallback and returns a recovery payload with err == nil.
+		// Log it as TOOL_ERROR and suppress TOOL_COMPLETED and AGENT_RESPONSE.
+		p.endUnfinishedFinishTask(ctx, id, name, callID, result, false)
+		p.logToolError(ctx, id, t, func() rowSpan { return span }, name, callID, args, errors.New(retryMsg))
+		return nil, nil
 	}
 	if confirmationOutcome {
+		p.endUnfinishedFinishTask(ctx, id, name, callID, result, true)
 		result = map[string]any{"error": err.Error()}
-	} else if name == finishTaskToolName && isTaskCompletedResult(result) {
+	} else if name == finishTaskToolName {
 		// The finish_task response event that follows reaches OnEventCallback
 		// without the context of the activation that made the call.
-		p.traces.noteTaskFinished(ctx, id, callID)
+		if isTaskCompletedResult(result) {
+			p.traces.noteTaskFinished(ctx, id, callID)
+		} else {
+			p.traces.noteTaskUnfinished(ctx, id, callID)
+		}
 	}
 	p.logEvent(ctx, id, EventToolCompleted, func() rowSpan { return span }, func(d *eventData) {
 		origin := p.resolveToolOrigin(ctx, id, t, args)
@@ -1375,6 +1438,25 @@ func (p *analyticsPlugin) afterTool(ctx agent.Context, t tool.Tool, args, result
 		})
 	}
 	return nil, nil
+}
+
+// endUnfinishedFinishTask records how a finish_task call that did not complete
+// its task ended (see traceManager.popTaskAgentSpanWithDelta). A call whose
+// result still reports completion, although it failed or an error callback
+// recovered it, is rejected, so that its function response event ends no task
+// activation. Any other call, such as one whose arguments the tool rejected or
+// one that waits for confirmation, is unfinished, so that the function call
+// that the model made no longer counts as evidence that a later response
+// event answers it. Calls of other tools are left alone.
+func (p *analyticsPlugin) endUnfinishedFinishTask(ctx context.Context, id identity, name, callID string, result map[string]any, confirmationOutcome bool) {
+	if name != finishTaskToolName {
+		return
+	}
+	if !confirmationOutcome && isTaskCompletedResult(result) {
+		p.traces.noteTaskRejected(ctx, id, callID)
+		return
+	}
+	p.traces.noteTaskUnfinished(ctx, id, callID)
 }
 
 func (p *analyticsPlugin) onToolError(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
