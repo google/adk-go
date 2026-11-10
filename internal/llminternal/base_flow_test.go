@@ -940,6 +940,27 @@ func TestPreprocess_Toolset(t *testing.T) {
 	}
 }
 
+// TestPreprocessStopsWhenTheConsumerDoes covers a request processor that
+// yields two events, as the auth preprocessor does when a tool it runs again
+// asks for another credential. A consumer that stops after the first event,
+// such as a runner whose session store fails to append it, must not be called
+// again: Go panics when a range-over-func loop body runs after it returned.
+func TestPreprocessStopsWhenTheConsumerDoes(t *testing.T) {
+	twoEvents := func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error] {
+		return func(yield func(*session.Event, error) bool) {
+			if yield(session.NewEvent(t.Context(), "inv"), nil) {
+				yield(session.NewEvent(t.Context(), "inv"), nil)
+			}
+		}
+	}
+	f := &Flow{RequestProcessors: []func(agent.InvocationContext, *model.LLMRequest, *Flow) iter.Seq2[*session.Event, error]{twoEvents}}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: &mockLLMAgent{s: &State{}}})
+
+	for range f.preprocess(ctx, &model.LLMRequest{}) {
+		break
+	}
+}
+
 // fnRespEvent builds a function-response event carrying a single text part,
 // mirroring what the parallel-call producer emits for a normal tool.
 func fnRespEvent(t *testing.T, text string) *session.Event {
