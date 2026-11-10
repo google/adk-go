@@ -59,7 +59,7 @@ const (
 // response summary shows for a function call or response part when maxLength >= 0
 // (before truncateString appends the 14-rune "...[TRUNCATED]" suffix). A
 // negative maxLength leaves function names unlimited in length while still
-// applying sensitive-text redaction.
+// applying redaction when it is enabled.
 const maxFunctionNameSummaryLength = 256
 
 // responseSummarySlack is the fixed absolute 4096-rune allowance (not
@@ -591,10 +591,14 @@ func (b *contentSummaryBuilder) retainInlineSummary(contentOrd, partIdx int, fal
 	}
 }
 
+// hasFailedUploadTruncated reports whether any non-omitted text piece was
+// truncated, pinning is_truncated when content is denied and a text upload
+// falls back to truncated inline text without counting summary-only caps on
+// non-text pieces.
 func (b *contentSummaryBuilder) hasFailedUploadTruncated() bool {
 	for _, m := range b.messages {
 		for _, p := range m.pieces {
-			if !p.omitted && p.truncated {
+			if p.isText && !p.omitted && p.truncated {
 				return true
 			}
 		}

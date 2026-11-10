@@ -59,11 +59,13 @@
 // [NewBigQueryAgentAnalyticsPluginWithClients].
 //
 // Automatic credential and sensitive-key redaction is enabled by default unless
-// [Config.DisableSensitiveKeyRedaction] is set, and string payloads are bounded
-// by [Config.MaxContentLen] (with joined [EventLLMResponse] summaries in
-// content.response bounded at MaxContentLen + 4096 runes and function call or
-// response names in response summaries bounded at 256 runes) unless
-// [Config.CaptureFullMessageContent] is set.
+// [Config.DisableSensitiveKeyRedaction] is set. When [Config.MaxContentLen]
+// sets a limit (is non-negative and [Config.CaptureFullMessageContent] is not
+// set), string payloads are bounded by [Config.MaxContentLen], joined
+// [EventLLMResponse] summaries in content.response are bounded at
+// MaxContentLen + 4096 runes, and function call or response names in response
+// summaries are bounded at 256 runes before the 14-rune "...[TRUNCATED]"
+// suffix.
 // Cloud Storage offloading requires content-parts logging (enabled by
 // [DefaultConfig] or by setting [Config.LogMultiModalContent] to true, and not
 // suppressed by [Config.DisableMultiModalContent] or by denying "content_parts"
@@ -280,17 +282,20 @@
 //     bigquery_agent_analytics_plugin_test.go, and TestBatchProcessor_DropStats
 //     and TestBatchProcessor_CloseTimeoutCountsAllLostRowsInDropStats in
 //     batch_processor_test.go).
-//   - Response summary and function-name bounds: When
-//     [Config.CaptureFullMessageContent] is false, Go caps FunctionCall and
-//     FunctionResponse names in response summaries at 256 runes with redaction
-//     and caps joined multi-part response summaries at [Config.MaxContentLen] +
-//     4096 runes before appending "...[TRUNCATED]"; [EventLLMResponse] writes
-//     that summary directly to content.response, whereas [EventAgentResponse]
-//     (in content.response) and [EventEventCompaction] also undergo column-level
-//     [Config.MaxContentLen] string truncation, and
-//     [Config.CaptureFullMessageContent] lifts both length caps while preserving
-//     redaction. adk-python interpolates function names verbatim and applies no
-//     joined-length cap after joining part summaries. (Pinned by
+//   - Response summary and function-name bounds: When [Config.MaxContentLen]
+//     sets a limit (MaxContentLen >= 0 and [Config.CaptureFullMessageContent]
+//     is false), Go caps FunctionCall and FunctionResponse names in response
+//     summaries at 256 runes (with redaction when enabled) and caps joined
+//     multi-part response summaries at [Config.MaxContentLen] + 4096 runes
+//     before appending the 14-rune "...[TRUNCATED]" suffix; [EventLLMResponse]
+//     writes that summary directly to content.response, whereas
+//     [EventAgentResponse] (in content.response) and [EventEventCompaction] (in
+//     content.compacted_content) also undergo column-level
+//     [Config.MaxContentLen] string truncation, and setting
+//     [Config.CaptureFullMessageContent] or MaxContentLen to -1 lifts both
+//     length caps while preserving redaction when enabled. adk-python
+//     interpolates function names verbatim and applies no joined-length cap
+//     after joining part summaries. (Pinned by
 //     TestResponseMessageSummaryLengthCap and
 //     TestResponseMessageSummaryFunctionNameCap in json_formatter_test.go, and
 //     TestDocParity_ResponseSummaryAndFunctionNameBounds in doc_test.go).

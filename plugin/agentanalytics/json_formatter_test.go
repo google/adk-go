@@ -16,6 +16,7 @@ package agentanalytics
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -3678,6 +3679,141 @@ func TestResponseMessageSummaryFunctionNameCap(t *testing.T) {
 		}
 		if got := agentRow["is_truncated"]; got != false {
 			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", got)
+		}
+	})
+
+	t.Run("MaxContentLen -1 without CaptureFullMessageContent keeps long function names and summaries whole", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = -1
+			c.CaptureFullMessageContent = false
+		})
+		callName300 := strings.Repeat("f", 300)
+		parts := append([]*genai.Part{{FunctionCall: &genai.FunctionCall{Name: callName300}}}, responseTextParts(40, 5000, "a")...)
+		if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: parts},
+		}, nil); err != nil {
+			t.Fatalf("AfterModelCallback error: %v", err)
+		}
+		p.AfterRunCallback()(mCtx)
+
+		row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string)
+		want := "call: " + callName300 + " | " + joinedResponsePieces(responseTextPiece(strings.Repeat("a", 5000)), 40)
+		if got != want {
+			t.Errorf("LLM_RESPONSE content.response = %d runes, want %d runes", utf8.RuneCountInString(got), utf8.RuneCountInString(want))
+		}
+		if strings.Contains(got, truncationSuffix) {
+			t.Errorf("LLM_RESPONSE content.response unexpectedly contains %q", truncationSuffix)
+		}
+		if row["is_truncated"] != false {
+			t.Errorf("LLM_RESPONSE is_truncated = %v, want false", row["is_truncated"])
+		}
+	})
+
+	t.Run("failed text upload with content denied ignores summary-only function-name cap", func(t *testing.T) {
+		callName300 := strings.Repeat("c", 300)
+		respName300 := strings.Repeat("r", 300)
+		text50 := strings.Repeat("t", 50)
+		text400 := strings.Repeat("t", 400)
+
+		cases := []struct {
+			name            string
+			denylist        []string
+			maxContentLen   int
+			parts           []*genai.Part
+			wantContent     string
+			wantPartsText   []string
+			wantIsTruncated bool
+		}{
+			{
+				name:          "content denied with 300-rune names and uncut fallback keeps is_truncated false",
+				denylist:      []string{columnContent},
+				maxContentLen: 500,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{FunctionResponse: &genai.FunctionResponse{Name: respName300}},
+					{Text: text50},
+				},
+				wantPartsText:   []string{"Function: " + callName300, "Function response: " + respName300, text50},
+				wantIsTruncated: false,
+			},
+			{
+				name:          "content denied with uncut 300-rune call name and cut text fallback sets is_truncated true",
+				denylist:      []string{columnContent},
+				maxContentLen: 350,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text400},
+				},
+				wantPartsText:   []string{"Function: " + callName300, text400[:350] + truncationSuffix},
+				wantIsTruncated: true,
+			},
+			{
+				name:          "content denied with MaxContentLen 30 cuts fallback and sets is_truncated true",
+				denylist:      []string{columnContent},
+				maxContentLen: 30,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text50},
+				},
+				wantPartsText:   []string{"Function: " + callName300[:30] + truncationSuffix, text50[:30] + truncationSuffix},
+				wantIsTruncated: true,
+			},
+			{
+				name:          "content written with 300-rune call name and uncut fallback sets is_truncated true",
+				denylist:      nil,
+				maxContentLen: 500,
+				parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: callName300}},
+					{Text: text50},
+				},
+				wantContent:     "call: " + callName300[:256] + truncationSuffix + " | text: '" + text50 + "'",
+				wantPartsText:   []string{"Function: " + callName300, text50},
+				wantIsTruncated: true,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				failingOff := &fakeOffloader{
+					hook: func(context.Context, GCSUploadRequest) error {
+						return errors.New("upload failed")
+					},
+				}
+				p, requests, mCtx := offloadingPlugin(t, failingOff, func(c *Config) {
+					c.PayloadColumnDenylist = tc.denylist
+					c.MaxContentLen = tc.maxContentLen
+					c.MaxInlineTextSize = 20
+				})
+				if _, err := p.AfterModelCallback()(mCtx, &model.LLMResponse{
+					Content: &genai.Content{Role: "model", Parts: tc.parts},
+				}, nil); err != nil {
+					t.Fatalf("AfterModelCallback error: %v", err)
+				}
+				p.AfterRunCallback()(mCtx)
+
+				row := onlyRowOfType(t, collectRows(t, requests, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+				if tc.wantContent == "" {
+					if v, ok := row[columnContent]; ok && v != nil {
+						t.Errorf("row[%q] = %v, want omitted when content is denied", columnContent, v)
+					}
+				} else if got, _ := jsonObjectColumn(t, row, columnContent)["response"].(string); got != tc.wantContent {
+					t.Errorf("LLM_RESPONSE content.response = %q, want %q", got, tc.wantContent)
+				}
+
+				gotParts := contentPartsOf(t, row)
+				if len(gotParts) != len(tc.wantPartsText) {
+					t.Fatalf("got %d content_parts, want %d", len(gotParts), len(tc.wantPartsText))
+				}
+				for i, wantText := range tc.wantPartsText {
+					if gotText, _ := gotParts[i]["text"].(string); gotText != wantText {
+						t.Errorf("content_parts[%d].text = %q, want %q", i, gotText, wantText)
+					}
+				}
+				if got := row["is_truncated"]; got != tc.wantIsTruncated {
+					t.Errorf("LLM_RESPONSE is_truncated = %v, want %v", got, tc.wantIsTruncated)
+				}
+			})
 		}
 	})
 }

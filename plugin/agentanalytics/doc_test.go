@@ -770,6 +770,7 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 		const maxLen = 100
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.MaxContentLen = maxLen
+			c.CustomMetadataAllowlist = []string{"adk_compaction"}
 		})
 		var errs callbackErrors
 		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
@@ -788,6 +789,19 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 			ID:          "ev-bounded-agent-resp",
 			Author:      "test-agent",
 			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: manyParts}},
+		}))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:     "ev-bounded-compaction",
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"adk_compaction": map[string]any{
+						"start_timestamp":   1700000000.0,
+						"end_timestamp":     1700000100.0,
+						"compacted_content": &genai.Content{Role: "model", Parts: manyParts},
+					},
+				},
+			},
 		}))
 		errs.check(t)
 		p.AfterRunCallback()(mCtx)
@@ -824,12 +838,57 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 		if agentRow["is_truncated"] != true {
 			t.Errorf("AGENT_RESPONSE is_truncated = %v, want true", agentRow["is_truncated"])
 		}
+
+		compRow := onlyRowOfType(t, rows, EventEventCompaction)
+		if got, _ := jsonObjectColumn(t, compRow, columnContent)["compacted_content"].(string); got != wantAgent {
+			t.Errorf("EVENT_COMPACTION content.compacted_content = %q, want %q", got, wantAgent)
+		}
+		if compRow["is_truncated"] != true {
+			t.Errorf("EVENT_COMPACTION is_truncated = %v, want true", compRow["is_truncated"])
+		}
+
+		// When MaxContentLen exceeds a capped function-name summary, EVENT_COMPACTION
+		// retains the 256-rune function-name cap from formatResponseContent.
+		pComp, reqComp, ctxComp := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = 600
+			c.CustomMetadataAllowlist = []string{"adk_compaction"}
+		})
+		if _, err := pComp.OnEventCallback()(ctxComp, &session.Event{
+			ID:     "ev-compaction-long-fn",
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"adk_compaction": map[string]any{
+						"start_timestamp": 1700000000.0,
+						"end_timestamp":   1700000100.0,
+						"compacted_content": &genai.Content{
+							Role: "model",
+							Parts: []*genai.Part{
+								{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+								{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+							},
+						},
+					},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("OnEventCallback(compaction) error: %v", err)
+		}
+		pComp.AfterRunCallback()(ctxComp)
+		compNameRow := onlyRowOfType(t, collectRows(t, reqComp, untilEventType(EventInvocationCompleted)), EventEventCompaction)
+		if got, _ := jsonObjectColumn(t, compNameRow, columnContent)["compacted_content"].(string); got != wantNames {
+			t.Errorf("EVENT_COMPACTION long-name content.compacted_content = %q, want %q", got, wantNames)
+		}
+		if compNameRow["is_truncated"] != true {
+			t.Errorf("EVENT_COMPACTION long-name is_truncated = %v, want true", compNameRow["is_truncated"])
+		}
 	})
 
 	t.Run("CaptureFullMessageContent preserves long function names and multi-part summaries while redacting credentials", func(t *testing.T) {
 		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
 			c.MaxContentLen = 1
 			c.CaptureFullMessageContent = true
+			c.CustomMetadataAllowlist = []string{"adk_compaction"}
 		})
 		fullParts := append([]*genai.Part{
 			{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
@@ -845,6 +904,19 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 			ID:          "ev-full-doc-agent-resp",
 			Author:      "test-agent",
 			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: manyParts}},
+		}))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:     "ev-full-doc-compaction",
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"adk_compaction": map[string]any{
+						"start_timestamp":   1700000000.0,
+						"end_timestamp":     1700000100.0,
+						"compacted_content": &genai.Content{Role: "model", Parts: fullParts},
+					},
+				},
+			},
 		}))
 		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
 			Content: &genai.Content{
@@ -881,6 +953,15 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", agentRow["is_truncated"])
 		}
 
+		compRow := onlyRowOfType(t, rows, EventEventCompaction)
+		if got, _ := jsonObjectColumn(t, compRow, columnContent)["compacted_content"].(string); got != wantFull {
+			t.Errorf("EVENT_COMPACTION content.compacted_content = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(wantFull))
+		}
+		if compRow["is_truncated"] != false {
+			t.Errorf("EVENT_COMPACTION is_truncated = %v, want false", compRow["is_truncated"])
+		}
+
 		gotRedacted, _ := jsonObjectColumn(t, llmRows[1], columnContent)["response"].(string)
 		wantRedacted := "call: " + overCapCall + " api_key=" + redactedValue
 		if gotRedacted != wantRedacted {
@@ -891,6 +972,118 @@ func TestDocParity_ResponseSummaryAndFunctionNameBounds(t *testing.T) {
 		}
 		if llmRows[1]["is_truncated"] != true {
 			t.Errorf("LLM_RESPONSE[1] is_truncated = %v, want true when redaction scrubs a credential", llmRows[1]["is_truncated"])
+		}
+	})
+
+	t.Run("MaxContentLen -1 without CaptureFullMessageContent lifts both length caps while preserving redaction when enabled", func(t *testing.T) {
+		p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = -1
+			c.CaptureFullMessageContent = false
+			c.CustomMetadataAllowlist = []string{"adk_compaction"}
+		})
+		fullParts := append([]*genai.Part{
+			{FunctionCall: &genai.FunctionCall{Name: overCapCall}},
+			{FunctionResponse: &genai.FunctionResponse{Name: overCapResp}},
+		}, manyParts...)
+		const secret = "SYNTHETIC_DOC_NEG_SECRET_0123456789"
+
+		var errs callbackErrors
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{Role: "model", Parts: fullParts},
+		}, nil))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:          "ev-neg-doc-agent-resp",
+			Author:      "test-agent",
+			LLMResponse: model.LLMResponse{Content: &genai.Content{Role: "model", Parts: manyParts}},
+		}))
+		errs.add(p.OnEventCallback()(mCtx, &session.Event{
+			ID:     "ev-neg-doc-compaction",
+			Author: "test-agent",
+			LLMResponse: model.LLMResponse{
+				CustomMetadata: map[string]any{
+					"adk_compaction": map[string]any{
+						"start_timestamp":   1700000000.0,
+						"end_timestamp":     1700000100.0,
+						"compacted_content": &genai.Content{Role: "model", Parts: fullParts},
+					},
+				},
+			},
+		}))
+		errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall + " api_key=" + secret}},
+				},
+			},
+		}, nil))
+		errs.check(t)
+		p.AfterRunCallback()(mCtx)
+
+		rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+		llmRows := rowsOfType(rows, EventLLMResponse)
+		if len(llmRows) != 2 {
+			t.Fatalf("got %d LLM_RESPONSE rows, want 2", len(llmRows))
+		}
+
+		wantFull := "call: " + overCapCall + " | resp: " + overCapResp + " | " + fortySmall
+		if got, _ := jsonObjectColumn(t, llmRows[0], columnContent)["response"].(string); got != wantFull {
+			t.Errorf("LLM_RESPONSE[0] content.response = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(wantFull))
+		}
+		if llmRows[0]["is_truncated"] != false {
+			t.Errorf("LLM_RESPONSE[0] is_truncated = %v, want false", llmRows[0]["is_truncated"])
+		}
+
+		agentRow := onlyRowOfType(t, rows, EventAgentResponse)
+		if got, _ := jsonObjectColumn(t, agentRow, columnContent)["response"].(string); got != fortySmall {
+			t.Errorf("AGENT_RESPONSE content.response = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(fortySmall))
+		}
+		if agentRow["is_truncated"] != false {
+			t.Errorf("AGENT_RESPONSE is_truncated = %v, want false", agentRow["is_truncated"])
+		}
+
+		compRow := onlyRowOfType(t, rows, EventEventCompaction)
+		if got, _ := jsonObjectColumn(t, compRow, columnContent)["compacted_content"].(string); got != wantFull {
+			t.Errorf("EVENT_COMPACTION content.compacted_content = %d runes, want %d runes",
+				utf8.RuneCountInString(got), utf8.RuneCountInString(wantFull))
+		}
+		if compRow["is_truncated"] != false {
+			t.Errorf("EVENT_COMPACTION is_truncated = %v, want false", compRow["is_truncated"])
+		}
+
+		gotRedacted, _ := jsonObjectColumn(t, llmRows[1], columnContent)["response"].(string)
+		wantRedacted := "call: " + overCapCall + " api_key=" + redactedValue
+		if gotRedacted != wantRedacted {
+			t.Errorf("LLM_RESPONSE[1] content.response = %q, want %q", gotRedacted, wantRedacted)
+		}
+		if llmRows[1]["is_truncated"] != true {
+			t.Errorf("LLM_RESPONSE[1] is_truncated = %v, want true when redaction scrubs a credential", llmRows[1]["is_truncated"])
+		}
+
+		pUnredacted, reqUnredacted, ctxUnredacted := setupTestPluginWithConfig(t, func(c *Config) {
+			c.MaxContentLen = -1
+			c.DisableSensitiveKeyRedaction = true
+		})
+		if _, err := pUnredacted.AfterModelCallback()(ctxUnredacted, &model.LLMResponse{
+			Content: &genai.Content{
+				Role: "model",
+				Parts: []*genai.Part{
+					{FunctionCall: &genai.FunctionCall{Name: overCapCall + " api_key=" + secret}},
+				},
+			},
+		}, nil); err != nil {
+			t.Fatalf("AfterModelCallback(unredacted) error: %v", err)
+		}
+		pUnredacted.AfterRunCallback()(ctxUnredacted)
+		unredactedRow := onlyRowOfType(t, collectRows(t, reqUnredacted, untilEventType(EventInvocationCompleted)), EventLLMResponse)
+		wantRaw := "call: " + overCapCall + " api_key=" + secret
+		if got, _ := jsonObjectColumn(t, unredactedRow, columnContent)["response"].(string); got != wantRaw {
+			t.Errorf("unredacted LLM_RESPONSE content.response = %q, want %q", got, wantRaw)
+		}
+		if unredactedRow["is_truncated"] != false {
+			t.Errorf("unredacted LLM_RESPONSE is_truncated = %v, want false", unredactedRow["is_truncated"])
 		}
 	})
 }
