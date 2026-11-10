@@ -165,6 +165,22 @@ func TestAgentRunOnAgentErrorCallback(t *testing.T) {
 			wantRunErr: true,
 		},
 		{
+			name: "caller cancellation with cause is not reported",
+			invocationCtx: func(ctx context.Context) context.Context {
+				cause := errors.New("caller gave up")
+				ctx, cancel := context.WithCancelCause(ctx)
+				cancel(cause)
+				return ctx
+			},
+			run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+				return func(yield func(*session.Event, error) bool) {
+					yield(nil, fmt.Errorf("wrapped: %w", context.Cause(ctx)))
+				}
+			},
+			wantCalls:  0,
+			wantRunErr: true,
+		},
+		{
 			name: "live invocation deadline is reported",
 			run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				return func(yield func(*session.Event, error) bool) {

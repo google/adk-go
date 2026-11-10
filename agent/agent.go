@@ -343,11 +343,12 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 
 // runOnAgentErrorCallbacks notifies plugins that an error escaped the agent's
 // run. Notification only: the caller still yields err, so a callback cannot
-// recover from or replace the failure. A cancellation or deadline error is
-// reported unless the invocation's own context is done; timeouts raised inside
-// the run still reach the callback.
+// recover from or replace the failure. A cancellation or deadline error,
+// including the context's cancellation cause, is reported unless the
+// invocation's own context is done; timeouts raised inside the run still reach
+// the callback.
 func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
-	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Cause(ctx))) {
 		return
 	}
 	pluginManager := pluginManagerFromContext(ctx)

@@ -210,9 +210,10 @@ type AfterRunCallback func(agent.InvocationContext)
 //
 // A panicking callback is recovered so the remaining callbacks still run and
 // the original error is still yielded, matching adk-python's
-// on_agent_error_callback. A cancellation or deadline error is not reported
-// when the invocation's own context is done, matching adk-python's handling of
-// task cancellation; timeouts raised inside the run are reported. Callbacks may
+// on_agent_error_callback. A cancellation or deadline error, including the
+// context's cancellation cause, is not reported when the invocation's own
+// context is done, matching adk-python's handling of task cancellation;
+// timeouts raised inside the run are reported. Callbacks may
 // be invoked concurrently by parallel sub-agents and must be safe for
 // concurrent use. An error from a sub-agent is reported once for each ancestor
 // as it propagates, matching adk-python; callbacks that count failures should
