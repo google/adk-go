@@ -392,3 +392,33 @@ func runAgentJoinResume(t *testing.T, secondWait bool) {
 		t.Fatal("D never executed after approval; completed predecessor must survive rehydration")
 	}
 }
+
+// A FunctionResponse without a call ID must still route through the workflow
+// root so the native join reevaluates after the interrupted branch resumes.
+func TestRunner_WorkflowRootResumesAfterRequestInputWithJoin(t *testing.T) {
+	b, c, d := joinResumeAgent(t, "b", "B", true), joinResumeAgent(t, "c", "C", false), joinResumeAgent(t, "d", "D", false)
+	bn, cn, dn := joinResumeAgentNode(t, b), joinResumeAgentNode(t, c), joinResumeAgentNode(t, d)
+	join := workflow.NewJoinNode("join")
+	r := newJoinResumeRunner(t, []workflow.Edge{
+		{From: workflow.Start, To: bn}, {From: workflow.Start, To: cn},
+		{From: bn, To: join}, {From: cn, To: join}, {From: join, To: dn},
+	}, b, c, d)
+	for _, err := range r.Run(t.Context(), "u", "s", genai.NewContentFromText("start", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	msg := genai.NewContentFromFunctionResponse(workflow.WorkflowInputFunctionCallName, map[string]any{"response": "approved"}, genai.RoleUser)
+	var sawD bool
+	for ev, err := range r.Run(t.Context(), "u", "s", msg, agent.RunConfig{}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Author == "d" {
+			sawD = true
+		}
+	}
+	if !sawD {
+		t.Fatal("d never executed; workflow root was not resumed after RequestInput")
+	}
+}

@@ -48,6 +48,7 @@ import (
 	"google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/session/compaction"
+	"google.golang.org/adk/v2/workflow"
 )
 
 // Config is used to create a [Runner].
@@ -560,6 +561,13 @@ func (r *Runner) getOrCreateSession(ctx context.Context, userID, sessionID strin
 // Run runs the agent for the given user input, yielding events from agents.
 // For each user message it finds the proper agent within an agent tree to
 // continue the conversation within the session.
+//
+// An adk_request_input function response without a call ID is given the ID of
+// the session's only unanswered long-running call, so it routes to the workflow
+// that asked, and the ID is stored with the user event. With none or several
+// open calls the message is left as is, so a response must carry its call ID when
+// several workflow branches wait at once. adk-python has no equivalent; this
+// diverges because ADK Go's workflow resume matches answers by call ID.
 func (r *Runner) Run(ctx context.Context, userID, sessionID string, msg *genai.Content, cfg agent.RunConfig, opts ...RunOption) iter.Seq2[*session.Event, error] {
 	return telemetry.InstrumentInvocation(ctx, r.rootAgent, sessionID, func(ctx context.Context) iter.Seq2[*session.Event, error] {
 		return r.run(ctx, userID, sessionID, msg, cfg, opts...)
@@ -736,6 +744,7 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// (#2204). The workflow resumes the interrupted node only for an
 		// adk_request_input response; any other response restarts the graph.
 		// The first response in the message decides the route.
+		msg = fillRequestInputResponseID(msg, storedSession)
 		agentToRun, branch := r.rootAgent, ""
 		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
@@ -1375,4 +1384,41 @@ func (r *Runner) withPluginManager(ctx context.Context) context.Context {
 		return plugininternal.ToContext(ctx, inherited)
 	}
 	return plugininternal.ToContext(ctx, r.pluginManager)
+}
+
+// fillRequestInputResponseID returns msg with the call ID set on an
+// adk_request_input response that has none, provided exactly one request is
+// still open in the session. Otherwise it returns msg unchanged. The message
+// passed in is never modified.
+func fillRequestInputResponseID(msg *genai.Content, sess session.Session) *genai.Content {
+	var missing bool
+	for _, fr := range utils.FunctionResponses(msg) {
+		if fr.ID == "" && fr.Name == workflow.WorkflowInputFunctionCallName {
+			missing = true
+		}
+	}
+	if !missing {
+		return msg
+	}
+	open := openLongRunningCallIDs(sess)
+	if len(open) != 1 {
+		return msg
+	}
+	var id string
+	for k := range open {
+		id = k
+	}
+	out := *msg
+	out.Parts = make([]*genai.Part, len(msg.Parts))
+	for i, p := range msg.Parts {
+		out.Parts[i] = p
+		if p != nil && p.FunctionResponse != nil && p.FunctionResponse.ID == "" && p.FunctionResponse.Name == workflow.WorkflowInputFunctionCallName {
+			fr := *p.FunctionResponse
+			fr.ID = id
+			cp := *p
+			cp.FunctionResponse = &fr
+			out.Parts[i] = &cp
+		}
+	}
+	return &out
 }
