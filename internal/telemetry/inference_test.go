@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"os"
 	"testing"
 
 	"google.golang.org/genai"
@@ -25,7 +26,7 @@ func TestProviderName(t *testing.T) {
 	for _, tc := range []struct {
 		model   string
 		backend genai.Backend
-		want    any
+		want    string
 	}{
 		{"claude-sonnet-4-5", genai.BackendVertexAI, "anthropic"},
 		{"claude-3-5-haiku-latest", genai.BackendUnspecified, "anthropic"},
@@ -42,22 +43,71 @@ func TestProviderName(t *testing.T) {
 		{"models/gemini-2.0-flash", genai.BackendGeminiAPI, "gcp.gemini"},
 		{"gemini-2.0-flash/001", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"models/claude-3-haiku", genai.BackendGeminiAPI, "anthropic"},
-		{"apigee/openai/gpt-4o", genai.BackendUnspecified, nil},
+		{"apigee/openai/gpt-4o", genai.BackendUnspecified, "gcp.gemini"},
 		{"some-model", genai.BackendVertexAI, "gcp.vertex_ai"},
 		{"/foo", genai.BackendVertexAI, "gcp.vertex_ai"},
-		// ADK Python guesses from the environment here.
-		{"gemini-2.0-flash", genai.BackendUnspecified, nil},
-		{"some-model", genai.BackendUnspecified, nil},
-		{"", genai.BackendUnspecified, nil},
+		// Guessed from the environment, which names no backend.
+		{"gemini-2.0-flash", genai.BackendUnspecified, "gcp.gemini"},
+		{"some-model", genai.BackendUnspecified, "gcp.gemini"},
+		{"", genai.BackendUnspecified, "gcp.gemini"},
 	} {
 		t.Run(tc.model+"/"+tc.backend.String(), func(t *testing.T) {
-			var got any
-			if kv, ok := providerName(tc.model, tc.backend); ok {
-				got = kv.Value.AsString()
-			}
-			if got != tc.want {
-				t.Errorf("providerName(%q, %v) = %v, want %v", tc.model, tc.backend, got, tc.want)
+			unsetEnvForTesting(t, "GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI")
+			if got := providerName(tc.model, tc.backend).Value.AsString(); got != tc.want {
+				t.Errorf("providerName(%q, %v) = %q, want %q", tc.model, tc.backend, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestProviderNameFromEnvironment(t *testing.T) {
+	const (
+		enterprise = "GOOGLE_GENAI_USE_ENTERPRISE"
+		vertexAI   = "GOOGLE_GENAI_USE_VERTEXAI"
+	)
+	for _, tc := range []struct {
+		name    string
+		model   string
+		backend genai.Backend
+		// env holds the variables to set; the others are unset.
+		env  map[string]string
+		want string
+	}{
+		{"claude", "claude-sonnet-4-5", genai.BackendUnspecified, map[string]string{enterprise: "true"}, "anthropic"},
+		{"provider prefix", "openai/gpt-4o", genai.BackendUnspecified, map[string]string{enterprise: "true"}, "openai"},
+		{"known backend", "gemini-2.0-flash", genai.BackendGeminiAPI, map[string]string{enterprise: "true"}, "gcp.gemini"},
+		{"nothing set", "gemini-2.0-flash", genai.BackendUnspecified, nil, "gcp.gemini"},
+		{"enterprise true", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "true"}, "gcp.vertex_ai"},
+		{"enterprise TRUE", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "TRUE"}, "gcp.vertex_ai"},
+		{"enterprise 1", "", genai.BackendUnspecified, map[string]string{enterprise: "1"}, "gcp.vertex_ai"},
+		{"enterprise not trimmed", "some-model", genai.BackendUnspecified, map[string]string{enterprise: " true"}, "gcp.gemini"},
+		{"enterprise yes", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "yes"}, "gcp.gemini"},
+		{"enterprise empty wins", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "", vertexAI: "true"}, "gcp.gemini"},
+		{"enterprise false wins", "some-model", genai.BackendUnspecified, map[string]string{enterprise: "false", vertexAI: "true"}, "gcp.gemini"},
+		{"vertex ai true", "some-model", genai.BackendUnspecified, map[string]string{vertexAI: "True"}, "gcp.vertex_ai"},
+		{"vertex ai 0", "some-model", genai.BackendUnspecified, map[string]string{vertexAI: "0"}, "gcp.gemini"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			unsetEnvForTesting(t, enterprise, vertexAI)
+			for name, v := range tc.env {
+				t.Setenv(name, v)
+			}
+			got := providerName(tc.model, tc.backend)
+			if got.Key != genAIProviderName || got.Value.AsString() != tc.want {
+				t.Errorf("providerName(%q, %v) = %v=%q, want %s=%q", tc.model, tc.backend, got.Key, got.Value.AsString(), genAIProviderName, tc.want)
+			}
+		})
+	}
+}
+
+// unsetEnvForTesting unsets the given environment variables until the test
+// ends.
+func unsetEnvForTesting(t *testing.T, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

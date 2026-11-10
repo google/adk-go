@@ -221,18 +221,7 @@ func logUserMessage(ctx context.Context, content *genai.Content, genAISystem *at
 }
 
 // GenAISystemAttr returns the gen_ai.system attribute for a backend, and
-// whether this repo can name one.
-//
-// The single definition, so telemetry that reports a provider agrees with
-// itself. It reports false for a provider it cannot identify, since naming the
-// wrong one is worse than saying nothing.
-//
-// Ref: https://github.com/open-telemetry/semantic-conventions/blob/v1.36.0/docs/registry/attributes/gen-ai.md#gen-ai-system well-known values.
-// GenAISystemAttr reports the semconv gen_ai.system attribute for a Google
-// backend, and whether one is known at all.
-//
-// Split out so the compaction spans can set the same attribute the rest of the
-// telemetry does, rather than deriving it a second way.
+// whether the backend is known.
 func GenAISystemAttr(variant genai.Backend) (attribute.KeyValue, bool) {
 	switch variant {
 	case genai.BackendVertexAI:

@@ -15,6 +15,7 @@
 package telemetry
 
 import (
+	"os"
 	"regexp"
 	"strings"
 
@@ -25,20 +26,39 @@ import (
 // genAIProviderName supersedes gen_ai.system in semantic conventions >1.36.
 var genAIProviderName = attribute.Key("gen_ai.provider.name")
 
-// providerName mirrors ADK Python: https://github.com/google/adk-python/blob/ed030cbf431ef6c12a2b3a75dcc7aff08378cb82/src/google/adk/telemetry/tracing.py#L1301-L1329
-// Unlike it, an unknown backend names no provider rather than a guess.
-func providerName(modelName string, backend genai.Backend) (attribute.KeyValue, bool) {
+// providerName is the provider a model call's span, log record and metrics
+// report: named by the model, else by the backend, else by the backend the
+// environment selects. adk-python skips the client's backend and guesses from
+// the environment; Go knows the backend, so it uses it.
+func providerName(modelName string, backend genai.Backend) attribute.KeyValue {
 	name := bareModelName(modelName)
 	if !strings.HasPrefix(name, "gemini-") {
 		if anthropicModel.MatchString(name) {
-			return genAIProviderName.String("anthropic"), true
+			return genAIProviderName.String("anthropic")
 		}
 		if provider, _, ok := strings.Cut(name, "/"); ok && provider != "" && !resourceCollections[strings.ToLower(provider)] {
-			return genAIProviderName.String(strings.ToLower(provider)), true
+			return genAIProviderName.String(strings.ToLower(provider))
 		}
 	}
-	sys, ok := GenAISystemAttr(backend)
-	return genAIProviderName.String(sys.Value.AsString()), ok
+	if backend == genai.BackendUnspecified {
+		backend = environmentBackend()
+	}
+	sys, _ := GenAISystemAttr(backend)
+	return genAIProviderName.String(sys.Value.AsString())
+}
+
+// environmentBackend returns the backend the environment selects for a client
+// that names none.
+func environmentBackend() genai.Backend {
+	for _, name := range []string{"GOOGLE_GENAI_USE_ENTERPRISE", "GOOGLE_GENAI_USE_VERTEXAI"} {
+		if v, ok := os.LookupEnv(name); ok {
+			if v := strings.ToLower(v); v == "1" || v == "true" {
+				return genai.BackendVertexAI
+			}
+			return genai.BackendGeminiAPI
+		}
+	}
+	return genai.BackendGeminiAPI
 }
 
 var (
