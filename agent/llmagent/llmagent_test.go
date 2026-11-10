@@ -1017,6 +1017,53 @@ func TestFunctionTool(t *testing.T) {
 	}
 }
 
+// transfer_to_agent returns no result of its own, so after-tool callbacks see
+// nil, as adk-python's see None. The model is still sent {"result": null}.
+func TestAgentTransferAfterToolCallbackSeesNoResult(t *testing.T) {
+	model := &testutil.MockModel{Responses: []*genai.Content{
+		genai.NewContentFromFunctionCall("transfer_to_agent", map[string]any{"agent_name": "sub_agent_1"}, "model"),
+		genai.NewContentFromText("response1", "model"),
+	}}
+	subAgent1, err := llmagent.New(llmagent.Config{
+		Name:  "sub_agent_1",
+		Model: model,
+	})
+	if err != nil {
+		t.Fatalf("failed to create subAgent1: %v", err)
+	}
+	var calls int
+	var gotResult map[string]any
+	rootAgent, err := llmagent.New(llmagent.Config{
+		Name:      "root_agent",
+		Model:     model,
+		SubAgents: []agent.Agent{subAgent1},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				calls++
+				gotResult = result
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create rootAgent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, rootAgent)
+	for _, err := range runner.Run(t, "session_id", "transfer") {
+		if err != nil {
+			t.Fatalf("Run() error = %v", err)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("after-tool callback ran %d times, want 1", calls)
+	}
+	if gotResult != nil {
+		t.Errorf("after-tool callback result = %v, want nil", gotResult)
+	}
+}
+
 func TestAgentTransfer(t *testing.T) {
 	// Helpers to create genai.Content conveniently.
 	transferCall := func(agentName string) *genai.Content {
@@ -1028,7 +1075,7 @@ func TestAgentTransfer(t *testing.T) {
 	}
 	transferResponse := func() *genai.Content {
 		return genai.NewContentFromFunctionResponse(
-			"transfer_to_agent", map[string]any{}, "user")
+			"transfer_to_agent", map[string]any{"result": nil}, "user")
 	}
 	text := func(text string) *genai.Content {
 		return genai.NewContentFromText(

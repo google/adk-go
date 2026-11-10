@@ -54,7 +54,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				genai.NewContentFromText("response2", "model"),
 				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
 				// Result from the tool execution
-				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{"result": nil}, "user"),
 			},
 		},
 		{
@@ -83,7 +83,7 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 			maxIterations: 3,
 			want: []*genai.Content{
 				genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
-				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{}, "user"),
+				genai.NewContentFromFunctionResponse("exit_loop", map[string]any{"result": nil}, "user"),
 			},
 		},
 	}
@@ -147,5 +147,47 @@ func TestExitLoopToolExitsLoopAgent(t *testing.T) {
 				t.Errorf("unexpected stream length, want %d got %d", len(tc.want), eventCount)
 			}
 		})
+	}
+}
+
+// exit_loop returns no result of its own, so after-tool callbacks see nil, as
+// adk-python's see None. The model is still sent {"result": null}.
+func TestExitLoopToolAfterToolCallbackSeesNoResult(t *testing.T) {
+	exitLoopTool, err := exitlooptool.New()
+	if err != nil {
+		t.Fatalf("failed to create exit tool: %v", err)
+	}
+	var calls int
+	var gotResult map[string]any
+	a, err := llmagent.New(llmagent.Config{
+		Name: "simple agent",
+		Model: &testutil.MockModel{Responses: []*genai.Content{
+			genai.NewContentFromFunctionCall("exit_loop", map[string]any{}, "model"),
+		}},
+		Tools: []tool.Tool{exitLoopTool},
+		AfterToolCallbacks: []llmagent.AfterToolCallback{
+			func(_ agent.Context, _ tool.Tool, _, result map[string]any, _ error) (map[string]any, error) {
+				calls++
+				gotResult = result
+				return nil, nil
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create llm agent: %v", err)
+	}
+
+	runner := testutil.NewTestAgentRunner(t, a)
+	for _, err := range runner.Run(t, "id", "message") {
+		if err != nil {
+			t.Fatalf("runner returned unexpected error: %v", err)
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("after-tool callback ran %d times, want 1", calls)
+	}
+	if gotResult != nil {
+		t.Errorf("after-tool callback result = %v, want nil", gotResult)
 	}
 }

@@ -1601,6 +1601,7 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 				if curTool != nil && curTool.IsLongRunning() {
 					return
 				}
+				result = map[string]any{"result": nil}
 			}
 
 			parts := []*genai.Part{

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/agent"
@@ -280,6 +281,7 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 		toolResult       map[string]any
 		wantEventCount   int
 		wantFREventIndex int // -1 if no FR event expected
+		wantResponse     map[string]any
 	}{
 		{
 			name:             "deferred + nil: gate fires, no FR event",
@@ -305,10 +307,11 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 			wantFREventIndex: -1,
 		},
 		{
-			name:             "plain + nil: no gate, FR(nil) still emitted (no-op tool legacy)",
+			name:             "plain + nil: no gate, FR wraps nil as {result: nil}",
 			toolResult:       nil,
-			wantEventCount:   3, // FC + FR(nil) + text
+			wantEventCount:   3, // FC + FR + text
 			wantFREventIndex: 1,
+			wantResponse:     map[string]any{"result": nil},
 		},
 		{
 			name:             "deferred + non-nil: FR event still emitted (gate is nil-only)",
@@ -316,6 +319,7 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 			toolResult:       map[string]any{"answer": "ok"},
 			wantEventCount:   3, // FC + FR + text
 			wantFREventIndex: 1,
+			wantResponse:     map[string]any{"answer": "ok"},
 		},
 		{
 			name:             "long-running + non-nil (pending dict): FR event still emitted",
@@ -323,6 +327,7 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 			toolResult:       map[string]any{"status": "pending"},
 			wantEventCount:   3, // FC + FR(pending) + text — the canonical HITL pattern
 			wantFREventIndex: 1,
+			wantResponse:     map[string]any{"status": "pending"},
 		},
 	}
 
@@ -382,8 +387,11 @@ func TestHandleFunctionCalls_FRSkipGates(t *testing.T) {
 				fr := events[tc.wantFREventIndex]
 				if fr.Content == nil || len(fr.Content.Parts) == 0 ||
 					fr.Content.Parts[0].FunctionResponse == nil {
-					t.Errorf("event[%d] should be a FunctionResponse, got:\n%v",
+					t.Fatalf("event[%d] should be a FunctionResponse, got:\n%v",
 						tc.wantFREventIndex, events)
+				}
+				if diff := cmp.Diff(tc.wantResponse, fr.Content.Parts[0].FunctionResponse.Response); diff != "" {
+					t.Errorf("FunctionResponse.Response mismatch (-want +got):\n%s", diff)
 				}
 			} else {
 				// Assert NO event carries a FunctionResponse part.
