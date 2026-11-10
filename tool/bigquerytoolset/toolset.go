@@ -44,10 +44,12 @@ var (
 	listTableIDsDescription string
 	//go:embed descriptions/get_table_info.txt
 	getTableInfoDescription string
+	//go:embed descriptions/get_job_info.txt
+	getJobInfoDescription string
 )
 
 // New returns a toolset with the BigQuery metadata tools: list_dataset_ids,
-// get_dataset_info, list_table_ids and get_table_info.
+// get_dataset_info, list_table_ids, get_table_info and get_job_info.
 //
 // New creates the HTTP client the tools share, so it fails when cfg is invalid
 // or, with the default credentials, when no Application Default Credentials
@@ -64,6 +66,7 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	}
 	b := &bigQuery{
 		client:           c,
+		location:         cfg.Location,
 		defaultProjectID: cfg.DefaultProjectID,
 		defaultDatasetID: cfg.DefaultDatasetID,
 	}
@@ -75,6 +78,7 @@ func New(ctx context.Context, cfg Config) (tool.Toolset, error) {
 	}
 	tools := []tool.Tool{
 		add(newTool(b, "get_dataset_info", getDatasetInfoDescription, b.getDatasetInfo)),
+		add(newTool(b, "get_job_info", getJobInfoDescription, b.getJobInfo)),
 		add(newTool(b, "get_table_info", getTableInfoDescription, b.getTableInfo)),
 		add(newTool(b, "list_dataset_ids", listDatasetIDsDescription, b.listDatasetIDs)),
 		add(newTool(b, "list_table_ids", listTableIDsDescription, b.listTableIDs)),
@@ -98,6 +102,7 @@ func (t *toolset) Tools(agent.ReadonlyContext) ([]tool.Tool, error) {
 // bigQuery is what the tools share.
 type bigQuery struct {
 	client           *client
+	location         string
 	defaultProjectID string
 	defaultDatasetID string
 }

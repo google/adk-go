@@ -47,6 +47,11 @@ type Config struct {
 	// not contain spaces or characters a request header cannot carry.
 	ApplicationName string
 
+	// Location is the BigQuery location the job metadata tool looks jobs up
+	// in, such as "US" or "europe-west4". Jobs outside the US and EU
+	// multi-regions are found only when it is set.
+	Location string
+
 	// DefaultProjectID is the project the tools use when the model does not
 	// name one. Setting it makes the project_id argument optional, so the
 	// model no longer has to ask the user for a project. The model can still

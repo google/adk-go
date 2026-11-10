@@ -47,6 +47,14 @@ func TestMatchType(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			name:      "nil value not nullable",
+			value:     nil,
+			schema:    &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(false)},
+			isInput:   true,
+			wantMatch: false,
+			wantErr:   false,
+		},
+		{
 			name:      "nil value nullable",
 			value:     nil,
 			schema:    &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)},

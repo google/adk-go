@@ -16,6 +16,7 @@ package llminternal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"math"
@@ -77,6 +78,13 @@ func startFakeLiveServer(t *testing.T, serveConn func(connNum int, conn *websock
 // server, which needs no in-flight connection to have finished first.
 func startClosableLiveServer(t *testing.T, serveConn func(connNum int, conn *websocket.Conn)) (*genai.Client, *atomic.Int32, func()) {
 	t.Helper()
+	return startLiveServerWithSetup(t, func(int, []byte) {}, serveConn)
+}
+
+// startLiveServerWithSetup is startClosableLiveServer plus onSetup, which
+// receives each connection's setup frame before setupComplete is sent.
+func startLiveServerWithSetup(t *testing.T, onSetup func(connNum int, frame []byte), serveConn func(connNum int, conn *websocket.Conn)) (*genai.Client, *atomic.Int32, func()) {
+	t.Helper()
 	var upgrader websocket.Upgrader
 	var connCount atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,10 +97,12 @@ func startClosableLiveServer(t *testing.T, serveConn func(connNum int, conn *web
 		// Count before the setup exchange: a client that saw setupComplete is
 		// then guaranteed to observe this connection in the count.
 		connNum := int(connCount.Add(1))
-		if _, _, err := conn.ReadMessage(); err != nil {
+		_, setupFrame, err := conn.ReadMessage()
+		if err != nil {
 			t.Errorf("reading setup frame failed: %v", err)
 			return
 		}
+		onSetup(connNum, setupFrame)
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"setupComplete":{}}`)); err != nil {
 			t.Errorf("writing setupComplete failed: %v", err)
 			return
@@ -1125,5 +1135,122 @@ gotResponse:
 	}
 	if got := connCount.Load(); got != 1 {
 		t.Errorf("connection count = %d, want 1 (scenario needs no reconnect)", got)
+	}
+}
+
+// TestRunLiveEventsCarryUsageMetadata checks that the token usage the Live API
+// reports reaches the event RunLive yields, with the Live API's response token
+// count mapped to CandidatesTokenCount.
+func TestRunLiveEventsCarryUsageMetadata(t *testing.T) {
+	const turnWithUsage = `{"serverContent":{"turnComplete":true},"usageMetadata":{"promptTokenCount":174,"responseTokenCount":146,"totalTokenCount":320}}`
+	client, _ := startFakeLiveServer(t, func(connNum int, conn *websocket.Conn) {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(turnWithUsage)); err != nil {
+			t.Errorf("writing usage message failed: %v", err)
+			return
+		}
+		blockUntilClientCloses(conn)
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+	next, stop := iter.Pull2(seq)
+	defer stop()
+
+	for {
+		ev, err, ok := next()
+		if !ok {
+			t.Fatal("iterator ended before the turn-complete event")
+		}
+		if err != nil {
+			t.Fatalf("RunLive yielded an error: %v", err)
+		}
+		if ev == nil || !ev.LLMResponse.TurnComplete {
+			continue
+		}
+		want := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     174,
+			CandidatesTokenCount: 146,
+			TotalTokenCount:      320,
+		}
+		if diff := cmp.Diff(want, ev.LLMResponse.UsageMetadata); diff != "" {
+			t.Errorf("UsageMetadata mismatch (-want +got):\n%s", diff)
+		}
+		return
+	}
+}
+
+// A reconnect sends the latest resumption handle in its setup frame, and that
+// handle stays out of the LiveRunConfig the caller passed in, which the caller
+// may reuse for another session.
+func TestRunLiveKeepsResumptionHandleOutOfCallerConfig(t *testing.T) {
+	const handleUpdate = `{"sessionResumptionUpdate":{"newHandle":"server-handle","resumable":true}}`
+	setups := make(chan []byte, 2)
+	client, _, _ := startLiveServerWithSetup(t, func(_ int, frame []byte) { setups <- frame }, func(connNum int, conn *websocket.Conn) {
+		if connNum > 1 {
+			blockUntilClientCloses(conn)
+			return
+		}
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(handleUpdate)); err != nil {
+			t.Errorf("writing resumption update failed: %v", err)
+		}
+		// Returning hard-closes the connection, which the flow resumes from.
+	})
+
+	f := &Flow{
+		Model:             &fakeLiveModel{client: client},
+		RequestProcessors: []func(ctx agent.InvocationContext, req *model.LLMRequest, f *Flow) iter.Seq2[*session.Event, error]{liveConfigProcessor},
+	}
+	ctx, cancel := newLiveInvocationContext(t)
+	defer cancel()
+	callerConfig := &genai.SessionResumptionConfig{}
+	runconfig.FromContext(ctx).Live.SessionResumption = callerConfig
+
+	sess, seq, err := f.RunLive(ctx)
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+	go func() {
+		for range seq {
+		}
+	}()
+
+	var got [2]string
+	for i := range got {
+		select {
+		case frame := <-setups:
+			var msg struct {
+				Setup struct {
+					SessionResumption struct {
+						Handle string `json:"handle"`
+					} `json:"sessionResumption"`
+				} `json:"setup"`
+			}
+			if err := json.Unmarshal(frame, &msg); err != nil {
+				t.Fatalf("decoding setup frame %q: %v", frame, err)
+			}
+			got[i] = msg.Setup.SessionResumption.Handle
+		case <-time.After(10 * time.Second):
+			t.Fatalf("connection %d never sent its setup frame", i+1)
+		}
+	}
+	if err := sess.Close(); err != nil {
+		t.Logf("closing session: %v", err)
+	}
+
+	if want := [2]string{"", "server-handle"}; got != want {
+		t.Errorf("setup handles = %q, want %q", got, want)
+	}
+	if callerConfig.Handle != "" {
+		t.Errorf("caller's SessionResumption.Handle = %q, want it left empty", callerConfig.Handle)
 	}
 }
