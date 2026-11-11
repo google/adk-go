@@ -34,6 +34,9 @@ const maxSearchResults = 10
 // InMemoryService returns a new in-memory implementation of the memory service. Thread-safe.
 // Searches return at most ten entries, ranked by the number of distinct query
 // words they match. Ties follow session insertion order, then event order.
+// Session content and custom metadata are copied on ingestion and retrieval.
+// Unexported reference fields, functions, channels, and unsafe pointers in
+// metadata remain shared.
 func InMemoryService() Service {
 	return &inMemoryService{
 		store: make(map[key]*userMemories),
@@ -107,10 +110,10 @@ func (s *inMemoryService) AddSessionToMemory(ctx context.Context, curSession ses
 
 		values = append(values, value{
 			id:             event.ID,
-			content:        &content,
+			content:        cloneMemoryData(&content),
 			author:         event.Author,
 			timestamp:      event.Timestamp,
-			customMetadata: event.CustomMetadata,
+			customMetadata: cloneMemoryData(event.CustomMetadata),
 			words:          words,
 			textLower:      strings.ToLower(strings.Join(texts, " ")),
 		})
@@ -203,7 +206,7 @@ func (s *inMemoryService) SearchMemory(ctx context.Context, req *SearchRequest) 
 		return cmp.Compare(b.score, a.score)
 	})
 	for _, match := range scored[:min(len(scored), maxSearchResults)] {
-		res.Memories = append(res.Memories, match.entry)
+		res.Memories = append(res.Memories, cloneMemoryData(match.entry))
 	}
 
 	return res, nil
