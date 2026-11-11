@@ -993,7 +993,10 @@ func scrubA2ACustomMetadata(meta map[string]any, allowlist customMetadataFilter,
 // adk-python (which currently lacks a partial guard on pause/state rows),
 // returning early here prevents duplicate STATE_DELTA and TOOL_PAUSED rows on
 // SSE runs and avoids phantom pause rows when a stream aborts before commit.
-func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, ev *session.Event) {
+//
+// settledAfterAgent reports that onEvent took ev for a retired activation's
+// after-agent event, whose rows go under the invocation (see eventSpanAt).
+func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, ev *session.Event, settledAfterAgent bool) {
 	if ev == nil || ev.Partial {
 		return
 	}
@@ -1002,7 +1005,7 @@ func (p *analyticsPlugin) emitSessionEventSignals(ctx agent.InvocationContext, e
 	if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 		id.path = ev.NodeInfo.Path
 	}
-	span := p.traces.eventSpan(ctx, id, ev.Author, ev.Branch)
+	span := p.traces.eventSpanAt(ctx, id, ev.Author, ev.Branch, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "", settledAfterAgent)
 	cleanCustomMeta, a2aTrunc := scrubA2ACustomMetadata(ev.CustomMetadata, p.customMetadata, p.config.redactSensitiveKeys())
 	applyEventBase := func(d *eventData) {
 		d.sourceEvent = ev

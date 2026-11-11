@@ -949,7 +949,11 @@ func (p *analyticsPlugin) logPurgedAgents(ctx context.Context, id identity, purg
 // A partial event, with or without content, records instead that its author
 // is streaming, so that a caller that stops reading on it is not taken for a
 // failure, and one with content or a typed output also records that its
-// author responded (see recordStreamed).
+// author responded (see recordStreamed). A non-partial event with neither
+// content nor a typed output responds to nothing, but when it is the event
+// that ADK built from a retired activation's after-agent callbacks that only
+// changed state or artifacts, it records that the activation creates no more
+// events (see clearLastPartialForEvent).
 //
 // Because ADK stops an event callback chain at the first plugin that returns an
 // event, this callback does not run for events that an earlier-registered
@@ -962,17 +966,20 @@ func (p *analyticsPlugin) onEvent(ctx agent.InvocationContext, ev *session.Event
 		if ev.NodeInfo != nil && ev.NodeInfo.Path != "" {
 			evID.path = ev.NodeInfo.Path
 		}
+		// settledAfterAgent stays on this call's stack until the event's rows
+		// are placed, so another event handled meanwhile cannot change it.
+		settledAfterAgent := false
 		if ev.Partial {
-			p.traces.recordStreamed(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil)
+			p.traces.recordStreamedAt(ctx, evID, ev.Author, ev.Branch, ev.Content != nil || ev.Output != nil, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "")
 		} else if ev.Content != nil || ev.Output != nil {
-			p.traces.completeResponseForEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev)
+			settledAfterAgent = p.traces.completeResponseForEvent(ctx, evID, ev.Author, ev.Branch, functionResponseCalls(ev.Content), hasFunctionCall(ev.Content), ev)
 		} else {
-			p.traces.clearLastPartial(ctx, evID)
+			settledAfterAgent = p.traces.clearLastPartialForEvent(ctx, evID, ev.Author, ev.Branch, ev)
 		}
 		if workflowName, failed, ok := nodeCompletion(ev); ok {
 			p.traces.recordNodeCompletion(ctx, evID, workflowName, ev.NodeInfo.Path, ev.Branch, failed)
 		}
-		p.emitSessionEventSignals(ctx, ev)
+		p.emitSessionEventSignals(ctx, ev, settledAfterAgent)
 		if !ev.Partial && ev.Author != "" && ev.Author != userAuthor && hasTaskCompletedResponse(ev.Content) {
 			taskID := evID
 			taskID.agentName = ev.Author

@@ -173,29 +173,30 @@ type GCSContentOffloader interface {
 // was split into several requests; see below), with two exceptions: if the
 // stream was rotated by an earlier batch and has not committed yet, Go drops
 // the batch and pauses rotation; if an earlier attempt of the request had an
-// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
-// duplicate delivery, and replace the stream before the next batch (pausing
-// rotation if the stream had not committed yet). adk-python drops the batch
-// after any of the three and replaces the stream before the next one. On an
-// RPC-level receive error after a successful Send (an AppendRowsResponse.Error
-// carrying one of these codes is a server rejection), Go treats Unavailable,
-// DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
-// outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
-// as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the request had an unknown
-// outcome, whereas adk-python also replaces it when the error is not a schema
-// mismatch. DropStats has five per-reason counters, whereas adk-python's
-// get_drop_stats() returns ten. adk-python uploads while it parses an event,
-// before the row is queued, with a Cloud Storage client built from the
-// credentials of the plugin, a fixed 32 KiB inline text limit and the
-// parallelism of its thread pool. This plugin queues payloads with rows and
-// uploads them at batch flush time, bounds upload concurrency and memory,
-// supports customizable offloaders, exposes atomic DropStats counters, and
-// optionally writes through a COMMITTED stream with explicit offsets when
-// ExactlyOnceDelivery is enabled. ExactlyOnceDelivery handles offset
-// desynchronization (rotating to a fresh stream without consuming append retry
-// attempts) and distinguishes ambiguous transport errors from definite server
-// rejections.
+// unknown outcome, OutOfRange or NotFound, or a response that reports
+// RowErrors, makes Go drop the batch, to prevent duplicate delivery, and
+// replace the stream before the next batch (pausing rotation if the stream
+// had not committed yet). adk-python drops the batch after OutOfRange,
+// NotFound, or AlreadyExists and replaces the stream before the next one. On
+// an RPC-level receive error after a successful Send (an
+// AppendRowsResponse.Error carrying one of these codes is a server
+// rejection), Go treats Unavailable, DeadlineExceeded, Canceled, Aborted,
+// Internal, and Unknown as unknown outcomes, whereas adk-python also treats
+// ResourceExhausted (TooManyRequests) as one. After an RPC-level
+// InvalidArgument or FailedPrecondition, Go replaces the stream only if an
+// earlier attempt of the request had an unknown outcome, whereas adk-python
+// also replaces it when the error is not a schema mismatch. DropStats has five
+// per-reason counters, whereas adk-python's get_drop_stats() returns ten.
+// adk-python uploads while it parses an event, before the row is queued, with a
+// Cloud Storage client built from the credentials of the plugin, a fixed 32 KiB
+// inline text limit and the parallelism of its thread pool. This plugin queues
+// payloads with rows and uploads them at batch flush time, bounds upload
+// concurrency and memory, supports customizable offloaders, exposes atomic
+// DropStats counters, and optionally writes through a COMMITTED stream with
+// explicit offsets when ExactlyOnceDelivery is enabled. ExactlyOnceDelivery
+// handles offset desynchronization (rotating to a fresh stream without
+// consuming append retry attempts) and distinguishes ambiguous transport errors
+// from definite server rejections.
 //
 // Go splits a batch whose rows are estimated at more than 8 MiB into several
 // AppendRows requests, and halves a multi-row request that serializes to more
@@ -227,32 +228,127 @@ type GCSContentOffloader interface {
 //
 // Custom agents that drain a sub-agent or branch error and recover by
 // yielding a final response event must construct that recovery event with
-// session.NewEvent or return content from an AfterAgentCallback. Recovery
-// provenance accepts events with a non-empty ID that carry a canonical UUIDv4
-// ID or observe an active custom platform.WithUUIDProvider installed on the
-// invocation context or on an agent/child context
+// session.NewEvent or return content from an AfterAgentCallback. The rest of
+// this comment describes when such a recovery clears the failure.
+//
+// Recovery provenance accepts events with a non-empty ID that carry a
+// canonical UUIDv4 ID or observe an active custom platform.WithUUIDProvider
+// installed on the invocation context or on an agent/child context
 // (ctx.WithContext(platform.WithUUIDProvider(ctx, p))) so agent lifecycle
-// callbacks can observe it. Bare session.Event struct literals lacking a
-// UUIDv4 ID under the default provider fail closed as AGENT_ERROR /
-// INVOCATION_ERROR even when Timestamp is zero or Actions maps are
-// initialized, because runner delivery stamps zero timestamps at delivery
-// time and struct literals can allocate Actions maps. A non-UUID
-// platform.WithUUIDProvider passed only to an isolated session.NewEvent call
-// context (session.NewEvent(platform.WithUUIDProvider(ctx, p), invID)) without
-// being attached to the invocation or agent context has no callback-observable
-// provenance and fails closed just like a bare struct literal. As a stated
-// fail-closed divergence from unconditional timestamp clearing, under a
-// constant platform.WithTimeProvider, single-activation AfterAgentCallback
-// content recovery succeeds on the same tick, whereas repeated sequential
-// activations of the same sub-agent or parallel branch under an open custom
-// ancestor require platform.WithTimeProvider to advance between iterations;
-// non-callback recovery events (whether live or buffered across a sub-agent's
-// retirement) likewise require platform.WithTimeProvider to advance strictly
-// past the failure timestamp before the recovery event is created. After the
-// tick in which a sub-agent's activation retired, only its
-// AfterAgentCallback events count as its own, so a non-callback recovery
-// event that an ancestor buffers past that retirement must be created no
-// later than the retirement tick.
+// callbacks can observe it:
+//
+//   - Bare session.Event struct literals lacking a UUIDv4 ID under the
+//     default provider fail closed as AGENT_ERROR / INVOCATION_ERROR even when
+//     Timestamp is zero or Actions maps are initialized, because runner
+//     delivery stamps zero timestamps at delivery time and struct literals can
+//     allocate Actions maps.
+//   - A non-UUID platform.WithUUIDProvider passed only to an isolated
+//     session.NewEvent call context
+//     (session.NewEvent(platform.WithUUIDProvider(ctx, p), invID)) without
+//     being attached to the invocation or agent context has no
+//     callback-observable provenance and fails closed just like a bare struct
+//     literal.
+//
+// Under a constant platform.WithTimeProvider, as a stated fail-closed
+// divergence from unconditional timestamp clearing, single-activation
+// AfterAgentCallback content recovery succeeds on the same tick, whereas
+// repeated sequential activations of the same sub-agent or parallel branch
+// under an open custom ancestor require platform.WithTimeProvider to advance
+// between iterations. Non-callback recovery events (whether live or buffered
+// across a sub-agent's retirement) likewise require platform.WithTimeProvider
+// to advance strictly past the failure timestamp before the recovery event is
+// created, because on a constant clock nothing in such an event shows whether
+// it was created after the failure or earlier in the same tick. After the tick
+// in which a sub-agent's activation retired, only its AfterAgentCallback
+// events count as its own, so a non-callback recovery event that an ancestor
+// buffers past that retirement must be created no later than the retirement
+// tick.
+//
+// An AfterAgentCallback event is recognized by the StateDelta or ArtifactDelta
+// map that ADK gives it from the context in which the callbacks ran:
+//
+//   - An earlier-registered plugin's OnEventCallback may replace either map
+//     with a copy, but an event whose maps it both replaces is no longer
+//     attributed to the retired activation after the retirement tick, and the
+//     failure that the callback recovered from stays reported.
+//   - Such an event is recognized whether or not the agent responded earlier,
+//     for as long as a custom ancestor may still deliver it or another
+//     activation of the same agent could be taken for its author, so the
+//     summary of an activation that finished cleanly never clears the failure
+//     of another activation of the same agent, whether that one started while
+//     the callbacks ran, started in the tick in which the summary was created,
+//     or a custom ancestor delivers the summary only after that one failed.
+//   - The event that ADK builds when the after-agent callbacks return no
+//     content but change state or artifacts counts as delivered the same way
+//     when it carries either map; it is no recovery itself.
+//   - ADK runs the callbacks on the goroutine that ran the activation, and an
+//     agent that a callback runs on that goroutine starts and ends while they
+//     run, so it does not show that they returned; an agent that a callback
+//     runs on another goroutine shows nothing about them either.
+//
+// When a parent runs more than eight activations of one agent on one branch
+// on goroutines that it does not wait for, nothing shows that their
+// after-agent callbacks returned until the parent's run returns, and the
+// after-agent events of the oldest of them are no longer told apart: until
+// then, an event of that agent that one of them can have created clears no
+// failure, and an open activation of that agent under a custom ancestor
+// records no response with it. While another activation of that agent on that
+// branch and node path is open, none of them is folded that way, nor is an
+// activation whose callbacks were seen to return: each keeps an entry of its
+// own until no such activation is open.
+//
+// Concurrent activations of one agent on the same branch and node path, such
+// as the sub-agents of two concurrent runs of one custom agent, are told apart
+// by when their events were created:
+//
+//   - An event that one of them created while the other ran, and that an open
+//     custom ancestor delivers only after the other retired, could be either's
+//     and records no response, so a failure of the activation that created it
+//     stays reported even when a custom ancestor recovers from it. Delivering
+//     such an event before either activation ends avoids this.
+//   - An event that the open activation creates after the other retired is
+//     its own, so it can recover a failure that the open activation swallowed,
+//     once nothing shows that the retired one may still deliver an event of
+//     its own: the retired activation has no AfterAgentCallback (of its agent
+//     or of a plugin registered after this one), its after-agent event was
+//     already delivered, or the event was created after its after-agent
+//     callbacks were seen to return, because another agent started or ended
+//     on the goroutine that ran them, outside them, or the run of its parent
+//     returned. Until then, such a recovery could be the retired activation's
+//     after-agent event with both maps replaced, and the failure stays
+//     reported.
+//
+// Activations of one agent on different branches, such as runs of one custom
+// agent under two branches of a ParallelAgent, are told apart by the Branch
+// of each event, which ADK sets on the events that it builds: an event is
+// never attributed to an activation on a sibling branch. An event without a
+// Branch, as session.NewEvent leaves it, can be that of an activation on any
+// branch, and the workflow scheduler stamps its node run's branch on an event
+// that left Branch empty, so an event with a Branch can be that of an
+// activation on that branch or on a branch under it:
+//
+//   - Such an event is attributed only when the activations of the same agent
+//     on a single one of those branches can have created it, and otherwise
+//     records no response, also when one activation ran on a branch and
+//     another one on a branch under it.
+//   - A failure that one of them swallowed is then recovered only by an event
+//     that the others cannot have created: one that carries the activation's
+//     own branch when no other activation of the agent runs on a branch under
+//     it (set ev.Branch = ctx.Branch()), one created after the others retired
+//     with no after-agent event of theirs to come, or the activation's own
+//     AfterAgentCallback event, which carries its action maps, unless an
+//     earlier plugin replaced both.
+//
+// An agent that a custom agent runs on a goroutine is placed under the
+// activation of the custom agent whose goroutine runs it or started it. The
+// runtime names only the goroutine that directly started another, so when
+// concurrent activations of one custom agent each run a sub-agent on a
+// goroutine that a helper goroutine of theirs started, and the helper runs no
+// ADK callback, the sub-agent is placed under the nearest span that encloses
+// all of those activations, and a failure that one of them swallows is
+// recovered only by that span or the agents above it, not by that
+// activation's own recovery. Run such sub-agents on the custom agent's
+// goroutine or on a goroutine that it starts directly.
 type Config struct {
 	Enabled        bool
 	ProjectID      string

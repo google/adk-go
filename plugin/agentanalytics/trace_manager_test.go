@@ -862,9 +862,15 @@ func TestTraceManager_AgentNesting(t *testing.T) {
 	}{
 		{"event of worker on w1", "worker", w1Branch, w1},
 		{"event of worker on w2", "worker", w2Branch, w2},
-		// An author that does not run on the event's branch is found by
-		// name: its most recent run.
-		{"event of worker on another branch", "worker", "fan.elsewhere", w2},
+		// An author that does not run on the event's branch did not create
+		// the event on any of its open runs: their branches are siblings of
+		// the event's.
+		{"event of worker on another branch", "worker", "fan.elsewhere", invocation},
+		// An event without a branch could be either run's.
+		{"event of worker without a branch", "worker", "", invocation},
+		// The workflow scheduler stamps its node run's branch on an event
+		// that left Branch empty, which an agent under it created.
+		{"event of x on an enclosing branch", "x", innerBranch, x},
 		{"event of x", "x", xBranch, x},
 		{"event of the user", "user", "", invocation},
 	}
@@ -1737,16 +1743,6 @@ func TestTraceManager_SameAgentConcurrentNodePaths(t *testing.T) {
 	req := &model.LLMRequest{Model: "gemini-2.5-pro", Contents: []*genai.Content{textContent("user", "hi")}}
 	res := &model.LLMResponse{Content: textContent("model", "ok")}
 
-	ev1 := session.NewEvent(t.Context(), mCtx.invocationID)
-	ev1.Author = "worker"
-	ev1.NodeInfo = &session.NodeInfo{Path: "wf@0/worker@1"}
-	ev1.LLMResponse = model.LLMResponse{Content: textContent("model", "event-1")}
-
-	ev2 := session.NewEvent(t.Context(), mCtx.invocationID)
-	ev2.Author = "worker"
-	ev2.NodeInfo = &session.NodeInfo{Path: "wf@0/worker@2"}
-	ev2.LLMResponse = model.LLMResponse{Content: textContent("model", "event-2")}
-
 	var errs callbackErrors
 	errs.add(p.BeforeRunCallback()(rootCtx))
 	errs.add(p.BeforeAgentCallback()(rootCtx))
@@ -1760,6 +1756,15 @@ func TestTraceManager_SameAgentConcurrentNodePaths(t *testing.T) {
 	errs.add(p.BeforeToolCallback()(w2ToolCtx, lookup, map[string]any{"id": 2}))
 	errs.add(p.AfterToolCallback()(w1ToolCtx, lookup, map[string]any{"id": 1}, map[string]any{"ok": true}, nil))
 	errs.add(p.AfterToolCallback()(w2ToolCtx, lookup, map[string]any{"id": 2}, map[string]any{"ok": true}, nil))
+	// Each activation creates its event once it runs.
+	ev1 := session.NewEvent(t.Context(), mCtx.invocationID)
+	ev1.Author = "worker"
+	ev1.NodeInfo = &session.NodeInfo{Path: "wf@0/worker@1"}
+	ev1.LLMResponse = model.LLMResponse{Content: textContent("model", "event-1")}
+	ev2 := session.NewEvent(t.Context(), mCtx.invocationID)
+	ev2.Author = "worker"
+	ev2.NodeInfo = &session.NodeInfo{Path: "wf@0/worker@2"}
+	ev2.LLMResponse = model.LLMResponse{Content: textContent("model", "event-2")}
 	errs.add(p.OnEventCallback()(rootCtx, ev1))
 	errs.add(p.OnEventCallback()(rootCtx, ev2))
 	// Activation 1 finishes before activation 2 (FIFO order on the same branch).
@@ -24480,6 +24485,8 @@ func TestRetireDrainedDescendants_NestedRetiredCustomAncestors(t *testing.T) {
 			invModel := tmModel.invocation(ctx, rootID)
 			invModel.mu.Lock()
 			mBot := invModel.agentStack[2]
+			// The events below were created while mBot ran.
+			mBot.startPlatformTime = t0
 			mBot.unforwardedModelEvents = 4
 			invModel.unrecoveredErrors[k] = recordedError{spanID: mBot.spanID, err: errors.New("model err"), platformTime: t2}
 			_, _, absorbedFCZero := invModel.selectResponseOwnerLocked(2, "", nil, true, false, "", t2, time.Time{}, false)
@@ -24867,13 +24874,13 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		}
 	})
 
-	// statePtr returns the StateDelta address of an event that carries delta,
-	// as OnEventCallback sees it.
-	statePtr := func(delta map[string]any) uintptr {
-		return eventStateDeltaPtr(&session.Event{Actions: session.EventActions{StateDelta: delta}})
+	// actionsOf returns the action maps of an event that carries delta and
+	// artifacts, as OnEventCallback sees them.
+	actionsOf := func(delta map[string]any, artifacts map[string]int64) actionMaps {
+		return eventActionMaps(&session.Event{Actions: session.EventActions{StateDelta: delta, ArtifactDelta: artifacts}})
 	}
 
-	t.Run("post-retirement event clears a retired cause only with the activation's AfterAgentCallback StateDelta", func(t *testing.T) {
+	t.Run("post-retirement event clears a retired cause only with an action map of the activation's AfterAgentCallback", func(t *testing.T) {
 		tm := newTraceManager()
 		tm.pushAgentSpan(ctx, rootID)
 		tm.pushAgentSpan(ctx, innerID)
@@ -24895,24 +24902,63 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		if idx < 0 {
 			t.Fatal("inner retired without a retired activation entry")
 		}
-		callbackDelta, otherDelta := map[string]any{}, map[string]any{}
-		inv.retiredActivations[idx].afterAgentStateDeltaPtr = statePtr(callbackDelta)
-		inv.retiredActivations[idx].afterAgentStateDeltaRef = callbackDelta
+		callbackDelta, callbackArtifacts := map[string]any{}, map[string]int64{}
+		otherDelta, otherArtifacts := map[string]any{}, map[string]int64{}
+		inv.retiredActivations[idx].afterAgentActions = actionsOf(callbackDelta, callbackArtifacts)
+		inv.retiredActivations[idx].afterAgentActionsRef = []any{callbackDelta, callbackArtifacts}
 
 		// Events created after inner retired, such as a held zero-timestamp
 		// event that the runner stamped on delivery, are not inner's unless
-		// they carry the StateDelta of its after-agent callbacks.
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, 0, true)
-		if len(rootSpan.retiredCauses) != 1 {
-			t.Fatalf("post-retirement event without StateDelta cleared the cause: len(retiredCauses) = %d, want 1", len(rootSpan.retiredCauses))
+		// they carry an action map of its after-agent callbacks.
+		for _, tc := range []struct {
+			name    string
+			actions actionMaps
+		}{
+			{"no action maps", actionMaps{}},
+			{"other action maps", actionsOf(otherDelta, otherArtifacts)},
+		} {
+			inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, tc.actions, true)
+			if len(rootSpan.retiredCauses) != 1 {
+				t.Fatalf("post-retirement event with %s cleared the cause: len(retiredCauses) = %d, want 1", tc.name, len(rootSpan.retiredCauses))
+			}
 		}
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, statePtr(otherDelta), true)
-		if len(rootSpan.retiredCauses) != 1 {
-			t.Fatalf("post-retirement event with another StateDelta cleared the cause: len(retiredCauses) = %d, want 1", len(rootSpan.retiredCauses))
-		}
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, statePtr(callbackDelta), true)
+		// An earlier plugin's OnEventCallback may swap StateDelta for a copy:
+		// the callback's ArtifactDelta still shows the event's origin.
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, actionsOf(maps.Clone(callbackDelta), callbackArtifacts), true)
 		if len(rootSpan.retiredCauses) != 0 {
-			t.Fatalf("AfterAgentCallback event left len(retiredCauses) = %d, want 0", len(rootSpan.retiredCauses))
+			t.Fatalf("AfterAgentCallback event with a copied StateDelta left len(retiredCauses) = %d, want 0", len(rootSpan.retiredCauses))
+		}
+	})
+
+	t.Run("post-retirement event with the AfterAgentCallback StateDelta and another ArtifactDelta clears a retired cause", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		rootSpan := inv.agentStack[1]
+		innerSpan := inv.agentStack[2]
+		innerSpan.completed = true
+		innerSpan.hasAfterAgentCallbacks = true
+		innerSpan.startPlatformTime = t0
+		innerSpan.retiredCauses = []retiredCause{{
+			err:          errors.New("child failure"),
+			name:         "child",
+			platformTime: t1,
+		}}
+		inv.retireAgentAtLocked(2, true, innerSpan.seq, t2)
+		idx := inv.findRetiredActivationIndexLocked(innerSpan.spanID)
+		if idx < 0 {
+			t.Fatal("inner retired without a retired activation entry")
+		}
+		callbackDelta, callbackArtifacts := map[string]any{}, map[string]int64{}
+		inv.retiredActivations[idx].afterAgentActions = actionsOf(callbackDelta, callbackArtifacts)
+		inv.retiredActivations[idx].afterAgentActionsRef = []any{callbackDelta, callbackArtifacts}
+
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, actionsOf(callbackDelta, map[string]int64{}), true)
+		if len(rootSpan.retiredCauses) != 0 {
+			t.Fatalf("AfterAgentCallback event with a copied ArtifactDelta left len(retiredCauses) = %d, want 0", len(rootSpan.retiredCauses))
 		}
 	})
 
@@ -24950,15 +24996,15 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 			t.Fatalf("retired activation entries = (%d, %d), want both", idx1, idx2)
 		}
 		delta1, delta2 := map[string]any{}, map[string]any{}
-		inv.retiredActivations[idx1].afterAgentStateDeltaPtr = statePtr(delta1)
-		inv.retiredActivations[idx1].afterAgentStateDeltaRef = delta1
-		inv.retiredActivations[idx2].afterAgentStateDeltaPtr = statePtr(delta2)
-		inv.retiredActivations[idx2].afterAgentStateDeltaRef = delta2
+		inv.retiredActivations[idx1].afterAgentActions = actionsOf(delta1, nil)
+		inv.retiredActivations[idx1].afterAgentActionsRef = delta1
+		inv.retiredActivations[idx2].afterAgentActions = actionsOf(delta2, nil)
+		inv.retiredActivations[idx2].afterAgentActionsRef = delta2
 
 		// The event carries inner1's callback StateDelta and was created
 		// after both activations retired: inner2, whose callbacks did not
 		// create it, cannot own it, so it does not exclude inner1.
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, statePtr(delta1), true)
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t3, true, true, actionsOf(delta1, nil), true)
 		if len(rootSpan.retiredCauses) != 0 {
 			t.Fatalf("inner1's AfterAgentCallback event left len(retiredCauses) = %d, want 0", len(rootSpan.retiredCauses))
 		}
@@ -25582,24 +25628,24 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		tm.pushAgentSpan(ctx, rootID)
 		inv := tm.invocation(ctx, rootID)
 		sdMap := map[string]any{}
-		sdPtr := reflect.ValueOf(sdMap).Pointer()
+		sdActions := actionMaps{stateDelta: reflect.ValueOf(sdMap).Pointer()}
 		innerSpanID := newSpanID()
 
 		inv.mu.Lock()
 		rootRec := inv.agentStack[1]
 		rootRec.startPlatformTime = t0
 		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
-			swallower:               retiredSwallower{spanID: innerSpanID, seq: 2, name: "inner"},
-			parentSpanID:            rootRec.spanID,
-			guardSpanIDs:            []string{rootRec.spanID},
-			retiredAtSeq:            10,
-			completedOrTask:         true,
-			unrespondedAtPop:        true,
-			hasAfterAgentCallbacks:  true,
-			afterAgentStateDeltaPtr: sdPtr,
-			afterAgentStateDeltaRef: sdMap,
-			startPlatformTime:       t0,
-			retiredAtPlatformTime:   t0,
+			swallower:              retiredSwallower{spanID: innerSpanID, seq: 2, name: "inner"},
+			parentSpanID:           rootRec.spanID,
+			guardSpanIDs:           []string{rootRec.spanID},
+			retiredAtSeq:           10,
+			completedOrTask:        true,
+			unrespondedAtPop:       true,
+			hasAfterAgentCallbacks: true,
+			afterAgentActions:      sdActions,
+			afterAgentActionsRef:   sdMap,
+			startPlatformTime:      t0,
+			retiredAtPlatformTime:  t0,
 		})
 		rootRec.retiredCauses = []retiredCause{{
 			err:          errors.New("post-retirement descendant boom"),
@@ -25609,28 +25655,28 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 			causeSeq:     15,
 		}}
 
-		// Even with an authentic AfterAgentCallback StateDelta pointer at matching timestamp t0,
+		// Even with an authentic AfterAgentCallback StateDelta at matching timestamp t0,
 		// a cause recorded at or after retirement (causeSeq 15 >= retiredAtSeq 10) must fail closed.
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdPtr, true)
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdActions, true)
 		if len(rootRec.retiredCauses) != 1 {
 			inv.mu.Unlock()
 			t.Fatalf("stale callback cleared later same-tick cause (retiredAtSeq=10 <= causeSeq=15); retiredCauses=%d, want 1", len(rootRec.retiredCauses))
 		}
 
 		// Control: a pre-retirement cause (causeSeq 5 < retiredAtSeq 10) on the same tick clears,
-		// releases the StateDelta keep-alive, and marks unrespondedAtPop = false.
-		inv.retiredActivations[0].afterAgentStateDeltaPtr = sdPtr
-		inv.retiredActivations[0].afterAgentStateDeltaRef = sdMap
+		// releases the callback context keep-alive, and marks unrespondedAtPop = false.
+		inv.retiredActivations[0].afterAgentActions = sdActions
+		inv.retiredActivations[0].afterAgentActionsRef = sdMap
 		rootRec.retiredCauses[0].causeSeq = 5
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdPtr, true)
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t0, true, true, sdActions, true)
 		causesLeft := len(rootRec.retiredCauses)
 		raAfter := inv.retiredActivations[0]
 		inv.mu.Unlock()
 		if causesLeft != 0 {
 			t.Fatalf("authentic callback failed to clear pre-retirement same-tick cause: retiredCauses=%d, want 0", causesLeft)
 		}
-		if raAfter.afterAgentStateDeltaPtr != 0 || raAfter.afterAgentStateDeltaRef != nil {
-			t.Fatalf("matched callback did not clear afterAgentStateDelta keep-alive: ptr=%#x ref=%v", raAfter.afterAgentStateDeltaPtr, raAfter.afterAgentStateDeltaRef)
+		if raAfter.afterAgentActions != (actionMaps{}) || raAfter.afterAgentActionsRef != nil {
+			t.Fatalf("matched callback did not clear afterAgentActions keep-alive: actions=%+v ref=%v", raAfter.afterAgentActions, raAfter.afterAgentActionsRef)
 		}
 		if raAfter.unrespondedAtPop {
 			t.Fatal("matched same-tick AfterAgentCallback left unrespondedAtPop=true, want false")
@@ -25668,12 +25714,12 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		}
 	})
 
-	t.Run("pointer-match does not bypass later retired activation ambiguity", func(t *testing.T) {
+	t.Run("pointer-match keeps the event its activation's although a later retired activation would exclude it by timestamp", func(t *testing.T) {
 		tm := newTraceManager()
 		tm.pushAgentSpan(ctx, rootID)
 		inv := tm.invocation(ctx, rootID)
 		sdMap := map[string]any{}
-		sdPtr := reflect.ValueOf(sdMap).Pointer()
+		sdActions := actionMaps{stateDelta: reflect.ValueOf(sdMap).Pointer()}
 		inner1Span := newSpanID()
 		inner2Span := newSpanID()
 
@@ -25682,17 +25728,17 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 		rootRec.startPlatformTime = t0
 		inv.retiredActivations = append(inv.retiredActivations,
 			retiredActivation{
-				swallower:               retiredSwallower{spanID: inner1Span, seq: 2, name: "inner"},
-				parentSpanID:            rootRec.spanID,
-				guardSpanIDs:            []string{rootRec.spanID},
-				retiredAtSeq:            10,
-				completedOrTask:         true,
-				unrespondedAtPop:        true,
-				hasAfterAgentCallbacks:  true,
-				afterAgentStateDeltaPtr: sdPtr,
-				afterAgentStateDeltaRef: sdMap,
-				startPlatformTime:       t0,
-				retiredAtPlatformTime:   t0,
+				swallower:              retiredSwallower{spanID: inner1Span, seq: 2, name: "inner"},
+				parentSpanID:           rootRec.spanID,
+				guardSpanIDs:           []string{rootRec.spanID},
+				retiredAtSeq:           10,
+				completedOrTask:        true,
+				unrespondedAtPop:       true,
+				hasAfterAgentCallbacks: true,
+				afterAgentActions:      sdActions,
+				afterAgentActionsRef:   sdMap,
+				startPlatformTime:      t0,
+				retiredAtPlatformTime:  t0,
 			},
 			retiredActivation{
 				swallower:             retiredSwallower{spanID: inner2Span, seq: 11, name: "inner"},
@@ -25713,44 +25759,62 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 			causeSeq:     5,
 		}}
 
-		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t1, true, true, sdPtr, true)
+		// Without the map, inner-1 cannot own an event created after it
+		// retired, so inner-2, which did not swallow the failure, is the
+		// author and the cause stays.
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t1, true, true, actionMaps{}, true)
+		causesLeftWithoutMap := len(rootRec.retiredCauses)
+		// The map that inner-1's after-agent callbacks ran with shows that
+		// the event is inner-1's, and timestamp provenance, which orders the
+		// events of runs, does not apply to an event built after the run.
+		inv.clearRetiredCauseForEventWithStateLocked("inner", "", "", t1, true, true, sdActions, true)
 		causesLeft := len(rootRec.retiredCauses)
 		inv.mu.Unlock()
-		if causesLeft != 1 {
-			t.Fatalf("pointer match bypassed later ambiguous activation: retiredCauses=%d, want 1", causesLeft)
+		if causesLeftWithoutMap != 1 {
+			t.Fatalf("map-less event cleared inner-1's cause: retiredCauses=%d, want 1", causesLeftWithoutMap)
+		}
+		if causesLeft != 0 {
+			t.Fatalf("pointer match did not clear inner-1's cause: retiredCauses=%d, want 0", causesLeft)
 		}
 	})
 
-	t.Run("afterAgentStateDeltaRef cleared on compaction and endInvocation", func(t *testing.T) {
+	t.Run("afterAgentActionsRef released once settled and on endInvocation, never by compaction", func(t *testing.T) {
 		tm := newTraceManager()
 		tm.pushAgentSpan(ctx, rootID)
 		inv := tm.invocation(ctx, rootID)
 
 		type sentinel struct{ _ [64]byte }
-		var hullWeak, endWeak weak.Pointer[sentinel]
+		var settledWeak, pendingWeak weak.Pointer[sentinel]
 		func() {
-			s1, s2 := &sentinel{}, &sentinel{}
-			m1 := map[string]any{"k": s1}
-			m2 := map[string]any{"k": s2}
-			m3 := map[string]any{}
-			m4 := map[string]any{}
-			endWeak = weak.Make(s1)
-			hullWeak = weak.Make(s2)
+			pending, settled := &sentinel{}, &sentinel{}
+			pendingWeak = weak.Make(pending)
+			settledWeak = weak.Make(settled)
 			inv.mu.Lock()
 			rootRec := inv.agentStack[1]
 			rootRec.startPlatformTime = t0
-			for idx, mp := range []map[string]any{m1, m2, m3, m4} {
+			// The first entry's after-agent callbacks may still run, so it
+			// keeps its maps. The four others' callbacks returned, so their
+			// maps go and they compact.
+			for idx := range 5 {
+				mp := map[string]any{}
+				switch idx {
+				case 0:
+					mp["k"] = pending
+				case 2:
+					mp["k"] = settled
+				}
 				inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
-					swallower:               retiredSwallower{spanID: newSpanID(), seq: inv.nextSeqLocked(), name: "bot"},
-					parentSpanID:            rootRec.spanID,
-					guardSpanIDs:            []string{rootRec.spanID},
-					retiredAtSeq:            inv.nextSeqLocked(),
-					completedOrTask:         true,
-					unrespondedAtPop:        true,
-					afterAgentStateDeltaPtr: reflect.ValueOf(mp).Pointer(),
-					afterAgentStateDeltaRef: mp,
-					startPlatformTime:       t0.Add(time.Duration(idx) * time.Millisecond),
-					retiredAtPlatformTime:   t1.Add(time.Duration(idx) * time.Millisecond),
+					swallower:             retiredSwallower{spanID: newSpanID(), seq: inv.nextSeqLocked(), name: "bot"},
+					parentSpanID:          rootRec.spanID,
+					guardSpanIDs:          []string{rootRec.spanID},
+					retiredAtSeq:          inv.nextSeqLocked(),
+					completedOrTask:       true,
+					joinedAtRetire:        true,
+					afterAgentDone:        idx > 0,
+					afterAgentActions:     actionMaps{stateDelta: reflect.ValueOf(mp).Pointer()},
+					afterAgentActionsRef:  mp,
+					startPlatformTime:     t0.Add(time.Duration(idx) * time.Millisecond),
+					retiredAtPlatformTime: t1.Add(time.Duration(idx) * time.Millisecond),
 				})
 			}
 			inv.mu.Unlock()
@@ -25758,36 +25822,44 @@ func TestCausalRecoveryOrderingAndProvenanceGuards(t *testing.T) {
 
 		runtime.GC()
 		runtime.GC()
-		if hullWeak.Value() == nil || endWeak.Value() == nil {
-			t.Fatal("retired StateDelta ref was collected before compaction or endInvocation")
+		if settledWeak.Value() == nil || pendingWeak.Value() == nil {
+			t.Fatal("retired StateDelta ref was collected before pruning or endInvocation")
 		}
 
 		inv.mu.Lock()
 		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
-		if len(inv.retiredActivations) != 3 || !inv.retiredActivations[1].compactedHull {
-			gotLen := len(inv.retiredActivations)
-			inv.mu.Unlock()
-			t.Fatalf("expected 3 entries with compactedHull at index 1, got len=%d", gotLen)
+		var hulls, withMaps int
+		for _, ra := range inv.retiredActivations {
+			if ra.compactedHull {
+				hulls++
+			}
+			if ra.afterAgentActions != (actionMaps{}) || ra.afterAgentActionsRef != nil {
+				withMaps++
+				if ra.compactedHull || ra.afterAgentDone {
+					inv.mu.Unlock()
+					t.Fatalf("entry with maps: hull %v, afterAgentDone %v; want only the entry whose callbacks may still run", ra.compactedHull, ra.afterAgentDone)
+				}
+			}
 		}
-		hull := inv.retiredActivations[1]
+		gotLen := len(inv.retiredActivations)
 		inv.mu.Unlock()
-		if hull.afterAgentStateDeltaPtr != 0 || hull.afterAgentStateDeltaRef != nil {
-			t.Fatalf("compacted hull retained StateDelta ref: ptr=%#x ref=%v", hull.afterAgentStateDeltaPtr, hull.afterAgentStateDeltaRef)
+		if gotLen != 4 || hulls != 1 || withMaps != 1 {
+			t.Fatalf("after pruning: %d entries, %d hulls, %d with maps; want 4, 1, 1 (the pending entry, and three for the settled ones)", gotLen, hulls, withMaps)
 		}
 
 		runtime.GC()
 		runtime.GC()
-		if hullWeak.Value() != nil {
-			t.Fatal("compacted entry callback StateDelta ref remained reachable after compaction and GC")
+		if settledWeak.Value() != nil {
+			t.Fatal("settled entry's callback StateDelta ref remained reachable after pruning and GC")
 		}
-		if endWeak.Value() == nil {
-			t.Fatal("surviving firstIdx StateDelta ref was unexpectedly collected before endInvocation")
+		if pendingWeak.Value() == nil {
+			t.Fatal("pending entry's callback StateDelta ref was collected before endInvocation")
 		}
 
 		tm.endInvocation(ctx, rootID)
 		runtime.GC()
 		runtime.GC()
-		if endWeak.Value() != nil {
+		if pendingWeak.Value() != nil {
 			t.Fatal("retired callback StateDelta ref remained reachable after endInvocation and GC")
 		}
 	})
@@ -26312,18 +26384,24 @@ func TestContextHasCustomUUIDProviderAndProvenance(t *testing.T) {
 	}
 }
 
-func TestCallbackAfterAgentStateDeltaPtr(t *testing.T) {
-	if got := callbackAfterAgentStateDeltaPtr(context.Background()); got != 0 {
-		t.Fatalf("callbackAfterAgentStateDeltaPtr(Background) = %#x, want 0", got)
+// TestCallbackAfterAgentActionMaps checks, against the event of a real run,
+// the reflection that reads the action maps of ADK's after-agent callback
+// context, which offers no exported accessor for them: a field that a later
+// ADK release renames fails this test instead of silently disabling the
+// recognition of after-agent callback events.
+func TestCallbackAfterAgentActionMaps(t *testing.T) {
+	if got := callbackAfterAgentActionMaps(context.Background()); got != (actionMaps{}) {
+		t.Fatalf("callbackAfterAgentActionMaps(Background) = %+v, want zero", got)
 	}
-	if got := eventStateDeltaPtr(nil); got != 0 {
-		t.Fatalf("eventStateDeltaPtr(nil) = %#x, want 0", got)
+	if got := eventActionMaps(nil); got != (actionMaps{}) {
+		t.Fatalf("eventActionMaps(nil) = %+v, want zero", got)
 	}
-	if got := eventStateDeltaPtr(&session.Event{}); got != 0 {
-		t.Fatalf("eventStateDeltaPtr(zero Event) = %#x, want 0", got)
+	if got := eventActionMaps(&session.Event{}); got != (actionMaps{}) {
+		t.Fatalf("eventActionMaps(zero Event) = %+v, want zero", got)
 	}
 
-	var observedCallbackPtr uintptr
+	var observed actionMaps
+	var observedKeep any
 	var events []*session.Event
 	var errLogs bytes.Buffer
 
@@ -26343,9 +26421,10 @@ func TestCallbackAfterAgentStateDeltaPtr(t *testing.T) {
 	}
 
 	probePlugin, err := baseplugin.New(baseplugin.Config{
-		Name: "probe-state-delta-ptr",
+		Name: "probe-action-maps",
 		AfterAgentCallback: func(ctx agent.Context) (*genai.Content, error) {
-			observedCallbackPtr = callbackAfterAgentStateDeltaPtr(ctx)
+			observed = callbackAfterAgentActionMaps(ctx)
+			_, observedKeep = callbackAfterAgentActions(ctx)
 			return nil, nil
 		},
 	})
@@ -26357,7 +26436,7 @@ func TestCallbackAfterAgentStateDeltaPtr(t *testing.T) {
 	log.SetOutput(&errLogs)
 	defer log.SetOutput(prevOut)
 
-	for ev, runErr := range newTestRunner(t, root, probePlugin).Run(t.Context(), "u1", "s-state-delta-ptr", textContent("user", "go"), agent.RunConfig{}) {
+	for ev, runErr := range newTestRunner(t, root, probePlugin).Run(t.Context(), "u1", "s-action-maps", textContent("user", "go"), agent.RunConfig{}) {
 		if runErr != nil {
 			t.Fatalf("runner.Run error = %v", runErr)
 		}
@@ -26366,12 +26445,1801 @@ func TestCallbackAfterAgentStateDeltaPtr(t *testing.T) {
 		}
 	}
 	if strings.Contains(errLogs.String(), "not supported for callback context") {
-		t.Fatalf("callbackAfterAgentStateDeltaPtr triggered callback-context warning log: %q", errLogs.String())
+		t.Fatalf("callbackAfterAgentActionMaps triggered callback-context warning log: %q", errLogs.String())
 	}
-	if observedCallbackPtr == 0 {
-		t.Fatal("callbackAfterAgentStateDeltaPtr = 0 during AfterAgentCallback, want non-zero")
+	if observed.stateDelta == 0 || observed.artifactDelta == 0 {
+		t.Fatalf("callbackAfterAgentActionMaps = %+v during AfterAgentCallback, want both maps", observed)
 	}
-	if len(events) != 1 || eventStateDeltaPtr(events[0]) != observedCallbackPtr {
-		t.Fatalf("eventStateDeltaPtr = %#x (events=%d), want %#x", eventStateDeltaPtr(events[0]), len(events), observedCallbackPtr)
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1", len(events))
+	}
+	if got := eventActionMaps(events[0]); got != observed {
+		t.Fatalf("eventActionMaps(after-agent event) = %+v, want %+v", got, observed)
+	}
+	// What keeps the maps reachable is the EventActions that holds them, not
+	// the callback context.
+	if _, keep := callbackAfterAgentActions(context.Background()); keep != nil {
+		t.Fatalf("callbackAfterAgentActions(Background) keeps %T, want nil", keep)
+	}
+	if _, ok := observedKeep.(context.Context); ok {
+		t.Fatalf("callbackAfterAgentActions keeps the callback context %T", observedKeep)
+	}
+	kept, ok := observedKeep.(reflect.Value)
+	if !ok || kept.Type() != reflect.TypeFor[session.EventActions]() {
+		t.Fatalf("callbackAfterAgentActions keeps %T, want the reflect.Value of a session.EventActions", observedKeep)
+	}
+	if got := (actionMaps{stateDelta: mapAddress(kept.FieldByName("StateDelta")), artifactDelta: mapAddress(kept.FieldByName("ArtifactDelta"))}); got != observed {
+		t.Fatalf("maps of the kept EventActions = %+v, want %+v", got, observed)
+	}
+}
+
+// TestRetiredActivationSettlementAndHullConjuncts pins each condition of the
+// settlement and compaction of retired activations with a pair of cases that
+// differ only in that condition.
+func TestRetiredActivationSettlementAndHullConjuncts(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	rootID := identity{invocationID: "inv-conjuncts", agentName: "root"}
+	errChild := errors.New("child failure")
+
+	// setup returns the locked trace of an invocation whose custom root is
+	// open, which guards the retired activations that a case records, so
+	// that pruning keeps them for inspection.
+	setup := func(t *testing.T) (*invocationTrace, *spanRecord) {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		t.Cleanup(inv.mu.Unlock)
+		return inv, inv.agentStack[1]
+	}
+	retired := func(t *testing.T, inv *invocationTrace, spanID string) retiredActivation {
+		t.Helper()
+		idx := inv.findRetiredActivationIndexLocked(spanID)
+		if idx < 0 {
+			t.Fatalf("no retired activation %q", spanID)
+		}
+		return inv.retiredActivations[idx]
+	}
+
+	t.Run("a surviving swallower of a retired cause is not settled", func(t *testing.T) {
+		for _, surviving := range []bool{false, true} {
+			t.Run(fmt.Sprintf("surviving swallower %v", surviving), func(t *testing.T) {
+				inv, root := setup(t)
+				if surviving {
+					root.retiredCauses = []retiredCause{{
+						err:        errChild,
+						name:       "child",
+						swallowers: []retiredSwallower{{spanID: "inner-1", seq: 2, name: "inner"}},
+					}}
+				}
+				inv.retiredActivations = []retiredActivation{{
+					swallower:       retiredSwallower{spanID: "inner-1", seq: 2, name: "inner"},
+					parentSpanID:    root.spanID,
+					guardSpanIDs:    []string{root.spanID},
+					ancestorSpanIDs: []string{"recovering", root.spanID},
+					joinedAtRetire:  true,
+				}}
+				inv.markSettledRetiredActivationsLocked("recovering", false)
+				if got := retired(t, inv, "inner-1").settledByParent; got == surviving {
+					t.Fatalf("settledByParent = %v, want %v", got, !surviving)
+				}
+			})
+		}
+	})
+
+	t.Run("settlement reaches only the subtree of the recovering activation", func(t *testing.T) {
+		for _, underRecovering := range []bool{false, true} {
+			t.Run(fmt.Sprintf("under recovering activation %v", underRecovering), func(t *testing.T) {
+				inv, root := setup(t)
+				ancestors := []string{"unrelated-parent"}
+				if underRecovering {
+					ancestors = []string{"recovering"}
+				}
+				inv.retiredActivations = []retiredActivation{{
+					swallower:       retiredSwallower{spanID: "other-1", seq: 2, name: "other"},
+					parentSpanID:    root.spanID,
+					guardSpanIDs:    []string{root.spanID},
+					ancestorSpanIDs: ancestors,
+					joinedAtRetire:  true,
+				}}
+				inv.markSettledRetiredActivationsLocked("recovering", false)
+				if got := retired(t, inv, "other-1").settledByParent; got != underRecovering {
+					t.Fatalf("settledByParent = %v, want %v", got, underRecovering)
+				}
+			})
+		}
+	})
+
+	t.Run("a retiring parent drops its child's callback maps only once nothing needs them", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// active makes the child a swallower of a recorded cause.
+			active bool
+			// runOver makes mid retire once its run returned, so that every
+			// after-agent event of the child that can still be delivered was
+			// created by then, whether or not mid waited for the child.
+			runOver bool
+			// guarded keeps root, which may hold the child's events, open.
+			guarded bool
+			// peerOpen keeps another activation of the child's agent open.
+			peerOpen bool
+			// unresponded makes the child retire without a response, and
+			// credit makes it leave a credit for one.
+			unresponded, credit bool
+			kept                bool
+		}{
+			{name: "callbacks returned and nothing else needs them", runOver: true, guarded: true, kept: false},
+			{name: "callbacks may still run while root may hold their event", guarded: true, kept: true},
+			{name: "callbacks may still run and no ancestor can hold their event", kept: false},
+			{name: "active swallower", active: true, runOver: true, guarded: true, kept: true},
+			{name: "callbacks returned while another activation of the agent is open", runOver: true, guarded: true, peerOpen: true, kept: true},
+			{name: "callbacks returned after the child retired without a response", runOver: true, guarded: true, unresponded: true, kept: false},
+			{name: "callbacks returned while the child's credit is outstanding", runOver: true, guarded: true, unresponded: true, credit: true, kept: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv, root := setup(t)
+				if tc.active {
+					root.retiredCauses = []retiredCause{{
+						err:        errChild,
+						name:       "child",
+						swallowers: []retiredSwallower{{spanID: "inner-1", seq: 3, name: "inner"}},
+					}}
+				}
+				if tc.peerOpen {
+					inv.agentStack = append(inv.agentStack, &spanRecord{spanID: "inner-2", parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "inner", seq: 4})
+				}
+				callbackDelta := map[string]any{}
+				callbackActions := actionMaps{stateDelta: reflect.ValueOf(callbackDelta).Pointer()}
+				// The activation responded before it retired, so only what the
+				// case names keeps the callback maps.
+				ra := retiredActivation{
+					swallower:            retiredSwallower{spanID: "inner-1", seq: 3, name: "inner"},
+					parentSpanID:         "mid-1",
+					joinedAtRetire:       true,
+					unrespondedAtPop:     tc.unresponded,
+					afterAgentCredit:     tc.credit,
+					afterAgentActions:    callbackActions,
+					afterAgentActionsRef: callbackDelta,
+				}
+				if tc.credit {
+					inv.unrespondedRetired = map[string]int{llmKey(identity{agentName: "inner"}): 1}
+				}
+				if tc.guarded {
+					ra.guardSpanIDs = []string{root.spanID}
+				}
+				inv.retiredActivations = []retiredActivation{ra}
+				mid := &spanRecord{spanID: "mid-1", parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "mid", seq: 2, completed: tc.runOver}
+				inv.recordRetiredActivationsAtLocked(inv.openSpanSetLocked(), t0, mid)
+				idx := inv.findRetiredActivationIndexLocked("inner-1")
+				kept := idx >= 0 && inv.retiredActivations[idx].afterAgentActions == callbackActions && inv.retiredActivations[idx].afterAgentActionsRef != nil
+				if kept != tc.kept {
+					t.Fatalf("callback maps kept = %v, want %v", kept, tc.kept)
+				}
+				if done := idx >= 0 && inv.retiredActivations[idx].afterAgentDone; idx >= 0 && done != tc.runOver {
+					t.Fatalf("afterAgentDone = %v, want %v", done, tc.runOver)
+				}
+			})
+		}
+	})
+
+	t.Run("a compacted hull keeps only the ancestors that all its members share", func(t *testing.T) {
+		inv, root := setup(t)
+		// The first and the last entry stay as they are, and the three in
+		// between become one hull.
+		for i, ancestors := range [][]string{{"a", "b", "c"}, {"a", "b", "c"}, {"a", "c"}, {"c", "d"}, {"c"}} {
+			inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+				swallower:       retiredSwallower{spanID: fmt.Sprintf("bot-%d", i), seq: uint64(2*i + 1), name: "bot"},
+				parentSpanID:    root.spanID,
+				guardSpanIDs:    []string{root.spanID},
+				ancestorSpanIDs: ancestors,
+				retiredAtSeq:    uint64(2*i + 2),
+				joinedAtRetire:  true,
+			})
+		}
+		inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+		if len(inv.retiredActivations) != 3 || !inv.retiredActivations[1].compactedHull {
+			t.Fatalf("after compaction: %d entries (hull at 1: %v), want 3 with a hull at 1", len(inv.retiredActivations), len(inv.retiredActivations) > 1 && inv.retiredActivations[1].compactedHull)
+		}
+		if got := inv.retiredActivations[1].ancestorSpanIDs; !slices.Equal(got, []string{"c"}) {
+			t.Fatalf("hull ancestorSpanIDs = %v, want [c]", got)
+		}
+	})
+
+	// A hull keeps joinedAtRetire and settledByParent of its first member,
+	// which is sound because compaction never merges entries that differ in
+	// either of them.
+	for _, field := range []string{"joinedAtRetire", "settledByParent"} {
+		t.Run("entries that differ in "+field+" never share a hull", func(t *testing.T) {
+			inv, root := setup(t)
+			flag := func(ra *retiredActivation) *bool {
+				if field == "joinedAtRetire" {
+					return &ra.joinedAtRetire
+				}
+				return &ra.settledByParent
+			}
+			for i := range 8 {
+				ra := retiredActivation{
+					swallower:      retiredSwallower{spanID: fmt.Sprintf("bot-%d", i), seq: uint64(2*i + 1), name: "bot"},
+					parentSpanID:   root.spanID,
+					guardSpanIDs:   []string{root.spanID},
+					retiredAtSeq:   uint64(2*i + 2),
+					joinedAtRetire: true,
+				}
+				*flag(&ra) = i%2 == 1
+				inv.retiredActivations = append(inv.retiredActivations, ra)
+			}
+			inv.pruneSettledRetiredActivationsLocked("bot", "", "")
+			// Each group of four compacts on its own into its first entry,
+			// a hull of its two middle ones and its last entry.
+			hulls, set := 0, 0
+			for i := range inv.retiredActivations {
+				ra := &inv.retiredActivations[i]
+				if ra.compactedHull {
+					hulls++
+				}
+				if *flag(ra) {
+					set++
+				}
+			}
+			if len(inv.retiredActivations) != 6 || hulls != 2 || set != 3 {
+				t.Fatalf("after compaction: %d entries, %d hulls, %d with %s set, want 6, 2 and 3", len(inv.retiredActivations), hulls, set, field)
+			}
+		})
+	}
+}
+
+// TestResponseOwnerCreationWindowAndRunEndRetirement pins the two parts of
+// attributing events that a custom ancestor holds across activations of the
+// same agent: an open peer that started after an event was created does not
+// take it, and an activation that an enclosing retirement left open after its
+// run was over retires, when a buffered event later lets it retire, where its
+// run was found over.
+func TestResponseOwnerCreationWindowAndRunEndRetirement(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	t1 := t0.Add(10 * time.Millisecond)
+	t2 := t0.Add(20 * time.Millisecond)
+	t3 := t0.Add(30 * time.Millisecond)
+	rootID := identity{invocationID: "inv-window", agentName: "root"}
+	innerID := identity{invocationID: "inv-window", agentName: "inner"}
+	parID := identity{invocationID: "inv-window", agentName: "par"}
+	childID := identity{invocationID: "inv-window", agentName: "child"}
+
+	for _, tc := range []struct {
+		name        string
+		evCreatedAt time.Time
+		wantOlder   bool
+	}{
+		{"event created before the newer peer started goes to the older one", t1, true},
+		{"event created after both peers started goes to the newer one", t3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			root := inv.agentStack[1]
+			older := &spanRecord{spanID: newSpanID(), parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "child", startPlatformTime: t0, seq: inv.nextSeqLocked()}
+			newer := &spanRecord{spanID: newSpanID(), parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "child", startPlatformTime: t2, seq: inv.nextSeqLocked()}
+			inv.agentStack = append(inv.agentStack, older, newer)
+			inv.mu.Unlock()
+
+			tm.completeResponseAt(ctx, rootID, "child", "", nil, false, tc.evCreatedAt, true)
+			inv.mu.Lock()
+			olderOwn, newerOwn := older.ownResponse, newer.ownResponse
+			inv.mu.Unlock()
+			if olderOwn != tc.wantOlder || newerOwn == tc.wantOlder {
+				t.Fatalf("ownResponse: older = %v, newer = %v, want %v and %v", olderOwn, newerOwn, tc.wantOlder, !tc.wantOlder)
+			}
+		})
+	}
+
+	t.Run("a drained descendant retires where an enclosing retirement found its run over", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, parID)
+		tm.pushAgentSpan(ctx, childID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		root, inner, par, child := inv.agentStack[1], inv.agentStack[2], inv.agentStack[3], inv.agentStack[4]
+		child.startPlatformTime = t0
+		// par's run returned with child's, which has not responded yet, so
+		// child stays open with its run known to be over.
+		par.completed = true
+		inv.retireAgentAtLocked(slices.Index(inv.agentStack, par), true, par.seq, t1)
+		if !slices.Contains(inv.agentStack, child) || child.runEndSeq == 0 || !child.runEndPlatformTime.Equal(t1) {
+			t.Fatalf("child after par retired: open = %v, runEndSeq = %d, runEndPlatformTime = %v, want open at %v", slices.Contains(inv.agentStack, child), child.runEndSeq, child.runEndPlatformTime, t1)
+		}
+		runEndSeq := child.runEndSeq
+		inner.completed = true
+		inv.retireAgentAtLocked(slices.Index(inv.agentStack, inner), true, inner.seq, t2)
+		if child.runEndSeq != runEndSeq || !child.runEndPlatformTime.Equal(t1) {
+			t.Fatalf("inner's retirement moved child's run end to (%d, %v), want (%d, %v)", child.runEndSeq, child.runEndPlatformTime, runEndSeq, t1)
+		}
+		// A later activation of child starts before child's buffered event
+		// arrives and lets child retire under inner.
+		later := &spanRecord{spanID: newSpanID(), parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "child", startPlatformTime: t2, seq: inv.nextSeqLocked()}
+		inv.agentStack = append(inv.agentStack, later)
+		child.hasResponse, child.ownResponse = true, true
+		inv.retireDrainedDescendantsAtLocked(t3, func(p *spanRecord, _ map[string]bool) bool { return p == inner })
+		idx := inv.findRetiredActivationIndexLocked(child.spanID)
+		if idx < 0 || slices.Contains(inv.agentStack, child) {
+			t.Fatalf("child was not retired as a drained descendant (entry %d)", idx)
+		}
+		ra := inv.retiredActivations[idx]
+		if ra.retiredAtSeq != runEndSeq || !ra.retiredAtPlatformTime.Equal(t1) {
+			t.Fatalf("child retired at (%d, %v), want (%d, %v)", ra.retiredAtSeq, ra.retiredAtPlatformTime, runEndSeq, t1)
+		}
+		if !ra.excludedByEventTimestamp(later.spanID, later.seq, later.goroutineID, later.concurrentPeer, later.startPlatformTime, t2.Add(time.Millisecond), true) {
+			t.Fatal("child can still own an event created after the later activation started")
+		}
+	})
+
+	t.Run("an activation left open while its run may go on has no run end", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, parID)
+		tm.pushAgentSpan(ctx, childID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		par, child := inv.agentStack[2], inv.agentStack[3]
+		// par does not wait for child, whose run goes on on a goroutine of
+		// its own with an error recorded, so child stays open, its run not
+		// known to be over.
+		child.activation, child.goroutineID = &struct{ run int }{}, 1<<62
+		inv.unrecoveredErrors = map[string]recordedError{"child-err": {err: errors.New("child error"), spanID: child.spanID, platformTime: t0}}
+		par.completed = true
+		inv.retireAgentAtLocked(slices.Index(inv.agentStack, par), true, par.seq, t1)
+		if !slices.Contains(inv.agentStack, child) || child.runDone {
+			t.Fatalf("child after par retired: open = %v, runDone = %v, want open and running", slices.Contains(inv.agentStack, child), child.runDone)
+		}
+		if child.runEndSeq != 0 || !child.runEndPlatformTime.IsZero() {
+			t.Fatalf("child run end = (%d, %v), want none", child.runEndSeq, child.runEndPlatformTime)
+		}
+	})
+}
+
+// TestReconcileConcurrentResponseOnPopKeepsInheritedPeerResponse pins that an
+// activation that retires unresponded while a peer of the same agent, branch
+// and node path is open takes back only a response that completeResponse
+// routed to the peer as its own. A response that the peer inherited from an
+// event of an activation under it is not the retiring activation's: the peer
+// keeps it, and the retiring activation retires unresponded, as it does when
+// no peer is open, so that its after-agent action maps are recorded (see
+// popAgentSpan) and its recovery event is not taken for the peer's.
+func TestReconcileConcurrentResponseOnPopKeepsInheritedPeerResponse(t *testing.T) {
+	ctx := t.Context()
+	for _, tc := range []struct {
+		name            string
+		peerOwnResponse bool
+	}{
+		{"inherited peer response stays with the peer", false},
+		{"own peer response moves to the retiring activation", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const invID = "inv-reconcile-inherited"
+			rootID := identity{invocationID: invID, agentName: "root"}
+			innerID := identity{invocationID: invID, agentName: "inner"}
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			tm.pushAgentSpan(ctx, innerID)
+			tm.pushAgentSpan(ctx, innerID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			peer, retiring := inv.agentStack[2], inv.agentStack[3]
+			if peer.name != "inner" || retiring.name != "inner" {
+				t.Fatalf("agentStack[2:4] = (%q, %q), want two inner activations", peer.name, retiring.name)
+			}
+			peer.hasResponse = true
+			peer.ownResponse = tc.peerOwnResponse
+			retiring.completed = true
+			retiring.hasAfterAgentCallbacks = true
+
+			inv.reconcileConcurrentResponseOnPopLocked(3, retiring.seq)
+			inv.retireAgentLocked(3, true, retiring.seq)
+
+			moved := tc.peerOwnResponse
+			if got := retiring.responded(); got != moved {
+				t.Errorf("retiring activation responded = %v, want %v", got, moved)
+			}
+			if peer.hasResponse == moved {
+				t.Errorf("peer hasResponse = %v, want %v", peer.hasResponse, !moved)
+			}
+			idx := inv.findRetiredActivationIndexLocked(retiring.spanID)
+			if idx < 0 {
+				t.Fatal("retiring activation has no retired activation entry")
+			}
+			if got := inv.retiredActivations[idx].unrespondedAtPop; got == moved {
+				t.Errorf("unrespondedAtPop = %v, want %v", got, !moved)
+			}
+			k := llmKey(innerID)
+			wantUnresponded := 0
+			if !moved {
+				wantUnresponded = 1
+			}
+			if got := inv.unrespondedRetired[k]; got != wantUnresponded {
+				t.Errorf("unrespondedRetired = %d, want %d", got, wantUnresponded)
+			}
+		})
+	}
+}
+
+// TestRetiredAuthorEventWhilePeerOpen pins how completeResponse handles an
+// event that a retired activation created while another activation of the
+// same agent is open. The event is absorbed onto the open activation's parent
+// and, when the retired activation is its only possible author, it settles
+// that activation as it would without the open one: the drained descendants
+// under that activation retire, and the failures that it swallowed are
+// cleared if the event shows that it recovered.
+func TestRetiredAuthorEventWhilePeerOpen(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	t1 := t0.Add(10 * time.Millisecond)
+	t2 := t0.Add(20 * time.Millisecond)
+	t3 := t0.Add(30 * time.Millisecond)
+	rootID := identity{invocationID: "inv-retired-author", agentName: "root"}
+	innerID := identity{invocationID: "inv-retired-author", agentName: "inner"}
+	parID := identity{invocationID: "inv-retired-author", agentName: "par"}
+	childID := identity{invocationID: "inv-retired-author", agentName: "child", branch: "par.child"}
+	errChild := errors.New("child failure")
+	actionsOf := func(delta map[string]any, artifacts map[string]int64) actionMaps {
+		return eventActionMaps(&session.Event{Actions: session.EventActions{StateDelta: delta, ArtifactDelta: artifacts}})
+	}
+	// callbackMaps records maps as the action maps of the context in which
+	// rec's after-agent callbacks ran, as popAgentSpan does, and returns them.
+	callbackMaps := func(t *testing.T, inv *invocationTrace, rec *spanRecord) actionMaps {
+		t.Helper()
+		idx := inv.findRetiredActivationIndexLocked(rec.spanID)
+		if idx < 0 {
+			t.Fatalf("%s retired without a retired activation entry", rec.name)
+		}
+		delta, artifacts := map[string]any{}, map[string]int64{}
+		inv.retiredActivations[idx].afterAgentActions = actionsOf(delta, artifacts)
+		inv.retiredActivations[idx].afterAgentActionsRef = []any{delta, artifacts}
+		return inv.retiredActivations[idx].afterAgentActions
+	}
+	retire := func(inv *invocationTrace, rec *spanRecord, at time.Time) {
+		rec.completed = true
+		i := slices.Index(inv.agentStack, rec)
+		inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
+		inv.retireAgentAtLocked(i, true, rec.seq, at)
+	}
+	causesLeft := func(inv *invocationTrace, root *spanRecord) int {
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		return len(root.retiredCauses)
+	}
+
+	// concurrentPair returns a trace in which inner1 swallowed the failure of
+	// a child at t1 and retired at t2 while inner2, a concurrent activation of
+	// the same agent that started at t1, stays open, together with the open
+	// custom root that holds the failure, inner2, and the action maps of
+	// inner1's after-agent callbacks. With responded set, inner1 retires
+	// after an event of a descendant marked it responded, so that only the
+	// count of retired concurrent peers leads its later events to be
+	// absorbed; without it, its retirement leaves an unresponded credit.
+	concurrentPair := func(t *testing.T, responded bool) (*traceManager, *invocationTrace, *spanRecord, *spanRecord, actionMaps) {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		root, inner1, inner2 := inv.agentStack[1], inv.agentStack[2], inv.agentStack[3]
+		if !inner1.concurrentPeer || !inner2.concurrentPeer {
+			t.Fatal("inner activations are not concurrent peers")
+		}
+		inner1.startPlatformTime, inner2.startPlatformTime = t0, t1
+		inner1.hasAfterAgentCallbacks = true
+		inner1.hasResponse = responded
+		inner1.retiredCauses = []retiredCause{{err: errChild, name: "child", platformTime: t1}}
+		retire(inv, inner1, t2)
+		k := llmKey(innerID)
+		if responded && (inv.retiredPeerCount[k] != 1 || inv.unrespondedRetired[k] != 0) {
+			t.Fatalf("retiredPeerCount = %d, unrespondedRetired = %d, want 1 and 0", inv.retiredPeerCount[k], inv.unrespondedRetired[k])
+		}
+		if !responded && inv.unrespondedRetired[k] != 1 {
+			t.Fatalf("unrespondedRetired = %d, want 1", inv.unrespondedRetired[k])
+		}
+		if len(root.retiredCauses) != 1 || !root.retiredCauses[0].hasSwallowerSpan(inner1.spanID) {
+			t.Fatalf("root retiredCauses = %+v, want inner1's swallowed failure", root.retiredCauses)
+		}
+		return tm, inv, root, inner2, callbackMaps(t, inv, inner1)
+	}
+
+	for _, responded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("after-agent event of a retired activation clears its failure while a concurrent peer is open/responded %v", responded), func(t *testing.T) {
+			for _, tc := range []struct {
+				name      string
+				actions   func(callback actionMaps) actionMaps
+				wantClear bool
+			}{
+				{"callback action maps", func(cb actionMaps) actionMaps { return cb }, true},
+				{"other action maps", func(actionMaps) actionMaps { return actionsOf(map[string]any{}, map[string]int64{}) }, false},
+				{"no action maps", func(actionMaps) actionMaps { return actionMaps{} }, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					tm, inv, root, inner2, callback := concurrentPair(t, responded)
+					tm.completeResponseWithEvent(ctx, rootID, "inner", "", nil, false, t3, true, true, tc.actions(callback), true)
+					if cleared := causesLeft(inv, root) == 0; cleared != tc.wantClear {
+						t.Fatalf("failure cleared = %v, want %v", cleared, tc.wantClear)
+					}
+					inv.mu.Lock()
+					defer inv.mu.Unlock()
+					if inner2.ownResponse {
+						t.Fatal("the open peer took the retired activation's event")
+					}
+				})
+			}
+		})
+	}
+
+	// sequentialPair returns a trace in which inner1 swallowed the failure of
+	// a child at t1 and retired at t2 before inner2, an activation of the
+	// same agent, started at inner2Start, together with the open custom root
+	// that holds the failure and inner2. root may still deliver events that
+	// inner1 created before it retired.
+	sequentialPair := func(t *testing.T, inner2Start time.Time) (*traceManager, *invocationTrace, *spanRecord, *spanRecord) {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		root, inner1 := inv.agentStack[1], inv.agentStack[2]
+		inner1.startPlatformTime = t0
+		inner1.retiredCauses = []retiredCause{{err: errChild, name: "child", platformTime: t1}}
+		retire(inv, inner1, t2)
+		inv.mu.Unlock()
+		tm.pushAgentSpan(ctx, innerID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		inner2 := inv.agentStack[2]
+		inner2.startPlatformTime = inner2Start
+		if inner2.concurrentPeer || !inv.hasGuardedRetiredPeerForEventLocked(inner2, "", t1.Add(time.Millisecond), true) {
+			t.Fatal("inner1 is not a guarded retired peer of the sequential inner2")
+		}
+		return tm, inv, root, inner2
+	}
+	for _, tc := range []struct {
+		name        string
+		inner2Start time.Time
+		evCreatedAt time.Time
+		wantClear   bool
+	}{
+		{"held recovery created after the failure clears it", t3, t1.Add(time.Millisecond), true},
+		{"held content created before the failure keeps it", t3, t0.Add(time.Millisecond), false},
+		{"held recovery that the open activation may have created keeps it", t1, t1.Add(time.Millisecond), false},
+	} {
+		t.Run("event held from a retired activation while a later one is open/"+tc.name, func(t *testing.T) {
+			tm, inv, root, inner2 := sequentialPair(t, tc.inner2Start)
+			// The held event is a live session.NewEvent event of inner1,
+			// with action maps of its own.
+			tm.completeResponseWithEvent(ctx, rootID, "inner", "", nil, false, tc.evCreatedAt, true, true, actionsOf(map[string]any{}, map[string]int64{}), true)
+			if cleared := causesLeft(inv, root) == 0; cleared != tc.wantClear {
+				t.Fatalf("failure cleared = %v, want %v", cleared, tc.wantClear)
+			}
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			if inner2.ownResponse {
+				t.Fatal("the open activation took the retired activation's event")
+			}
+		})
+	}
+
+	t.Run("held function response of a retired activation clears its failure while a concurrent peer is open", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		root, inner1, inner2 := inv.agentStack[1], inv.agentStack[2], inv.agentStack[3]
+		// inner1's tool call returned at t0+5ms, before inner2 started,
+		// after the child failure at t0+2ms that inner1 swallowed.
+		inner1.startPlatformTime, inner2.startPlatformTime = t0, t1
+		inner1.awaitingToolEvent = 1
+		inner1.retiredCauses = []retiredCause{{err: errChild, name: "child", platformTime: t0.Add(2 * time.Millisecond)}}
+		retire(inv, inner1, t2)
+		if n := inv.unrespondedRetiredTools[llmKey(innerID)]; n != 1 {
+			inv.mu.Unlock()
+			t.Fatalf("unrespondedRetiredTools = %d, want 1", n)
+		}
+		inv.mu.Unlock()
+		tm.completeResponseWithEvent(ctx, rootID, "inner", "", []string{"call-1"}, false, t0.Add(5*time.Millisecond), true, true, actionsOf(map[string]any{}, map[string]int64{}), true)
+		if n := causesLeft(inv, root); n != 0 {
+			t.Fatalf("len(root.retiredCauses) = %d, want 0", n)
+		}
+	})
+
+	t.Run("only the drained descendants of the retired author retire", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		// branch pushes inner, par and child, retires par and inner, and
+		// leaves child open under them as a drained descendant whose event
+		// root has not delivered yet.
+		branch := func() (inner, child *spanRecord) {
+			tm.pushAgentSpan(ctx, innerID)
+			tm.pushAgentSpan(ctx, parID)
+			tm.pushAgentSpan(ctx, childID)
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			n := len(inv.agentStack)
+			inner, par, child := inv.agentStack[n-3], inv.agentStack[n-2], inv.agentStack[n-1]
+			if par.parent != inner || child.parent != par {
+				t.Fatalf("parents: par under %s, child under %s, want inner and par", par.parent.name, child.parent.name)
+			}
+			inner.startPlatformTime, par.startPlatformTime, child.startPlatformTime = t0, t0, t0
+			inner.hasAfterAgentCallbacks = true
+			retire(inv, par, t1)
+			retire(inv, inner, t1)
+			if !slices.Contains(inv.agentStack, child) {
+				t.Fatal("the unresponded child retired with its parents")
+			}
+			return inner, child
+		}
+		_, child0 := branch()
+		inner1, child1 := branch()
+		tm.pushAgentSpan(ctx, innerID)
+		inv.mu.Lock()
+		child0.hasResponse, child1.hasResponse = true, true
+		callback := callbackMaps(t, inv, inner1)
+		inv.mu.Unlock()
+
+		tm.completeResponseWithEvent(ctx, rootID, "inner", "", nil, false, t3, true, true, callback, true)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		if slices.Contains(inv.agentStack, child1) {
+			t.Error("the drained descendant of inner1, the event's author, is still open")
+		}
+		if !slices.Contains(inv.agentStack, child0) {
+			t.Error("the drained descendant of another retired activation of inner retired")
+		}
+	})
+
+	t.Run("event author", func(t *testing.T) {
+		// setup returns a locked trace with an open custom root, the
+		// action maps of a context in which after-agent callbacks ran, and a
+		// retired activation of inner whose callbacks ran in it.
+		setup := func(t *testing.T) (*invocationTrace, *spanRecord, actionMaps, retiredActivation) {
+			t.Helper()
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			t.Cleanup(inv.mu.Unlock)
+			root := inv.agentStack[1]
+			delta := map[string]any{}
+			callback := actionsOf(delta, nil)
+			return inv, root, callback, retiredActivation{
+				swallower:              retiredSwallower{spanID: "inner-1", seq: 2, name: "inner"},
+				parentSpanID:           root.spanID,
+				guardSpanIDs:           []string{root.spanID},
+				retiredAtSeq:           3,
+				completedOrTask:        true,
+				joinedAtRetire:         true,
+				unrespondedAtPop:       true,
+				hasAfterAgentCallbacks: true,
+				afterAgentActions:      callback,
+				afterAgentActionsRef:   delta,
+				startPlatformTime:      t0,
+				retiredAtPlatformTime:  t1,
+			}
+		}
+		openPeer := func(inv *invocationTrace, root *spanRecord) {
+			inv.agentStack = append(inv.agentStack, &spanRecord{spanID: "inner-open", parentSpanID: root.spanID, parent: root, kind: spanKindAgent, name: "inner", startPlatformTime: t0, seq: inv.nextSeqLocked()})
+		}
+
+		t.Run("a retired activation whose callback map the event carries beats an open peer", func(t *testing.T) {
+			inv, root, callback, ra := setup(t)
+			inv.retiredActivations = append(inv.retiredActivations, ra)
+			openPeer(inv, root)
+			author, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true)
+			if !ok || author.spanID != "inner-1" || author.idx != 0 {
+				t.Fatalf("eventAuthorLocked = %+v, %v, want inner-1 at 0", author, ok)
+			}
+			// Without the map, or when only a compacted hull or another agent
+			// has the map, the open peer is the only possible author.
+			for _, mutate := range []func(*retiredActivation){
+				func(r *retiredActivation) { r.afterAgentActions = actionMaps{} },
+				func(r *retiredActivation) { r.compactedHull = true },
+				func(r *retiredActivation) { r.swallower.name = "other" },
+			} {
+				inv.retiredActivations[0] = ra
+				mutate(&inv.retiredActivations[0])
+				author, ok = inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true)
+				if !ok || author.spanID != "inner-open" || author.idx != -1 {
+					t.Fatalf("eventAuthorLocked = %+v, %v, want the open peer", author, ok)
+				}
+			}
+		})
+		t.Run("a callback map that two retired activations claim leaves the event without an author", func(t *testing.T) {
+			inv, _, callback, ra := setup(t)
+			ra.unrespondedAtPop = false
+			other := ra
+			other.swallower = retiredSwallower{spanID: "inner-2", seq: 4, name: "inner"}
+			other.retiredAtSeq = 5
+			other.startPlatformTime = t1
+			other.retiredAtPlatformTime = t2
+			inv.retiredActivations = append(inv.retiredActivations, ra, other)
+			if author, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true); ok {
+				t.Fatalf("eventAuthorLocked = %+v, want no author", author)
+			}
+		})
+		t.Run("a callback map whose activation cannot own the event leaves it without an author", func(t *testing.T) {
+			inv, root, callback, ra := setup(t)
+			ra.parentRetiredAtPlatformTime = t1
+			inv.retiredActivations = append(inv.retiredActivations, ra)
+			openPeer(inv, root)
+			if author, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true); ok {
+				t.Fatalf("eventAuthorLocked = %+v, want no author", author)
+			}
+		})
+		t.Run("a callback map keeps the event its activation's although a later retired one would exclude it by timestamp", func(t *testing.T) {
+			inv, root, callback, ra := setup(t)
+			ra.unrespondedAtPop = false
+			later := retiredActivation{
+				swallower:             retiredSwallower{spanID: "inner-2", seq: 4, name: "inner"},
+				parentSpanID:          root.spanID,
+				guardSpanIDs:          []string{root.spanID},
+				retiredAtSeq:          5,
+				completedOrTask:       true,
+				joinedAtRetire:        true,
+				startPlatformTime:     t1,
+				retiredAtPlatformTime: t2,
+			}
+			inv.retiredActivations = append(inv.retiredActivations, ra, later)
+			if a, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true); !ok || a != (eventAuthor{spanID: ra.swallower.spanID, idx: 0}) {
+				t.Fatalf("eventAuthorLocked = %+v, %v, want %q at 0", a, ok, ra.swallower.spanID)
+			}
+			// Without the callback map, timestamp provenance still decides.
+			if a, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, actionMaps{}, true); !ok || a.spanID != "inner-2" {
+				t.Fatalf("eventAuthorLocked without the callback map = %+v, %v, want inner-2", a, ok)
+			}
+		})
+		// concurrentRetiredPeer returns inner-2, a concurrent activation of
+		// inner that started at t1 and retired at t3, after the event of
+		// inner-1's after-agent callbacks was created at t2.
+		concurrentRetiredPeer := func(root *spanRecord) retiredActivation {
+			return retiredActivation{
+				swallower:             retiredSwallower{spanID: "inner-2", seq: 4, name: "inner"},
+				parentSpanID:          root.spanID,
+				guardSpanIDs:          []string{root.spanID},
+				retiredAtSeq:          6,
+				completedOrTask:       true,
+				joinedAtRetire:        true,
+				concurrentPeer:        true,
+				startPlatformTime:     t1,
+				retiredAtPlatformTime: t3,
+			}
+		}
+		t.Run("a callback map keeps the event its activation's although a concurrent peer that retired later can own it", func(t *testing.T) {
+			inv, root, callback, ra := setup(t)
+			ra.concurrentPeer = true
+			inv.retiredActivations = append(inv.retiredActivations, ra, concurrentRetiredPeer(root))
+			if a, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true); !ok || a != (eventAuthor{spanID: ra.swallower.spanID, idx: 0}) {
+				t.Fatalf("eventAuthorLocked = %+v, %v, want %q at 0", a, ok, ra.swallower.spanID)
+			}
+			// Without the callback map, inner-1 cannot own an event created
+			// after it retired, and the concurrent peer is the author.
+			if a, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, actionMaps{}, true); !ok || a.spanID != "inner-2" {
+				t.Fatalf("eventAuthorLocked without the callback map = %+v, %v, want inner-2", a, ok)
+			}
+		})
+		t.Run("a compacted hull's callback map does not take the event", func(t *testing.T) {
+			inv, root, callback, ra := setup(t)
+			ra.compactedHull = true
+			inv.retiredActivations = append(inv.retiredActivations, ra)
+			openPeer(inv, root)
+			if a, ok := inv.eventAuthorLocked("inner", "", "", t2, true, true, callback, true); !ok || a != (eventAuthor{spanID: "inner-open", idx: -1}) {
+				t.Fatalf("eventAuthorLocked = %+v, %v, want the open peer", a, ok)
+			}
+		})
+
+		causeOf := func(span string, at time.Time, seq uint64) retiredCause {
+			return retiredCause{err: errChild, name: "child", swallowers: []retiredSwallower{{spanID: span, seq: 3, name: "inner"}}, platformTime: at, causeSeq: seq}
+		}
+		left := func(root *spanRecord) []string {
+			var ids []string
+			for _, c := range root.retiredCauses {
+				for _, s := range c.swallowers {
+					id := s.spanID
+					if id == "" {
+						id = "spanless"
+					}
+					ids = append(ids, id)
+				}
+			}
+			return ids
+		}
+		settle := func(inv *invocationTrace, callback actionMaps) {
+			inv.settleRetiredAuthorLocked(t3, "inner", "", "", t2, true, true, callback, true)
+		}
+		// recovered returns the trace of setup in which inner-1, a concurrent
+		// activation of inner, retired at t1 and inner-2, a concurrent peer,
+		// retired at t3, with causes on the root.
+		recovered := func(t *testing.T, mutate func(*retiredActivation), causes func(ra retiredActivation) []retiredCause) (*invocationTrace, *spanRecord, actionMaps) {
+			t.Helper()
+			inv, root, callback, ra := setup(t)
+			ra.concurrentPeer = true
+			if mutate != nil {
+				mutate(&ra)
+			}
+			inv.retiredActivations = append(inv.retiredActivations, ra, concurrentRetiredPeer(root))
+			root.retiredCauses = causes(ra)
+			return inv, root, callback
+		}
+		t.Run("T5a recovery of inner-1 clears its own cause and keeps child-1, which inner-2 swallowed earlier", func(t *testing.T) {
+			inv, root, callback := recovered(t, nil, func(ra retiredActivation) []retiredCause {
+				return []retiredCause{causeOf("inner-2", t0, 1), causeOf(ra.swallower.spanID, t1, 2)}
+			})
+			settle(inv, callback)
+			if got, want := left(root), []string{"inner-2"}; !slices.Equal(got, want) {
+				t.Errorf("causes left = %q, want %q", got, want)
+			}
+			if inv.retiredActivations[0].afterAgentActions != (actionMaps{}) {
+				t.Errorf("afterAgentActions = %+v, want them released", inv.retiredActivations[0].afterAgentActions)
+			}
+		})
+		t.Run("T5b recovery of inner-1 keeps a child-1 cause recorded with a spanless swallower", func(t *testing.T) {
+			inv, root, callback := recovered(t, nil, func(ra retiredActivation) []retiredCause {
+				spanless := causeOf("", t0, 1)
+				return []retiredCause{spanless, causeOf(ra.swallower.spanID, t1, 2)}
+			})
+			settle(inv, callback)
+			if got, want := left(root), []string{"spanless"}; !slices.Equal(got, want) {
+				t.Errorf("causes left = %q, want %q", got, want)
+			}
+		})
+		t.Run("T5c recovery of inner-1 keeps a cause of its own that is newer than the event", func(t *testing.T) {
+			inv, root, callback := recovered(t, nil, func(ra retiredActivation) []retiredCause {
+				return []retiredCause{causeOf(ra.swallower.spanID, t3, 2)}
+			})
+			settle(inv, callback)
+			if got, want := left(root), []string{"inner-1"}; !slices.Equal(got, want) {
+				t.Errorf("causes left = %q, want %q", got, want)
+			}
+		})
+		t.Run("T5d an after-agent event of the cause's tick clears only a cause older than the retirement", func(t *testing.T) {
+			inv, root, callback := recovered(t, nil, func(ra retiredActivation) []retiredCause {
+				kept := causeOf(ra.swallower.spanID, t2, ra.retiredAtSeq)
+				cleared := causeOf(ra.swallower.spanID, t2, ra.retiredAtSeq-1)
+				cleared.name = "cleared"
+				return []retiredCause{kept, cleared}
+			})
+			settle(inv, callback)
+			if len(root.retiredCauses) != 1 || root.retiredCauses[0].causeSeq != inv.retiredActivations[0].retiredAtSeq {
+				t.Errorf("causes left = %+v, want only the cause of the retirement's tick", root.retiredCauses)
+			}
+		})
+		t.Run("T5e a sharer that cannot own the event clears nothing", func(t *testing.T) {
+			inv, root, callback := recovered(t, func(ra *retiredActivation) { ra.parentRetiredAtPlatformTime = t1 }, func(ra retiredActivation) []retiredCause {
+				return []retiredCause{causeOf(ra.swallower.spanID, t1, 2)}
+			})
+			settle(inv, callback)
+			if got, want := left(root), []string{"inner-1"}; !slices.Equal(got, want) {
+				t.Errorf("causes left = %q, want %q", got, want)
+			}
+		})
+
+		t.Run("an after-agent callback map takes the event from every open peer", func(t *testing.T) {
+			k := llmKey(identity{agentName: "inner"})
+			// gate returns the trace of setup with ra retired, after prep
+			// changed it, and one open peer of inner, after open changed it.
+			gate := func(t *testing.T, prep func(inv *invocationTrace, root *spanRecord, ra *retiredActivation), open func(peer *spanRecord)) (*invocationTrace, actionMaps, int, *spanRecord) {
+				t.Helper()
+				inv, root, callback, ra := setup(t)
+				ra.guardSpanIDs = nil
+				inv.retiredPeerCount = map[string]int{}
+				inv.unrespondedRetired = map[string]int{}
+				inv.unrespondedRetiredTools = map[string]int{}
+				if prep != nil {
+					prep(inv, root, &ra)
+				}
+				inv.retiredActivations = append(inv.retiredActivations, ra)
+				openPeer(inv, root)
+				pi := len(inv.agentStack) - 1
+				peer := inv.agentStack[pi]
+				if open != nil {
+					open(peer)
+				}
+				return inv, callback, pi, peer
+			}
+			type call struct {
+				calls         []string
+				wasPartial    bool
+				partialSpanID string
+			}
+			sel := func(inv *invocationTrace, pi int, c call, evActions actionMaps) (int, bool, bool, bool) {
+				owner, matched, absorbed, retiredAuthor, _ := inv.selectResponseOwnerWithIDLocked(pi, "", c.calls, false, c.wasPartial, c.partialSpanID, t3, t2, true, true, evActions)
+				return owner, matched, absorbed, retiredAuthor
+			}
+			wantAbsorbed := func(t *testing.T, inv *invocationTrace, pi int, c call, callback actionMaps) {
+				t.Helper()
+				if _, matched, absorbed, retiredAuthor := sel(inv, pi, c, callback); matched || !absorbed || !retiredAuthor {
+					t.Fatalf("with the callback map: matched = %v, absorbed = %v, retired author = %v, want false, true, true", matched, absorbed, retiredAuthor)
+				}
+			}
+			wantOwner := func(t *testing.T, inv *invocationTrace, pi int, c call, evActions actionMaps) bool {
+				t.Helper()
+				owner, matched, absorbed, _ := sel(inv, pi, c, evActions)
+				if owner != pi || absorbed {
+					t.Fatalf("owner = %d, absorbed = %v, want the open peer %d", owner, absorbed, pi)
+				}
+				return matched
+			}
+			modelPeer := func(inv *invocationTrace, _ *spanRecord, _ *retiredActivation) { inv.retiredPeerCount[k] = 1 }
+
+			t.Run("awaited model event, retired debt paid", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, modelPeer, func(p *spanRecord) { p.awaitingModelEvent = 1 })
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				if peer.awaitingModelEvent != 1 || inv.unrespondedRetired[k] != 0 {
+					t.Fatalf("awaitingModelEvent = %d, unrespondedRetired = %d, want 1 and 0", peer.awaitingModelEvent, inv.unrespondedRetired[k])
+				}
+				if !wantOwner(t, inv, pi, call{}, actionMaps{}) || peer.awaitingModelEvent != 0 {
+					t.Fatalf("without the callback map the peer did not take its awaited model event")
+				}
+			})
+			// The event settles the credit that its own activation left when
+			// it retired unresponded, and not one that another activation
+			// left (see consumeAfterAgentCreditLocked).
+			for _, own := range []bool{true, false} {
+				t.Run(fmt.Sprintf("awaited model event, retired debt outstanding, own credit %v", own), func(t *testing.T) {
+					inv, callback, pi, peer := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+						modelPeer(inv, root, ra)
+						inv.unrespondedRetired[k] = 1
+						ra.afterAgentCredit = own
+					}, func(p *spanRecord) { p.awaitingModelEvent = 1 })
+					wantAbsorbed(t, inv, pi, call{}, callback)
+					want := 1
+					if own {
+						want = 0
+					}
+					if peer.awaitingModelEvent != 1 || inv.unrespondedRetired[k] != want {
+						t.Fatalf("awaitingModelEvent = %d, unrespondedRetired = %d, want 1 and %d", peer.awaitingModelEvent, inv.unrespondedRetired[k], want)
+					}
+				})
+			}
+			t.Run("partial", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, modelPeer, func(p *spanRecord) { p.hasResponse = true })
+				c := call{wasPartial: true, partialSpanID: peer.spanID}
+				wantAbsorbed(t, inv, pi, c, callback)
+				if wantOwner(t, inv, pi, c, actionMaps{}) {
+					t.Fatal("without the callback map the partial event matched pending evidence")
+				}
+			})
+			t.Run("awaited tool event", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					inv.unrespondedRetiredTools[k] = 2
+				}, func(p *spanRecord) { p.awaitingToolEvent = 1 })
+				c := call{calls: []string{"call-1"}}
+				wantAbsorbed(t, inv, pi, c, callback)
+				// The retired tool credits stand for function responses of
+				// the retired run, which the after-agent event is not, even
+				// when its content holds one.
+				if peer.awaitingToolEvent != 1 || inv.unrespondedRetiredTools[k] != 2 {
+					t.Fatalf("awaitingToolEvent = %d, unrespondedRetiredTools = %d, want 1 and 2", peer.awaitingToolEvent, inv.unrespondedRetiredTools[k])
+				}
+				// The tool await claims the event once no retired tool
+				// response is outstanding.
+				inv.unrespondedRetiredTools[k] = 0
+				if !wantOwner(t, inv, pi, c, actionMaps{}) || peer.awaitingToolEvent != 0 {
+					t.Fatal("without the callback map the peer did not take its awaited tool event")
+				}
+			})
+			t.Run("single open peer", func(t *testing.T) {
+				inv, callback, pi, _ := gate(t, nil, nil)
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				if wantOwner(t, inv, pi, call{}, actionMaps{}) {
+					t.Fatal("without the callback map the event matched pending evidence")
+				}
+			})
+			t.Run("unresponded open peer pushed after the retired one popped", func(t *testing.T) {
+				inv, callback, pi, _ := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					ra.concurrentPeer = false
+				}, nil)
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				wantOwner(t, inv, pi, call{}, actionMaps{})
+			})
+			t.Run("responded open peer", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, modelPeer, func(p *spanRecord) { p.hasResponse = true })
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				if peer.extraResponses != 0 {
+					t.Fatalf("extraResponses = %d, want 0", peer.extraResponses)
+				}
+				wantOwner(t, inv, pi, call{}, actionMaps{})
+				if peer.extraResponses != 1 {
+					t.Fatalf("without the callback map extraResponses = %d, want 1", peer.extraResponses)
+				}
+			})
+			t.Run("concurrent peer", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					ra.concurrentPeer = true
+					ra.guardSpanIDs = []string{root.spanID}
+				}, func(p *spanRecord) {
+					p.concurrentPeer = true
+					p.awaitingModelEvent = 1
+				})
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				if peer.awaitingModelEvent != 1 {
+					t.Fatalf("awaitingModelEvent = %d, want 1", peer.awaitingModelEvent)
+				}
+				if !wantOwner(t, inv, pi, call{}, actionMaps{}) {
+					t.Fatal("without the callback map the peer did not take its awaited model event")
+				}
+			})
+			t.Run("two claimants are absorbed and settle nothing", func(t *testing.T) {
+				inv, callback, pi, _ := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					ra.unrespondedAtPop = false
+				}, func(p *spanRecord) { p.awaitingModelEvent = 1 })
+				other := inv.retiredActivations[0]
+				other.swallower = retiredSwallower{spanID: "inner-3", seq: 4, name: "inner"}
+				other.retiredAtSeq = 5
+				inv.retiredActivations = append(inv.retiredActivations, other)
+				root := inv.agentStack[1]
+				root.retiredCauses = []retiredCause{causeOf("inner-1", t1, 1), causeOf("inner-3", t1, 2)}
+				wantAbsorbed(t, inv, pi, call{}, callback)
+				settle(inv, callback)
+				if got, want := left(root), []string{"inner-1", "inner-3"}; !slices.Equal(got, want) {
+					t.Errorf("causes left = %q, want %q", got, want)
+				}
+			})
+			t.Run("a compacted hull's map is inert", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					ra.compactedHull = true
+				}, func(p *spanRecord) { p.awaitingModelEvent = 1 })
+				if !wantOwner(t, inv, pi, call{}, callback) || peer.awaitingModelEvent != 0 {
+					t.Fatal("the peer did not take its awaited model event")
+				}
+			})
+			t.Run("another agent's map is inert", func(t *testing.T) {
+				inv, callback, pi, peer := gate(t, func(inv *invocationTrace, root *spanRecord, ra *retiredActivation) {
+					modelPeer(inv, root, ra)
+					ra.swallower.name = "other"
+				}, func(p *spanRecord) { p.awaitingModelEvent = 1 })
+				if !wantOwner(t, inv, pi, call{}, callback) || peer.awaitingModelEvent != 0 {
+					t.Fatal("the peer did not take its awaited model event")
+				}
+			})
+		})
+	})
+
+	t.Run("an event of an earlier turn of the open activation is absorbed without settling a retired one", func(t *testing.T) {
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		inner := inv.agentStack[2]
+		// The event was created in an earlier turn of inner, after inner
+		// started.
+		inner.startPlatformTime = t0
+		inner.unforwardedModelEvents = 1
+		inv.unrecoveredErrors = map[string]recordedError{"inner-err": {err: errors.New("model error"), spanID: inner.spanID, platformTime: t2}}
+		_, _, absorbed, retiredAuthor, _ := inv.selectResponseOwnerWithIDLocked(2, "", nil, false, false, "", t3, t1, true, true, actionMaps{})
+		if !absorbed || retiredAuthor {
+			t.Fatalf("absorbed = %v, retired author = %v, want true and false", absorbed, retiredAuthor)
+		}
+	})
+}
+
+// TestSoleOpenAuthor pins each condition under which soleOpenAuthorLocked
+// takes an event for the only open activation that can have created it: a
+// first activation of inner retired at t2 as a concurrent peer of a second
+// one that started at t1 and is still open.
+func TestSoleOpenAuthor(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	t1 := t0.Add(10 * time.Millisecond)
+	t2 := t0.Add(20 * time.Millisecond)
+	t3 := t0.Add(30 * time.Millisecond)
+	rootID := identity{invocationID: "inv-sole-open-author", agentName: "root"}
+	innerID := identity{invocationID: "inv-sole-open-author", agentName: "inner"}
+	withID := func(*spanRecord) bool { return true }
+	type state struct {
+		inv    *invocationTrace
+		root   *spanRecord
+		inner2 *spanRecord
+		ra     *retiredActivation
+	}
+	setup := func(t *testing.T, callbacks bool) state {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		tm.pushAgentSpan(ctx, innerID)
+		tm.pushAgentSpan(ctx, innerID)
+		inv := tm.invocation(ctx, rootID)
+		root, inner1, inner2 := inv.agentStack[1], inv.agentStack[2], inv.agentStack[3]
+		inner1.startPlatformTime, inner2.startPlatformTime = t0, t1
+		inner1.hasAfterAgentCallbacks = callbacks
+		inner1.hasResponse, inner1.ownResponse = true, true
+		inner1.completed = true
+		peer, _ := inv.reconcileConcurrentResponseOnPopLocked(2, inner1.seq)
+		inv.retireAgentAtLocked(2, true, inner1.seq, t2)
+		idx := inv.findRetiredActivationIndexLocked(inner1.spanID)
+		if idx < 0 || !peer {
+			t.Fatalf("first inner retired with entry %d, peer retirement %v; want an entry and true", idx, peer)
+		}
+		inv.retiredActivations[idx].peerRetirement = peer
+		return state{inv: inv, root: root, inner2: inner2, ra: &inv.retiredActivations[idx]}
+	}
+	sole := func(s state, evCreatedAt time.Time, hasIDFor func(*spanRecord) bool) int {
+		var peers []int
+		for j := len(s.inv.agentStack) - 1; j > 0; j-- {
+			if rec := s.inv.agentStack[j]; rec.name == "inner" {
+				peers = append(peers, j)
+			}
+		}
+		return s.inv.soleOpenAuthorLocked(peers, "", evCreatedAt, hasIDFor)
+	}
+	isInner2 := func(s state, j int) bool { return j > 0 && s.inv.agentStack[j] == s.inner2 }
+
+	t.Run("event created after a peer without after-agent callbacks retired", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("author = %d, want the open activation", j)
+		}
+	})
+	t.Run("after-agent event of the retired peer may still come", func(t *testing.T) {
+		s := setup(t, true)
+		if j := sole(s, t3, withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+		s.ra.afterAgentEventSeen = true
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("once the after-agent event arrived: author = %d, want the open activation", j)
+		}
+	})
+	t.Run("event created while the retired peer ran", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, t1.Add(time.Millisecond), withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+	})
+	t.Run("event without creation evidence", func(t *testing.T) {
+		s := setup(t, false)
+		if j := sole(s, time.Time{}, withID); j != -1 {
+			t.Fatalf("zero timestamp: author = %d, want none", j)
+		}
+		if j := sole(s, t3, func(*spanRecord) bool { return false }); j != -1 {
+			t.Fatalf("no event ID: author = %d, want none", j)
+		}
+		// With no retired activation left to rule out and no start time to
+		// compare with, the timestamp alone decides.
+		s.inv.retiredActivations, s.inv.retiredPeerCount = nil, nil
+		s.inner2.startPlatformTime = time.Time{}
+		if j := sole(s, time.Time{}, withID); j != -1 {
+			t.Fatalf("zero timestamp, nothing retired: author = %d, want none", j)
+		}
+		if j := sole(s, t3, withID); !isInner2(s, j) {
+			t.Fatalf("nothing retired: author = %d, want the open activation", j)
+		}
+	})
+	t.Run("retired peer without an entry of its own", func(t *testing.T) {
+		for _, how := range []string{"pruned", "compacted"} {
+			t.Run(how, func(t *testing.T) {
+				s := setup(t, false)
+				if how == "pruned" {
+					s.inv.retiredActivations = nil
+				} else {
+					s.ra.compactedHull = true
+				}
+				if j := sole(s, t3, withID); j != -1 {
+					t.Fatalf("author = %d, want none", j)
+				}
+			})
+		}
+	})
+	t.Run("another open activation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			start time.Time
+			want  bool
+		}{
+			{"started before the event", t1, false},
+			{"started after the event", t3.Add(time.Millisecond), true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				s := setup(t, false)
+				s.inv.agentStack = append(s.inv.agentStack, &spanRecord{
+					spanID: "inner-3", parentSpanID: s.root.spanID, parent: s.root, kind: spanKindAgent,
+					name: "inner", startPlatformTime: tc.start, seq: s.inv.nextSeqLocked(),
+				})
+				if j := sole(s, t3, withID); isInner2(s, j) != tc.want {
+					t.Fatalf("author = %d, want the second activation %v", j, tc.want)
+				}
+			})
+		}
+	})
+	t.Run("a swallower of a recorded cause", func(t *testing.T) {
+		s := setup(t, false)
+		s.root.retiredCauses = []retiredCause{{err: errors.New("child failure"), name: "child", swallowers: []retiredSwallower{{name: "inner"}}}}
+		if j := sole(s, t3, withID); j != -1 {
+			t.Fatalf("author = %d, want none", j)
+		}
+	})
+	// selectResponseOwnerWithIDLocked gives such an event to its author even
+	// though the author holds a failure and a peer retired, but an author
+	// that awaits a model event takes the event as that model event.
+	for _, awaiting := range []bool{false, true} {
+		t.Run(fmt.Sprintf("response owner of an open activation that holds a failure, awaiting a model event %v", awaiting), func(t *testing.T) {
+			s := setup(t, false)
+			s.inner2.retiredCauses = []retiredCause{{err: errors.New("child failure"), name: "child", platformTime: t2}}
+			if awaiting {
+				s.inner2.awaitingModelEvent = 1
+				s.inner2.retiredCauses = nil
+			}
+			i := slices.Index(s.inv.agentStack, s.inner2)
+			owner, matched, absorbed, _, _ := s.inv.selectResponseOwnerWithIDLocked(i, "", nil, false, false, "", t3, t3, true, true, actionMaps{})
+			if absorbed || owner != i || matched != awaiting || s.inner2.awaitingModelEvent != 0 {
+				t.Fatalf("owner = %d, matched = %v, absorbed = %v, awaitingModelEvent = %d; want %d, %v, false, 0", owner, matched, absorbed, s.inner2.awaitingModelEvent, i, awaiting)
+			}
+		})
+	}
+}
+
+// TestAfterAgentCreditSettlesOnlyItsOwnActivation drives two concurrent
+// activations of inner under a custom root to the point where both retired,
+// one of them unresponded while the other ran, which left one
+// unrespondedRetired credit. An after-agent event settles that credit only if
+// it is the event of the activation that left it, whether or not it carries
+// function responses, and leaves the tool credits alone.
+func TestAfterAgentCreditSettlesOnlyItsOwnActivation(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	rootID := identity{invocationID: "inv-after-agent-credit", agentName: "root"}
+	innerID := identity{invocationID: "inv-after-agent-credit", agentName: "inner"}
+	k := llmKey(innerID)
+	// retire retires agentStack[i] as popAgentSpan does and records the
+	// action maps of the context in which its after-agent callbacks ran.
+	retire := func(t *testing.T, inv *invocationTrace, i int, at time.Time) actionMaps {
+		t.Helper()
+		rec := inv.agentStack[i]
+		rec.completed = true
+		peer, credit := inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
+		inv.retireAgentAtLocked(i, true, rec.seq, at)
+		idx := inv.findRetiredActivationIndexLocked(rec.spanID)
+		if idx < 0 {
+			t.Fatalf("%s retired without an entry", rec.spanID)
+		}
+		ra := &inv.retiredActivations[idx]
+		ra.peerRetirement, ra.afterAgentCredit = peer, credit
+		delta, artifacts := map[string]any{}, map[string]int64{}
+		ra.afterAgentActions = eventActionMaps(&session.Event{Actions: session.EventActions{StateDelta: delta, ArtifactDelta: artifacts}})
+		ra.afterAgentActionsRef = []any{delta, artifacts}
+		return ra.afterAgentActions
+	}
+	for _, tc := range []struct {
+		name  string
+		calls []string
+		// ownCredit makes the event the after-agent event of the activation
+		// that retired unresponded while the other one ran, rather than of
+		// the other one.
+		ownCredit   bool
+		wantCredits int
+	}{
+		{"function response of the activation that left the credit", []string{"call-1"}, true, 0},
+		{"content of the activation that left the credit", nil, true, 0},
+		{"content of another activation", nil, false, 1},
+		{"function response of another activation", []string{"call-1"}, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := newTraceManager()
+			tm.pushAgentSpan(ctx, rootID)
+			tm.pushAgentSpan(ctx, innerID)
+			tm.pushAgentSpan(ctx, innerID)
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			inner1, inner2 := inv.agentStack[2], inv.agentStack[3]
+			inner1.hasAfterAgentCallbacks, inner2.hasAfterAgentCallbacks = true, true
+			inner1.startPlatformTime, inner2.startPlatformTime = t0, t0
+			// The activation that retires second responds after the first
+			// one retired, so the first cannot take its response, and leaves
+			// no credit: no peer of it is open by then.
+			first, second := inner1, inner2
+			if !tc.ownCredit {
+				first, second = inner2, inner1
+			}
+			firstMaps := retire(t, inv, slices.Index(inv.agentStack, first), t0.Add(time.Millisecond))
+			second.hasResponse, second.ownResponse = true, true
+			secondMaps := retire(t, inv, slices.Index(inv.agentStack, second), t0.Add(2*time.Millisecond))
+			inv.unrespondedRetiredTools = map[string]int{k: 2}
+			if inv.unrespondedRetired[k] != 1 {
+				inv.mu.Unlock()
+				t.Fatalf("unrespondedRetired = %d after the retirements, want 1", inv.unrespondedRetired[k])
+			}
+			evMaps := firstMaps
+			if !tc.ownCredit {
+				evMaps = secondMaps
+			}
+			inv.mu.Unlock()
+			tm.completeResponseWithEvent(ctx, rootID, "inner", "", tc.calls, false, t0.Add(3*time.Millisecond), true, true, evMaps, true)
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			if inv.unrespondedRetired[k] != tc.wantCredits || inv.unrespondedRetiredTools[k] != 2 {
+				t.Fatalf("unrespondedRetired = %d, unrespondedRetiredTools = %d, want %d and 2", inv.unrespondedRetired[k], inv.unrespondedRetiredTools[k], tc.wantCredits)
+			}
+		})
+	}
+}
+
+// TestRunningLookalikeLocked pins the order in which runningLookalikeLocked
+// tells concurrent activations of one agent apart: the only one that runs on
+// the goroutine first, and only when none does, the only one that runs on the
+// goroutine that started it.
+func TestRunningLookalikeLocked(t *testing.T) {
+	const g0, g2, g3 = 100, 200, 300
+	setup := func(goroutines ...uint64) (*invocationTrace, *spanRecord, []*spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-lookalike", time.Unix(1_700_000_000, 0))
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], goroutineID: g0 - 1}
+		inv.agentStack = append(inv.agentStack, root)
+		var recs []*spanRecord
+		for i, g := range goroutines {
+			rec := &spanRecord{spanID: fmt.Sprintf("inner-%d", i+1), kind: spanKindAgent, name: "inner", parent: root, goroutineID: g, seq: uint64(i + 1)}
+			inv.agentStack = append(inv.agentStack, rec)
+			recs = append(recs, rec)
+		}
+		return inv, root, recs
+	}
+	const (
+		// p is the last record.
+		wantP = -1
+		// wantEnclosing is root, which every record runs under.
+		wantEnclosing = -2
+	)
+	for _, tc := range []struct {
+		name       string
+		goroutines []uint64
+		// want is the index of the expected record, wantP or wantEnclosing.
+		want int
+	}{
+		{"one runs on the goroutine, a later one on the goroutine that started it", []uint64{g2, g0}, 0},
+		{"one runs on the goroutine that started it", []uint64{g3, g0}, 1},
+		{"two run on the goroutine", []uint64{g2, g2, g0}, wantP},
+		{"two run on the goroutine that started it", []uint64{g3, g0, g0}, wantP},
+		{"none runs on or started the goroutine", []uint64{g3, g3 + 1}, wantEnclosing},
+		{"only p, which neither runs on nor started the goroutine", []uint64{g3}, wantP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, root, recs := setup(tc.goroutines...)
+			p := recs[len(recs)-1]
+			var want *spanRecord
+			switch tc.want {
+			case wantP:
+				want = p
+			case wantEnclosing:
+				want = root
+			default:
+				want = recs[tc.want]
+			}
+			if got := inv.runningLookalikeLocked(p, nil, g2, goroutineOrigin{parent: g0}); got != want {
+				t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, want.spanID)
+			}
+		})
+	}
+	t.Run("an excluded lookalike leaves only p", func(t *testing.T) {
+		inv, _, recs := setup(g3, g3+1)
+		if got := inv.runningLookalikeLocked(recs[1], map[string]bool{recs[0].spanID: true}, g2, goroutineOrigin{parent: g0}); got != recs[1] {
+			t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, recs[1].spanID)
+		}
+	})
+	t.Run("an unknown goroutine leaves p", func(t *testing.T) {
+		inv, _, recs := setup(g3, g3+1)
+		if got := inv.runningLookalikeLocked(recs[1], nil, 0, goroutineOrigin{}); got != recs[1] {
+			t.Fatalf("runningLookalikeLocked = %s, want %s", got.spanID, recs[1].spanID)
+		}
+	})
+	t.Run("enclosingOpenSpanLocked skips retired spans", func(t *testing.T) {
+		inv, root, recs := setup(g3, g3+1)
+		mid := &spanRecord{spanID: "mid", kind: spanKindAgent, name: "mid", parent: root}
+		for _, rec := range recs {
+			rec.parent = mid
+		}
+		if got := inv.enclosingOpenSpanLocked(recs); got != root {
+			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", got.spanID, root.spanID)
+		}
+		inv.agentStack = slices.Insert(inv.agentStack, 2, mid)
+		if got := inv.enclosingOpenSpanLocked(recs); got != mid {
+			t.Fatalf("enclosingOpenSpanLocked = %s, want %s", got.spanID, mid.spanID)
+		}
+	})
+}
+
+// TestCrossBranchEventAuthor pins how a session event is matched with an
+// open activation of its author by branch: never across sibling branches or
+// from a non-empty branch to an activation without one, but across a branch
+// under the event's, and from an event without a branch to any branch, as
+// long as no activation of the author on another branch that the event's
+// branch covers can have created the event (see findEventAgentLocked).
+func TestCrossBranchEventAuthor(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	setup := func(branch string) (*invocationTrace, *spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-cross-branch", t0)
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], startPlatformTime: at(0)}
+		w := &spanRecord{spanID: "w-b2", kind: spanKindAgent, name: "worker", branch: branch, parent: root, startPlatformTime: at(10)}
+		inv.agentStack = append(inv.agentStack, root, w)
+		return inv, w
+	}
+	t.Run("findAgent", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, recBranch, evBranch string
+			found                     bool
+		}{
+			{"same branch", "par.b2", "par.b2", true},
+			{"sibling branch", "par.b2", "par.b1", false},
+			{"branch under the event's, as the workflow scheduler stamps", "wf.par.b2", "wf", true},
+			{"branch above the event's", "par", "par.b2", false},
+			{"no branch for an event with one", "", "par.b1", false},
+			{"event without a branch", "par.b2", "", true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				inv, _ := setup(tc.recBranch)
+				if got := inv.findAgent("", "worker", tc.evBranch); (got == 2) != tc.found || (!tc.found && got != -1) {
+					t.Fatalf("findAgent(%q) on an activation on %q = %d, want found %v", tc.evBranch, tc.recBranch, got, tc.found)
+				}
+			})
+		}
+	})
+	retired := func(branch string, callbacks bool, start, retiredAt time.Time) retiredActivation {
+		return retiredActivation{
+			swallower:              retiredSwallower{spanID: "w-" + branch, name: "worker", branch: branch},
+			hasAfterAgentCallbacks: callbacks,
+			joinedAtRetire:         true,
+			startPlatformTime:      start,
+			retiredAtPlatformTime:  retiredAt,
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		evBranch string
+		ev       time.Time
+		hasID    bool
+		mutate   func(inv *invocationTrace)
+		found    bool
+	}{
+		{"no other activation", "", at(30), true, nil, true},
+		{"retired on a sibling branch with its after-agent event to come", "", at(30), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", true, at(5), at(20)))
+		}, false},
+		{"retired on a sibling branch before the event without after-agent callbacks", "", at(30), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", false, at(5), at(20)))
+		}, true},
+		{"retired on a sibling branch after the event", "", at(15), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", false, at(5), at(20)))
+		}, false},
+		{"retired on a sibling branch and no creation provenance", "", at(30), false, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", false, at(5), at(20)))
+		}, false},
+		{"retired on a sibling branch whose after-agent event was delivered", "", at(30), true, func(inv *invocationTrace) {
+			ra := retired("par.b1", true, at(5), at(20))
+			ra.afterAgentEventSeen = true
+			inv.retiredActivations = append(inv.retiredActivations, ra)
+		}, true},
+		{"open on a sibling branch since before the event", "", at(30), true, func(inv *invocationTrace) {
+			inv.agentStack = append(inv.agentStack, &spanRecord{spanID: "w-b1", kind: spanKindAgent, name: "worker", branch: "par.b1", parent: inv.agentStack[1], startPlatformTime: at(5)})
+		}, false},
+		{"open on a sibling branch since after the event", "", at(30), true, func(inv *invocationTrace) {
+			inv.agentStack = append(inv.agentStack, &spanRecord{spanID: "w-b1", kind: spanKindAgent, name: "worker", branch: "par.b1", parent: inv.agentStack[1], startPlatformTime: at(40)})
+		}, true},
+		{"swallower on a sibling branch named by a recorded cause", "", at(30), true, func(inv *invocationTrace) {
+			inv.agentStack[1].retiredCauses = []retiredCause{{err: errors.New("b1 failure"), swallowers: []retiredSwallower{{spanID: "w-b1", name: "worker", branch: "par.b1"}}}}
+		}, false},
+		{"another agent retired on a sibling branch", "", at(30), true, func(inv *invocationTrace) {
+			ra := retired("par.b1", true, at(5), at(20))
+			ra.swallower.name = "other"
+			inv.retiredActivations = append(inv.retiredActivations, ra)
+		}, true},
+		{"retired on the activation's own branch", "", at(30), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b2", true, at(5), at(20)))
+		}, true},
+		{"event on the activation's branch", "par.b2", at(30), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", true, at(5), at(20)))
+		}, true},
+		{"event on an enclosing branch with a retired activation under it", "par", at(30), true, func(inv *invocationTrace) {
+			inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", true, at(5), at(20)))
+		}, false},
+	} {
+		t.Run("findEventAgentLocked/"+tc.name, func(t *testing.T) {
+			inv, _ := setup("par.b2")
+			if tc.mutate != nil {
+				tc.mutate(inv)
+			}
+			want := -1
+			if tc.found {
+				want = 2
+			}
+			if got := inv.findEventAgentLocked("", "worker", tc.evBranch, tc.ev, tc.hasID, tc.hasID); got != want {
+				t.Fatalf("findEventAgentLocked = %d, want %d", got, want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name         string
+		retiredOnB1  bool
+		wantRecovery bool
+	}{
+		{"completeResponse gives an event without a branch to the only activation that can have created it", false, true},
+		{"completeResponse ignores an event that could be another branch's", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			tm := newTraceManager()
+			rootID := identity{invocationID: "inv-cross-branch", agentName: "root"}
+			tm.pushAgentSpan(ctx, rootID)
+			tm.pushAgentSpan(ctx, identity{invocationID: rootID.invocationID, agentName: "worker", branch: "par.b2"})
+			inv := tm.invocation(ctx, rootID)
+			inv.mu.Lock()
+			w := inv.agentStack[2]
+			w.startPlatformTime = at(10)
+			w.retiredCauses = []retiredCause{{err: errors.New("b2 failure"), platformTime: at(20)}}
+			w.awaitingModelEvent = 1
+			if tc.retiredOnB1 {
+				inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", true, at(5), at(20)))
+			}
+			inv.mu.Unlock()
+			tm.completeResponseWithEvent(ctx, rootID, "worker", "", nil, false, at(30), true, true, actionMaps{}, true)
+			inv.mu.Lock()
+			defer inv.mu.Unlock()
+			if recovered := len(w.retiredCauses) == 0 && w.awaitingModelEvent == 0 && w.hasResponse; recovered != tc.wantRecovery {
+				t.Fatalf("worker on par.b2: causes %d, awaitingModelEvent %d, hasResponse %v; want the event to be its own: %v", len(w.retiredCauses), w.awaitingModelEvent, w.hasResponse, tc.wantRecovery)
+			}
+			if !tc.wantRecovery && (len(w.retiredCauses) != 1 || w.awaitingModelEvent != 1 || w.hasResponse) {
+				t.Fatalf("worker on par.b2: causes %d, awaitingModelEvent %d, hasResponse %v; want 1, 1, false", len(w.retiredCauses), w.awaitingModelEvent, w.hasResponse)
+			}
+		})
+	}
+	t.Run("recordStreamedAt", func(t *testing.T) {
+		ctx := t.Context()
+		for _, tc := range []struct {
+			name    string
+			ev      time.Time
+			retired bool
+			want    bool
+		}{
+			{"partial event of the only activation that can have created it", at(30), false, true},
+			{"partial event that could be another branch's", at(30), true, false},
+			{"partial event created before the activation started", at(5), false, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tm := newTraceManager()
+				rootID := identity{invocationID: "inv-cross-branch-stream", agentName: "root"}
+				tm.pushAgentSpan(ctx, rootID)
+				tm.pushAgentSpan(ctx, identity{invocationID: rootID.invocationID, agentName: "worker", branch: "par.b2"})
+				inv := tm.invocation(ctx, rootID)
+				inv.mu.Lock()
+				w := inv.agentStack[2]
+				w.startPlatformTime = at(10)
+				if tc.retired {
+					inv.retiredActivations = append(inv.retiredActivations, retired("par.b1", true, at(5), at(20)))
+				}
+				inv.mu.Unlock()
+				tm.recordStreamedAt(ctx, rootID, "worker", "", true, tc.ev, true, true)
+				inv.mu.Lock()
+				defer inv.mu.Unlock()
+				if got := inv.lastPartialSpanID == w.spanID && w.hasResponse; got != tc.want {
+					t.Fatalf("partial event recorded for worker on par.b2 = %v (last partial span %q, hasResponse %v), want %v", got, inv.lastPartialSpanID, w.hasResponse, tc.want)
+				}
+			})
+		}
+	})
+}
+
+// TestEventCreatedBeforeOpenActivationsStarted pins that an event created
+// before every open activation of its author, branch and node path started is
+// none of theirs: selectResponseOwnerWithIDLocked absorbs and settles it as a
+// retired activation's, settling a credit that such an activation left and
+// no pending event of the open ones, and eventActivationLocked places it
+// under the latest open activation that had started by then, if any. An
+// event created on the tick at which the activation started, as under a
+// constant clock, or without creation provenance, is still its own.
+func TestEventCreatedBeforeOpenActivationsStarted(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	setup := func(starts ...time.Time) (*invocationTrace, []*spanRecord) {
+		inv := newInvocationTraceWithSpan(trace.SpanContext{}, "trace-pre-start", t0)
+		root := &spanRecord{spanID: "root", kind: spanKindAgent, name: "root", parent: inv.agentStack[0], startPlatformTime: at(0)}
+		inv.agentStack = append(inv.agentStack, root)
+		var recs []*spanRecord
+		for n, start := range starts {
+			rec := &spanRecord{spanID: fmt.Sprintf("worker-%d", n+1), kind: spanKindAgent, name: "worker", parent: root, startPlatformTime: start}
+			inv.agentStack = append(inv.agentStack, rec)
+			recs = append(recs, rec)
+		}
+		inv.unrespondedRetired = map[string]int{}
+		inv.unrespondedRetiredTools = map[string]int{}
+		return inv, recs
+	}
+	k := llmKey(identity{agentName: "worker"})
+	t.Run("model event before the only open activation started", func(t *testing.T) {
+		inv, recs := setup(at(20))
+		recs[0].awaitingModelEvent = 1
+		inv.unrespondedRetired[k] = 1
+		_, _, absorbed, retiredAuthor, _ := inv.selectResponseOwnerWithIDLocked(2, "", nil, false, false, "", at(30), at(10), true, true, actionMaps{})
+		if !absorbed || !retiredAuthor || recs[0].awaitingModelEvent != 1 || inv.unrespondedRetired[k] != 0 {
+			t.Fatalf("absorbed %v, retired author %v, awaitingModelEvent %d, unrespondedRetired %d; want true, true, 1, 0", absorbed, retiredAuthor, recs[0].awaitingModelEvent, inv.unrespondedRetired[k])
+		}
+	})
+	t.Run("tool event before the only open activation started", func(t *testing.T) {
+		inv, recs := setup(at(20))
+		recs[0].awaitingToolEvent = 1
+		inv.unrespondedRetiredTools[k] = 2
+		_, _, absorbed, retiredAuthor, _ := inv.selectResponseOwnerWithIDLocked(2, "", []string{"call-1"}, false, false, "", at(30), at(10), true, true, actionMaps{})
+		if !absorbed || !retiredAuthor || recs[0].awaitingToolEvent != 1 || inv.unrespondedRetiredTools[k] != 1 {
+			t.Fatalf("absorbed %v, retired author %v, awaitingToolEvent %d, unrespondedRetiredTools %d; want true, true, 1, 1", absorbed, retiredAuthor, recs[0].awaitingToolEvent, inv.unrespondedRetiredTools[k])
+		}
+	})
+	t.Run("event before every open activation started", func(t *testing.T) {
+		inv, recs := setup(at(20), at(25))
+		recs[0].awaitingModelEvent = 1
+		recs[1].awaitingModelEvent = 1
+		if _, _, absorbed, retiredAuthor, _ := inv.selectResponseOwnerWithIDLocked(3, "", nil, false, false, "", at(30), at(10), true, true, actionMaps{}); !absorbed || !retiredAuthor || recs[0].awaitingModelEvent != 1 || recs[1].awaitingModelEvent != 1 {
+			t.Fatalf("absorbed %v, retired author %v, awaitingModelEvent %d and %d; want true, true, 1 and 1", absorbed, retiredAuthor, recs[0].awaitingModelEvent, recs[1].awaitingModelEvent)
+		}
+	})
+	for _, tc := range []struct {
+		name               string
+		ev                 time.Time
+		hasID, nonEmptyID  bool
+		customUUIDProvider bool
+		wantAbsorbed       bool
+	}{
+		{"event on the tick at which the activation started", at(20), true, true, false, false},
+		{"event after the activation started", at(25), true, true, false, false},
+		{"event before the activation started without creation provenance", at(10), false, false, false, false},
+		{"event with a non-UUID ID before an activation with a custom UUID provider started", at(10), false, true, true, true},
+		{"event with a non-UUID ID before an activation without one started", at(10), false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv, recs := setup(at(20))
+			recs[0].awaitingModelEvent = 1
+			recs[0].hasCustomUUIDProvider = tc.customUUIDProvider
+			owner, matched, absorbed, _, _ := inv.selectResponseOwnerWithIDLocked(2, "", nil, false, false, "", at(30), tc.ev, tc.hasID, tc.nonEmptyID, actionMaps{})
+			if absorbed != tc.wantAbsorbed {
+				t.Fatalf("absorbed = %v, want %v", absorbed, tc.wantAbsorbed)
+			}
+			if !tc.wantAbsorbed && (owner != 2 || !matched || recs[0].awaitingModelEvent != 0) {
+				t.Fatalf("owner %d, matched %v, awaitingModelEvent %d; want 2, true, 0", owner, matched, recs[0].awaitingModelEvent)
+			}
+		})
+	}
+	t.Run("eventActivationLocked", func(t *testing.T) {
+		inv, _ := setup(at(10), at(20))
+		for _, tc := range []struct {
+			ev   time.Time
+			want int
+		}{
+			{at(25), 3},
+			{at(15), 2},
+			{at(20), 3},
+			{at(5), -1},
+		} {
+			if got := inv.eventActivationLocked("", "worker", "", tc.ev, true, true); got != tc.want {
+				t.Errorf("eventActivationLocked(event at %v) = %d, want %d", tc.ev.Sub(t0), got, tc.want)
+			}
+		}
+		if got := inv.eventActivationLocked("", "worker", "", at(5), false, false); got != 3 {
+			t.Errorf("eventActivationLocked(event without provenance) = %d, want 3", got)
+		}
+	})
+}
+
+// TestClearLastPartialForEvent pins when an event without content or a typed
+// output counts as the after-agent event of a retired activation: when it
+// carries an action map of the context in which exactly one retired
+// activation's after-agent callbacks ran, other than a compacted hull's, and
+// that activation can own it. The activation then creates no later event
+// (afterAgentEventSeen), and its credit is settled, but no failure is cleared
+// and nothing is marked as responded.
+func TestClearLastPartialForEvent(t *testing.T) {
+	ctx := t.Context()
+	t0 := time.Unix(1_700_000_000, 0)
+	at := func(ms int) time.Time { return t0.Add(time.Duration(ms) * time.Millisecond) }
+	rootID := identity{invocationID: "inv-state-only-after-agent", agentName: "root"}
+	k := llmKey(identity{agentName: "inner"})
+	newEvent := func() *session.Event {
+		ev := session.NewEvent(ctx, rootID.invocationID)
+		ev.Author = "inner"
+		ev.Timestamp = at(30)
+		ev.Actions.StateDelta["inner_state"] = true
+		return ev
+	}
+	type state struct {
+		tm   *traceManager
+		inv  *invocationTrace
+		root *spanRecord
+		ev   *session.Event
+	}
+	setup := func(t *testing.T) state {
+		t.Helper()
+		tm := newTraceManager()
+		tm.pushAgentSpan(ctx, rootID)
+		inv := tm.invocation(ctx, rootID)
+		ev := newEvent()
+		inv.mu.Lock()
+		defer inv.mu.Unlock()
+		root := inv.agentStack[1]
+		root.retiredCauses = []retiredCause{{err: errors.New("inner-1 failure"), platformTime: at(15), swallowers: []retiredSwallower{{spanID: "inner-1", name: "inner"}}}}
+		inv.retiredActivations = append(inv.retiredActivations, retiredActivation{
+			swallower:              retiredSwallower{spanID: "inner-1", name: "inner"},
+			hasAfterAgentCallbacks: true,
+			afterAgentActions:      eventActionMaps(ev),
+			afterAgentActionsRef:   &ev.Actions,
+			afterAgentCredit:       true,
+			peerRetirement:         true,
+			joinedAtRetire:         true,
+			startPlatformTime:      at(10),
+			retiredAtPlatformTime:  at(20),
+		})
+		inv.unrespondedRetired = map[string]int{k: 1}
+		return state{tm: tm, inv: inv, root: root, ev: ev}
+	}
+	check := func(t *testing.T, s state, wantSeen bool) {
+		t.Helper()
+		s.inv.mu.Lock()
+		defer s.inv.mu.Unlock()
+		ra := s.inv.retiredActivations[0]
+		wantCredits := 1
+		if wantSeen {
+			wantCredits = 0
+		}
+		if ra.afterAgentEventSeen != wantSeen || ra.afterAgentCredit == wantSeen || s.inv.unrespondedRetired[k] != wantCredits || (ra.afterAgentActions == actionMaps{}) == !wantSeen {
+			t.Errorf("seen %v, credit %v, unrespondedRetired %d, maps kept %v; want seen %v", ra.afterAgentEventSeen, ra.afterAgentCredit, s.inv.unrespondedRetired[k], ra.afterAgentActions != actionMaps{}, wantSeen)
+		}
+		if len(s.root.retiredCauses) != 1 || s.root.hasResponse {
+			t.Errorf("root: %d causes, hasResponse %v; want 1 and false", len(s.root.retiredCauses), s.root.hasResponse)
+		}
+	}
+	t.Run("the only retired activation whose maps it carries", func(t *testing.T) {
+		s := setup(t)
+		s.tm.clearLastPartialForEvent(ctx, rootID, "inner", "", s.ev)
+		check(t, s, true)
+	})
+	t.Run("one copied map", func(t *testing.T) {
+		s := setup(t)
+		s.ev.Actions.StateDelta = maps.Clone(s.ev.Actions.StateDelta)
+		s.tm.clearLastPartialForEvent(ctx, rootID, "inner", "", s.ev)
+		check(t, s, true)
+	})
+	for _, tc := range []struct {
+		name   string
+		mutate func(s state)
+	}{
+		{"both maps copied", func(s state) {
+			s.ev.Actions.StateDelta = maps.Clone(s.ev.Actions.StateDelta)
+			s.ev.Actions.ArtifactDelta = maps.Clone(s.ev.Actions.ArtifactDelta)
+		}},
+		{"two retired activations claim it", func(s state) {
+			other := s.inv.retiredActivations[0]
+			other.swallower.spanID = "inner-3"
+			other.afterAgentCredit = false
+			s.inv.retiredActivations = append(s.inv.retiredActivations, other)
+		}},
+		{"a compacted hull", func(s state) { s.inv.retiredActivations[0].compactedHull = true }},
+		{"another agent's maps", func(s state) { s.inv.retiredActivations[0].swallower.name = "other" }},
+		{"no creation provenance", func(s state) { s.ev.ID = "not-a-uuid" }},
+		{"created before the activation started", func(s state) { s.ev.Timestamp = at(5) }},
+	} {
+		t.Run(tc.name+" changes nothing", func(t *testing.T) {
+			s := setup(t)
+			tc.mutate(s)
+			s.tm.clearLastPartialForEvent(ctx, rootID, "inner", "", s.ev)
+			check(t, s, false)
+		})
 	}
 }

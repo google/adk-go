@@ -349,6 +349,13 @@ type spanRecord struct {
 	// failureSeq records the earliest invocation sequence at which this
 	// unretired span remained failed/unresponded when an enclosing span retired.
 	failureSeq uint64
+	// runEndSeq and runEndPlatformTime record the sequence and platform time of
+	// the first retirement of an enclosing span that left this activation open
+	// after its run was known to be over (runDone): the run created all its
+	// events by then, so a later retirement of the activation is dated there
+	// (see recordRetiredActivationLocked).
+	runEndSeq          uint64
+	runEndPlatformTime time.Time
 	// callStarted reports that pushLLMSpan or pushToolSpan started the model
 	// or tool call, rather than popToolSpan making up a span for a call that
 	// this plugin did not see start.
@@ -377,6 +384,25 @@ type spanRecord struct {
 	// which the name, branch and path of the span do not. It is nil when the
 	// context does not show it.
 	activation any
+	// popRetirement holds, while popAgentSpan retires the activation, what
+	// the retired activation's entry records about that retirement (see
+	// recordRetiredActivationLocked), so that the entry has it before any
+	// pruning looks at it.
+	popRetirement *popRetirement
+}
+
+// popRetirement is what popAgentSpan knows about an activation that it
+// retires: whether reconcileConcurrentResponseOnPopLocked counted it as a
+// peer retirement and left a credit for it, the action maps of the context in
+// which its after-agent callbacks run and the value that keeps them reachable
+// (see callbackAfterAgentActions), and the goroutine that runs those
+// callbacks.
+type popRetirement struct {
+	peerRetirement       bool
+	afterAgentCredit     bool
+	afterAgentActions    actionMaps
+	afterAgentActionsRef any
+	goroutineID          uint64
 }
 
 // retiredSwallower identifies a retired custom ancestor that drained a child
@@ -492,18 +518,418 @@ type retiredActivation struct {
 	// settledByParent reports that this activation retired cleanly or had every
 	// cause cleared by an ancestor with no surviving failures along the chain;
 	// exclusion still requires event ID and post-start/post-retirement ordering.
-	settledByParent             bool
-	concurrentPeer              bool
-	unrespondedAtPop            bool
-	hasAfterAgentCallbacks      bool
-	hasCustomUUIDProvider       bool
-	afterAgentStateDeltaPtr     uintptr
-	afterAgentStateDeltaRef     any
+	settledByParent        bool
+	concurrentPeer         bool
+	unrespondedAtPop       bool
+	hasAfterAgentCallbacks bool
+	hasCustomUUIDProvider  bool
+	// afterAgentActions holds the action maps of the context in which the
+	// activation's after-agent callbacks ran, which the event that ADK builds
+	// from their content carries (see actionMaps), and afterAgentActionsRef
+	// holds the EventActions that holds both maps (see
+	// callbackAfterAgentActions), which keeps them reachable so that their
+	// addresses cannot be reused while they are compared, without keeping the
+	// callback context or anything else of the run. They are recorded for
+	// every activation with after-agent callbacks and kept until that event
+	// arrives or nothing can take it for another activation's event anymore
+	// (see settleAfterAgentActionsLocked).
+	afterAgentActions    actionMaps
+	afterAgentActionsRef any
+	// afterAgentEventSeen records that the event that ADK built from the
+	// activation's after-agent callbacks was delivered (see
+	// clearRetiredCauseForEventWithStateLocked). ADK builds at most one such
+	// event per activation, so no event created after the activation retired
+	// is its own from then on (see canOwnEventCreatedAt).
+	afterAgentEventSeen bool
+	// afterAgentCredit records that the activation retired unresponded while
+	// an open peer of the same agent, branch and node path ran, with no model
+	// or tool event pending, so that reconcileConcurrentResponseOnPopLocked
+	// added one unrespondedRetired credit for the response that it may still
+	// deliver. Its own after-agent event settles that credit and no other (see
+	// consumeAfterAgentCreditLocked).
+	afterAgentCredit bool
+	// creditSettled records that an event of the activation settled the
+	// credit that afterAgentCredit recorded, its after-agent event or an
+	// event of its run, so that no other event of the activation settles a
+	// credit (see settleRetiredResponseCreditLocked).
+	creditSettled bool
+	// peerRetirement records that reconcileConcurrentResponseOnPopLocked
+	// counted the activation's retirement in retiredPeerCount, so that the
+	// retired peers that still have entries of their own can be told from
+	// those that were pruned or compacted (see soleOpenAuthorLocked).
+	peerRetirement bool
+	// popGoroutineID is the goroutine on which popAgentSpan retired the
+	// activation, 0 when unknown. ADK runs the activation's after-agent
+	// callbacks and builds their event on that goroutine right after
+	// popAgentSpan returns, before the goroutine starts or ends another
+	// agent other than one that a callback runs, which starts and ends
+	// inside them (see markAfterAgentCallbacksReturnedOnLocked).
+	popGoroutineID uint64
+	// afterAgentDone records that the activation's after-agent callbacks
+	// returned, or that the run of its parent returned, so that their event,
+	// if they built one and anyone can still deliver it, was created by then
+	// (see settleAfterAgentActionsLocked). afterAgentDoneAt is the platform
+	// time at which that was seen, zero when unknown: the activation created
+	// no event after it, its after-agent event included (see
+	// canOwnEventCreatedAt).
+	afterAgentDone   bool
+	afterAgentDoneAt time.Time
+	// afterAgentPending marks a compacted hull that stands for activations
+	// whose after-agent events may still come and whose action maps it no
+	// longer holds (see foldPendingAfterAgentLocked): any event of its agent
+	// that one of them can have created may be such an event, so the hull can
+	// own an event created after its members retired, and no later activation
+	// excludes it by event-creation timestamp provenance.
+	afterAgentPending           bool
 	compactedHull               bool
 	goroutineID                 uint64
 	startPlatformTime           time.Time
 	retiredAtPlatformTime       time.Time
 	parentRetiredAtPlatformTime time.Time
+}
+
+// actionMaps holds the addresses of the StateDelta and ArtifactDelta maps of
+// a session.EventActions, 0 for a nil map. ADK builds the event of an
+// after-agent callback's content with a copy of the callback context's
+// EventActions, which shares both maps, and gives no other event those maps,
+// so an event that carries either of them is that callback's event. An
+// earlier plugin's OnEventCallback that replaces one map with a copy leaves
+// the other one in place.
+type actionMaps struct {
+	stateDelta, artifactDelta uintptr
+}
+
+// shares reports whether a and b hold a common non-nil map.
+func (a actionMaps) shares(b actionMaps) bool {
+	return (a.stateDelta != 0 && a.stateDelta == b.stateDelta) ||
+		(a.artifactDelta != 0 && a.artifactDelta == b.artifactDelta)
+}
+
+// afterAgentSharerLocked returns the index in retiredActivations of the
+// retired activation of (name, branch, path), other than a compacted hull,
+// whose after-agent callbacks ran in a context that holds a map of evActions
+// (see actionMaps), or -1 when there is none. ambiguous reports that more
+// than one does; sharer is then -1. inv.mu must be held.
+func (inv *invocationTrace) afterAgentSharerLocked(name, branch, path string, evActions actionMaps) (sharer int, ambiguous bool) {
+	sharer = -1
+	for j, ra := range inv.retiredActivations {
+		if ra.compactedHull || !ra.swallower.matches(name, branch, path) || !ra.afterAgentActions.shares(evActions) {
+			continue
+		}
+		if sharer >= 0 {
+			return -1, true
+		}
+		sharer = j
+	}
+	return sharer, false
+}
+
+// afterAgentSharerWithinLocked is afterAgentSharerLocked for a session event
+// on branch, which can be that of an activation on branch or on a branch under
+// it (see withinBranch): it returns the index in retiredActivations of the
+// only retired activation of name on such a branch and on path, other than a
+// compacted hull, whose after-agent callbacks ran in a context that holds a
+// map of evActions, or -1 when there is none or more than one. ADK gives an
+// after-agent event the activation's own branch, but an event without a
+// branch, or with an enclosing one, as when a plugin cleared or replaced it,
+// still carries the maps. inv.mu must be held.
+func (inv *invocationTrace) afterAgentSharerWithinLocked(name, branch, path string, evActions actionMaps) int {
+	sharer := -1
+	for j, ra := range inv.retiredActivations {
+		if ra.compactedHull || ra.swallower.name != name || !withinBranch(ra.swallower.branch, branch) ||
+			(path != "" && ra.swallower.path != "" && ra.swallower.path != path) || !ra.afterAgentActions.shares(evActions) {
+			continue
+		}
+		if sharer >= 0 {
+			return -1
+		}
+		sharer = j
+	}
+	return sharer
+}
+
+// consumeAfterAgentCreditLocked settles, for the after-agent event of
+// retiredActivations[idx], the unrespondedRetired credit that the activation
+// left when it retired (see retiredActivation.afterAgentCredit), and nothing
+// else: the model and tool credits that it left stand for events of its run
+// that may still come, whatever the after-agent event's content, and a credit
+// of another activation of the same agent stands for that activation's
+// response. inv.mu must be held.
+func (inv *invocationTrace) consumeAfterAgentCreditLocked(idx int) {
+	if idx < 0 || idx >= len(inv.retiredActivations) {
+		return
+	}
+	ra := &inv.retiredActivations[idx]
+	if !ra.afterAgentCredit {
+		return
+	}
+	ra.afterAgentCredit = false
+	ra.creditSettled = true
+	k := llmKey(identity{path: ra.swallower.path, agentName: ra.swallower.name, branch: ra.swallower.branch})
+	if inv.unrespondedRetired[k] > 0 {
+		inv.unrespondedRetired[k]--
+	}
+}
+
+// settleRetiredResponseCreditLocked settles one unrespondedRetired credit of
+// the key k, the llmKey of (name, branch, path), for a session event that
+// completeResponse absorbs as the response of a retired activation and that
+// carries no action map of a retired activation's after-agent callbacks. If
+// exactly one retired activation of (name, branch, path) can have created
+// the event in its run (see createdInRun) and that activation left a
+// credit when it retired (see retiredActivation.afterAgentCredit), the event
+// settles that activation's credit, so that its after-agent event settles
+// none later; if that activation's credit was already settled, by its
+// after-agent event or another event of its run, the event settles nothing.
+// Otherwise it settles one credit of k, as before such credits were told
+// apart. It reports whether a credit was settled. inv.mu must be held.
+func (inv *invocationTrace) settleRetiredResponseCreditLocked(k, name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	if inv.unrespondedRetired[k] <= 0 {
+		return false
+	}
+	author := -1
+	for j, ra := range inv.retiredActivations {
+		if ra.compactedHull || ra.swallower.name != name || ra.swallower.branch != branch || ra.swallower.path != path {
+			continue
+		}
+		if !ra.createdInRun(evCreatedAt, hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider)) {
+			continue
+		}
+		if author >= 0 {
+			author = -1
+			break
+		}
+		author = j
+	}
+	if author >= 0 {
+		ra := &inv.retiredActivations[author]
+		switch {
+		case ra.afterAgentCredit:
+			inv.consumeAfterAgentCreditLocked(author)
+			return true
+		case ra.creditSettled:
+			return false
+		}
+	}
+	inv.unrespondedRetired[k]--
+	return true
+}
+
+// createdInRun reports whether the retired activation ra can have
+// created, in its run, an event created at evCreatedAt, which hasEventID
+// reports to be its creation time: the event was created after ra started
+// and no later than ra retired. An event without creation evidence can be
+// any activation's.
+func (ra retiredActivation) createdInRun(evCreatedAt time.Time, hasEventID bool) bool {
+	if evCreatedAt.IsZero() || !hasEventID {
+		return true
+	}
+	if !ra.startPlatformTime.IsZero() && evCreatedAt.Before(ra.startPlatformTime) {
+		return false
+	}
+	return ra.retiredAtPlatformTime.IsZero() || ra.unjoinedTaskRetirement() || !evCreatedAt.After(ra.retiredAtPlatformTime)
+}
+
+// afterAgentState holds what tells whether a retired activation still needs
+// the action maps of its after-agent callbacks (see
+// needsAfterAgentActionsLocked): the spans that a recorded cause names as
+// swallowers, and the spans that an open agent span runs under, which may
+// have retired already. When such an open span retires later, its failure
+// cause moves up with the activation among its swallowers (see
+// retireDrainedDescendantsAtLocked), so the activation's after-agent event
+// may still have to recover it.
+type afterAgentState struct {
+	swallowers map[string]bool
+	underOpen  map[string]bool
+}
+
+func (inv *invocationTrace) afterAgentStateLocked() afterAgentState {
+	st := afterAgentState{swallowers: make(map[string]bool), underOpen: make(map[string]bool)}
+	for _, rec := range inv.agentStack {
+		for _, c := range rec.retiredCauses {
+			for _, s := range c.swallowers {
+				if s.spanID != "" {
+					st.swallowers[s.spanID] = true
+				}
+			}
+		}
+	}
+	for _, r := range inv.agentStack[1:] {
+		for p := r.parent; p != nil && p.kind == spanKindAgent; p = p.parent {
+			if p.spanID != "" {
+				st.underOpen[p.spanID] = true
+			}
+		}
+	}
+	return st
+}
+
+// holdsAfterAgentEvent reports whether ra still recognizes an after-agent
+// event that may come: it keeps the action maps of its after-agent callbacks,
+// or it is a hull that stands for activations whose events may (see
+// afterAgentPending).
+func (ra retiredActivation) holdsAfterAgentEvent() bool {
+	return ra.afterAgentActions != (actionMaps{}) || ra.afterAgentPending
+}
+
+// markAfterAgentDone records that ra's after-agent callbacks returned, as
+// seen at the platform time at, zero when unknown. Each time at which that is
+// seen bounds the events of ra, so the earliest known one is kept.
+func (ra *retiredActivation) markAfterAgentDone(at time.Time) {
+	ra.afterAgentDone = true
+	if !at.IsZero() && (ra.afterAgentDoneAt.IsZero() || at.Before(ra.afterAgentDoneAt)) {
+		ra.afterAgentDoneAt = at
+	}
+}
+
+// dropAfterAgentEvent forgets the after-agent event that ra recognizes (see
+// holdsAfterAgentEvent).
+func (ra *retiredActivation) dropAfterAgentEvent() {
+	ra.afterAgentActions = actionMaps{}
+	ra.afterAgentActionsRef = nil
+	ra.afterAgentPending = false
+}
+
+// needsAfterAgentActionsLocked reports whether retiredActivations[idx] keeps
+// the action maps of its after-agent callbacks (see
+// retiredActivation.afterAgentActions), or, for a hull, keeps standing for
+// the after-agent events of its members (see afterAgentPending). Its
+// after-agent event is recognized by them alone, so that an event that it
+// builds after the activation retired is never taken for another
+// activation's: one that started meanwhile, or one whose run the event's
+// timestamp falls in. The maps are kept while
+//
+//   - the event may recover a failure that the activation swallowed, or one
+//     that an open span under it carries and that moves up with it among its
+//     swallowers once that span retires (see afterAgentState);
+//   - its after-agent callbacks may still run (see afterAgentDone), so that
+//     an activation of the same agent that starts meanwhile could be taken
+//     for the event's author;
+//   - the event may settle the credit that the activation left (see
+//     afterAgentCredit);
+//   - or, once the callbacks returned, another activation of the agent could
+//     be taken for the event's author or lose something to it: one is open,
+//     one swallowed a failure that is still recorded or has an open span
+//     under it, or a credit of the agent is outstanding.
+//
+// An activation of the agent that starts after the callbacks returned
+// started after their event was created, so it does not own that event (see
+// spanRecord.startedAfterEvent), unless both fall in one tick of a coarse
+// clock, which the maps cover while that activation is open (see
+// pushAgentSpan), and an event that a retired activation of the agent, other
+// than a swallower, is taken to have created recovers nothing. Nor is the activation a possible author of an event created after
+// its callbacks were seen to return (see afterAgentDoneAt), whether its
+// after-agent event was delivered unrecognized or never came, so an open
+// activation's later recovery counts without the maps. That the activation
+// retired without a response, or that a custom ancestor may still hold its
+// after-agent event, keeps nothing by itself once its callbacks returned:
+// the event would only show that it responded, which no failure depends on,
+// and keeping the maps until such an event arrives would keep them for every
+// activation whose callbacks build none, while a custom ancestor runs.
+// inv.mu must be held.
+func (inv *invocationTrace) needsAfterAgentActionsLocked(idx int, st afterAgentState) bool {
+	ra := &inv.retiredActivations[idx]
+	if !ra.holdsAfterAgentEvent() {
+		return false
+	}
+	if st.swallowers[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID] {
+		return true
+	}
+	if !ra.afterAgentDone || ra.afterAgentCredit {
+		return true
+	}
+	name, branch, path := ra.swallower.name, ra.swallower.branch, ra.swallower.path
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind == spanKindAgent && rec.name == name && rec.branch == branch && (path == "" || rec.path == "" || rec.path == path) {
+			return true
+		}
+	}
+	for j, other := range inv.retiredActivations {
+		if j != idx && other.swallower.matches(name, branch, path) && (st.swallowers[other.swallower.spanID] || st.underOpen[other.swallower.spanID]) {
+			return true
+		}
+	}
+	k := llmKey(identity{path: path, agentName: name, branch: branch})
+	return inv.unrespondedRetired[k] > 0 || inv.unrespondedRetiredTools[k] > 0
+}
+
+// settleAfterAgentActionsLocked drops the after-agent action maps of the
+// retired activations for which match reports true that no longer need them
+// (see needsAfterAgentActionsLocked). inv.mu must be held.
+func (inv *invocationTrace) settleAfterAgentActionsLocked(match func(ra *retiredActivation) bool) {
+	var st afterAgentState
+	for idx := range inv.retiredActivations {
+		ra := &inv.retiredActivations[idx]
+		if !ra.holdsAfterAgentEvent() || !match(ra) {
+			continue
+		}
+		if st.swallowers == nil {
+			st = inv.afterAgentStateLocked()
+		}
+		if !inv.needsAfterAgentActionsLocked(idx, st) {
+			ra.dropAfterAgentEvent()
+		}
+	}
+}
+
+// afterAgentCallbacksReturnedOnLocked records, when an agent starts or ends
+// on the goroutine goid at the platform time at, that the after-agent
+// callbacks of the activations that popAgentSpan retired on that goroutine
+// earlier returned, and by when (see markAfterAgentCallbacksReturnedOnLocked),
+// and drops the action maps that they no longer need. inv.mu must be held.
+func (inv *invocationTrace) afterAgentCallbacksReturnedOnLocked(goid uint64, at time.Time, running int) {
+	if inv.markAfterAgentCallbacksReturnedOnLocked(goid, at, running) {
+		inv.settleAfterAgentActionsOnLocked(goid)
+	}
+}
+
+// markAfterAgentCallbacksReturnedOnLocked records, when an agent starts or
+// ends on the goroutine goid at the platform time at, that the after-agent
+// callbacks of the activations that popAgentSpan retired on that goroutine
+// earlier returned (see retiredActivation.popGoroutineID), and by when (see
+// retiredActivation.afterAgentDoneAt), except for those that are still
+// running: running is the number of runs of after-agent callbacks that
+// enclose the start or end on that goroutine, other than the ending
+// activation's own (see afterAgentCallbackRunsOfTrace), as when a callback
+// runs an agent itself. Each start or end on goid records every activation
+// retired there except the ones whose callbacks enclose it, and those runs
+// nest, so the activations whose callbacks still run are the ones that
+// retired first among those on goid not recorded yet: the activation retired
+// last may have returned from its callbacks or still run them, and every
+// other one encloses it. It reports whether it recorded any. goid 0 is
+// unknown and shows nothing. inv.mu must be held.
+func (inv *invocationTrace) markAfterAgentCallbacksReturnedOnLocked(goid uint64, at time.Time, running int) bool {
+	if goid == 0 {
+		return false
+	}
+	var pending []int
+	for idx := range inv.retiredActivations {
+		if ra := &inv.retiredActivations[idx]; ra.popGoroutineID == goid && !ra.afterAgentDone {
+			pending = append(pending, idx)
+		}
+	}
+	if len(pending) <= running {
+		return false
+	}
+	slices.SortStableFunc(pending, func(a, b int) int {
+		return cmp.Compare(inv.retiredActivations[a].retiredAtSeq, inv.retiredActivations[b].retiredAtSeq)
+	})
+	for _, idx := range pending[max(running, 0):] {
+		inv.retiredActivations[idx].markAfterAgentDone(at)
+	}
+	return true
+}
+
+// settleAfterAgentActionsOnLocked drops the after-agent action maps of the
+// activations that popAgentSpan retired on the goroutine goid that no longer
+// need them (see needsAfterAgentActionsLocked). inv.mu must be held.
+func (inv *invocationTrace) settleAfterAgentActionsOnLocked(goid uint64) {
+	if goid == 0 {
+		return
+	}
+	inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+		return ra.popGoroutineID == goid
+	})
 }
 
 func (inv *invocationTrace) openSpanSetLocked() map[string]bool {
@@ -556,8 +982,17 @@ func (inv *invocationTrace) recordRetiredActivationEntryLocked(entry retiredActi
 					inv.retiredActivations[i].ancestorSpanIDs = append(inv.retiredActivations[i].ancestorSpanIDs, a)
 				}
 			}
-			inv.retiredActivations[i].joinedAtRetire = inv.retiredActivations[i].joinedAtRetire || entry.joinedAtRetire
-			inv.retiredActivations[i].settledByParent = inv.retiredActivations[i].settledByParent || entry.settledByParent
+			ra := &inv.retiredActivations[i]
+			ra.joinedAtRetire = ra.joinedAtRetire || entry.joinedAtRetire
+			ra.settledByParent = ra.settledByParent || entry.settledByParent
+			ra.peerRetirement = ra.peerRetirement || entry.peerRetirement
+			ra.afterAgentCredit = ra.afterAgentCredit || entry.afterAgentCredit
+			if ra.popGoroutineID == 0 {
+				ra.popGoroutineID = entry.popGoroutineID
+			}
+			if ra.afterAgentActions == (actionMaps{}) && !ra.afterAgentEventSeen {
+				ra.afterAgentActions, ra.afterAgentActionsRef = entry.afterAgentActions, entry.afterAgentActionsRef
+			}
 			return
 		}
 	}
@@ -566,25 +1001,18 @@ func (inv *invocationTrace) recordRetiredActivationEntryLocked(entry retiredActi
 	inv.retiredActivations = append(inv.retiredActivations, entry)
 }
 
-func (inv *invocationTrace) isActiveSwallowerLocked(spanID string) bool {
-	if spanID == "" {
-		return false
-	}
-	for _, rec := range inv.agentStack {
-		for _, c := range rec.retiredCauses {
-			if c.hasSwallowerSpan(spanID) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]bool, retiredAt time.Time, recs ...*spanRecord) {
 	if len(recs) == 0 {
 		return
 	}
 	retiredParents := make(map[string]bool, len(recs))
+	// runOver holds the retired parents whose runs returned. An activation
+	// that one of them ran has either returned, after-agent callbacks
+	// included, or, if the parent left it running on a goroutine of its own,
+	// can no longer hand an event to the parent, which yields nothing once its
+	// run returned: every after-agent event of it that can still be delivered
+	// was created by then (see retiredActivation.afterAgentDone).
+	runOver := make(map[string]bool, len(recs))
 	var pruneKeys []agentIdentityKey
 	addPruneKey := func(name, branch, path string) {
 		k := agentIdentityKey{name: name, branch: branch, path: path}
@@ -596,10 +1024,14 @@ func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]
 		inv.recordRetiredActivationLocked(rec, openSet, retiredAt)
 		if rec != nil && rec.kind == spanKindAgent && rec.spanID != "" {
 			retiredParents[rec.spanID] = true
+			if rec.completed || rec.runDone {
+				runOver[rec.spanID] = true
+			}
 			addPruneKey(rec.name, rec.branch, rec.path)
 		}
 	}
 	if len(retiredParents) > 0 {
+		var st afterAgentState
 		for i := range inv.retiredActivations {
 			ra := &inv.retiredActivations[i]
 			if !retiredParents[ra.parentSpanID] {
@@ -608,12 +1040,24 @@ func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]
 			if !retiredAt.IsZero() && ra.parentRetiredAtPlatformTime.IsZero() {
 				ra.parentRetiredAtPlatformTime = retiredAt
 			}
+			if runOver[ra.parentSpanID] {
+				ra.markAfterAgentDone(retiredAt)
+			}
+			if st.swallowers == nil {
+				st = inv.afterAgentStateLocked()
+			}
 			hasOpenGuard := slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
 				return openSet[g]
 			})
-			if !inv.isActiveSwallowerLocked(ra.swallower.spanID) && (!ra.unrespondedAtPop || !hasOpenGuard) {
-				ra.afterAgentStateDeltaPtr = 0
-				ra.afterAgentStateDeltaRef = nil
+			// Once the parent retired, only an open custom ancestor that holds
+			// the activation's events can still deliver its after-agent event,
+			// so without one the maps go, unless the event may still recover a
+			// cause that the activation swallowed, or one that an open span under
+			// it carries and moves up with it among its swallowers once that span
+			// retires (see afterAgentState). With one, they stay as long
+			// as the activation needs them (see needsAfterAgentActionsLocked).
+			if !hasOpenGuard && !st.swallowers[ra.swallower.spanID] && !st.underOpen[ra.swallower.spanID] {
+				ra.dropAfterAgentEvent()
 			}
 			addPruneKey(
 				ra.swallower.name,
@@ -621,6 +1065,9 @@ func (inv *invocationTrace) recordRetiredActivationsAtLocked(openSet map[string]
 				ra.swallower.path,
 			)
 		}
+		inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+			return retiredParents[ra.parentSpanID]
+		})
 	}
 	for _, k := range pruneKeys {
 		inv.pruneSettledRetiredActivationsLocked(k.name, k.branch, k.path)
@@ -637,6 +1084,29 @@ func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openS
 			ancestorSpanIDs = append(ancestorSpanIDs, p.spanID)
 		}
 	}
+	// An activation that an enclosing retirement left open after its run was
+	// over (see spanRecord.runEndSeq) created all its events by then, so its
+	// retirement is dated there. Dated when a buffered event later lets
+	// retireDrainedDescendantsAtLocked retire it, which can come after a later
+	// activation of the same agent started, it would look like a peer that
+	// could have created the later activation's events.
+	retiredAtSeq := inv.nextSeqLocked()
+	if rec.runEndSeq != 0 && rec.runEndSeq < retiredAtSeq {
+		retiredAtSeq = rec.runEndSeq
+		if !rec.runEndPlatformTime.IsZero() {
+			retiredAt = rec.runEndPlatformTime
+		}
+	}
+	// What popAgentSpan knows about the retirement goes into the entry now,
+	// before recordRetiredActivationsAtLocked prunes the entries of rec's
+	// agent, branch and node path, which keeps an entry that still expects
+	// its after-agent event or holds a credit (see
+	// pruneSettledRetiredActivationsLocked).
+	var pop popRetirement
+	if rec.popRetirement != nil {
+		pop = *rec.popRetirement
+		rec.popRetirement = nil
+	}
 	inv.recordRetiredActivationEntryLocked(retiredActivation{
 		swallower: retiredSwallower{
 			spanID: rec.spanID,
@@ -648,13 +1118,18 @@ func (inv *invocationTrace) recordRetiredActivationLocked(rec *spanRecord, openS
 		parentSpanID:           rec.parentSpanID,
 		guardSpanIDs:           customGuardSpanIDsLocked(rec, openSet),
 		ancestorSpanIDs:        ancestorSpanIDs,
-		retiredAtSeq:           inv.nextSeqLocked(),
+		retiredAtSeq:           retiredAtSeq,
 		completedOrTask:        rec.completed || rec.taskMode,
 		joinedAtRetire:         rec.completed || rec.runDone,
 		concurrentPeer:         rec.concurrentPeer,
 		unrespondedAtPop:       !rec.ownResponse && !rec.contextEnded && !rec.taskMode,
 		hasAfterAgentCallbacks: rec.hasAfterAgentCallbacks,
 		hasCustomUUIDProvider:  rec.hasCustomUUIDProvider,
+		afterAgentActions:      pop.afterAgentActions,
+		afterAgentActionsRef:   pop.afterAgentActionsRef,
+		afterAgentCredit:       pop.afterAgentCredit,
+		peerRetirement:         pop.peerRetirement,
+		popGoroutineID:         pop.goroutineID,
 		goroutineID:            rec.goroutineID,
 		startPlatformTime:      rec.startPlatformTime,
 		retiredAtPlatformTime:  retiredAt,
@@ -738,7 +1213,40 @@ func (inv *invocationTrace) markSettledRetiredActivationsLocked(recoveringSpanID
 	}
 }
 
+// unjoinedTaskRetirement reports that a finish_task function response retired
+// the activation (completedOrTask without completed) before its run
+// synchronized (!joinedAtRetire), so its goroutine may still be creating
+// events after retiredAtPlatformTime. Both fields are part of compactKey, so
+// a compacted hull has the same value as each of its members.
+func (ra retiredActivation) unjoinedTaskRetirement() bool {
+	return ra.completedOrTask && !ra.joinedAtRetire
+}
+
+// canOwnEventCreatedAt reports whether ra can have created an event created
+// at evCreatedAt. An activation without after-agent callbacks creates no event
+// after it retired, unless it is an unjoined finish_task retirement (see
+// unjoinedTaskRetirement), whose run may outlast its retirement, and neither
+// does one whose after-agent event was already delivered (see
+// afterAgentEventSeen). The enclosing activation's run returns only after ra's
+// run did, so its retirement bounds ra's events in either case. So does the
+// time at which ra's after-agent callbacks were seen to have returned (see
+// afterAgentDoneAt), which is only seen once ra's run returned: ADK builds
+// their event before the goroutine that ran them starts or ends another
+// agent, and before the run of ra's parent returns, so an event created later
+// is not that event, even if that event never comes or is not recognized. An
+// agent that the callbacks run on that goroutine shows nothing (see
+// markAfterAgentCallbacksReturnedOnLocked).
 func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEventID bool) bool {
+	return ra.canOwnEventAt(evCreatedAt, hasEventID, false)
+}
+
+// canOwnEventAt is canOwnEventCreatedAt for an event that, if afterAgentEvent
+// is set, carries an action map of the context in which ra's after-agent
+// callbacks ran (see actionMaps). Such an event is ra's after-agent event
+// whenever it was created, so afterAgentDoneAt does not bound it, as for
+// callbacks that run an agent on another goroutine and wait for it, which
+// the goroutine that ran them does not show.
+func (ra retiredActivation) canOwnEventAt(evCreatedAt time.Time, hasEventID, afterAgentEvent bool) bool {
 	if evCreatedAt.IsZero() {
 		return true
 	}
@@ -748,7 +1256,10 @@ func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEvent
 	if !ra.startPlatformTime.IsZero() && evCreatedAt.Before(ra.startPlatformTime) {
 		return false
 	}
-	if !ra.hasAfterAgentCallbacks && !ra.retiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.retiredAtPlatformTime) {
+	if (!ra.hasAfterAgentCallbacks || ra.afterAgentEventSeen) && !ra.unjoinedTaskRetirement() && !ra.retiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.retiredAtPlatformTime) {
+		return false
+	}
+	if !afterAgentEvent && !ra.afterAgentDoneAt.IsZero() && evCreatedAt.After(ra.afterAgentDoneAt) {
 		return false
 	}
 	if !ra.parentRetiredAtPlatformTime.IsZero() && evCreatedAt.After(ra.parentRetiredAtPlatformTime) {
@@ -757,7 +1268,26 @@ func (ra retiredActivation) canOwnEventCreatedAt(evCreatedAt time.Time, hasEvent
 	return true
 }
 
+// ownsAfterAgentEvent reports whether ra can own, as its after-agent event,
+// a session event created at evCreatedAt that carries an action map of the
+// context in which ra's after-agent callbacks ran (see
+// afterAgentSharerLocked): the event has creation provenance for ra, as
+// hasEventID reports, or a non-empty ID (evNonEmptyID) while ra ran with a
+// custom UUID provider, and ra can own an event created then (see
+// canOwnEventAt). An event that carries such a map but fails either test, as
+// when an earlier plugin rewrote its ID or Timestamp, is no one's: it is not
+// ra's after-agent event, settles none of ra's credit and is placed like an
+// event of no retired activation.
+func (ra retiredActivation) ownsAfterAgentEvent(evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	return (hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider)) && ra.canOwnEventAt(evCreatedAt, true, true)
+}
+
 func (ra retiredActivation) excludedByEventTimestamp(laterSpanID string, laterSeq, laterGoroutineID uint64, laterConcurrentPeer bool, laterStartPlatformTime, evCreatedAt time.Time, hasEventID bool) bool {
+	// The after-agent events that a hull stands for may come at any time (see
+	// afterAgentPending), so a later activation never excludes it.
+	if ra.afterAgentPending {
+		return false
+	}
 	settledMatch := ra.joinedAtRetire && ra.settledByParent
 	joinedResponded := ra.joinedAtRetire && !ra.unrespondedAtPop
 	if ra.swallower.spanID == laterSpanID ||
@@ -785,29 +1315,60 @@ func (ra retiredActivation) excludedByEventTimestamp(laterSpanID string, laterSe
 		!ra.canOwnEventCreatedAt(evCreatedAt, hasEventID)
 }
 
+// pruneSettledRetiredActivationsLocked drops the entries of (name, branch,
+// path) in retiredActivations that nothing needs anymore and compacts the
+// rest (see below). An entry stays as long as a recorded cause names it as a
+// swallower, or an open custom ancestor of it may still deliver its events
+// (guardSpanIDs). An entry also stays, whatever its ancestors, while it
+// still recognizes an after-agent event that may come (see
+// needsAfterAgentActionsLocked), has an open span under it, whose failure
+// moves up with it among its swallowers once that span retires, or counted as
+// a peer retirement or holds a credit (afterAgentCredit) while a peer of it
+// is open (see soleOpenAuthorLocked), as for the agent of a workflow node or
+// the agent that the runner runs, which have no custom ancestor. Such an
+// entry is not compacted either while it keeps its maps, its credit or an
+// open span under it, or, while a peer of it is open, counted as a peer
+// retirement, so that the entries that the peer's own events depend on stay
+// as many as the activations that retired while it runs. An entry's maps go
+// once nothing needs them, so that, as for the activations of an agent that
+// a custom agent runs one after another, a wave of activations whose runs
+// are over and whose after-agent events cannot be taken for another
+// activation's leaves no more entries than compaction keeps, and the entries
+// that keep their maps only because their after-agent events may still come
+// are bounded too (see foldPendingAfterAgentLocked). inv.mu must be held.
 func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, path string) {
 	if len(inv.retiredActivations) == 0 {
 		return
 	}
+	inv.settleAfterAgentActionsLocked(func(ra *retiredActivation) bool {
+		return ra.afterAgentDone && ra.swallower.matches(name, branch, path)
+	})
 	openSet := inv.openSpanSetLocked()
-	surviving := make(map[string]bool)
-	for _, rec := range inv.agentStack {
-		for _, c := range rec.retiredCauses {
-			for _, s := range c.swallowers {
-				if s.spanID != "" {
-					surviving[s.spanID] = true
-				}
-			}
-		}
+	st := inv.afterAgentStateLocked()
+	surviving := st.swallowers
+	openPeer := inv.hasOpenPeerLocked
+	// pinned reports that ra stays as it is, neither dropped nor compacted.
+	// A peer retirement stays uncompacted while a peer of it is open, as it
+	// stays undeleted below: soleOpenAuthorLocked gives an open activation an
+	// event only while every retired peer that retiredPeerCount counts has
+	// an entry of its own, so a hull that took the place of such entries
+	// would keep the open activation's recovery from counting. A credit, or
+	// a settled one, is only ever left by a peer retirement.
+	pinned := func(ra retiredActivation) bool {
+		return ra.holdsAfterAgentEvent() || ra.afterAgentCredit || st.underOpen[ra.swallower.spanID] ||
+			(ra.peerRetirement && openPeer(ra))
 	}
 	inv.retiredActivations = slices.DeleteFunc(inv.retiredActivations, func(ra retiredActivation) bool {
-		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] {
+		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] ||
+			ra.holdsAfterAgentEvent() || st.underOpen[ra.swallower.spanID] ||
+			((ra.peerRetirement || ra.afterAgentCredit) && openPeer(ra)) {
 			return false
 		}
 		return !slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
 			return openSet[g]
 		})
 	})
+	inv.foldPendingAfterAgentLocked(name, branch, st)
 
 	type compactKey struct {
 		name                   string
@@ -844,7 +1405,7 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 	}
 	for idx := range inv.retiredActivations {
 		ra := &inv.retiredActivations[idx]
-		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] {
+		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] || pinned(*ra) {
 			continue
 		}
 		var openGuards []string
@@ -953,14 +1514,23 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 			}
 			m := inv.retiredActivations[idx]
 			if firstMidIdx == -1 {
+				// The fields of compactKey, joinedAtRetire and
+				// settledByParent among them, are the same for every
+				// member of the bucket, so the hull keeps those of its
+				// first member.
 				firstMidIdx = idx
 				hull = m
 				hull.guardSpanIDs = slices.Clone(m.guardSpanIDs)
 				hull.ancestorSpanIDs = slices.Clone(m.ancestorSpanIDs)
 				hull.compactedHull = true
 				hull.hasCustomUUIDProvider = false
-				hull.afterAgentStateDeltaPtr = 0
-				hull.afterAgentStateDeltaRef = nil
+				hull.afterAgentActions = actionMaps{}
+				hull.afterAgentActionsRef = nil
+				hull.afterAgentEventSeen = false
+				hull.afterAgentCredit = false
+				hull.creditSettled = false
+				hull.peerRetirement = false
+				hull.popGoroutineID = 0
 				continue
 			}
 			if m.swallower.seq > hull.swallower.seq {
@@ -978,14 +1548,14 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 			if hull.goroutineID != m.goroutineID {
 				hull.goroutineID = 0
 			}
-			hull.joinedAtRetire = hull.joinedAtRetire && m.joinedAtRetire
-			hull.settledByParent = hull.settledByParent && m.settledByParent
 			hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
 				return !slices.Contains(m.ancestorSpanIDs, id)
 			})
 			hull.startPlatformTime = mergeMinTime(hull.startPlatformTime, m.startPlatformTime)
 			hull.retiredAtPlatformTime = mergeMaxTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
 			hull.parentRetiredAtPlatformTime = mergeMaxTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
+			hull.afterAgentDone = hull.afterAgentDone && m.afterAgentDone
+			hull.afterAgentDoneAt = mergeMaxTime(hull.afterAgentDoneAt, m.afterAgentDoneAt)
 		}
 		if firstMidIdx != -1 {
 			midHullAt[firstMidIdx] = hull
@@ -997,7 +1567,159 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 			out = append(out, hull)
 			continue
 		}
-		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] || keep[idx] {
+		if !ra.swallower.matches(name, branch, path) || surviving[ra.swallower.spanID] || keep[idx] || pinned(ra) {
+			out = append(out, ra)
+		}
+	}
+	clear(inv.retiredActivations[len(out):])
+	inv.retiredActivations = out
+}
+
+// hasOpenPeerLocked reports whether an activation of the agent, branch and
+// node path of the retired activation ra is open, a peer of ra in the sense
+// of retiredPeerCount (see soleOpenAuthorLocked). inv.mu must be held.
+func (inv *invocationTrace) hasOpenPeerLocked(ra retiredActivation) bool {
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind == spanKindAgent && rec.name == ra.swallower.name && rec.branch == ra.swallower.branch && rec.path == ra.swallower.path {
+			return true
+		}
+	}
+	return false
+}
+
+// maxPendingAfterAgent bounds, per parent activation, agent and branch, the
+// retired activations that keep the action maps of their after-agent
+// callbacks only because their after-agent events may still come (see
+// foldPendingAfterAgentLocked).
+const maxPendingAfterAgent = 8
+
+// foldPendingAfterAgentLocked bounds the entries of the agent name on branch
+// that keep their after-agent action maps only because their after-agent
+// events may still come: those that hold no credit and that no recorded
+// cause names as a swallower or has an open span under it. Nothing may show
+// when the after-agent callbacks of such an activation return, as for the
+// activations that a parent runs on goroutines of their own and does not wait
+// for, until the parent's run returns (see recordRetiredActivationsAtLocked).
+// Of those under one parent, at most maxPendingAfterAgent stay; the oldest of
+// the others fold into one compacted hull that stands for their after-agent
+// events (see afterAgentPending). An event that one of them can have created
+// may then be such an event, so it is no one's alone and clears no failure,
+// and an open activation of the agent that an ancestor of theirs may hold
+// events for clears no failure with its own events either (see
+// hasGuardedRetiredPeerForEventLocked), until the hull no longer needs to
+// stand for them (see needsAfterAgentActionsLocked).
+// A hull of activations on different node paths matches any path.
+//
+// While a peer of an entry is open (see hasOpenPeerLocked), the entry is not
+// folded if it counted as a peer retirement, since soleOpenAuthorLocked gives
+// the open peer its events only while every retired peer that
+// retiredPeerCount counts has an entry of its own, nor if its callbacks were
+// seen to return (afterAgentDone): it keeps its maps then because the open
+// peer could be taken for the author of its after-agent event, not because
+// that event may still come, and a hull would stand for it as one that may.
+// Such entries stay as they are until no peer is open, as pruning keeps them
+// (see pruneSettledRetiredActivationsLocked). inv.mu must be held.
+func (inv *invocationTrace) foldPendingAfterAgentLocked(name, branch string, st afterAgentState) {
+	groups := make(map[string][]int)
+	for idx, ra := range inv.retiredActivations {
+		if ra.swallower.name != name || ra.swallower.branch != branch || !ra.holdsAfterAgentEvent() ||
+			ra.afterAgentCredit || st.swallowers[ra.swallower.spanID] || st.underOpen[ra.swallower.spanID] {
+			continue
+		}
+		if (ra.peerRetirement || (ra.afterAgentDone && !ra.compactedHull)) && inv.hasOpenPeerLocked(ra) {
+			continue
+		}
+		groups[ra.parentSpanID] = append(groups[ra.parentSpanID], idx)
+	}
+	minTime := func(a, b time.Time) time.Time {
+		if a.IsZero() || b.IsZero() {
+			return time.Time{}
+		}
+		if a.Before(b) {
+			return a
+		}
+		return b
+	}
+	maxTime := func(a, b time.Time) time.Time {
+		if a.IsZero() || b.IsZero() {
+			return time.Time{}
+		}
+		if a.After(b) {
+			return a
+		}
+		return b
+	}
+	folded := make(map[int]bool)
+	for _, members := range groups {
+		if len(members) <= maxPendingAfterAgent {
+			continue
+		}
+		slices.SortFunc(members, func(a, b int) int {
+			return cmp.Compare(inv.retiredActivations[a].retiredAtSeq, inv.retiredActivations[b].retiredAtSeq)
+		})
+		hullIdx := slices.IndexFunc(members, func(idx int) bool {
+			return inv.retiredActivations[idx].compactedHull
+		})
+		var fold []int
+		if hullIdx >= 0 {
+			hull := members[hullIdx]
+			fold = append([]int{hull}, slices.DeleteFunc(slices.Clone(members), func(idx int) bool { return idx == hull })[:len(members)-maxPendingAfterAgent]...)
+		} else {
+			fold = members[:len(members)-maxPendingAfterAgent+1]
+		}
+		hull := &inv.retiredActivations[fold[0]]
+		hull.compactedHull = true
+		hull.hasAfterAgentCallbacks = true
+		for _, idx := range fold[1:] {
+			m := inv.retiredActivations[idx]
+			if m.swallower.seq > hull.swallower.seq {
+				hull.swallower.seq = m.swallower.seq
+				hull.swallower.spanID = m.swallower.spanID
+			}
+			if hull.swallower.path != m.swallower.path {
+				hull.swallower.path = ""
+			}
+			hull.retiredAtSeq = max(hull.retiredAtSeq, m.retiredAtSeq)
+			for _, g := range m.guardSpanIDs {
+				if !slices.Contains(hull.guardSpanIDs, g) {
+					hull.guardSpanIDs = append(hull.guardSpanIDs, g)
+				}
+			}
+			hull.ancestorSpanIDs = slices.DeleteFunc(hull.ancestorSpanIDs, func(id string) bool {
+				return !slices.Contains(m.ancestorSpanIDs, id)
+			})
+			if hull.goroutineID != m.goroutineID {
+				hull.goroutineID = 0
+			}
+			hull.startPlatformTime = minTime(hull.startPlatformTime, m.startPlatformTime)
+			hull.retiredAtPlatformTime = maxTime(hull.retiredAtPlatformTime, m.retiredAtPlatformTime)
+			hull.parentRetiredAtPlatformTime = maxTime(hull.parentRetiredAtPlatformTime, m.parentRetiredAtPlatformTime)
+			hull.completedOrTask = hull.completedOrTask && m.completedOrTask
+			hull.joinedAtRetire = hull.joinedAtRetire && m.joinedAtRetire
+			hull.settledByParent = hull.settledByParent && m.settledByParent
+			hull.concurrentPeer = hull.concurrentPeer || m.concurrentPeer
+			hull.unrespondedAtPop = hull.unrespondedAtPop || m.unrespondedAtPop
+			hull.afterAgentDone = hull.afterAgentDone && m.afterAgentDone
+			hull.afterAgentDoneAt = maxTime(hull.afterAgentDoneAt, m.afterAgentDoneAt)
+			folded[idx] = true
+		}
+		hull.guardSpanIDs = slices.Clone(hull.guardSpanIDs)
+		hull.ancestorSpanIDs = slices.Clone(hull.ancestorSpanIDs)
+		hull.afterAgentActions = actionMaps{}
+		hull.afterAgentActionsRef = nil
+		hull.afterAgentPending = true
+		hull.afterAgentEventSeen = false
+		hull.creditSettled = false
+		hull.peerRetirement = false
+		hull.popGoroutineID = 0
+		hull.hasCustomUUIDProvider = false
+	}
+	if len(folded) == 0 {
+		return
+	}
+	out := inv.retiredActivations[:0]
+	for idx, ra := range inv.retiredActivations {
+		if !folded[idx] {
 			out = append(out, ra)
 		}
 	}
@@ -1010,7 +1732,11 @@ func (inv *invocationTrace) pruneSettledRetiredActivationsLocked(name, branch, p
 // remained open to buffer and later replay its events, or left a retiredCause
 // swallow token on agentStack, and cannot be excluded by event-creation
 // timestamp provenance. When true, an event arriving while rec is still open on
-// agentStack cannot safely clear rec's failure state. inv.mu must be held.
+// agentStack cannot safely clear rec's failure state. An ancestor that buffers
+// events replays them with the time at which they were created, so a retired
+// activation that cannot have created an event at that time (see
+// canOwnEventCreatedAt), such as one without after-agent callbacks that had
+// retired by then, does not guard it. inv.mu must be held.
 func (inv *invocationTrace) hasGuardedRetiredPeerForEventLocked(rec *spanRecord, path string, evCreatedAt time.Time, hasEventID bool) bool {
 	if rec == nil || rec.kind != spanKindAgent {
 		return false
@@ -1021,6 +1747,7 @@ func (inv *invocationTrace) hasGuardedRetiredPeerForEventLocked(rec *spanRecord,
 			slices.ContainsFunc(ra.guardSpanIDs, func(g string) bool {
 				return openSet[g]
 			}) &&
+			(!hasEventID || ra.canOwnEventCreatedAt(evCreatedAt, true)) &&
 			!ra.excludedByEventTimestamp(rec.spanID, rec.seq, rec.goroutineID, rec.concurrentPeer, rec.startPlatformTime, evCreatedAt, hasEventID) {
 			return true
 		}
@@ -1035,6 +1762,62 @@ func (inv *invocationTrace) hasGuardedRetiredPeerForEventLocked(rec *spanRecord,
 		}
 	}
 	return false
+}
+
+// soleOpenAuthorLocked returns the index on agentStack of the only activation
+// that can have created a session event created at evCreatedAt, if that is
+// one of the open activations at peerIdxs, or -1. Open activations that
+// started after the event was created did not create it. A retired activation
+// of the same agent, branch and node path did not either if it cannot own the
+// event (see canOwnEventCreatedAt): the event was created before it started,
+// after its enclosing activation retired, after its after-agent callbacks
+// were seen to return, or after it retired itself once its run returned,
+// unless its after-agent event may still come. An event with no
+// creation evidence, a retired peer that no longer has its own entry in
+// retiredActivations (see retiredPeerCount), or a swallower that a retired
+// cause names leaves the author unproven. inv.mu must be held.
+func (inv *invocationTrace) soleOpenAuthorLocked(peerIdxs []int, path string, evCreatedAt time.Time, hasIDFor func(*spanRecord) bool) int {
+	if evCreatedAt.IsZero() || len(peerIdxs) == 0 {
+		return -1
+	}
+	author := -1
+	for _, j := range peerIdxs {
+		rec := inv.agentStack[j]
+		if hasIDFor(rec) && !rec.startPlatformTime.IsZero() && evCreatedAt.Before(rec.startPlatformTime) {
+			continue
+		}
+		if author >= 0 {
+			return -1
+		}
+		author = j
+	}
+	if author < 0 || !hasIDFor(inv.agentStack[author]) {
+		return -1
+	}
+	rec := inv.agentStack[author]
+	k := llmKey(identity{path: rec.path, agentName: rec.name, branch: rec.branch})
+	trackedPeers := 0
+	for _, ra := range inv.retiredActivations {
+		if ra.peerRetirement && !ra.compactedHull && ra.swallower.name == rec.name && ra.swallower.branch == rec.branch && ra.swallower.path == rec.path {
+			trackedPeers++
+		}
+		if ra.swallower.spanID != rec.spanID && ra.swallower.matches(rec.name, rec.branch, path) && ra.canOwnEventCreatedAt(evCreatedAt, true) {
+			return -1
+		}
+	}
+	if trackedPeers < inv.retiredPeerCount[k] {
+		return -1
+	}
+	for _, s := range inv.agentStack {
+		for _, c := range s.retiredCauses {
+			for _, sw := range c.swallowers {
+				if sw.spanID != rec.spanID && sw.matches(rec.name, rec.branch, path) {
+					return -1
+				}
+			}
+		}
+	}
+	return author
 }
 
 // provenAfterAllRetiredLocked reports whether at least one retired activation
@@ -1074,7 +1857,7 @@ func (inv *invocationTrace) provenAfterAllRetiredLocked(rec *spanRecord, path st
 // event-creation timestamp provenance is available, failing closed whenever
 // multiple retired activations match (name, branch, path).
 func (inv *invocationTrace) clearRetiredCauseForLocked(name, branch, path string) {
-	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, time.Time{}, false, false, 0, false)
+	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, time.Time{}, false, false, actionMaps{}, false)
 }
 
 // clearRetiredCauseForEventLocked deletes swallowable retiredCauses only when
@@ -1082,10 +1865,28 @@ func (inv *invocationTrace) clearRetiredCauseForLocked(name, branch, path string
 // (name, branch, path) can own the delayed event; earlier non-custom
 // predecessors proven strictly older than evCreatedAt are excluded.
 func (inv *invocationTrace) clearRetiredCauseForEventLocked(name, branch, path string, evCreatedAt time.Time, hasEventID bool) {
-	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, evCreatedAt, hasEventID, false, 0, false)
+	inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, evCreatedAt, hasEventID, false, actionMaps{}, false)
 }
 
-func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evStateDeltaPtr uintptr, requireProvenance bool) {
+// eventAuthor is the activation that eventAuthorLocked takes for the author
+// of a session event: spanID is its span, or "" for a retired swallower that
+// was recorded without one, and idx is its index in retiredActivations, or -1
+// when it is open or has no span.
+type eventAuthor struct {
+	spanID string
+	idx    int
+}
+
+// eventAuthorLocked returns the only activation of (name, branch, path) that
+// can have created a session event created at evCreatedAt, or false when no
+// activation or more than one can have. An event that carries an action map
+// of a retired activation's after-agent callbacks is that activation's alone
+// (see below). Otherwise the candidates are the open activations that had
+// started by then, the retired ones that can own the event and that no later
+// activation excludes by event-creation timestamp provenance, and the retired
+// swallowers recorded without a span.
+// inv.mu must be held.
+func (inv *invocationTrace) eventAuthorLocked(name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps, requireProvenance bool) (eventAuthor, bool) {
 	openSet := inv.openSpanSetLocked()
 	for _, rec := range inv.agentStack {
 		var recGuards []string
@@ -1116,21 +1917,46 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 	// retiredCanOwn reports whether the retired activation r can have created
 	// the event. r's run returned before popAgentSpan retired r, so the only
 	// events of r that ADK creates after r.retiredAtPlatformTime are those of
-	// its after-agent callbacks, which carry the StateDelta map that r's
-	// AfterAgentCallback saw. Any other event created later, such as a
-	// zero-timestamp event that an ancestor held and the runner stamped when
-	// it was delivered, is not r's, even though r has after-agent callbacks.
-	// An event of the tick in which r retired may still be one that r's run
-	// created in that tick and an ancestor delivered later, so a coarse clock
-	// keeps such events r's (see Config).
+	// its after-agent callbacks, which carry an action map of the context in
+	// which r's AfterAgentCallback ran (see actionMaps). Any other event
+	// created later, such as a zero-timestamp event that an ancestor held and
+	// the runner stamped when it was delivered, is not r's, even though r has
+	// after-agent callbacks. An event of the tick in which r retired may still
+	// be one that r's run created in that tick and an ancestor delivered
+	// later, so a coarse clock keeps such events r's (see Config). A hull that
+	// stands for after-agent events that may still come can own any event
+	// that its members can have created (see afterAgentPending).
 	retiredCanOwn := func(r retiredActivation) bool {
-		if !r.canOwnEventCreatedAt(evCreatedAt, retiredHasID(r)) {
+		afterAgentEvent := !r.compactedHull && r.afterAgentActions.shares(evActions)
+		if !r.canOwnEventAt(evCreatedAt, retiredHasID(r), afterAgentEvent) {
 			return false
 		}
 		if requireProvenance && !evCreatedAt.IsZero() && !r.retiredAtPlatformTime.IsZero() && evCreatedAt.After(r.retiredAtPlatformTime) {
-			return !r.compactedHull && evStateDeltaPtr != 0 && evStateDeltaPtr == r.afterAgentStateDeltaPtr
+			return r.afterAgentPending || afterAgentEvent
 		}
 		return true
+	}
+
+	// ADK runs an activation's after-agent callbacks with action maps of their
+	// own and builds their event from them (see actionMaps), and
+	// afterAgentActionsRef keeps those maps alive while the activation is
+	// retained. So an event that holds such a map of one retired activation is
+	// that activation's if it can own the event, and no one's otherwise: an
+	// open activation has not run its after-agent callbacks yet, another
+	// retired one or a swallower recorded without a span ran them with other
+	// maps, and timestamp provenance, which orders the events of activations'
+	// runs, does not apply to an event built after the run returned. An event
+	// whose map two retired activations claim has no author.
+	sharer, ambiguous := inv.afterAgentSharerLocked(name, branch, path, evActions)
+	if ambiguous {
+		return eventAuthor{}, false
+	}
+	if sharer >= 0 {
+		ra := inv.retiredActivations[sharer]
+		if !retiredCanOwn(ra) {
+			return eventAuthor{}, false
+		}
+		return eventAuthor{spanID: ra.swallower.spanID, idx: sharer}, true
 	}
 
 	matchedIDs := make(map[string]struct{})
@@ -1226,22 +2052,39 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 		}
 	}
 	if len(matchedIDs)+fallbackCount != 1 {
-		return
+		return eventAuthor{}, false
 	}
-	targetIdx := -1
+	author := eventAuthor{spanID: targetSpanID, idx: -1}
 	if targetSpanID != "" {
-		targetIdx = inv.findRetiredActivationIndexLocked(targetSpanID)
-		if targetIdx >= 0 && !retiredCanOwn(inv.retiredActivations[targetIdx]) {
-			return
+		author.idx = inv.findRetiredActivationIndexLocked(targetSpanID)
+		if author.idx >= 0 && !retiredCanOwn(inv.retiredActivations[author.idx]) {
+			return eventAuthor{}, false
 		}
 	}
+	return author, true
+}
+
+// clearRetiredCauseForEventWithStateLocked clears the failure causes that the
+// only activation that can have created a session event (see
+// eventAuthorLocked) swallowed, if the event shows that it recovered. It
+// reports whether it took the event for that retired activation's after-agent
+// event, which carries an action map of the context in which its after-agent
+// callbacks ran: the activation then recognizes no later event as that event
+// (afterAgentEventSeen), and the event is no open activation's (see
+// eventSpanAt). inv.mu must be held.
+func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps, requireProvenance bool) (settledAfterAgent bool) {
+	author, ok := inv.eventAuthorLocked(name, branch, path, evCreatedAt, hasEventID, evNonEmptyID, evActions, requireProvenance)
+	if !ok {
+		return false
+	}
+	targetSpanID, targetIdx := author.spanID, author.idx
 	var targetHasCustomUUID, isAfterAgentCallbackEvent bool
 	var targetRetiredAtSeq uint64
 	if targetIdx >= 0 {
 		ra := inv.retiredActivations[targetIdx]
 		targetHasCustomUUID = !ra.compactedHull && ra.hasCustomUUIDProvider
 		targetRetiredAtSeq = ra.retiredAtSeq
-		isAfterAgentCallbackEvent = !ra.compactedHull && evStateDeltaPtr != 0 && evStateDeltaPtr == ra.afterAgentStateDeltaPtr
+		isAfterAgentCallbackEvent = !ra.compactedHull && ra.afterAgentActions.shares(evActions)
 	}
 	effHasEventID := hasEventID || (evNonEmptyID && targetHasCustomUUID)
 	canClearCauseAt := func(c retiredCause) bool {
@@ -1277,8 +2120,10 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 		if targetIdx >= 0 {
 			ra := &inv.retiredActivations[targetIdx]
 			if isAfterAgentCallbackEvent {
-				ra.afterAgentStateDeltaPtr = 0
-				ra.afterAgentStateDeltaRef = nil
+				ra.afterAgentActions = actionMaps{}
+				ra.afterAgentActionsRef = nil
+				ra.afterAgentEventSeen = true
+				settledAfterAgent = true
 			}
 			if ra.unrespondedAtPop && ra.hasAfterAgentCallbacks && !ra.concurrentPeer &&
 				!evCreatedAt.IsZero() && !ra.retiredAtPlatformTime.IsZero() &&
@@ -1289,7 +2134,7 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 		if clearedAny {
 			inv.markSettledRetiredActivationsLocked(targetSpanID, true)
 		}
-		return
+		return settledAfterAgent
 	}
 	for _, rec := range inv.agentStack {
 		prevLen := len(rec.retiredCauses)
@@ -1302,9 +2147,10 @@ func (inv *invocationTrace) clearRetiredCauseForEventWithStateLocked(name, branc
 			return false
 		})
 		if len(rec.retiredCauses) != prevLen {
-			return
+			return false
 		}
 	}
+	return false
 }
 
 // rowSpan places a row in the trace of its invocation. It holds the
@@ -1453,7 +2299,8 @@ type invocationTrace struct {
 	// concurrent activations of the same (path, agentName, branch) overlapped,
 	// so trailer events emitted from a retired peer's own AfterAgentCallback
 	// are absorbed rather than attributed to a remaining peer with an
-	// unrecovered model or tool error.
+	// unrecovered model or tool error, unless the event is one that only the
+	// remaining peer can have created (see soleOpenAuthorLocked).
 	retiredPeerCount map[string]int
 	// retiredActivations records retired agent activations by span ID while an
 	// enclosing custom ancestor remains open on agentStack or no later
@@ -2000,13 +2847,23 @@ func (inv *invocationTrace) isAncestorAgent(ancestor, child string) bool {
 
 // findAgent returns the index in agentStack of the most recent span of the
 // agent name running on path and branch, falling back to matching branch and
-// name, or name alone, or -1. It never returns the invocation span.
+// name, or name alone, or -1. It never returns the invocation span. A
+// non-empty branch only matches spans on that branch or on a branch under it
+// (see withinBranch): ADK gives the events and callbacks of an activation its
+// own branch, and the workflow scheduler stamps its node run's branch on an
+// event that left Branch empty, which an agent that runs on a branch under
+// the node run's may have created. So an event of one branch of a parallel
+// agent is never taken for an activation of the same agent on a sibling
+// branch. An empty branch, as on an event that a custom agent creates without
+// setting Branch, matches any branch. Callbacks of an activation carry its own
+// branch, which this prefers; a session event may not, so it is resolved by
+// the activations that can have created it (see resolveEventBranchLocked).
 func (inv *invocationTrace) findAgent(path, name, branch string) int {
 	branchMatch := -1
 	nameMatch := -1
 	for i := len(inv.agentStack) - 1; i > 0; i-- {
 		rec := inv.agentStack[i]
-		if rec.kind != spanKindAgent || rec.name != name || (path != "" && rec.path != "" && rec.path != path) {
+		if rec.kind != spanKindAgent || rec.name != name || (path != "" && rec.path != "" && rec.path != path) || !withinBranch(rec.branch, branch) {
 			continue
 		}
 		if path != "" && rec.path == path && rec.branch == branch {
@@ -2026,6 +2883,160 @@ func (inv *invocationTrace) findAgent(path, name, branch string) int {
 		return branchMatch
 	}
 	return nameMatch
+}
+
+// eventActivationLocked returns the index in agentStack of the open
+// activation under which a session event of author on branch and path,
+// created at evCreatedAt, is placed: the one that findEventAgentLocked
+// returns, unless it started after the event was created. It did not create
+// the event then, and the latest open activation of its agent, branch and
+// node path that had started by then is returned, or -1 when there is none,
+// as when a custom ancestor delivers an event of a retired activation once a
+// later activation of the same agent started. inv.mu must be held.
+func (inv *invocationTrace) eventActivationLocked(path, author, branch string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) int {
+	i := inv.findEventAgentLocked(path, author, branch, evCreatedAt, hasEventID, evNonEmptyID)
+	if i <= 0 {
+		return i
+	}
+	base := inv.agentStack[i]
+	if !base.startedAfterEvent(evCreatedAt, hasEventID, evNonEmptyID) {
+		return i
+	}
+	for j := len(inv.agentStack) - 1; j > 0; j-- {
+		if rec := inv.agentStack[j]; rec.kind == spanKindAgent && rec.name == base.name && rec.branch == base.branch && rec.path == base.path && !rec.startedAfterEvent(evCreatedAt, hasEventID, evNonEmptyID) {
+			return j
+		}
+	}
+	return -1
+}
+
+// startedAfterEvent reports whether rec started after an event created at
+// evCreatedAt was created, so that it did not create the event: the event
+// has creation provenance for rec, as hasEventID reports, or a non-empty ID
+// (evNonEmptyID) and rec runs with a custom UUID provider, and both times are
+// known. Equal times do not count, as under a constant clock.
+func (rec *spanRecord) startedAfterEvent(evCreatedAt time.Time, hasEventID, evNonEmptyID bool) bool {
+	return !evCreatedAt.IsZero() && (hasEventID || (evNonEmptyID && rec.hasCustomUUIDProvider)) &&
+		!rec.startPlatformTime.IsZero() && evCreatedAt.Before(rec.startPlatformTime)
+}
+
+// findEventAgentLocked returns the index in agentStack of the open activation
+// of author that created a session event on branch and path, created at
+// evCreatedAt, as resolveEventBranchLocked finds it, or -1 when no open
+// activation can be shown to have, or when the event is no one's. An open
+// activation that started after the event was created does not own it either
+// way (see selectResponseOwnerWithIDLocked and eventActivationLocked).
+// evNonEmptyID reports that the event's ID is not empty, which counts as
+// creation provenance for an activation that runs with a custom UUID
+// provider. The event's action maps play no part here: the event that onEvent
+// took for a retired activation's after-agent event is placed under the
+// invocation (see eventSpanAt). inv.mu must be held.
+func (inv *invocationTrace) findEventAgentLocked(path, author, branch string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) int {
+	i, _, ok := inv.resolveEventBranchLocked(path, author, branch, evCreatedAt, hasEventID, evNonEmptyID, actionMaps{})
+	if !ok {
+		return -1
+	}
+	return i
+}
+
+// resolveEventBranchLocked resolves which activations of author created a
+// session event on branch and path, created at evCreatedAt. A session event
+// does not show the branch of the activation that created it: ADK gives the
+// events that it builds, after-agent events included, the activation's own
+// branch, but session.NewEvent leaves Branch empty, and the workflow
+// scheduler stamps its node run's branch on an event that left Branch empty,
+// which an activation on that branch or on any branch under it may have
+// created. So an event on branch can be that of an activation on branch
+// itself or on a branch under it (see withinBranch), and one without a branch
+// that of an activation on any branch, and nothing tells an activation on
+// branch from one under it. The response-owner rules tell the activations of
+// one agent, branch and node path apart, but not activations on different
+// branches, so the event is that of the activations on the only branch whose
+// activations can have created it (see eventAuthorBranchesLocked): resolved
+// is that branch, and i the index in agentStack of the latest open activation
+// on it, or -1 when there is none, as when only a retired activation can have
+// created the event while a later activation of author runs on another
+// branch. When the activations on more than one branch can have created it,
+// ok is false: the event is no one's, so it clears no failure and settles no
+// credit, as when an activation of author ran on par and another one on a
+// branch under par. When none can have, i is the activation that findAgent
+// finds, if any, and resolved its branch, or the event's own.
+//
+// An event that carries an action map of the after-agent callbacks of exactly
+// one retired activation of author on those branches (evActions, see
+// afterAgentSharerWithinLocked) was built from them, since ADK gives those
+// maps to no other event, so it resolves to that activation's branch, however
+// many branches hold activations that its timestamp would allow; whether that
+// activation can own it is decided there (see ownsAfterAgentEvent). Without
+// such a map, as for an event of a run, the rule above applies. inv.mu must be
+// held.
+func (inv *invocationTrace) resolveEventBranchLocked(path, author, branch string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps) (i int, resolved string, ok bool) {
+	authorBranch, branches := inv.eventAuthorBranchesLocked(path, author, branch, evCreatedAt, hasEventID, evNonEmptyID)
+	if sharer := inv.afterAgentSharerWithinLocked(author, branch, path, evActions); sharer >= 0 {
+		authorBranch, branches = inv.retiredActivations[sharer].swallower.branch, 1
+	}
+	switch {
+	case branches > 1:
+		return -1, "", false
+	case branches == 0:
+		if i = inv.findAgent(path, author, branch); i > 0 {
+			return i, inv.agentStack[i].branch, true
+		}
+		return i, branch, true
+	}
+	for j := len(inv.agentStack) - 1; j > 0; j-- {
+		if rec := inv.agentStack[j]; rec.kind == spanKindAgent && rec.name == author && rec.branch == authorBranch && (path == "" || rec.path == "" || rec.path == path) {
+			return j, authorBranch, true
+		}
+	}
+	return -1, authorBranch, true
+}
+
+// eventAuthorBranchesLocked reports on which branches, of those that branch
+// covers (see withinBranch), an activation of author can have created a
+// session event on branch and path, created at evCreatedAt: branches is
+// their number, counting any more than one as two, and authorBranch the
+// branch when there is one. The candidates are the open
+// activations that had started by then (see spanRecord.startedAfterEvent),
+// the retired ones that can own the event (see
+// retiredActivation.canOwnEventCreatedAt), or all retired ones when the event
+// has no creation provenance for them, and the swallowers that a recorded
+// cause names. inv.mu must be held.
+func (inv *invocationTrace) eventAuthorBranchesLocked(path, author, branch string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) (authorBranch string, branches int) {
+	add := func(b string) {
+		switch {
+		case branches == 0:
+			authorBranch, branches = b, 1
+		case b != authorBranch:
+			branches = 2
+		}
+	}
+	candidate := func(name, b, p string) bool {
+		return name == author && withinBranch(b, branch) && (path == "" || p == "" || p == path)
+	}
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind == spanKindAgent && candidate(rec.name, rec.branch, rec.path) && !rec.startedAfterEvent(evCreatedAt, hasEventID, evNonEmptyID) {
+			add(rec.branch)
+		}
+	}
+	for _, ra := range inv.retiredActivations {
+		if !candidate(ra.swallower.name, ra.swallower.branch, ra.swallower.path) {
+			continue
+		}
+		if hasID := hasEventID || (evNonEmptyID && ra.hasCustomUUIDProvider); !hasID || ra.canOwnEventCreatedAt(evCreatedAt, true) {
+			add(ra.swallower.branch)
+		}
+	}
+	for _, s := range inv.agentStack {
+		for _, c := range s.retiredCauses {
+			for _, sw := range c.swallowers {
+				if candidate(sw.name, sw.branch, sw.path) {
+					add(sw.branch)
+				}
+			}
+		}
+	}
+	return authorBranch, branches
 }
 
 // parentFor returns the span that an agent starting with id runs under:
@@ -2085,7 +3096,11 @@ func (inv *invocationTrace) parentOutsideLocked(id identity, exclude map[string]
 // scheduler runs each node run on a goroutine of its own right under the
 // workflow agent, so such an earlier run of the node does not enclose the new
 // one even when an agent under it shares id's branch and node path, as a
-// sub-agent of a sequential agent that a failed attempt left open does.
+// sub-agent of a sequential agent that a failed attempt left open does. Of
+// open activations that share the agent, branch and node path of that span,
+// as concurrent runs of one custom agent and the agents that each of them
+// runs do, it returns the one that runs on goroutine goid or started it (see
+// runningLookalikeLocked).
 func (inv *invocationTrace) parentForRunLocked(id identity, goid uint64, origin goroutineOrigin) *spanRecord {
 	var exclude map[string]bool
 	for i := 1; i < len(inv.agentStack); i++ {
@@ -2100,10 +3115,100 @@ func (inv *invocationTrace) parentForRunLocked(id identity, goid uint64, origin 
 		}
 		maps.Copy(exclude, inv.subtreeLocked(i))
 	}
-	if exclude == nil {
-		return inv.parentFor(id)
+	parent := inv.parentFor(id)
+	if exclude != nil {
+		parent = inv.parentOutsideLocked(id, exclude)
 	}
-	return inv.parentOutsideLocked(id, exclude)
+	return inv.runningLookalikeLocked(parent, exclude, goid, origin)
+}
+
+// runningLookalikeLocked returns, of p and the other open activations of p's
+// agent, branch and node path but those in exclude, the only one that runs
+// on goroutine goid, whose origin is origin, or, when none does, the only one
+// whose goroutine started goid. parentFor tells such lookalikes apart only by
+// which started last, but an agent that starts on a goroutine runs under the
+// activation whose Run that goroutine iterates, as when a custom agent runs a
+// sub-agent inside its loop over its own events, or under the one that
+// started the goroutine, as a ParallelAgent does for each branch. So when a
+// custom agent runs the same agent on goroutines of its own, each of the
+// agents under them runs under its own run, not the one that started last.
+// Goroutine IDs are never reused within a process.
+//
+// The runtime names only the goroutine that started goid, so an agent that
+// starts on a goroutine that a helper goroutine of a lookalike started, which
+// runs no callback of this plugin, matches none of them. It then runs under
+// the nearest open span that encloses every lookalike (see
+// enclosingOpenSpanLocked), not under the one that started last, whose
+// response would otherwise clear a failure under it that another lookalike
+// swallowed. Its failure is then recovered only by that span or the
+// activations above it. When more than one lookalike runs on goid or, with
+// none running on it, started it, the one that started last runs innermost
+// on that goroutine, and p is returned, as it is when there is only p or
+// goid is not known. inv.mu must be held.
+func (inv *invocationTrace) runningLookalikeLocked(p *spanRecord, exclude map[string]bool, goid uint64, origin goroutineOrigin) *spanRecord {
+	if p == nil || p.kind != spanKindAgent || goid == 0 {
+		return p
+	}
+	var running, starter *spanRecord
+	var lookalikes []*spanRecord
+	var runningCount, starterCount int
+	for _, rec := range inv.agentStack[1:] {
+		if rec.kind != spanKindAgent || exclude[rec.spanID] ||
+			rec.name != p.name || rec.branch != p.branch || rec.path != p.path {
+			continue
+		}
+		lookalikes = append(lookalikes, rec)
+		if rec.goroutineID == 0 {
+			continue
+		}
+		switch rec.goroutineID {
+		case goid:
+			running = rec
+			runningCount++
+		case origin.parent:
+			starter = rec
+			starterCount++
+		}
+	}
+	// An activation that runs on goid itself is the one whose Run the
+	// goroutine iterates, even when a later lookalike runs on the goroutine
+	// that started goid, as when a custom agent runs one activation of an
+	// agent on a goroutine of its own and the next one inline.
+	switch {
+	case runningCount == 1:
+		return running
+	case runningCount == 0 && starterCount == 1:
+		return starter
+	case runningCount == 0 && starterCount == 0 && len(lookalikes) > 1:
+		return inv.enclosingOpenSpanLocked(lookalikes)
+	}
+	return p
+}
+
+// enclosingOpenSpanLocked returns the nearest span on agentStack that each of
+// recs runs under, or the invocation span when there is none. inv.mu must be
+// held.
+func (inv *invocationTrace) enclosingOpenSpanLocked(recs []*spanRecord) *spanRecord {
+	if len(recs) == 0 {
+		return inv.agentStack[0]
+	}
+	runsUnder := func(rec, anc *spanRecord) bool {
+		for p := rec.parent; p != nil; p = p.parent {
+			if p == anc {
+				return true
+			}
+		}
+		return false
+	}
+	for anc := recs[0].parent; anc != nil; anc = anc.parent {
+		if anc == inv.agentStack[0] || !slices.Contains(inv.agentStack, anc) {
+			continue
+		}
+		if !slices.ContainsFunc(recs[1:], func(rec *spanRecord) bool { return !runsUnder(rec, anc) }) {
+			return anc
+		}
+	}
+	return inv.agentStack[0]
 }
 
 // ownerOf returns the span that the model and tool calls of id run under:
@@ -2527,8 +3632,8 @@ func (tm *traceManager) rememberCompletedLocked(invocationID, runner string, inv
 	inv.finished = true
 	inv.agentStack[0].dropContexts()
 	for i := range inv.retiredActivations {
-		inv.retiredActivations[i].afterAgentStateDeltaPtr = 0
-		inv.retiredActivations[i].afterAgentStateDeltaRef = nil
+		inv.retiredActivations[i].afterAgentActions = actionMaps{}
+		inv.retiredActivations[i].afterAgentActionsRef = nil
 	}
 	inv.runnerAgent = nil
 	lastSeq := inv.lastSeq
@@ -2916,8 +4021,12 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 	var goid uint64
 	var origin goroutineOrigin
 	var attempt attemptSite
+	var afterAgentRuns int
 	if ended != nil {
-		goid, origin, attempt = currentGoroutine()
+		trace, complete := currentGoroutineTrace()
+		goid, origin = parseGoroutineTrace(trace, complete)
+		attempt = attemptSiteOfTrace(trace, complete)
+		afterAgentRuns = afterAgentCallbackRunsOfTrace(trace)
 	}
 	// The trace of a node attempt shows no other agent run on this goroutine
 	// (see attemptSiteOfTrace), so every activation that ran on it before is
@@ -3075,7 +4184,12 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 			break
 		}
 	}
-	inv.pruneSettledRetiredActivationsLocked(id.agentName, id.branch, id.path)
+	// The runs that retired on this goroutine earlier returned, after-agent
+	// callbacks included, before this agent started, unless this agent starts
+	// inside their after-agent callbacks, as when a callback runs an agent
+	// (see markAfterAgentCallbacksReturnedOnLocked). Their maps are dropped
+	// only once this agent is open (see below).
+	inv.markAfterAgentCallbacksReturnedOnLocked(goid, startPlatformTime, afterAgentRuns)
 	// Mark concurrent peers on any remaining matching spans (workflow
 	// children that did not fail and were not purged by the retry loop).
 	parent = inv.parentForRunLocked(id, goid, origin)
@@ -3116,6 +4230,14 @@ func (tm *traceManager) pushAgentSpan(ctx context.Context, id identity) (rowSpan
 		seq:                    inv.nextSeqLocked(),
 	}
 	inv.agentStack = append(inv.agentStack, rec)
+	// An after-agent event created in the tick in which this agent started,
+	// as on a coarse clock, does not show that this agent did not create it
+	// (see spanRecord.startedAfterEvent), so a retired activation of the same
+	// agent keeps the maps that recognize its after-agent event while this
+	// agent is open (see needsAfterAgentActionsLocked), and its entry is
+	// pruned only after that.
+	inv.settleAfterAgentActionsOnLocked(goid)
+	inv.pruneSettledRetiredActivationsLocked(id.agentName, id.branch, id.path)
 	if rec.isNodeAgentOf(parent) {
 		if parent.nodeRuns == nil {
 			parent.nodeRuns = make(map[nodeRunKey]int)
@@ -3196,19 +4318,35 @@ func (tm *traceManager) popAgentSpan(ctx context.Context, id identity) rowSpan {
 	if !rec.hasCustomUUIDProvider && contextHasCustomUUIDProvider(ctx) {
 		rec.hasCustomUUIDProvider = true
 	}
-	inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
-	inv.retireAgentAtLocked(i, true, rec.seq, platform.Now(ctx))
-	if rec.hasAfterAgentCallbacks {
-		if sdPtr := callbackAfterAgentStateDeltaPtr(ctx); sdPtr != 0 {
-			if idx := inv.findRetiredActivationIndexLocked(rec.spanID); idx >= 0 {
-				ra := &inv.retiredActivations[idx]
-				if ra.unrespondedAtPop || inv.isActiveSwallowerLocked(rec.spanID) {
-					ra.afterAgentStateDeltaPtr = sdPtr
-					ra.afterAgentStateDeltaRef = ctx
-				}
-			}
-		}
+	peerRetirement, credit := inv.reconcileConcurrentResponseOnPopLocked(i, rec.seq)
+	var goid uint64
+	var afterAgentRuns int
+	if rec.goroutineID != 0 {
+		trace, complete := currentGoroutineTrace()
+		goid, _ = parseGoroutineTrace(trace, complete)
+		// This callback runs in the activation's own after-agent callbacks.
+		afterAgentRuns = max(afterAgentCallbackRunsOfTrace(trace)-1, 0)
 	}
+	retiredAt := platform.Now(ctx)
+	// The runs that retired on this goroutine earlier returned, after-agent
+	// callbacks included, before this activation's AfterAgentCallback, unless
+	// this activation ran inside their after-agent callbacks.
+	inv.afterAgentCallbacksReturnedOnLocked(goid, retiredAt, afterAgentRuns)
+	// The after-agent event of every activation with after-agent callbacks is
+	// recognized by its action maps (see actionMaps), whether or not the
+	// activation responded or another activation of its agent is open now:
+	// one may start while ADK runs the callbacks, and an ancestor that holds
+	// the event may deliver it once one that started earlier holds a failure.
+	// The entry gets the maps when it is recorded, before any pruning, and
+	// keeps them as long as it needs them (see needsAfterAgentActionsLocked).
+	// Only the EventActions that holds the maps is kept, never ctx.
+	pop := &popRetirement{peerRetirement: peerRetirement, afterAgentCredit: credit, goroutineID: goid}
+	if rec.hasAfterAgentCallbacks {
+		pop.afterAgentActions, pop.afterAgentActionsRef = callbackAfterAgentActions(ctx)
+	}
+	rec.popRetirement = pop
+	inv.retireAgentAtLocked(i, true, rec.seq, retiredAt)
+	rec.popRetirement = nil
 	span := inv.rowSpan(rec, latencyOf(rec, now), ambient)
 	span.timestamp = now
 	return span
@@ -3376,8 +4514,12 @@ func (inv *invocationTrace) inWorkflowNodeSubtreeLocked(rec *spanRecord) bool {
 // Silent custom activations that emit no content retire normally via
 // AfterAgentCallback without remaining open on agentStack. since bounds the
 // activations that settleEndedInSubtreeLocked takes to be over because they
-// ran on the current goroutine.
-func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since uint64) {
+// ran on the current goroutine. peerRetirement reports that the retirement
+// was counted in retiredPeerCount, and credit that rec retired unresponded
+// with no model or tool event pending while a peer was open, so that one
+// unrespondedRetired credit stands for the response that it may still deliver
+// (see retiredActivation.afterAgentCredit).
+func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since uint64) (peerRetirement, credit bool) {
 	rec := inv.agentStack[i]
 	inv.settleEndedInSubtreeLocked(i, true, since)
 	var livePeers []*spanRecord
@@ -3395,6 +4537,7 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 			inv.retiredPeerCount = make(map[string]int)
 		}
 		inv.retiredPeerCount[k]++
+		peerRetirement = true
 	}
 	pendingModel := rec.awaitingModelEvent + rec.unforwardedModelEvents
 	pendingTools := rec.awaitingToolEvent + rec.unforwardedToolEvents
@@ -3413,7 +4556,7 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 				inv.unrespondedRetiredTools[k] += pendingTools
 			}
 		}
-		return
+		return peerRetirement, false
 	}
 	if !rec.responded() {
 		if pendingTools > 0 {
@@ -3427,16 +4570,22 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 				rec.hasResponse = true
 				rec.ownResponse = true
 				other.extraResponses--
-				return
+				return peerRetirement, false
 			}
 		}
+		// Only a response that completeResponse routed to the peer as its own
+		// (ownResponse) can be rec's. A peer that inherited hasResponse from
+		// an event of an activation under it (see markRespondedLocked) keeps
+		// it: that event is not rec's, and taking it would retire rec as
+		// responded, so that rec's after-agent action maps go unrecorded and
+		// its recovery event could clear a failure that the peer swallowed.
 		for _, other := range livePeers {
-			if other.hasResponse && !other.modelResponded {
+			if other.hasResponse && other.ownResponse && !other.modelResponded {
 				rec.hasResponse = true
 				rec.ownResponse = true
 				other.hasResponse = false
 				other.ownResponse = false
-				return
+				return peerRetirement, false
 			}
 		}
 		if pendingModel > 0 {
@@ -3449,8 +4598,9 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 				inv.unrespondedRetired = make(map[string]int)
 			}
 			inv.unrespondedRetired[k]++
+			credit = true
 		}
-		return
+		return peerRetirement, credit
 	}
 	if pendingModel > 0 {
 		if inv.unrespondedRetired == nil {
@@ -3464,6 +4614,7 @@ func (inv *invocationTrace) reconcileConcurrentResponseOnPopLocked(i int, since 
 		}
 		inv.unrespondedRetiredTools[k] += pendingTools
 	}
+	return peerRetirement, false
 }
 
 // popTaskAgentSpan ends the span of a task-mode sub-agent that completed via
@@ -3744,6 +4895,10 @@ func (inv *invocationTrace) retireAgentAtLocked(i int, done bool, since uint64, 
 		}
 		if subtree[d.spanID] && d.failureSeq == 0 {
 			d.failureSeq = failSeq
+		}
+		if subtree[d.spanID] && d.runDone && d.runEndSeq == 0 {
+			d.runEndSeq = failSeq
+			d.runEndPlatformTime = failTime
 		}
 		idx++
 	}
@@ -4241,18 +5396,24 @@ func (tm *traceManager) completeResponse(ctx context.Context, id identity, autho
 	tm.completeResponseAt(ctx, id, author, branch, calls, false, time.Time{}, false)
 }
 
-func (tm *traceManager) completeResponseForEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, ev *session.Event) {
+// completeResponseForEvent is completeResponse for the session event ev. It
+// reports whether it took ev for a retired activation's after-agent event,
+// which is no open activation's, so that the caller places ev's rows under
+// the invocation (see eventSpanAt). The report is returned rather than kept
+// on the invocation, so that another event that the invocation's callbacks
+// handle meanwhile cannot change where ev's rows go.
+func (tm *traceManager) completeResponseForEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, ev *session.Event) (settledAfterAgent bool) {
 	if ev == nil {
-		return
+		return false
 	}
-	tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "", eventStateDeltaPtr(ev), true)
+	return tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "", eventActionMaps(ev), true)
 }
 
 func (tm *traceManager) completeResponseAt(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, evCreatedAt time.Time, hasEventID bool) {
-	tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, evCreatedAt, hasEventID, false, 0, false)
+	tm.completeResponseWithEvent(ctx, id, author, branch, calls, hasFuncCall, evCreatedAt, hasEventID, false, actionMaps{}, false)
 }
 
-func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evStateDeltaPtr uintptr, requireProvenance bool) {
+func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identity, author, branch string, calls []string, hasFuncCall bool, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps, requireProvenance bool) (settledAfterAgent bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -4260,18 +5421,64 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 	wasPartial := inv.lastSessionEventPartial
 	partialSpanID := inv.lastPartialSpanID
 	inv.clearLastPartialLocked()
-	i := inv.findAgent(id.path, author, branch)
+	// The event is that of the activations of author on the only branch
+	// whose activations can have created it, and of the latest open one
+	// there, if any (see resolveEventBranchLocked). Every rule below matches
+	// the activations, retired ones, their swallowed causes and their credits
+	// on that branch alone (see retiredSwallower.matches), so the branch is
+	// resolved first, also for an event without a branch, which
+	// session.NewEvent leaves empty, or one that the workflow scheduler
+	// stamped with an enclosing node run's branch. An event that carries the
+	// after-agent maps of one retired activation on those branches resolves
+	// to that activation's branch first, so that its after-agent event
+	// recovers what it swallowed and settles its credit while an activation
+	// of author runs on a branch under it.
+	i, resolved, ok := inv.resolveEventBranchLocked(id.path, author, branch, evCreatedAt, hasEventID, evNonEmptyID, evActions)
+	if !ok {
+		// Activations of author on more than one branch that the event's
+		// branch covers may have created it, so it is no one's: it clears no
+		// failure and settles no credit. It still arrived under the
+		// activation that author runs under on the event's branch, as when
+		// author has no open activation.
+		if author != id.agentName {
+			if j := slices.Index(inv.agentStack, inv.parentFor(identity{agentName: author, branch: branch, path: id.path})); j > 0 {
+				inv.touchAgentActivityLocked(inv.agentStack[j], now)
+				inv.markRespondedLocked(inv.lineageLocked(j))
+			}
+		}
+		return settledAfterAgent
+	}
+	branch = resolved
 	if i <= 0 {
 		if author == "" || author == userAuthor {
-			return
+			return settledAfterAgent
 		}
-		// Settle drained descendants before clearing retired causes so any
-		// failure carried from a drained child through this recovered custom
-		// agent is also cleared by its AfterAgentCallback recovery response.
+		// A retired activation of author on the resolved branch created the
+		// event, even when a later activation of author runs on another
+		// branch. Settle drained descendants before clearing retired causes
+		// so any failure carried from a drained child through this recovered
+		// custom agent is also cleared by its AfterAgentCallback recovery
+		// response.
 		inv.retireDrainedDescendantsAtLocked(platform.Now(ctx), func(p *spanRecord, openSet map[string]bool) bool {
 			return !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil &&
 				p.name == author && p.branch == branch && (id.path == "" || p.path == "" || p.path == id.path)
 		})
+		// An after-agent event settles only the credit that its own retired
+		// activation left (see consumeAfterAgentCreditLocked), and it is that
+		// activation's after-agent event only if the activation can own it
+		// (see ownsAfterAgentEvent), as clearLastPartialForEvent checks for
+		// an after-agent event without content. Clearing the causes below
+		// forgets that activation's maps and records that its after-agent
+		// event came, which changes whether it can own the event, so both
+		// are found first. An event that holds a map of more than one
+		// retired activation, or of one that cannot own it, is no one's: it
+		// settles no credit, and its rows are placed as for an event of no
+		// retired activation.
+		sharer, ambiguous := inv.afterAgentSharerLocked(author, branch, id.path, evActions)
+		var sharerSpanID string
+		if sharer >= 0 && inv.retiredActivations[sharer].ownsAfterAgentEvent(evCreatedAt, hasEventID, evNonEmptyID) {
+			sharerSpanID = inv.retiredActivations[sharer].swallower.spanID
+		}
 		// ADK runs an agent's own AfterAgentCallback after this plugin's
 		// retired the agent's activation, so recovery content that a custom
 		// agent returns arrives once the activation is gone: scan all open
@@ -4281,9 +5488,15 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 		// Clear only the earliest non-excluded matching retired swallower
 		// activation's swallowable causes so delayed recovery from one
 		// activation does not clear unrecovered causes belonging to another.
-		inv.clearRetiredCauseForEventWithStateLocked(author, branch, id.path, evCreatedAt, hasEventID, evNonEmptyID, evStateDeltaPtr, requireProvenance)
+		settledAfterAgent = inv.clearRetiredCauseForEventWithStateLocked(author, branch, id.path, evCreatedAt, hasEventID, evNonEmptyID, evActions, requireProvenance)
 		k := llmKey(identity{path: id.path, agentName: author, branch: branch})
-		if len(calls) > 0 {
+		switch {
+		case sharer >= 0 || ambiguous:
+			if sharerSpanID != "" {
+				settledAfterAgent = true
+				inv.consumeAfterAgentCreditLocked(inv.findRetiredActivationIndexLocked(sharerSpanID))
+			}
+		case len(calls) > 0:
 			if inv.unrespondedRetiredTools[k] > 0 {
 				inv.unrespondedRetiredTools[k] = max(0, inv.unrespondedRetiredTools[k]-len(calls))
 			} else if id.path == "" && len(inv.unrespondedRetiredTools) > 0 {
@@ -4295,31 +5508,34 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 					}
 				}
 			}
-		} else if inv.unrespondedRetired[k] > 0 {
-			inv.unrespondedRetired[k]--
-		} else if id.path == "" && len(inv.unrespondedRetired) > 0 {
+		case inv.unrespondedRetired[k] > 0:
+			inv.settleRetiredResponseCreditLocked(k, author, branch, id.path, evCreatedAt, hasEventID, evNonEmptyID)
+		case id.path == "" && len(inv.unrespondedRetired) > 0:
 			suffix := "\x00" + author + "\x00" + branch
 			for key, n := range inv.unrespondedRetired {
 				if n > 0 && strings.HasSuffix(key, suffix) {
-					inv.unrespondedRetired[key]--
+					inv.settleRetiredResponseCreditLocked(key, author, branch, strings.TrimSuffix(key, suffix), evCreatedAt, hasEventID, evNonEmptyID)
 					break
 				}
 			}
 		}
 		parent := inv.parentFor(identity{agentName: author, branch: branch, path: id.path})
 		if author == id.agentName {
-			return
+			return settledAfterAgent
 		}
 		if j := slices.Index(inv.agentStack, parent); j > 0 {
 			inv.touchAgentActivityLocked(inv.agentStack[j], now)
 			inv.markRespondedLocked(inv.lineageLocked(j))
 		}
-		return
+		return settledAfterAgent
 	}
-	var matchedPending, absorbed bool
-	i, matchedPending, absorbed = inv.selectResponseOwnerWithIDLocked(i, id.path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, evNonEmptyID, requireProvenance)
+	var matchedPending, absorbed, retiredAuthor bool
+	i, matchedPending, absorbed, retiredAuthor, settledAfterAgent = inv.selectResponseOwnerWithIDLocked(i, id.path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, evNonEmptyID, evActions)
 	if absorbed {
-		return
+		if retiredAuthor && inv.settleRetiredAuthorLocked(platform.Now(ctx), author, branch, id.path, evCreatedAt, hasEventID, evNonEmptyID, evActions, requireProvenance) {
+			settledAfterAgent = true
+		}
+		return settledAfterAgent
 	}
 	owner := inv.agentStack[i]
 	ownerHasEventID := hasEventID || (evNonEmptyID && owner.hasCustomUUIDProvider)
@@ -4428,6 +5644,7 @@ func (tm *traceManager) completeResponseWithEvent(ctx context.Context, id identi
 	// markToolRunsDoneLocked).
 	inv.settleFinishedLocked()
 	inv.retireLateSettledLocked()
+	return false
 }
 
 // retireDrainedDescendantsLocked removes healthy open agent spans that stayed
@@ -4534,34 +5751,114 @@ func (inv *invocationTrace) retireDrainedDescendantsAtLocked(failTime time.Time,
 	inv.syncOpenAgentsLocked()
 }
 
+// settleRetiredAuthorLocked handles a session event that completeResponse
+// absorbed because a retired activation of its author, rather than one that is
+// open, created it (see selectResponseOwnerWithIDLocked), as it handles the
+// response of an author that has no open activation: if the event's author is
+// a retired activation (see eventAuthorLocked), the drained descendants that
+// stayed open under that activation retire, and the failure causes that it
+// swallowed are cleared if the event shows that it recovered (see
+// clearRetiredCauseForEventWithStateLocked). An open activation is no
+// candidate for an event created before it started. If the open activation
+// may have created the event, or another retired one may have, nothing
+// changes: an open activation never swallowed a cause. failTime dates the
+// failures that the drained descendants carry. It reports whether it took the
+// event for the retired author's after-agent event (see
+// clearRetiredCauseForEventWithStateLocked). inv.mu must be held.
+func (inv *invocationTrace) settleRetiredAuthorLocked(failTime time.Time, name, branch, path string, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps, requireProvenance bool) (settledAfterAgent bool) {
+	if author, ok := inv.eventAuthorLocked(name, branch, path, evCreatedAt, hasEventID, evNonEmptyID, evActions, requireProvenance); ok && author.idx >= 0 {
+		inv.retireDrainedDescendantsAtLocked(failTime, func(p *spanRecord, openSet map[string]bool) bool {
+			return p.spanID == author.spanID && !openSet[p.spanID] && !p.propagatesChildError && p.contextFailureCause() == nil
+		})
+	}
+	return inv.clearRetiredCauseForEventWithStateLocked(name, branch, path, evCreatedAt, hasEventID, evNonEmptyID, evActions, requireProvenance)
+}
+
 // selectResponseOwnerLocked picks which open activation of agentStack[i]'s
 // (path, name, branch) owns a session event in completeResponse, reporting
 // whether it matched pending model/tool callback evidence, or absorbs the event
 // when its author already retired while a peer remained open.
 func (inv *invocationTrace) selectResponseOwnerLocked(i int, path string, calls []string, hasFuncCall, wasPartial bool, partialSpanID string, now, evCreatedAt time.Time, hasEventID bool) (int, bool, bool) {
-	return inv.selectResponseOwnerWithIDLocked(i, path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, false, false)
+	owner, matchedPending, absorbed, _, _ := inv.selectResponseOwnerWithIDLocked(i, path, calls, hasFuncCall, wasPartial, partialSpanID, now, evCreatedAt, hasEventID, false, actionMaps{})
+	return owner, matchedPending, absorbed
 }
 
-func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, calls []string, hasFuncCall, wasPartial bool, partialSpanID string, now, evCreatedAt time.Time, hasEventID, evNonEmptyID, requireProvenance bool) (int, bool, bool) {
+// selectResponseOwnerWithIDLocked is selectResponseOwnerLocked for an event
+// whose non-empty ID (evNonEmptyID) may come from a custom UUID provider and
+// whose action maps are evActions (see actionMaps). Its fourth result
+// reports, for an absorbed event, that a retired activation of the author
+// rather than an earlier turn of the open activation created it, which
+// completeResponse then settles (see settleRetiredAuthorLocked), and its last
+// one that the event was taken for a retired activation's after-agent event.
+func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, calls []string, hasFuncCall, wasPartial bool, partialSpanID string, now, evCreatedAt time.Time, hasEventID, evNonEmptyID bool, evActions actionMaps) (int, bool, bool, bool, bool) {
 	base := inv.agentStack[i]
+	settledAfterAgent := false
 	hasIDFor := func(rec *spanRecord) bool {
 		return hasEventID || (evNonEmptyID && rec.hasCustomUUIDProvider)
 	}
 	k := llmKey(identity{path: base.path, agentName: base.name, branch: base.branch})
-	absorbOntoParent := func() (int, bool, bool) {
+	absorbOntoParent := func(retiredAuthor bool) (int, bool, bool, bool, bool) {
 		if base.parent != nil && base.parent.kind == spanKindAgent {
 			inv.touchAgentActivityLocked(base.parent, now)
 			if pIdx := slices.Index(inv.agentStack, base.parent); pIdx > 0 {
 				inv.markRespondedLocked(inv.lineageLocked(pIdx))
 			}
 		}
-		return 0, false, true
+		return 0, false, true, retiredAuthor, settledAfterAgent
+	}
+	// An open activation has not run its after-agent callbacks yet, so an
+	// event that holds an action map of the context in which a retired
+	// activation's after-agent callbacks ran is the retired activation's (see
+	// eventAuthorLocked), whatever model, tool or partial event an open peer
+	// awaits. It is absorbed and settled, so that no open peer claims it and
+	// keeps the failure that the retired activation swallowed. It settles the
+	// credit that the activation whose maps it holds left when it retired, if
+	// that activation can own it (see ownsAfterAgentEvent), and none of
+	// another one (see consumeAfterAgentCreditLocked).
+	if sharer, ambiguous := inv.afterAgentSharerLocked(base.name, base.branch, path, evActions); sharer >= 0 || ambiguous {
+		if sharer >= 0 && inv.retiredActivations[sharer].ownsAfterAgentEvent(evCreatedAt, hasEventID, evNonEmptyID) {
+			settledAfterAgent = true
+			inv.consumeAfterAgentCreditLocked(sharer)
+		}
+		return absorbOntoParent(true)
 	}
 	var peerIdxs []int
 	for j := len(inv.agentStack) - 1; j > 0; j-- {
 		rec := inv.agentStack[j]
 		if rec.kind == spanKindAgent && rec.path == base.path && rec.name == base.name && rec.branch == base.branch {
 			peerIdxs = append(peerIdxs, j)
+		}
+	}
+	// A peer that started after the event was created did not create it, as
+	// clearRetiredCauseForEventWithStateLocked takes no such open activation
+	// either. Without this, the newest peer would take an event of an earlier
+	// one that a custom ancestor held until a later activation of the same
+	// agent had started. When every peer started after the event, including
+	// the only one, none created it: an activation of the agent that retired
+	// before them did, so the event is absorbed and settled as that
+	// activation's, as below, and it settles a credit that such an
+	// activation left for an event of its own that was still to come, and
+	// no peer's pending model or tool event.
+	if !evCreatedAt.IsZero() {
+		inWindow := slices.DeleteFunc(slices.Clone(peerIdxs), func(j int) bool {
+			return inv.agentStack[j].startedAfterEvent(evCreatedAt, hasEventID, evNonEmptyID)
+		})
+		if len(inWindow) == 0 {
+			if len(calls) > 0 {
+				if inv.unrespondedRetiredTools[k] > 0 {
+					inv.unrespondedRetiredTools[k] = max(0, inv.unrespondedRetiredTools[k]-len(calls))
+				}
+			} else {
+				inv.settleRetiredResponseCreditLocked(k, base.name, base.branch, base.path, evCreatedAt, hasEventID, evNonEmptyID)
+			}
+			return absorbOntoParent(true)
+		}
+		if len(inWindow) < len(peerIdxs) {
+			peerIdxs = inWindow
+			if !slices.Contains(peerIdxs, i) {
+				i = peerIdxs[0]
+				base = inv.agentStack[i]
+			}
 		}
 	}
 	// hasUnrecErr reports whether activation idx has a non-collateral
@@ -4615,7 +5912,7 @@ func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, 
 			if !matchedPending && base.unforwardedToolEvents > 0 {
 				base.unforwardedToolEvents = max(0, base.unforwardedToolEvents-len(calls))
 				if hasUnrecErr(i) {
-					return absorbOntoParent()
+					return absorbOntoParent(false)
 				}
 			}
 		} else if base.awaitingModelEvent > 0 {
@@ -4626,11 +5923,26 @@ func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, 
 			if hasUnrecErr(i) {
 				errTime, hasUntimestamped := unrecErrTiming(i)
 				if hasFuncCall || (!evCreatedAt.IsZero() && (!hasIDFor(base) || hasUntimestamped || (!errTime.IsZero() && !evCreatedAt.After(errTime)))) {
-					return absorbOntoParent()
+					return absorbOntoParent(false)
 				}
 			}
 		}
-		return i, matchedPending, false
+		return i, matchedPending, false, false, false
+	}
+	// A retired peer's credits and retiredPeerCount stand for events that it
+	// may still deliver, and a peer's unrecovered failure for events that a
+	// guarded or earlier activation may have created. An event that only one
+	// open activation, which awaits no model or tool event, can have created,
+	// and that no retired activation of the same agent can have (see
+	// soleOpenAuthorLocked), is neither: it is that activation's own, such as
+	// the recovery that a custom agent yields after it swallowed a failure
+	// once a concurrent peer finished.
+	if len(calls) == 0 && !hasFuncCall {
+		if j := inv.soleOpenAuthorLocked(peerIdxs, path, evCreatedAt, hasIDFor); j > 0 {
+			if cand := inv.agentStack[j]; cand.awaitingModelEvent == 0 && cand.unforwardedModelEvents == 0 && cand.awaitingToolEvent == 0 && cand.unforwardedToolEvents == 0 {
+				return j, false, false, false, false
+			}
+		}
 	}
 	if len(calls) > 0 {
 		for _, j := range peerIdxs {
@@ -4643,67 +5955,63 @@ func (inv *invocationTrace) selectResponseOwnerWithIDLocked(i int, path string, 
 			}
 			if cand.awaitingToolEvent > 0 {
 				cand.awaitingToolEvent = max(0, cand.awaitingToolEvent-len(calls))
-				return j, true, false
+				return j, true, false, false, false
 			}
 			if !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 				for key, rec := range inv.toolSpans {
 					if rec.parentSpanID == cand.spanID && slices.Contains(calls, toolKeyCall(key)) {
-						return j, true, false
+						return j, true, false, false, false
 					}
 				}
 			}
 		}
 		if inv.unrespondedRetiredTools[k] > 0 {
 			inv.unrespondedRetiredTools[k] = max(0, inv.unrespondedRetiredTools[k]-len(calls))
-			return absorbOntoParent()
+			return absorbOntoParent(true)
 		}
 	} else {
 		for _, j := range peerIdxs {
 			cand := inv.agentStack[j]
 			if cand.awaitingModelEvent > 0 && !hasUnrecErr(j) && (inv.unrespondedRetired[k] == 0 || inv.provenAfterAllRetiredLocked(cand, path, evCreatedAt, hasIDFor(cand))) {
 				cand.awaitingModelEvent--
-				return j, true, false
+				return j, true, false, false, false
 			}
 		}
 		if inv.unrespondedRetired[k] > 0 {
-			inv.unrespondedRetired[k]--
-			return absorbOntoParent()
+			inv.settleRetiredResponseCreditLocked(k, base.name, base.branch, base.path, evCreatedAt, hasEventID, evNonEmptyID)
+			return absorbOntoParent(true)
 		}
 	}
 	if wasPartial && partialSpanID != "" {
 		for _, j := range peerIdxs {
 			if cand := inv.agentStack[j]; cand.spanID == partialSpanID && cand.hasResponse && !cand.modelResponded {
-				return j, false, false
+				return j, false, false, false, false
 			}
 		}
 	}
 	for _, j := range peerIdxs {
 		cand := inv.agentStack[j]
 		if !cand.hasResponse && !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
-			return j, false, false
+			return j, false, false, false, false
 		}
 	}
 	for _, j := range peerIdxs {
 		cand := inv.agentStack[j]
 		if !hasUnrecErr(j) && !inv.hasGuardedRetiredPeerForEventLocked(cand, path, evCreatedAt, hasIDFor(cand)) {
 			cand.extraResponses++
-			return j, false, false
+			return j, false, false, false, false
 		}
 	}
-	if inv.retiredPeerCount[k] > 0 {
-		inv.clearRetiredCauseForEventWithStateLocked(base.name, base.branch, base.path, evCreatedAt, hasEventID, evNonEmptyID, 0, requireProvenance)
-		return absorbOntoParent()
-	}
-	if inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasIDFor(base)) {
-		return absorbOntoParent()
+	if inv.retiredPeerCount[k] > 0 || inv.hasGuardedRetiredPeerForEventLocked(base, path, evCreatedAt, hasIDFor(base)) {
+		return absorbOntoParent(true)
 	}
 	for _, j := range peerIdxs {
 		if !inv.agentStack[j].hasResponse {
-			return j, false, false
+			return j, false, false, false, false
 		}
 	}
 	base.extraResponses++
-	return i, false, false
+	return i, false, false, false, false
 }
 
 // markRespondedLocked marks the open agent spans in spans, by span ID, as
@@ -5788,16 +7096,48 @@ const maxGoroutineTraceSize = 1 << 20
 // (see attemptSiteOfTrace), or zero values for what the stack trace does not
 // show.
 func currentGoroutine() (uint64, goroutineOrigin, attemptSite) {
+	trace, complete := currentGoroutineTrace()
+	id, origin := parseGoroutineTrace(trace, complete)
+	return id, origin, attemptSiteOfTrace(trace, complete)
+}
+
+// currentGoroutineTrace returns the stack trace of the caller's goroutine as
+// runtime.Stack(buf, false) writes it, and whether it fit in the buffer.
+func currentGoroutineTrace() (trace []byte, complete bool) {
 	buf := make([]byte, 8<<10)
 	for {
 		n := runtime.Stack(buf, false)
 		if n < len(buf) || len(buf) >= maxGoroutineTraceSize {
-			complete := n < len(buf)
-			id, origin := parseGoroutineTrace(buf[:n], complete)
-			return id, origin, attemptSiteOfTrace(buf[:n], complete)
+			return buf[:n], n < len(buf)
 		}
 		buf = make([]byte, 2*len(buf))
 	}
+}
+
+// afterAgentCallbackRunsOfTrace returns how many runs of after-agent
+// callbacks the goroutine whose stack trace runtime.Stack(buf, false) wrote is
+// in: the frames of agent.runAfterAgentCallbacks, which runs an activation's
+// after-agent callbacks, this plugin's AfterAgentCallback among them, on the
+// goroutine that ran the activation and builds their event once they all
+// returned. An agent that a callback runs on that goroutine starts and ends
+// inside that frame. The runtime prints the innermost frames of a long trace
+// and elides some of the others, so the innermost runs are always counted.
+func afterAgentCallbackRunsOfTrace(trace []byte) int {
+	_, frames, ok := strings.Cut(string(trace), "\n")
+	if !ok {
+		return 0
+	}
+	fn := agentPkgPath + ".runAfterAgentCallbacks"
+	runs := 0
+	for line := range strings.SplitSeq(frames, "\n") {
+		if strings.HasPrefix(line, "created by ") {
+			break
+		}
+		if paren := strings.LastIndexByte(line, '('); paren > 0 && line[0] != '\t' && line[:paren] == fn {
+			runs++
+		}
+	}
+	return runs
 }
 
 // parseGoroutineTrace parses the stack trace of one goroutine as
@@ -6007,6 +7347,14 @@ func (tm *traceManager) recordFirstToken(ctx context.Context, id identity) {
 // runner.Run runs, so the call is also found as one that the author's
 // activation owns.
 func (tm *traceManager) recordStreamed(ctx context.Context, id identity, author, branch string, withContent bool) {
+	tm.recordStreamedAt(ctx, id, author, branch, withContent, time.Time{}, false, false)
+}
+
+// recordStreamedAt is recordStreamed for a partial event created at
+// evCreatedAt, which hasEventID reports to be its creation time, and whose
+// ID is not empty if evNonEmptyID is set. The event is recorded for the
+// activation under which eventSpanAt places it (see eventActivationLocked).
+func (tm *traceManager) recordStreamedAt(ctx context.Context, id identity, author, branch string, withContent bool, evCreatedAt time.Time, hasEventID, evNonEmptyID bool) {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	inv.mu.Lock()
@@ -6018,7 +7366,7 @@ func (tm *traceManager) recordStreamed(ctx context.Context, id identity, author,
 	if rec := inv.llmSpans[llmKey(callID)]; rec != nil {
 		rec.streamed = true
 	}
-	if i := inv.findAgent(id.path, author, branch); i > 0 {
+	if i := inv.eventActivationLocked(id.path, author, branch, evCreatedAt, hasEventID, evNonEmptyID); i > 0 {
 		rec := inv.agentStack[i]
 		for _, llm := range inv.llmSpans {
 			if llm.parentSpanID == rec.spanID {
@@ -6045,6 +7393,52 @@ func (tm *traceManager) clearLastPartial(ctx context.Context, id identity) {
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
 	inv.clearLastPartialLocked()
+}
+
+// clearLastPartialForEvent is clearLastPartial for a non-partial session
+// event ev of author on branch and node path id.path that has neither
+// content nor a typed output, such as the event that ADK builds when an
+// activation's after-agent callbacks returned no content but changed its
+// state or artifacts. Such an event that carries an action map of the
+// context in which exactly one retired activation's after-agent callbacks
+// ran (see afterAgentSharerLocked), and that the activation can own (see
+// canOwnEventCreatedAt), is that activation's after-agent event, and ADK
+// builds no other: no later event is the activation's (afterAgentEventSeen),
+// and the credit that it left for a response that it might still deliver is
+// settled (see consumeAfterAgentCreditLocked). The event is no response: it
+// marks nothing as responded and clears no failure, so a failure that the
+// activation swallowed stays reported. An event that carries maps of no
+// retired activation or of more than one, as when an earlier plugin replaced
+// both maps, changes nothing else. The activation can run on the event's
+// branch or on a branch under it (see afterAgentSharerWithinLocked), as when
+// a plugin cleared the event's branch. It reports whether it took the event
+// for that activation's after-agent event, so that the caller places the
+// event's rows under the invocation (see eventSpanAt).
+func (tm *traceManager) clearLastPartialForEvent(ctx context.Context, id identity, author, branch string, ev *session.Event) (settledAfterAgent bool) {
+	inv := tm.invocation(ctx, id)
+	inv.mu.Lock()
+	defer inv.mu.Unlock()
+	inv.clearLastPartialLocked()
+	if ev == nil || author == "" || author == userAuthor {
+		return false
+	}
+	evActions := eventActionMaps(ev)
+	if evActions == (actionMaps{}) {
+		return false
+	}
+	sharer := inv.afterAgentSharerWithinLocked(author, branch, id.path, evActions)
+	if sharer < 0 {
+		return false
+	}
+	ra := &inv.retiredActivations[sharer]
+	if !ra.ownsAfterAgentEvent(ev.Timestamp, hasEventCreationProvenance(ctx, ev), ev.ID != "") {
+		return false
+	}
+	ra.afterAgentActions = actionMaps{}
+	ra.afterAgentActionsRef = nil
+	ra.afterAgentEventSeen = true
+	inv.consumeAfterAgentCreditLocked(sharer)
+	return true
 }
 
 // popLLMSpan ends the running model call of an agent and returns the place
@@ -6242,6 +7636,21 @@ func (tm *traceManager) popToolSpan(ctx context.Context, id identity, key string
 // is called with the agent that the runner runs, whose name is recorded as
 // the root agent.
 func (tm *traceManager) eventSpan(ctx context.Context, id identity, author, branch string) rowSpan {
+	return tm.eventSpanAt(ctx, id, author, branch, time.Time{}, false, false, false)
+}
+
+// eventSpanAt is eventSpan for an event created at evCreatedAt, which
+// hasEventID reports to be its creation time, and whose ID is not empty if
+// evNonEmptyID is set: the event is placed under the activation that
+// eventActivationLocked returns. An event that onEvent took for a retired
+// activation's after-agent event, as settledAfterAgent reports (see
+// completeResponseForEvent and clearLastPartialForEvent), is no open
+// activation's, so it is placed under the invocation, as when no activation
+// of its author is open. onEvent passes that report from its own call, so a
+// row that a callback places meanwhile, which comes through eventSpan, and
+// another event that the invocation's callbacks handle meanwhile, leave it
+// alone.
+func (tm *traceManager) eventSpanAt(ctx context.Context, id identity, author, branch string, evCreatedAt time.Time, hasEventID, evNonEmptyID, settledAfterAgent bool) rowSpan {
 	inv := tm.invocation(ctx, id)
 	now := tm.now()
 	ambient := ambientTraceID(ctx)
@@ -6250,7 +7659,7 @@ func (tm *traceManager) eventSpan(ctx context.Context, id identity, author, bran
 	defer inv.mu.Unlock()
 	inv.noteRootAgentLocked(id, rootIn, false)
 	rec := inv.agentStack[0]
-	if i := inv.findAgent(id.path, author, branch); i > 0 {
+	if i := inv.eventActivationLocked(id.path, author, branch, evCreatedAt, hasEventID, evNonEmptyID); i > 0 && !settledAfterAgent {
 		rec = inv.agentStack[i]
 		inv.touchAgentActivityLocked(rec, now)
 	}
@@ -6811,14 +8220,30 @@ func contextHasCustomUUIDProvider(ctx context.Context) (res bool) {
 	return res
 }
 
-// callbackAfterAgentStateDeltaPtr inspects ADK's callback context (without
-// calling Context.Actions, which logs an unsupported warning and returns nil)
-// and returns the underlying EventActions.StateDelta map pointer so onEvent
-// can match events built by that runAfterAgentCallbacks call.
-func callbackAfterAgentStateDeltaPtr(ctx context.Context) (ptr uintptr) {
+// callbackAfterAgentActionMaps returns the action maps of the EventActions of
+// ADK's callback context ctx (see actionMaps), so that onEvent can recognize
+// the event that runAfterAgentCallbacks builds from the same EventActions.
+// The callback context offers no exported accessor for them: its Actions
+// method logs that it is unsupported and returns nil. So the unexported
+// actions field is read by reflection, which TestCallbackAfterAgentActionMaps
+// checks against the event of a real run.
+func callbackAfterAgentActionMaps(ctx context.Context) actionMaps {
+	am, _ := callbackAfterAgentActions(ctx)
+	return am
+}
+
+// callbackAfterAgentActions returns callbackAfterAgentActionMaps(ctx) and, when
+// they are not zero, a value that keeps the EventActions that holds both maps
+// reachable: the reflect.Value of that struct, which refers to nothing of ctx.
+// ADK replaces a map of that struct only while it is nil, and the callback
+// context gives callbacks no access to the struct (its Actions method returns
+// nil), so they write their state and artifact deltas into the maps. As long
+// as the value is kept, neither map can be freed and its address reused (see
+// actionMaps).
+func callbackAfterAgentActions(ctx context.Context) (am actionMaps, keep any) {
 	defer func() {
 		if r := recover(); r != nil {
-			ptr = 0
+			am, keep = actionMaps{}, nil
 		}
 	}()
 	walkContextStructs(ctx, func(v reflect.Value) bool {
@@ -6835,22 +8260,37 @@ func callbackAfterAgentStateDeltaPtr(ctx context.Context) (ptr uintptr) {
 		if !actions.IsValid() || actions.Kind() != reflect.Struct {
 			return true
 		}
-		sd := actions.FieldByName("StateDelta")
-		if sd.IsValid() && sd.Kind() == reflect.Map && !sd.IsNil() {
-			ptr = sd.Pointer()
+		am = actionMaps{
+			stateDelta:    mapAddress(actions.FieldByName("StateDelta")),
+			artifactDelta: mapAddress(actions.FieldByName("ArtifactDelta")),
+		}
+		if am != (actionMaps{}) {
+			keep = actions
 		}
 		return true
 	})
-	return ptr
+	return am, keep
 }
 
-// eventStateDeltaPtr returns the underlying StateDelta map pointer of ev, or 0
-// when ev or ev.Actions.StateDelta is nil.
-func eventStateDeltaPtr(ev *session.Event) uintptr {
-	if ev == nil || ev.Actions.StateDelta == nil {
+// mapAddress returns the address of the map that v holds, or 0 when v is not
+// a non-nil map.
+func mapAddress(v reflect.Value) uintptr {
+	if !v.IsValid() || v.Kind() != reflect.Map || v.IsNil() {
 		return 0
 	}
-	return reflect.ValueOf(ev.Actions.StateDelta).Pointer()
+	return v.Pointer()
+}
+
+// eventActionMaps returns the action maps of ev (see actionMaps), zero when ev
+// is nil.
+func eventActionMaps(ev *session.Event) actionMaps {
+	if ev == nil {
+		return actionMaps{}
+	}
+	return actionMaps{
+		stateDelta:    mapAddress(reflect.ValueOf(ev.Actions.StateDelta)),
+		artifactDelta: mapAddress(reflect.ValueOf(ev.Actions.ArtifactDelta)),
+	}
 }
 
 func exportContextKey(key reflect.Value) (any, bool) {
