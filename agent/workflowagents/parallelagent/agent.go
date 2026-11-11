@@ -19,11 +19,13 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
 
 	"golang.org/x/sync/errgroup"
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agentstate"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -67,6 +69,64 @@ func New(cfg Config) (agent.Agent, error) {
 }
 
 func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	subAgents := ctx.Agent().SubAgents()
+	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+		selected := make([]agent.Agent, 0, len(indexes))
+		for _, i := range indexes {
+			selected = append(selected, subAgents[i])
+		}
+		subAgents = selected
+	}
+	if states := agentstate.FromContext(ctx); states != nil {
+		return runResumable(ctx, states, subAgents)
+	}
+	return runSubAgents(ctx, subAgents, nil)
+}
+
+// runResumable runs the sub-agents in a resumable invocation, as adk-python's
+// ParallelAgent does: on the turn after a pause it runs only the sub-agents
+// that have not finished, and it finishes once all of them have. A sub-agent
+// that pauses does not stop its siblings.
+func runResumable(ctx agent.InvocationContext, states *agentstate.Store, subAgents []agent.Agent) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		if len(ctx.Agent().SubAgents()) == 0 {
+			return
+		}
+		if _, resuming := states.Load(ctx.Agent().Name()); resuming {
+			subAgents = slices.DeleteFunc(slices.Clone(ctx.Agent().SubAgents()), func(sub agent.Agent) bool {
+				return states.Ended(sub.Name())
+			})
+		} else if !yield(states.Checkpoint(ctx, map[string]any{}), nil) {
+			return
+		}
+		scopes := make([]*agentstate.Scope, len(subAgents))
+		for event, err := range runSubAgents(ctx, subAgents, scopes) {
+			if !yield(event, err) || err != nil {
+				return
+			}
+		}
+		paused := false
+		for i, sub := range subAgents {
+			if scopes[i] != nil && scopes[i].Paused() {
+				paused = true
+				continue
+			}
+			// The sub-agent finished, so a later turn does not run it again.
+			// Workflow agents record their own end.
+			if !states.Ended(sub.Name()) && !yield(states.End(ctx, sub.Name()), nil) {
+				return
+			}
+		}
+		if !paused {
+			yield(states.End(ctx, ctx.Agent().Name()), nil)
+		}
+	}
+}
+
+// runSubAgents runs subAgents concurrently, each on its own branch. When
+// scopes is not nil, sub-agent i runs in a new agentstate.Scope stored at
+// scopes[i], which is safe to read once the returned sequence is done.
+func runSubAgents(ctx agent.InvocationContext, subAgents []agent.Agent, scopes []*agentstate.Scope) iter.Seq2[*session.Event, error] {
 	curAgent := ctx.Agent()
 
 	// Cancelable so an early consumer stop aborts each sub-agent's in-flight Run
@@ -80,15 +140,7 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 		resultsChan           = make(chan result)
 	)
 
-	subAgents := ctx.Agent().SubAgents()
-	if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
-		selected := make([]agent.Agent, 0, len(indexes))
-		for _, i := range indexes {
-			selected = append(selected, subAgents[i])
-		}
-		subAgents = selected
-	}
-	for _, sa := range subAgents {
+	for i, sa := range subAgents {
 		branch := fmt.Sprintf("%s.%s", curAgent.Name(), sa.Name())
 		if ctx.Branch() != "" {
 			branch = fmt.Sprintf("%s.%s", ctx.Branch(), branch)
@@ -109,6 +161,9 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
+			if scopes != nil {
+				subCtx, scopes[i] = agentstate.NewScope(subCtx)
+			}
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)
@@ -159,6 +214,9 @@ func runSubAgent(ctx agent.InvocationContext, agent agent.Agent, results chan<- 
 	for event, err := range agent.Run(ctx) {
 		if err != nil {
 			return err
+		}
+		if agentstate.Pauses(event) {
+			agentstate.MarkPaused(ctx)
 		}
 
 		ackChan := make(chan struct{})
