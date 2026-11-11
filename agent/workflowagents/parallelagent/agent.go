@@ -109,6 +109,13 @@ func run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
 				RunConfig:      ctx.RunConfig(),
 				InvocationID:   ctx.InvocationID(),
 			})
+			// A graph workflow below keeps recording its nodes under the
+			// workflow node this agent runs in, if any, so a request one of
+			// them makes interrupts that node.
+			if ac, ok := ctx.(agent.Context); ok && ac.Path() != "" {
+				path := ac.Path()
+				subCtx = agent.PromoteWithDelta(subCtx, &agent.CommonContextDelta{Path: &path})
+			}
 
 			if err := runSubAgent(subCtx, subAgent, resultsChan, doneChan); err != nil {
 				return fmt.Errorf("failed to run sub-agent %q: %w", subAgent.Name(), err)

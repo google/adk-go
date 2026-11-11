@@ -646,3 +646,45 @@ func contentTexts(contents []*genai.Content) []string {
 	}
 	return texts
 }
+
+// TestRun_FunctionResponseResumesWorkflowInsideCompositeNode checks that a
+// graph workflow nested in a composite agent that is itself a node of an outer
+// workflow resumes its paused node with the user's answer, rather than asking
+// again, and that the sub-agent before it in the composite does not run again.
+func TestRun_FunctionResponseResumesWorkflowInsideCompositeNode(t *testing.T) {
+	tests := []struct {
+		name         string
+		newComposite func(t *testing.T, other, inner agent.Agent) agent.Agent
+	}{
+		{"sequential", func(t *testing.T, other, inner agent.Agent) agent.Agent {
+			return mustSequential(t, "comp", other, inner)
+		}},
+		{"parallel", func(t *testing.T, other, inner agent.Agent) agent.Agent {
+			return mustParallel(t, "comp", other, inner)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var otherRuns atomic.Int32
+			comp := tc.newComposite(t, customAgent(t, "other", &otherRuns, nil), pausedWorkflow(t, "inner", "b", "d"))
+			outer, err := workflowagent.New(workflowagent.Config{
+				Name: "outer", SubAgents: []agent.Agent{comp},
+				Edges: []workflow.Edge{{From: workflow.Start, To: joinResumeAgentNode(t, comp)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			authors, err := runResumeTurn(t, outer, resumeContent("b", workflow.WorkflowInputFunctionCallName, "ok"), func() { otherRuns.Store(0) })
+			if err != nil {
+				t.Fatalf("resume error: %v, authors = %v", err, authors)
+			}
+			if authors["d"] != 1 {
+				t.Errorf("d ran %d times on the resume turn, want 1 (inner resumed), authors = %v", authors["d"], authors)
+			}
+			if got := otherRuns.Load(); got != 0 {
+				t.Errorf("other ran %d times on the resume turn, want 0", got)
+			}
+		})
+	}
+}

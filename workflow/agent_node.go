@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/genai"
@@ -60,6 +61,15 @@ func newAgentNodeWithSchemasTyped[Input, Output any](a agent.Agent, inputSchema,
 	// whether this node is activated by a static edge or delegated to
 	// via RunNode. Mirrors runner.newAgentNode.
 	cfg.EmitsOwnSpan = true
+
+	// A request made inside a composite agent, such as a sequence holding a
+	// graph workflow, leaves work in it unfinished, so by default the node runs
+	// again with the answer rather than handing the answer on as its output,
+	// as an adk-python Workflow node does.
+	if cfg.RerunOnResume == nil && isComposite(a) {
+		rerun := true
+		cfg.RerunOnResume = &rerun
+	}
 
 	return &AgentNode{
 		BaseNode:          NewBaseNodeWithSchemas(a.Name(), a.Description(), cfg, ischema, oschema),
@@ -161,6 +171,15 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 			bound = llminternal.WithBoundOutputSchema(bound, n.agent.Name(), state, n.modelOutputSchema)
 		}
 
+		// A composite agent, such as a sequence holding a graph workflow, finds
+		// the answers to its sub-agents' requests in UserContent. The node
+		// input replaces it here, so the answers this node is resumed with
+		// are passed along beside the input.
+		composite := isComposite(n.agent)
+		if composite {
+			userContent = withResumedResponses(ctx, userContent)
+		}
+
 		// Use existing agent context instead of implementing a new one.
 		// Branch is inherited from ctx so the agent runs under the
 		// activation's branch; the scheduler assigns sub-branches at
@@ -180,6 +199,12 @@ func (n *AgentNode) Run(ctx agent.Context, input any) iter.Seq2[*session.Event, 
 		}
 		agentCtx := internalcontext.NewInvocationContext(bound, params)
 		exCtx := agent.NewContext(agentCtx)
+		// A graph workflow nested in a composite agent records its nodes
+		// under this node's path, so a request one of them makes interrupts
+		// this node, and the outer workflow resumes it with the answer.
+		if p := ctx.Path(); composite && p != "" {
+			exCtx = exCtx.WithDelta(&agent.CommonContextDelta{Path: &p})
+		}
 
 		type NodeRunner interface {
 			RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.Event, error]
@@ -336,4 +361,39 @@ func nodeInputToContent(input any) (*genai.Content, error) {
 		}
 		return &genai.Content{Role: "user", Parts: []*genai.Part{{Text: string(b)}}}, nil
 	}
+}
+
+// isComposite reports whether a is an agent such as a sequential, loop or
+// parallel agent that runs sub-agents of its own, rather than an LLM agent.
+func isComposite(a agent.Agent) bool {
+	if _, isLLM := a.(llminternal.Agent); isLLM {
+		return false
+	}
+	return len(a.SubAgents()) > 0
+}
+
+// withResumedResponses returns content with the function responses from
+// ctx's user content that answer this node's interrupts appended, or content
+// itself when there are none.
+func withResumedResponses(ctx agent.Context, content *genai.Content) *genai.Content {
+	var resumed []*genai.Part
+	if uc := ctx.UserContent(); uc != nil {
+		for _, part := range uc.Parts {
+			if part == nil || part.FunctionResponse == nil {
+				continue
+			}
+			if _, ok := ctx.ResumedInput(part.FunctionResponse.ID); ok {
+				resumed = append(resumed, part)
+			}
+		}
+	}
+	if len(resumed) == 0 {
+		return content
+	}
+	out := &genai.Content{Role: genai.RoleUser}
+	if content != nil {
+		out.Parts = slices.Clone(content.Parts)
+	}
+	out.Parts = append(out.Parts, resumed...)
+	return out
 }
