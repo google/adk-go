@@ -2628,6 +2628,16 @@ func TestGenerateContentConfigValidation(t *testing.T) {
 			cfg:       &genai.GenerateContentConfig{ContinuationToken: []byte("tok")},
 			wantField: "ContinuationToken",
 		},
+		{
+			name:      "generation_output_config",
+			cfg:       &genai.GenerateContentConfig{GenerationOutputConfig: &genai.GenerationOutputConfig{}},
+			wantField: "GenerationOutputConfig",
+		},
+		{
+			name:      "store",
+			cfg:       &genai.GenerateContentConfig{Store: &boolTrue},
+			wantField: "Store",
+		},
 	}
 
 	for _, tc := range rejectedCases {
@@ -3902,6 +3912,8 @@ func TestGenaiConfigReflectionCompleteness(t *testing.T) {
 		"AudioTranscriptionConfig":   true,
 		"AutomaticContinuation":      true,
 		"ContinuationToken":          true,
+		"GenerationOutputConfig":     true,
+		"Store":                      true,
 	})
 
 	assertFieldsMatch(t, reflect.TypeFor[genai.HTTPOptions](), map[string]bool{
