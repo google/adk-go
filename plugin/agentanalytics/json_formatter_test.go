@@ -5096,12 +5096,12 @@ type countingMarshaler struct{ n uint64 }
 func (countingMarshaler) MarshalJSON() ([]byte, error) { return []byte(`"counting"`), nil }
 
 // TestJSONFormatter_CredentialNamedTypes checks that, under redaction, a value
-// of a type named for a credential is written as [REDACTED] whatever its
-// kind, whether it is a value, a field, an element, a map value or a map key,
-// without reading it or calling its methods, and so is a struct that promotes
-// the marshaler of such a type; that a struct of such a type without a
-// marshaler is written by its exported fields; and that a url.Userinfo with
-// credentials is written as [REDACTED] under redaction and as {} without.
+// of url.Userinfo (or a pointer to it) or of a type named for a credential is
+// written as [REDACTED] whatever its kind, whether it is a value, a field, an
+// element, a map value or a map key, without reading it or calling its
+// methods, and so is a struct that promotes the marshaler of such a type; and
+// that a struct of a credential-named type without a marshaler is written by
+// its exported fields.
 func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET_8642"
 	type (
@@ -5580,7 +5580,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			}
 			// Credential pointers at max depth still redact from their static
 			// type without calling IsNil.
-			for _, credNil := range []any{APIKey(nil), (*Token)(nil)} {
+			for _, credNil := range []any{APIKey(nil), (*Token)(nil), (*url.Userinfo)(nil)} {
 				got, truncated, err = SmartTruncate(nestAtMaxDepth(credNil), 100)
 				if err != nil || !truncated {
 					t.Fatalf("SmartTruncate(%T at max depth) = (truncated %v, %v), want (true, nil)", credNil, truncated, err)
@@ -5739,6 +5739,10 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 	})
 
 	t.Run("url.Userinfo", func(t *testing.T) {
+		type definedUserinfo url.Userinfo
+		checkCredentialNamed(t, false, reflect.TypeFor[url.Userinfo](), reflect.TypeFor[definedUserinfo]())
+		u := url.UserPassword("alice", secret)
+		uPtr := u
 		for _, tt := range []struct {
 			name         string
 			in           any
@@ -5747,12 +5751,32 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			wantOff      string // with redaction off
 			wantOffTrunc bool
 		}{
-			{"with a password", url.UserPassword("alice", secret), `"[REDACTED]"`, true, `{}`, false},
+			{"with a password", u, `"[REDACTED]"`, true, `{}`, false},
 			{"with a password only", url.UserPassword("", secret), `"[REDACTED]"`, true, `{}`, false},
 			{"with an empty password set", url.UserPassword("", ""), `"[REDACTED]"`, true, `{}`, false},
 			{"with a user name only", url.User(secret), `"[REDACTED]"`, true, `{}`, false},
-			{"value in a field", struct{ U url.Userinfo }{*url.UserPassword("alice", secret)}, `{"U":"[REDACTED]"}`, true, `{"U":{}}`, false},
-			{"empty", url.User(""), `{}`, false, `{}`, false},
+			{"empty", url.User(""), `"[REDACTED]"`, true, `{}`, false},
+			{"zero value", url.Userinfo{}, `"[REDACTED]"`, true, `{}`, false},
+			{"nil pointer", (*url.Userinfo)(nil), `"[REDACTED]"`, true, `null`, false},
+			{"double pointer", &uPtr, `"[REDACTED]"`, true, `{}`, false},
+			{"value in a field", struct{ U url.Userinfo }{*u}, `{"U":"[REDACTED]"}`, true, `{"U":{}}`, false},
+			{"zero value in an omitzero field", struct {
+				U url.Userinfo `json:"u,omitzero"`
+			}{}, `{"u":"[REDACTED]"}`, true, `{}`, false},
+			{"nil pointer in an omitempty field", struct {
+				U *url.Userinfo `json:"u,omitempty"`
+			}{}, `{"u":"[REDACTED]"}`, true, `{}`, false},
+			{"embedded value", struct {
+				url.Userinfo
+				Host string
+			}{*u, "example.com"}, `{"Host":"example.com","Userinfo":"[REDACTED]"}`, true, `{"Host":"example.com"}`, false},
+			{"nil embedded pointer", struct {
+				*url.Userinfo
+				Host string
+			}{nil, "example.com"}, `{"Host":"example.com","Userinfo":"[REDACTED]"}`, true, `{"Host":"example.com"}`, false},
+			{"map key", map[url.Userinfo]string{*u: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
+			{"nil pointer map key", map[*url.Userinfo]string{nil: secret}, `{"[REDACTED]":"[REDACTED]"}`, true, `{"[UNSUPPORTED_KEY]":"` + secret + `"}`, true},
+			{"defined type over url.Userinfo", definedUserinfo(*u), `{}`, false, `{}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				got, truncated, err := SmartTruncate(tt.in, 1000)
@@ -5764,6 +5788,25 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 					t.Errorf("smartTruncate(%T, redact off) = (%s, %v, %v), want (%s, %v, nil)", tt.in, got, truncated, err, tt.wantOff, tt.wantOffTrunc)
 				}
 			})
+		}
+
+		// A url.URL holds User *url.Userinfo, which redacts whole whether nil
+		// or populated while keeping the non-sensitive URL fields intact.
+		for _, in := range []*url.URL{
+			{Scheme: "https", Host: "example.com", Path: "/v1"},
+			{Scheme: "https", User: u, Host: "example.com", Path: "/v1"},
+		} {
+			got, truncated, err := SmartTruncate(in, 1000)
+			if err != nil || !truncated {
+				t.Fatalf("SmartTruncate(*url.URL) = (%s, %v, %v), want truncated", got, truncated, err)
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal(got, &parsed); err != nil {
+				t.Fatalf("json.Unmarshal(%s) error: %v", got, err)
+			}
+			if parsed["User"] != redactedValue || parsed["Host"] != "example.com" || parsed["Path"] != "/v1" {
+				t.Errorf("SmartTruncate(*url.URL) = %v, want User=%q, Host=example.com, Path=/v1", parsed, redactedValue)
+			}
 		}
 	})
 
@@ -5795,12 +5838,13 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 
 // TestJSONFormatter_OmitEmptyAndOmitZeroGuards checks that, under redaction,
 // omitempty and omitzero do not read a credential to tell whether it is
-// empty: a field of a type named for a credential, or a field that is not a
-// string and whose Go name or json name is named for one, is written as
-// [REDACTED], empty or not, and an omitzero field that holds such a value in
-// an array element or a struct field at any depth is written, zero or not.
-// Empty string fields named for credentials, fields that hold no credential,
-// and every field with redaction off keep their omit options.
+// empty: a field of url.Userinfo (or a pointer to it) or of a type named for
+// a credential, or a field that is not a string and whose Go name or json
+// name is named for one, is written as [REDACTED], empty or not, and an
+// omitzero field that holds such a value in an array element or a struct
+// field at any depth is written, zero or not. Empty string fields named for
+// credentials, fields that hold no credential, and every field with redaction
+// off keep their omit options.
 func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 	const secret = "SYNTHETIC_SECRET_9753"
 	type (
@@ -5919,8 +5963,9 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 				Secret string
 				Note   string
 			} `json:"guarded,omitzero"`
-			GenKeys   [2]apiKeyString[int] `json:"gen_keys,omitzero"`
-			GenLocked codeVerifier[uint64] `json:"gen_locked,omitzero"`
+			GenKeys   [2]apiKeyString[int]      `json:"gen_keys,omitzero"`
+			GenLocked codeVerifier[uint64]      `json:"gen_locked,omitzero"`
+			UserPtr   struct{ U *url.Userinfo } `json:"user_ptr,omitzero"`
 			// Fields that hold no credential keep omitzero.
 			Meta struct{ N uint64 } `json:"meta,omitzero"`
 			When time.Time          `json:"when,omitzero"`
@@ -5942,14 +5987,15 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 		set.Nested[0].Token = 1
 		set.Guarded.Secret = secret
 		set.Guarded.Note = "n"
+		set.UserPtr.U = url.UserPassword("alice", secret)
 		set.Meta.N = 3
 		for _, tt := range []struct {
 			name string
 			in   *holder
 			want string
 		}{
-			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":""},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}]}`},
-			{"set", set, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":"id-2"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"when":"1970-01-01T00:00:00Z"}`},
+			{"zero", &holder{}, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":""},"guarded":{"Note":"","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":""},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"}}`},
+			{"set", set, `{"big":{"Password":"[REDACTED]"},"gen_keys":["[REDACTED]","[REDACTED]"],"gen_locked":{"id":"id-2"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"ifaces":["[REDACTED]"],"inner":{"T":"[REDACTED]"},"keys":["[REDACTED]","[REDACTED]"],"locked":{"id":"id-1"},"meta":{"N":3},"nested":[{"Token":"[REDACTED]"}],"user_ptr":{"U":"[REDACTED]"},"when":"1970-01-01T00:00:00Z"}`},
 		} {
 			if got, _, err := SmartTruncate(tt.in, 10000); err != nil || string(got) != tt.want {
 				t.Errorf("%s: SmartTruncate(*holder) = (%s, %v), want %s", tt.name, got, err, tt.want)
@@ -5969,14 +6015,15 @@ func TestJSONFormatter_OmitEmptyAndOmitZeroGuards(t *testing.T) {
 // TestJSONFormatter_ConcurrentCredentialStructNoRace checks that, under
 // redaction, SmartTruncate reads none of the credentials of a struct while
 // another goroutine updates them atomically or under a lock: neither a field
-// of a type named for a credential (including untagged named or unnamed
-// pointer fields and pointer slice elements rotated via atomic.StorePointer)
-// nor a field named for one, whatever its omit option, nor what an omitzero
-// field holds in an array over 1024 bytes, in a credential-named struct
-// guarded by a mutex, or in a credential-named string field inside an omitzero
-// composite struct guarded by a mutex. Run it with -race, which reports such a
-// read; the values are never zero or nil, so that the output is the same
-// whether or not they are read.
+// of url.Userinfo or of a type named for a credential (including untagged
+// named or unnamed pointer fields and pointer slice elements rotated via
+// atomic.StorePointer) nor a field named for one, whatever its omit option,
+// nor what an omitzero field holds in an array over 1024 bytes, in a
+// credential-named struct or url.Userinfo struct guarded by a mutex, or in a
+// credential-named string field inside an omitzero composite struct guarded
+// by a mutex. Run it with -race, which reports such a read; the values are
+// never zero or nil, so that the output is the same whether or not they are
+// read.
 func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 	type (
 		Token        uint64
@@ -5996,57 +6043,80 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 	checkCredentialNamed(t, true,
 		reflect.TypeFor[Token](), reflect.TypeFor[APIKey](),
 		reflect.TypeFor[Passphrase](), reflect.TypeFor[SessionToken]())
+	checkCredentialNamed(t, false, reflect.TypeFor[url.Userinfo]())
 	// The fields that are updated atomically come first, so that they are
 	// aligned to 64 bits on every platform.
 	type holder struct {
-		T        Token  `json:"t,omitempty"`
-		Secret   uint64 `json:"secret_count,omitzero"`
-		K        APIKey
-		P        *Passphrase
-		Keys     []APIKey
-		Ptrs     []*Passphrase
-		InnerPtr struct{ P *Passphrase }       `json:"inner_ptr,omitzero"`
-		Big      struct{ Password [2048]byte } `json:"big,omitzero"`
-		Locked   SessionToken                  `json:"locked,omitzero"`
-		Guarded  struct {
+		T         Token  `json:"t,omitempty"`
+		Secret    uint64 `json:"secret_count,omitzero"`
+		K         APIKey
+		P         *Passphrase
+		U         *url.Userinfo
+		Keys      []APIKey
+		Ptrs      []*Passphrase
+		Users     []*url.Userinfo
+		InnerPtr  struct{ P *Passphrase }       `json:"inner_ptr,omitzero"`
+		InnerUser struct{ U *url.Userinfo }     `json:"inner_user,omitzero"`
+		Big       struct{ Password [2048]byte } `json:"big,omitzero"`
+		Locked    SessionToken                  `json:"locked,omitzero"`
+		Guarded   struct {
 			mu     sync.Mutex
 			Secret string
 			Note   string
 		} `json:"guarded,omitzero"`
+		GuardedUser struct {
+			mu sync.Mutex
+			U  url.Userinfo
+		} `json:"guarded_user,omitzero"`
+		userMu  sync.Mutex
+		UserArr [1]url.Userinfo `json:"user_arr,omitzero"`
 	}
 	k1, k2 := "k1", "k2"
 	p1, p2 := Passphrase("p1"), Passphrase("p2")
+	u1, u2 := url.UserPassword("alice", "s1"), url.UserPassword("bob", "s2")
 	h := &holder{
 		T:      1,
 		Secret: 1,
 		K:      APIKey(&k1),
 		P:      &p1,
+		U:      u1,
 		Keys:   []APIKey{APIKey(&k1)},
 		Ptrs:   []*Passphrase{&p1},
+		Users:  []*url.Userinfo{u1},
 		Locked: SessionToken{raw: 1, scopes: []string{"read"}, ID: "id-1"},
 	}
 	h.InnerPtr.P = &p1
+	h.InnerUser.U = u1
 	h.Big.Password[0] = 1
 	h.Guarded.Secret = "s1"
 	h.Guarded.Note = "n"
+	h.GuardedUser.U = *url.UserPassword("alice", "s1")
+	h.UserArr[0] = *url.UserPassword("alice", "s1")
 	var bigMu sync.Mutex
 	var flip bool
-	const want = `{"K":"[REDACTED]","Keys":["[REDACTED]"],"P":"[REDACTED]","Ptrs":["[REDACTED]"],"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"inner_ptr":{"P":"[REDACTED]"},"locked":{"id":"id-1"},"secret_count":"[REDACTED]","t":"[REDACTED]"}`
+	const want = `{"K":"[REDACTED]","Keys":["[REDACTED]"],"P":"[REDACTED]","Ptrs":["[REDACTED]"],"U":"[REDACTED]","Users":["[REDACTED]"],"big":{"Password":"[REDACTED]"},"guarded":{"Note":"n","Secret":"[REDACTED]"},"guarded_user":{"U":"[REDACTED]"},"inner_ptr":{"P":"[REDACTED]"},"inner_user":{"U":"[REDACTED]"},"locked":{"id":"id-1"},"secret_count":"[REDACTED]","t":"[REDACTED]","user_arr":["[REDACTED]"]}`
 	runWhileUpdating(func() {
 		atomic.AddUint64((*uint64)(&h.T), 1)
 		atomic.AddUint64(&h.Secret, 1)
 		flip = !flip
 		next := &k1
 		nextPass := &p1
+		nextUser := u1
+		nextSecret := "s1"
 		if flip {
 			next = &k2
 			nextPass = &p2
+			nextUser = u2
+			nextSecret = "s2"
 		}
 		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.K)), unsafe.Pointer(next))
 		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.P)), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.U)), unsafe.Pointer(nextUser))
 		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Keys[0])), unsafe.Pointer(next))
 		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Ptrs[0])), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.Users[0])), unsafe.Pointer(nextUser))
 		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.InnerPtr.P)), unsafe.Pointer(nextPass))
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&h.InnerUser.U)), unsafe.Pointer(nextUser))
 		bigMu.Lock()
 		h.Big.Password[0] = h.Big.Password[0]%255 + 1
 		bigMu.Unlock()
@@ -6060,6 +6130,12 @@ func TestJSONFormatter_ConcurrentCredentialStructNoRace(t *testing.T) {
 			h.Guarded.Secret = "s1"
 		}
 		h.Guarded.mu.Unlock()
+		h.GuardedUser.mu.Lock()
+		h.GuardedUser.U = *url.UserPassword("alice", nextSecret)
+		h.GuardedUser.mu.Unlock()
+		h.userMu.Lock()
+		h.UserArr[0] = *url.UserPassword("alice", nextSecret)
+		h.userMu.Unlock()
 	}, func() {
 		for range 1000 {
 			if got, _, err := SmartTruncate(h, 10000); err != nil || string(got) != want {

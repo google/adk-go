@@ -90,6 +90,7 @@ var (
 	jsonMarshalerType = reflect.TypeFor[json.Marshaler]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
 	jsonNumberType    = reflect.TypeFor[json.Number]()
+	userinfoType      = reflect.TypeFor[url.Userinfo]()
 )
 
 // Values of the storage_mode column of content_parts.
@@ -784,9 +785,10 @@ func (s *sanitizer) walk(v reflect.Value, depth int) (any, bool) {
 	}
 	if v.Kind() == reflect.Pointer {
 		// A pointer whose type, or pointed-to type chain, is redacted whole
-		// (such as type APIKey *string or *Token) is redacted from its static
-		// type before checking whether it is nil or following it, which would
-		// read the pointer value and lose any defined pointer type's name.
+		// (such as type APIKey *string, *Token, or *url.Userinfo) is redacted
+		// from its static type before checking whether it is nil or following
+		// it, which would read the pointer value and lose any defined pointer
+		// type's name.
 		if s.redact && redactsWhole(v.Type()) {
 			return s.redacted()
 		}
@@ -909,14 +911,17 @@ func hasSensitiveTypeName(t reflect.Type) bool {
 
 // redactsWhole reports whether values of type t are redacted whole from t
 // alone, without reading them: t (or any type along a pointer chain from t) is
-// named for a credential (see hasSensitiveTypeName), or is a struct that may
-// write itself with a method promoted from such a type (see
-// promotesSensitiveMarshaler). A seen set stops on recursive pointer types
-// such as type P *P.
+// url.Userinfo, is named for a credential (see hasSensitiveTypeName), or is a
+// struct that may write itself with a method promoted from such a type (see
+// promotesSensitiveMarshaler). url.Userinfo holds a URL's user name and
+// password in unexported fields without a credential-named type name, and is
+// redacted from its type so neither its fields nor a pointer to it are read
+// while another goroutine may update them. A seen set stops on recursive
+// pointer types such as type P *P.
 func redactsWhole(t reflect.Type) bool {
 	var seen map[reflect.Type]bool
 	for {
-		if hasSensitiveTypeName(t) || promotesSensitiveMarshaler(t) {
+		if t == userinfoType || hasSensitiveTypeName(t) || promotesSensitiveMarshaler(t) {
 			return true
 		}
 		if t.Kind() != reflect.Pointer {
@@ -1008,16 +1013,15 @@ var zeroReadsRedacted sync.Map
 // type t is zero. IsZero reads every array element and every struct field,
 // exported or not, at any depth, and of a pointer, map, slice, interface,
 // channel or function only whether it is nil, not what it refers to. A value
-// is redacted if its type is named for a credential, of any kind (see
-// hasSensitiveTypeName), if it is a struct that may write itself with a
-// method promoted from such a type (see embedsSensitiveMarshaler), or if it
-// is held by a struct field named for a credential (see
-// fieldNamedForCredential), including a string field: calling IsZero on an
-// enclosing struct reads all of its fields (such as a mutex alongside the
-// string) without holding any lock. It looks into array elements and struct
-// fields only, as IsZero does; a type holds itself only through a pointer,
-// map, slice, interface, channel or function, which it does not look into,
-// so it never meets t again. It reads only types, not values.
+// is redacted if its type is redacted whole (see redactsWhole, including
+// url.Userinfo and pointers to redacted types), is named for a credential of
+// any kind (see typeSensitiveName), or if it is held by a struct field named
+// for a credential (see fieldNamedForCredential), including a string field:
+// calling IsZero on an enclosing struct reads all of its fields (such as a
+// mutex alongside the string) without holding any lock. It looks into array
+// elements and struct fields only, as IsZero does; a type holds itself only
+// through a pointer, map, slice, interface, channel or function, which it does
+// not look into, so it never meets t again. It reads only types, not values.
 func readsRedactedToCheckZero(t reflect.Type) bool {
 	if r, ok := zeroReadsRedacted.Load(t); ok {
 		return r.(bool)
@@ -1134,7 +1138,7 @@ func (s *sanitizer) bytes(b []byte, depth int) (any, bool) {
 }
 
 // marshalResult is the outcome of trying to convert a value through a custom
-// marshaler or special-cased type before falling back to kind-based walking.
+// marshaler before falling back to kind-based walking.
 type marshalResult struct {
 	value     any
 	truncated bool
@@ -1143,10 +1147,8 @@ type marshalResult struct {
 
 // marshaled converts a value that implements json.Marshaler or
 // encoding.TextMarshaler through that method, as encoding/json would, and
-// then sanitizes the result. Under redaction, it also redacts a url.Userinfo
-// that holds a user name or password (see redactUserinfo). The zero
-// marshalResult (handled == false) is returned if v is written in none of
-// these ways.
+// then sanitizes the result. The zero marshalResult (handled == false) is
+// returned if v implements neither interface.
 func (s *sanitizer) marshaled(v reflect.Value, depth int) marshalResult {
 	if m, found := implementer(v, jsonMarshalerType); found {
 		b, err := safeCall(m.(json.Marshaler).MarshalJSON)
@@ -1167,30 +1169,6 @@ func (s *sanitizer) marshaled(v reflect.Value, depth int) marshalResult {
 		}
 		out, truncated := s.stringValue(string(b), depth)
 		return marshalResult{value: out, truncated: truncated, handled: true}
-	}
-	if s.redact && v.Kind() == reflect.Struct && v.Type() == userinfoType {
-		return redactUserinfo(v)
-	}
-	return marshalResult{}
-}
-
-// userinfoType is the type of the password-bearing URL userinfo.
-var userinfoType = reflect.TypeFor[url.Userinfo]()
-
-// redactUserinfo redacts a url.Userinfo when it holds a user name or a
-// password, matching sanitizeURI: the user name may be the credential itself,
-// as in a git remote that authenticates with a token
-// (https://TOKEN@github.com/o/r). An empty url.Userinfo returns
-// marshalResult{handled: false} so it falls through to walkStruct and renders
-// as {}. Callers reach redactUserinfo through walk after v has already been
-// charged to the node budget.
-func redactUserinfo(v reflect.Value) marshalResult {
-	if !v.CanInterface() {
-		return marshalResult{value: redactedValue, truncated: true, handled: true}
-	}
-	u := v.Interface().(url.Userinfo)
-	if _, hasPassword := u.Password(); hasPassword || u.Username() != "" {
-		return marshalResult{value: redactedValue, truncated: true, handled: true}
 	}
 	return marshalResult{}
 }
@@ -1412,10 +1390,12 @@ func (s *sanitizer) walkStruct(v reflect.Value, depth int) (any, bool) {
 				}
 				fv := sv.Field(i)
 				if f.Anonymous && name == "" && isStructOrStructPointer(f.Type) {
-					// An embedded struct that would redact whole on its own
-					// (when its marshaler is shadowed by a field or ambiguous
-					// with a sibling marshaler on the outer struct) must not
-					// promote its exported fields.
+					// An embedded struct or struct pointer that redacts whole on
+					// its own (such as url.Userinfo, *url.Userinfo, or a
+					// credential struct whose marshaler is shadowed by a field or
+					// ambiguous with a sibling marshaler on the outer struct) is
+					// redacted under its type name without following any pointer
+					// or promoting exported fields.
 					if s.redact && redactsWhole(f.Type) {
 						if !s.budget.take() {
 							out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
