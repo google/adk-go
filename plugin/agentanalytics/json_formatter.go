@@ -1211,7 +1211,8 @@ func (s *sanitizer) walkMap(v reflect.Value, depth int) (any, bool) {
 		}
 		if s.redact && mapKeyRedactsWhole(iter.Key()) {
 			// Charge one node for the key and one for the skipped value.
-			if keyOK := s.budget.take(); !keyOK || !s.budget.take() {
+			s.budget.take()
+			if !s.budget.take() {
 				out[sanitizeBudgetPlaceholder] = sanitizeBudgetPlaceholder
 				truncated = true
 				break

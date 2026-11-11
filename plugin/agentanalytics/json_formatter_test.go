@@ -4547,9 +4547,12 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			ID  string `json:"id"`
 			raw string
 		}
-		Label   string
-		Pointer *string
-		Value   any
+		Middle      struct{ AccessToken }
+		MiddleText  struct{ RefreshToken }
+		MiddleIface struct{ json.Marshaler }
+		Label       string
+		Pointer     *string
+		Value       any
 	)
 	checkCredentialNamed(t, true,
 		reflect.TypeFor[Token](), reflect.TypeFor[Secret](), reflect.TypeFor[Passphrase](),
@@ -4559,6 +4562,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 		reflect.TypeFor[apiKeyString[int]](), reflect.TypeFor[apiKeySecret[string]](),
 		reflect.TypeFor[authCode[string]](), reflect.TypeFor[codeVerifier[string]]())
 	checkCredentialNamed(t, false,
+		reflect.TypeFor[Middle](), reflect.TypeFor[MiddleText](), reflect.TypeFor[MiddleIface](),
 		reflect.TypeFor[Label](), reflect.TypeFor[Pointer](), reflect.TypeFor[Value](),
 		reflect.TypeFor[neutralGeneric[int]]())
 	s, label := secret, "kept"
@@ -4644,15 +4648,21 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				AccessToken
 				Note string
 			}{AccessToken{credentialJSON{secret}}, "n"}, `"[REDACTED]"`, true},
+			{"promoted MarshalJSON through two levels", struct{ Middle }{Middle{AccessToken{credentialJSON{secret}}}}, `"[REDACTED]"`, true},
 			{"promoted pointer MarshalText by value", struct {
 				RefreshToken
 				Note string
 			}{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
+			{"promoted pointer MarshalText through two levels by value", struct {
+				MiddleText
+				Note string
+			}{MiddleText{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, "n"}, `"[REDACTED]"`, true},
 			{"promoted pointer MarshalJSON by value", struct {
 				Bearer
 				Note string
 			}{Bearer{Raw: secret, credentialPtrJSON: ptrJSONCred}, "n"}, `"[REDACTED]"`, true},
 			{"promoted MarshalText through a pointer", struct{ *RefreshToken }{&RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}, `"[REDACTED]"`, true},
+			{"promoted MarshalText through two levels via pointer", struct{ *MiddleText }{&MiddleText{RefreshToken{Raw: secret, credentialTextKey: ptrTextCred}}}, `"[REDACTED]"`, true},
 			{"promoted generic value MarshalText", struct {
 				apiKeySecret[string]
 				Note string
@@ -4662,6 +4672,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 				Note string
 			}{authCode[string]{Raw: secret, credentialTextKey: ptrTextCred}, "n"}, `"[REDACTED]"`, true},
 			{"embedded json.Marshaler", struct{ json.Marshaler }{AccessToken{credentialJSON{secret}}}, `"[REDACTED]"`, true},
+			{"embedded json.Marshaler through two levels", struct{ MiddleIface }{MiddleIface{AccessToken{credentialJSON{secret}}}}, `"[REDACTED]"`, true},
 			{"nil embedded encoding.TextMarshaler", struct{ encoding.TextMarshaler }{}, `"[REDACTED]"`, true},
 			// An embedded credential struct whose marshaler is shadowed or
 			// ambiguous on the outer struct must not promote its exported
@@ -4713,6 +4724,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			&RefreshToken{Raw: "id", credentialTextKey: credentialTextKey{&offCalled, secret}},
 			apiKeySecret[string]{Raw: "id", credentialTextValueKey: credentialTextValueKey{&offCalled, secret}},
 			struct{ AccessToken }{AccessToken{credentialJSON{secret}}},
+			struct{ Middle }{Middle{AccessToken{credentialJSON{secret}}}},
 			struct {
 				RefreshToken
 				MarshalText int
@@ -5056,6 +5068,7 @@ func TestJSONFormatter_CredentialNamedTypes(t *testing.T) {
 			{"colliding neutral keys that agree", map[Label]string{"a\xff": "v", "a\xfe": "v"}, "{\"a\uFFFD\":\"v\"}", false},
 			{"colliding neutral keys that disagree", map[Label]string{"a\xff": "v1", "a\xfe": "v2"}, "{\"a\uFFFD\":\"[REDACTED]\"}", true},
 			{"neutral key", map[Label]string{"kept": "v"}, `{"kept":"v"}`, false},
+			{"nil key in an interface", map[any]string{nil: "v"}, `{"null":"v"}`, false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				got, truncated, err := SmartTruncate(tt.in, 1000)
