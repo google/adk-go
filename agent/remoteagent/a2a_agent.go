@@ -49,8 +49,9 @@ type BeforeA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams
 type A2AEventConverter func(ctx agent.InvocationContext, req *a2a.MessageSendParams, event a2a.Event, err error) (*session.Event, error)
 
 // AfterA2ARequestCallback is called after receiving a response from the remote agent and converting it to a session.Event.
-// In streaming responses the callback is invoked for every request. Session event parameter might be nil if conversion logic
-// decides to not emit an A2A event.
+// In streaming responses the callback is invoked for every request. The default converter passes a nil session event
+// with err on a transport or conversion failure, so a callback must check the event before use. An event returned
+// together with an error by a BeforeRequestCallbacks entry or a custom Converter is passed on as is.
 //
 // If it returns non-nil result or error, it gets emitted instead of the original result.
 type AfterA2ARequestCallback func(ctx agent.Context, req *a2a.MessageSendParams, resp *session.Event, err error) (*session.Event, error)
@@ -82,7 +83,7 @@ type A2AConfig struct {
 	// response, which would skip the actual remote agent call.
 	BeforeRequestCallbacks []BeforeA2ARequestCallback
 	// Converter is used to convert a2a.Event to session.Event. If not provided, adka2a.ToSessionEvent
-	// is used as the default implementation and errors are converted to events with error payload.
+	// is used as the default implementation and transport and conversion errors are returned from Run.
 	Converter A2AEventConverter
 	// AfterRequestCallbacks will be called in the order they are provided until
 	// there's a callback that returns a non-nil result or error. Then

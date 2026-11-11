@@ -107,6 +107,8 @@ type batchProcessor struct {
 	streamName             string
 	createdCommittedStream bool
 	config                 Config
+	effectiveGCSPathPrefix string
+	gcsPathPrefixResolved  bool
 	queue                  chan map[string]any
 
 	counters *dropCounters
@@ -208,6 +210,7 @@ func newBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		}
 		createdCommittedStream = true
 	}
+	effectiveGCSPathPrefix := resolveGCSPathPrefix(config)
 
 	return &batchProcessor{
 		writeClient:            writeClient,
@@ -215,6 +218,8 @@ func newBatchProcessor(ctx context.Context, writeClient *bqstorage.BigQueryWrite
 		streamName:             streamName,
 		createdCommittedStream: createdCommittedStream,
 		config:                 config,
+		effectiveGCSPathPrefix: effectiveGCSPathPrefix,
+		gcsPathPrefixResolved:  true,
 		counters:               &dropCounters{},
 		queue:                  make(chan map[string]any, config.QueueMaxSize),
 		arrowSchema:            schema,
