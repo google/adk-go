@@ -605,6 +605,62 @@ func RunServiceTests(t *testing.T, opts SuiteOptions, setup func(t *testing.T) s
 			}
 		})
 
+		t.Run("agent_state_round_trips", func(t *testing.T) {
+			// A workflow agent checkpoints where it is on its events, and a
+			// resumed invocation reads that back from the stored session. A
+			// backend that drops it restarts the workflow from the top. An
+			// empty state is a checkpoint too (started, nothing saved yet), so
+			// it must not come back as nil.
+			s := setup(t)
+			ctx := t.Context()
+
+			created, err := s.Create(ctx, &session.CreateRequest{AppName: testAppName, UserID: "user1"})
+			if err != nil {
+				t.Fatalf("Setup: Create failed: %v", err)
+			}
+
+			want := []session.EventActions{
+				{AgentState: map[string]any{}},
+				{AgentState: map[string]any{"current_sub_agent": "b"}},
+				{EndOfAgent: true},
+			}
+			for i, actions := range want {
+				event := &session.Event{
+					ID:           "agent_state_" + strconv.Itoa(i),
+					Author:       "seq",
+					InvocationID: "inv-agent-state",
+					Actions:      actions,
+				}
+				if err := s.AppendEvent(ctx, created.Session, event); err != nil {
+					t.Fatalf("AppendEvent(%d) error = %v", i, err)
+				}
+			}
+
+			got, err := s.Get(ctx, &session.GetRequest{
+				AppName:   testAppName,
+				UserID:    "user1",
+				SessionID: created.Session.ID(),
+			})
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			snap := Snapshot(got.Session)
+			if len(snap.Events) != len(want) {
+				t.Fatalf("got %d events, want %d", len(snap.Events), len(want))
+			}
+			for i, ev := range snap.Events {
+				if (ev.Actions.AgentState == nil) != (want[i].AgentState == nil) {
+					t.Errorf("event %d: AgentState nil = %v, want %v", i, ev.Actions.AgentState == nil, want[i].AgentState == nil)
+				}
+				if diff := cmp.Diff(want[i].AgentState, ev.Actions.AgentState); diff != "" {
+					t.Errorf("event %d: AgentState mismatch (-want +got):\n%s", i, diff)
+				}
+				if ev.Actions.EndOfAgent != want[i].EndOfAgent {
+					t.Errorf("event %d: EndOfAgent = %v, want %v", i, ev.Actions.EndOfAgent, want[i].EndOfAgent)
+				}
+			}
+		})
+
 		t.Run("requested_auth_configs_round_trip", func(t *testing.T) {
 			// A pending credential request is recorded only on the event that
 			// made it. The user may answer after a restart or on another

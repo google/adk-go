@@ -287,10 +287,23 @@ type EventActions struct {
 	// content in their place, which is not a decision the code running inside a
 	// turn gets to make about the conversation it is running in.
 	Compaction *EventCompaction `json:"compaction,omitempty"`
+
+	// AgentState is the checkpoint a workflow agent saves on this event, such
+	// as which sub-agent a sequence is on, so a resumed invocation can continue
+	// from there. An empty, non-nil map is a checkpoint too: the agent has
+	// started but has nothing to save yet. It matches adk-python's
+	// EventActions.agent_state and is written by the framework.
+	AgentState map[string]any `json:"agentState,omitempty"`
+
+	// EndOfAgent reports that the event's agent has finished its current run.
+	// A loop can finish the same agent more than once in an invocation. It
+	// matches adk-python's EventActions.end_of_agent and is written by the
+	// framework.
+	EndOfAgent bool `json:"endOfAgent,omitempty"`
 }
 
-// MarshalJSON omits StateDelta and ArtifactDelta when they are nil and writes
-// an empty object when they are allocated but empty.
+// MarshalJSON omits StateDelta, ArtifactDelta and AgentState when they are nil
+// and writes an empty object when they are allocated but empty.
 //
 // The two cases have to stay distinguishable, and neither `omitempty` nor a
 // plain tag manages it. A map tagged `omitempty` is dropped whenever its
@@ -307,6 +320,9 @@ type EventActions struct {
 // decodes it back to nil, so nil stays nil and empty stays empty in either
 // runtime. The shadowing pointer fields below express that -- `omitempty` on a
 // pointer keys off the pointer being nil, not the length of what it points to.
+//
+// AgentState is Optional in adk-python, so `null` would be accepted there, but
+// an empty state is a checkpoint of its own and has to stay apart from none.
 func (a EventActions) MarshalJSON() ([]byte, error) {
 	// alias strips this method, so json does not recurse into it. The two
 	// pointer fields sit at depth 0 and shadow the promoted ones at depth 1,
@@ -318,10 +334,12 @@ func (a EventActions) MarshalJSON() ([]byte, error) {
 		alias
 		StateDelta    *map[string]any   `json:"stateDelta,omitempty"`
 		ArtifactDelta *map[string]int64 `json:"artifactDelta,omitempty"`
+		AgentState    *map[string]any   `json:"agentState,omitempty"`
 	}{
 		alias:         alias(a),
 		StateDelta:    nilOrRef(a.StateDelta),
 		ArtifactDelta: nilOrRef(a.ArtifactDelta),
+		AgentState:    nilOrRef(a.AgentState),
 	})
 }
 
