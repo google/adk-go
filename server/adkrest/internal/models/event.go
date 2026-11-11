@@ -37,6 +37,8 @@ type EventActions struct {
 	RequestedToolConfirmations map[string]toolconfirmation.ToolConfirmation `json:"requestedToolConfirmations,omitempty"`
 	RequestedAuthConfigs       authConfigs                                  `json:"requestedAuthConfigs,omitempty"`
 	Compaction                 *session.EventCompaction                     `json:"compaction,omitempty"`
+	AgentState                 map[string]any                               `json:"agentState,omitempty"`
+	EndOfAgent                 bool                                         `json:"endOfAgent,omitempty"`
 }
 
 // Event represents a single event in a session.
@@ -150,6 +152,9 @@ func ToSessionEvent(event Event) (*session.Event, error) {
 			// tool writes a credential request, and one taken from a request body
 			// would claim a sign-in no tool asked for, which compaction then
 			// holds open as an unanswered call.
+			// Actions.AgentState and Actions.EndOfAgent are not mapped inbound.
+			// They tell a resumed workflow where to continue, so one taken from
+			// a request body could skip a sub-agent such as an approval step.
 		},
 	}, nil
 }
@@ -194,6 +199,8 @@ func FromSessionEvent(event session.Event) Event {
 			RequestedToolConfirmations: event.Actions.RequestedToolConfirmations,
 			RequestedAuthConfigs:       event.Actions.RequestedAuthConfigs,
 			Compaction:                 event.Actions.Compaction,
+			AgentState:                 event.Actions.AgentState,
+			EndOfAgent:                 event.Actions.EndOfAgent,
 		},
 	}
 }
