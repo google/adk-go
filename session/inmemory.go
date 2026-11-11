@@ -286,6 +286,8 @@ func (s *inMemoryService) AppendEvent(ctx context.Context, curSession Session, e
 			Escalate:                   event.Actions.Escalate,
 			SkipSummarization:          event.Actions.SkipSummarization,
 			Compaction:                 event.Actions.Compaction.clone(),
+			AgentState:                 maps.Clone(event.Actions.AgentState),
+			EndOfAgent:                 event.Actions.EndOfAgent,
 		},
 		LongRunningToolIDs: slices.Clone(event.LongRunningToolIDs),
 		Routes:             slices.Clone(event.Routes),

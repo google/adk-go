@@ -142,6 +142,34 @@ func TestCompactionIsReadOnlyOverREST(t *testing.T) {
 	}
 }
 
+// TestAgentStateIsReadOnlyOverREST pins that a client can read a workflow
+// agent's checkpoint but not plant one. A planted state would tell a resumed
+// sequence where to continue from, letting a client skip a sub-agent such as
+// an approval step.
+func TestAgentStateIsReadOnlyOverREST(t *testing.T) {
+	t.Parallel()
+
+	state := map[string]any{"current_sub_agent": "after_approval"}
+
+	in := models.Event{Actions: models.EventActions{AgentState: state, EndOfAgent: true}}
+	got, err := models.ToSessionEvent(in)
+	if err != nil {
+		t.Fatalf("ToSessionEvent() failed: %v", err)
+	}
+	if got.Actions.AgentState != nil || got.Actions.EndOfAgent {
+		t.Errorf("ToSessionEvent kept a client-supplied checkpoint (AgentState=%v, EndOfAgent=%v); it must be dropped", got.Actions.AgentState, got.Actions.EndOfAgent)
+	}
+
+	stored := session.Event{Actions: session.EventActions{AgentState: state, EndOfAgent: true}}
+	out := models.FromSessionEvent(stored)
+	if diff := cmp.Diff(state, out.Actions.AgentState); diff != "" {
+		t.Errorf("FromSessionEvent AgentState mismatch (-want +got):\n%s", diff)
+	}
+	if !out.Actions.EndOfAgent {
+		t.Error("FromSessionEvent dropped EndOfAgent; reads should show it")
+	}
+}
+
 // decodeKeepingNumbers decodes data into v with numbers as json.Number, so two
 // numbers compare equal only when their digits do.
 func decodeKeepingNumbers(data []byte, v any) error {
