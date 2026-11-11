@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	icontext "google.golang.org/adk/v2/internal/context"
+	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -180,25 +182,79 @@ func TestHandleFunctionCalls_Streaming(t *testing.T) {
 	})
 }
 
+// A streaming tool that fails reports the failure the way a non-streaming
+// one does: the tool error callbacks see the error, and the model reads
+// what they answer, or a generic message when none of them answers. The
+// error a callback sees carries the panic value and the stack of a
+// recovered panic, which the model never reads.
 func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
+	panicking := func(agent.Context, struct{}) iter.Seq2[string, error] {
+		return func(func(string, error) bool) { panic("boom") }
+	}
 	for _, tc := range []struct {
-		name    string
+		name string
+		// handler is the streaming tool.
 		handler functiontool.StreamingFunc[struct{}]
-		want    string
+		// callback is the tool error callback, when the case has one.
+		callback OnToolErrorCallback
+		// want is the function response the model reads.
+		want map[string]any
+		// wantSeen is a substring the error the callback saw must contain.
+		wantSeen string
+		// wantAfterTool says whether the after-tool callback has to run.
+		wantAfterTool bool
 	}{
 		{
-			name: "panic is hidden from the model",
-			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
-				return func(func(string, error) bool) { panic("boom") }
-			},
-			want: "Invoking `test_stream()` failed with an internal error.",
+			name:          "panic is hidden from the model",
+			handler:       panicking,
+			want:          map[string]any{"error": "Invoking `test_stream()` failed with an internal error."},
+			wantAfterTool: true,
 		},
 		{
 			name: "returned error reaches the model",
 			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
 				return func(yield func(string, error) bool) { yield("", errors.New("order not found")) }
 			},
-			want: "order not found",
+			want:          map[string]any{"error": "order not found"},
+			wantAfterTool: true,
+		},
+		{
+			name:    "the callback sees the panic and the stack",
+			handler: panicking,
+			callback: func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+				return nil, nil
+			},
+			want:          map[string]any{"error": "Invoking `test_stream()` failed with an internal error."},
+			wantSeen:      "boom",
+			wantAfterTool: true,
+		},
+		{
+			name:    "a callback that answers replaces the error",
+			handler: panicking,
+			callback: func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+				return map[string]any{"retry": "please try again"}, nil
+			},
+			want:          map[string]any{"retry": "please try again"},
+			wantAfterTool: true,
+		},
+		{
+			name:    "a callback that fails replaces the error",
+			handler: panicking,
+			callback: func(agent.Context, tool.Tool, map[string]any, error) (map[string]any, error) {
+				return nil, errors.New("callback failed")
+			},
+			want:          map[string]any{"error": "callback failed"},
+			wantAfterTool: true,
+		},
+		{
+			name: "a successful streaming tool runs no callback",
+			handler: func(agent.Context, struct{}) iter.Seq2[string, error] {
+				return func(yield func(string, error) bool) {
+					yield("chunk ", nil)
+					yield("two", nil)
+				}
+			},
+			want: map[string]any{"result": "chunk two"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,12 +270,47 @@ func TestHandleFunctionCalls_StreamingToolErrors(t *testing.T) {
 				Agent:        &mockAgent{name: "agent_1"},
 			})
 
-			mergedEvent, err := (&Flow{}).handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, resp, nil, nil)
+			flow := &Flow{}
+			var seen error
+			afterToolCalls := 0
+			flow.AfterToolCallbacks = []AfterToolCallback{
+				func(ctx agent.Context, t tool.Tool, args, result map[string]any, err error) (map[string]any, error) {
+					afterToolCalls++
+					return nil, nil
+				},
+			}
+			if tc.callback != nil {
+				callback := tc.callback
+				flow.OnToolErrorCallbacks = []OnToolErrorCallback{
+					func(ctx agent.Context, t tool.Tool, args map[string]any, err error) (map[string]any, error) {
+						seen = err
+						return callback(ctx, t, args, err)
+					},
+				}
+			}
+
+			mergedEvent, err := flow.handleFunctionCalls(invCtx, map[string]tool.Tool{"test_stream": streamTool}, resp, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response["error"]; got != tc.want {
-				t.Errorf("FunctionResponse error = %q, want %q", got, tc.want)
+			got := mergedEvent.LLMResponse.Content.Parts[0].FunctionResponse.Response
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("FunctionResponse mismatch (-want +got):\n%s", diff)
+			}
+			if ran, want := afterToolCalls > 0, tc.wantAfterTool; ran != want {
+				t.Errorf("after-tool callback ran = %t; want %t", ran, want)
+			}
+			if tc.wantSeen != "" {
+				if seen == nil {
+					t.Fatal("the callback did not receive an error")
+				}
+				if !strings.Contains(seen.Error(), tc.wantSeen) {
+					t.Errorf("the error the callback saw = %q, want it to contain %q", seen, tc.wantSeen)
+				}
+				var panicErr *toolinternal.PanicError
+				if !errors.As(seen, &panicErr) {
+					t.Errorf("the error the callback saw = %v, want a *toolinternal.PanicError", seen)
+				}
 			}
 		})
 	}

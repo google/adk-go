@@ -1573,8 +1573,33 @@ func (f *Flow) handleFunctionCalls(ctx agent.InvocationContext, toolsDict map[st
 						var sb strings.Builder
 						for chunk, err := range streamTool.RunStream(toolCtx, fnCall.Args) {
 							if err != nil {
-								errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
-								result = map[string]any{"error": errText}
+								// The error may be a recovered panic, whose
+								// text carries the panic value and the stack.
+								// adk-python logs the exception at this point
+								// (flows/llm_flows/tools/_caller.py, in
+								// _process_function_live_helper); ADK Go has
+								// no library logger, so the error goes to the
+								// tool callbacks, the way the non-streaming
+								// path does, and the model keeps seeing a
+								// generic message for a panic.
+								errorResponse, cbErr := f.runOnToolErrorCallbacks(toolCtx, streamTool, fnCall.Args, err)
+								if errorResponse != nil || cbErr != nil {
+									err = cbErr
+								}
+								response := errorResponse
+
+								alteredResponse, alteredErr := f.runAfterToolCallbacks(toolCtx, streamTool, fnCall.Args, response, err)
+								if alteredResponse != nil || alteredErr != nil {
+									response = alteredResponse
+									err = alteredErr
+								}
+
+								if err != nil {
+									errText, _ := toolinternal.ModelErrorText(streamTool.Name(), err)
+									result = map[string]any{"error": errText}
+								} else {
+									result = response
+								}
 								break
 							}
 							sb.WriteString(chunk)
@@ -1689,6 +1714,21 @@ func (f *Flow) runOnToolErrorCallbacks(toolCtx agent.Context, tool tool.Tool, fA
 	return f.invokeOnToolErrorCallbacks(toolCtx, tool, fArgs, err)
 }
 
+// runAfterToolCallbacks runs the plugin's after-tool callback and then the
+// flow's own ones. It is the counterpart of runOnToolErrorCallbacks, and the
+// streaming path uses it so that a failed streaming tool is reported the same
+// way as a failed non-streaming one.
+func (f *Flow) runAfterToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs, fResult map[string]any, err error) (map[string]any, error) {
+	pluginManager := pluginManagerFromContext(toolCtx)
+	if pluginManager != nil {
+		result, err := pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, fResult, err)
+		if result != nil || err != nil {
+			return result, err
+		}
+	}
+	return f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, fResult, err)
+}
+
 func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs map[string]any) map[string]any {
 	var response map[string]any
 	var err error
@@ -1719,12 +1759,7 @@ func (f *Flow) callTool(toolCtx agent.Context, tool toolinternal.FunctionTool, f
 
 	var alteredResponse map[string]any
 	var alteredErr error
-	if pluginManager != nil {
-		alteredResponse, alteredErr = pluginManager.RunAfterToolCallback(toolCtx, tool, fArgs, response, err)
-	}
-	if alteredResponse == nil && alteredErr == nil {
-		alteredResponse, alteredErr = f.invokeAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
-	}
+	alteredResponse, alteredErr = f.runAfterToolCallbacks(toolCtx, tool, fArgs, response, err)
 	if alteredResponse != nil || alteredErr != nil {
 		response = alteredResponse
 		err = alteredErr
@@ -1752,7 +1787,7 @@ func (f *Flow) invokeBeforeToolCallbacks(toolCtx agent.Context, tool tool.Tool, 
 	return nil, nil
 }
 
-func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool toolinternal.FunctionTool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
+func (f *Flow) invokeAfterToolCallbacks(toolCtx agent.Context, tool tool.Tool, fArgs, fResult map[string]any, fErr error) (map[string]any, error) {
 	for _, callback := range f.AfterToolCallbacks {
 		result, err := callback(toolCtx, tool, fArgs, fResult, fErr)
 		if err != nil {
