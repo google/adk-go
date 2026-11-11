@@ -33,6 +33,7 @@ import (
 	"google.golang.org/adk/v2/internal/agent/compactionctx"
 	"google.golang.org/adk/v2/internal/agent/parentmap"
 	"google.golang.org/adk/v2/internal/agent/runconfig"
+	"google.golang.org/adk/v2/internal/agentstate"
 	artifactinternal "google.golang.org/adk/v2/internal/artifact"
 	"google.golang.org/adk/v2/internal/compactioninternal"
 	icontext "google.golang.org/adk/v2/internal/context"
@@ -102,6 +103,21 @@ type Config struct {
 	//
 	// optional
 	ContextCache *model.ContextCacheConfig
+
+	// Resumable lets an invocation that stopped on a long-running call
+	// continue where it was once the call is answered, like adk-python's
+	// ResumabilityConfig.is_resumable. Sequential, loop and parallel agents
+	// stop on such a call and save their position on events (as
+	// session.EventActions.AgentState). When a later message answers the
+	// call, the runner runs the root agent again in the same invocation, and
+	// each workflow agent continues from its saved position.
+	//
+	// Without it, sequential and loop agents keep running their sub-agents
+	// after a long-running call, and the answer goes straight to the agent
+	// that made the call.
+	//
+	// optional
+	Resumable bool
 }
 
 // PluginConfig configures the plugins a [Runner] applies and how long it waits
@@ -182,6 +198,7 @@ func New(cfg Config) (*Runner, error) {
 		autoCreateSession: cfg.AutoCreateSession,
 		compactionConfig:  compactionConfig,
 		contextCache:      contextCache,
+		resumable:         cfg.Resumable,
 	}, nil
 }
 
@@ -276,6 +293,8 @@ type Runner struct {
 	// contextCache is nil when context caching is disabled. Otherwise it is
 	// a validated copy of Config.ContextCache.
 	contextCache *model.ContextCacheConfig
+
+	resumable bool
 }
 
 // invocationIDOf returns the invocation an InvocationContext names, or "".
@@ -801,6 +820,16 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		ctx = r.withContextCache(ctx)
 		defer r.settleContextCaches(ctx, storedSession)
 
+		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
+		var states *agentstate.Store
+		if r.resumable {
+			states = agentstate.New()
+			if invocationID != "" {
+				states.Populate(storedSession.Events(), invocationID)
+			}
+			ctx = agentstate.ToContext(ctx, states)
+		}
+
 		// Compaction has to happen however iteration ends. Breaking out of the
 		// range loop on the terminal event is the ordinary streaming idiom, and
 		// what the A2A executor does, so a hook placed only after the loop
@@ -861,9 +890,13 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// (#2204). The workflow resumes the interrupted node only for an
 		// adk_request_input response; any other response restarts the graph.
 		// The first response in the message decides the route.
+		//
+		// In a resumable run, the root runs again whenever it stopped partway
+		// through the invocation being answered, and each workflow agent
+		// continues from the position it saved.
 		agentToRun, branch := r.rootAgent, ""
 		routedToCaller := false
-		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil {
+		if ev := utils.FunctionCallEvent(storedSession.Events(), msg); ev != nil && (states == nil || !states.Resumes(r.rootAgent.Name())) {
 			if sub := r.rootAgent.FindAgent(ev.Author); sub != nil && !r.isInGraphWorkflow(sub) {
 				agentToRun, branch = sub, ev.Branch
 				routedToCaller = true
@@ -877,7 +910,6 @@ func (r *Runner) run(ctx context.Context, userID, sessionID string, msg *genai.C
 		// does an answer whose caller is not in the agent tree, since that
 		// caller can be a workflow node agent missing from the workflow's
 		// sub-agents; adk-python starts a new invocation there.
-		invocationID, spansInvocations := resolveInvocationID(storedSession, msg)
 		if spansInvocations && routedToCaller {
 			invocationID = ""
 		}
