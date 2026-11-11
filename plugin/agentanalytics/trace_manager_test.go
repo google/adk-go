@@ -22961,8 +22961,9 @@ func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
 	}
 
 	// Wrapping a ToolContext in context.WithoutCancel and context.WithTimeout
-	// exercises both the unexported "c" (withoutCancelCtx) and "cancelCtx"
-	// (timerCtx) fields in unwrapToolContextActions.
+	// exercises both the unexported "c" field (withoutCancelCtx) and the
+	// "Context" field that timerCtx promotes from its embedded cancelCtx in
+	// unwrapToolContextActions.
 	timedCtx, cancel := context.WithTimeout(context.WithoutCancel(toolCtx), time.Minute)
 	defer cancel()
 	for _, c := range []context.Context{context.WithoutCancel(toolCtx), timedCtx} {
@@ -22979,6 +22980,43 @@ func TestTraceManager_UnwrapContext_WithoutCancel(t *testing.T) {
 	}
 	if logBuf.Len() != 0 {
 		t.Errorf("unexpected log output unwrapping withoutCancel contexts: %q", logBuf.String())
+	}
+}
+
+// unwrapTestKey is a context key of TestTraceManager_UnwrapContext_CustomLayouts.
+type unwrapTestKey struct{}
+
+// TestTraceManager_UnwrapContext_CustomLayouts checks that the EventActions of
+// a custom context come from its Actions() method, never from a private field
+// that happens to be named actions, and that a standard-library wrapper around
+// a custom context reads none of the custom context's fields.
+func TestTraceManager_UnwrapContext_CustomLayouts(t *testing.T) {
+	stable := &session.EventActions{StateDelta: map[string]any{"stable": 1}}
+	custom := &privateActionsToolCtx{
+		mockInvocationContext: &mockInvocationContext{ctx: context.Background()},
+		stable:                stable,
+	}
+	custom.replaceActions(0)
+
+	ap, acts, delta, pinned := unwrapToolContextActions(custom)
+	if want := reflect.ValueOf(stable).Pointer(); acts != stable || ap != want {
+		t.Errorf("custom context unwrap = (%#x, %p), want Actions() = (%#x, %p)", ap, acts, want, stable)
+	}
+	if delta.m == nil || mapPtr(delta.m) != mapPtr(stable.StateDelta) || pinned != nil {
+		t.Errorf("custom context unwrap delta = %+v, pinned = %v, want Actions().StateDelta held directly without a pinned context", delta, pinned)
+	}
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "WithValue", ctx: context.WithValue(custom, unwrapTestKey{}, 1)},
+		{name: "WithoutCancel", ctx: context.WithoutCancel(custom)},
+	} {
+		ap, acts, delta, pinned := unwrapToolContextActions(tc.ctx)
+		if ap != 0 || acts != nil || !delta.empty() || pinned != nil {
+			t.Errorf("%s(custom) unwrap = (%#x, %p, %+v, %v), want zero values: the custom context's fields are not read", tc.name, ap, acts, delta, pinned)
+		}
 	}
 }
 

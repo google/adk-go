@@ -19,9 +19,13 @@
 // ADK does not expose everything that tells apart the attempts of a tool call
 // or the activations of a task-mode agent, so the plugin reads some
 // unexported fields of the google.golang.org/adk/v2 contexts by reflection.
-// These reads are best effort: if a version of ADK or a custom context wrapper
-// changes or hides those fields, the reads fail quietly, without a build error
-// or a log, and the plugin falls back as follows.
+// It reads fields of ADK's own context types and of the standard library's
+// context wrappers only: a context of any other type, whose fields are its
+// own, tells its EventActions through its Actions() method, and a custom
+// context that a standard-library wrapper hides is not inspected. These reads
+// are best effort: if a version of ADK or a custom context wrapper changes or
+// hides those fields, the reads fail quietly, without a build error or a log,
+// and the plugin falls back as follows.
 //
 //   - The EventActions of a tool context (see agent.NewToolContext): tool
 //     callbacks are told apart by their context pointer and JSON-shaped
@@ -34,8 +38,9 @@
 //     response of a finish_task call that failed or was recovered ends no
 //     activation unless an open or settled finish_task call shows a newer
 //     completion (or a hidden-callback peer's deferred completion settles once
-//     the activation ends), so the AGENT_COMPLETED row of a task-mode agent
-//     can move to the end of its parent or run.
+//     the activation ends, unless a finish_task response of that peer reports
+//     no completion), so the AGENT_COMPLETED row of a task-mode agent can move
+//     to the end of its parent or run.
 package agentanalytics
 
 import (
@@ -139,6 +144,16 @@ const (
 	// the arguments in place (matched by attempt identity when present, or by
 	// an outstanding OnToolErrorCallback marker in the same turn for custom
 	// value contexts).
+	//
+	// On a custom value context, which tells attempts apart by nothing else,
+	// such an AfterToolCallback is taken for another attempt, and gets a row
+	// of its own, when it sees another arguments map than the outstanding
+	// failure did and both hold different JSON-shaped arguments within the
+	// digest bounds (see EventToolCompleted). A recovered AfterToolCallback of
+	// the failed attempt settles the marker. Otherwise, a later failure of the
+	// same call in the same turn whose BeforeToolCallback and
+	// OnToolErrorCallback were both skipped, with equal arguments or arguments
+	// past the bounds, is taken for the outstanding failure and adds no row.
 	EventToolError     = "TOOL_ERROR"
 	EventStateDelta    = "STATE_DELTA"
 	EventAgentTransfer = "AGENT_TRANSFER"
@@ -1005,8 +1020,12 @@ func (p *analyticsPlugin) logDeferredTaskCompletions(ctx context.Context, baseID
 // such a call, and a custom agent or workflow node may respond with an output
 // alone. The function responses of such an event end the tool calls that they
 // answer, which an earlier plugin's AfterToolCallback may have hidden from
-// this plugin. Streamed partial events end nothing: AfterModelCallback ends
-// the model call with the final response, which carries the call's latency.
+// this plugin. A finish_task function response that reports no completion
+// also ends the task-mode activation's finish_task call without ending the
+// activation, and one that reports completion ends the activation (see
+// traceManager.completeResponseEvent and popTaskAgentSpanWithDelta).
+// Streamed partial events end nothing: AfterModelCallback ends the model call
+// with the final response, which carries the call's latency.
 // A partial event, with or without content, records instead that its author
 // is streaming, so that a caller that stops reading on it is not taken for a
 // failure, and one with content or a typed output also records that its
@@ -1184,7 +1203,8 @@ func functionResponseCalls(c *genai.Content) []string {
 }
 
 // functionResponseCallSpecs returns each function response in c paired with
-// its tool name so open tool spans are matched by both call ID and tool name.
+// its tool name so open tool spans are matched by both call ID and tool name,
+// and with whether it is a finish_task response that reports no completion.
 func functionResponseCallSpecs(c *genai.Content) []functionResponseCall {
 	if c == nil {
 		return nil
@@ -1196,8 +1216,9 @@ func functionResponseCallSpecs(c *genai.Content) []functionResponseCall {
 		}
 		if call := cmp.Or(part.FunctionResponse.ID, part.FunctionResponse.Name); call != "" {
 			calls = append(calls, functionResponseCall{
-				call: call,
-				name: part.FunctionResponse.Name,
+				call:       call,
+				name:       part.FunctionResponse.Name,
+				unfinished: part.FunctionResponse.Name == finishTaskToolName && !isTaskCompletedResult(part.FunctionResponse.Response),
 			})
 		}
 	}
