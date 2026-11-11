@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "release-type": "go",
+      "versioning": "always-bump-minor",
       "package-name": "adk-go",
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",

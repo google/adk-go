@@ -12,35 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package agentanalytics implements the BigQuery Agent Analytics Plugin.
-//
-// # Best-effort inspection of ADK internals
-//
-// ADK does not expose everything that tells apart the attempts of a tool call
-// or the activations of a task-mode agent, so the plugin reads some
-// unexported fields of the google.golang.org/adk/v2 contexts by reflection.
-// It reads fields of ADK's own context types and of the standard library's
-// context wrappers only: a context of any other type, whose fields are its
-// own, tells its EventActions through its Actions() method, and a custom
-// context that a standard-library wrapper hides is not inspected. These reads
-// are best effort: if a version of ADK or a custom context wrapper changes or
-// hides those fields, the reads fail quietly, without a build error or a log,
-// and the plugin falls back as follows.
-//
-//   - The EventActions of a tool context (see agent.NewToolContext): tool
-//     callbacks are told apart by their context pointer and JSON-shaped
-//     arguments instead (see EventToolCompleted). A custom context that is not
-//     a pointer no longer suppresses the TOOL_COMPLETED row of a recovered
-//     tool error, and a pointer context without EventActions suppresses it
-//     only when AfterToolCallback sees unchanged JSON-shaped arguments within
-//     the comparison bounds. A finish_task function response event of a
-//     task-mode agent no longer shows which activation wrote it: a delayed
-//     response of a finish_task call that failed or was recovered ends no
-//     activation unless an open or settled finish_task call shows a newer
-//     completion (or a hidden-callback peer's deferred completion settles once
-//     the activation ends, unless a finish_task response of that peer reports
-//     no completion), so the AGENT_COMPLETED row of a task-mode agent can move
-//     to the end of its parent or run.
 package agentanalytics
 
 import (
@@ -1859,8 +1830,9 @@ func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
 // agent a, matching adk-python: the static instruction of an LLM agent as
 // content, and its description, model, sub-agent names and, when an
 // instruction provider builds the instruction, instruction_source ("provider",
-// with nil content). An agent that inherits its model from an ancestor has no
-// model attribute, because ADK Go exposes no parent link on agent.Agent.
+// with nil content). ADK Go neither inherits models from ancestor agents nor
+// exposes a parent link on agent.Agent, so only a's own configured Model is
+// recorded.
 func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	attrs = map[string]any{}
 	if a == nil {

@@ -1317,7 +1317,7 @@ func TestAgentStartingData(t *testing.T) {
 			wantAttrs: map[string]any{"model": "scripted-model", "instruction_source": "provider"},
 		},
 		{
-			name:      "LLM agent that inherits its model",
+			name:      "LLM agent with nil Model omits model attribute",
 			agent:     helper,
 			wantAttrs: map[string]any{"agent_description": "Helps"},
 		},
