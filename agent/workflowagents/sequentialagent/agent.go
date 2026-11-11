@@ -23,6 +23,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agentstate"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/utils"
 	"google.golang.org/adk/v2/session"
@@ -82,7 +83,14 @@ type liveRunner interface {
 	RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
 }
 
+// currentSubAgent is the agent state key naming the sub-agent a sequence or
+// loop is on, as in adk-python's SequentialAgentState.
+const currentSubAgent = "current_sub_agent"
+
 func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+	if states := agentstate.FromContext(ctx); states != nil {
+		return a.runResumable(ctx, states)
+	}
 	return func(yield func(*session.Event, error) bool) {
 		subAgents := ctx.Agent().SubAgents()
 		if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
@@ -97,6 +105,50 @@ func (a *sequentialAgent) Run(ctx agent.InvocationContext) iter.Seq2[*session.Ev
 				}
 			}
 		}
+	}
+}
+
+// runResumable runs the sequence in a resumable invocation, as adk-python's
+// SequentialAgent does: it saves which sub-agent it is on before running it,
+// stops when the invocation pauses on a long-running call, and on the next
+// turn continues from the saved sub-agent.
+func (a *sequentialAgent) runResumable(ctx agent.InvocationContext, states *agentstate.Store) iter.Seq2[*session.Event, error] {
+	return func(yield func(*session.Event, error) bool) {
+		subAgents := ctx.Agent().SubAgents()
+		if len(subAgents) == 0 {
+			return
+		}
+		start := 0
+		state, resuming := states.Load(ctx.Agent().Name())
+		if resuming {
+			start = agentstate.Index(subAgents, state, currentSubAgent)
+		} else if indexes := utils.GraphResumeIndexes(ctx); len(indexes) > 0 {
+			start = indexes[0]
+		}
+		for _, subAgent := range subAgents[start:] {
+			// The sub-agent being resumed was saved on the turn it started.
+			if !resuming && !yield(states.Checkpoint(ctx, map[string]any{currentSubAgent: subAgent.Name()}), nil) {
+				return
+			}
+			resuming = false
+			subCtx, scope := agentstate.NewScope(ctx)
+			for event, err := range subAgent.Run(subCtx) {
+				// A failed sub-agent ends the sequence, as in adk-python: later
+				// sub-agents would run without the output they depend on.
+				if !yield(event, err) || err != nil {
+					return
+				}
+				if agentstate.Pauses(event) {
+					agentstate.MarkPaused(subCtx)
+				}
+			}
+			// The sub-agents after this one need the answer to its call, so
+			// the sequence stops until a later turn brings it.
+			if scope.Paused() {
+				return
+			}
+		}
+		yield(states.End(ctx, ctx.Agent().Name()), nil)
 	}
 }
 

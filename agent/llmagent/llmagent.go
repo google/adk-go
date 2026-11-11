@@ -28,6 +28,8 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	agentinternal "google.golang.org/adk/v2/internal/agent"
+	"google.golang.org/adk/v2/internal/agent/parentmap"
+	"google.golang.org/adk/v2/internal/agentstate"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/internal/workflowinternal"
@@ -467,6 +469,31 @@ func (a *llmAgent) run(ctx agent.InvocationContext) iter.Seq2[*session.Event, er
 	}
 
 	return func(yield func(*session.Event, error) bool) {
+		if states := agentstate.FromContext(ctx); states != nil {
+			// Run again on a later turn of a resumable invocation, an agent
+			// that had transferred continues with the agent it transferred to.
+			if states.Resumes(a.Name()) {
+				if name := agentstate.TransferToResume(ctx); name != "" {
+					target := findAgent(ctx, name)
+					if target == nil {
+						yield(nil, fmt.Errorf("failed to find agent to resume: %s", name))
+						return
+					}
+					for ev, err := range target.Run(ctx) {
+						if !yield(ev, err) || err != nil {
+							return
+						}
+					}
+					return
+				}
+			}
+			// An agent still waiting on its own long-running call stays
+			// paused until the user answers it.
+			if agentstate.AwaitsAnswer(ctx) {
+				agentstate.MarkPaused(ctx)
+				return
+			}
+		}
 		for ev, err := range f.Run(ctx) {
 			a.maybeSaveOutputToState(ev)
 			if !yield(ev, err) {
@@ -591,3 +618,17 @@ func (a *llmAgent) RunNode(ctx agent.Context, nodeInput any) iter.Seq2[*session.
 // placeholders into the instruction. You can use
 // util/instructionutil.InjectSessionState() helper if this functionality is needed.
 type InstructionProvider func(ctx agent.ReadonlyContext) (string, error)
+
+// findAgent returns the agent named name, looking first below ctx's agent and
+// then in the whole tree, as adk-python's LlmAgent.__get_agent_to_run does.
+func findAgent(ctx agent.InvocationContext, name string) agent.Agent {
+	if found := ctx.Agent().FindAgent(name); found != nil {
+		return found
+	}
+	parents := parentmap.FromContext(ctx)
+	root := ctx.Agent()
+	for parent := parents[root.Name()]; parent != nil; parent = parents[root.Name()] {
+		root = parent
+	}
+	return root.FindAgent(name)
+}
