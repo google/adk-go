@@ -30,6 +30,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
+	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/llminternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/runner"
@@ -978,5 +979,95 @@ func TestSequentialAgentStopsOnSubAgentError(t *testing.T) {
 	}
 	if secondLLM.callCounter != 0 {
 		t.Errorf("second agent's model called %d times after the first agent failed, want 0", secondLLM.callCounter)
+	}
+}
+
+// TestSequentialAgent_RunLive_StopsOnSubAgentError is the live counterpart of
+// TestSequentialAgentStopsOnSubAgentError: a sub-agent whose live stream yields
+// an error ends the sequence, and the next sub-agent is never started.
+func TestSequentialAgent_RunLive_StopsOnSubAgentError(t *testing.T) {
+	firstSess := &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}
+	first := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "first"})),
+		runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			return firstSess, func(yield func(*session.Event, error) bool) {
+				yield(nil, fmt.Errorf("live connection failed"))
+			}, nil
+		},
+	}
+	secondStarted := false
+	second := &mockLiveAgent{
+		Agent: mustAgent(agent.New(agent.Config{Name: "second"})),
+		runLiveFn: func(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+			secondStarted = true
+			return &dummyLiveSession{sendChan: make(chan agent.LiveRequest, 1)}, func(yield func(*session.Event, error) bool) {
+				ev := session.NewEvent(ctx, ctx.InvocationID())
+				ev.Author = "second"
+				yield(ev, nil)
+			}, nil
+		},
+	}
+
+	seqAgent, err := sequentialagent.New(sequentialagent.Config{
+		AgentConfig: agent.Config{Name: "pipeline", SubAgents: []agent.Agent{first, second}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveAgent, ok := seqAgent.(interface {
+		RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error)
+	})
+	if !ok {
+		t.Fatal("sequential agent does not implement RunLive")
+	}
+	_, seqIter, err := liveAgent.RunLive(&mockInvocationContext{agent: seqAgent, invocationID: "inv", ctx: t.Context()})
+	if err != nil {
+		t.Fatalf("RunLive failed: %v", err)
+	}
+
+	// Keep reading after an error, as the runner does.
+	var errs []error
+	var authors []string
+	for ev, err := range seqIter {
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		authors = append(authors, ev.Author)
+	}
+
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "live connection failed") {
+		t.Errorf("got errors %v, want exactly one from the first sub-agent", errs)
+	}
+	if secondStarted {
+		t.Errorf("second sub-agent was started after the first one failed; events from: %v", authors)
+	}
+	if !firstSess.closed {
+		t.Error("first sub-agent's live session was not closed after its error")
+	}
+}
+
+// TestSequentialAgent_RunWithoutSessionOrFunctionResponse checks that an
+// ordinary turn does not read the session to look for a resume target.
+func TestSequentialAgent_RunWithoutSessionOrFunctionResponse(t *testing.T) {
+	ran := false
+	sub, err := agent.New(agent.Config{Name: "sub", Run: func(agent.InvocationContext) iter.Seq2[*session.Event, error] {
+		return func(func(*session.Event, error) bool) { ran = true }
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := sequentialagent.New(sequentialagent.Config{AgentConfig: agent.Config{Name: "root", SubAgents: []agent.Agent{sub}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := icontext.NewInvocationContext(t.Context(), icontext.InvocationContextParams{Agent: root})
+	for _, err := range root.Run(ctx) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !ran {
+		t.Error("sub-agent did not run")
 	}
 }

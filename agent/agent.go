@@ -17,6 +17,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 
@@ -53,8 +54,18 @@ type Agent interface {
 	internal() *agent
 }
 
-// New creates an Agent with a custom logic defined by Run function.
+// New creates an Agent with a custom logic defined by Run function. It returns
+// an error if cfg.Name is empty or a sub-agent appears more than once in
+// cfg.SubAgents.
 func New(cfg Config) (Agent, error) {
+	// Under agenttool or as a transfer target, an empty name puts an empty
+	// function name or enum value in the parent's model request, which Vertex
+	// AI rejects. adk-python also requires a valid identifier other than
+	// "user"; that is not enforced here because it would reject names that
+	// work today, such as "research-agent".
+	if cfg.Name == "" {
+		return nil, fmt.Errorf("error creating agent: name must not be empty")
+	}
 	subAgentSet := make(map[Agent]bool)
 	for _, subAgent := range cfg.SubAgents {
 		if _, ok := subAgentSet[subAgent]; ok {
@@ -183,6 +194,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 			a.OnBeforeAgentCallbackEvent(event)
 		}
 		if event != nil || err != nil {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if !yield(event, err) {
 				return
 			}
@@ -195,11 +209,16 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		// Matches adk-python, where an agent without a run implementation is
 		// constructed fine and fails when run.
 		if a.run == nil {
-			yield(nil, fmt.Errorf("agent %q has no Run function", a.name))
+			err := fmt.Errorf("agent %q has no Run function", a.name)
+			runOnAgentErrorCallbacks(nodeCtx, err)
+			yield(nil, err)
 			return
 		}
 
 		for event, err := range a.run(nodeCtx) {
+			if err != nil {
+				runOnAgentErrorCallbacks(nodeCtx, err)
+			}
 			if event != nil && event.Author == "" {
 				event.Author = getAuthorForEvent(nodeCtx, event)
 			}
@@ -213,6 +232,9 @@ func (a *agent) Run(ctx InvocationContext) iter.Seq2[*session.Event, error] {
 		}
 
 		event, err = runAfterAgentCallbacks(nodeCtx)
+		if err != nil {
+			runOnAgentErrorCallbacks(nodeCtx, err)
+		}
 		if event != nil || err != nil {
 			yield(event, err)
 		}
@@ -317,6 +339,22 @@ func runBeforeAgentCallbacks(ctx InvocationContext) (*session.Event, error) {
 	}
 
 	return nil, nil
+}
+
+// runOnAgentErrorCallbacks notifies plugins that an error escaped the agent's
+// run. Notification only: the caller still yields err, so a callback cannot
+// recover from or replace the failure. A cancellation or deadline error is
+// reported unless the invocation's own context is done; timeouts raised inside
+// the run still reach the callback.
+func runOnAgentErrorCallbacks(ctx InvocationContext, err error) {
+	if ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return
+	}
+	pluginManager := pluginManagerFromContext(ctx)
+	if pluginManager == nil {
+		return
+	}
+	pluginManager.RunOnAgentErrorCallback(NewCallbackContext(ctx, nil), ctx.Agent(), err)
 }
 
 // runAfterAgentCallbacks checks if any afterAgentCallback returns non-nil content or a state modification
@@ -509,6 +547,7 @@ func pluginManagerFromContext(ctx context.Context) pluginManager {
 type pluginManager interface {
 	RunBeforeAgentCallback(cctx Context) (*genai.Content, error)
 	RunAfterAgentCallback(cctx Context) (*genai.Content, error)
+	RunOnAgentErrorCallback(cctx Context, a Agent, err error)
 }
 
 var _ InvocationContext = (*invocationContext)(nil)

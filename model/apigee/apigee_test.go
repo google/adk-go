@@ -291,3 +291,90 @@ func TestGenerateContent(t *testing.T) {
 		}
 	}
 }
+
+// TestGenerateContentWithRequestModel checks the URL a request is sent to when
+// LLMRequest.Model holds the model's Name(), which is what the LLM flow sets,
+// or another model, which a BeforeModelCallback may set.
+func TestGenerateContentWithRequestModel(t *testing.T) {
+	tests := []struct {
+		name      string
+		modelName string
+		// requestModel is the LLMRequest.Model to send. Empty means Name().
+		requestModel string
+		vertexAI     bool
+		wantURL      string
+	}{
+		{
+			name:      "model_id_only",
+			modelName: "apigee/gemini-2.5-flash",
+			wantURL:   proxyURL + "/v1beta/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:      "version_and_model_id",
+			modelName: "apigee/v1/gemini-2.5-flash",
+			wantURL:   proxyURL + "/v1/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:      "gemini_provider_version_and_model_id",
+			modelName: "apigee/gemini/v1/gemini-2.5-flash",
+			wantURL:   proxyURL + "/v1/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:      "vertex_ai_provider_version_and_model_id",
+			modelName: "apigee/vertex_ai/v1beta1/gemini-2.5-flash",
+			vertexAI:  true,
+			wantURL:   proxyURL + "/v1beta1/projects/test-project/locations/test-location/publishers/google/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			name:         "request_model_differs_from_wrapper_model",
+			modelName:    "apigee/v1/gemini-2.5-flash",
+			requestModel: "gemini-2.5-pro",
+			wantURL:      proxyURL + "/v1/models/gemini-2.5-pro:generateContent",
+		},
+		{
+			name:         "request_model_with_apigee_path_differs_from_wrapper_model",
+			modelName:    "apigee/v1/gemini-2.5-flash",
+			requestModel: "apigee/v1/gemini-2.5-pro",
+			wantURL:      proxyURL + "/v1/models/gemini-2.5-pro:generateContent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_API_KEY", "test-key")
+			t.Setenv(googleGenaiUseVertexAIEnvVar, "")
+			if tt.vertexAI {
+				t.Setenv(projectEnvVar, "test-project")
+				t.Setenv(locationEnvVar, "test-location")
+			}
+			var gotURLs []string
+			client := newTestClient(func(req *http.Request) (*http.Response, error) {
+				gotURLs = append(gotURLs, req.URL.String())
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"role":"model","parts":[{"text":"Paris"}]},"finishReason":"STOP"}]}`)),
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+				}, nil
+			})
+			m, err := NewModel(t.Context(), tt.modelName, WithProxyURL(proxyURL), WithHTTPClient(client))
+			if err != nil {
+				t.Fatalf("NewModel(%q) error = %v", tt.modelName, err)
+			}
+			requestModel := tt.requestModel
+			if requestModel == "" {
+				requestModel = m.Name()
+			}
+			req := &model.LLMRequest{
+				Model:    requestModel,
+				Contents: genai.Text("What is the capital of France? One word."),
+			}
+			for _, err := range m.GenerateContent(t.Context(), req, false) {
+				if err != nil {
+					t.Fatalf("GenerateContent() error = %v", err)
+				}
+			}
+			if diff := cmp.Diff([]string{tt.wantURL}, gotURLs); diff != "" {
+				t.Errorf("request URLs mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
