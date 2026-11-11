@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"maps"
 	"reflect"
 	"slices"
 	"sort"
@@ -158,11 +159,15 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	// before the suffix are recorded first, so a response in the suffix pairs
 	// the same way it does when the whole session is built.
 	callAuthors := make(map[string]string)
+	// The ids of the visible calls before the suffix, so a response in the
+	// suffix to one of them is not taken for an orphan.
+	callsBefore := make(map[string]struct{})
 	if len(events) > 0 {
 		if start := slices.Index(allEvents, events[0]); start > 0 {
 			for _, ev := range allEvents[:start] {
 				if visible(ev) {
 					recordCallAuthors(callAuthors, ev)
+					addCallIDs(callsBefore, ev)
 				}
 			}
 		}
@@ -246,7 +251,7 @@ func buildContentsDefaultWithCallSource(agentName, invocationBranch, isolationSc
 	}
 	filtered = processedEvents
 
-	filtered, orphanRemnants := dropOrphanedFunctionResponses(filtered, allEvents)
+	filtered, orphanRemnants := dropOrphanedFunctionResponses(filtered, callsBefore)
 
 	//  src/google/adk/flows/llm_flows/contents.py
 	// 	 - _rearrange_events_for_async_function_response
@@ -309,16 +314,27 @@ func eventBelongsToBranch(invocationBranch string, event *session.Event) bool {
 	return utils.EventBelongsToBranch(invocationBranch, event.Branch)
 }
 
-// dropOrphanedFunctionResponses also identifies surviving events whose orphaned
-// responses were removed, so later rearrangement preserves their remaining content.
-func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*session.Event, map[*session.Event]bool) {
-	callIDs := make(map[string]struct{})
-	for _, event := range allEvents {
-		for _, call := range utils.FunctionCalls(utils.Content(event)) {
-			if call.ID != "" {
-				callIDs[call.ID] = struct{}{}
-			}
+// addCallIDs adds the ids of the function calls in event to ids.
+func addCallIDs(ids map[string]struct{}, event *session.Event) {
+	for _, call := range utils.FunctionCalls(utils.Content(event)) {
+		if call.ID != "" {
+			ids[call.ID] = struct{}{}
 		}
+	}
+}
+
+// dropOrphanedFunctionResponses removes function responses that no earlier
+// call in events, or in callsBefore, answers. Only calls the agent sees count:
+// a response to a call on another branch or in another isolation scope has
+// nothing to pair with in the request, so it is dropped wherever it sits, as
+// in adk-python's drop_orphaned_function_responses.
+//
+// It also identifies surviving events whose orphaned responses were removed,
+// so later rearrangement preserves their remaining content.
+func dropOrphanedFunctionResponses(events []*session.Event, callsBefore map[string]struct{}) ([]*session.Event, map[*session.Event]bool) {
+	callIDs := maps.Clone(callsBefore)
+	if callIDs == nil {
+		callIDs = make(map[string]struct{})
 	}
 
 	isOrphan := func(part *genai.Part) bool {
@@ -340,6 +356,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 		}
 
 		if !slices.ContainsFunc(content.Parts, isOrphan) {
+			addCallIDs(callIDs, event)
 			result = append(result, event)
 			continue
 		}
@@ -359,6 +376,7 @@ func dropOrphanedFunctionResponses(events, allEvents []*session.Event) ([]*sessi
 			parts = append(parts, part)
 		}
 		cloned.LLMResponse.Content.Parts = parts
+		addCallIDs(callIDs, cloned)
 		if len(cloned.LLMResponse.Content.Parts) > 0 {
 			result = append(result, cloned)
 			orphanRemnants[cloned] = true

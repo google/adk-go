@@ -2199,13 +2199,17 @@ func TestContentsRequestProcessor_Rearrange(t *testing.T) {
 			},
 		},
 		{
-			name: "Function response with filtered matching call remains an error",
+			// The call is in another isolation scope, so the agent never sees
+			// it and its response has nothing to pair with.
+			name: "Function response with filtered matching call is dropped",
 			events: []*session.Event{
 				{Author: "user", LLMResponse: model.LLMResponse{Content: genai.NewContentFromText("Regular message", "user")}},
 				{Author: agentName, IsolationScope: "task", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionCall(fcBasic, "model")}},
 				{Author: "user", LLMResponse: model.LLMResponse{Content: NewContentFromFunctionResponse(frBasic, "user")}},
 			},
-			wantErr: "no function call event found",
+			want: []*genai.Content{
+				genai.NewContentFromText("Regular message", "user"),
+			},
 		},
 		{
 			name:            "Current turn retains validation for a call from an earlier turn",
