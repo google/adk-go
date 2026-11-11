@@ -67,45 +67,10 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 				if funcResp.Name != toolconfirmation.FunctionCallName {
 					continue
 				}
-				var tc toolconfirmation.ToolConfirmation
-				if funcResp.Response != nil {
-					resp, hasResponseKey := funcResp.Response["response"]
-					// ADK web client will send a request that is always encapsulated in a 'response' key.
-					// A client that has already decoded that JSON sends the decoded value
-					// instead, which adk-python accepts too (tool_confirmation.py,
-					// ToolConfirmation.from_response_dict).
-					if hasResponseKey && len(funcResp.Response) == 1 {
-						var jsonBytes []byte
-						switch v := resp.(type) {
-						case string:
-							jsonBytes = []byte(v)
-						case nil:
-							yield(nil, fmt.Errorf("error 'response' key found but value is null for confirmation function response for event id %q", event.ID))
-							return
-						default:
-							b, err := json.Marshal(v)
-							if err != nil {
-								yield(nil, fmt.Errorf("error 'response' key found but failed marshaling its value for confirmation function response for event id %q: %w", event.ID, err))
-								return
-							}
-							jsonBytes = b
-						}
-						if err := json.Unmarshal(jsonBytes, &tc); err != nil {
-							yield(nil, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
-							return
-						}
-					} else {
-						tempJSON, err := json.Marshal(funcResp.Response)
-						if err != nil {
-							yield(nil, fmt.Errorf("error failed marshaling confirmation function response for event id %q: %w", event.ID, err))
-							return
-						}
-						err = json.Unmarshal(tempJSON, &tc)
-						if err != nil {
-							yield(nil, fmt.Errorf("error failed unmarshalling confirmation function response for event id %q: %w", event.ID, err))
-							return
-						}
-					}
+				tc, err := parseToolConfirmation(event.ID, funcResp.Response)
+				if err != nil {
+					yield(nil, err)
+					return
 				}
 				confirmationResponses[funcResp.ID] = tc
 			}
@@ -268,9 +233,54 @@ func RequestConfirmationRequestProcessor(ctx agent.InvocationContext, req *model
 			ev, err := f.handleFunctionCalls(ctx, toolsmap, &model.LLMResponse{
 				Content: &genai.Content{Parts: parts, Role: genai.RoleUser},
 			}, toolsToResumeConfirmation, nil)
-			if !yield(ev, err) {
+			if err != nil {
+				if !yield(ev, err) {
+					return
+				}
+				continue
+			}
+			if ev != nil && !yieldWithAuthRequest(ctx, ev, yield) {
 				return
 			}
 		}
 	}
+}
+
+func parseToolConfirmation(eventID string, response map[string]any) (toolconfirmation.ToolConfirmation, error) {
+	var tc toolconfirmation.ToolConfirmation
+	if response == nil {
+		return tc, nil
+	}
+	resp, hasResponseKey := response["response"]
+	// ADK web client will send a request that is always encapsulated in a 'response' key.
+	// A client that has already decoded that JSON sends the decoded value
+	// instead, which adk-python accepts too (tool_confirmation.py,
+	// ToolConfirmation.from_response_dict).
+	if hasResponseKey && len(response) == 1 {
+		var jsonBytes []byte
+		switch v := resp.(type) {
+		case string:
+			jsonBytes = []byte(v)
+		case nil:
+			return tc, fmt.Errorf("error 'response' key found but value is null for confirmation function response for event id %q", eventID)
+		default:
+			b, err := json.Marshal(v)
+			if err != nil {
+				return tc, fmt.Errorf("error 'response' key found but failed marshaling its value for confirmation function response for event id %q: %w", eventID, err)
+			}
+			jsonBytes = b
+		}
+		if err := json.Unmarshal(jsonBytes, &tc); err != nil {
+			return tc, fmt.Errorf("error 'response' key found but failed unmarshalling confirmation function response for event id %q: %w", eventID, err)
+		}
+		return tc, nil
+	}
+	tempJSON, err := json.Marshal(response)
+	if err != nil {
+		return tc, fmt.Errorf("error failed marshaling confirmation function response for event id %q: %w", eventID, err)
+	}
+	if err := json.Unmarshal(tempJSON, &tc); err != nil {
+		return tc, fmt.Errorf("error failed unmarshalling confirmation function response for event id %q: %w", eventID, err)
+	}
+	return tc, nil
 }
