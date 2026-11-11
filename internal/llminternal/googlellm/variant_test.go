@@ -48,6 +48,39 @@ func TestIsGemini25OrLower(t *testing.T) {
 	}
 }
 
+func TestIsGemini1(t *testing.T) {
+	testCases := []struct {
+		model string
+		want  bool
+	}{
+		{"gemini-1", true},
+		{"gemini-1.5", true},
+		{"gemini-1.5-flash", true},
+		{"gemini-1.5-pro", true},
+		{"gemini-10", false},
+		{"gemini-10-flash", false},
+		{"gemini-2.0-flash", false},
+		{"gemini-2.5-flash-lite", false},
+		{"gemini-2.0-flash-exp", false},
+		{"gemini-1.0-pro", true},
+		{"projects/p/locations/l/models/gemini-2.0-flash", false},
+		{"projects/p/locations/l/models/gemini-1.0-flash", true},
+		{"projects/p/locations/l/models/gemini-10-flash", false},
+		{"models/gemini-1.5-pro", true},
+		{"not-a-gemini-model", false},
+		{"gemini-2", false},
+		{"gemini-3.0", false},
+		{"gemini-3-pro", false},
+	}
+
+	for _, tc := range testCases {
+		got := IsGemini1Model(tc.model)
+		if got != tc.want {
+			t.Errorf("IsGemini1Model(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
 func TestIsGeminiModel(t *testing.T) {
 	testCases := []struct {
 		model string
@@ -62,6 +95,30 @@ func TestIsGeminiModel(t *testing.T) {
 		got := IsGeminiModel(tc.model)
 		if got != tc.want {
 			t.Errorf("IsGeminiModel(%q) = %v, want %v", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestIsGemini3xLive(t *testing.T) {
+	testCases := []struct {
+		model string
+		want  bool
+	}{
+		{"gemini-3.1-flash-live-preview", true},
+		{"gemini-3.8-live", true},
+		{"models/gemini-3.8-live", true},
+		{"projects/p/locations/l/models/gemini-3.1-flash-live-preview", true},
+		{"gemini-3.5-flash-live-preview", true},
+		{"models/gemini-3.5-live-translate-preview", false},
+		{"gemini-3.5-live-translate", false},
+		{"gemini-3.1-pro-preview", false},
+		{"gemini-2.0-flash-live-001", false},
+	}
+
+	for _, tc := range testCases {
+		got := IsGemini3xLive(tc.model)
+		if got != tc.want {
+			t.Errorf("IsGemini3xLive(%q) = %v, want %v", tc.model, got, tc.want)
 		}
 	}
 }

@@ -26,7 +26,10 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -34,6 +37,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	bq "cloud.google.com/go/bigquery"
 	bqstorage "cloud.google.com/go/bigquery/storage/apiv1"
@@ -51,6 +55,7 @@ import (
 	"google.golang.org/adk/v2/model"
 	baseplugin "google.golang.org/adk/v2/plugin"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 )
 
 type mockTransport struct {
@@ -58,7 +63,35 @@ type mockTransport struct {
 }
 
 func (m *mockTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	return m.roundTrip(r)
+	if m.roundTrip != nil {
+		resp, err := m.roundTrip(r)
+		if err != nil {
+			return nil, err
+		}
+		if resp != nil {
+			if strings.Contains(r.URL.Path, "/jobs") && resp.StatusCode == http.StatusOK {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				bodyStr := strings.TrimSpace(string(bodyBytes))
+				if bodyStr == "" || bodyStr == "{}" {
+					resp.Body = io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`))
+				} else {
+					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				}
+			}
+			return resp, nil
+		}
+	}
+	if strings.Contains(r.URL.Path, "/jobs") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader("{}")),
+	}, nil
 }
 
 // fakeBigQueryWriteServer implements a fake gRPC BigQueryWriteServer for testing.
@@ -267,7 +300,7 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 	config := DefaultConfig()
 	config.Enabled = true
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 	if mutate != nil {
 		mutate(&config)
@@ -275,6 +308,12 @@ func newTestPluginWithConfig(t *testing.T, mutate func(*Config)) (*baseplugin.Pl
 
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
+				}, nil
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("{}")),
@@ -489,7 +528,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 	config := DefaultConfig()
 	config.Enabled = true
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 
 	createCalled := false
@@ -498,14 +537,14 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
 			// Table metadata request: returns 404 Not Found to trigger creation
-			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+			if r.Method == "GET" && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
 				}, nil
 			}
 			// Table creation request
-			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+			if r.Method == "POST" && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables") {
 				createCalled = true
 				bodyBytes, _ := io.ReadAll(r.Body)
 				requestBody = string(bodyBytes)
@@ -514,6 +553,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_CreateTable_WithPartitioning(t *testing
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 				}, nil
 			}
 			return &http.Response{
@@ -655,17 +700,20 @@ func TestConfig_DefaultOnFeatures(t *testing.T) {
 	cleared.DisableSessionMetadata = true
 	cleared.DisableSensitiveKeyRedaction = true
 	cleared.DisableFlushOnRunEnd = true
+	cleared.DisableCreateViews = true
 	disabled := Config{
 		DisableMultiModalContent:     true,
 		DisableSessionMetadata:       true,
 		DisableSensitiveKeyRedaction: true,
 		DisableFlushOnRunEnd:         true,
+		DisableCreateViews:           true,
 	}
 	defaultDisabled := DefaultConfig()
 	defaultDisabled.DisableMultiModalContent = true
 	defaultDisabled.DisableSessionMetadata = true
 	defaultDisabled.DisableSensitiveKeyRedaction = true
 	defaultDisabled.DisableFlushOnRunEnd = true
+	defaultDisabled.DisableCreateViews = true
 
 	tests := []struct {
 		name   string
@@ -685,6 +733,7 @@ func TestConfig_DefaultOnFeatures(t *testing.T) {
 				"logSessionMetadata":   tt.config.logSessionMetadata(),
 				"redactSensitiveKeys":  tt.config.redactSensitiveKeys(),
 				"flushOnRunEnd":        tt.config.flushOnRunEnd(),
+				"createViews":          tt.config.createViews(),
 			}
 			for name, enabled := range got {
 				if enabled != tt.want {
@@ -823,11 +872,14 @@ func TestCallbacks_WriteRows(t *testing.T) {
 			attrs:     map[string]string{"adk.function_call_id": `"call-1"`},
 		},
 		{
-			eventType: legacyEventType,
-			content:   `{"text_summary":"event text"}`,
+			eventType: EventAgentResponse,
+			content:   `{"response":"text: 'event text'"}`,
 			parts:     []map[string]any{textPart("event text", 0)},
 			attrs: map[string]string{
 				"event_author":        `"test-agent"`,
+				"source_event_id":     `"event-1"`,
+				"source_event_author": `"test-agent"`,
+				"source_event_branch": `"root.test-agent"`,
 				"adk.source_event_id": `"event-1"`,
 				"adk.branch":          `"root.test-agent"`,
 				"adk.node":            `{"path":"wf@0/review@2","run_id":"2","parent_run_id":"0","output_for":["wf@0"]}`,
@@ -933,7 +985,7 @@ func TestCallbacks_WriteRows(t *testing.T) {
 				t.Errorf("attributes.adk.adk_version = %v, want either absent or a real version", v)
 			}
 			_, hasBranch := lookup(attrs, "adk", "branch")
-			if wantBranch := w.eventType == legacyEventType; hasBranch != wantBranch {
+			if wantBranch := w.eventType == EventAgentResponse; hasBranch != wantBranch {
 				t.Errorf("attributes.adk.branch present = %v, want %v", hasBranch, wantBranch)
 			}
 			_, hasCallID := lookup(attrs, "adk", "function_call_id")
@@ -1483,9 +1535,16 @@ func TestNewPlugin_RejectsInvalidConfig(t *testing.T) {
 			},
 			wantErr: "invalid RetryConfig",
 		},
+		{
+			name:    "invalid ViewPrefix with SQL injection characters",
+			mutate:  func(c *Config) { c.ViewPrefix = "v` OR 1=1 --" },
+			wantErr: "invalid ViewPrefix",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GOOGLE_APPLICATION_CREDENTIALS",
+				filepath.Join(t.TempDir(), "missing-credentials.json"))
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
@@ -1618,7 +1677,10 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.CustomMetadataAllowlist = tt.allowlist })
 			md := map[string]any{"a2a:task_id": "task-1", "private": "p"}
 			var errs callbackErrors
-			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{Author: "test-agent", LLMResponse: model.LLMResponse{CustomMetadata: md}})
+			gotEv, evErr := p.OnEventCallback()(mCtx, &session.Event{
+				Author:      "test-agent",
+				LLMResponse: model.LLMResponse{Content: textContent("model", "hi"), CustomMetadata: md},
+			})
 			errs.add(gotEv, evErr)
 			if gotEv != nil {
 				t.Errorf("OnEventCallback returned %v, want nil so subsequent plugins run", gotEv)
@@ -1628,7 +1690,7 @@ func TestCustomMetadataAllowlist(t *testing.T) {
 			p.AfterRunCallback()(mCtx)
 
 			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-			for _, eventType := range []string{legacyEventType, EventLLMResponse} {
+			for _, eventType := range []string{EventAgentResponse, EventLLMResponse} {
 				attrs := jsonObjectColumn(t, onlyRowOfType(t, rows, eventType), "attributes")
 				got, ok := lookup(attrs, "custom_metadata")
 				switch {
@@ -1740,6 +1802,61 @@ func TestToolFailure_WritesErrorRows(t *testing.T) {
 	if _, ok := row[columnLatencyMS]; !ok {
 		t.Error("TOOL_ERROR row has no latency_ms")
 	}
+}
+
+// TestToolConfirmationRequired_CompletesCall replays the callbacks ADK runs
+// for a call of a tool that waits for the user's confirmation: the tool
+// fails with tool.ErrConfirmationRequired before it runs, so ADK runs
+// BeforeToolCallback, OnToolErrorCallback, then AfterToolCallback with the
+// same error. As in adk-python, whose tools return the confirmation request
+// as their result, the call ends with a TOOL_COMPLETED row whose result is
+// the error that ADK sends the model, and no TOOL_ERROR row. A final
+// response tool writes its AGENT_RESPONSE row when the confirmed call runs.
+func TestToolConfirmationRequired_CompletesCall(t *testing.T) {
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) { c.FinalResponseToolNames = []string{"deploy"} })
+	mCtx.functionCallID = "call-1"
+	deployTool := &fakeTool{name: "deploy"}
+	args := map[string]any{"region": "us-central1"}
+	toolErr := fmt.Errorf("error tool %q %w", "deploy", tool.ErrConfirmationRequired)
+	var errs callbackErrors
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	if res, err := p.OnToolErrorCallback()(mCtx, deployTool, args, toolErr); res != nil || err != nil {
+		t.Errorf("OnToolErrorCallback() = %v, %v; want nil, nil", res, err)
+	}
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, nil, toolErr))
+	// The user confirms the call, and ADK runs the tool.
+	errs.add(p.BeforeToolCallback()(mCtx, deployTool, args))
+	errs.add(p.AfterToolCallback()(mCtx, deployTool, args, map[string]any{"cluster_id": "c-123"}, nil))
+	errs.check(t)
+	p.AfterRunCallback()(mCtx)
+
+	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+	wantTypes := []string{
+		EventToolStarting, EventToolCompleted, // waits for confirmation
+		EventToolStarting, EventToolCompleted, EventAgentResponse, // confirmed
+		EventInvocationCompleted,
+	}
+	if diff := cmp.Diff(wantTypes, eventTypes(rows)); diff != "" {
+		t.Fatalf("event types mismatch (-want +got):\n%s", diff)
+	}
+	row := rowsOfType(rows, EventToolCompleted)[0]
+	if got := row["status"]; got != "OK" {
+		t.Errorf("status = %v, want OK", got)
+	}
+	if got, ok := row["error_message"]; ok {
+		t.Errorf("error_message = %v, want none", got)
+	}
+	checkJSON(t, "content", jsonObjectColumn(t, row, "content"),
+		`{"tool":"deploy","result":{"error":"error tool \"deploy\" requires confirmation, please approve or reject"},"tool_origin":"UNKNOWN"}`)
+	checkJSONAt(t, jsonObjectColumn(t, row, "attributes"), `"call-1"`, "adk", "function_call_id")
+	if got, want := row["span_id"], rowsOfType(rows, EventToolStarting)[0]["span_id"]; got != want {
+		t.Errorf("TOOL_COMPLETED span_id = %v, want the TOOL_STARTING span_id %v", got, want)
+	}
+	if _, ok := row[columnLatencyMS]; !ok {
+		t.Error("TOOL_COMPLETED row has no latency_ms")
+	}
+	checkJSON(t, "AGENT_RESPONSE content", jsonObjectColumn(t, onlyRowOfType(t, rows, EventAgentResponse), "content"),
+		`{"response":{"region":"us-central1"}}`)
 }
 
 func TestToolCallbacks_NilToolDoesNotPanic(t *testing.T) {
@@ -1904,13 +2021,17 @@ func (noAgentContext) AgentName() string { panic("invocation has no agent") }
 func TestIdentity_AgentFallsBackToEventAuthor(t *testing.T) {
 	p, requests, mCtx := setupTestPlugin(t)
 	ctx := noAgentContext{mCtx}
-	if _, err := p.OnEventCallback()(ctx, &session.Event{Author: "event-author"}); err != nil {
+	ev := &session.Event{
+		Author:      "event-author",
+		LLMResponse: model.LLMResponse{Content: textContent("model", "hi")},
+	}
+	if _, err := p.OnEventCallback()(ctx, ev); err != nil {
 		t.Fatalf("OnEventCallback error: %v", err)
 	}
 	p.AfterRunCallback()(ctx)
 
 	rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
-	row := onlyRowOfType(t, rows, legacyEventType)
+	row := onlyRowOfType(t, rows, EventAgentResponse)
 	if got := row["agent"]; got != "event-author" {
 		t.Errorf("agent = %v, want the event author", got)
 	}
@@ -2121,7 +2242,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			config.DisableSchemaUpgrade = tt.disableUpgrade
 
@@ -2145,7 +2266,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 			var patchedLabels map[string]string
 			mockTransport := &mockTransport{
 				roundTrip: func(r *http.Request) (*http.Response, error) {
-					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 						if patchCalled && tt.retryUpgraded {
 							return &http.Response{
 								StatusCode: http.StatusOK,
@@ -2157,7 +2278,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 							Body:       io.NopCloser(bytes.NewReader(getBodyBytes)),
 						}, nil
 					}
-					if (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+					if (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 						patchCalled = true
 						bodyBytes, _ := io.ReadAll(r.Body)
 						var body struct {
@@ -2181,6 +2302,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_UpgradesExistingSchema(t *testing.T) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+						}, nil
+					}
+					if strings.Contains(r.URL.Path, "/jobs") {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 						}, nil
 					}
 					return &http.Response{
@@ -2320,9 +2447,12 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			config.DisableSchemaUpgrade = tt.disableUpgrade
+			// Views are created in the background once the table is ready;
+			// this test covers only the table requests.
+			config.DisableCreateViews = true
 
 			respond := func(status int, body string) *http.Response {
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}
@@ -2330,7 +2460,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 			apiError := func(status int) *http.Response {
 				return respond(status, fmt.Sprintf(`{"error":{"code":%d,"message":"status %d"}}`, status, status))
 			}
-			const tablePath = "/datasets/test-dataset/tables/test-table"
+			const tablePath = "/datasets/test_dataset/tables/test-table"
 			var gets, posts, patches int
 			var patchedColumns []string
 			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -2345,7 +2475,7 @@ func TestNewBigQueryAgentAnalyticsPlugin_TableSetup(t *testing.T) {
 						return apiError(status), nil
 					}
 					return respond(http.StatusOK, legacyTable), nil
-				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test-dataset/tables"):
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/datasets/test_dataset/tables"):
 					posts++
 					return apiError(tt.postStatus), nil
 				case (r.Method == http.MethodPatch || r.Method == http.MethodPut) && strings.HasSuffix(r.URL.Path, tablePath):
@@ -2465,7 +2595,7 @@ func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesUnusedWriteClient(t *t
 			ctx := context.Background()
 			config := DefaultConfig()
 			config.ProjectID = "test-project"
-			config.DatasetID = "test-dataset"
+			config.DatasetID = "test_dataset"
 			config.TableName = "test-table"
 			tt.mutate(&config)
 			transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
@@ -2500,7 +2630,7 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	ctx := context.Background()
 	config := DefaultConfig()
 	config.ProjectID = "test-project"
-	config.DatasetID = "test-dataset"
+	config.DatasetID = "test_dataset"
 	config.TableName = "test-table"
 	config.PayloadColumnDenylist = []string{columnContent, columnContentParts, columnLatencyMS}
 
@@ -2508,13 +2638,13 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 	var createdLabels map[string]string
 	mockTransport := &mockTransport{
 		roundTrip: func(r *http.Request) (*http.Response, error) {
-			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables/test-table") {
+			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
 				return &http.Response{
 					StatusCode: http.StatusNotFound,
 					Body:       io.NopCloser(strings.NewReader(`{"error":{"code":404,"message":"Not found"}}`)),
 				}, nil
 			}
-			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/datasets/test-dataset/tables") {
+			if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables") {
 				bodyBytes, _ := io.ReadAll(r.Body)
 				var body struct {
 					Labels map[string]string `json:"labels"`
@@ -2533,6 +2663,12 @@ func TestPayloadColumns_ProjectsTableAndArrowSchema(t *testing.T) {
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			}
+			if strings.Contains(r.URL.Path, "/jobs") {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
 				}, nil
 			}
 			return &http.Response{
@@ -2640,7 +2776,7 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 	errs.add(p.AfterModelCallback()(mCtx, &model.LLMResponse{Content: structuredContent}, nil))
 	errs.add(p.OnEventCallback()(mCtx, &session.Event{
 		Author:      "test-agent",
-		LLMResponse: model.LLMResponse{Content: structuredContent},
+		LLMResponse: model.LLMResponse{Content: textContent("model", `{"api_key":"sk-secret-key","note":"hello world"}`)},
 	}))
 	errs.check(t)
 	p.AfterRunCallback()(mCtx)
@@ -2660,33 +2796,43 @@ func TestStructuredContentPartsAndSanitizedTextInCallbacks(t *testing.T) {
 		t.Errorf("LLM_REQUEST content %s leaked secret from JSON text", raw)
 	}
 
-	for _, eventType := range []string{EventLLMResponse, legacyEventType} {
-		row := onlyRowOfType(t, rows, eventType)
-		if raw, _ := row["content"].(string); strings.Contains(raw, "sk-secret") {
-			t.Errorf("%s content %s leaked secret", eventType, raw)
-		}
-		parts, _ := row["content_parts"].([]map[string]any)
-		if len(parts) != 5 {
-			t.Fatalf("%s content_parts len = %d, want 5: %v", eventType, len(parts), parts)
-		}
-		if parts[1]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[1] mime_type = %v", eventType, parts[1]["mime_type"])
-		}
-		if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[1] part_attributes = %s, want redacted args", eventType, attrs)
-		}
-		if parts[2]["mime_type"] != "application/json" {
-			t.Errorf("%s parts[2] mime_type = %v", eventType, parts[2]["mime_type"])
-		}
-		if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
-			t.Errorf("%s parts[2] part_attributes = %s, want redacted response", eventType, attrs)
-		}
-		if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
-			t.Errorf("%s parts[3] = %v", eventType, parts[3])
-		}
-		if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
-			t.Errorf("%s parts[4] = %v", eventType, parts[4])
-		}
+	resRow := onlyRowOfType(t, rows, EventLLMResponse)
+	if raw, _ := resRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("LLM_RESPONSE content %s leaked secret", raw)
+	}
+	parts, _ := resRow["content_parts"].([]map[string]any)
+	if len(parts) != 5 {
+		t.Fatalf("LLM_RESPONSE content_parts len = %d, want 5: %v", len(parts), parts)
+	}
+	if parts[1]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[1] mime_type = %v", parts[1]["mime_type"])
+	}
+	if attrs, _ := parts[1]["part_attributes"].(string); strings.Contains(attrs, "sk-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[1] part_attributes = %s, want redacted args", attrs)
+	}
+	if parts[2]["mime_type"] != "application/json" {
+		t.Errorf("LLM_RESPONSE parts[2] mime_type = %v", parts[2]["mime_type"])
+	}
+	if attrs, _ := parts[2]["part_attributes"].(string); strings.Contains(attrs, "tok-secret") || !strings.Contains(attrs, redactedValue) {
+		t.Errorf("LLM_RESPONSE parts[2] part_attributes = %s, want redacted response", attrs)
+	}
+	if parts[3]["mime_type"] != "text/plain" || parts[3]["text"] != "print(42)" {
+		t.Errorf("LLM_RESPONSE parts[3] = %v", parts[3])
+	}
+	if parts[4]["mime_type"] != "text/plain" || parts[4]["text"] != "42\n" {
+		t.Errorf("LLM_RESPONSE parts[4] = %v", parts[4])
+	}
+
+	agentRespRow := onlyRowOfType(t, rows, EventAgentResponse)
+	if raw, _ := agentRespRow["content"].(string); strings.Contains(raw, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE content %s leaked secret", raw)
+	}
+	respParts, _ := agentRespRow["content_parts"].([]map[string]any)
+	if len(respParts) != 1 {
+		t.Fatalf("AGENT_RESPONSE content_parts len = %d, want 1: %v", len(respParts), respParts)
+	}
+	if text, _ := respParts[0]["text"].(string); strings.Contains(text, "sk-secret") {
+		t.Errorf("AGENT_RESPONSE parts[0] text = %s leaked secret", text)
 	}
 
 	proseCases := []string{
@@ -3031,6 +3177,469 @@ func TestCredentialShapesNeverReachARow(t *testing.T) {
 	}
 }
 
+// TestValueEndingInKeyName checks that a credential whose value only ends in
+// a sensitive key name, as in the text that fmt.Errorf("password=%s: %w", ...)
+// writes before a wrapped error, is redacted from error_message, content,
+// content_parts, tool arguments and results, and event attributes, and that
+// no row holds a credential. When the text is a JSON object or array whose
+// string also holds a password after an escaped line break, error_message
+// redacts each pair, while content, content_parts, tool arguments and
+// results, and event attributes are written as [REDACTED_SENSITIVE_TEXT].
+func TestValueEndingInKeyName(t *testing.T) {
+	marshalN := func(s string, n int) string {
+		for range n {
+			b, err := json.Marshal(s)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			s = string(b)
+		}
+		return s
+	}
+	secrets := []string{"SECRET123", "hunter2", "s3cr3t", "bob pw", "OTHER pass"}
+	tests := []struct {
+		name string
+		text string
+		// want is the error_message, and also the content, content_parts and
+		// attributes text unless wantContent is set.
+		want        string
+		wantContent string
+		// wantResponse is the AGENT_RESPONSE content.response, if it is not
+		// "text: '" + the content + "'". The response is redacted again
+		// once the text is quoted, and a redacted value that runs to the
+		// end of the text then also takes the closing "'".
+		wantResponse string
+	}{
+		{
+			name: "password before a wrapped error",
+			text: "connect user=bob password=dev-SECRET123-password: dial tcp 10.0.0.1:5432: connection refused",
+			want: "connect user=bob password=[REDACTED] tcp 10.0.0.1:5432: connection refused",
+		},
+		{
+			name: "quoted password before an error",
+			text: `login failed: password="SECRET123-secret": invalid`,
+			want: `login failed: password="[REDACTED]"`,
+		},
+		{
+			name:         "API key before a wrapped error",
+			text:         "api_key=prodSECRET123-api-key: permission denied",
+			want:         "api_key=[REDACTED]",
+			wantResponse: "text: 'api_key=[REDACTED]",
+		},
+		{
+			name: "token in prose",
+			text: "my login is token=abc-SECRET123-token: please check",
+			want: "my login is token=[REDACTED] check",
+		},
+		{
+			name: "temp: value ending in a key name before a wrapped error",
+			text: "password=temp:SECRET123-token: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "temp: value before a wrapped error",
+			text: "password=temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "user:temp: value before a wrapped error",
+			text: "password=user:temp:SECRET123: dial tcp",
+			want: "password=[REDACTED] tcp",
+		},
+		{
+			name: "quoted temp: value before a wrapped error",
+			text: `password="temp:SECRET123": dial tcp`,
+			want: `password="[REDACTED]" tcp`,
+		},
+		{
+			name:         "temp: key on the line of credentials",
+			text:         "credentials: temp:foo: SECRET123",
+			want:         "credentials:[REDACTED]",
+			wantResponse: "text: 'credentials:[REDACTED]",
+		},
+		{
+			name:         "temp: key on an indented line under credentials",
+			text:         "credentials:\n  temp:foo: SECRET123",
+			want:         "credentials:\n  temp:foo:[REDACTED]",
+			wantResponse: "text: 'credentials:[REDACTED]",
+		},
+		{
+			name:        "password after an escaped line break in a JSON message",
+			text:        `{"msg":"retry\npassword=hunter2 vault: secret: kv/data/db-password: \"s3cr3t pass\""}`,
+			want:        `{"msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON error",
+			text:        `{"error":"connect failed\npassword=hunter2 credentials: user/password:\"bob pw\""}`,
+			want:        `{"error":"connect failed\npassword=[REDACTED] credentials:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "password after an escaped line break in a JSON object whose last field is a bare pair",
+			text:        `{"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\"","code":"token=abc"}`,
+			want:        `{"code":"token=[REDACTED]","msg":"retry\npassword=[REDACTED] vault: secret:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON error with a password after an escaped line break",
+			text:        `POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefix with bracket tag before JSON error with a password after an escaped line break",
+			text:        `POST /v1/login [400]: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "bracket-led log line before JSON error with only an escaped-newline password",
+			text:        `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123"}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "bracket-prefixed JSON error with a password after an escaped line break and a raw marker",
+			text:        `[ERROR] POST /v1/login: 400: {"msg":"retry\npassword=SECRET123 vault: secret: kv/data/db-password: \"OTHER pass\""}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "JSON error followed by trailing status text with a password after an escaped line break",
+			text:        `POST /v1/login: {"msg":"retry\npassword=SECRET123"} (status 400)`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object whose string ends with a value ending in a key name before a word",
+			text:        `{"msg":"retry\npassword=dev-SECRET123-password: dial"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object with a password after an escaped line break and a final value ending in a key name",
+			text:        `{"msg":"retry\npassword=hunter2 token=abc-SECRET123-token: dial"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED] token=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON array whose string ends with a value ending in a key name before a word",
+			text:        `["retry\npassword=dev-SECRET123-password: dial"]`,
+			want:        `["retry\npassword=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object whose string ends with a value ending in a key name",
+			text:        `{"msg":"retry\npassword=dev-SECRET123-password"}`,
+			want:        `{"msg":"retry\npassword=[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON array whose string ends with a value ending in a key name",
+			text:        `["retry\npassword=dev-SECRET123-password"]`,
+			want:        `["retry\npassword=[REDACTED]"]`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "stray quote before JSON error with an escaped-newline password",
+			text:        `bad token " in body: {"msg":"retry\npassword=SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "escaped quote before JSON error with an escaped-newline password",
+			text:        `flag \"foo: {"msg":"retry\npassword=SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "non-JSON backslash before escaped quote and escaped-newline password",
+			text:        `err: "dir C:\work\"retry\npassword=SECRET123"`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "5-deep marshaled JSON string with an escaped-newline password",
+			text:        "upstream: " + marshalN(`"retry\npassword=SECRET123"`, 5),
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "9-deep marshaled JSON string with an escaped-newline password",
+			text:        "upstream: " + marshalN(`"retry\npassword=SECRET123"`, 9),
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "truncated unclosed JSON error body with an escaped-newline password",
+			text:        `upstream error: {"error":"login failed\npassword=SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "single-quoted Python dict with an escaped-newline password",
+			text:        `{'error': 'retry\npassword=SECRET123'}`,
+			want:        unparseableJSONPlaceholder,
+			wantContent: unparseableJSONPlaceholder,
+		},
+		{
+			name:        "prefixed single-quoted Python dict with an escaped-newline password",
+			text:        `bad config: {'error': 'retry\npassword=SECRET123'}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "unquoted escaped log line with an escaped-newline password",
+			text:        `err=retry\npassword=SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows escaped newline before value ending in key name",
+			text:        `{"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want:        `{"msg":"token=[REDACTED]\npassword:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows escaped newline before value ending in key name",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\npassword: dev-SECRET123-password: dial"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier compound key value swallows escaped newline before password",
+			text:        `{"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want:        `{"msg":"secret:[REDACTED]\npassword:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier compound key value swallows escaped newline before password",
+			text:        `POST /v1/login: 400: {"msg":"secret: kv/data/db-password: other\npassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by escaped newline and space",
+			text:        `{"msg":"password:\n SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where password colon is followed by escaped newline and space",
+			text:        `POST /v1/login: 400: {"msg":"password:\n SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed single-quoted Python dict where earlier token swallows escaped newline before password",
+			text:        `bad config: {'error': 'token=abc\npassword: SECRET123'}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "truncated JSON error body where earlier token swallows escaped newline before password",
+			text:        `upstream error: {"error":"token=abc\npassword: SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "bare token value ending with escaped quote before password key",
+			text:        `token=abc\"password\": SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed quoted string where earlier token swallows escaped newline before password",
+			text:        `upstream failed: "token=abc\npassword: SECRET123"`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows percent-encoded newline before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc%0Apassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows double-escaped unicode newline before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\\u000apassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows escaped newline and unicode colon before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\npassword\u003a SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			text:        `{"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows unicode-escaped backslash and n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\u005cnpassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where earlier token swallows percent-escaped backslash and n before password",
+			text:        `{"msg":"token=abc%5Cnpassword: SECRET123"}`,
+			want:        `{"msg":"[REDACTED_SENSITIVE_TEXT]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows hex-escaped backslash and n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\x5cnpassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where earlier token swallows unicode-escaped backslash and unicode n before password",
+			text:        `POST /v1/login: 400: {"msg":"token=abc\u005c\u006epassword: SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by escaped backspace and space",
+			text:        `{"msg":"password:\b SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "prefixed JSON object where password colon is followed by escaped backspace and space",
+			text:        `POST /v1/login: 400: {"msg":"password:\b SECRET123"}`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "plain text where password colon is followed by escaped backspace and space",
+			text:        `password:\b SECRET123`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode backspace and space",
+			text:        `{"msg":"password:\u0008 SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode vertical tab and space",
+			text:        `{"msg":"password:\u000b SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:        "JSON object where password colon is followed by unicode NUL and space",
+			text:        `{"msg":"password:\u0000 SECRET123"}`,
+			want:        `{"msg":"password:[REDACTED]"}`,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+		{
+			name:         "Go struct field ending in key name followed by space, closing brace, backspace byte and secret",
+			text:         "failed: {Password:abc-token: }\bSECRET123",
+			want:         "failed: {Password:[REDACTED]",
+			wantContent:  "failed: {Password:[REDACTED]",
+			wantResponse: "text: 'failed: {Password:[REDACTED]",
+		},
+		{
+			name:        "Go struct field ending in key name followed by space, backspace byte and closing brace",
+			text:        "failed: {Password:abc-token: \b}",
+			want:        "failed: {Password:[REDACTED] \b}",
+			wantContent: "failed: {Password:[REDACTED] \b}",
+		},
+		{
+			name:        "caller-supplied redaction placeholders splitting secret after escaped newline",
+			text:        `password:\n [REDACTED]a[REDACTED]u[REDACTED]t[REDACTED]h[REDACTED] authorization=1 authorization=2`,
+			want:        redactedSensitiveTextPlaceholder,
+			wantContent: redactedSensitiveTextPlaceholder,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, requests, mCtx := setupTestPlugin(t)
+			var errs callbackErrors
+			errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tt.text)))
+			errs.add(p.BeforeModelCallback()(mCtx, &model.LLMRequest{
+				Model:    "gemini-test",
+				Contents: []*genai.Content{textContent("user", tt.text)},
+			}))
+			errs.add(p.BeforeToolCallback()(mCtx, &fakeTool{name: "lookup"}, map[string]any{"input": tt.text}))
+			errs.add(p.AfterToolCallback()(mCtx, &fakeTool{name: "lookup"}, nil, map[string]any{"output": tt.text}, nil))
+			errs.add(p.OnToolErrorCallback()(mCtx, &fakeTool{name: "db"}, map[string]any{"input": tt.text}, errors.New(tt.text)))
+			errs.add(p.OnEventCallback()(mCtx, &session.Event{
+				ID:          "event-1",
+				Author:      "test-agent",
+				Branch:      tt.text,
+				LLMResponse: model.LLMResponse{Content: textContent("model", tt.text)},
+			}))
+			errs.check(t)
+			p.AfterRunCallback()(mCtx)
+
+			rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+			wantContent := tt.want
+			if tt.wantContent != "" {
+				wantContent = tt.wantContent
+			}
+			wantResponse := "text: '" + wantContent + "'"
+			if tt.wantResponse != "" {
+				wantResponse = tt.wantResponse
+			}
+			userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+			if got, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary"); got != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %v, want %q", got, wantContent)
+			}
+			if parts, _ := userRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("USER_MESSAGE_RECEIVED content_parts = %v, want text %q", parts, wantContent)
+			}
+			llmRow := onlyRowOfType(t, rows, EventLLMRequest)
+			if prompt, _ := lookup(jsonObjectColumn(t, llmRow, "content"), "prompt"); len(prompt.([]any)) != 1 || prompt.([]any)[0].(map[string]any)["content"] != wantContent {
+				t.Errorf("LLM_REQUEST content.prompt = %v, want content %q", prompt, wantContent)
+			}
+			if parts, _ := llmRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("LLM_REQUEST content_parts = %v, want text %q", parts, wantContent)
+			}
+			startRow := onlyRowOfType(t, rows, EventToolStarting)
+			if got, _ := lookup(jsonObjectColumn(t, startRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_STARTING content.args.input = %v, want %q", got, wantContent)
+			}
+			toolRow := onlyRowOfType(t, rows, EventToolCompleted)
+			if got, _ := lookup(jsonObjectColumn(t, toolRow, "content"), "result", "output"); got != wantContent {
+				t.Errorf("TOOL_COMPLETED content.result.output = %v, want %q", got, wantContent)
+			}
+			errRow := onlyRowOfType(t, rows, EventToolError)
+			if got := errRow["error_message"]; got != tt.want {
+				t.Errorf("TOOL_ERROR error_message = %v, want %q", got, tt.want)
+			}
+			if got, _ := lookup(jsonObjectColumn(t, errRow, "content"), "args", "input"); got != wantContent {
+				t.Errorf("TOOL_ERROR content.args.input = %v, want %q", got, wantContent)
+			}
+			evRow := onlyRowOfType(t, rows, EventAgentResponse)
+			if got, _ := lookup(jsonObjectColumn(t, evRow, "content"), "response"); got != wantResponse {
+				t.Errorf("AGENT_RESPONSE content.response = %v, want %q", got, wantResponse)
+			}
+			if parts, _ := evRow["content_parts"].([]map[string]any); len(parts) != 1 || parts[0]["text"] != wantContent {
+				t.Errorf("AGENT_RESPONSE content_parts = %v, want text %q", parts, wantContent)
+			}
+			if got, _ := lookup(jsonObjectColumn(t, evRow, "attributes"), "adk", "branch"); got != wantContent {
+				t.Errorf("AGENT_RESPONSE attributes.adk.branch = %v, want %q", got, wantContent)
+			}
+			for _, row := range rows {
+				s := fmt.Sprint(row)
+				for _, secret := range secrets {
+					if strings.Contains(s, secret) {
+						t.Errorf("%v row leaked %s: %s", row["event_type"], secret, s)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestFileDataURICredentialsAreRedacted checks that credentials in the path,
 // a nested URL, a query value or the fragment of a FileData URI do not reach
 // content_parts.uri.
@@ -3140,6 +3749,39 @@ func TestTextWithoutCredentialsIsUnchanged(t *testing.T) {
 		}
 		if got := userRow["is_truncated"]; got != false {
 			t.Errorf("is_truncated = %v, want false", got)
+		}
+	})
+
+	t.Run("large user message with pattern words and backslashes", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			text   string
+			prefix string
+		}{
+			{
+				name:   "52KB prose",
+				text:   strings.Repeat("design review notes; ", 2_500) + strings.Repeat(`\`, 256) + " end",
+				prefix: "design review notes; ",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				p, requests, mCtx := setupTestPlugin(t)
+				start := time.Now()
+				var errs callbackErrors
+				errs.add(p.OnUserMessageCallback()(mCtx, textContent("user", tc.text)))
+				errs.check(t)
+				if d := time.Since(start); d > 3*time.Second {
+					t.Errorf("OnUserMessageCallback took %v for a %d-byte text", d, len(tc.text))
+				}
+				p.AfterRunCallback()(mCtx)
+
+				rows := collectRows(t, requests, untilEventType(EventInvocationCompleted))
+				userRow := onlyRowOfType(t, rows, EventUserMessageReceived)
+				gotSummary, _ := lookup(jsonObjectColumn(t, userRow, "content"), "text_summary")
+				if s, _ := gotSummary.(string); !strings.HasPrefix(s, tc.prefix) {
+					t.Errorf("USER_MESSAGE_RECEIVED content.text_summary = %q, want prefix %q", s, tc.prefix)
+				}
+			})
 		}
 	})
 }
@@ -3308,4 +3950,1086 @@ func TestCacheType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_DropStats(t *testing.T) {
+	if _, ok := AsBigQueryAgentAnalyticsPlugin(nil); ok {
+		t.Error("AsBigQueryAgentAnalyticsPlugin(nil) = true, want false")
+	}
+	var nilPlugin *BigQueryAgentAnalyticsPlugin
+	if got := nilPlugin.DropStats(); got != (DropStats{}) {
+		t.Errorf("nil BigQueryAgentAnalyticsPlugin.DropStats() = %+v, want zero DropStats", got)
+	}
+
+	p, requests, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+		c.ContentFormatter = func(_ any, eventType string) (any, error) {
+			if eventType == EventUserMessageReceived {
+				return nil, errors.New("formatter error")
+			}
+			return "ok", nil
+		}
+	})
+
+	bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+	if !ok || bqaap == nil {
+		t.Fatal("AsBigQueryAgentAnalyticsPlugin(p) failed")
+	}
+	if got := bqaap.DropStats(); got != (DropStats{}) {
+		t.Errorf("initial DropStats() = %+v, want zero DropStats", got)
+	}
+
+	if _, err := p.OnUserMessageCallback()(mCtx, textContent("user", "secret")); err != nil {
+		t.Fatalf("OnUserMessageCallback error: %v", err)
+	}
+	p.AfterRunCallback()(mCtx)
+	_ = collectRows(t, requests, untilEventType(EventInvocationCompleted))
+
+	want := DropStats{
+		FormatterFailureDrops: 1,
+		TotalDrops:            0,
+	}
+	if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+		t.Errorf("BigQueryAgentAnalyticsPlugin.DropStats() mismatch (-want +got):\n%s", diff)
+	}
+
+	counters, _ := bqaap.stats.(*dropCounters)
+	// Verify a recovered panic inside logEvent increments AppendFailureDrops and TotalDrops once.
+	ap := &analyticsPlugin{
+		config:    DefaultConfig(),
+		processor: &BatchProcessor{counters: counters},
+	}
+	ap.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in callback")
+	})
+	wantAfterPanic := DropStats{
+		AppendFailureDrops:    1,
+		FormatterFailureDrops: 1,
+		TotalDrops:            1,
+	}
+	if diff := cmp.Diff(wantAfterPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a recovered panic inside logSessionEvent also increments AppendFailureDrops and TotalDrops once.
+	ap.logSessionEvent(context.Background(), identity{}, EventStateDelta, rowSpan{}, func(*eventData) {
+		panic("boom in logSessionEvent")
+	})
+	wantAfterSessionPanic := DropStats{
+		AppendFailureDrops:    2,
+		FormatterFailureDrops: 1,
+		TotalDrops:            2,
+	}
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after recovered panic in logSessionEvent mismatch (-want +got):\n%s", diff)
+	}
+
+	// Verify a disabled analyticsPlugin does not increment AppendFailureDrops on panic.
+	disabledCfg := DefaultConfig()
+	disabledCfg.Enabled = false
+	disabledAP := &analyticsPlugin{
+		config:    disabledCfg,
+		processor: &BatchProcessor{counters: counters},
+	}
+	disabledAP.logEvent(context.Background(), identity{}, EventUserMessageReceived, nil, func(*eventData) {
+		panic("boom in disabled plugin")
+	})
+	if diff := cmp.Diff(wantAfterSessionPanic, bqaap.DropStats()); diff != "" {
+		t.Errorf("DropStats() after panic in disabled plugin mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_ClosesWriteClientOnError(t *testing.T) {
+	ctx := context.Background()
+
+	newWriteClient := func(t *testing.T) *bqstorage.BigQueryWriteClient {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+
+		wc, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+		return wc
+	}
+
+	t.Run("rejects nil writeClient when plugin is enabled", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "writeClient must not be nil") {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(writeClient=nil) error = %v, want error containing %q", err, "writeClient must not be nil")
+		}
+	})
+
+	t.Run("succeeds with bqClient == nil for pre-provisioned append-only deployments", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients(bqClient=nil) error = %v, want nil", err)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+	})
+
+	t.Run("closes writeClient when table metadata returns non-retryable HTTP 400", func(t *testing.T) {
+		httpClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"bad request"}}`)),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want HTTP 400 error")
+		}
+		// Verify writeClient was closed by attempting to open an AppendRows stream on it.
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after constructor error (resource leak)")
+		}
+	})
+
+	t.Run("closes writeClient when validateConfig fails", func(t *testing.T) {
+		wc := newWriteClient(t)
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{"not_a_valid_column"}
+
+		if _, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, wc); err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithClients() error = nil, want validation error")
+		}
+		if _, err := wc.AppendRows(ctx); err == nil {
+			t.Error("writeClient remained open after validateConfig error (resource leak)")
+		}
+	})
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithClients_UpgradesExistingOutdatedTableViaHTTP(t *testing.T) {
+	ctx := context.Background()
+
+	var patchBody string
+	var patchIfMatch string
+	patchCalls := 0
+
+	httpClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Etag": []string{"etag-http-1"}},
+						Body: io.NopCloser(strings.NewReader(`{
+							"etag": "etag-http-1",
+							"schema": {
+								"fields": [
+									{"name": "timestamp", "type": "TIMESTAMP", "mode": "REQUIRED"}
+								]
+							}
+						}`)),
+					}, nil
+				}
+				if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/datasets/test_dataset/tables/test-table") {
+					patchCalls++
+					patchIfMatch = r.Header.Get("If-Match")
+					b, _ := io.ReadAll(r.Body)
+					patchBody = string(b)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"etag":"etag-http-2"}`)),
+					}, nil
+				}
+				if strings.Contains(r.URL.Path, "/jobs") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"jobReference":{"projectId":"test-project","jobId":"test-job"},"status":{"state":"DONE"}}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			},
+		},
+	}
+
+	bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(httpClient))
+	if err != nil {
+		t.Fatalf("bq.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = bqClient.Close() })
+
+	srv := &committedStreamTestServer{
+		createdStreamName: "projects/test-project/datasets/test_dataset/tables/test-table/streams/committed-http-1",
+	}
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, srv)
+	go func() { _ = gSrv.Serve(lis) }()
+	t.Cleanup(gSrv.Stop)
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test-table"
+	cfg.ExactlyOnceDelivery = true
+
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+	}
+
+	if patchCalls != 1 {
+		t.Fatalf("PATCH calls = %d, want 1", patchCalls)
+	}
+	if patchIfMatch != "etag-http-1" {
+		t.Errorf("If-Match header = %q, want %q", patchIfMatch, "etag-http-1")
+	}
+
+	var parsed struct {
+		Labels map[string]string `json:"labels"`
+		Schema struct {
+			Fields []struct {
+				Name string `json:"name"`
+			} `json:"fields"`
+		} `json:"schema"`
+	}
+	if err := json.Unmarshal([]byte(patchBody), &parsed); err != nil {
+		t.Fatalf("json.Unmarshal(patchBody) error = %v", err)
+	}
+	if got := parsed.Labels[schemaVersionKey]; got != SchemaVersion {
+		t.Errorf("patched label %q = %q, want %q", schemaVersionKey, got, SchemaVersion)
+	}
+	if len(parsed.Schema.Fields) != len(EventsSchema()) {
+		t.Errorf("patched field count = %d, want %d", len(parsed.Schema.Fields), len(EventsSchema()))
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("p.Close() error = %v", err)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if len(srv.createReqs) != 1 {
+		t.Fatalf("CreateWriteStream calls = %d, want 1", len(srv.createReqs))
+	}
+	if got := srv.createReqs[0].GetWriteStream().GetType(); got != storagepb.WriteStream_COMMITTED {
+		t.Errorf("CreateWriteStream type = %v, want %v", got, storagepb.WriteStream_COMMITTED)
+	}
+	if len(srv.finalizeReqs) != 1 || srv.finalizeReqs[0].GetName() != srv.createdStreamName {
+		t.Errorf("FinalizeWriteStream reqs = %+v, want [%q]", srv.finalizeReqs, srv.createdStreamName)
+	}
+}
+
+func TestBigQueryAgentAnalyticsPlugin_PluginRegistryCleanupAndDisabledConstructors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("enabled plugin remains reachable via AsBigQueryAgentAnalyticsPlugin after Close", func(t *testing.T) {
+		p, _, mCtx := setupTestPluginWithConfig(t, func(c *Config) {
+			c.QueueMaxSize = 1
+		})
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		// A caller holding only *baseplugin.Plugin can still call AsBigQueryAgentAnalyticsPlugin(p) after Close().
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+		_, _ = p.OnUserMessageCallback()(mCtx, textContent("user", "after_close"))
+		want := DropStats{
+			ShutdownDrops: 1,
+			TotalDrops:    1,
+		}
+		if diff := cmp.Diff(want, bqaap.DropStats()); diff != "" {
+			t.Errorf("DropStats() after Close mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithConfig remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+		}
+		bqaap, ok := AsBigQueryAgentAnalyticsPlugin(p)
+		if !ok || bqaap == nil {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if got := bqaap.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero DropStats", got)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("disabled via NewBigQueryAgentAnalyticsPluginWithClients remains reachable after Close", func(t *testing.T) {
+		p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, Config{Enabled: false}, nil, nil)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Fatal("AsBigQueryAgentAnalyticsPlugin() = false before Close, want true")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if _, ok := AsBigQueryAgentAnalyticsPlugin(p); !ok {
+			t.Error("AsBigQueryAgentAnalyticsPlugin() = false after Close, want true while p is reachable")
+		}
+	})
+
+	t.Run("unreachable plugin entry is removed from pluginRegistry after GC", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			// newPlugin returns a plugin that the caller drops.
+			newPlugin func(t *testing.T) *baseplugin.Plugin
+			// wantStats reports whether the registry entry holds drop
+			// counters, which only an enabled plugin has.
+			wantStats bool
+		}{
+			{
+				name: "disabled plugin",
+				newPlugin: func(t *testing.T) *baseplugin.Plugin {
+					p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+					if err != nil {
+						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+					}
+					return p
+				},
+			},
+			{
+				name: "enabled plugin after Close",
+				newPlugin: func(t *testing.T) *baseplugin.Plugin {
+					_, writeClient := newTestWriteClient(t)
+					cfg := DefaultConfig()
+					cfg.ProjectID = "test-project"
+					cfg.DatasetID = "test_dataset"
+					p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, nil, writeClient)
+					if err != nil {
+						t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+					}
+					if err := p.Close(); err != nil {
+						t.Fatalf("p.Close() error = %v", err)
+					}
+					return p
+				},
+				wantStats: true,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				newWeakKey := func() weak.Pointer[baseplugin.Plugin] {
+					p := tc.newPlugin(t)
+					key := weak.Make(p)
+					v, ok := pluginRegistry.Load(key)
+					if !ok {
+						t.Fatal("pluginRegistry missing entry before GC")
+					}
+					state, _ := v.(*pluginState)
+					if gotStats := state != nil && state.counters != nil; gotStats != tc.wantStats {
+						t.Fatalf("pluginRegistry entry holds drop counters = %t, want %t", gotStats, tc.wantStats)
+					}
+					return key
+				}
+				key := newWeakKey()
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) {
+					runtime.GC()
+					if _, ok := pluginRegistry.Load(key); !ok {
+						return
+					}
+					time.Sleep(5 * time.Millisecond)
+				}
+				t.Fatal("pluginRegistry still contained entry for unreachable plugin after GC")
+			})
+		}
+	})
+
+	t.Run("closed disabled plugins are garbage collected and cleaned from pluginRegistry", func(t *testing.T) {
+		const count = 16
+		weakKeys := make([]weak.Pointer[baseplugin.Plugin], count)
+		var cleanedCount atomic.Int32
+
+		func() {
+			for i := 0; i < count; i++ {
+				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false})
+				if err != nil {
+					t.Fatalf("failed to create disabled plugin: %v", err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatalf("failed to close disabled plugin: %v", err)
+				}
+				weakKeys[i] = weak.Make(p)
+				runtime.AddCleanup(p, func(_ int) {
+					cleanedCount.Add(1)
+				}, 1)
+			}
+		}()
+
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			runtime.GC()
+			runtime.Gosched()
+			if int(cleanedCount.Load()) == count {
+				allClean := true
+				for _, wk := range weakKeys {
+					if _, ok := pluginRegistry.Load(wk); ok || wk.Value() != nil {
+						allClean = false
+						break
+					}
+				}
+				if allClean {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if int(cleanedCount.Load()) != count {
+			t.Fatalf("expected all %d disabled plugins to be collected, got %d", count, cleanedCount.Load())
+		}
+		for i, wk := range weakKeys {
+			if wk.Value() != nil {
+				t.Fatalf("weakKey[%d] still valid after GC", i)
+			}
+			if _, ok := pluginRegistry.Load(wk); ok {
+				t.Fatalf("pluginRegistry still retains key for instance %d after GC", i)
+			}
+		}
+	})
+
+	t.Run("closed enabled plugins are garbage collected and cleaned from pluginRegistry", func(t *testing.T) {
+		var weakKey weak.Pointer[baseplugin.Plugin]
+		var cleaned atomic.Bool
+
+		func() {
+			mockTransport := &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("{}")),
+					}, nil
+				},
+			}
+			httpClient := &http.Client{Transport: mockTransport}
+			bqClient, err := bq.NewClient(ctx, "test-proj", option.WithHTTPClient(httpClient))
+			if err != nil {
+				t.Fatalf("failed to create BQ client: %v", err)
+			}
+			defer func() { _ = bqClient.Close() }()
+
+			lis, err := net.Listen("tcp", "localhost:0")
+			if err != nil {
+				t.Fatalf("failed to listen: %v", err)
+			}
+			defer func() { _ = lis.Close() }()
+			gSrv := grpc.NewServer()
+			storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{requests: make(chan *storagepb.AppendRowsRequest, 10)})
+			go func() { _ = gSrv.Serve(lis) }()
+			defer gSrv.Stop()
+
+			conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				t.Fatalf("failed to dial: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(conn))
+			if err != nil {
+				t.Fatalf("failed to create write client: %v", err)
+			}
+
+			config := DefaultConfig()
+			config.Enabled = true
+			config.ProjectID = "test-proj"
+			config.DatasetID = "test_dataset"
+			config.TableName = "test-table"
+			config.DisableSchemaUpgrade = true
+			config.DisableCreateViews = true
+
+			p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, config, bqClient, writeClient)
+			if err != nil {
+				t.Fatalf("failed to create plugin: %v", err)
+			}
+			if err := p.Close(); err != nil {
+				t.Fatalf("p.Close() error = %v", err)
+			}
+			weakKey = weak.Make(p)
+			runtime.AddCleanup(p, func(_ int) {
+				cleaned.Store(true)
+			}, 1)
+		}()
+
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			runtime.GC()
+			runtime.Gosched()
+			if _, ok := pluginRegistry.Load(weakKey); cleaned.Load() && weakKey.Value() == nil && !ok {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+
+		if !cleaned.Load() || weakKey.Value() != nil {
+			t.Fatal("expected closed plugin to be collected and not retained by pluginRegistry")
+		}
+		if _, ok := pluginRegistry.Load(weakKey); ok {
+			t.Fatal("expected pluginRegistry entry to be deleted after GC")
+		}
+	})
+
+	// An application can hand the plugin an object that holds the plugin, such
+	// as a per-tenant struct used as the Logger. The registry holds its values
+	// for as long as the plugin lives, so a value that reached such an object
+	// would keep the plugin alive for the life of the process. That holds for
+	// a plugin that is dropped without Close too, even though its
+	// BatchProcessor goroutine then keeps running, as it does on main.
+	for _, tc := range []struct {
+		name string
+		// newPlugin returns a plugin that refers to h, and a function that
+		// closes what the caller owns once the plugin is closed.
+		newPlugin func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func())
+		// leaveOpen drops the plugin without closing it.
+		leaveOpen bool
+	}{
+		{
+			name: "closed enabled plugin with circular Logger back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{}, func(c *Config) { c.Logger = h })
+			},
+		},
+		{
+			name: "closed enabled plugin with ContentFormatter method receiver back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{}, func(c *Config) { c.ContentFormatter = h.format })
+			},
+		},
+		{
+			name: "closed disabled plugin with circular Logger back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				p, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, Config{Enabled: false, Logger: h})
+				if err != nil {
+					t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+				}
+				return p, nil
+			},
+		},
+		{
+			name: "closed enabled plugin with constructor context back-reference is collected after Close cancels view creation",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				jobStarted := make(chan struct{})
+				var started atomic.Bool
+				transport := &mockTransport{roundTrip: func(r *http.Request) (*http.Response, error) {
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/jobs") {
+						if started.CompareAndSwap(false, true) {
+							close(jobStarted)
+						}
+						<-r.Context().Done()
+						return nil, r.Context().Err()
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+				}}
+				p, closeOwned := newHolderTestPlugin(t, context.WithValue(ctx, pluginHolderKey{}, h), transport, nil)
+				select {
+				case <-jobStarted:
+				case <-time.After(3 * time.Second):
+					t.Fatal("timed out waiting for startup view creation to send a job")
+				}
+				return p, closeOwned
+			},
+		},
+		{
+			name: "closed enabled plugin with BigQuery client transport back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{roundTrip: h.roundTrip}, nil)
+			},
+		},
+		{
+			name: "unclosed enabled plugin with DisableCreateViews and BigQuery client transport back-reference is collected",
+			newPlugin: func(t *testing.T, h *pluginHolder) (*baseplugin.Plugin, func()) {
+				return newHolderTestPlugin(t, ctx, &mockTransport{roundTrip: h.roundTrip}, func(c *Config) { c.DisableCreateViews = true })
+			},
+			leaveOpen: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var key weak.Pointer[baseplugin.Plugin]
+			func() {
+				h := &pluginHolder{}
+				p, closeOwned := tc.newPlugin(t, h)
+				h.plugin = p
+				if !tc.leaveOpen {
+					if err := p.Close(); err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				}
+				if closeOwned != nil {
+					closeOwned()
+				}
+				key = weak.Make(p)
+			}()
+			if !waitPluginCollected(key) {
+				_, registered := pluginRegistry.Load(key)
+				t.Fatalf("after GC: plugin collected = %v, registry entry removed = %v; want both", key.Value() == nil, !registered)
+			}
+		})
+	}
+}
+
+// pluginHolder stands for an application object that holds a plugin and is
+// also handed to it: as its Logger, as the receiver of its ContentFormatter,
+// in the context that it is constructed with, or in the transport of its
+// BigQuery client.
+type pluginHolder struct {
+	plugin *baseplugin.Plugin
+}
+
+func (h *pluginHolder) Printf(string, ...any) {}
+
+func (h *pluginHolder) Println(...any) {}
+
+func (h *pluginHolder) format(payload any, _ string) (any, error) {
+	return payload, nil
+}
+
+func (h *pluginHolder) roundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+}
+
+type pluginHolderKey struct{}
+
+// newHolderTestPlugin constructs an enabled plugin with ctx. The plugin
+// creates its views in the background through a BigQuery client whose
+// requests go to transport, and writes rows to a fake BigQuery Storage Write
+// server. mutate, if set, adjusts the config. The returned function closes
+// what the caller owns: the BigQuery client, the connection and the server.
+func newHolderTestPlugin(t *testing.T, ctx context.Context, transport http.RoundTripper, mutate func(*Config)) (*baseplugin.Plugin, func()) {
+	t.Helper()
+	bqClient, err := bq.NewClient(context.Background(), "test-project", option.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatalf("bq.NewClient: %v", err)
+	}
+	lis, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	gSrv := grpc.NewServer()
+	storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+	go func() { _ = gSrv.Serve(lis) }()
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	writeClient, err := bqstorage.NewBigQueryWriteClient(context.Background(), option.WithGRPCConn(conn))
+	if err != nil {
+		t.Fatalf("NewBigQueryWriteClient: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.Enabled = true
+	cfg.ProjectID = "test-project"
+	cfg.DatasetID = "test_dataset"
+	cfg.TableName = "test-table"
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	p, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, bqClient, writeClient)
+	if err != nil {
+		t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+	}
+	return p, func() {
+		_ = bqClient.Close()
+		_ = conn.Close()
+		gSrv.Stop()
+	}
+}
+
+// waitPluginCollected runs the garbage collector until the plugin that key
+// points to has been collected and its pluginRegistry entry removed, and
+// reports whether both happened within five seconds.
+func waitPluginCollected(key weak.Pointer[baseplugin.Plugin]) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		runtime.GC()
+		if _, ok := pluginRegistry.Load(key); !ok && key.Value() == nil {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func TestAddContent_FormatterFailureWhenContentDeniedRecordsDropForContentParts(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("content denied but content_parts enabled records formatter failure drop and omits content_parts", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: textContent("user", "hello")}
+		truncated := p.addContent(row, EventUserMessageReceived, ed)
+		if truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if _, exists := row[columnContent]; exists {
+			t.Errorf("row[%q] = %v, want omitted when columnContent is denied", columnContent, row[columnContent])
+		}
+		if _, exists := row[columnContentParts]; exists {
+			t.Errorf("row[%q] = %v, want omitted when ContentFormatter fails", columnContentParts, row[columnContentParts])
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("both content and content_parts denied skips formatter and records zero drops", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent, columnContentParts}
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		if truncated := p.addContent(row, EventUserMessageReceived, &eventData{content: textContent("user", "hello")}); truncated {
+			t.Error("addContent() truncated = true, want false when both content and content_parts are denied")
+		}
+		if got := bp.DropStats(); got != (DropStats{}) {
+			t.Errorf("DropStats() = %+v, want zero drops when both content and content_parts are denied", got)
+		}
+	})
+
+	t.Run("content denied and multimodal content off still runs formatter and records failure on LLM_REQUEST", func(t *testing.T) {
+		cfg := DefaultConfig()
+		cfg.PayloadColumnDenylist = []string{columnContent}
+		cfg.DisableMultiModalContent = true
+		cfg.ContentFormatter = func(any, string) (any, error) {
+			return nil, errors.New("formatter boom")
+		}
+
+		bp, err := NewBatchProcessor(ctx, nil, "test_stream", cfg)
+		if err != nil {
+			t.Fatalf("NewBatchProcessor() error = %v", err)
+		}
+		denied, err := validateConfig(cfg)
+		if err != nil {
+			t.Fatalf("validateConfig() error = %v", err)
+		}
+		p := &analyticsPlugin{
+			config:        cfg,
+			processor:     bp,
+			deniedColumns: denied,
+		}
+
+		row := make(map[string]any)
+		ed := &eventData{content: &model.LLMRequest{Model: "gemini-2.5-flash"}}
+		if truncated := p.addContent(row, EventLLMRequest, ed); truncated {
+			t.Error("addContent() truncated = true, want false when ContentFormatter fails")
+		}
+		if ed.attributes["formatter_failed"] != true {
+			t.Errorf("ed.attributes[\"formatter_failed\"] = %v, want true", ed.attributes["formatter_failed"])
+		}
+		if !strings.Contains(ed.errMsg, "content_formatter raised") {
+			t.Errorf("ed.errMsg = %q, want formatter failure note", ed.errMsg)
+		}
+		want := DropStats{
+			FormatterFailureDrops: 1,
+			TotalDrops:            0,
+		}
+		if diff := cmp.Diff(want, bp.DropStats()); diff != "" {
+			t.Errorf("DropStats() mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+func TestNewBigQueryAgentAnalyticsPluginWithConfig_BQClientLifecycle(t *testing.T) {
+	ctx := context.Background()
+
+	newMockGRPCWriteConn := func(t *testing.T) *grpc.ClientConn {
+		t.Helper()
+		lis, err := net.Listen("tcp", "localhost:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		gSrv := grpc.NewServer()
+		storagepb.RegisterBigQueryWriteServer(gSrv, &fakeBigQueryWriteServer{})
+		go func() { _ = gSrv.Serve(lis) }()
+		t.Cleanup(gSrv.Stop)
+
+		conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
+	}
+
+	okHTTPClient := &http.Client{
+		Transport: &mockTransport{
+			roundTrip: func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)),
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader("{}")),
+				}, nil
+			},
+		},
+	}
+
+	t.Run("closes internal bqClient when writeClient creation fails", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			_ = origClose(c)
+			return errors.New("simulated bq close failure")
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		logger := &recordingLogger{}
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DisableCreateViews = true
+		cfg.Logger = logger
+		cfg.ClientOptions = []option.ClientOption{
+			option.WithHTTPClient(okHTTPClient),
+			option.WithCredentialsFile(filepath.Join(t.TempDir(), "missing-creds.json")),
+		}
+
+		_, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, cfg)
+		if err == nil {
+			t.Fatal("NewBigQueryAgentAnalyticsPluginWithConfig() error = nil, want writeClient error")
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times, want 1", closeCount)
+		}
+		if !logger.contains("failed to close bigquery client") {
+			t.Errorf("expected close error to be logged, got:\n%s", logger.String())
+		}
+	})
+
+	t.Run("closes internal bqClient when table verification fails", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			return origClose(c)
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		failHTTPClient := &http.Client{
+			Transport: &mockTransport{
+				roundTrip: func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":400,"message":"bad request"}}`)),
+					}, nil
+				},
+			},
+		}
+		bqClient, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(failHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = bqClient.Close() })
+		writeClient, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DisableCreateViews = true
+
+		_, err = newBigQueryAgentAnalyticsPlugin(ctx, cfg, bqClient, writeClient, true)
+		if err == nil {
+			t.Fatal("newBigQueryAgentAnalyticsPlugin() error = nil, want table check error")
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times on table verification failure, want 1", closeCount)
+		}
+	})
+
+	t.Run("closes internal bqClient on plugin Close but does not close caller-supplied bqClient", func(t *testing.T) {
+		var closeCount int
+		origClose := closeBQClient
+		closeBQClient = func(c *bq.Client) error {
+			closeCount++
+			return origClose(c)
+		}
+		t.Cleanup(func() { closeBQClient = origClose })
+
+		internalBQ, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = internalBQ.Close() })
+		internalWrite, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		cfg := DefaultConfig()
+		cfg.ProjectID = "test-project"
+		cfg.DatasetID = "test_dataset"
+		cfg.DisableCreateViews = true
+
+		p, err := newBigQueryAgentAnalyticsPlugin(ctx, cfg, internalBQ, internalWrite, true)
+		if err != nil {
+			t.Fatalf("newBigQueryAgentAnalyticsPlugin(ownBQClient=true) error = %v", err)
+		}
+		if closeCount != 0 {
+			t.Fatalf("closeBQClient called %d times before Close(), want 0", closeCount)
+		}
+		if err := p.Close(); err != nil {
+			t.Fatalf("p.Close() error = %v", err)
+		}
+		if closeCount != 1 {
+			t.Errorf("closeBQClient called %d times after Close(), want 1", closeCount)
+		}
+
+		// Public NewBigQueryAgentAnalyticsPluginWithConfig must pass ownBQClient=true
+		// so p.Close() closes the internally constructed bq.Client.
+		httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/tables/") {
+				_, _ = io.WriteString(w, `{"type":"TABLE","labels":{"adk_schema_version":"2"}}`)
+				return
+			}
+			_, _ = io.WriteString(w, "{}")
+		}))
+		t.Cleanup(httpSrv.Close)
+
+		publicCfg := DefaultConfig()
+		publicCfg.ProjectID = "test-project"
+		publicCfg.DatasetID = "test_dataset"
+		publicCfg.DisableCreateViews = true
+		publicCfg.ClientOptions = []option.ClientOption{
+			option.WithEndpoint(httpSrv.URL),
+			option.WithoutAuthentication(),
+			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		}
+		pPublic, err := NewBigQueryAgentAnalyticsPluginWithConfig(ctx, publicCfg)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithConfig() error = %v", err)
+		}
+		if closeCount != 1 {
+			t.Fatalf("closeBQClient called %d times before closing WithConfig plugin, want 1", closeCount)
+		}
+		if err := pPublic.Close(); err != nil {
+			t.Fatalf("pPublic.Close() error = %v", err)
+		}
+		if closeCount != 2 {
+			t.Errorf("closeBQClient called %d times after closing WithConfig plugin, want 2", closeCount)
+		}
+
+		// Caller-supplied bqClient via NewBigQueryAgentAnalyticsPluginWithClients must NOT be closed by p.Close().
+		callerBQ, err := bq.NewClient(ctx, "test-project", option.WithHTTPClient(okHTTPClient))
+		if err != nil {
+			t.Fatalf("bq.NewClient: %v", err)
+		}
+		t.Cleanup(func() { _ = callerBQ.Close() })
+		callerWrite, err := bqstorage.NewBigQueryWriteClient(ctx, option.WithGRPCConn(newMockGRPCWriteConn(t)))
+		if err != nil {
+			t.Fatalf("NewBigQueryWriteClient: %v", err)
+		}
+
+		p2, err := NewBigQueryAgentAnalyticsPluginWithClients(ctx, cfg, callerBQ, callerWrite)
+		if err != nil {
+			t.Fatalf("NewBigQueryAgentAnalyticsPluginWithClients() error = %v", err)
+		}
+		if err := p2.Close(); err != nil {
+			t.Fatalf("p2.Close() error = %v", err)
+		}
+		if closeCount != 2 {
+			t.Errorf("closeBQClient called %d times after closing WithClients plugin, want 2 (caller owns bqClient)", closeCount)
+		}
+	})
 }

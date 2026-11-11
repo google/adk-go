@@ -220,7 +220,6 @@ func TestResolveAgentReferenceMCPPolicyIsolation(t *testing.T) {
 	t.Setenv("GOOGLE_API_KEY", "unused-test-key")
 	executable := policyExecutable(t)
 	dir := t.TempDir()
-	parent := filepath.Join(dir, "root_agent.yaml")
 	child := filepath.Join(dir, "child.yaml")
 	// JSON is also YAML and quotes platform-specific executable paths correctly.
 	data, err := json.Marshal(map[string]any{
@@ -234,11 +233,11 @@ func TestResolveAgentReferenceMCPPolicyIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := policyContext(t, executable, []string{})
-	first, err := ResolveAgentReference(ctx, parent, "child.yaml")
+	first, err := ResolveAgentReference(ctx, dir, "child.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := ResolveAgentReference(ctx, parent, "child.yaml")
+	again, err := ResolveAgentReference(ctx, dir, "child.yaml")
 	if err != nil || first != again {
 		t.Fatalf("same policy did not reuse cached agent: %v", err)
 	}
@@ -248,7 +247,7 @@ func TestResolveAgentReferenceMCPPolicyIsolation(t *testing.T) {
 	if err := os.WriteFile(second, []byte(secondData), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	another, err := ResolveAgentReference(ctx, parent, "second.yaml")
+	another, err := ResolveAgentReference(ctx, dir, "second.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +255,7 @@ func TestResolveAgentReferenceMCPPolicyIsolation(t *testing.T) {
 		t.Fatal("different configs shared a cached agent")
 	}
 	for _, denied := range []context.Context{context.Background(), policyContext(t, executable, []string{"different"})} {
-		if _, err := ResolveAgentReference(denied, parent, "child.yaml"); err == nil {
+		if _, err := ResolveAgentReference(denied, dir, "child.yaml"); err == nil {
 			t.Fatal("cached agent bypassed the new context's MCP policy")
 		}
 	}
