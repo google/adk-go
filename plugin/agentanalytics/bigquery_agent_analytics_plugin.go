@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package agentanalytics implements the BigQuery Agent Analytics Plugin.
 package agentanalytics
 
 import (
@@ -1583,8 +1582,9 @@ func cacheType(u *genai.GenerateContentResponseUsageMetadata) string {
 // agent a, matching adk-python: the static instruction of an LLM agent as
 // content, and its description, model, sub-agent names and, when an
 // instruction provider builds the instruction, instruction_source ("provider",
-// with nil content). An agent that inherits its model from an ancestor has no
-// model attribute, because ADK Go exposes no parent link on agent.Agent.
+// with nil content). ADK Go neither inherits models from ancestor agents nor
+// exposes a parent link on agent.Agent, so only a's own configured Model is
+// recorded.
 func agentStartingData(a agent.Agent) (content any, attrs map[string]any) {
 	attrs = map[string]any{}
 	if a == nil {

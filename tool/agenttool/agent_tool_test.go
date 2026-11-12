@@ -17,6 +17,7 @@ package agenttool_test
 import (
 	"iter"
 	"log"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -24,13 +25,17 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	icontext "google.golang.org/adk/v2/internal/context"
 	"google.golang.org/adk/v2/internal/testutil"
 	"google.golang.org/adk/v2/internal/toolinternal"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
+	"google.golang.org/adk/v2/tool/functiontool"
 )
 
 func TestAgentTool_Declaration(t *testing.T) {
@@ -204,6 +209,77 @@ func TestAgentTool_Run_Successful(t *testing.T) {
 	want := map[string]any{"is_valid": true, "message": "success"}
 	if diff := cmp.Diff(want, result); diff != "" {
 		t.Errorf("Run() result diff (-want +got):\n%s", diff)
+	}
+}
+
+// TestAgentTool_Run_CompositeAgentInputSchema checks that a wrapped workflow
+// agent whose first sub-agent has an InputSchema takes the arguments its
+// declaration advertises, as adk-python's AgentTool does with
+// _get_input_schema.
+func TestAgentTool_Run_CompositeAgentInputSchema(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"is_magic": {Type: "BOOLEAN"},
+		},
+		Required: []string{"is_magic"},
+	}
+	tests := []struct {
+		name    string
+		args    map[string]any
+		want    map[string]any
+		wantErr bool
+	}{
+		{
+			name: "valid_arguments",
+			args: map[string]any{"is_magic": true},
+			want: map[string]any{"result": "magic"},
+		},
+		{
+			name:    "invalid_arguments",
+			args:    map[string]any{"is_magic": "yes"},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testLLM := &testutil.MockModel{
+				Responses: []*genai.Content{genai.NewContentFromText("magic", genai.RoleModel)},
+			}
+			pipeline, err := sequentialagent.New(sequentialagent.Config{
+				AgentConfig: agent.Config{
+					Name:        "pipeline",
+					Description: "Runs the math agent.",
+					SubAgents:   []agent.Agent{createAgentWithModel(t, inputSchema, nil, testLLM)},
+				},
+			})
+			if err != nil {
+				t.Fatalf("sequentialagent.New() failed: %v", err)
+			}
+			toolImpl, ok := agenttool.New(pipeline, nil).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+			if diff := cmp.Diff(inputSchema, toolImpl.Declaration().Parameters); diff != "" {
+				t.Fatalf("Declaration().Parameters diff (-want +got):\n%s", diff)
+			}
+
+			got, err := toolImpl.Run(createToolContext(t, pipeline), tt.args)
+			if tt.wantErr {
+				// The schema rejects the arguments, rather than the missing
+				// "request" the declaration never asked for.
+				if err == nil || !strings.Contains(err.Error(), "argument validation failed") {
+					t.Fatalf("Run(%v) error = %v, want an argument validation error", tt.args, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Run(%v) failed unexpectedly: %v", tt.args, err)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("Run() result diff (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -451,12 +527,21 @@ func TestAgentTool_Run_EmptyModelResponse(t *testing.T) {
 }
 
 func TestAgentTool_Run_SkipSummarization(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type:       "OBJECT",
+		Properties: map[string]*genai.Schema{"city": {Type: "STRING"}},
+		Required:   []string{"city"},
+	}
 	tests := []struct {
 		name              string
 		skipSummarization bool
+		inputSchema       *genai.Schema
+		args              map[string]any
 	}{
-		{name: "skip_summarization_true", skipSummarization: true},
-		{name: "skip_summarization_false", skipSummarization: false},
+		{name: "skip_summarization_true", skipSummarization: true, args: map[string]any{"request": "magic"}},
+		{name: "skip_summarization_false", skipSummarization: false, args: map[string]any{"request": "magic"}},
+		{name: "input_schema_skip_summarization_true", skipSummarization: true, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "input_schema_skip_summarization_false", skipSummarization: false, inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
 	}
 
 	for _, tt := range tests {
@@ -466,7 +551,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 					genai.NewContentFromText("test response", genai.RoleModel),
 				},
 			}
-			ag := createAgentWithModel(t, nil, nil, testLLM)
+			ag := createAgentWithModel(t, tt.inputSchema, nil, testLLM)
 			toolCtx := createToolContext(t, ag)
 
 			agentTool := agenttool.New(ag, &agenttool.Config{SkipSummarization: tt.skipSummarization})
@@ -475,7 +560,7 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 				t.Fatal("agentTool does not implement FunctionTool")
 			}
 
-			_, err := toolImpl.Run(toolCtx, map[string]any{"request": "magic"})
+			_, err := toolImpl.Run(toolCtx, tt.args)
 			if err != nil {
 				t.Fatalf("Run() failed unexpectedly: %v", err)
 			}
@@ -484,6 +569,319 @@ func TestAgentTool_Run_SkipSummarization(t *testing.T) {
 				t.Errorf("SkipSummarization propagated to parent tool context = %v, want %v", got, tt.skipSummarization)
 			}
 		})
+	}
+}
+
+type transferArgs struct {
+	Amount int `json:"amount"`
+}
+
+func TestAgentTool_Run_PendingConfirmationReturnsError(t *testing.T) {
+	ran := false
+	transfer, err := functiontool.New(functiontool.Config{
+		Name:                "transfer",
+		Description:         "Transfers money.",
+		RequireConfirmation: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		ran = true
+		return map[string]any{"status": "done"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   "call-1",
+					Name: "transfer",
+					Args: map[string]any{"amount": 100},
+				}}},
+			},
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "payments_agent",
+		Description: "Moves money.",
+		Model:       testLLM,
+		Tools:       []tool.Tool{transfer},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	toolCtx := createToolContext(t, child)
+	// Something other than the tool's Config, e.g. a BeforeToolCallback, set
+	// the flag on this call.
+	toolCtx.Actions().SkipSummarization = true
+
+	result, err := toolImpl.Run(toolCtx, map[string]any{"request": "send 100"})
+
+	if toolCtx.Actions().SkipSummarization {
+		t.Error("SkipSummarization still set; the parent model would never see the error")
+	}
+	if ran {
+		t.Fatal("transfer ran without confirmation")
+	}
+	if err == nil {
+		t.Fatalf("Run() = %v, nil; want an error for the unresolved confirmation", result)
+	}
+	if !strings.Contains(err.Error(), "unresolved long-running tool calls") {
+		t.Errorf("Run() error = %q, want it to report the unresolved call", err)
+	}
+}
+
+func TestAgentTool_Run_AnsweredLongRunningCallSucceeds(t *testing.T) {
+	start, err := functiontool.New(functiontool.Config{
+		Name:          "start_job",
+		Description:   "Starts a job.",
+		IsLongRunning: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		return map[string]any{"status": "started"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	testLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   "call-1",
+					Name: "start_job",
+					Args: map[string]any{"amount": 1},
+				}}},
+			},
+			genai.NewContentFromText("job started", genai.RoleModel),
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "jobs_agent",
+		Description: "Starts jobs.",
+		Model:       testLLM,
+		Tools:       []tool.Tool{start},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "start"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	if got := result["result"]; got != "job started" {
+		t.Errorf("Run() result = %v, want job started", result)
+	}
+}
+
+// With SkipSummarization, the pending-call error must still go back to the
+// parent model instead of ending the parent's turn on an empty response.
+func TestAgentTool_Run_SkipSummarizationPendingErrorReachesParent(t *testing.T) {
+	transfer, err := functiontool.New(functiontool.Config{
+		Name:                "transfer",
+		Description:         "Transfers money.",
+		RequireConfirmation: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		return map[string]any{"status": "done"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "payments_agent",
+		Description: "Moves money.",
+		Model: &testutil.MockModel{
+			Responses: []*genai.Content{
+				{
+					Role: genai.RoleModel,
+					Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+						ID:   "call-1",
+						Name: "transfer",
+						Args: map[string]any{"amount": 1},
+					}}},
+				},
+			},
+		},
+		Tools: []tool.Tool{transfer},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	parentLLM := &testutil.MockModel{
+		Responses: []*genai.Content{
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID:   "p-1",
+					Name: "payments_agent",
+					Args: map[string]any{"request": "send"},
+				}}},
+			},
+			genai.NewContentFromText("handled the error", genai.RoleModel),
+		},
+	}
+	parent, err := llmagent.New(llmagent.Config{
+		Name:  "root",
+		Model: parentLLM,
+		Tools: []tool.Tool{agenttool.New(child, &agenttool.Config{SkipSummarization: true})},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	svc := session.InMemoryService()
+	r, err := runner.New(runner.Config{AppName: "app", Agent: parent, SessionService: svc})
+	if err != nil {
+		t.Fatalf("runner.New() failed: %v", err)
+	}
+	s, err := svc.Create(t.Context(), &session.CreateRequest{AppName: "app", UserID: "u"})
+	if err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	for _, err := range r.Run(t.Context(), "u", s.Session.ID(), genai.NewContentFromText("pay", genai.RoleUser), agent.RunConfig{}) {
+		if err != nil {
+			t.Fatalf("Run() failed: %v", err)
+		}
+	}
+
+	if got := len(parentLLM.Requests); got != 2 {
+		t.Fatalf("parent model requests = %d, want 2 (the second carrying the agent tool's error)", got)
+	}
+	if !requestHasFunctionResponseError(parentLLM.Requests[1], "unresolved long-running tool calls") {
+		t.Error("second parent model request does not carry the agent tool's pending-call error")
+	}
+}
+
+func requestHasFunctionResponseError(req *model.LLMRequest, want string) bool {
+	for _, c := range req.Contents {
+		if c == nil {
+			continue
+		}
+		for _, p := range c.Parts {
+			if p == nil || p.FunctionResponse == nil {
+				continue
+			}
+			if msg, ok := p.FunctionResponse.Response["error"].(string); ok && strings.Contains(msg, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// A long-running call whose arguments are streamed without an ID gets a
+// different generated ID on each partial chunk than on the final event. Only
+// the final event's ID is answered, so partial chunks must not count.
+func TestAgentTool_Run_StreamedArgsAnsweredLongRunningCallSucceeds(t *testing.T) {
+	start, err := functiontool.New(functiontool.Config{
+		Name:          "start_job",
+		Description:   "Starts a job.",
+		IsLongRunning: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		return map[string]any{"status": "started"}, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	testLLM := &testutil.MockModel{
+		StreamResponsesCount: 2,
+		Responses: []*genai.Content{
+			{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+			},
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
+					WillContinue: genai.Ptr(false),
+				}}},
+			},
+			genai.NewContentFromText("job started", genai.RoleModel),
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "jobs_agent",
+		Description: "Starts jobs.",
+		Model:       testLLM,
+		Tools:       []tool.Tool{start},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "start"})
+	if err != nil {
+		t.Fatalf("Run() failed unexpectedly: %v", err)
+	}
+	if got := result["result"]; got != "job started" {
+		t.Errorf("Run() result = %v, want job started", result)
+	}
+}
+
+// Skipping partial chunks must not drop the final event's ID when a streamed
+// long-running call is never answered.
+func TestAgentTool_Run_StreamedArgsUnansweredLongRunningCallReturnsError(t *testing.T) {
+	start, err := functiontool.New(functiontool.Config{
+		Name:          "start_job",
+		Description:   "Starts a job.",
+		IsLongRunning: true,
+	}, func(agent.Context, transferArgs) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("functiontool.New() failed: %v", err)
+	}
+	testLLM := &testutil.MockModel{
+		StreamResponsesCount: 2,
+		Responses: []*genai.Content{
+			{
+				Role:  genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "start_job", WillContinue: genai.Ptr(true)}}},
+			},
+			{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					PartialArgs:  []*genai.PartialArg{{JsonPath: "$.amount", NumberValue: genai.Ptr(1.0)}},
+					WillContinue: genai.Ptr(false),
+				}}},
+			},
+		},
+	}
+	child, err := llmagent.New(llmagent.Config{
+		Name:        "jobs_agent",
+		Description: "Starts jobs.",
+		Model:       testLLM,
+		Tools:       []tool.Tool{start},
+	})
+	if err != nil {
+		t.Fatalf("llmagent.New() failed: %v", err)
+	}
+	toolImpl, ok := agenttool.New(child, nil).(toolinternal.FunctionTool)
+	if !ok {
+		t.Fatal("agentTool does not implement FunctionTool")
+	}
+
+	result, err := toolImpl.Run(createToolContext(t, child), map[string]any{"request": "start"})
+
+	if err == nil {
+		t.Fatalf("Run() = %v, nil; want an error for the unanswered call", result)
+	}
+	if !strings.Contains(err.Error(), "unresolved long-running tool calls") {
+		t.Errorf("Run() error = %q, want it to report the unresolved call", err)
 	}
 }
 
@@ -544,4 +942,44 @@ func createToolContext(t *testing.T, testAgent agent.Agent) agent.Context {
 	})
 
 	return agent.NewToolContext(ctx, "", &session.EventActions{}, nil)
+}
+
+// With SkipSummarization, invalid arguments must not end the parent turn: the
+// error goes back to the parent model so it can retry with corrected args.
+func TestAgentTool_Run_SkipSummarizationNotSetOnInvalidArgs(t *testing.T) {
+	inputSchema := &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"city": {Type: "STRING"},
+			"days": {Type: "INTEGER"},
+		},
+		Required: []string{"city", "days"},
+	}
+	tests := []struct {
+		name        string
+		inputSchema *genai.Schema
+		args        map[string]any
+	}{
+		{name: "input_schema_missing_required", inputSchema: inputSchema, args: map[string]any{"city": "Paris"}},
+		{name: "no_schema_missing_request", args: map[string]any{"query": "Paris"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ag := createAgent(t, tt.inputSchema, nil)
+			toolCtx := createToolContext(t, ag)
+			toolImpl, ok := agenttool.New(ag, &agenttool.Config{SkipSummarization: true}).(toolinternal.FunctionTool)
+			if !ok {
+				t.Fatal("agentTool does not implement FunctionTool")
+			}
+
+			if _, err := toolImpl.Run(toolCtx, tt.args); err == nil {
+				t.Fatalf("Run(%v) succeeded unexpectedly, wanted error", tt.args)
+			}
+
+			if toolCtx.Actions().SkipSummarization {
+				t.Error("SkipSummarization = true after invalid arguments, want false so the parent model can retry")
+			}
+		})
+	}
 }

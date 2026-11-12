@@ -51,13 +51,29 @@ type Logger interface {
 // InitialDelay: 100ms, MaxDelay: 10s, Multiplier: 2.0); to disable retries,
 // set MaxRetries: 0 alongside a non-zero InitialDelay, MaxDelay, or Multiplier.
 //
+// MaxRetries applies to each AppendRows request. A batch that is too large for
+// one request is split into several that are sent in order (see [Config]); a
+// request that fails is resent on its own, up to MaxRetries times (plus at most
+// one resend after a stream rotation when [Config.ExactlyOnceDelivery] is
+// enabled), and the requests that BigQuery already confirmed are not resent. A
+// status that a retry cannot fix, such as PermissionDenied or InvalidArgument,
+// ends the write of the batch without further retries when opening the stream
+// fails with it or BigQuery reports it in an AppendRowsResponse. When it
+// instead ends the stream, the server may not have read the request, so while
+// retries remain the request is resent on a fresh stream: always if an earlier
+// request opened that stream, and once per request if it was opened for the
+// request, after which the status ends the write. Each such resend uses up one
+// retry and its backoff.
+//
 // Retries never extend a write beyond Config.ShutdownTimeout. Each batch
 // write made by a background flush, including its retries and the backoff
 // between them, ends when ShutdownTimeout expires, while the writes made by a
 // run-end flush, and those made while Close drains the queue, share a single
 // ShutdownTimeout. If a run-end flush times out while writing to BigQuery, the
-// in-flight batch is deferred for at most one retry in the next flush
-// (background, run-end, or Close). This provides at-least-once delivery; if
+// rows of the in-flight batch that BigQuery has not confirmed are deferred for
+// at most one retry in the next flush (background, run-end, or Close); the
+// rows of the split requests that it confirmed before then are not resent.
+// This provides at-least-once delivery; if
 // the backend already committed the cut-off write, duplicates under the same
 // event_id can occur (and may differ if uploads cut short on the first attempt
 // succeed on retry; queries deduplicating by event_id should prefer rows where
@@ -116,8 +132,15 @@ type DropStats struct {
 
 // GCSUploadRequest describes one payload to upload to Cloud Storage.
 type GCSUploadRequest struct {
-	// Path is the object name within the bucket; it already includes
-	// Config.GCSPathPrefix.
+	// Path is the object name within the bucket. When Config.GCSPathPrefix is
+	// non-empty after trimming leading and trailing '/', Path begins with the
+	// effective prefix followed by "/" — either the '/'-trimmed
+	// Config.GCSPathPrefix verbatim, or its rewritten "<base>~<sha256>" form
+	// when that '/'-trimmed prefix contains '~', control/line-separator
+	// characters, or invalid UTF-8, starts with the reserved
+	// ".well-known/acme-challenge" segments, or exceeds 750 bytes (see
+	// Config.GCSPathPrefix). Every condition is checked after the trimming, so
+	// a 752-byte "/" + 750 bytes + "/" does not exceed the limit.
 	Path string
 	// Data is the raw payload to store in the object.
 	Data []byte
@@ -129,11 +152,16 @@ type GCSUploadRequest struct {
 // Storage and returns the gs:// URI of the stored object.
 //
 // The plugin calls UploadContent from several goroutines at the same time.
-// GCSUploadRequest.Path is the object name within the bucket and already
-// includes Config.GCSPathPrefix. If UploadContent fails, a text part keeps its
-// inline text (truncated to MaxContentLen) in the BigQuery row, while a binary
-// part's text is set to "[UPLOAD FAILED]" and its raw bytes are not stored
-// inline.
+// GCSUploadRequest.Path is the object name within the bucket and already begins
+// with the effective prefix derived from Config.GCSPathPrefix: the '/'-trimmed
+// prefix verbatim when valid, or its rewritten "<base>~<sha256>" form when the
+// '/'-trimmed prefix contains '~', control/line-separator characters, or
+// invalid UTF-8, starts with the reserved ".well-known/acme-challenge"
+// segments, or exceeds 750 bytes (see Config.GCSPathPrefix), so raw and
+// rewritten prefix namespaces are strictly disjoint. If UploadContent fails, a
+// text part keeps its inline text (truncated to MaxContentLen) in the BigQuery
+// row, while a binary part's text is set to "[UPLOAD FAILED]" and its raw bytes
+// are not stored inline.
 // UploadContent must return soon after ctx is done: the plugin waits for the
 // uploads of a batch before writing it, and Close waits for that write.
 type GCSContentOffloader interface {
@@ -148,10 +176,11 @@ type GCSContentOffloader interface {
 // exactly_once_delivery and creates a COMMITTED write stream when enabled, but
 // differs in handling. After OutOfRange, NotFound, or an unexpected
 // AlreadyExists, Go replaces the stream (at most once per batch) and resends
-// the batch within the same append, with two exceptions: if the stream was
-// rotated by an earlier batch and has not committed yet, Go drops the batch
-// and pauses rotation; if an earlier attempt of the batch had an unknown
-// outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
+// the request that failed within the same append (the whole batch, unless it
+// was split into several requests; see below), with two exceptions: if the
+// stream was rotated by an earlier batch and has not committed yet, Go drops
+// the batch and pauses rotation; if an earlier attempt of the request had an
+// unknown outcome, OutOfRange or NotFound makes Go drop the batch, to prevent
 // duplicate delivery, and replace the stream before the next batch (pausing
 // rotation if the stream had not committed yet). adk-python drops the batch
 // after any of the three and replaces the stream before the next one. On an
@@ -160,7 +189,7 @@ type GCSContentOffloader interface {
 // DeadlineExceeded, Canceled, Aborted, Internal, and Unknown as unknown
 // outcomes, whereas adk-python also treats ResourceExhausted (TooManyRequests)
 // as one. After an RPC-level InvalidArgument or FailedPrecondition, Go
-// replaces the stream only if an earlier attempt of the batch had an unknown
+// replaces the stream only if an earlier attempt of the request had an unknown
 // outcome, whereas adk-python also replaces it when the error is not a schema
 // mismatch. DropStats has four counters, whereas adk-python's get_drop_stats()
 // returns ten per-reason counts. adk-python uploads while it parses an event,
@@ -174,6 +203,20 @@ type GCSContentOffloader interface {
 // desynchronization (rotating to a fresh stream without consuming append retry
 // attempts) and distinguishes ambiguous transport errors from definite server
 // rejections.
+//
+// Go splits a batch whose rows are estimated at more than 8 MiB into several
+// AppendRows requests, and halves a multi-row request that serializes to more
+// than 9 MiB, so that a multi-row request stays under the Write API's size
+// limit; adk-python sends every batch as one request. The requests of a batch
+// are sent in order, each with its own retries (see [RetryConfig]). The first
+// request that fails ends the batch: the requests that BigQuery confirmed
+// before it are written and are not resent, and only the rows that BigQuery
+// did not confirm count as dropped or, when a run-end flush times out, are
+// deferred. After an AppendRowsResponse.Error, Go resends the request while
+// retries remain if the code is Unavailable, ResourceExhausted, Internal,
+// DeadlineExceeded, or Aborted, whereas adk-python resends it only for
+// DeadlineExceeded, Internal, or Unavailable, and drops the batch for any
+// other code.
 //
 // Zero numeric and duration fields (MaxContentLen, BatchSize, BatchFlushIntv,
 // ShutdownTimeout, QueueMaxSize, and an unset RetryConfig) are filled from
@@ -214,10 +257,13 @@ type Config struct {
 	// [RetryConfig]), and separately bounds a whole run-end flush (see
 	// DisableFlushOnRunEnd) and the BigQuery writes of the drain of queued
 	// rows during Close. The drain starts once a background write that is
-	// already in flight has finished. In a run-end flush, an in-flight batch
-	// that times out is deferred for at most one retry in the next flush
-	// (background, run-end, or Close); rows whose write remains unfinished
-	// after retrying or when the timeout expires during Close are dropped.
+	// already in flight has finished. In a run-end flush, the rows of an
+	// in-flight batch that BigQuery has not confirmed when the timeout expires
+	// are deferred for at most one retry in the next flush (background,
+	// run-end, or Close); the rows of the batch's requests that BigQuery
+	// confirmed first are written, not retried. Rows whose write remains
+	// unfinished after retrying or when the timeout expires during Close are
+	// dropped.
 	// (Duplicates under the same event_id can occur and may differ if cut-short
 	// uploads succeed on retry; prefer rows with GCS_REFERENCE storage_mode).
 	// Close logs each batch it drops.
@@ -345,7 +391,36 @@ type Config struct {
 	// GCSClientOptions configures the Cloud Storage client created for
 	// GCSBucketName. When empty, ClientOptions is used.
 	GCSClientOptions []option.ClientOption
-	// GCSPathPrefix is prepended to the names of offloaded objects.
+	// GCSPathPrefix is prepended, followed by "/", to the names of offloaded
+	// objects. Leading and trailing slashes are trimmed, so "/logs/" and
+	// "logs" are the same prefix and a prefix of only slashes adds nothing.
+	// The trimmed prefix is used verbatim when it is valid UTF-8 of at most
+	// 750 bytes; does not contain '~' (reserved as the rewrite hash
+	// delimiter); has no control character (U+0000 to U+001F and U+007F to
+	// U+009F, which include CR, LF and U+0085) and no Unicode line or
+	// paragraph separator (U+2028 or U+2029); and its first two "/"-separated
+	// segments are not, case-insensitively, ".well-known" and "acme-challenge",
+	// which Cloud Storage reserves (whole segments are compared, so
+	// ".well-known/acme-challenge-x" is kept verbatim). Valid characters and
+	// segments such as '\', spaces, '=', Unicode text, empty inner segments
+	// ("//"), and "." or ".." segments are kept unchanged.
+	//
+	// Any other prefix is rewritten to "<base>~<sha256>", and a warning with
+	// the rewrite reason and byte lengths (without logging prefix text) is
+	// logged to Logger when the plugin or BatchProcessor is constructed: each
+	// '~', each byte that is not valid UTF-8, and each of those control or
+	// line/paragraph-separator characters is replaced with '_', a leading
+	// ".well-known" segment before "acme-challenge" becomes "_well-known", the
+	// result is cut to at most 402 bytes on a UTF-8 rune boundary, and "~"
+	// followed by the 64 lowercase hex digits of the SHA-256 digest of the
+	// trimmed prefix is appended (at most 467 rewritten prefix bytes total),
+	// so distinct trimmed prefixes keep distinct destinations, the folder part
+	// of "<prefix>/<YYYY-MM-DD>/<trace_id>/" fits the 512-byte folder limit on
+	// hierarchical-namespace Cloud Storage buckets, assembled object names stay
+	// within Cloud Storage's 1,024-byte limit, and raw and rewritten prefix
+	// namespaces are strictly disjoint. Because '~' is reserved, passing a
+	// rewritten "<base>~<sha256>" output back into GCSPathPrefix rewrites it
+	// again rather than aliasing the original rewritten prefix.
 	GCSPathPrefix string
 	// ConnectionID is the BigQuery connection recorded as the authorizer of
 	// offloaded objects, in the "location.connection_id" form, for example

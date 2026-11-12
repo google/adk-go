@@ -23,7 +23,8 @@ import (
 )
 
 // FlattenContentText joins a content's text parts with newlines, and errors on
-// a part without text.
+// a part without text or on a part that carries content besides its text, such
+// as media or a function call.
 func FlattenContentText(content *genai.Content) (string, error) {
 	if content == nil {
 		return "", nil
@@ -35,6 +36,21 @@ func FlattenContentText(content *genai.Content) (string, error) {
 		}
 		if part.Text == "" {
 			return "", fmt.Errorf("non-text system instruction part %T", part)
+		}
+		// Only the text is sent, so anything else on the part would be dropped
+		// while the text beside it goes out. adk-python drops it without an
+		// error, and the caller never learns the model did not see it.
+		// UnsupportedPayload counts a call and its result as sent, which holds
+		// for contents but not here.
+		field := UnsupportedPayload(part)
+		switch {
+		case part.FunctionCall != nil:
+			field = "FunctionCall"
+		case part.FunctionResponse != nil:
+			field = "FunctionResponse"
+		}
+		if field != "" {
+			return "", fmt.Errorf("unsupported system instruction part: %s", field)
 		}
 		if b.Len() > 0 {
 			b.WriteString("\n")
@@ -88,6 +104,9 @@ const (
 	// one is able to send the other: they differ in where the bytes are, not
 	// in what the wire field is.
 	PartFieldMedia PartField = iota
+	// PartFieldCodeExecution is ExecutableCode and CodeExecutionResult, which
+	// both endpoints send as text. See CodeExecutionText.
+	PartFieldCodeExecution
 )
 
 // UnsupportedPayload names the first field on part that the calling endpoint
@@ -114,7 +133,8 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 	rest.PartMetadata = nil     // caller bookkeeping, never content
 
 	for _, field := range emitted {
-		if field == PartFieldMedia {
+		switch field {
+		case PartFieldMedia:
 			rest.InlineData = nil // the caller has a wire field for the bytes
 			rest.FileData = nil   // and for the id or location naming them
 			// A qualifier is only harmless while nothing is sent for it to
@@ -129,6 +149,9 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 				rest.MediaResolution = part.MediaResolution
 				rest.VideoMetadata = part.VideoMetadata
 			}
+		case PartFieldCodeExecution:
+			rest.ExecutableCode = nil
+			rest.CodeExecutionResult = nil
 		}
 	}
 
@@ -139,4 +162,33 @@ func UnsupportedPayload(part *genai.Part, emitted ...PartField) string {
 		}
 	}
 	return ""
+}
+
+// CodeExecutionText renders Gemini code-execution parts as the fenced text
+// adk-python's Responses converter sends, so an OpenAI model sharing the
+// session can read the code and its output. The fence language is always
+// python, matching that converter, whatever ExecutableCode.Language says.
+//
+// An empty code or output is still rendered: the part is present, and
+// dropping it would hide that a run happened. A part carrying both fields
+// renders the code first, then the result.
+func CodeExecutionText(part *genai.Part) string {
+	if part == nil {
+		return ""
+	}
+	var b strings.Builder
+	if part.ExecutableCode != nil {
+		b.WriteString("Code:```python\n")
+		b.WriteString(part.ExecutableCode.Code)
+		b.WriteString("\n```")
+	}
+	if part.CodeExecutionResult != nil {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("Execution Result:```code_output\n")
+		b.WriteString(part.CodeExecutionResult.Output)
+		b.WriteString("\n```")
+	}
+	return b.String()
 }
