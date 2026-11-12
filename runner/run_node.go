@@ -211,7 +211,7 @@ func (r *Runner) runNode(
 			// Captured before the plugin runs: one that mutates the event in
 			// place has already overwritten this field by the time the callback
 			// returns.
-			record := event.Actions.Compaction
+			record := frameworkActionsOf(event)
 			modifiedEvent, perr := pluginManager.RunOnEventCallback(ictx, event)
 			if perr != nil {
 				if !yield(nil, perr) {
