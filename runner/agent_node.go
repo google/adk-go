@@ -97,12 +97,12 @@ func runLlmAgentBody(
 		nodeInput = input
 	}
 
-	// Drain the wrapper's iterator. Output is set on emitted events by
-	// the wrapper for single_turn (model reply) and task (finish_task FR)
-	// modes; the dynamic-node return value mirrors adk-python where a
-	// root chat coordinator sets no Output.
+	// Drain the wrapper's iterator. The wrapper sets Output on the events
+	// it emits, for single_turn (model reply) and task (finish_task FR)
+	// modes, so the body returns no output: a second output event would
+	// fail the node with workflow.ErrMultipleOutputs. adk-python's
+	// run_llm_agent_as_node also returns nothing in every mode.
 	paused := false
-	var lastOutput any
 	for event, err := range llmagent.RunLLMAgentAsNode(a, ctx, nodeInput) {
 		if err != nil {
 			// The wrapper bubbles ErrNodeInterrupted up from a task
@@ -117,9 +117,6 @@ func runLlmAgentBody(
 		if len(event.LongRunningToolIDs) > 0 {
 			paused = true
 		}
-		if event.Output != nil {
-			lastOutput = event.Output
-		}
 		if emitErr := emit(event); emitErr != nil {
 			return nil, emitErr
 		}
@@ -127,7 +124,7 @@ func runLlmAgentBody(
 	if paused {
 		return nil, workflow.ErrNodeInterrupted
 	}
-	return lastOutput, nil
+	return nil, nil
 }
 
 // runGenericAgentBody is the pre-existing agent-agnostic loop: forward

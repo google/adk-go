@@ -1286,3 +1286,51 @@ func TestRunner_RunLive_EventWithNilPart(t *testing.T) {
 		}
 	})
 }
+
+// getRecordingService is a session.Service that records every GetRequest.
+type getRecordingService struct {
+	session.Service
+	gets []*session.GetRequest
+}
+
+func (s *getRecordingService) Get(ctx context.Context, req *session.GetRequest) (*session.GetResponse, error) {
+	s.gets = append(s.gets, req)
+	return s.Service.Get(ctx, req)
+}
+
+func TestRunner_GetSessionConfig_LiveRunConfig(t *testing.T) {
+	ctx := t.Context()
+	const appName, userID, sessionID = "testApp", "testUser", "s"
+	svc := &getRecordingService{Service: session.InMemoryService()}
+	if _, err := svc.Create(ctx, &session.CreateRequest{AppName: appName, UserID: userID, SessionID: sessionID}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{
+		AppName: appName,
+		Agent: &mockLiveAgent{
+			Agent: must(agent.New(agent.Config{Name: "test_agent"})),
+			runLiveFn: func(agent.InvocationContext) (agent.LiveSession, iter.Seq2[*session.Event, error], error) {
+				return &dummyLiveSession{}, func(func(*session.Event, error) bool) {}, nil
+			},
+		},
+		SessionService: svc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	after := time.Date(2026, 1, 1, 0, 0, 4, 0, time.UTC)
+	if _, _, err := r.RunLive(ctx, userID, sessionID, agent.LiveRunConfig{
+		GetSessionConfig: &agent.GetSessionConfig{NumRecentEvents: 7, After: after},
+	}); err != nil {
+		t.Fatalf("RunLive() error = %v", err)
+	}
+
+	if len(svc.gets) == 0 {
+		t.Fatal("RunLive() did not read the session")
+	}
+	want := &session.GetRequest{AppName: appName, UserID: userID, SessionID: sessionID, NumRecentEvents: 7, After: after}
+	if diff := cmp.Diff(want, svc.gets[0]); diff != "" {
+		t.Errorf("first GetRequest mismatch (-want +got):\n%s", diff)
+	}
+}

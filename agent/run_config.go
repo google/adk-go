@@ -16,6 +16,7 @@ package agent
 
 import (
 	"errors"
+	"time"
 
 	"google.golang.org/genai"
 )
@@ -34,6 +35,22 @@ const (
 	// LLM response parts are streamed immediately as they are generated.
 	StreamingModeSSE StreamingMode = "sse"
 )
+
+// GetSessionConfig controls which historical events the runner requests from
+// [session.Service.Get] when loading a session for an invocation.
+//
+// Its fields mirror the event-window filter fields of [session.GetRequest].
+// A zero GetSessionConfig (or a nil *GetSessionConfig on [RunConfig] or
+// [LiveRunConfig]) applies no filter and loads the full session history.
+// GetSessionConfig is a pure value type and is safe for concurrent read use.
+type GetSessionConfig struct {
+	// NumRecentEvents limits the loaded session to at most the NumRecentEvents
+	// most recent events. If zero or negative, no count limit is applied.
+	NumRecentEvents int
+	// After limits the loaded session to events with Timestamp >= After.
+	// If zero (After.IsZero()), no timestamp filter is applied.
+	After time.Time
+}
 
 // RunConfig controls runtime behavior of an agent.
 type RunConfig struct {
@@ -98,6 +115,17 @@ type RunConfig struct {
 	// returns an event, the same or a new one, gets the run's metadata merged
 	// into it, its own keys winning.
 	CustomMetadata *map[string]any
+
+	// GetSessionConfig controls which events are fetched when the runner
+	// loads the session from the session service at the start of Run.
+	//
+	// When non-nil, the runner copies NumRecentEvents and After into the
+	// session.GetRequest it sends to session.Service.Get. Nil or a zero
+	// GetSessionConfig leaves both filters unset (0 and time.Time{}), loading
+	// all session events. The runner snapshots GetSessionConfig when Run is
+	// called, before Run returns, so mutating the struct after calling Run
+	// does not affect the invocation.
+	GetSessionConfig *GetSessionConfig
 
 	// HTTPOptions holds per-invocation HTTP options (such as custom headers,
 	// timeout, retry options, or extra body fields) merged into each model

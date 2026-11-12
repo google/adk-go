@@ -40,17 +40,26 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 		_, ok := value.(string)
 		return ok, nil
 	case genai.TypeInteger:
-		f, ok := value.(float64)
-		if !ok {
-			return false, nil
+		// JSON-decoded arguments carry float64; arguments built in Go code
+		// carry Go integer types.
+		switch v := value.(type) {
+		case float64:
+			return v == math.Trunc(v), nil
+		case float32:
+			return float64(v) == math.Trunc(float64(v)), nil
+		default:
+			return isGoInteger(value), nil
 		}
-		return f == math.Trunc(f), nil
 	case genai.TypeBoolean:
 		_, ok := value.(bool)
 		return ok, nil
 	case genai.TypeNumber:
-		_, ok := value.(float64)
-		return ok, nil
+		switch value.(type) {
+		case float64, float32:
+			return true, nil
+		default:
+			return isGoInteger(value), nil
+		}
 	case genai.TypeArray:
 		val := reflect.ValueOf(value)
 		if val.Kind() != reflect.Slice {
@@ -78,6 +87,16 @@ func matchType(value any, schema *genai.Schema, isInput bool) (bool, error) {
 		return err == nil, err
 	default:
 		return false, fmt.Errorf("unsupported type: %s", schema.Type)
+	}
+}
+
+// isGoInteger reports whether value has a signed or unsigned Go integer type.
+func isGoInteger(value any) bool {
+	switch value.(type) {
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	default:
+		return false
 	}
 }
 

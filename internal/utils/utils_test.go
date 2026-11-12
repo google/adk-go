@@ -98,3 +98,46 @@ func TestPartAccessorsSkipNilParts(t *testing.T) {
 		})
 	}
 }
+
+// Arguments built in Go code, rather than decoded from JSON, carry Go integer
+// and float32 values, so integer and number schemas must accept them. The
+// float64 cases are covered by TestMatchType.
+func TestValidateMapOnSchema_NumericTypes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		schemaType genai.Type
+		value      any
+		wantErr    bool
+	}{
+		{"integer/int", genai.TypeInteger, int(42), false},
+		{"integer/int8", genai.TypeInteger, int8(42), false},
+		{"integer/int16", genai.TypeInteger, int16(42), false},
+		{"integer/int32", genai.TypeInteger, int32(42), false},
+		{"integer/int64", genai.TypeInteger, int64(42), false},
+		{"integer/uint", genai.TypeInteger, uint(7), false},
+		{"integer/uint8", genai.TypeInteger, uint8(7), false},
+		{"integer/uint16", genai.TypeInteger, uint16(7), false},
+		{"integer/uint32", genai.TypeInteger, uint32(7), false},
+		{"integer/uint64", genai.TypeInteger, uint64(7), false},
+		{"integer/whole_float32", genai.TypeInteger, float32(42), false},
+		{"integer/fractional_float32", genai.TypeInteger, float32(42.5), true},
+		{"integer/bool", genai.TypeInteger, true, true},
+		{"number/int", genai.TypeNumber, int(42), false},
+		{"number/uint", genai.TypeNumber, uint(7), false},
+		{"number/float32", genai.TypeNumber, float32(42.5), false},
+		{"number/bool", genai.TypeNumber, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := &genai.Schema{
+				Type:       genai.TypeObject,
+				Properties: map[string]*genai.Schema{"n": {Type: tc.schemaType}},
+			}
+
+			err := utils.ValidateMapOnSchema(map[string]any{"n": tc.value}, schema, false)
+
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Errorf("ValidateMapOnSchema(%T value, %s schema) error = %v, want error: %t", tc.value, tc.schemaType, err, tc.wantErr)
+			}
+		})
+	}
+}

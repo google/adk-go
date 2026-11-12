@@ -60,7 +60,7 @@ func buildRunnerNode(a agent.Agent) (workflow.Node, error) {
 // session/plugin/persist pipeline. The wrapping node bridges the agent's
 // HITL (long-running tools, which emit LongRunningToolIDs) into a
 // workflow pause; see newAgentNode. Go equivalent of adk-python
-// Runner._run_node_async.
+// Runner._run_node_async. rootMode is the root LlmAgent's resolved mode.
 func (r *Runner) runNode(
 	ctx context.Context,
 	storedSession session.Session,
@@ -68,6 +68,7 @@ func (r *Runner) runNode(
 	msg *genai.Content,
 	cfg agent.RunConfig,
 	runMetadata map[string]any,
+	rootMode llminternal.Mode,
 	opts runOptions,
 	yield func(*session.Event, error) bool,
 ) {
@@ -91,12 +92,6 @@ func (r *Runner) runNode(
 			invocationFailed = true
 		}
 		return emit(ev, err)
-	}
-
-	node, err := buildRunnerNode(agentToRun)
-	if err != nil {
-		yield(nil, err)
-		return
 	}
 
 	// Compaction has to happen however iteration ends. Breaking out of the
@@ -125,30 +120,32 @@ func (r *Runner) runNode(
 		}
 	}()
 
-	// Architectural note: Unlike Go, Python ADK executes standalone agents
-	// directly via agent.run_async. Go wraps top-level agents in a synthetic
-	// single-node workflow (START -> node) so all execution rides through
-	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
-	// this synthetic workflow from stamping an unwanted namespace prefix
-	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
-	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
-		{From: workflow.Start, To: node},
-	}, workflow.WithRootWrapper())
-	if err != nil {
-		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
-		return
-	}
-
 	// UserContent is read by Workflow.Run as the workflow's seed input.
 	ictx := r.newNodeInvocationContext(ctx, storedSession, agentToRun, msg, cfg, runMetadata)
 	invocationCtx = ictx
 
 	// Append the user message to history (also runs the on_user_message
 	// plugin callback), same as the agent path.
-	ictx, userEvent, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, r.pluginManager, opts.stateDelta)
+	ictx, userEvent, replaced, err := r.appendMessageToSession(ictx, storedSession, msg, cfg.SaveInputBlobsAsArtifacts, false, r.pluginManager, opts.stateDelta)
 	if err != nil {
 		yield(nil, err)
 		return
+	}
+	if replaced && r.usesLegacySubAgentPicker(rootMode) {
+		// The agent is picked again from the session that now holds the
+		// replacement, which may answer a sub-agent's call. Its branch is
+		// restored from the invocation's own events only, as adk-python
+		// does, so it never takes a branch of an earlier invocation.
+		agentToRun, err = r.findAgentToRun(storedSession, ictx.UserContent())
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		branch := r.restoreBranchFromHistory(storedSession, agentToRun, ictx.InvocationID())
+		ictx = ictx.WithDelta(&agent.CommonContextDelta{
+			InvocationContextDelta: &agent.InvocationContextDelta{Agent: &agentToRun, Branch: &branch},
+		})
+		invocationCtx = ictx
 	}
 	if opts.yieldUserMessage && userEvent != nil {
 		if !yield(userEvent, nil) {
@@ -167,6 +164,27 @@ func (r *Runner) runNode(
 		}
 	}
 
+	// Built only now, for the agent picked after the message was taken in:
+	// the node runs the agent it wraps, not the context's agent.
+	node, err := buildRunnerNode(agentToRun)
+	if err != nil {
+		yield(nil, err)
+		return
+	}
+	// Architectural note: Unlike Go, Python ADK executes standalone agents
+	// directly via agent.run_async. Go wraps top-level agents in a synthetic
+	// single-node workflow (START -> node) so all execution rides through
+	// a unified graph engine. We pass workflow.WithRootWrapper() to prevent
+	// this synthetic workflow from stamping an unwanted namespace prefix
+	// ("app/agent@1") onto events, ensuring 100% path parity with Python.
+	wf, err := workflow.New(rootWorkflowName(r.appName, agentToRun), []workflow.Edge{
+		{From: workflow.Start, To: node},
+	}, workflow.WithRootWrapper())
+	if err != nil {
+		yield(nil, fmt.Errorf("failed to build node workflow: %w", err))
+		return
+	}
+
 	// Resume (HITL continuation) vs Run (fresh): a resume is a turn whose
 	// function response answers a node waiting on an open interrupt. The
 	// paused state comes from session history, not a persisted blob.
@@ -177,7 +195,7 @@ func (r *Runner) runNode(
 	}
 
 	var events iter.Seq2[*session.Event, error]
-	responses := buildResumeResponses(msg, state, storedSession)
+	responses := buildResumeResponses(ictx.UserContent(), state, storedSession)
 	if len(responses) > 0 {
 		events = wf.Resume(ictx, state, responses)
 	} else {
@@ -299,6 +317,7 @@ func (r *Runner) newNodeInvocationContext(
 		Artifacts:    artifacts,
 		Memory:       memoryImpl,
 		Session:      storedSession,
+		Branch:       r.restoreBranchFromHistory(storedSession, agentToRun, invocationID),
 		Agent:        agentToRun,
 		UserContent:  msg,
 		RunConfig:    &cfg,
