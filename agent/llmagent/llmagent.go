@@ -16,6 +16,28 @@
 // LLM agents use large language models to perform tasks based on instructions, user input,
 // deciding on actions to take, and executing actions using available tools or
 // delegating to sub agents.
+//
+// # Model requests and responses
+//
+// Before each model call, the agent adds the label "adk_agent_name", set to
+// its own name, to the request's GenerateContentConfig.Labels, so that billing
+// reports can be split per agent. It keeps a label already present under that
+// key, for example one set through [agent.RunConfig.Labels] or by a
+// BeforeModelCallback. The connector in model/gemini removes every label from
+// what it sends to the Gemini Developer API, which does not accept labels; the
+// connectors in model/anthropicmodel and model/openaimodel drop this label.
+//
+// A completed model response that finished with [genai.FinishReasonStop] but
+// holds no part a caller can act on (no parts at all, only thought parts, or
+// only text that is whitespace) becomes an error event, which ends the agent's
+// turn. Its ErrorCode is "MODEL_RETURNED_NO_CONTENT", and its ErrorMessage, if
+// the response had none, says whether the response had no parts or only
+// thought or whitespace parts. The check runs after the AfterModelCallbacks,
+// on the response a callback put in place of the model's, and leaves a
+// response that already has an ErrorCode as it is. Two responses are exempt:
+// under [agent.StreamingModeSSE], one without parts, which ends every stream;
+// and a thought-only one when the agent has no [planner.RewritingPlanner],
+// after which the agent calls the model again (see [Config.Planner]).
 package llmagent
 
 import (
