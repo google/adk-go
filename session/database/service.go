@@ -45,6 +45,8 @@ type databaseService struct {
 	db *gorm.DB
 }
 
+var _ session.UserStateReader = (*databaseService)(nil)
+
 // NewSessionService creates a new [session.Service] implementation that uses a
 // relational database (e.g., PostgreSQL, Spanner, SQLite) via the GORM library.
 //
@@ -660,4 +662,27 @@ func mergeStates(appState, userState, sessionState map[string]any) map[string]an
 	}
 
 	return mergedState
+}
+
+// GetUserState returns the user-scoped state stored for exactly
+// (req.AppName, req.UserID), with keys stripped of [session.KeyPrefixUser],
+// and an empty map when no row exists. Empty ids are matched literally. Each
+// call decodes the stored JSON afresh, so the returned map shares nothing with
+// the database or with earlier results. A nil req, a failed query or a
+// canceled ctx returns a nil response and an error, which wraps ctx.Err() in
+// the last case. It implements [session.UserStateReader].
+func (s *databaseService) GetUserState(ctx context.Context, req *session.GetUserStateRequest) (*session.GetUserStateResponse, error) {
+	if req == nil {
+		return nil, errors.New("get user state request is nil")
+	}
+	storageUser, err := fetchStorageUserState(s.db.WithContext(ctx), req.AppName, req.UserID)
+	if err != nil {
+		return nil, err
+	}
+	state := storageUser.State
+	if state == nil {
+		// A state column holding JSON null decodes to a nil map.
+		state = make(map[string]any)
+	}
+	return &session.GetUserStateResponse{State: state}, nil
 }

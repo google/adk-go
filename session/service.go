@@ -17,6 +17,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -142,4 +143,52 @@ type DeleteRequest struct {
 	AppName   string
 	UserID    string
 	SessionID string
+}
+
+// UserStateReader is an optional interface implemented by [Service]
+// implementations that can read user-scoped state for an (AppName, UserID)
+// pair without an active session.
+//
+// Implementations must be safe for concurrent use by multiple goroutines.
+type UserStateReader interface {
+	// GetUserState returns a detached snapshot of the user-scoped state for
+	// (req.AppName, req.UserID), with keys stripped of [KeyPrefixUser].
+	GetUserState(ctx context.Context, req *GetUserStateRequest) (*GetUserStateResponse, error)
+}
+
+// GetUserStateRequest represents a request to read user-scoped state.
+type GetUserStateRequest struct {
+	AppName string
+	UserID  string
+}
+
+// GetUserStateResponse represents a response from [GetUserState] and
+// [UserStateReader.GetUserState].
+type GetUserStateResponse struct {
+	// State holds the user-scoped key-value pairs for (AppName, UserID)
+	// without [KeyPrefixUser]. On a nil error, State is always non-nil
+	// (an empty map when no user state is stored) and shares no mutable
+	// memory with the service.
+	State map[string]any
+}
+
+// GetUserState reads the user-scoped state for (req.AppName, req.UserID) from svc
+// without requiring a session.
+//
+// If svc does not implement [UserStateReader], GetUserState returns an error
+// wrapping [errors.ErrUnsupported]. Callers that need a fallback on unsupported
+// backends can check errors.Is(err, errors.ErrUnsupported) and enumerate
+// sessions via [Service.List] and [Service.Get].
+func GetUserState(ctx context.Context, svc Service, req *GetUserStateRequest) (*GetUserStateResponse, error) {
+	if svc == nil {
+		return nil, errors.New("session: service is nil")
+	}
+	if req == nil {
+		return nil, errors.New("session: get user state request is nil")
+	}
+	r, ok := svc.(UserStateReader)
+	if !ok {
+		return nil, fmt.Errorf("session: %T does not support GetUserState; list sessions and get each session to read merged state: %w", svc, errors.ErrUnsupported)
+	}
+	return r.GetUserState(ctx, req)
 }

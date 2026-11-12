@@ -16,7 +16,10 @@ package session_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -914,5 +917,396 @@ func TestInMemoryService_Get_AfterWithOutOfOrderTimestamps(t *testing.T) {
 				t.Errorf("Get() event IDs = %v, want %v", ids, tt.want)
 			}
 		})
+	}
+}
+
+func TestInMemoryService_Create_StripsTempKeys(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	req := &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State:     map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv", "temp:t": "tv"},
+	}
+	want := map[string]any{"app:a": "av", "user:u": "uv", "sk": "sv"}
+
+	createResp, err := svc.Create(ctx, req)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	getResp, err := svc.Get(ctx, &session.GetRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if diff := cmp.Diff(want, maps.Collect(createResp.Session.State().All())); diff != "" {
+		t.Errorf("Create() session state mismatch (-want +got):\n%s", diff)
+	}
+	if v, err := createResp.Session.State().Get("temp:t"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("Create() session State().Get(%q) = %v, %v, want error %v", "temp:t", v, err, session.ErrStateKeyNotExist)
+	}
+	if diff := cmp.Diff(want, maps.Collect(getResp.Session.State().All())); diff != "" {
+		t.Errorf("Get() session state mismatch (-want +got):\n%s", diff)
+	}
+	if v, err := getResp.Session.State().Get("temp:t"); !errors.Is(err, session.ErrStateKeyNotExist) {
+		t.Errorf("Get() session State().Get(%q) = %v, %v, want error %v", "temp:t", v, err, session.ErrStateKeyNotExist)
+	}
+	if got := req.State["temp:t"]; got != "tv" {
+		t.Errorf("Create() changed the request: req.State[%q] = %v, want %q", "temp:t", got, "tv")
+	}
+}
+
+// getUserState reads the user state of (appName, userID) through
+// session.GetUserState and fails the test on an error.
+func getUserState(t *testing.T, svc session.Service, appName, userID string) map[string]any {
+	t.Helper()
+	resp, err := session.GetUserState(t.Context(), svc, &session.GetUserStateRequest{AppName: appName, UserID: userID})
+	if err != nil {
+		t.Fatalf("GetUserState(%q, %q) error = %v", appName, userID, err)
+	}
+	return resp.State
+}
+
+func TestInMemoryService_GetUserState_ScopesAndEmptyIDs(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+
+	if diff := cmp.Diff(map[string]any{}, getUserState(t, svc, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState() before any write mismatch (-want +got):\n%s", diff)
+	}
+
+	createResp, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State:     map[string]any{"app:a": "av", "user:from_create": "c1", "user:overwritten": "old", "temp:t": "tv", "sk": "sv"},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	event := &session.Event{
+		ID:        "e1",
+		Timestamp: time.Now(),
+		Actions: session.EventActions{
+			StateDelta: map[string]any{"user:overwritten": "new", "user:nil_val": nil, "app:a2": "av2", "temp:t2": "tv2", "sk2": "sv2"},
+		},
+	}
+	if err := svc.AppendEvent(ctx, createResp.Session, event); err != nil {
+		t.Fatalf("AppendEvent() error = %v", err)
+	}
+
+	wantU1 := map[string]any{"from_create": "c1", "overwritten": "new", "nil_val": nil}
+	tests := []struct {
+		appName, userID string
+		want            map[string]any
+	}{
+		{appName: "app", userID: "u1", want: wantU1},
+		{appName: "app", userID: "u2", want: map[string]any{}},
+		{appName: "other_app", userID: "u1", want: map[string]any{}},
+		{appName: "app", userID: "", want: map[string]any{}},
+		{appName: "", userID: "u1", want: map[string]any{}},
+		{appName: "", userID: "", want: map[string]any{}},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("app=%q,user=%q", tt.appName, tt.userID), func(t *testing.T) {
+			if diff := cmp.Diff(tt.want, getUserState(t, svc, tt.appName, tt.userID)); diff != "" {
+				t.Errorf("GetUserState() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+
+	if err := svc.Delete(ctx, &session.DeleteRequest{AppName: "app", UserID: "u1", SessionID: "s1"}); err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if diff := cmp.Diff(wantU1, getUserState(t, svc, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState() after Delete mismatch (-want +got):\n%s", diff)
+	}
+	s2, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s2"})
+	if err != nil {
+		t.Fatalf("Create(s2) error = %v", err)
+	}
+	wantS2 := map[string]any{"app:a": "av", "app:a2": "av2", "user:from_create": "c1", "user:overwritten": "new", "user:nil_val": nil}
+	if diff := cmp.Diff(wantS2, maps.Collect(s2.Session.State().All())); diff != "" {
+		t.Errorf("Create(s2) session state mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// tags is a named slice type, stored to check that a read keeps the dynamic
+// type of a value.
+type tags []string
+
+// nestedMap returns a chain of depth maps: each map holds the next under
+// "next", and the last one holds "leaf": "bottom".
+func nestedMap(depth int) map[string]any {
+	m := map[string]any{"leaf": "bottom"}
+	for range depth - 1 {
+		m = map[string]any{"next": m}
+	}
+	return m
+}
+
+// followNext follows the "next" key hops times from m and returns the map
+// reached.
+func followNext(t *testing.T, m any, hops int) map[string]any {
+	t.Helper()
+	cur, ok := m.(map[string]any)
+	for i := range hops {
+		if !ok {
+			t.Fatalf("hop %d: value is %T, want map[string]any", i, cur)
+		}
+		cur, ok = cur["next"].(map[string]any)
+	}
+	if !ok {
+		t.Fatalf("hop %d: value is not a map[string]any", hops)
+	}
+	return cur
+}
+
+func TestInMemoryService_GetUserState_DeepCopyNoAliasingAndTypes(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	when := time.Date(2026, time.March, 15, 12, 30, 0, 0, time.UTC)
+	cycle := map[string]any{"label": "root"}
+	cycle["self"] = cycle
+	selfSlice := make([]any, 1)
+	selfSlice[0] = selfSlice
+	if _, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State: map[string]any{
+			"user:count":      7,
+			"user:when":       when,
+			"user:nothing":    nil,
+			"user:nested":     map[string]any{"inner": map[string]any{"name": "Alice"}, "items": []any{"x", map[string]any{"tag": "v1"}}},
+			"user:strings":    []string{"a", "b"},
+			"user:labels":     tags{"t1", "t2"},
+			"user:cycle":      cycle,
+			"user:self_slice": selfSlice,
+			"user:deep":       nestedMap(40),
+		},
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got1 := getUserState(t, svc, "app", "u1")
+
+	if got, ok := got1["count"].(int); !ok || got != 7 {
+		t.Errorf("first read: count = %#v, want int(7)", got1["count"])
+	}
+	if got, ok := got1["when"].(time.Time); !ok || !got.Equal(when) {
+		t.Errorf("first read: when = %#v, want time.Time %v", got1["when"], when)
+	}
+	if v, ok := got1["nothing"]; !ok || v != nil {
+		t.Errorf("first read: nothing = %#v, present %v, want a present nil", v, ok)
+	}
+	if diff := cmp.Diff(tags{"t1", "t2"}, got1["labels"]); diff != "" {
+		t.Errorf("first read: labels mismatch (-want +got):\n%s", diff)
+	}
+	gotCycle := got1["cycle"].(map[string]any)
+	if gotCycle["label"] != "root" {
+		t.Errorf("first read: cycle[label] = %#v, want %q", gotCycle["label"], "root")
+	}
+	if reflect.ValueOf(gotCycle["self"]).Pointer() != reflect.ValueOf(gotCycle).Pointer() {
+		t.Error("first read: cycle[self] is not the copied cycle map")
+	}
+	if reflect.ValueOf(gotCycle).Pointer() == reflect.ValueOf(cycle).Pointer() {
+		t.Error("first read: cycle is the stored map, want a copy")
+	}
+	gotSelfSlice := got1["self_slice"].([]any)
+	if reflect.ValueOf(gotSelfSlice[0]).Pointer() != reflect.ValueOf(gotSelfSlice).Pointer() {
+		t.Error("first read: self_slice[0] is not the copied slice")
+	}
+	if reflect.ValueOf(gotSelfSlice).Pointer() == reflect.ValueOf(selfSlice).Pointer() {
+		t.Error("first read: self_slice is the stored slice, want a copy")
+	}
+
+	got1["added"] = "injected"
+	got1["count"] = 999
+	got1["nothing"] = "not-nil"
+	got1["nested"].(map[string]any)["inner"].(map[string]any)["name"] = "Mallory"
+	got1["nested"].(map[string]any)["items"].([]any)[0] = "mutated"
+	got1["nested"].(map[string]any)["items"].([]any)[1].(map[string]any)["tag"] = "mutated"
+	got1["strings"].([]string)[0] = "z"
+	got1["labels"].(tags)[0] = "z"
+	gotCycle["label"] = "corrupted"
+	followNext(t, got1["deep"], 39)["leaf"] = "mutated"
+
+	got2 := getUserState(t, svc, "app", "u1")
+
+	if v, ok := got2["added"]; ok {
+		t.Errorf("second read: added = %#v, want absent", v)
+	}
+	if got, ok := got2["count"].(int); !ok || got != 7 {
+		t.Errorf("second read: count = %#v, want int(7)", got2["count"])
+	}
+	if v, ok := got2["nothing"]; !ok || v != nil {
+		t.Errorf("second read: nothing = %#v, present %v, want a present nil", v, ok)
+	}
+	wantNested := map[string]any{"inner": map[string]any{"name": "Alice"}, "items": []any{"x", map[string]any{"tag": "v1"}}}
+	if diff := cmp.Diff(wantNested, got2["nested"]); diff != "" {
+		t.Errorf("second read: nested mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"a", "b"}, got2["strings"]); diff != "" {
+		t.Errorf("second read: strings mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(tags{"t1", "t2"}, got2["labels"]); diff != "" {
+		t.Errorf("second read: labels mismatch (-want +got):\n%s", diff)
+	}
+	if got, ok := got2["when"].(time.Time); !ok || !got.Equal(when) {
+		t.Errorf("second read: when = %#v, want time.Time %v", got2["when"], when)
+	}
+	if got := got2["cycle"].(map[string]any)["label"]; got != "root" {
+		t.Errorf("second read: cycle[label] = %#v, want %q", got, "root")
+	}
+	if got := followNext(t, got2["deep"], 39)["leaf"]; got != "bottom" {
+		t.Errorf("second read: leaf of deep = %#v, want %q", got, "bottom")
+	}
+}
+
+// profile is a struct whose exported fields hold references, one of them to
+// another profile.
+type profile struct {
+	Name  string
+	Roles map[string]any
+	Next  *profile
+}
+
+// attrs is a named map type; a copy of a stored attrs value must keep it.
+type attrs map[string]any
+
+func TestInMemoryService_GetUserState_DeepCopyPointersStructsArraysAndTypedNils(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	n := 1
+	node := &profile{Name: "Alice", Roles: map[string]any{"r": "admin"}}
+	node.Next = node
+	full := []any{"a", "b"}
+	shared := []string{"s"}
+	m := map[string]any{"k": "v"}
+	if _, err := svc.Create(ctx, &session.CreateRequest{
+		AppName:   "app",
+		UserID:    "u1",
+		SessionID: "s1",
+		State: map[string]any{
+			"user:ptr":       &n,
+			"user:node":      node,
+			"user:struct":    profile{Name: "Alice", Roles: map[string]any{"r": "admin"}},
+			"user:array":     [2]map[string]any{{"k": "v"}, nil},
+			"user:nil_map":   map[string]any(nil),
+			"user:nil_slice": []string(nil),
+			"user:nil_ptr":   (*int)(nil),
+			// Each pair shares memory, but the two values differ in length or
+			// in type, and each must come back as itself.
+			"user:full":      full,
+			"user:prefix":    full[:1],
+			"user:shared":    shared,
+			"user:tags":      tags(shared),
+			"user:map":       m,
+			"user:attrs_map": attrs(m),
+		},
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	got1 := getUserState(t, svc, "app", "u1")
+	gotNode := got1["node"].(*profile)
+	if gotNode == node {
+		t.Fatal("first read: node is the stored pointer, want a copy")
+	}
+	if gotNode.Next != gotNode {
+		t.Error("first read: node.Next is not the copied node")
+	}
+	*got1["ptr"].(*int) = 2
+	gotNode.Name = "Mallory"
+	gotNode.Roles["r"] = "root"
+	got1["struct"].(profile).Roles["r"] = "guest"
+	got1["array"].([2]map[string]any)[0]["k"] = "mutated"
+
+	got2 := getUserState(t, svc, "app", "u1")
+	one := 1
+	wantNode := &profile{Name: "Alice", Roles: map[string]any{"r": "admin"}}
+	wantNode.Next = wantNode
+	want := map[string]any{
+		"ptr":       &one,
+		"node":      wantNode,
+		"struct":    profile{Name: "Alice", Roles: map[string]any{"r": "admin"}},
+		"array":     [2]map[string]any{{"k": "v"}, nil},
+		"nil_map":   map[string]any(nil),
+		"nil_slice": []string(nil),
+		"nil_ptr":   (*int)(nil),
+		"full":      []any{"a", "b"},
+		"prefix":    []any{"a"},
+		"shared":    []string{"s"},
+		"tags":      tags{"s"},
+		"map":       map[string]any{"k": "v"},
+		"attrs_map": attrs{"k": "v"},
+	}
+	if diff := cmp.Diff(want, got2); diff != "" {
+		t.Errorf("second read mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestInMemoryService_GetUserState_ContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	resp, err := session.GetUserState(ctx, session.InMemoryService(), &session.GetUserStateRequest{AppName: "app", UserID: "u1"})
+
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("GetUserState() error = %v, want an error wrapping context.Canceled", err)
+	}
+	if resp != nil {
+		t.Errorf("GetUserState() response = %+v, want nil", resp)
+	}
+}
+
+func TestInMemoryService_GetUserState_NilRequest(t *testing.T) {
+	r, ok := session.InMemoryService().(session.UserStateReader)
+	if !ok {
+		t.Fatal("InMemoryService() does not implement session.UserStateReader")
+	}
+
+	resp, err := r.GetUserState(t.Context(), nil)
+
+	if err == nil || resp != nil {
+		t.Errorf("GetUserState(nil) = %v, %v; want nil and an error", resp, err)
+	}
+}
+
+func TestInMemoryService_GetUserState_ConcurrentReadAndAppend(t *testing.T) {
+	ctx := t.Context()
+	svc := session.InMemoryService()
+	created, err := svc.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "u1", SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	const appends = 100
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range appends {
+			event := &session.Event{
+				ID:        fmt.Sprintf("e%d", i),
+				Timestamp: time.Now(),
+				Actions:   session.EventActions{StateDelta: map[string]any{"user:k": i}},
+			}
+			if err := svc.AppendEvent(ctx, created.Session, event); err != nil {
+				t.Errorf("AppendEvent(%d) error = %v", i, err)
+				return
+			}
+		}
+	})
+	for range appends {
+		if _, err := session.GetUserState(ctx, svc, &session.GetUserStateRequest{AppName: "app", UserID: "u1"}); err != nil {
+			t.Errorf("GetUserState() error = %v", err)
+			break
+		}
+	}
+	wg.Wait()
+
+	if diff := cmp.Diff(map[string]any{"k": appends - 1}, getUserState(t, svc, "app", "u1")); diff != "" {
+		t.Errorf("GetUserState() after all appends mismatch (-want +got):\n%s", diff)
 	}
 }
