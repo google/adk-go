@@ -296,6 +296,9 @@ func TestListToolsSessionChangesBetweenPages(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "connection lost again after reconnection") {
 					t.Errorf("ListTools() error = %v, want repeated connection loss", err)
 				}
+				if !errors.Is(err, mcp.ErrConnectionClosed) {
+					t.Errorf("ListTools() error = %v, want wrapping %v", err, mcp.ErrConnectionClosed)
+				}
 				if len(tools) != 0 {
 					t.Errorf("ListTools() returned %d partial tools on failure", len(tools))
 				}
@@ -367,6 +370,9 @@ func TestListToolsErrors(t *testing.T) {
 			}
 			if !errors.Is(err, wantErr) {
 				t.Errorf("ListTools() error = %v, want wrapping %v", err, wantErr)
+			}
+			if tc.close && (err == nil || !strings.Contains(err.Error(), "reconnection also failed")) {
+				t.Errorf("ListTools() error = %v, want it to report the failed reconnection", err)
 			}
 			if err != nil && strings.Contains(err.Error(), "connection lost again") {
 				t.Error("ListTools() incorrectly reported repeated connection loss")
