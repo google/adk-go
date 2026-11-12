@@ -299,7 +299,7 @@ func appendTools(r *model.LLMRequest, tools ...tool.Tool) error {
 	// Find an existing genai.Tool with FunctionDeclarations
 	var funcTool *genai.Tool
 	for _, gt := range r.Config.Tools {
-		if gt.FunctionDeclarations != nil {
+		if gt != nil && len(gt.FunctionDeclarations) > 0 {
 			funcTool = gt
 			break
 		}

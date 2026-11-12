@@ -25,6 +25,7 @@ import (
 	"log"
 	"maps"
 	"net"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -625,7 +626,10 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 		nreq := &model.LLMRequest{
 			Model: f.Model.Name(),
 		}
-		for ev, err := range f.preprocess(ctx, nreq) {
+		// The live callable map is built from f.Tools, so it needs the names
+		// of the tools that registered themselves without a declaration.
+		dropped := make(map[string]struct{})
+		for ev, err := range f.preprocessRecording(ctx, nreq, dropped) {
 			if err != nil {
 				sess.pushError(err)
 				return
@@ -896,6 +900,9 @@ func (f *Flow) RunLive(ctx agent.InvocationContext) (agent.LiveSession, iter.Seq
 					if len(fnCalls) > 0 {
 						tools = make(map[string]tool.Tool, len(f.Tools))
 						for _, t := range f.Tools {
+							if _, ok := dropped[t.Name()]; ok {
+								continue
+							}
 							tools[t.Name()] = t
 						}
 						ev.LongRunningToolIDs = findLongRunningFunctionCallIDs(ev.LLMResponse.Content, tools)
@@ -1095,6 +1102,11 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 					}
 					continue
 				}
+				// An entry registered after preprocess, for example by a
+				// before-model callback, is still subject to the rule.
+				if undeclared(tool) {
+					continue
+				}
 				tools[k] = tool
 			}
 
@@ -1176,7 +1188,17 @@ func (f *Flow) runOneStep(ctx agent.InvocationContext) iter.Seq2[*session.Event,
 	}
 }
 
+// preprocess runs the request processors, then the tools and toolsets of the
+// agent, over req. See preprocessRecording.
 func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) iter.Seq2[*session.Event, error] {
+	return f.preprocessRecording(ctx, req, nil)
+}
+
+// preprocessRecording is preprocess. When it has run the last tool and toolset
+// ProcessRequest without error, it deletes from req.Tools every entry for
+// which undeclared is true. When dropped is not nil it also records each
+// deleted name in dropped.
+func (f *Flow) preprocessRecording(ctx agent.InvocationContext, req *model.LLMRequest, dropped map[string]struct{}) iter.Seq2[*session.Event, error] {
 	return func(yield func(*session.Event, error) bool) {
 		// apply request processor functions to the request in the configured order.
 		for _, processor := range f.RequestProcessors {
@@ -1199,7 +1221,33 @@ func (f *Flow) preprocess(ctx agent.InvocationContext, req *model.LLMRequest) it
 			yield(nil, err)
 			return
 		}
+		// A tool without a declaration is not registered, as in adk-python's
+		// LlmRequest.append_tools, so the model cannot call it.
+		maps.DeleteFunc(req.Tools, func(name string, t any) bool {
+			if !undeclared(t) {
+				return false
+			}
+			if dropped != nil {
+				dropped[name] = struct{}{}
+			}
+			return true
+		})
 	}
+}
+
+// undeclared reports whether t has a Declaration method that returns nil. A
+// nil pointer, and a value without a Declaration method, are not undeclared.
+func undeclared(t any) bool {
+	d, ok := t.(interface {
+		Declaration() *genai.FunctionDeclaration
+	})
+	if !ok {
+		return false
+	}
+	if v := reflect.ValueOf(t); v.Kind() == reflect.Pointer && v.IsNil() {
+		return false
+	}
+	return d.Declaration() == nil
 }
 
 // toolPreprocess runs tool preprocess on the given request
