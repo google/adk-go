@@ -16,7 +16,6 @@ package artifact
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"iter"
@@ -153,9 +152,10 @@ func (s *inMemoryService) delete(appName, userID, sessionID, fileName string, ve
 
 // Save implements [artifact.Service]
 func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResponse, error) {
-	// Allow artifact reference parts, which carry neither text nor inline data
-	// and are only understood by this service; the scope check below re-validates
-	// that a reference stays within the caller's app/user/session.
+	// Allow file data parts, which carry neither text nor inline data and are
+	// only stored by this service: external file data is kept as is, and the
+	// scope check below re-validates that a reference stays within the caller's
+	// app/user/session.
 	if err := req.validate(true); err != nil {
 		return nil, fmt.Errorf("request validation failed: %w", err)
 	}
@@ -163,14 +163,12 @@ func (s *inMemoryService) Save(ctx context.Context, req *SaveRequest) (*SaveResp
 	if isArtifactRef(req.Part) {
 		parsed, ok := parseArtifactURI(req.Part.FileData.FileURI)
 		if !ok {
-			// Do not echo the URI: it carries app, user, session, and file
-			// identifiers, which are caller data.
-			return nil, errors.New("invalid artifact reference URI")
+			return nil, fmt.Errorf("request validation failed: %w", errInvalidReferenceURI())
 		}
 		// Check the caller's session before the user-scope rewrite, so the scope
 		// is validated against the caller, matching Load's per-hop rule.
 		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
-			return nil, fmt.Errorf("invalid artifact reference: %w", err)
+			return nil, fmt.Errorf("request validation failed: invalid artifact reference: %w", err)
 		}
 	}
 	// If file is user scoped, store it under user scope path
@@ -229,6 +227,13 @@ func (s *inMemoryService) Delete(ctx context.Context, req *DeleteRequest) error 
 	hi := artifactKey{AppName: appName, UserID: userID, SessionID: sessionID, FileName: fileName}.Encode()
 	s.artifacts.DeleteRange(lo, hi)
 	return nil
+}
+
+// errInvalidReferenceURI returns the error for a malformed artifact:// URI. It
+// carries adk-python's phrase and leaves the URI out: the URI holds app, user,
+// session and file identifiers, which are caller data.
+func errInvalidReferenceURI() error {
+	return invalidInput("invalid artifact reference URI (Invalid artifact reference URI)")
 }
 
 // Load implements [artifact.Service]
@@ -298,9 +303,7 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 
 		parsed, ok := parseArtifactURI(entry.part.FileData.FileURI)
 		if !ok {
-			// Do not echo the URI: it carries app, user, session, and file
-			// identifiers, which are caller data.
-			return nil, errors.New("invalid artifact reference URI")
+			return nil, errInvalidReferenceURI()
 		}
 		if err := validateArtifactReferenceScope(appName, userID, sessionID, parsed); err != nil {
 			return nil, fmt.Errorf("invalid artifact reference: %w", err)
@@ -308,7 +311,7 @@ func (s *inMemoryService) resolve(appName, userID, sessionID, fileName string, v
 
 		remainingDepth--
 		if remainingDepth < 0 {
-			return nil, fmt.Errorf("artifact reference resolution exceeded maximum depth of %d", maxArtifactRefDepth)
+			return nil, invalidInput(fmt.Sprintf("artifact reference resolution exceeded maximum depth of %d (Exceeded maximum recursion depth resolving artifact reference)", maxArtifactRefDepth))
 		}
 
 		// Follow the reference: the next hop is validated against the session it
@@ -426,12 +429,15 @@ func (s *inMemoryService) GetArtifactVersion(ctx context.Context, req *GetArtifa
 		canonicalURI = fmt.Sprintf("memory://apps/%s/users/%s/artifacts/%s/versions/%d", escapedAppName, escapedUserID, escapedFileName, version)
 	}
 	// Report the media type the same way adk-python's in-memory service does:
-	// inline data carries its own, text (empty text included) is text/plain,
-	// and a reference has no media type until it is loaded.
+	// inline data and external file data carry their own, text (empty text
+	// included) is text/plain, and a reference has no media type until it is
+	// loaded.
 	var mimeType string
 	switch {
 	case entry.part.InlineData != nil:
 		mimeType = entry.part.InlineData.MIMEType
+	case entry.part.FileData != nil && !isArtifactRef(entry.part):
+		mimeType = entry.part.FileData.MIMEType
 	case !isArtifactRef(entry.part):
 		mimeType = "text/plain"
 	}

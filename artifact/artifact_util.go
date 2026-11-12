@@ -18,9 +18,11 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"golang.org/x/text/cases"
 	"google.golang.org/genai"
 )
 
@@ -258,16 +260,86 @@ func isArtifactRef(part *genai.Part) bool {
 	return part != nil && part.FileData != nil && strings.HasPrefix(part.FileData.FileURI, artifactURIScheme)
 }
 
+// ValidatePathSegment reports whether value is safe to use as the app name,
+// user ID or session ID of an artifact, with the rules of adk-python's
+// validate_path_segment. fieldName names the field in the error message, for
+// example "session_id". The caller provides the value and the field name.
+//
+// The rules apply in this order and the first violation is returned:
+//
+//  1. value is not empty;
+//  2. value contains no NUL byte;
+//  3. value does not start with "/" or "\";
+//  4. value does not start with an ASCII letter followed by ":" (drive-qualified);
+//  5. value is not "." or "..", and no segment of value split on "/" and "\" is "..";
+//  6. only when value contains "/" or "\": no segment, split on both, is one of
+//     "apps", "users", "sessions", "artifacts" or "versions" after Unicode case
+//     folding with golang.org/x/text/cases.Fold (Python's casefold), so "a/APPS/b",
+//     "a/ſessions" and "x/seßions" are refused and "x/versİons" is accepted.
+//     A value without a separator, such as "users" or "seßions", is valid.
+//
+// The empty value is refused: the error is "<fieldName> must not be empty.".
+// The other messages are "<fieldName> must not contain null bytes.", "must not
+// be an absolute path or start with a slash.", "must not be drive-qualified.",
+// "must not contain traversal segments." and "must not contain reserved path
+// segments.", each after "<fieldName> ". A violation returns an error that
+// wraps [ErrInputValidation] and does not contain value. A "/" alone, as in
+// "group/user123", is allowed. ValidatePathSegment is safe for concurrent use.
+func ValidatePathSegment(value, fieldName string) error {
+	// Unlike adk-python, the messages leave value out: it is caller data.
+	switch {
+	case value == "":
+		return invalidInput(fieldName + " must not be empty.")
+	case strings.Contains(value, "\x00"):
+		return invalidInput(fieldName + " must not contain null bytes.")
+	case strings.HasPrefix(value, "/") || strings.HasPrefix(value, "\\"):
+		return invalidInput(fieldName + " must not be an absolute path or start with a slash.")
+	case isDriveQualified(value):
+		return invalidInput(fieldName + " must not be drive-qualified.")
+	}
+	segments := strings.Split(strings.ReplaceAll(value, "\\", "/"), "/")
+	if value == "." || value == ".." || slices.Contains(segments, "..") {
+		return invalidInput(fieldName + " must not contain traversal segments.")
+	}
+	if strings.ContainsAny(value, "/\\") && hasReservedSegment(segments) {
+		return invalidInput(fieldName + " must not contain reserved path segments.")
+	}
+	return nil
+}
+
+// isDriveQualified reports whether value starts with an ASCII letter and a
+// colon, as a Windows drive such as "C:" does (adk-python's _WINDOWS_DRIVE_RE).
+func isDriveQualified(value string) bool {
+	if len(value) < 2 || value[1] != ':' {
+		return false
+	}
+	c := value[0]
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+}
+
+// hasReservedSegment reports whether a segment, case-folded as Python's
+// str.casefold does, is one of reservedURISegments.
+func hasReservedSegment(segments []string) bool {
+	// A Caser is not safe for concurrent use, so each call makes its own.
+	fold := cases.Fold()
+	for _, segment := range segments {
+		if slices.Contains(reservedURISegments, fold.String(segment)) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateArtifactReferenceScope ensures an artifact reference cannot escape the
 // caller's app/user/session scope: parsed must belong to the same app and user
 // as appName/userID, and if parsed is session-scoped, its session must match
-// sessionID.
+// sessionID. Its errors wrap [ErrInputValidation].
 func validateArtifactReferenceScope(appName, userID, sessionID string, parsed parsedArtifactURI) error {
 	if parsed.AppName != appName || parsed.UserID != userID {
-		return fmt.Errorf("artifact reference must stay within the same app and user scope")
+		return invalidInput("artifact reference must stay within the same app and user scope")
 	}
 	if parsed.SessionID != "" && parsed.SessionID != sessionID {
-		return fmt.Errorf("session-scoped artifact reference must stay within the same session scope")
+		return invalidInput("session-scoped artifact reference must stay within the same session scope")
 	}
 	return nil
 }

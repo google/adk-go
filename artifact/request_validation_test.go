@@ -15,6 +15,7 @@
 package artifact
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -554,4 +555,180 @@ func TestSaveRequest_Validate_EmptyTextAndNonContentParts(t *testing.T) {
 		},
 	}
 	executeValidatorTestCases(t, "SaveRequest", testCases)
+}
+
+// TestRequestValidate_PathSafetyAndSentinel checks that every Validate error
+// wraps ErrInputValidation with its exact text, that the app name, user ID and
+// session ID are path-checked in that order, and that a "user:" file name makes
+// the session ID optional.
+func TestRequestValidate_PathSafetyAndSentinel(t *testing.T) {
+	textPart := genai.NewPartFromText("data")
+	testCases := []struct {
+		name string
+		req  Validator
+		// want is the exact error text; empty means the request is valid.
+		want string
+	}{
+		// Existing errors keep their text and wrap the sentinel.
+		{
+			name: "save missing fields",
+			req:  &SaveRequest{AppName: "app"},
+			want: "invalid save request: missing required fields: UserID, SessionID, FileName, Part",
+		},
+		{
+			name: "save unsupported part",
+			req:  &SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f", Part: genai.NewPartFromFunctionCall("fn", nil)},
+			want: "invalid save request: Part.InlineData or Part.Text has to be set",
+		},
+		{
+			name: "save reference part",
+			req:  &SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "f", Part: genai.NewPartFromURI("artifact://apps/app/users/u/sessions/s/artifacts/g/versions/1", "")},
+			want: "invalid save request: Part.InlineData or Part.Text has to be set",
+		},
+		{
+			name: "save file name with slash",
+			req:  &SaveRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "a/b.txt", Part: textPart},
+			want: "invalid name: filename cannot contain path separators",
+		},
+		{
+			name: "load file name with backslash",
+			req:  &LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "a\\b.txt"},
+			want: "invalid name: filename cannot contain path separators",
+		},
+		{
+			name: "load missing fields",
+			req:  &LoadRequest{},
+			want: "invalid load request: missing required fields: AppName, UserID, SessionID, FileName",
+		},
+		{
+			name: "delete missing fields",
+			req:  &DeleteRequest{AppName: "app", FileName: "f"},
+			want: "invalid delete request: missing required fields: UserID, SessionID",
+		},
+		{
+			name: "list missing fields",
+			req:  &ListRequest{},
+			want: "invalid list request: missing required fields: AppName, UserID, SessionID",
+		},
+		{
+			name: "versions missing fields",
+			req:  &VersionsRequest{UserID: "u"},
+			want: "invalid versions request: missing required fields: AppName, SessionID, FileName",
+		},
+		{
+			name: "get artifact version missing fields",
+			req:  &GetArtifactVersionRequest{AppName: "app", UserID: "u", SessionID: "s"},
+			want: "invalid get artifact version request: missing required fields: FileName",
+		},
+		// Path checks run on the app name, user ID and session ID in that order.
+		{
+			name: "save app name checked first",
+			req:  &SaveRequest{AppName: "/bad", UserID: "../bad", SessionID: "victim/apps", FileName: "f.txt", Part: textPart},
+			want: "app_name must not be an absolute path or start with a slash.",
+		},
+		{
+			name: "load user ID checked before session ID",
+			req:  &LoadRequest{AppName: "ok", UserID: "C:/bad", SessionID: "../bad", FileName: "f.txt"},
+			want: "user_id must not be drive-qualified.",
+		},
+		{
+			name: "delete session ID checked",
+			req:  &DeleteRequest{AppName: "ok", UserID: "ok", SessionID: "victim/versions", FileName: "f.txt"},
+			want: "session_id must not contain reserved path segments.",
+		},
+		{
+			name: "versions null byte in user ID",
+			req:  &VersionsRequest{AppName: "ok", UserID: "u\x00", SessionID: "s", FileName: "f.txt"},
+			want: "user_id must not contain null bytes.",
+		},
+		{
+			name: "get artifact version traversal in session ID",
+			req:  &GetArtifactVersionRequest{AppName: "ok", UserID: "u", SessionID: "..", FileName: "f.txt"},
+			want: "session_id must not contain traversal segments.",
+		},
+		// A "user:" file name makes the session ID optional and unchecked.
+		{
+			name: "save user name without session",
+			req:  &SaveRequest{AppName: "app", UserID: "u", FileName: "user:safe.txt", Part: textPart},
+		},
+		{
+			name: "load user name without session",
+			req:  &LoadRequest{AppName: "app", UserID: "u", FileName: "user:safe.txt"},
+		},
+		{
+			name: "delete user name without session",
+			req:  &DeleteRequest{AppName: "app", UserID: "u", FileName: "user:safe.txt"},
+		},
+		{
+			name: "versions user name without session",
+			req:  &VersionsRequest{AppName: "app", UserID: "u", FileName: "user:safe.txt"},
+		},
+		{
+			name: "get artifact version user name without session",
+			req:  &GetArtifactVersionRequest{AppName: "app", UserID: "u", FileName: "user:safe.txt"},
+		},
+		{
+			name: "save user name ignores an invalid session",
+			req:  &SaveRequest{AppName: "app", UserID: "u", SessionID: "../../etc", FileName: "user:safe.txt", Part: textPart},
+		},
+		{
+			name: "load user name ignores an invalid session",
+			req:  &LoadRequest{AppName: "app", UserID: "u", SessionID: "victim/apps", FileName: "user:safe.txt"},
+		},
+		{
+			name: "user name still path-checks the app name",
+			req:  &DeleteRequest{AppName: "/leading/slash", UserID: "u", FileName: "user:safe.txt"},
+			want: "app_name must not be an absolute path or start with a slash.",
+		},
+		{
+			name: "user name does not list the session as missing",
+			req:  &LoadRequest{UserID: "u", FileName: "user:safe.txt"},
+			want: "invalid load request: missing required fields: AppName",
+		},
+		{
+			name: "user name does not list the session as missing on save",
+			req:  &SaveRequest{AppName: "app", FileName: "user:safe.txt", Part: textPart},
+			want: "invalid save request: missing required fields: UserID",
+		},
+		{
+			name: "session-scoped name still needs the session",
+			req:  &VersionsRequest{AppName: "app", UserID: "u", FileName: "safe.txt"},
+			want: "invalid versions request: missing required fields: SessionID",
+		},
+		// List path-checks the session ID only when it is set.
+		{
+			name: "list without session",
+			req:  &ListRequest{AppName: "app", UserID: "u"},
+		},
+		{
+			name: "list traversal in session ID",
+			req:  &ListRequest{AppName: "app", UserID: "u", SessionID: "../s"},
+			want: "session_id must not contain traversal segments.",
+		},
+		{
+			name: "list reserved segment in app name",
+			req:  &ListRequest{AppName: "victim/users", UserID: "u", SessionID: "s"},
+			want: "app_name must not contain reserved path segments.",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.req.Validate()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() = nil, want %q", tc.want)
+			}
+			if !errors.Is(err, ErrInputValidation) {
+				t.Errorf("errors.Is(%v, ErrInputValidation) = false, want true", err)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("Validate() error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/genai"
 
 	"google.golang.org/adk/v2/artifact"
@@ -363,4 +364,171 @@ func TestInMemoryArtifactVersionReferenceMimeType(t *testing.T) {
 	if got := loaded.Part.InlineData.MIMEType; got != "image/png" {
 		t.Errorf("Load(alias).Part.InlineData.MIMEType = %q, want %q", got, "image/png")
 	}
+}
+
+// TestInMemoryArtifactService_ExternalFileData checks that the in-memory
+// service stores file data that is not an artifact:// reference, loads it back
+// as file data and reports its media type, as adk-python's in-memory service
+// does (in_memory_artifact_service.py, save_artifact).
+func TestInMemoryArtifactService_ExternalFileData(t *testing.T) {
+	ctx := context.Background()
+	testCases := []struct {
+		name         string
+		uri, mime    string
+		wantMimeType string
+	}{
+		{name: "empty URI", uri: "", mime: "text/plain", wantMimeType: "text/plain"},
+		{name: "gs URI", uri: "gs://my-bucket/file.pdf", mime: "application/pdf", wantMimeType: "application/pdf"},
+		{name: "empty URI with a binary MIME type", uri: "", mime: "application/octet-stream", wantMimeType: "application/octet-stream"},
+		{name: "gs URI without a MIME type", uri: "gs://my-bucket/file.bin", mime: "", wantMimeType: ""},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := artifact.InMemoryService()
+			saved, err := svc.Save(ctx, &artifact.SaveRequest{
+				AppName: "app", UserID: "user", SessionID: "s", FileName: "external",
+				Part: &genai.Part{FileData: &genai.FileData{FileURI: tc.uri, MIMEType: tc.mime}},
+			})
+			if err != nil {
+				t.Fatalf("Save(external) failed: %v", err)
+			}
+			if saved.Version != 1 {
+				t.Errorf("Save(external).Version = %d, want 1", saved.Version)
+			}
+
+			loaded, err := svc.Load(ctx, &artifact.LoadRequest{
+				AppName: "app", UserID: "user", SessionID: "s", FileName: "external",
+			})
+			if err != nil {
+				t.Fatalf("Load(external) failed: %v", err)
+			}
+			want := &genai.Part{FileData: &genai.FileData{FileURI: tc.uri, MIMEType: tc.mime}}
+			if diff := cmp.Diff(want, loaded.Part); diff != "" {
+				t.Errorf("Load(external).Part mismatch (-want +got):\n%s", diff)
+			}
+
+			got, err := svc.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{
+				AppName: "app", UserID: "user", SessionID: "s", FileName: "external",
+			})
+			if err != nil {
+				t.Fatalf("GetArtifactVersion(external) failed: %v", err)
+			}
+			if got.ArtifactVersion.MimeType != tc.wantMimeType {
+				t.Errorf("GetArtifactVersion(external).MimeType = %q, want %q", got.ArtifactVersion.MimeType, tc.wantMimeType)
+			}
+		})
+	}
+}
+
+// TestInMemoryArtifactService_ReferenceErrorsWrapSentinelAndPhrase checks that
+// every refused artifact reference wraps artifact.ErrInputValidation, carries
+// adk-python's phrase, and leaves the URI out of the message.
+func TestInMemoryArtifactService_ReferenceErrorsWrapSentinelAndPhrase(t *testing.T) {
+	ctx := context.Background()
+
+	// assertRefused checks err against the sentinel and the wanted substrings,
+	// and that it holds none of the unwanted ones.
+	assertRefused := func(t *testing.T, err error, want, unwanted []string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("got nil error, want a refused reference")
+		}
+		if !errors.Is(err, artifact.ErrInputValidation) {
+			t.Errorf("errors.Is(%v, artifact.ErrInputValidation) = false, want true", err)
+		}
+		for _, s := range want {
+			if !strings.Contains(err.Error(), s) {
+				t.Errorf("error %q does not contain %q", err.Error(), s)
+			}
+		}
+		for _, s := range unwanted {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("error %q contains %q, want it left out", err.Error(), s)
+			}
+		}
+	}
+
+	t.Run("save of a malformed URI", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		_, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+			Part: &genai.Part{FileData: &genai.FileData{FileURI: "artifact://secret-app/secret-user/invalid"}},
+		})
+		assertRefused(t, err,
+			[]string{"request validation failed", "invalid artifact reference URI", "Invalid artifact reference URI"},
+			[]string{"secret"})
+
+		list, err := svc.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "user", SessionID: "s"})
+		if err != nil {
+			t.Fatalf("List() failed: %v", err)
+		}
+		if len(list.FileNames) != 0 {
+			t.Errorf("List().FileNames = %v, want none", list.FileNames)
+		}
+		if _, err := svc.Versions(ctx, &artifact.VersionsRequest{
+			AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+		}); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Versions(alias) error = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("save of a cross-user reference", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		_, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s", FileName: "alias.txt",
+			Part: refPart("app", "victim", "s", "target.txt", 1),
+		})
+		assertRefused(t, err,
+			[]string{"request validation failed", "must stay within the same app and user scope"},
+			[]string{"victim"})
+	})
+
+	t.Run("save of a user-scoped name without a session referencing a session file", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		_, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", FileName: "user:alias.txt",
+			Part: refPart("app", "user", "s1", "file1", 1),
+		})
+		assertRefused(t, err,
+			[]string{"request validation failed", "session-scoped artifact reference must stay within the same session scope"},
+			[]string{"s1"})
+	})
+
+	t.Run("load hop into another session", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		if _, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s1", FileName: "target.txt",
+			Part: genai.NewPartFromText("private"),
+		}); err != nil {
+			t.Fatalf("Save(target) failed: %v", err)
+		}
+		if _, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s1", FileName: "user:alias",
+			Part: refPart("app", "user", "s1", "target.txt", 1),
+		}); err != nil {
+			t.Fatalf("Save(user:alias) failed: %v", err)
+		}
+		_, err := svc.Load(ctx, &artifact.LoadRequest{
+			AppName: "app", UserID: "user", SessionID: "s2", FileName: "user:alias",
+		})
+		assertRefused(t, err,
+			[]string{"session-scoped artifact reference must stay within the same session scope"},
+			[]string{"s1", "target.txt"})
+	})
+
+	t.Run("load past the depth limit", func(t *testing.T) {
+		svc := artifact.InMemoryService()
+		if _, err := svc.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "user", SessionID: "s", FileName: "loop.txt",
+			Part: refPart("app", "user", "s", "loop.txt", 1),
+		}); err != nil {
+			t.Fatalf("Save(loop) failed: %v", err)
+		}
+		_, err := svc.Load(ctx, &artifact.LoadRequest{
+			AppName: "app", UserID: "user", SessionID: "s", FileName: "loop.txt",
+		})
+		assertRefused(t, err,
+			[]string{"maximum depth of 5", "Exceeded maximum recursion depth resolving artifact reference"},
+			[]string{"artifact://", "loop.txt"})
+	})
 }

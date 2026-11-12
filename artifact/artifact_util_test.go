@@ -15,6 +15,7 @@
 package artifact
 
 import (
+	"errors"
 	"testing"
 
 	"google.golang.org/genai"
@@ -291,5 +292,83 @@ func TestNewRewindTombstone(t *testing.T) {
 	first.InlineData.Data = []byte("changed")
 	if second := NewRewindTombstone(); !IsRewindTombstone(second) {
 		t.Errorf("NewRewindTombstone() after changing an earlier result = %+v, want a marker", second.InlineData)
+	}
+}
+
+func TestValidatePathSegment(t *testing.T) {
+	testCases := []struct {
+		name      string
+		value     string
+		fieldName string
+		// want is the exact error text; empty means value is valid.
+		want string
+	}{
+		{name: "plain", value: "app1", fieldName: "app_name"},
+		{name: "slash allowed", value: "group/user123", fieldName: "user_id"},
+		{name: "resource name", value: "projects/123/locations/us-central1/reasoningEngines/456", fieldName: "session_id"},
+		{name: "backslash allowed", value: "back\\slash", fieldName: "user_id"},
+		{name: "bare users", value: "users", fieldName: "user_id"},
+		{name: "bare apps", value: "apps", fieldName: "app_name"},
+		{name: "bare sessions", value: "sessions", fieldName: "session_id"},
+		{name: "bare artifacts", value: "artifacts", fieldName: "app_name"},
+		{name: "bare versions", value: "versions", fieldName: "user_id"},
+		{name: "dot segment inside a path", value: "a/.", fieldName: "user_id"},
+		{name: "dots inside a segment", value: "a..b/c", fieldName: "user_id"},
+		{name: "colon after two letters", value: "ab:1", fieldName: "user_id"},
+		{name: "colon after a digit", value: "1:a", fieldName: "user_id"},
+		{name: "colon after an underscore", value: "_:x", fieldName: "user_id"},
+		{name: "session named user", value: "user", fieldName: "session_id"},
+		{name: "session under user", value: "user/x", fieldName: "session_id"},
+		{name: "folded word without a slash", value: "seßions", fieldName: "user_id"},
+		{name: "dotted capital I does not fold to i", value: "x/versİons", fieldName: "user_id"},
+		{name: "empty", value: "", fieldName: "user_id", want: "user_id must not be empty."},
+		{name: "null byte", value: "null\x00byte", fieldName: "app_name", want: "app_name must not contain null bytes."},
+		{name: "null byte before leading slash", value: "/\x00", fieldName: "app_name", want: "app_name must not contain null bytes."},
+		{name: "leading slash", value: "/leading/slash", fieldName: "app_name", want: "app_name must not be an absolute path or start with a slash."},
+		{name: "leading backslash", value: "\\x", fieldName: "user_id", want: "user_id must not be an absolute path or start with a slash."},
+		{name: "leading slash before traversal", value: "/..", fieldName: "app_name", want: "app_name must not be an absolute path or start with a slash."},
+		{name: "drive letter", value: "C:x", fieldName: "user_id", want: "user_id must not be drive-qualified."},
+		{name: "lower-case drive letter", value: "z:\\abs", fieldName: "session_id", want: "session_id must not be drive-qualified."},
+		{name: "drive before traversal", value: "C:/..", fieldName: "app_name", want: "app_name must not be drive-qualified."},
+		{name: "bare drive", value: "C:", fieldName: "user_id", want: "user_id must not be drive-qualified."},
+		{name: "drive letter a", value: "a:1", fieldName: "user_id", want: "user_id must not be drive-qualified."},
+		{name: "drive letter A", value: "A:1", fieldName: "user_id", want: "user_id must not be drive-qualified."},
+		{name: "drive letter Z", value: "Z:1", fieldName: "user_id", want: "user_id must not be drive-qualified."},
+		{name: "dot", value: ".", fieldName: "user_id", want: "user_id must not contain traversal segments."},
+		{name: "dot dot", value: "..", fieldName: "user_id", want: "user_id must not contain traversal segments."},
+		{name: "leading traversal", value: "../../etc", fieldName: "session_id", want: "session_id must not contain traversal segments."},
+		{name: "trailing traversal", value: "a/..", fieldName: "user_id", want: "user_id must not contain traversal segments."},
+		{name: "traversal between backslashes", value: "mixed/..\\separators", fieldName: "user_id", want: "user_id must not contain traversal segments."},
+		{name: "traversal before reserved", value: "../apps", fieldName: "app_name", want: "app_name must not contain traversal segments."},
+		{name: "reserved apps", value: "victim/apps", fieldName: "session_id", want: "session_id must not contain reserved path segments."},
+		{name: "reserved upper case", value: "a/APPS/b", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+		{name: "reserved users", value: "victim/users", fieldName: "app_name", want: "app_name must not contain reserved path segments."},
+		{name: "reserved sessions", value: "victim/sessions/1", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+		{name: "reserved artifacts", value: "victim/artifacts", fieldName: "session_id", want: "session_id must not contain reserved path segments."},
+		{name: "reserved versions", value: "victim/versions", fieldName: "session_id", want: "session_id must not contain reserved path segments."},
+		{name: "reserved between backslashes", value: "back\\users\\x", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+		{name: "long s folds to s", value: "a/ſessions", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+		{name: "sharp s folds to ss", value: "x/seßions", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+		{name: "long s in users", value: "a/uſers", fieldName: "user_id", want: "user_id must not contain reserved path segments."},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidatePathSegment(tc.value, tc.fieldName)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("ValidatePathSegment() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidatePathSegment() = nil, want %q", tc.want)
+			}
+			if !errors.Is(err, ErrInputValidation) {
+				t.Errorf("errors.Is(%v, ErrInputValidation) = false, want true", err)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("ValidatePathSegment() error = %q, want %q", err.Error(), tc.want)
+			}
+		})
 	}
 }

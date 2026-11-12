@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -69,6 +70,13 @@ func TestArtifactService(t *testing.T, name string, factory func(t *testing.T) (
 			t.Fatalf("Failed to set up service: %v", err)
 		}
 		testArtifactService_ListEmptySessionID(t, srv)
+	})
+	t.Run(fmt.Sprintf("Test%sArtifactService_PathSafetyAndUserScopeWithoutSession", name), func(t *testing.T) {
+		srv, err := factory(t)
+		if err != nil {
+			t.Fatalf("Failed to set up service: %v", err)
+		}
+		testArtifactService_PathSafetyAndUserScopeWithoutSession(t, srv)
 	})
 	t.Run(fmt.Sprintf("Test%sArtifactService_GetArtifactVersion", name), func(t *testing.T) {
 		ctx := t.Context()
@@ -165,6 +173,138 @@ func testArtifactService_ListEmptySessionID(t *testing.T, srv artifact.Service) 
 	if diff := cmp.Diff([]string{"user:a.txt", "user:b.txt"}, resp.FileNames); diff != "" {
 		t.Errorf("List(SessionID: \"\") mismatch (-want +got):\n%s", diff)
 	}
+}
+
+// testArtifactService_PathSafetyAndUserScopeWithoutSession checks that a
+// "user:" file name needs no session ID, that unsafe app, user and session IDs
+// are refused with artifact.ErrInputValidation, and that a refused call leaves
+// the stored artifacts as they were.
+func testArtifactService_PathSafetyAndUserScopeWithoutSession(t *testing.T, srv artifact.Service) {
+	ctx := t.Context()
+
+	t.Run("user-scoped name without a session", func(t *testing.T) {
+		const appName, userID, fileName = "app/one", "group/user1", "user:doc.txt"
+		saved, err := srv.Save(ctx, &artifact.SaveRequest{
+			AppName: appName, UserID: userID, FileName: fileName,
+			Part: genai.NewPartFromBytes([]byte("hello"), "text/plain"),
+		})
+		if err != nil {
+			t.Fatalf("Save() failed: %v", err)
+		}
+		if saved.Version != 1 {
+			t.Errorf("Save().Version = %d, want 1", saved.Version)
+		}
+
+		loaded, err := srv.Load(ctx, &artifact.LoadRequest{AppName: appName, UserID: userID, FileName: fileName})
+		if err != nil {
+			t.Fatalf("Load() failed: %v", err)
+		}
+		if got := string(loaded.Part.InlineData.Data); got != "hello" {
+			t.Errorf("Load() data = %q, want %q", got, "hello")
+		}
+
+		versions, err := srv.Versions(ctx, &artifact.VersionsRequest{AppName: appName, UserID: userID, FileName: fileName})
+		if err != nil {
+			t.Fatalf("Versions() failed: %v", err)
+		}
+		if diff := cmp.Diff([]int64{1}, versions.Versions); diff != "" {
+			t.Errorf("Versions() mismatch (-want +got):\n%s", diff)
+		}
+
+		got, err := srv.GetArtifactVersion(ctx, &artifact.GetArtifactVersionRequest{AppName: appName, UserID: userID, FileName: fileName})
+		if err != nil {
+			t.Fatalf("GetArtifactVersion() failed: %v", err)
+		}
+		if got.ArtifactVersion.Version != 1 {
+			t.Errorf("GetArtifactVersion().Version = %d, want 1", got.ArtifactVersion.Version)
+		}
+
+		if err := srv.Delete(ctx, &artifact.DeleteRequest{AppName: appName, UserID: userID, FileName: fileName}); err != nil {
+			t.Fatalf("Delete() failed: %v", err)
+		}
+		if _, err := srv.Load(ctx, &artifact.LoadRequest{AppName: appName, UserID: userID, FileName: fileName}); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Load() after Delete() error = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		call func() error
+		want string
+	}{
+		{
+			name: "list with a reserved segment in the app name",
+			call: func() error {
+				_, err := srv.List(ctx, &artifact.ListRequest{AppName: "victim/users", UserID: "u", SessionID: "s"})
+				return err
+			},
+			want: "app_name must not contain reserved path segments.",
+		},
+		{
+			name: "list with a drive-qualified user ID",
+			call: func() error {
+				_, err := srv.List(ctx, &artifact.ListRequest{AppName: "app", UserID: "C:/absolute", SessionID: "s"})
+				return err
+			},
+			want: "user_id must not be drive-qualified.",
+		},
+		{
+			name: "save with a reserved segment in the session ID",
+			call: func() error {
+				_, err := srv.Save(ctx, &artifact.SaveRequest{
+					AppName: "app", UserID: "u", SessionID: "victim/versions", FileName: "f.txt",
+					Part: genai.NewPartFromText("data"),
+				})
+				return err
+			},
+			want: "session_id must not contain reserved path segments.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			if !errors.Is(err, artifact.ErrInputValidation) {
+				t.Fatalf("error = %v, want artifact.ErrInputValidation", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+
+	t.Run("refused calls leave storage unchanged", func(t *testing.T) {
+		if _, err := srv.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "u", SessionID: "s", FileName: "safe.txt",
+			Part: genai.NewPartFromBytes([]byte("v1"), "text/plain"),
+		}); err != nil {
+			t.Fatalf("Save(safe.txt) failed: %v", err)
+		}
+		if _, err := srv.Save(ctx, &artifact.SaveRequest{
+			AppName: "app", UserID: "u/sessions/s", SessionID: "s", FileName: "safe.txt",
+			Part: genai.NewPartFromBytes([]byte("v2"), "text/plain"),
+		}); !errors.Is(err, artifact.ErrInputValidation) {
+			t.Errorf("Save(unsafe user ID) error = %v, want artifact.ErrInputValidation", err)
+		}
+		if err := srv.Delete(ctx, &artifact.DeleteRequest{
+			AppName: "app", UserID: "u", SessionID: "../s", FileName: "safe.txt",
+		}); !errors.Is(err, artifact.ErrInputValidation) {
+			t.Errorf("Delete(unsafe session ID) error = %v, want artifact.ErrInputValidation", err)
+		}
+
+		loaded, err := srv.Load(ctx, &artifact.LoadRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "safe.txt"})
+		if err != nil {
+			t.Fatalf("Load(safe.txt) failed: %v", err)
+		}
+		if got := string(loaded.Part.InlineData.Data); got != "v1" {
+			t.Errorf("Load(safe.txt) data = %q, want %q", got, "v1")
+		}
+		versions, err := srv.Versions(ctx, &artifact.VersionsRequest{AppName: "app", UserID: "u", SessionID: "s", FileName: "safe.txt"})
+		if err != nil {
+			t.Fatalf("Versions(safe.txt) failed: %v", err)
+		}
+		if diff := cmp.Diff([]int64{1}, versions.Versions); diff != "" {
+			t.Errorf("Versions(safe.txt) mismatch (-want +got):\n%s", diff)
+		}
+	})
 }
 
 func testArtifactService(ctx context.Context, t *testing.T, srv artifact.Service, testSuffix string) {
