@@ -20,6 +20,7 @@ import (
 	"iter"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -713,6 +714,33 @@ func TestAddEventsToMemory_UnsupportedService(t *testing.T) {
 	}
 	if !errors.Is(err, errors.ErrUnsupported) {
 		t.Errorf("AddEventsToMemory() error = %v, want errors.Is(err, errors.ErrUnsupported)", err)
+	}
+}
+
+// The unsupported error must point a Go caller at the Go fallback method, in
+// the package's error style, and not at adk-python's add_session_to_memory.
+func TestAddEventsToMemory_UnsupportedServiceNamesGoFallback(t *testing.T) {
+	err := memory.AddEventsToMemory(t.Context(), eventlessService{}, &memory.AddEventsRequest{
+		AppName: "app",
+		UserID:  "user",
+		Events:  []*session.Event{memoryTextEvent("e1", "hello")},
+	})
+	if err == nil {
+		t.Fatal("AddEventsToMemory() error = nil, want an unsupported error")
+	}
+
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "memory: ") {
+		t.Errorf("AddEventsToMemory() error = %q, want prefix %q", msg, "memory: ")
+	}
+	if !strings.Contains(msg, "AddSessionToMemory") {
+		t.Errorf("AddEventsToMemory() error = %q, want it to name %q", msg, "AddSessionToMemory")
+	}
+	if strings.Contains(msg, "add_session_to_memory") {
+		t.Errorf("AddEventsToMemory() error = %q, want no Python name %q", msg, "add_session_to_memory")
+	}
+	if strings.HasSuffix(msg, ".") {
+		t.Errorf("AddEventsToMemory() error = %q, want no trailing full stop", msg)
 	}
 }
 

@@ -67,9 +67,11 @@ type Entry struct {
 }
 
 // ErrAddEventsUnsupported is returned by [AddEventsToMemory] when a [Service]
-// does not implement [EventAdder]. It wraps [errors.ErrUnsupported].
+// does not implement [EventAdder]. It wraps [errors.ErrUnsupported]. A caller
+// that receives it can ingest the full session with
+// [Service.AddSessionToMemory] instead, as its message says.
 var ErrAddEventsUnsupported error = &unsupportedError{
-	msg: "This memory service does not support adding event deltas. Call add_session_to_memory(session) to ingest the full session.",
+	msg: "memory: service does not support adding event deltas; call Service.AddSessionToMemory to ingest the full session",
 }
 
 // unsupportedError is an error that wraps [errors.ErrUnsupported] with a
